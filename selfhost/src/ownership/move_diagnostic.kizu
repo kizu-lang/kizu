@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::source;
 import selfhost::ownership::borrow_param_keys;
 import selfhost::ownership::data;
@@ -360,7 +361,17 @@ fn first_use_after_move_statement(
         Match(match_node) => data::no_use_after_move(),
         MatchArm(match_arm) => data::no_use_after_move(),
         Unsafe(unsafe_node) => data::no_use_after_move(),
-        ComptimeIf(comptime_if_node) => data::no_use_after_move(),
+        ComptimeIf(comptime_if_node) => try first_use_after_move_comptime_if(
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            states,
+            kinds,
+            resources,
+            borrow_params
+        ),
     };
 }
 
@@ -460,6 +471,28 @@ fn first_use_after_move_if(
     else_kinds.deinit();
     else_resources.deinit();
     return result;
+}
+
+fn first_use_after_move_comptime_if(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
+    borrow_params: &std::map::Map<[]u8, bool>
+) -> !data::UseAfterMoveSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return data::no_use_after_move();
+    }
+    return first_use_after_move_statement(
+        file, ast, selected.node_id, states, kinds, resources, borrow_params
+    );
 }
 
 fn first_use_after_move_while(
@@ -662,16 +695,7 @@ fn first_use_after_move_expr_node(
             borrow_params,
             move_direct
         ),
-        ComptimeExpr(comptime_expr_node) => try first_use_after_move_expr(
-            file,
-            ast,
-            comptime_expr_node.value,
-            states,
-            kinds,
-            resources,
-            borrow_params,
-            move_direct
-        ),
+        ComptimeExpr(comptime_expr_node) => data::no_use_after_move(),
         DerefExpr(deref_expr) => try first_use_after_move_expr(
             file,
             ast,
@@ -762,7 +786,17 @@ fn first_use_after_move_expr_node(
         Match(match_node) => data::no_use_after_move(),
         MatchArm(match_arm) => data::no_use_after_move(),
         Unsafe(unsafe_node) => data::no_use_after_move(),
-        ComptimeIf(comptime_if_node) => data::no_use_after_move(),
+        ComptimeIf(comptime_if_node) => try first_use_after_move_comptime_if(
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            states,
+            kinds,
+            resources,
+            borrow_params
+        ),
     };
 }
 
@@ -965,7 +999,7 @@ fn moved_base_name(
         FieldExpr(field_expr) => moved_base_name(file, ast, field_expr.receiver),
         DerefExpr(deref_expr) => moved_base_name(file, ast, deref_expr.receiver),
         TryExpr(try_expr_node) => moved_base_name(file, ast, try_expr_node.value),
-        ComptimeExpr(comptime_expr_node) => moved_base_name(file, ast, comptime_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => "",
         Program(program) => "",
         FnDecl(fn_decl) => "",
         Empty => "",

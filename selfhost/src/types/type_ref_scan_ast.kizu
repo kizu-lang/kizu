@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::source;
 import selfhost::types::model;
 import selfhost::types::package_modules;
@@ -68,6 +69,7 @@ fn scan_type_reference_ast_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.return_type,
             fn_decl.body,
@@ -287,7 +289,7 @@ fn scan_type_reference_ast_node(
             import_alias_starts,
             import_alias_ends
         );,
-        ComptimeIf(comptime_if_node) => return scan_type_reference_three_nodes(
+        ComptimeIf(comptime_if_node) => return scan_type_reference_comptime_if(
             allocator,
             file,
             ast,
@@ -469,6 +471,7 @@ fn scan_type_reference_fn(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: &std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
@@ -482,11 +485,40 @@ fn scan_type_reference_fn(
         summary,
         try scan_type_reference_type_node(allocator, file, ast, return_type, kinds, arities, import_alias_starts, import_alias_ends)
     );
-    summary = merge_type_reference_scans(
-        summary,
-        try scan_type_reference_ast_node(allocator, file, ast, body, kinds, arities, import_alias_starts, import_alias_ends)
-    );
+    // A generic body is checked after its type arguments are concrete. Walking
+    // it here would either reject a valid static type condition or inspect both
+    // branches without an environment.
+    if type_params.len == 0 {
+        summary = merge_type_reference_scans(
+            summary,
+            try scan_type_reference_ast_node(allocator, file, ast, body, kinds, arities, import_alias_starts, import_alias_ends)
+        );
+    }
     return summary;
+}
+
+fn scan_type_reference_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return type_reference_scan(0, 0, 0);
+    }
+    return scan_type_reference_ast_node(
+        allocator, file, ast, selected.node_id, kinds, arities,
+        import_alias_starts, import_alias_ends
+    );
 }
 
 fn scan_type_reference_two_nodes(

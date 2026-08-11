@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::source;
 import selfhost::types::ast_text;
 import selfhost::types::diagnostic_summary;
@@ -253,10 +254,11 @@ fn first_return_type_mismatch_in_statement(
             scope,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return first_return_type_mismatch_in_two_statements(
+        ComptimeIf(comptime_if_node) => return first_return_type_mismatch_in_comptime_if(
             allocator,
             file,
             ast,
+            comptime_if_node.condition,
             comptime_if_node.then_block,
             comptime_if_node.else_block,
             local_types,
@@ -266,6 +268,30 @@ fn first_return_type_mismatch_in_statement(
         );,
         _ => return diagnostic_summary::no_return_type_mismatch();,
     }
+}
+
+fn first_return_type_mismatch_in_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    scope: &ReturnScope,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::ReturnTypeSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_return_type_mismatch();
+    }
+    return first_return_type_mismatch_in_statement(
+        allocator, file, ast, selected.node_id, local_types, local_mutability,
+        scope, function_returns
+    );
 }
 
 fn first_return_type_mismatch_in_statement_range(
@@ -406,7 +432,10 @@ pub fn first_missing_return_node(
             program.declarations,
             function_returns
         );,
-        FnDecl(fn_decl) => return first_missing_return_in_function(
+        FnDecl(fn_decl) => if fn_decl.type_params.len > 0 {
+            return diagnostic_summary::no_missing_return();
+        } else {
+            return first_missing_return_in_function(
             allocator,
             file,
             ast,
@@ -415,7 +444,8 @@ pub fn first_missing_return_node(
             fn_decl.return_type,
             fn_decl.body,
             function_returns
-        );,
+            );
+        },
         ImplDecl(impl_decl) => return first_missing_return_in_declarations(
             allocator,
             file,
@@ -478,7 +508,7 @@ fn first_missing_return_in_function(
     if !function_requires_return(expected_return) {
         return diagnostic_summary::no_missing_return();
     }
-    if try statement_always_returns(ast, body) {
+    if try statement_always_returns(allocator, file, ast, body) {
         return diagnostic_summary::no_missing_return();
     }
     return diagnostic_summary::missing_return_summary(
@@ -499,33 +529,38 @@ fn function_requires_return(expected_return: []u8) -> bool {
 }
 
 fn statement_always_returns(
+    allocator: Allocator,
+    file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId
 ) -> !bool {
     let node = ast.get(node_id);
     return match node.data {
-        Block(block) => try statement_range_has_return(ast, block.statements),
+        Block(block) => try statement_range_has_return(allocator, file, ast, block.statements),
         Return(return_node) => true,
-        If(if_node) => (try statement_always_returns(ast, if_node.then_block)) and
-            (try statement_always_returns(ast, if_node.else_block)),
-        Match(match_node) => try statement_range_all_return(ast, match_node.arms),
-        MatchArm(match_arm) => try statement_always_returns(ast, match_arm.body),
-        Unsafe(unsafe_node) => try statement_always_returns(ast, unsafe_node.body),
-        ComptimeIf(comptime_if_node) =>
-            (try statement_always_returns(ast, comptime_if_node.then_block)) and
-            (try statement_always_returns(ast, comptime_if_node.else_block)),
+        If(if_node) => (try statement_always_returns(allocator, file, ast, if_node.then_block)) and
+            (try statement_always_returns(allocator, file, ast, if_node.else_block)),
+        Match(match_node) => try statement_range_all_return(allocator, file, ast, match_node.arms),
+        MatchArm(match_arm) => try statement_always_returns(allocator, file, ast, match_arm.body),
+        Unsafe(unsafe_node) => try statement_always_returns(allocator, file, ast, unsafe_node.body),
+        ComptimeIf(comptime_if_node) => try comptime_if_statement_always_returns(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block
+        ),
         _ => false,
     };
 }
 
 fn statement_range_has_return(
+    allocator: Allocator,
+    file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange
 ) -> !bool {
     var index = 0;
     while index < statements.len {
         let child = try ast.child_at(statements, index);
-        if try statement_always_returns(ast, child) {
+        if try statement_always_returns(allocator, file, ast, child) {
             return true;
         }
         index = index + 1;
@@ -534,6 +569,8 @@ fn statement_range_has_return(
 }
 
 fn statement_range_all_return(
+    allocator: Allocator,
+    file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange
 ) -> !bool {
@@ -543,10 +580,27 @@ fn statement_range_all_return(
     var index = 0;
     while index < statements.len {
         let child = try ast.child_at(statements, index);
-        if !(try statement_always_returns(ast, child)) {
+        if !(try statement_always_returns(allocator, file, ast, child)) {
             return false;
         }
         index = index + 1;
     }
     return true;
+}
+
+fn comptime_if_statement_always_returns(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !bool {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return false;
+    }
+    return statement_always_returns(allocator, file, ast, selected.node_id);
 }

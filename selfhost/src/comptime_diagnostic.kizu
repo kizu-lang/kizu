@@ -1,0 +1,207 @@
+import selfhost::comptime_eval;
+import selfhost::diagnostic;
+import selfhost::source;
+
+pub struct ComptimeDiagnostic {
+    pub found: bool,
+    pub start: i64,
+    pub end: i64,
+    pub error: comptime_eval::ComptimeErrorKind,
+}
+
+pub fn first_diagnostic(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !ComptimeDiagnostic {
+    var environment = comptime_eval::Environment(allocator);
+    defer environment.deinit();
+    return try scan_node(file, ast, root, &environment);
+}
+
+pub fn first_report(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !diagnostic::Report {
+    let found = try first_diagnostic(allocator, file, ast, root);
+    if !found.found { return diagnostic::no_report(allocator); }
+    var report = diagnostic::error_report(
+        allocator,
+        diagnostic::file_span(file.path, found.start, found.end)
+    );
+    try report.message.append_bytes(comptime_eval::error_message(found.error));
+    return report;
+}
+
+fn scan_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(value) => return scan_range(file, ast, value.declarations, environment);,
+        FnDecl(value) => return scan_function(file, ast, value.type_params, value.body, environment);,
+        ImplDecl(value) => return scan_range(file, ast, value.methods, environment);,
+        Block(value) => return scan_range(file, ast, value.statements, environment);,
+        Prefix(value) => return scan_node(file, ast, value.right, environment);,
+        Binary(value) => return scan_two(file, ast, value.left, value.right, environment);,
+        FieldExpr(value) => return scan_node(file, ast, value.receiver, environment);,
+        DerefExpr(value) => return scan_node(file, ast, value.receiver, environment);,
+        Call(value) => return scan_head_range(file, ast, value.callee, value.args, environment);,
+        TypeApplyExpr(value) => return scan_head_range(file, ast, value.callee, value.type_args, environment);,
+        CastExpr(value) => return scan_two(file, ast, value.type_node, value.value, environment);,
+        IndexExpr(value) => return scan_three(file, ast, value.target, value.start, value.end, environment);,
+        StructLiteralExpr(value) => return scan_head_range(file, ast, value.type_name, value.fields, environment);,
+        StructFieldInit(value) => return scan_node(file, ast, value.value, environment);,
+        ArenaNewExpr(value) => return scan_two(file, ast, value.type_node, value.allocator, environment);,
+        TryExpr(value) => return scan_node(file, ast, value.value, environment);,
+        ComptimeExpr(value) => return evaluate_expression(file, ast, node_id, value.value, environment);,
+        If(value) => return scan_three(file, ast, value.condition, value.then_block, value.else_block, environment);,
+        Let(value) => return scan_node(file, ast, value.value, environment);,
+        Assign(value) => return scan_two(file, ast, value.target, value.value, environment);,
+        Return(value) => return scan_node(file, ast, value.value, environment);,
+        Defer(value) => return scan_node(file, ast, value.expr, environment);,
+        ErrDefer(value) => return scan_node(file, ast, value.expr, environment);,
+        ExprStmt(value) => return scan_node(file, ast, value.expr, environment);,
+        While(value) => return scan_two(file, ast, value.condition, value.body, environment);,
+        For(value) => return scan_three(file, ast, value.start, value.end, value.body, environment);,
+        Match(value) => return scan_head_range(file, ast, value.value, value.arms, environment);,
+        MatchArm(value) => return scan_node(file, ast, value.body, environment);,
+        Unsafe(value) => return scan_node(file, ast, value.body, environment);,
+        ComptimeIf(value) => return scan_comptime_if(
+            file,
+            ast,
+            node_id,
+            value.condition,
+            value.then_block,
+            value.else_block,
+            environment
+        );,
+        StructDecl(value) => return scan_range(file, ast, value.fields, environment);,
+        UnionDecl(value) => return scan_range(file, ast, value.variants, environment);,
+        Param(value) => return scan_node(file, ast, value.type_node, environment);,
+        Field(value) => return scan_node(file, ast, value.type_node, environment);,
+        UnionVariant(value) => return scan_node(file, ast, value.payload, environment);,
+        _ => return no_diagnostic();,
+    }
+}
+
+fn scan_function(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    // SPEC §13: an uninstantiated generic body is checked only after static
+    // arguments exist. Do not guess a branch and do not inspect both branches.
+    if type_params.len > 0 { return no_diagnostic(); }
+    return scan_node(file, ast, body, environment);
+}
+
+fn evaluate_expression(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    outer: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let result = try comptime_eval::evaluate(file, ast, value, environment);
+    if result.kind != comptime_eval::ComptimeResultKind::Error { return no_diagnostic(); }
+    let node = ast.get(outer);
+    return make_comptime_diagnostic(node.span.start, node.span.end, result.error);
+}
+
+fn scan_comptime_if(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    outer: std::kizu::ast::NodeId,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let selected = try comptime_eval::select_branch_node(
+        file, ast, condition, then_block, else_block, environment
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        let node = ast.get(outer);
+        return make_comptime_diagnostic(node.span.start, node.span.end, selected.error);
+    }
+    return scan_node(file, ast, selected.node_id, environment);
+}
+
+fn scan_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    children: std::kizu::ast::ChildRange,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try scan_node(file, ast, child, environment);
+        if found.found { return found; }
+        index = index + 1;
+    }
+    return no_diagnostic();
+}
+
+fn scan_head_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    head: std::kizu::ast::NodeId,
+    children: std::kizu::ast::ChildRange,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let found = try scan_node(file, ast, head, environment);
+    if found.found { return found; }
+    return scan_range(file, ast, children, environment);
+}
+
+fn scan_two(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let found = try scan_node(file, ast, first, environment);
+    if found.found { return found; }
+    return scan_node(file, ast, second, environment);
+}
+
+fn scan_three(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    environment: &comptime_eval::Environment
+) -> !ComptimeDiagnostic {
+    let found = try scan_two(file, ast, first, second, environment);
+    if found.found { return found; }
+    return scan_node(file, ast, third, environment);
+}
+
+fn make_comptime_diagnostic(
+    start: i64,
+    end: i64,
+    error_kind: comptime_eval::ComptimeErrorKind
+) -> ComptimeDiagnostic {
+    return ComptimeDiagnostic { found: true, start: start, end: end, error: error_kind };
+}
+
+fn no_diagnostic() -> ComptimeDiagnostic {
+    return ComptimeDiagnostic {
+        found: false,
+        start: 0,
+        end: 0,
+        error: comptime_eval::ComptimeErrorKind::UnsupportedExpression
+    };
+}

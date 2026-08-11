@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::source;
 import selfhost::types::function_calls;
 import selfhost::types::package_modules;
@@ -59,15 +60,19 @@ fn scan_function_reference_ast_node(
             import_alias_starts,
             import_alias_ends
         );,
-        FnDecl(fn_decl) => return scan_function_reference_ast_node(
-            allocator,
-            file,
-            ast,
-            fn_decl.body,
-            functions,
-            import_alias_starts,
-            import_alias_ends
-        );,
+        FnDecl(fn_decl) => if fn_decl.type_params.len > 0 {
+            return function_reference_scan(0, 0, 0);
+        } else {
+            return scan_function_reference_ast_node(
+                allocator,
+                file,
+                ast,
+                fn_decl.body,
+                functions,
+                import_alias_starts,
+                import_alias_ends
+            );
+        },
         ImplDecl(impl_decl) => return scan_function_reference_range(
             allocator,
             file,
@@ -201,7 +206,7 @@ fn scan_function_reference_ast_node(
             import_alias_starts,
             import_alias_ends
         );,
-        ComptimeIf(comptime_if_node) => return scan_function_reference_three_nodes(
+        ComptimeIf(comptime_if_node) => return scan_function_reference_comptime_if(
             allocator,
             file,
             ast,
@@ -335,6 +340,29 @@ fn scan_function_reference_ast_node(
         );,
         _ => return function_reference_scan(0, 0, 0);,
     }
+}
+
+fn scan_function_reference_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return function_reference_scan(0, 0, 0);
+    }
+    return scan_function_reference_ast_node(
+        allocator, file, ast, selected.node_id, functions,
+        import_alias_starts, import_alias_ends
+    );
 }
 
 fn scan_function_reference_range(

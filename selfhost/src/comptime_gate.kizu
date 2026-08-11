@@ -1,0 +1,223 @@
+import selfhost::comptime_eval;
+import selfhost::parser;
+import selfhost::source;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let text =
+        \\fn main(runtime_value: i64) { let seed = comptime 40; let from_binding = comptime bound + 2; let from_bool = comptime bound_bool and true; let from_string = comptime bound_string == "ki"; let arithmetic = comptime 4 * 1024; let prefix_neg = comptime -7; let prefix_not = comptime !false; let string_equal = comptime "ki" == "ki"; let bool_equal = comptime true == true; let comparison = comptime 3 < 4; let short_and = comptime false and runtime_value == 1; let short_or = comptime true or runtime_value == 1; let division = comptime 1 / 0; let modulo = comptime 1 % 0; let invalid_unary = comptime !1; let invalid_binary = comptime 1 + true; let invalid_equality = comptime 1 == true; let escaped = comptime runtime_value; comptime if 1 + 1 == 2 { print(1); } else { print(0); } comptime if 1 { print(1); } else { print(0); } }
+    ;
+    let path = "comptime_gate.kizu";
+    let parsed = try parser::parse_checked_file(allocator, path, text);
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        package_name: "gate",
+        module_start: 0,
+        module_end: 4,
+        path: path,
+        text: text
+    };
+    var environment = comptime_eval::Environment(allocator);
+    defer environment.deinit();
+    let quoted_ki =
+        \\"ki"
+    ;
+
+    let seed = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 0), &environment);
+    try expect_i64(seed, 40);
+    try environment.bind_i64("bound", 40);
+    try environment.bind_bool("bound_bool", true);
+    try environment.bind_string("bound_string", quoted_ki);
+
+    let from_binding = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 1), &environment);
+    try expect_i64(from_binding, 42);
+    let from_bool = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 2), &environment);
+    try expect_bool(from_bool, true);
+    let from_string = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 3), &environment);
+    try expect_bool(from_string, true);
+
+    let arithmetic = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 4), &environment);
+    try expect_i64(arithmetic, 4096);
+    let prefix_neg = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 5), &environment);
+    try expect_i64(prefix_neg, -7);
+    let prefix_not = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 6), &environment);
+    try expect_bool(prefix_not, true);
+
+    let string_equal = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 7), &environment);
+    try expect_bool(string_equal, true);
+    let bool_equal = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 8), &environment);
+    try expect_bool(bool_equal, true);
+    let comparison = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 9), &environment);
+    try expect_bool(comparison, true);
+    let short_and = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 10), &environment);
+    try expect_bool(short_and, false);
+    let short_or = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 11), &environment);
+    try expect_bool(short_or, true);
+
+    let division = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 12), &environment);
+    try expect_error(division, comptime_eval::ComptimeErrorKind::DivisionByZero);
+    let modulo = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 13), &environment);
+    try expect_error(modulo, comptime_eval::ComptimeErrorKind::ModuloByZero);
+    let invalid_unary = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 14), &environment);
+    try expect_error(invalid_unary, comptime_eval::ComptimeErrorKind::UnaryType);
+    let invalid_binary = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 15), &environment);
+    try expect_error(invalid_binary, comptime_eval::ComptimeErrorKind::BinaryType);
+    let invalid_equality = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 16), &environment);
+    try expect_error(invalid_equality, comptime_eval::ComptimeErrorKind::EqualityType);
+
+    let escaped = try comptime_eval::evaluate(&file, parsed.ast, try let_value(parsed.ast, parsed.root, 17), &environment);
+    try expect_error(escaped, comptime_eval::ComptimeErrorKind::RuntimeValue);
+
+    let selection = try select_statement_branch(&file, parsed.ast, parsed.root, 18, &environment);
+    std::testing::expect(selection.kind == comptime_eval::BranchSelectionKind::Selected);
+    std::testing::expect(selection.then_selected);
+    let invalid_condition = try select_statement_branch(&file, parsed.ast, parsed.root, 19, &environment);
+    std::testing::expect(invalid_condition.kind == comptime_eval::BranchSelectionKind::Error);
+    std::testing::expect(invalid_condition.error == comptime_eval::ComptimeErrorKind::ConditionType);
+    try expect_string_cursor();
+    parsed.deinit();
+    print("comptime-contract");
+    return;
+}
+
+fn expect_string_cursor() -> !void {
+    let quoted =
+        \\"ki"
+    ;
+    let single_segment_multiline =
+        \\\\ki
+    ;
+    let cross_equal = comptime_eval::normalized_string_equal(
+        quoted,
+        single_segment_multiline
+    );
+    std::testing::expect(cross_equal);
+    let different_multiline =
+        \\\\kj
+    ;
+    let cross_different = comptime_eval::normalized_string_equal(
+        quoted,
+        different_multiline
+    );
+    std::testing::expect(!cross_different);
+
+    let two_segments =
+        \\\\a
+        \\  \\\\b
+    ;
+    let same_segments =
+        \\\\a
+        \\      \\\\b
+    ;
+    let multiline_equal = comptime_eval::normalized_string_equal(
+        two_segments,
+        same_segments
+    );
+    std::testing::expect(multiline_equal);
+    return;
+}
+
+fn expect_i64(value: comptime_eval::ComptimeResult, expected: i64) -> !void {
+    if value.kind != comptime_eval::ComptimeResultKind::I64 {
+        return error("comptime gate expected i64");
+    }
+    std::testing::expect(value.int_value == expected);
+    return;
+}
+
+fn expect_bool(value: comptime_eval::ComptimeResult, expected: bool) -> !void {
+    if value.kind != comptime_eval::ComptimeResultKind::Bool {
+        return error("comptime gate expected bool");
+    }
+    std::testing::expect(value.bool_value == expected);
+    return;
+}
+
+fn expect_error(
+    value: comptime_eval::ComptimeResult,
+    expected: comptime_eval::ComptimeErrorKind
+) -> !void {
+    if value.kind != comptime_eval::ComptimeResultKind::Error {
+        return error("comptime gate expected error");
+    }
+    std::testing::expect(value.error == expected);
+    return;
+}
+
+fn node_is_empty(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
+}
+
+fn function_body(
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let root_node = ast.get(root);
+    match root_node.data {
+        Program(program) => return try function_body_in_range(ast, program.declarations);,
+        _ => return error("comptime gate expected program");,
+    }
+}
+
+fn function_body_in_range(
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !std::kizu::ast::NodeId {
+    let declaration = try ast.child_at(declarations, 0);
+    let declaration_node = ast.get(declaration);
+    match declaration_node.data {
+        FnDecl(fn_decl) => return fn_decl.body;,
+        _ => return error("comptime gate expected function");,
+    }
+}
+
+fn statement_at(
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let body = try function_body(ast, root);
+    let body_node = ast.get(body);
+    match body_node.data {
+        Block(block) => return try ast.child_at(block.statements, index);,
+        _ => return error("comptime gate expected block");,
+    }
+}
+
+fn let_value(
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let statement = try statement_at(ast, root, index);
+    let statement_node = ast.get(statement);
+    match statement_node.data {
+        Let(let_node) => return let_node.value;,
+        _ => return error("comptime gate expected let");,
+    }
+}
+
+fn select_statement_branch(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    index: i64,
+    environment: &comptime_eval::Environment
+) -> !comptime_eval::BranchSelection {
+    let statement = try statement_at(ast, root, index);
+    let statement_node = ast.get(statement);
+    match statement_node.data {
+        ComptimeIf(comptime_if) => return try comptime_eval::select_branch(
+            file,
+            ast,
+            comptime_if.condition,
+            environment
+        );,
+        _ => return error("comptime gate expected comptime if");,
+    }
+}

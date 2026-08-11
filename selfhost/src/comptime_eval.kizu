@@ -1,0 +1,567 @@
+import selfhost::source;
+
+pub enum ComptimeErrorKind {
+    RuntimeValue,
+    UnsupportedExpression,
+    UnaryType,
+    BinaryType,
+    EqualityType,
+    DivisionByZero,
+    ModuloByZero,
+    ConditionType,
+    InvalidInteger,
+}
+
+pub enum ComptimeResultKind {
+    I64,
+    Bool,
+    String,
+    Error,
+}
+
+// kind is the sole discriminator. Payload fields have no meaning outside their
+// selected kind; there is no separate validity flag or error-none state.
+pub struct ComptimeResult {
+    pub kind: ComptimeResultKind,
+    pub int_value: i64,
+    pub bool_value: bool,
+    pub string_raw: []u8,
+    pub error: ComptimeErrorKind,
+}
+
+pub enum BranchSelectionKind {
+    Selected,
+    Error,
+}
+
+pub struct BranchSelection {
+    pub kind: BranchSelectionKind,
+    pub then_selected: bool,
+    pub error: ComptimeErrorKind,
+}
+
+pub enum SelectedNodeKind {
+    Selected,
+    Error,
+}
+
+// node_id is meaningful only for Selected. Keeping the discriminator and
+// payload in a plain record avoids letting a tagged-union payload escape its
+// match arm in selfhost code.
+pub struct SelectedNode {
+    pub kind: SelectedNodeKind,
+    pub node_id: std::kizu::ast::NodeId,
+    pub error: ComptimeErrorKind,
+}
+
+pub struct ComptimeBinding {
+    pub name: []u8,
+    pub value: ComptimeResult,
+}
+
+// Comptime environments are deliberately small. A single binding array keeps
+// each name and typed value atomic and avoids parallel-map consistency states.
+pub struct Environment {
+    bindings: std::array::Array<ComptimeBinding>,
+}
+
+pub fn Environment(allocator: Allocator) -> Environment {
+    return Environment { bindings: std::array::Array<ComptimeBinding>(allocator) };
+}
+
+impl Environment {
+    fn bind_i64(self: Environment, name: []u8, value: i64) -> !void {
+        try self.bindings.append(ComptimeBinding { name: name, value: result_i64(value) });
+        return;
+    }
+
+    fn bind_bool(self: Environment, name: []u8, value: bool) -> !void {
+        try self.bindings.append(ComptimeBinding { name: name, value: result_bool(value) });
+        return;
+    }
+
+    fn bind_string(self: Environment, name: []u8, raw: []u8) -> !void {
+        try self.bindings.append(ComptimeBinding { name: name, value: result_string(raw) });
+        return;
+    }
+
+    fn deinit(self: Environment) -> void { self.bindings.deinit(); }
+}
+
+pub fn evaluate(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !ComptimeResult {
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => return parse_int_value(file.text[node.span.start..node.span.end]);,
+        Bool(bool_node) => return result_bool(bool_node.value);,
+        String(string_node) => return result_string(file.text[node.span.start..node.span.end]);,
+        Var(var_node) => return try evaluate_var(file, ast, node_id, environment);,
+        ComptimeExpr(comptime_expr) => return try evaluate(file, ast, comptime_expr.value, environment);,
+        Prefix(prefix) => return try evaluate_prefix(file, ast, prefix.op, prefix.right, environment);,
+        Binary(binary) => return try evaluate_binary(
+            file, ast, binary.op, binary.left, binary.right, environment
+        );,
+        _ => return result_error(ComptimeErrorKind::UnsupportedExpression);,
+    }
+}
+
+pub fn evaluate_without_bindings(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !ComptimeResult {
+    var environment = Environment(std::mem::page_allocator());
+    defer environment.deinit();
+    return evaluate(file, ast, node_id, &environment);
+}
+
+pub fn select_branch(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !BranchSelection {
+    let value = try evaluate(file, ast, condition, environment);
+    if value.kind == ComptimeResultKind::Error {
+        return branch_error(value.error);
+    }
+    if value.kind != ComptimeResultKind::Bool {
+        return branch_error(ComptimeErrorKind::ConditionType);
+    }
+    return BranchSelection {
+        kind: BranchSelectionKind::Selected,
+        then_selected: value.bool_value,
+        error: ComptimeErrorKind::ConditionType
+    };
+}
+
+pub fn select_branch_without_bindings(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId
+) -> !BranchSelection {
+    var environment = Environment(std::mem::page_allocator());
+    defer environment.deinit();
+    return select_branch(file, ast, condition, &environment);
+}
+
+pub fn select_branch_node_without_bindings(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_node: std::kizu::ast::NodeId,
+    else_node: std::kizu::ast::NodeId
+) -> !SelectedNode {
+    var environment = Environment(std::mem::page_allocator());
+    defer environment.deinit();
+    return select_branch_node(file, ast, condition, then_node, else_node, &environment);
+}
+
+pub fn select_branch_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_node: std::kizu::ast::NodeId,
+    else_node: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !SelectedNode {
+    let selection = try select_branch(file, ast, condition, environment);
+    if selection.kind == BranchSelectionKind::Error {
+        return SelectedNode {
+            kind: SelectedNodeKind::Error,
+            node_id: then_node,
+            error: selection.error
+        };
+    }
+    if selection.then_selected {
+        return SelectedNode {
+            kind: SelectedNodeKind::Selected,
+            node_id: then_node,
+            error: selection.error
+        };
+    }
+    return SelectedNode {
+        kind: SelectedNodeKind::Selected,
+        node_id: else_node,
+        error: selection.error
+    };
+}
+
+pub fn type_name(value: &ComptimeResult) -> []u8 {
+    if value.kind == ComptimeResultKind::I64 { return "i64"; }
+    if value.kind == ComptimeResultKind::Bool { return "bool"; }
+    if value.kind == ComptimeResultKind::String { return "[]u8"; }
+    return "unknown";
+}
+
+pub fn error_message(error_kind: ComptimeErrorKind) -> []u8 {
+    if error_kind == ComptimeErrorKind::RuntimeValue {
+        return "comptime error: runtime value cannot cross comptime boundary";
+    }
+    if error_kind == ComptimeErrorKind::UnaryType {
+        return "comptime error: invalid unary operand type";
+    }
+    if error_kind == ComptimeErrorKind::BinaryType {
+        return "comptime error: invalid binary operand types";
+    }
+    if error_kind == ComptimeErrorKind::EqualityType {
+        return "comptime error: equality operands must have same type";
+    }
+    if error_kind == ComptimeErrorKind::DivisionByZero {
+        return "comptime error: division by zero";
+    }
+    if error_kind == ComptimeErrorKind::ModuloByZero {
+        return "comptime error: modulo by zero";
+    }
+    if error_kind == ComptimeErrorKind::ConditionType {
+        return "comptime error: if condition must be bool";
+    }
+    if error_kind == ComptimeErrorKind::InvalidInteger {
+        return "comptime error: invalid integer";
+    }
+    return "comptime error: unsupported compile-time expression";
+}
+
+fn evaluate_var(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !ComptimeResult {
+    let node = ast.get(node_id);
+    let name = file.text[node.span.start..node.span.end];
+    let bindings = &environment.bindings;
+    var index = 0;
+    while index < bindings.len() {
+        let binding = try bindings.at(index);
+        if std::mem::equal_bytes(binding.name, name) {
+            return ComptimeResult {
+                kind: binding.value.kind,
+                int_value: binding.value.int_value,
+                bool_value: binding.value.bool_value,
+                string_raw: binding.value.string_raw,
+                error: binding.value.error
+            };
+        }
+        index = index + 1;
+    }
+    return result_error(ComptimeErrorKind::RuntimeValue);
+}
+
+fn evaluate_prefix(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::PrefixOp,
+    right: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !ComptimeResult {
+    let value = try evaluate(file, ast, right, environment);
+    if value.kind == ComptimeResultKind::Error { return result_error(value.error); }
+    if op == std::kizu::ast::prefix_neg() and value.kind == ComptimeResultKind::I64 {
+        return result_i64(0 - value.int_value);
+    }
+    if op == std::kizu::ast::prefix_not() and value.kind == ComptimeResultKind::Bool {
+        return result_bool(!value.bool_value);
+    }
+    return result_error(ComptimeErrorKind::UnaryType);
+}
+
+fn evaluate_binary(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left_id: std::kizu::ast::NodeId,
+    right_id: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !ComptimeResult {
+    let left = try evaluate(file, ast, left_id, environment);
+    let left_kind = left.kind;
+    let left_int = left.int_value;
+    let left_bool = left.bool_value;
+    let left_string = left.string_raw;
+    let left_error = left.error;
+    if left_kind == ComptimeResultKind::Error { return result_error(left_error); }
+    if op == std::kizu::ast::binary_and() or op == std::kizu::ast::binary_or() {
+        return try evaluate_logical(file, ast, op, left_kind, left_bool, right_id, environment);
+    }
+    let right = try evaluate(file, ast, right_id, environment);
+    let right_kind = right.kind;
+    let right_int = right.int_value;
+    let right_bool = right.bool_value;
+    let right_string = right.string_raw;
+    let right_error = right.error;
+    if right_kind == ComptimeResultKind::Error { return result_error(right_error); }
+    if op == std::kizu::ast::binary_eq() or op == std::kizu::ast::binary_not_eq() {
+        return evaluate_equality(
+            op,
+            left_kind,
+            left_int,
+            left_bool,
+            left_string,
+            right_kind,
+            right_int,
+            right_bool,
+            right_string
+        );
+    }
+    return evaluate_integer_binary(op, left_kind, left_int, right_kind, right_int);
+}
+
+fn evaluate_logical(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left_kind: ComptimeResultKind,
+    left_bool: bool,
+    right_id: std::kizu::ast::NodeId,
+    environment: &Environment
+) -> !ComptimeResult {
+    if left_kind != ComptimeResultKind::Bool {
+        return result_error(ComptimeErrorKind::BinaryType);
+    }
+    if op == std::kizu::ast::binary_and() and !left_bool { return result_bool(false); }
+    if op == std::kizu::ast::binary_or() and left_bool { return result_bool(true); }
+    let right = try evaluate(file, ast, right_id, environment);
+    if right.kind == ComptimeResultKind::Error { return result_error(right.error); }
+    if right.kind != ComptimeResultKind::Bool {
+        return result_error(ComptimeErrorKind::BinaryType);
+    }
+    return result_bool(right.bool_value);
+}
+
+fn evaluate_equality(
+    op: std::kizu::ast::BinaryOp,
+    left_kind: ComptimeResultKind,
+    left_int: i64,
+    left_bool: bool,
+    left_string: []u8,
+    right_kind: ComptimeResultKind,
+    right_int: i64,
+    right_bool: bool,
+    right_string: []u8
+) -> ComptimeResult {
+    if left_kind != right_kind { return result_error(ComptimeErrorKind::EqualityType); }
+    var equal = false;
+    if left_kind == ComptimeResultKind::I64 {
+        equal = left_int == right_int;
+    } else {
+        if left_kind == ComptimeResultKind::Bool {
+            equal = left_bool == right_bool;
+        } else {
+            if left_kind == ComptimeResultKind::String {
+                equal = normalized_string_equal(left_string, right_string);
+            } else {
+                return result_error(ComptimeErrorKind::EqualityType);
+            }
+        }
+    }
+    if op == std::kizu::ast::binary_not_eq() { equal = !equal; }
+    return result_bool(equal);
+}
+
+fn evaluate_integer_binary(
+    op: std::kizu::ast::BinaryOp,
+    left_kind: ComptimeResultKind,
+    left_int: i64,
+    right_kind: ComptimeResultKind,
+    right_int: i64
+) -> ComptimeResult {
+    if left_kind != ComptimeResultKind::I64 or right_kind != ComptimeResultKind::I64 {
+        return result_error(ComptimeErrorKind::BinaryType);
+    }
+    if op == std::kizu::ast::binary_add() { return result_i64(left_int + right_int); }
+    if op == std::kizu::ast::binary_sub() { return result_i64(left_int - right_int); }
+    if op == std::kizu::ast::binary_mul() { return result_i64(left_int * right_int); }
+    if op == std::kizu::ast::binary_div() {
+        if right_int == 0 { return result_error(ComptimeErrorKind::DivisionByZero); }
+        return result_i64(left_int / right_int);
+    }
+    if op == std::kizu::ast::binary_mod() {
+        if right_int == 0 { return result_error(ComptimeErrorKind::ModuloByZero); }
+        return result_i64(left_int % right_int);
+    }
+    if op == std::kizu::ast::binary_lt() { return result_bool(left_int < right_int); }
+    if op == std::kizu::ast::binary_lte() { return result_bool(left_int <= right_int); }
+    if op == std::kizu::ast::binary_gt() { return result_bool(left_int > right_int); }
+    if op == std::kizu::ast::binary_gte() { return result_bool(left_int >= right_int); }
+    return result_error(ComptimeErrorKind::BinaryType);
+}
+
+fn parse_int_value(text: []u8) -> ComptimeResult {
+    if std::mem::len(text) == 0 { return result_error(ComptimeErrorKind::InvalidInteger); }
+    var value = 0;
+    var index = 0;
+    while index < std::mem::len(text) {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return result_error(ComptimeErrorKind::InvalidInteger);
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value > (9223372036854775807 - digit) / 10 {
+            return result_error(ComptimeErrorKind::InvalidInteger);
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    return result_i64(value);
+}
+
+fn result_i64(value: i64) -> ComptimeResult {
+    return ComptimeResult {
+        kind: ComptimeResultKind::I64,
+        int_value: value,
+        bool_value: false,
+        string_raw: "",
+        error: ComptimeErrorKind::UnsupportedExpression
+    };
+}
+
+fn result_bool(value: bool) -> ComptimeResult {
+    return ComptimeResult {
+        kind: ComptimeResultKind::Bool,
+        int_value: 0,
+        bool_value: value,
+        string_raw: "",
+        error: ComptimeErrorKind::UnsupportedExpression
+    };
+}
+
+fn result_string(raw: []u8) -> ComptimeResult {
+    return ComptimeResult {
+        kind: ComptimeResultKind::String,
+        int_value: 0,
+        bool_value: false,
+        string_raw: raw,
+        error: ComptimeErrorKind::UnsupportedExpression
+    };
+}
+
+fn result_error(error_kind: ComptimeErrorKind) -> ComptimeResult {
+    return ComptimeResult {
+        kind: ComptimeResultKind::Error,
+        int_value: 0,
+        bool_value: false,
+        string_raw: "",
+        error: error_kind
+    };
+}
+
+struct StringCursor {
+    raw: []u8,
+    index: i64,
+    segment_end: i64,
+    multiline: bool,
+    done: bool,
+}
+
+struct StringStep {
+    done: bool,
+    byte: u8,
+}
+
+// normalized_string_equal compares the exact byte value the lexer assigns to
+// one-line and multiline literals. It allocates nothing and the same cursor can
+// later materialize a checked constant for codegen.
+pub fn normalized_string_equal(left: []u8, right: []u8) -> bool {
+    var left_cursor = string_cursor(left);
+    var right_cursor = string_cursor(right);
+    while true {
+        let left_step = string_cursor_next(&var left_cursor);
+        let right_step = string_cursor_next(&var right_cursor);
+        if left_step.done or right_step.done {
+            return left_step.done and right_step.done;
+        }
+        if left_step.byte != right_step.byte { return false; }
+    }
+    return false;
+}
+
+fn string_cursor(raw: []u8) -> StringCursor {
+    let length = std::mem::len(raw);
+    if length >= 2 and raw[0] == cast<u8>(34) and raw[length - 1] == cast<u8>(34) {
+        return StringCursor {
+            raw: raw,
+            index: 1,
+            segment_end: length - 1,
+            multiline: false,
+            done: false
+        };
+    }
+    let slash = cast<u8>(92);
+    if length >= 2 and raw[0] == slash and raw[1] == slash {
+        return StringCursor {
+            raw: raw,
+            index: 2,
+            segment_end: string_line_end(raw, 2),
+            multiline: true,
+            done: false
+        };
+    }
+    return StringCursor {
+        raw: raw,
+        index: 0,
+        segment_end: 0,
+        multiline: false,
+        done: true
+    };
+}
+
+fn string_cursor_next(cursor: &var StringCursor) -> StringStep {
+    if cursor.done { return StringStep { done: true, byte: cast<u8>(0) }; }
+    if cursor.index < cursor.segment_end {
+        let byte = cursor.raw[cursor.index];
+        cursor.index = cursor.index + 1;
+        return StringStep { done: false, byte: byte };
+    }
+    if !cursor.multiline or cursor.segment_end >= std::mem::len(cursor.raw) {
+        cursor.done = true;
+        return StringStep { done: true, byte: cast<u8>(0) };
+    }
+    let next = string_next_segment(cursor);
+    if next < 0 {
+        cursor.done = true;
+        return StringStep { done: true, byte: cast<u8>(0) };
+    }
+    cursor.index = next + 2;
+    cursor.segment_end = cursor.index;
+    while cursor.segment_end < std::mem::len(cursor.raw) and
+        cursor.raw[cursor.segment_end] != cast<u8>(10) {
+        cursor.segment_end = cursor.segment_end + 1;
+    }
+    return StringStep { done: false, byte: cast<u8>(10) };
+}
+
+fn string_line_end(raw: []u8, start: i64) -> i64 {
+    var index = start;
+    while index < std::mem::len(raw) and raw[index] != cast<u8>(10) {
+        index = index + 1;
+    }
+    return index;
+}
+
+fn string_next_segment(cursor: &StringCursor) -> i64 {
+    var index = cursor.segment_end + 1;
+    while index < std::mem::len(cursor.raw) and string_indent(cursor.raw[index]) {
+        index = index + 1;
+    }
+    let slash = cast<u8>(92);
+    if index + 1 >= std::mem::len(cursor.raw) { return 0 - 1; }
+    if cursor.raw[index] != slash or cursor.raw[index + 1] != slash { return 0 - 1; }
+    return index;
+}
+
+fn string_indent(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9) or byte == cast<u8>(13);
+}
+
+fn branch_error(error_kind: ComptimeErrorKind) -> BranchSelection {
+    return BranchSelection {
+        kind: BranchSelectionKind::Error,
+        then_selected: false,
+        error: error_kind
+    };
+}

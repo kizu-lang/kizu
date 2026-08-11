@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::parser;
 import selfhost::source;
 import selfhost::type_constructor;
@@ -414,16 +415,20 @@ fn first_function_call_error_ast_node_with_imports(
             import_alias_ends,
             local_only
         );,
-        FnDecl(fn_decl) => return first_function_call_error_ast_node_with_imports(
-            allocator,
-            file,
-            ast,
-            fn_decl.body,
-            functions,
-            import_alias_starts,
-            import_alias_ends,
-            local_only
-        );,
+        FnDecl(fn_decl) => if fn_decl.type_params.len > 0 {
+            return function_call_summary(false, 0, 0, 0, 0, 0);
+        } else {
+            return first_function_call_error_ast_node_with_imports(
+                allocator,
+                file,
+                ast,
+                fn_decl.body,
+                functions,
+                import_alias_starts,
+                import_alias_ends,
+                local_only
+            );
+        },
         ImplDecl(impl_decl) => return first_function_call_error_in_range(
             allocator,
             file,
@@ -571,7 +576,7 @@ fn first_function_call_error_ast_node_with_imports(
             import_alias_ends,
             local_only
         );,
-        ComptimeIf(comptime_if_node) => return first_function_call_error_in_three_nodes(
+        ComptimeIf(comptime_if_node) => return first_function_call_error_in_comptime_if(
             allocator,
             file,
             ast,
@@ -719,6 +724,30 @@ fn first_function_call_error_ast_node_with_imports(
         );,
         _ => return function_call_summary(false, 0, 0, 0, 0, 0);,
     }
+}
+
+fn first_function_call_error_in_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
+    return first_function_call_error_ast_node_with_imports(
+        allocator, file, ast, selected.node_id, functions,
+        import_alias_starts, import_alias_ends, local_only
+    );
 }
 
 fn first_function_call_error_in_range(
