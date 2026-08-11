@@ -262,10 +262,12 @@ fn evaluate_prefix(
     let value = try evaluate(file, ast, right, environment);
     if value.kind == ComptimeResultKind::Error { return result_error(value.error); }
     if op == std::kizu::ast::prefix_neg() and value.kind == ComptimeResultKind::I64 {
-        return result_i64(0 - value.int_value);
+        let negated_int = 0 - value.int_value;
+        return result_i64(negated_int);
     }
     if op == std::kizu::ast::prefix_not() and value.kind == ComptimeResultKind::Bool {
-        return result_bool(!value.bool_value);
+        let negated_bool = !value.bool_value;
+        return result_bool(negated_bool);
     }
     return result_error(ComptimeErrorKind::UnaryType);
 }
@@ -461,17 +463,38 @@ struct StringCursor {
 struct StringStep {
     done: bool,
     byte: u8,
+    index: i64,
+    segment_end: i64,
+    cursor_done: bool,
 }
 
 // normalized_string_equal compares the exact byte value the lexer assigns to
 // one-line and multiline literals. It allocates nothing and the same cursor can
 // later materialize a checked constant for codegen.
 pub fn normalized_string_equal(left: []u8, right: []u8) -> bool {
-    var left_cursor = string_cursor(left);
-    var right_cursor = string_cursor(right);
+    let left_start = string_cursor(left);
+    let right_start = string_cursor(right);
+    var left_index = left_start.index;
+    var left_end = left_start.segment_end;
+    var left_done = left_start.done;
+    var right_index = right_start.index;
+    var right_end = right_start.segment_end;
+    var right_done = right_start.done;
+    let left_multiline = left_start.multiline;
+    let right_multiline = right_start.multiline;
     while true {
-        let left_step = string_cursor_next(&var left_cursor);
-        let right_step = string_cursor_next(&var right_cursor);
+        let left_step = string_cursor_next(
+            left, left_index, left_end, left_multiline, left_done
+        );
+        left_index = left_step.index;
+        left_end = left_step.segment_end;
+        left_done = left_step.cursor_done;
+        let right_step = string_cursor_next(
+            right, right_index, right_end, right_multiline, right_done
+        );
+        right_index = right_step.index;
+        right_end = right_step.segment_end;
+        right_done = right_step.cursor_done;
         if left_step.done or right_step.done {
             return left_step.done and right_step.done;
         }
@@ -510,29 +533,47 @@ fn string_cursor(raw: []u8) -> StringCursor {
     };
 }
 
-fn string_cursor_next(cursor: &var StringCursor) -> StringStep {
-    if cursor.done { return StringStep { done: true, byte: cast<u8>(0) }; }
-    if cursor.index < cursor.segment_end {
-        let byte = cursor.raw[cursor.index];
-        cursor.index = cursor.index + 1;
-        return StringStep { done: false, byte: byte };
+fn string_cursor_next(
+    raw: []u8,
+    index: i64,
+    segment_end: i64,
+    multiline: bool,
+    done: bool
+) -> StringStep {
+    if done {
+        return cursor_step(true, cast<u8>(0), index, segment_end, true);
     }
-    if !cursor.multiline or cursor.segment_end >= std::mem::len(cursor.raw) {
-        cursor.done = true;
-        return StringStep { done: true, byte: cast<u8>(0) };
+    if index < segment_end {
+        let byte = raw[index];
+        let advanced = index + 1;
+        return cursor_step(false, byte, advanced, segment_end, false);
     }
-    let next = string_next_segment(cursor);
+    if !multiline or segment_end >= std::mem::len(raw) {
+        return cursor_step(true, cast<u8>(0), index, segment_end, true);
+    }
+    let next = string_next_segment_at(raw, segment_end);
     if next < 0 {
-        cursor.done = true;
-        return StringStep { done: true, byte: cast<u8>(0) };
+        return cursor_step(true, cast<u8>(0), index, segment_end, true);
     }
-    cursor.index = next + 2;
-    cursor.segment_end = cursor.index;
-    while cursor.segment_end < std::mem::len(cursor.raw) and
-        cursor.raw[cursor.segment_end] != cast<u8>(10) {
-        cursor.segment_end = cursor.segment_end + 1;
-    }
-    return StringStep { done: false, byte: cast<u8>(10) };
+    let restart = next + 2;
+    let line_end = string_line_end(raw, restart);
+    return cursor_step(false, cast<u8>(10), restart, line_end, false);
+}
+
+fn cursor_step(
+    done: bool,
+    byte: u8,
+    index: i64,
+    segment_end: i64,
+    cursor_done: bool
+) -> StringStep {
+    return StringStep {
+        done: done,
+        byte: byte,
+        index: index,
+        segment_end: segment_end,
+        cursor_done: cursor_done
+    };
 }
 
 fn string_line_end(raw: []u8, start: i64) -> i64 {
@@ -543,14 +584,15 @@ fn string_line_end(raw: []u8, start: i64) -> i64 {
     return index;
 }
 
-fn string_next_segment(cursor: &StringCursor) -> i64 {
-    var index = cursor.segment_end + 1;
-    while index < std::mem::len(cursor.raw) and string_indent(cursor.raw[index]) {
+fn string_next_segment_at(raw: []u8, segment_end: i64) -> i64 {
+    var index = segment_end + 1;
+    while index < std::mem::len(raw) and string_indent(raw[index]) {
         index = index + 1;
     }
     let slash = cast<u8>(92);
-    if index + 1 >= std::mem::len(cursor.raw) { return 0 - 1; }
-    if cursor.raw[index] != slash or cursor.raw[index + 1] != slash { return 0 - 1; }
+    if index + 1 >= std::mem::len(raw) { return 0 - 1; }
+    let after = index + 1;
+    if raw[index] != slash or raw[after] != slash { return 0 - 1; }
     return index;
 }
 
