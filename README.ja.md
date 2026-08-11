@@ -169,6 +169,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 
 ## プロジェクト文書
 
+- [docs/architecture.md](docs/architecture.md): アーキテクチャ概観(オンボーディングはここから)
 - [SPEC.md](SPEC.md): 言語仕様
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): examples catalog
