@@ -5,8 +5,10 @@
 #
 # runner は開発環境と同じ macOS/arm64。バックエンドの artifact gate は
 # 「dominance violation を拒否する検証器」を要求し Apple clang はそれを
-# 満たさないため、nightly は brew の llvm (opt) を PATH の先頭に置く
-# (justfile の selfhost-backend-artifact-gate と同じ取り決め)。
+# 満たさないため、nightly は brew llvm の opt を PATH の先頭に置く。
+# ただし露出するのは opt だけ: brew llvm の clang まで PATH 先頭に置くと
+# Xcode の as に -Q を渡して "can't specify -Q with -arch arm64" で
+# アセンブルが落ちるため、コンパイル/リンクは Apple clang のままにする。
 name: ci
 
 on:
@@ -43,14 +45,17 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install LLVM verifier
-        run: brew install llvm
+        run: |
+          brew install llvm
+          mkdir -p "$HOME/llvm-verifier-bin"
+          ln -sf "$(brew --prefix llvm)/bin/opt" "$HOME/llvm-verifier-bin/opt"
       - name: Bootstrap (stage0 -> stage1 -> stage2)
         run: |
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          export PATH="$HOME/llvm-verifier-bin:$PATH"
           KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
       - name: Hosted parity gates
         run: |
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          export PATH="$HOME/llvm-verifier-bin:$PATH"
           KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1
           KIZU_RUN_SELFHOST_CHECK_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostCheckParityGate$' -count=1
           KIZU_RUN_SELFHOST_PARSE_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostParseParityGate$' -count=1
