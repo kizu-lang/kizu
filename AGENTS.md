@@ -5,6 +5,7 @@ Kizu はメモリ安全な systems programming language です。
 ## 最優先
 
 基本の実行経路は `kizu run examples/hello.kizu`、必須 CLI は `run` / `parse` / `check` です。
+リポジトリ全体の構造とデータフローは `docs/architecture.md` を先に読んでください。
 
 ## 実装ルール
 
