@@ -230,7 +230,7 @@ func runProbeStageCommand(runner string, dir string) bootstrapCommandResult {
 
 // linkProbeStageDriver links the staged module with the generated probe driver.
 func linkProbeStageDriver(clang string, dir string) error {
-	args := append([]string{"-Wno-override-module", "-fno-integrated-as"}, hostedLinkStackArgs()...)
+	args := append([]string{"-Wno-override-module"}, hostedLinkStackArgs()...)
 	args = append(
 		args,
 		probeStageModule,

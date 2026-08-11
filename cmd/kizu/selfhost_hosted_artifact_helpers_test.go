@@ -39,7 +39,6 @@ func linkRunParityExecutableWithHost(
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
-		"-fno-integrated-as",
 		llPath,
 		storageLLPath,
 		hostLLPath,

@@ -3133,7 +3133,6 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	compileArgs := append(
 		[]string{
 			"-Wno-override-module",
-			"-fno-integrated-as",
 		},
 		hostedLinkStackArgs()...,
 	)

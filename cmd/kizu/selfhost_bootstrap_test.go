@@ -183,7 +183,6 @@ func linkBootstrapStage(clang string, stage string, exePath string) error {
 	compileArgs := append(
 		[]string{
 			"-Wno-override-module",
-			"-fno-integrated-as",
 		},
 		hostedLinkStackArgs()...,
 	)
