@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"testing"
 
 	kizuast "github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
 )
@@ -43,9 +41,10 @@ var parserParityFrontendStdPaths = []string{
 }
 
 const stdKizuParserParityHarness = `
-fn run_case(allocator: Allocator, name: []u8, text: []u8) -> !void {
+fn run_case(allocator: Allocator, io: Io, name: []u8, path: []u8) -> !void {
     print("@@KIZU_PARSER_PARITY_CASE@@");
     print(name);
+    let text = try std::fs::read_file(io, path);
     let source = std::kizu::ast::source_file(name, text);
     let result = try std::kizu::parser::parse_program(allocator, source);
     try dump_node(text, result.ast, result.root);
@@ -112,6 +111,7 @@ fn dump_node(
         MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);,
         Unsafe(unsafe_node) => try dump_unsafe(source, ast, unsafe_node);,
         ComptimeIf(comptime_if) => try dump_comptime_if(source, ast, comptime_if);,
+        ContractDecl(contract_decl) => try dump_leaf("ContractDecl", source, &node.span);,
         Empty => print("Empty");,
     }
     return;
@@ -120,7 +120,7 @@ fn dump_node(
 fn dump_program(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    program: std::kizu::ast::ProgramNode
+    program: &std::kizu::ast::ProgramNode
 ) -> !void {
     print("Program");
     try dump_range(source, ast, program.declarations);
@@ -130,7 +130,7 @@ fn dump_program(
 fn dump_fn_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    fn_decl: std::kizu::ast::FnDeclNode
+    fn_decl: &std::kizu::ast::FnDeclNode
 ) -> !void {
     print("FnDecl");
     dump_visibility(fn_decl.public);
@@ -148,7 +148,7 @@ fn dump_fn_decl(
 fn dump_param(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    param: std::kizu::ast::ParamNode
+    param: &std::kizu::ast::ParamNode
 ) -> !void {
     print("Param");
     if param.comptime_param {
@@ -164,7 +164,7 @@ fn dump_param(
 fn dump_import_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    import_decl: std::kizu::ast::ImportDeclNode
+    import_decl: &std::kizu::ast::ImportDeclNode
 ) -> !void {
     print("ImportDecl");
     try dump_range(source, ast, import_decl.path);
@@ -174,7 +174,7 @@ fn dump_import_decl(
 fn dump_field(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    field: std::kizu::ast::FieldNode
+    field: &std::kizu::ast::FieldNode
 ) -> !void {
     print("Field");
     dump_visibility(field.public);
@@ -186,7 +186,7 @@ fn dump_field(
 fn dump_struct_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    struct_decl: std::kizu::ast::StructDeclNode
+    struct_decl: &std::kizu::ast::StructDeclNode
 ) -> !void {
     print("StructDecl");
     dump_visibility(struct_decl.public);
@@ -199,7 +199,7 @@ fn dump_struct_decl(
 fn dump_enum_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    enum_decl: std::kizu::ast::EnumDeclNode
+    enum_decl: &std::kizu::ast::EnumDeclNode
 ) -> !void {
     print("EnumDecl");
     dump_visibility(enum_decl.public);
@@ -211,7 +211,7 @@ fn dump_enum_decl(
 fn dump_union_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    union_decl: std::kizu::ast::UnionDeclNode
+    union_decl: &std::kizu::ast::UnionDeclNode
 ) -> !void {
     print("UnionDecl");
     dump_visibility(union_decl.public);
@@ -224,7 +224,7 @@ fn dump_union_decl(
 fn dump_impl_decl(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    impl_decl: std::kizu::ast::ImplDeclNode
+    impl_decl: &std::kizu::ast::ImplDeclNode
 ) -> !void {
     print("ImplDecl");
     try dump_node(source, ast, impl_decl.type_name);
@@ -235,7 +235,7 @@ fn dump_impl_decl(
 fn dump_union_variant(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    union_variant: std::kizu::ast::UnionVariantNode
+    union_variant: &std::kizu::ast::UnionVariantNode
 ) -> !void {
     print("UnionVariant");
     try dump_node(source, ast, union_variant.name);
@@ -264,14 +264,14 @@ fn dump_safety(requires_unsafe: bool) -> void {
 fn dump_block(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    block: std::kizu::ast::BlockNode
+    block: &std::kizu::ast::BlockNode
 ) -> !void {
     print("Block");
     try dump_range(source, ast, block.statements);
     return;
 }
 
-fn dump_bool(bool_node: std::kizu::ast::BoolNode) -> void {
+fn dump_bool(bool_node: &std::kizu::ast::BoolNode) -> void {
     print("Bool");
     if bool_node.value {
         print("true");
@@ -284,7 +284,7 @@ fn dump_bool(bool_node: std::kizu::ast::BoolNode) -> void {
 fn dump_return(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    return_node: std::kizu::ast::ReturnNode
+    return_node: &std::kizu::ast::ReturnNode
 ) -> !void {
     print("Return");
     try dump_node(source, ast, return_node.value);
@@ -294,7 +294,7 @@ fn dump_return(
 fn dump_defer(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    defer_node: std::kizu::ast::DeferNode
+    defer_node: &std::kizu::ast::DeferNode
 ) -> !void {
     print("Defer");
     try dump_node(source, ast, defer_node.expr);
@@ -304,7 +304,7 @@ fn dump_defer(
 fn dump_err_defer(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    err_defer_node: std::kizu::ast::ErrDeferNode
+    err_defer_node: &std::kizu::ast::ErrDeferNode
 ) -> !void {
     print("ErrDefer");
     try dump_node(source, ast, err_defer_node.expr);
@@ -314,7 +314,7 @@ fn dump_err_defer(
 fn dump_if(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    if_node: std::kizu::ast::IfNode
+    if_node: &std::kizu::ast::IfNode
 ) -> !void {
     print("If");
     try dump_node(source, ast, if_node.condition);
@@ -326,7 +326,7 @@ fn dump_if(
 fn dump_let(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    let_node: std::kizu::ast::LetNode
+    let_node: &std::kizu::ast::LetNode
 ) -> !void {
     print("Let");
     if let_node.mutable {
@@ -342,7 +342,7 @@ fn dump_let(
 fn dump_assign(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    assign_node: std::kizu::ast::AssignNode
+    assign_node: &std::kizu::ast::AssignNode
 ) -> !void {
     print("Assign");
     try dump_node(source, ast, assign_node.target);
@@ -353,7 +353,7 @@ fn dump_assign(
 fn dump_while(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    while_node: std::kizu::ast::WhileNode
+    while_node: &std::kizu::ast::WhileNode
 ) -> !void {
     print("While");
     try dump_node(source, ast, while_node.label);
@@ -365,7 +365,7 @@ fn dump_while(
 fn dump_for(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    for_node: std::kizu::ast::ForNode
+    for_node: &std::kizu::ast::ForNode
 ) -> !void {
     print("For");
     try dump_node(source, ast, for_node.label);
@@ -379,7 +379,7 @@ fn dump_for(
 fn dump_break(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    break_node: std::kizu::ast::BreakNode
+    break_node: &std::kizu::ast::BreakNode
 ) -> !void {
     print("Break");
     try dump_node(source, ast, break_node.label);
@@ -389,7 +389,7 @@ fn dump_break(
 fn dump_continue(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    continue_node: std::kizu::ast::ContinueNode
+    continue_node: &std::kizu::ast::ContinueNode
 ) -> !void {
     print("Continue");
     try dump_node(source, ast, continue_node.label);
@@ -399,7 +399,7 @@ fn dump_continue(
 fn dump_binary(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    binary: std::kizu::ast::BinaryNode
+    binary: &std::kizu::ast::BinaryNode
 ) -> !void {
     print("Binary");
     match binary.op {
@@ -425,7 +425,7 @@ fn dump_binary(
 fn dump_prefix(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    prefix: std::kizu::ast::PrefixNode
+    prefix: &std::kizu::ast::PrefixNode
 ) -> !void {
     print("Prefix");
     match prefix.op {
@@ -441,7 +441,7 @@ fn dump_prefix(
 fn dump_field_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    field_expr: std::kizu::ast::FieldExprNode
+    field_expr: &std::kizu::ast::FieldExprNode
 ) -> !void {
     print("FieldExpr");
     if field_expr.namespace {
@@ -457,7 +457,7 @@ fn dump_field_expr(
 fn dump_deref_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    deref_expr: std::kizu::ast::DerefExprNode
+    deref_expr: &std::kizu::ast::DerefExprNode
 ) -> !void {
     print("DerefExpr");
     try dump_node(source, ast, deref_expr.receiver);
@@ -467,7 +467,7 @@ fn dump_deref_expr(
 fn dump_call(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    call: std::kizu::ast::CallNode
+    call: &std::kizu::ast::CallNode
 ) -> !void {
     print("Call");
     try dump_node(source, ast, call.callee);
@@ -478,7 +478,7 @@ fn dump_call(
 fn dump_type_apply_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    type_apply: std::kizu::ast::TypeApplyExprNode
+    type_apply: &std::kizu::ast::TypeApplyExprNode
 ) -> !void {
     print("TypeApplyExpr");
     try dump_node(source, ast, type_apply.callee);
@@ -489,7 +489,7 @@ fn dump_type_apply_expr(
 fn dump_cast_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    cast_expr: std::kizu::ast::CastExprNode
+    cast_expr: &std::kizu::ast::CastExprNode
 ) -> !void {
     print("CastExpr");
     try dump_node(source, ast, cast_expr.type_node);
@@ -500,7 +500,7 @@ fn dump_cast_expr(
 fn dump_index_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    index_expr: std::kizu::ast::IndexExprNode
+    index_expr: &std::kizu::ast::IndexExprNode
 ) -> !void {
     print("IndexExpr");
     if index_expr.slice {
@@ -517,7 +517,7 @@ fn dump_index_expr(
 fn dump_struct_literal_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    struct_literal: std::kizu::ast::StructLiteralExprNode
+    struct_literal: &std::kizu::ast::StructLiteralExprNode
 ) -> !void {
     print("StructLiteralExpr");
     try dump_node(source, ast, struct_literal.type_name);
@@ -528,7 +528,7 @@ fn dump_struct_literal_expr(
 fn dump_struct_field_init(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    struct_field_init: std::kizu::ast::StructFieldInitNode
+    struct_field_init: &std::kizu::ast::StructFieldInitNode
 ) -> !void {
     print("StructFieldInit");
     try dump_node(source, ast, struct_field_init.name);
@@ -539,7 +539,7 @@ fn dump_struct_field_init(
 fn dump_arena_new_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    arena_new: std::kizu::ast::ArenaNewExprNode
+    arena_new: &std::kizu::ast::ArenaNewExprNode
 ) -> !void {
     print("ArenaNewExpr");
     try dump_node(source, ast, arena_new.type_node);
@@ -550,7 +550,7 @@ fn dump_arena_new_expr(
 fn dump_try_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    try_expr: std::kizu::ast::TryExprNode
+    try_expr: &std::kizu::ast::TryExprNode
 ) -> !void {
     print("TryExpr");
     try dump_node(source, ast, try_expr.value);
@@ -560,7 +560,7 @@ fn dump_try_expr(
 fn dump_comptime_expr(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    comptime_expr: std::kizu::ast::ComptimeExprNode
+    comptime_expr: &std::kizu::ast::ComptimeExprNode
 ) -> !void {
     print("ComptimeExpr");
     try dump_node(source, ast, comptime_expr.value);
@@ -570,7 +570,7 @@ fn dump_comptime_expr(
 fn dump_match(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    match_node: std::kizu::ast::MatchNode
+    match_node: &std::kizu::ast::MatchNode
 ) -> !void {
     print("Match");
     try dump_node(source, ast, match_node.value);
@@ -581,7 +581,7 @@ fn dump_match(
 fn dump_match_arm(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    match_arm: std::kizu::ast::MatchArmNode
+    match_arm: &std::kizu::ast::MatchArmNode
 ) -> !void {
     print("MatchArm");
     try dump_node(source, ast, match_arm.pattern);
@@ -593,7 +593,7 @@ fn dump_match_arm(
 fn dump_unsafe(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    unsafe_node: std::kizu::ast::UnsafeNode
+    unsafe_node: &std::kizu::ast::UnsafeNode
 ) -> !void {
     print("Unsafe");
     try dump_range(source, ast, unsafe_node.capabilities);
@@ -604,7 +604,7 @@ fn dump_unsafe(
 fn dump_comptime_if(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    comptime_if: std::kizu::ast::ComptimeIfNode
+    comptime_if: &std::kizu::ast::ComptimeIfNode
 ) -> !void {
     print("ComptimeIf");
     try dump_node(source, ast, comptime_if.condition);
@@ -632,7 +632,7 @@ fn dump_range(
 fn dump_expr_stmt(
     source: []u8,
     ast: std::kizu::ast::Ast,
-    expr_stmt: std::kizu::ast::ExprStmtNode
+    expr_stmt: &std::kizu::ast::ExprStmtNode
 ) -> !void {
     print("ExprStmt");
     try dump_node(source, ast, expr_stmt.expr);
@@ -685,7 +685,8 @@ fn dump_string(
             }
         }
     }
-    print(value.as_bytes());
+    let value_bytes = value.as_bytes();
+    print(value_bytes);
     value.deinit();
     return;
 }
@@ -2191,88 +2192,45 @@ func runStdKizuParserParityHarness(
 	cases []parserParityCase,
 ) map[string]string {
 	t.Helper()
-	source, err := buildStdKizuParserParityHarness(cases)
+	dir := t.TempDir()
+	source, err := buildStdKizuParserParityHarness(t, dir, cases)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "std_kizu_parser_parity.kizu")
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	program, errs, err := parsePathWithStd(path)
+	binary := buildNativeParityHarness(t, dir, "std_kizu_parser_parity", source)
+	out := runNativeParityHarness(t, binary)
+	got, err := parseStdKizuParserParityOutput(out)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if len(errs) > 0 {
-		t.Fatalf("harness parse errors: %v", errs)
-	}
-	var out bytes.Buffer
-	if err := interp.New(&out).Run(program); err != nil {
-		t.Fatalf("harness failed: %v\n%s", err, out.String())
-	}
-	got, err := parseStdKizuParserParityOutput(out.String())
-	if err != nil {
-		t.Fatalf("invalid harness output: %v\n%s", err, out.String())
+		t.Fatalf("invalid harness output: %v\n%s", err, tailForLog(out))
 	}
 	return got
 }
 
 // buildStdKizuParserParityHarness creates a Kizu program that parses all cases.
-func buildStdKizuParserParityHarness(cases []parserParityCase) (string, error) {
+func buildStdKizuParserParityHarness(
+	t *testing.T,
+	dir string,
+	cases []parserParityCase,
+) (string, error) {
+	t.Helper()
 	var out strings.Builder
 	out.WriteString(stdKizuParserParityHarness)
 	out.WriteString("\nfn main() -> !void {\n")
 	out.WriteString("    let allocator = std::mem::page_allocator();\n")
+	out.WriteString("    let io = std::io::blocking();\n")
 	for index, testCase := range cases {
 		name, err := kizuRawStringLiteral(testCase.name)
 		if err != nil {
 			return "", fmt.Errorf("%s name: %w", testCase.name, err)
 		}
-		source, cleanup, err := writeKizuSourceLiteral(&out, index, testCase.source)
+		path, err := kizuRawStringLiteral(writeParityCaseFile(t, dir, index, testCase.source))
 		if err != nil {
-			return "", fmt.Errorf("%s source: %w", testCase.name, err)
+			return "", fmt.Errorf("%s path: %w", testCase.name, err)
 		}
-		fmt.Fprintf(&out, "    try run_case(allocator, %s, %s);\n", name, source)
-		if cleanup != "" {
-			out.WriteString(cleanup)
-		}
+		fmt.Fprintf(&out, "    try run_case(allocator, io, %s, %s);\n", name, path)
 	}
 	out.WriteString("    return;\n}\n")
 	return out.String(), nil
-}
-
-// writeKizuSourceLiteral writes source construction and returns its expression.
-func writeKizuSourceLiteral(out *strings.Builder, index int, value string) (string, string, error) {
-	if !strings.Contains(value, "\"") {
-		lit, err := kizuRawStringLiteral(value)
-		return lit, "", err
-	}
-	name := fmt.Sprintf("source_%d", index)
-	bytesName := fmt.Sprintf("%s_bytes", name)
-	fmt.Fprintf(out, "    var %s = std::string::String(allocator);\n", name)
-	if err := writeKizuStringChunks(out, name, value); err != nil {
-		return "", "", err
-	}
-	fmt.Fprintf(out, "    let %s = %s.as_bytes();\n", bytesName, name)
-	return bytesName, fmt.Sprintf("    %s.deinit();\n", name), nil
-}
-
-// writeKizuStringChunks appends raw chunks and quote bytes to a String value.
-func writeKizuStringChunks(out *strings.Builder, name string, value string) error {
-	parts := strings.Split(value, "\"")
-	for index, part := range parts {
-		if part != "" {
-			lit, err := kizuRawStringLiteral(part)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(out, "    try %s.append_bytes(%s);\n", name, lit)
-		}
-		if index < len(parts)-1 {
-			fmt.Fprintf(out, "    try %s.append_byte(cast<u8>(34));\n", name)
-		}
-	}
-	return nil
 }
 
 // kizuRawStringLiteral returns a literal for Kizu's current no-escape strings.

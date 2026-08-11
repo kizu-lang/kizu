@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
 )
@@ -22,23 +20,28 @@ const (
 )
 
 const stdKizuLexerParityHarness = `
-fn run_lexer_case(name: []u8, text: []u8) -> !void {
+fn run_lexer_case(io: Io, name: []u8, path: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
+    let text = try std::fs::read_file(io, path);
     var token = std::kizu::lexer::first_token(text);
-    while true {
+    var done = false;
+    while !done {
         try dump_token(text, token);
         if is_eof_token(token) {
-            print("@@KIZU_LEXER_PARITY_END@@");
-            return;
+            done = true;
+        } else {
+            token = std::kizu::lexer::next_token(text, token);
         }
-        token = std::kizu::lexer::next_token(text, token);
     }
+    print("@@KIZU_LEXER_PARITY_END@@");
+    return;
 }
 
-fn run_tokenize_case(name: []u8, text: []u8) -> !void {
+fn run_tokenize_case(io: Io, name: []u8, path: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
+    let text = try std::fs::read_file(io, path);
     let allocator = std::mem::page_allocator();
     var tokens = try std::kizu::lexer::tokenize(allocator, text);
     var index = 0;
@@ -116,6 +119,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Range => false,
         Pipe => false,
         Mut => false,
+        Dyn => false,
     };
 }
 
@@ -182,6 +186,7 @@ fn dump_token(source: []u8, token: std::kizu::lexer::Token) -> !void {
         Range => print("Range");,
         Pipe => print("Pipe");,
         Mut => print("Mut");,
+        Dyn => print("Dyn");,
         Eof => print("Eof");,
     }
     let text = try std::mem::slice(source, token.start, token.end);
@@ -601,51 +606,42 @@ func runStdKizuLexerHarness(
 	runner string,
 ) map[string]string {
 	t.Helper()
-	source, err := buildStdKizuLexerParityHarness(cases, runner)
+	dir := t.TempDir()
+	source, err := buildStdKizuLexerParityHarness(t, dir, cases, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "std_kizu_lexer_parity.kizu")
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	program, errs, err := parsePathWithStd(path)
+	binary := buildNativeParityHarness(t, dir, "std_kizu_lexer_parity", source)
+	out := runNativeParityHarness(t, binary)
+	got, err := parseStdKizuLexerParityOutput(out)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if len(errs) > 0 {
-		t.Fatalf("harness parse errors: %v", errs)
-	}
-	var out bytes.Buffer
-	if err := interp.New(&out).Run(program); err != nil {
-		t.Fatalf("harness failed: %v\n%s", err, out.String())
-	}
-	got, err := parseStdKizuLexerParityOutput(out.String())
-	if err != nil {
-		t.Fatalf("invalid harness output: %v\n%s", err, out.String())
+		t.Fatalf("invalid harness output: %v\n%s", err, tailForLog(out))
 	}
 	return got
 }
 
 // buildStdKizuLexerParityHarness creates a Kizu program that lexes all cases.
-func buildStdKizuLexerParityHarness(cases []lexerParityCase, runner string) (string, error) {
+func buildStdKizuLexerParityHarness(
+	t *testing.T,
+	dir string,
+	cases []lexerParityCase,
+	runner string,
+) (string, error) {
+	t.Helper()
 	var out strings.Builder
 	out.WriteString(stdKizuLexerParityHarness)
 	out.WriteString("\nfn main() -> !void {\n")
-	out.WriteString("    let allocator = std::mem::page_allocator();\n")
+	out.WriteString("    let io = std::io::blocking();\n")
 	for index, testCase := range cases {
 		name, err := kizuRawStringLiteral(testCase.name)
 		if err != nil {
 			return "", fmt.Errorf("%s name: %w", testCase.name, err)
 		}
-		source, cleanup, err := writeKizuSourceLiteral(&out, index, testCase.source)
+		path, err := kizuRawStringLiteral(writeParityCaseFile(t, dir, index, testCase.source))
 		if err != nil {
-			return "", fmt.Errorf("%s source: %w", testCase.name, err)
+			return "", fmt.Errorf("%s path: %w", testCase.name, err)
 		}
-		fmt.Fprintf(&out, "    try %s(%s, %s);\n", runner, name, source)
-		if cleanup != "" {
-			out.WriteString(cleanup)
-		}
+		fmt.Fprintf(&out, "    try %s(io, %s, %s);\n", runner, name, path)
 	}
 	out.WriteString("    return;\n}\n")
 	return out.String(), nil
