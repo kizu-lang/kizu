@@ -235,6 +235,22 @@ func runNativeSelfhostCommandWithEnv(
 	}
 }
 
+// stripClangDriverNoise drops toolchain warning lines clang emits for wrapper flags
+// it does not consume (nix wrappers pass framework/include flags to every job). They
+// vary by machine and toolchain and say nothing about the artifact under test.
+func stripClangDriverNoise(stderr string) string {
+	lines := strings.Split(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "clang-") &&
+			strings.Contains(line, ": warning: argument unused during compilation:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // expectNativeSourceCommand checks a native-source command result.
 func expectNativeSourceCommand(
 	t *testing.T,
@@ -245,6 +261,7 @@ func expectNativeSourceCommand(
 	code int,
 ) int {
 	t.Helper()
+	result.stderr = stripClangDriverNoise(result.stderr)
 	if result.code != code || result.stdout != stdout || result.stderr != stderr {
 		// Say what mismatched. The report beside this records only sha256s, so a bare
 		// "mismatch" sends the next reader off to reproduce the command by hand -- and a
