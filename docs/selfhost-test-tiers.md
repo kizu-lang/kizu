@@ -47,6 +47,24 @@ pass, and `--no-verify` becomes routine. That is what happened to the three
 the code was correct. They are opt-in behind
 `KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1` as of this measurement.
 
+Measured locally on 2026-08-11, after moving the std lexer/parser parity
+harnesses from the Go interpreter to native harness binaries and sharing one
+`go build` CLI binary across command smokes:
+
+| Command | Elapsed |
+| --- | ---: |
+| `go test ./... -count=1` | 81.7s |
+| `go test ./cmd/kizu -count=1` | 81.4s |
+
+The same commands immediately before those two changes measured 160.2s for
+`go test ./cmd/kizu -count=1`: the three selfhost-corpus parity tests took
+61.7s interpreting the std lexer/parser, and 78 command smokes paid a
+`go run .` link each. The parity harnesses now compile with the Go backend and
+run as native binaries (about 1.5s per corpus pass), and `TestMain` builds the
+smoke CLI once. No single test exceeds 6s in the current profile; the remaining
+time is a long tail of per-test `loadPackageProgram` + `checkProgram` reloads
+and real CLI/clang work.
+
 Measured locally on 2026-07-30:
 
 | Command | Elapsed |

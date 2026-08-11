@@ -14,7 +14,7 @@ import (
 
 // TestRunCommandSmoke checks the CLI can execute the hello example.
 func TestRunCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/hello.kizu")
+	cmd := kizuCommand("run", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -27,7 +27,7 @@ func TestRunCommandSmoke(t *testing.T) {
 
 // TestRunCommandBorrowExample checks borrow parameters preserve ownership.
 func TestRunCommandBorrowExample(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/borrow.kizu")
+	cmd := kizuCommand("run", "../../examples/borrow.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -40,7 +40,7 @@ func TestRunCommandBorrowExample(t *testing.T) {
 
 // TestRunCommandArenaExample checks the CLI can execute the arena example.
 func TestRunCommandArenaExample(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/arena.kizu")
+	cmd := kizuCommand("run", "../../examples/arena.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -53,7 +53,7 @@ func TestRunCommandArenaExample(t *testing.T) {
 
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")
+	cmd := kizuCommand("ir", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -66,7 +66,7 @@ func TestIRCommandSmoke(t *testing.T) {
 
 // TestParseCommandUsesSelfhostFrontend keeps parse routed through Kizu frontend code.
 func TestParseCommandUsesSelfhostFrontend(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "parse", "../../examples/hello.kizu")
+	cmd := kizuCommand("parse", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -836,7 +836,7 @@ func chdirForTest(t *testing.T, dir string) func() {
 
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
 func TestFmtCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "fmt", "../../examples/hello.kizu")
+	cmd := kizuCommand("fmt", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -989,7 +989,7 @@ func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "fmt", path)
+	cmd := kizuCommand("fmt", path)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1024,7 +1024,7 @@ func TestFmtCommandPreservesBlockLineComments(t *testing.T) {
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "fmt", path)
+	cmd := kizuCommand("fmt", path)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1119,7 +1119,7 @@ func TestFmtWritePreservesInlineLineComments(t *testing.T) {
 
 // TestCheckPackageCommandSmoke checks package roots can be statically checked.
 func TestCheckPackageCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "check", "../../examples/modules/same_module_helper_lookup")
+	cmd := kizuCommand("check", "../../examples/modules/same_module_helper_lookup")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1131,7 +1131,7 @@ func TestCheckPackageCommandSmoke(t *testing.T) {
 
 // TestRunPackageCommandSmoke checks package roots can execute root module main.
 func TestRunPackageCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/cross_module_types")
+	cmd := kizuCommand("run", "../../examples/modules/cross_module_types")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1143,7 +1143,7 @@ func TestRunPackageCommandSmoke(t *testing.T) {
 
 // TestTestPackageCommandSmoke checks package roots can run assertion tests.
 func TestTestPackageCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "test", "../../examples/modules/cross_module_types")
+	cmd := kizuCommand("test", "../../examples/modules/cross_module_types")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1199,7 +1199,7 @@ func TestTestFileCommandDoesNotRunMain(t *testing.T) {
 
 // TestRunCompilerPhasesPackageSmoke checks self-host phase-shaped APIs.
 func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases")
+	cmd := kizuCommand("run", "../../examples/modules/compiler_phases")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1211,7 +1211,7 @@ func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
 
 // TestRunCompilerPhasesStopsAfterParseError checks try prevents later phases.
 func TestRunCompilerPhasesStopsAfterParseError(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases_fail")
+	cmd := kizuCommand("run", "../../examples/modules/compiler_phases_fail")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
@@ -1318,7 +1318,7 @@ func TestIROptCommandSmoke(t *testing.T) {
 	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "ir", "--opt", source)
+	cmd := kizuCommand("ir", "--opt", source)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1333,7 +1333,7 @@ func TestIROptCommandSmoke(t *testing.T) {
 
 // TestBuildEmitLLVMCommandSmoke checks the CLI can dump LLVM IR.
 func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../examples/hello.kizu")
+	cmd := kizuCommand("build", "--emit-llvm", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1380,7 +1380,7 @@ pub fn main() -> void {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", root)
+	cmd := kizuCommand("build", "--emit-llvm", root)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1408,7 +1408,7 @@ fn main() {
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	cmd := kizuCommand("build", "--emit-llvm", source)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1439,7 +1439,7 @@ fn main() -> !void {
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	cmd := kizuCommand("build", "--emit-llvm", source)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1482,7 +1482,7 @@ fn main() -> !void {
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	cmd := kizuCommand("build", "--emit-llvm", source)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1509,7 +1509,7 @@ func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "--opt", source)
+	cmd := kizuCommand("build", "--emit-llvm", "--opt", source)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1521,8 +1521,8 @@ func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 
 // TestBuildTargetWASICommandSmoke checks the CLI can dump WASI WebAssembly text.
 func TestBuildTargetWASICommandSmoke(t *testing.T) {
-	cmd := exec.Command(
-		"go", "run", ".", "build", "--target", "wasm32-wasi", "../../examples/hello.kizu",
+	cmd := kizuCommand(
+		"build", "--target", "wasm32-wasi", "../../examples/hello.kizu",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1540,8 +1540,8 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	output := filepath.Join(t.TempDir(), "hello")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, "../../examples/hello.kizu",
 	)
@@ -1570,8 +1570,8 @@ func TestBuildTargetNativeOptCommandSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	output := filepath.Join(t.TempDir(), "hello-opt")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native", "--opt",
+	build := kizuCommand(
+		"build", "--target", "native", "--opt",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, "../../examples/hello.kizu",
 	)
@@ -1611,8 +1611,8 @@ fn main() -> !void {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "error_union")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -1642,8 +1642,8 @@ fn main() -> !void {
 		t.Fatal(err)
 	}
 	failOutput := filepath.Join(t.TempDir(), "error_union_fail")
-	failBuild := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	failBuild := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", failOutput, failSource,
 	)
@@ -1684,8 +1684,8 @@ func TestBuildTargetNativeProcessSpawnCommandSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "spawn")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -1727,8 +1727,8 @@ func TestBuildTargetNativeProcessProfileHelpersSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "process_profile_helpers")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -1782,8 +1782,8 @@ fn main() -> !void {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "returned_array_field")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -1849,8 +1849,8 @@ fn main() -> !void {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "returned_union_array_borrow")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -1980,8 +1980,8 @@ fn main() {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "arena")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -2010,8 +2010,8 @@ func TestBuildTargetNativeWhileContinuePhiCommandSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "while_continue_phi")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -2055,8 +2055,8 @@ func TestBuildTargetNativeWhileBreakPhiCommandSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(t.TempDir(), "while_break_phi")
-	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native",
+	build := kizuCommand(
+		"build", "--target", "native",
 		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
 		"-o", output, source,
 	)
@@ -2090,12 +2090,12 @@ const nativeWhileBreakPhiSource = `fn main() {
 // TestCacheCommands checks cache status, why-rebuild, and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()
-	build := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../examples/hello.kizu")
+	build := kizuCommand("build", "--emit-llvm", "../../examples/hello.kizu")
 	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
-	why := exec.Command("go", "run", ".", "why-rebuild", "../../examples/hello.kizu")
+	why := kizuCommand("why-rebuild", "../../examples/hello.kizu")
 	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	out, err := why.CombinedOutput()
 	if err != nil {
@@ -2104,7 +2104,7 @@ func TestCacheCommands(t *testing.T) {
 	if !strings.Contains(string(out), "cache hit") {
 		t.Fatalf("got %q", out)
 	}
-	status := exec.Command("go", "run", ".", "cache", "status")
+	status := kizuCommand("cache", "status")
 	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	out, err = status.CombinedOutput()
 	if err != nil {
@@ -2113,7 +2113,7 @@ func TestCacheCommands(t *testing.T) {
 	if !strings.Contains(string(out), "entries: 1") {
 		t.Fatalf("got %q", out)
 	}
-	prune := exec.Command("go", "run", ".", "cache", "prune")
+	prune := kizuCommand("cache", "prune")
 	prune.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err = prune.CombinedOutput(); err != nil {
 		t.Fatalf("prune failed: %v\n%s", err, out)
@@ -2124,17 +2124,17 @@ func TestCacheCommands(t *testing.T) {
 func TestBuildOptUsesSeparateCacheEntry(t *testing.T) {
 	cacheDir := t.TempDir()
 	source := "../../examples/hello.kizu"
-	plain := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	plain := kizuCommand("build", "--emit-llvm", source)
 	plain.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err := plain.CombinedOutput(); err != nil {
 		t.Fatalf("plain build failed: %v\n%s", err, out)
 	}
-	opt := exec.Command("go", "run", ".", "build", "--emit-llvm", "--opt", source)
+	opt := kizuCommand("build", "--emit-llvm", "--opt", source)
 	opt.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err := opt.CombinedOutput(); err != nil {
 		t.Fatalf("opt build failed: %v\n%s", err, out)
 	}
-	status := exec.Command("go", "run", ".", "cache", "status")
+	status := kizuCommand("cache", "status")
 	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	out, err := status.CombinedOutput()
 	if err != nil {
@@ -2152,7 +2152,7 @@ func TestImportCHeaderCommandSmoke(t *testing.T) {
 	if err := os.WriteFile(header, source, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "import-c-header", header)
+	cmd := kizuCommand("import-c-header", header)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("import failed: %v\n%s", err, out)
@@ -2169,7 +2169,7 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 	if err := os.WriteFile(header, []byte("int printf(const char *fmt, ...);\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "import-c-header", header)
+	cmd := kizuCommand("import-c-header", header)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected import to fail\n%s", out)
@@ -2187,7 +2187,7 @@ func TestWhyRebuildChangedSource(t *testing.T) {
 	if err := os.WriteFile(source, []byte(`fn main() { print("hello"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	build := kizuCommand("build", "--emit-llvm", source)
 	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
@@ -2195,7 +2195,7 @@ func TestWhyRebuildChangedSource(t *testing.T) {
 	if err := os.WriteFile(source, []byte(`fn main() { print("changed"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	why := exec.Command("go", "run", ".", "why-rebuild", source)
+	why := kizuCommand("why-rebuild", source)
 	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	out, err := why.CombinedOutput()
 	if err != nil {
@@ -2208,7 +2208,7 @@ func TestWhyRebuildChangedSource(t *testing.T) {
 
 // TestRunCommandRejectsMoveError checks run does not bypass static move checks.
 func TestRunCommandRejectsMoveError(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")
+	cmd := kizuCommand("run", "../../examples/move_error.kizu")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
