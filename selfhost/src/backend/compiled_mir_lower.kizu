@@ -7248,6 +7248,20 @@ fn lower_embedded_value_cursor_append_loop(
         0,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator())
     );
+    // The latch call runs on the back edge, after the whole body. An argument the body
+    // reassigned -- a carried scalar such as 'start = cursor + 2' ahead of
+    // 'cursor = path_segment_end(spelling, start)' -- must be read through the alias the
+    // body lowering bound for it, exactly as the field-read latch reads its receiver.
+    // Its source spelling names the loop-top seed instead, so the latch would recompute
+    // the cursor from first-iteration values and the loop would never advance
+    // (expression_infer::last_path_segment_start spun forever on any 'a::b' spelling).
+    var latch_alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer latch_alias_sources.deinit();
+    var latch_alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer latch_alias_currents.deinit();
+    try local_alias_name_tables(
+        &body_aliases, &var latch_alias_sources, &var latch_alias_currents
+    );
     if std::mem::equal_bytes(latch_value_kind, "TryExpr") {
         let latch_call = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, latch_value, "value", 0, bs
@@ -7259,8 +7273,9 @@ fn lower_embedded_value_cursor_append_loop(
         cursor_type = try compiled_mir_types::call_info_error_success_llvm(
             ir_lookup_index, canonical_facts, ir_bytes, &latch_info
         );
-        let latch_args = try compiled_mir_lower_call::lower_call_args_canonical(
-            ir_bytes, function_name, module_prefix, body_locals, latch_call, body_string_counter, bs,
+        let latch_args = try compiled_mir_lower_call::lower_call_args_canonical_with_aliases(
+            ir_bytes, function_name, module_prefix, body_locals, latch_call, body_string_counter,
+            &latch_alias_sources, &latch_alias_currents, bs,
             ir_lookup_index, canonical_facts, &latch_info.types,
             call_arg_type_cache
         );
@@ -7326,9 +7341,10 @@ fn lower_embedded_value_cursor_append_loop(
                     function_name, module_prefix, latch_value, bs, call_arg_type_cache
                 );
                 cursor_type = latch_info.return_llvm_type;
-                let latch_args = try compiled_mir_lower_call::lower_call_args_canonical(
+                let latch_args = try compiled_mir_lower_call::lower_call_args_canonical_with_aliases(
                     ir_bytes, function_name, module_prefix, body_locals, latch_value,
-                    body_string_counter, bs, ir_lookup_index, canonical_facts,
+                    body_string_counter, &latch_alias_sources, &latch_alias_currents,
+                    bs, ir_lookup_index, canonical_facts,
                     &latch_info.types, call_arg_type_cache
                 );
                 let latch_arg_strings = try compiled_mir_lower_call::count_string_args(&latch_args);
@@ -20498,6 +20514,7 @@ fn lower_multi_while_statement(
                 increment_value,
                 body_string_counter,
                 body_try_counter,
+                &body_aliases,
                 bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
@@ -20517,6 +20534,7 @@ fn lower_multi_while_statement(
                     induction_phi,
                     increment_value,
                     body_string_counter,
+                    &body_aliases,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -21848,6 +21866,7 @@ fn lower_while_latch_try_call(
     try_node: i64,
     string_counter: i64,
     try_index: i64,
+    body_aliases: &std::array::Array<LocalAliasState>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -21873,9 +21892,9 @@ fn lower_while_latch_try_call(
     if !std::mem::equal_bytes(success_type, "i64") {
         return error("compiled mir: induction latch try-call must return an i64");
     }
-    let args = try compiled_mir_lower_call::lower_call_args_canonical(
-        ir_bytes, function_name, module_prefix, locals_spec, inner, string_counter, bs,
-        ir_lookup_index, canonical_facts, &call_info.types,
+    let args = try lower_while_latch_call_args(
+        ir_bytes, function_name, module_prefix, locals_spec, inner, string_counter,
+        body_aliases, bs, ir_lookup_index, canonical_facts, &call_info.types,
         call_arg_type_cache
     );
     // The bound name is the induction variable itself; the latch renderer suffixes every SSA
@@ -21886,6 +21905,39 @@ fn lower_while_latch_try_call(
         call_info.module_prefix, call_info.callee_name, string_counter, try_index,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         args
+    );
+}
+
+// lower_while_latch_call_args lowers a latch call's arguments through the body's final
+// alias map. The latch runs on the back edge, after the whole body: an argument the body
+// reassigned -- a carried scalar such as 'start = cursor + 2' ahead of
+// 'cursor = path_segment_end(spelling, start)' -- must be read through the alias the body
+// lowering bound for it. Its source spelling names the loop-head phi instead, so the latch
+// would recompute the cursor from the previous iteration's value and the loop would never
+// advance (expression_infer::last_path_segment_start spun forever on any 'a::b' spelling).
+fn lower_while_latch_call_args(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    string_counter: i64,
+    body_aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_types: &compiled_canonical_facts::ParsedCallTypeFact,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    try local_alias_name_tables(body_aliases, &var alias_sources, &var alias_currents);
+    return try compiled_mir_lower_call::lower_call_args_canonical_with_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter,
+        &alias_sources, &alias_currents, bs, ir_lookup_index, canonical_facts, call_types,
+        call_arg_type_cache
     );
 }
 
@@ -21920,6 +21972,7 @@ fn lower_while_latch_call(
     induction_var: []u8,
     call_node: i64,
     string_counter: i64,
+    body_aliases: &std::array::Array<LocalAliasState>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -21944,9 +21997,9 @@ fn lower_while_latch_call(
     if !latch_call_cursor_type_is_seedable(call_info.return_llvm_type) {
         return error("compiled mir: token-carried latch call must return an i64 or struct value");
     }
-    let args = try compiled_mir_lower_call::lower_call_args_canonical(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, bs,
-        ir_lookup_index, canonical_facts, &call_info.types,
+    let args = try lower_while_latch_call_args(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter,
+        body_aliases, bs, ir_lookup_index, canonical_facts, &call_info.types,
         call_arg_type_cache
     );
     return compiled_mir::let_call_stmt(
