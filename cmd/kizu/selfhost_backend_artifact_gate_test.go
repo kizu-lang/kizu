@@ -2249,11 +2249,13 @@ func requiredLLVMParserPredicateFragments() []string {
 		"define i1 @kizu_kizu__parser_is_struct_literal_start(",
 		"%nps_saw = phi i1",
 		"%slt_count = phi i64",
+		// is_type_apply_start outgrew the pps template (adjacency, bare-name, and
+		// static-argument lookahead) and lowers through the general path now, so only
+		// the struct-literal instantiation still pins the template's fragments.
 		"%pps_next = extractvalue %kizu.kizu.parser.parse_node %left,",
-		"%pps_guard = call i1 @kizu_kizu__parser_is_lt_token",
 		"%pps_ast_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(",
-		"%pps_result = call i1 @kizu_kizu__parser_is_namespace_path_span(",
 		"%pps_result = call i1 @kizu_kizu__parser_is_struct_literal_type_span(",
+		"@kizu_kizu__parser_type_apply_has_valid_static_arguments(",
 		"_idx_oob:",
 	}
 	return append(parser, requiredLLVMFormatHelperFragments()...)
