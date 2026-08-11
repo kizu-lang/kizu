@@ -982,7 +982,6 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
-		"-fno-integrated-as",
 		llPath,
 		"selfhost/runtime/selfhost.storage.ll",
 		"selfhost/runtime/selfhost.host.ll",
