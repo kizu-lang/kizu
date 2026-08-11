@@ -1012,8 +1012,12 @@ func requiredLLVMMatchUnionFragments() []string {
 // (bool -> i1, an enum tag -> i64, NodeId / ChildRange / Span -> their value types). The five
 // leaf variants and the payload-less Empty are not modelled here. This is the type-definition
 // foundation; the cluster's lowering lands in a later PR.
+//
+// The id types and the expression variants are here; BlockNode through FnDeclNode are in
+// requiredLLVMNodeCountStatementTypeFragments. The two lists are one foundation and are
+// always read together.
 func requiredLLVMNodeCountTypeFragments() []string {
-	return []string{
+	fragments := []string{
 		"%kizu.kizu.ast.token_id = type { i64 }",
 		"%kizu.kizu.ast.symbol_id = type { i64 }",
 		"%kizu.kizu.ast.int_node = type { %kizu.kizu.ast.token_id }",
@@ -1037,6 +1041,15 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.arena_new_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.try_expr_node = type { %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.comptime_expr_node = type { %kizu.kizu.ast.node_id }",
+	}
+	return append(fragments, requiredLLVMNodeCountStatementTypeFragments()...)
+}
+
+// requiredLLVMNodeCountStatementTypeFragments returns the statement and declaration half of
+// the node_count type foundation described on requiredLLVMNodeCountTypeFragments: the AstData
+// variant payload structs from BlockNode through FnDeclNode, modelled in stage2 the same way.
+func requiredLLVMNodeCountStatementTypeFragments() []string {
+	return []string{
 		"%kizu.kizu.ast.block_node = type { %kizu.kizu.ast.child_range }",
 		"%kizu.kizu.ast.if_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
@@ -1094,7 +1107,7 @@ func requiredLLVMNodeCountTypeFragments() []string {
 // cluster is defined so selfhost.ll links with no undefined symbol; every arm returns a real
 // value (no 'unreachable'). These fragments lock each lowered body shape.
 func requiredLLVMNodeCountLoweringFragments() []string {
-	return []string{
+	fragments := []string{
 		// All eleven cluster defines are present (linkage invariant).
 		"define %kizu.error.i64 @kizu_selfhost__ast_node_count(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_range(",
@@ -1107,6 +1120,16 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_range(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
+	}
+	fragments = append(fragments, requiredLLVMNodeCountDispatchFragments()...)
+	return append(fragments, requiredLLVMNodeCountRangeLoweringFragments()...)
+}
+
+// requiredLLVMNodeCountDispatchFragments returns node_count's own entry shape from the cluster
+// described on requiredLLVMNodeCountLoweringFragments: the Ast.get bind, the union tag extract,
+// the 46-arm dispatch chain, and the Program arm's forward to count_with_range.
+func requiredLLVMNodeCountDispatchFragments() []string {
+	return []string{
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
 		// the 46-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
 		// last arm's test is elided unconditionally, so dispatch1_check_45 falls through to
@@ -1135,6 +1158,15 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"%enumdispatchret1_0_val = insertvalue %kizu.error.i64 " +
 			"%enumdispatchret1_0_ok, i64 %t2, 1",
 		"  ret %kizu.error.i64 %enumdispatchret1_0_val",
+	}
+}
+
+// requiredLLVMNodeCountRangeLoweringFragments returns the lowered bodies of the helpers
+// node_count recurses through, from the cluster described on
+// requiredLLVMNodeCountLoweringFragments: count_range's two-phi accumulator loop, and the
+// let-try / return-try arithmetic of count_two and count_one.
+func requiredLLVMNodeCountRangeLoweringFragments() []string {
+	return []string{
 		// count_range: a two-phi accumulator loop over the range calling the checked
 		// Ast.child_at and the recursive node_count, propagating either failure and returning
 		// the accumulated count wrapped as the success. Both phis take their back edge from
@@ -1499,6 +1531,29 @@ func requiredLLVMFormatHelperFragments() []string {
 		// on matching in parser::validation::skip_fn_param_type after the temp became %t8.
 		// Measured: once.
 		" = add i64 %index.while.head.4, 1\n  %if1002_retexpr_ok",
+	}
+	fragments = append(fragments, requiredLLVMFormatIndexAfterLeadingImportsFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSourceDriverFragments()...)
+	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
+	fragments = append(fragments, requiredLLVMFormatImportDeclFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSortedImportsFragments()...)
+	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
+	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
+	fragments = append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+	fragments = append(fragments, requiredLLVMFormatClosureLeafFragments()...)
+	return append(fragments, requiredLLVMFormatTrailingCommaFragments()...)
+}
+
+// requiredLLVMFormatIndexAfterLeadingImportsFragments locks
+// selfhost::parser::format::index_after_leading_imports, the first scan-while whose loop latch
+// is a loop-carried try-call. It belongs to the component described on
+// requiredLLVMFormatHelperFragments.
+func requiredLLVMFormatIndexAfterLeadingImportsFragments() []string {
+	return []string{
 		// index_after_leading_imports is the first scan-while whose loop latch is a
 		// loop-carried try-call: 'var index = 0; while index < tokens.len() { let token =
 		// try tokens.get(index); if !is_import_token(token) { return index; } index = try
@@ -1541,6 +1596,16 @@ func requiredLLVMFormatHelperFragments() []string {
 		// wraps is the head phi. Measured: two functions.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, " +
 			"i64 %index.while.head.4, 1",
+	}
+}
+
+// requiredLLVMFormatSourceDriverFragments locks selfhost::parser::format::format_source, the
+// compiled formatter driver the hosted fmt command runs: its tokenizer call, its owned String
+// return shape, and the header phis of the one loop in the staged module that the generic
+// while lowering takes. It belongs to the component described on
+// requiredLLVMFormatHelperFragments.
+func requiredLLVMFormatSourceDriverFragments() []string {
+	return []string{
 		// format_source is the compiled formatter driver used by the hosted fmt command. Pin the
 		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
 		// the old parse_format_alloc emitter.
@@ -1578,18 +1643,6 @@ func requiredLLVMFormatHelperFragments() []string {
 		"%retwrap0_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
 		"%retwrap0_val = insertvalue %kizu.error.owned %retwrap0_ok, %kizu.owned %out, 1",
 	}
-	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
-	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
-	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
-	fragments = append(fragments, requiredLLVMFormatImportDeclFragments()...)
-	fragments = append(fragments, requiredLLVMFormatSortedImportsFragments()...)
-	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
-	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
-	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
-	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
-	fragments = append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
-	fragments = append(fragments, requiredLLVMFormatClosureLeafFragments()...)
-	return append(fragments, requiredLLVMFormatTrailingCommaFragments()...)
 }
 
 // requiredLLVMFormatClosureLeafFragments locks the eleven selfhost::parser::format
