@@ -15,14 +15,22 @@ Kizu はメモリ安全な systems programming language です。
 - parser / AST / checker / backend は読みやすく保つ。
 - ファイルが 1000 行を超える場合、分割を検討し、関心が分離できていない可能性を疑う。
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
+- selfhost のソースは**フル Kizu で書く**(ADR-0080)。必須要件は Go backend(stage0)で
+  コンパイル・検査が通ること。selfhost backend の subset に合わせた書き下げはせず、
+  backend が受けない形は `docs/selfhost-backend-generalization.md` に gap として記録する。
 
 ## 禁止事項
 
 - テストを pass させるだけの場当たり的変更やハードコードを入れない。
 - selfhost 実装で 静的コード生成に分岐する実装を増やさない。
+- selfhost backend に**新しい形状 lowering・関数名分岐を追加しない**(ADR-0080)。
+  一般 lowering(generic while 系)を拡張し、既存 shapes は退役させる。
 - `backend.kizu` に静的 LLVM 文字列を積み増すだけの変更をしない。
 - hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
-- `main` へ直接 commit / push しない。
+- 関数の内部形状や生成テキスト断片を grep で固定する**構造 pin を新規に追加しない**
+  (ADR-0080)。検証は probe 差分・parity manifest・実行 golden で行う。
+- `main` へ直接 commit / push しない。red な gate を含む変更を merge しない。
+  WIP checkpoint は branch に置く。
 
 ## テストと性能
 

@@ -1,0 +1,58 @@
+# ADR-0080: main は green のみ。push/PR ごとに daily suite、nightly に
+# bootstrap + hosted parity を回す。nightly の bootstrap red は
+# docs/selfhost-backend-generalization.md の記録済み gap と突き合わせて
+# 退行かどうかを判定する。
+#
+# runner は開発環境と同じ macOS/arm64。バックエンドの artifact gate は
+# 「dominance violation を拒否する検証器」を要求し Apple clang はそれを
+# 満たさないため、nightly は brew の llvm (opt) を PATH の先頭に置く
+# (justfile の selfhost-backend-artifact-gate と同じ取り決め)。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # nightly (JST 03:00)
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Daily suite
+        run: go test ./... -count=1 -timeout=20m
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal)"
+
+  nightly-bootstrap:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install LLVM verifier
+        run: brew install llvm
+      - name: Bootstrap (stage0 -> stage1 -> stage2)
+        run: |
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
+      - name: Hosted parity gates
+        run: |
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1
+          KIZU_RUN_SELFHOST_CHECK_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostCheckParityGate$' -count=1
+          KIZU_RUN_SELFHOST_PARSE_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostParseParityGate$' -count=1
+          KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1
+          KIZU_RUN_SELFHOST_TEST_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostTestParityGate$' -count=1
