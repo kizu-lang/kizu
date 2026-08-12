@@ -1491,6 +1491,7 @@ func tokenSpan(tok token.Token) ast.Span {
 		width = 1
 	}
 	return ast.Span{
+		File:  tok.File,
 		Start: ast.Position{Line: tok.Line, Column: tok.Column},
 		End:   ast.Position{Line: tok.Line, Column: tok.Column + width},
 	}
@@ -1526,7 +1527,7 @@ func joinSpans(first ast.Span, last ast.Span) ast.Span {
 	if last.IsZero() {
 		return first
 	}
-	return ast.Span{Start: first.Start, End: last.End}
+	return ast.Span{File: first.File, Start: first.Start, End: last.End}
 }
 
 // parseCallExpr parses a function call expression.

@@ -13,7 +13,12 @@ type Position struct {
 }
 
 // Span identifies a half-open source range using one-based positions.
+//
+// File is the path the range was read from. A package is checked as one merged
+// program, so without it a diagnostic's line and column say nothing about which
+// module they belong to.
 type Span struct {
+	File  string
 	Start Position
 	End   Position
 }

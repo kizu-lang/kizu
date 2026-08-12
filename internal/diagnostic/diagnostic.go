@@ -81,7 +81,11 @@ func (d *Diagnostic) Error() string {
 		first = "warning: " + d.Message
 	}
 	if !d.Span.IsZero() {
-		first += fmt.Sprintf(" at %d:%d", d.Span.Start.Line, d.Span.Start.Column)
+		if d.Span.File != "" {
+			first += fmt.Sprintf(" at %s:%d:%d", d.Span.File, d.Span.Start.Line, d.Span.Start.Column)
+		} else {
+			first += fmt.Sprintf(" at %d:%d", d.Span.Start.Line, d.Span.Start.Column)
+		}
 	}
 	lines := []string{first}
 	for _, note := range d.Notes {

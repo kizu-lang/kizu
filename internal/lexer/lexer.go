@@ -11,6 +11,7 @@ type Lexer struct {
 	line               int
 	column             int
 	pendingDocComments []string
+	file               string
 }
 
 var singleCharTokens = map[rune]token.Type{
@@ -50,7 +51,13 @@ var compoundTokens = map[rune]compoundToken{
 
 // New creates a lexer for input.
 func New(input string) *Lexer {
-	l := &Lexer{input: []rune(input), line: 1}
+	return NewFile("", input)
+}
+
+// NewFile creates a lexer that stamps file onto every token it produces, so a
+// diagnostic built from one can name the source it came from.
+func NewFile(file string, input string) *Lexer {
+	l := &Lexer{input: []rune(input), line: 1, file: file}
 	l.readChar()
 	return l
 }
@@ -59,7 +66,7 @@ func New(input string) *Lexer {
 func (l *Lexer) NextToken() token.Token {
 	l.skipIgnored()
 
-	tok := token.Token{Line: l.line, Column: l.column, DocComments: l.takeDocComments()}
+	tok := token.Token{File: l.file, Line: l.line, Column: l.column, DocComments: l.takeDocComments()}
 
 	switch l.ch {
 	case '/':
@@ -128,6 +135,7 @@ func (l *Lexer) oneCharToken(t token.Type, docs []string) token.Token {
 	return token.Token{
 		Type:        t,
 		Literal:     string(l.ch),
+		File:        l.file,
 		Line:        l.line,
 		Column:      l.column,
 		DocComments: docs,
@@ -143,6 +151,7 @@ func (l *Lexer) twoCharToken(t token.Type, docs []string) token.Token {
 	return token.Token{
 		Type:        t,
 		Literal:     string([]rune{ch, l.ch}),
+		File:        l.file,
 		Line:        line,
 		Column:      column,
 		DocComments: docs,

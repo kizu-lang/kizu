@@ -783,7 +783,7 @@ func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	p := parser.New(lexer.New(string(b)))
+	p := parser.New(lexer.NewFile(path, string(b)))
 	program := p.ParseProgram()
 	return program, p.Diagnostics(), nil
 }
