@@ -520,6 +520,13 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		if _, exists := c.functions[fn.Name]; exists {
 			return errorf("type error: duplicate function `%s`", fn.Name)
 		}
+		// ADR-0066 keeps generics to one type parameter. The std container
+		// spellings the ADR lists -- `std::map::Map<K, V>` -- are the exception
+		// it names, and they are type constructors rather than generic bodies.
+		if !fn.Std && len(fn.TypeParams) > 1 {
+			return errorf("type error: `%s` takes %d type parameters, v0.2 supports one",
+				fn.Name, len(fn.TypeParams))
+		}
 		fnType, err := c.newFunctionType(fn)
 		if err != nil {
 			return err

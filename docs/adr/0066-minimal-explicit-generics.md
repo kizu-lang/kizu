@@ -48,6 +48,12 @@ Kizu adopts a minimal explicit static argument subset for function generics.
   canonical Kizu generic syntax. Kizu keeps type/static arguments in `<...>` so
   runtime arguments remain ordinary move/borrow checked values.
 
+A declaration takes at most one type parameter. The std container spellings
+above (`std::map::Map<K, V>`) are type constructors rather than generic bodies
+and keep their existing arity. The checker rejects a second parameter at the
+declaration, not at the call, because a generic body is only checked once a
+call instantiates it.
+
 This subset deliberately excludes:
 
 - implicit type argument inference

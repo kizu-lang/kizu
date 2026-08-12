@@ -25,6 +25,21 @@ type lowerer struct {
 	nextBlock   int
 	loops       []*loopContext
 	deferFrames [][]Cleanup
+	// typeBindings binds the type parameters of the generic function being
+	// instantiated. Lowering reads the generic body once per type argument
+	// rather than rewriting its AST, so `T` resolves through here.
+	typeBindings map[string]string
+	// instantiated records the generic instances already requested, keyed by
+	// the symbol they were given.
+	instantiated map[string]bool
+	pending      []genericInstance
+}
+
+// genericInstance is one generic function bound to one type argument.
+type genericInstance struct {
+	decl    *ast.FunctionDecl
+	typeArg string
+	symbol  string
 }
 
 type loopContext struct {
@@ -50,8 +65,81 @@ func newLowerer(program *ast.Program) *lowerer {
 			Enums:   map[string]Enum{},
 			Unions:  map[string]Union{},
 		},
-		signatures: map[string]Signature{},
+		signatures:   map[string]Signature{},
+		typeBindings: map[string]string{},
+		instantiated: map[string]bool{},
 	}
+}
+
+// resolveType binds a type parameter to the type argument in force, and leaves
+// every other name alone.
+func (l *lowerer) resolveType(name string) string {
+	if bound, ok := l.typeBindings[name]; ok {
+		return bound
+	}
+	return name
+}
+
+// requestGenericInstance records that one generic function is needed for one
+// type argument, and returns the symbol it will be lowered under. Lowering
+// happens after the current function finishes, so an instantiation never
+// interrupts the function that asked for it.
+func (l *lowerer) requestGenericInstance(name string, typeArg string) (string, string, error) {
+	decl := l.genericDecl(name)
+	if decl == nil {
+		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
+	}
+	if len(decl.TypeParams) != 1 {
+		return "", "", fmt.Errorf(
+			"ir error: `%s` takes %d type parameters, only one is supported",
+			name, len(decl.TypeParams))
+	}
+	symbol := genericInstanceName(name, typeArg)
+	if !l.instantiated[symbol] {
+		l.instantiated[symbol] = true
+		l.pending = append(l.pending, genericInstance{decl: decl, typeArg: typeArg, symbol: symbol})
+	}
+	ret := decl.ReturnType
+	if ret == decl.TypeParams[0] {
+		ret = typeArg
+	}
+	return symbol, returnType(ret), nil
+}
+
+// lowerPendingGenerics lowers every requested instantiation, including any an
+// instantiation itself requests.
+func (l *lowerer) lowerPendingGenerics() error {
+	for len(l.pending) > 0 {
+		next := l.pending[0]
+		l.pending = l.pending[1:]
+		l.typeBindings = map[string]string{next.decl.TypeParams[0]: next.typeArg}
+		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
+		l.typeBindings = map[string]string{}
+		if err != nil {
+			return err
+		}
+		l.module.Functions = append(l.module.Functions, lowered)
+	}
+	return nil
+}
+
+// genericDecl returns the generic function declaration with this IR name.
+func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
+	for _, decl := range l.program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok || len(fn.TypeParams) == 0 {
+			continue
+		}
+		if fn.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+// genericInstanceName is the symbol one instantiation is lowered under.
+func genericInstanceName(name string, typeArg string) string {
+	return name + "<" + typeArg + ">"
 }
 
 // lower performs declaration collection and function lowering.
@@ -92,6 +180,9 @@ func (l *lowerer) lower() (*Module, error) {
 		}
 	}
 	if err := l.lowerTests(); err != nil {
+		return nil, err
+	}
+	if err := l.lowerPendingGenerics(); err != nil {
 		return nil, err
 	}
 	return l.module, nil
@@ -215,7 +306,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 
 // lowerFunctionNamed lowers one function using an explicit IR symbol name.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	l.current = &Function{Name: name, Return: returnType(fn.ReturnType)}
+	l.current = &Function{Name: name, Return: returnType(l.resolveType(fn.ReturnType))}
 	l.env = map[string]Value{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -238,16 +329,17 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 
 // paramIRTypeName preserves borrow ABI only for unions that need pointer matching.
 func (l *lowerer) paramIRTypeName(param ast.Param) string {
+	typeName := l.resolveType(param.TypeName)
 	if !param.Borrow && !param.MutBorrow {
-		return param.TypeName
+		return typeName
 	}
-	if _, ok := l.module.Unions[param.TypeName]; !ok {
-		return param.TypeName
+	if _, ok := l.module.Unions[typeName]; !ok {
+		return typeName
 	}
 	if param.MutBorrow {
-		return "&var " + param.TypeName
+		return "&var " + typeName
 	}
-	return "&" + param.TypeName
+	return "&" + typeName
 }
 
 // scopedBinding remembers what a name meant before a block rebound it.
@@ -704,7 +796,13 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		}
 		return l.emit("test.expect_equal", "void", args, typeArg), nil
 	default:
-		return Value{}, fmt.Errorf("ir error: typed call `%s<%s>` is not supported", name, typeArg)
+		// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
+		// argument T is currently bound to, not the parameter name.
+		symbol, ret, err := l.requestGenericInstance(name, l.resolveType(typeArg))
+		if err != nil {
+			return Value{}, err
+		}
+		return l.emit("call."+symbol, ret, args, ""), nil
 	}
 }
 
