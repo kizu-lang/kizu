@@ -5547,17 +5547,17 @@ func isAtomicSupportedType(typeName string) bool {
 	return typeName == "bool" || typeName == "i64"
 }
 
-// isAstNodeIDType reports the selfhost AST id wrapper allowed in child lists.
+// isAstNodeIDType reports the std::kizu AST id wrapper allowed in child lists.
 func isAstNodeIDType(typeName string) bool {
 	return typeName == "NodeId" || typeName == "std::kizu::ast::NodeId"
 }
 
-// isAstChildRangeType reports selfhost AST child range values.
+// isAstChildRangeType reports std::kizu AST child range values.
 func isAstChildRangeType(typeName string) bool {
 	return typeName == "ChildRange" || typeName == "std::kizu::ast::ChildRange"
 }
 
-// isAstType reports the selfhost AST owner type.
+// isAstType reports the std::kizu AST owner type.
 func isAstType(typeName string) bool {
 	return typeName == "Ast" || typeName == "std::kizu::ast::Ast"
 }
@@ -5567,7 +5567,7 @@ func isAstParseResultType(typeName string) bool {
 	return typeName == "ParseResult" || typeName == "std::kizu::ast::ParseResult"
 }
 
-// isAstScalarType reports small selfhost AST metadata wrappers with copy fields.
+// isAstScalarType reports small std::kizu AST metadata wrappers with copy fields.
 func isAstScalarType(typeName string) bool {
 	switch typeName {
 	case "SourceFile", "std::kizu::ast::SourceFile",

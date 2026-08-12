@@ -92,10 +92,10 @@ func runClang(irPath string, runtimePath string, options Options) ([]string, err
 	if options.Triple != "" {
 		args = append(args, "-target", options.Triple)
 	}
-	// The selfhost compiler's checker recurses deeply over large packages; the
-	// default 8MiB main-thread stack overflows while checking the selfhost
-	// package itself. Reserve a 512MiB stack for the produced executable on
-	// darwin (address-space reservation only; pages commit on use).
+	// Kizu programs that recurse over large inputs, such as the std::kizu lexer
+	// and parser, overflow the default 8MiB main-thread stack. Reserve a 512MiB
+	// stack for the produced executable on darwin (address-space reservation
+	// only; pages commit on use).
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-Wl,-stack_size,0x20000000")
 	}

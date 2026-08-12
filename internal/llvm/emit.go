@@ -439,7 +439,7 @@ func (e *emitter) unionPayloadCapacity(name string) (int, error) {
 		return 0, fmt.Errorf(
 			"llvm error: union `%s` has an unsupported tagged-union payload shape; "+
 				"inline payload size/alignment must be compile-time known per the #991 ABI "+
-				"(see docs/selfhost-runtime-abi.md, broader shapes tracked by #495)",
+				"(broader shapes tracked by #495)",
 			name,
 		)
 	}

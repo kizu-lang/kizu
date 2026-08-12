@@ -409,7 +409,7 @@ func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
 }
 
 // TestEmitMapGetLabelFeedsFollowingPhi keeps Map.get helper labels visible to
-// later phi predecessors because selfhost package diagnostics use maps heavily.
+// later phi predecessors, the shape a Map.get feeding a branch produces.
 func TestEmitMapGetLabelFeedsFollowingPhi(t *testing.T) {
 	got := emitTestModule(t, mapGetPhiModule())
 	want := "%kizu.result = phi %kizu.error.i64 [ %kizu.found, %kizu.found.array.join ], " +

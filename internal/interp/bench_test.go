@@ -8,11 +8,10 @@ import (
 	"github.com/kizu-lang/kizu/internal/parser"
 )
 
-// interpHotPathSource exercises the interpreter hot paths that dominate the
-// selfhost backend gate: recursive calls, identifier resolution, arithmetic
-// and logical binary operators, locals, and loop control. It is a fast proxy
-// for the ~350s gate so optimizations can be iterated with `go test -bench`
-// and confirmed afterwards with TestSelfhostBackendArtifactGate.
+// interpHotPathSource exercises the interpreter hot paths that dominate large
+// Kizu programs: recursive calls, identifier resolution, arithmetic and
+// logical binary operators, locals, and loop control. Optimizations can be
+// iterated against it with `go test -bench`.
 const interpHotPathSource = `fn fib(n: i64) -> i64 {
     if n < 2 { return n; }
     return fib(n - 1) + fib(n - 2);

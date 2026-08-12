@@ -245,7 +245,7 @@ fn main(value: lexer::Token) -> void {
 	}
 }
 
-// TestCheckGraphAllowsCrossModuleTokenReferences covers self-host token shapes.
+// TestCheckGraphAllowsCrossModuleTokenReferences covers cross-module token types.
 func TestCheckGraphAllowsCrossModuleTokenReferences(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;

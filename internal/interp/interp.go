@@ -1413,7 +1413,7 @@ func (i *Interpreter) evalQualifiedUserCall(
 	return value, true, err
 }
 
-// evalStdMemSourceBuiltin accelerates pure std::mem helpers used in hot selfhost paths.
+// evalStdMemSourceBuiltin accelerates pure std::mem helpers used in hot paths.
 func (i *Interpreter) evalStdMemSourceBuiltin(
 	name string,
 	args []ast.Expression,
@@ -4448,7 +4448,7 @@ func callQueueFromExprs(args []ast.Expression) Value {
 	return queueValue()
 }
 
-// qualifiedName caches immutable namespace chains for loop-heavy selfhost calls.
+// qualifiedName caches immutable namespace chains for loop-heavy calls.
 func (i *Interpreter) qualifiedName(expr ast.Expression) (string, bool) {
 	if name, ok := i.qualified[expr]; ok {
 		return name, true

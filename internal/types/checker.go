@@ -728,13 +728,13 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 }
 
 // ownedContainerBases lists the inline-stored std containers that own heap
-// storage and must be released through their explicit `deinit`. Per
-// docs/selfhost-runtime-abi.md a payload built from one of these (directly or
-// nested) is an owner payload of the v0.2 inline tagged-union payload ABI.
+// storage and must be released through their explicit `deinit`. A payload
+// built from one of these (directly or nested) is an owner payload of the
+// v0.2 inline tagged-union payload ABI.
 //
 // std::mem::Box is intentionally excluded: a boxed (heap-indirected) or
-// recursive union payload is deferred to #495 by the same document, so it is
-// outside this contract and is left to ordinary move/borrow checking.
+// recursive union payload is deferred to #495, so it is outside this contract
+// and is left to ordinary move/borrow checking.
 var ownedContainerBases = map[string]bool{
 	"std::array::Array":   true,
 	"std::string::String": true,
@@ -6912,12 +6912,12 @@ func (c *Checker) isCopyType(typ Type) bool {
 	return copyTypes[typ]
 }
 
-// isAstNodeIDType reports the selfhost AST id wrapper allowed in child lists.
+// isAstNodeIDType reports the std::kizu AST id wrapper allowed in child lists.
 func isAstNodeIDType(typ Type) bool {
 	return typ == "NodeId" || typ == "std::kizu::ast::NodeId"
 }
 
-// isAstScalarType reports small selfhost AST metadata wrappers with copy fields.
+// isAstScalarType reports small std::kizu AST metadata wrappers with copy fields.
 func isAstScalarType(typ Type) bool {
 	switch typ {
 	case "SourceFile", "std::kizu::ast::SourceFile",
