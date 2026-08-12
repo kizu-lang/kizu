@@ -3,8 +3,8 @@
 This document is the working memory-safety contract for safe Kizu v0.1.
 
 ADR files explain why decisions were made. `SPEC.md` defines the language. This
-document lists the safety invariants that the checker and interpreter must
-preserve, and maps them to regression coverage.
+document lists the safety invariants that the checker and the generated code
+must preserve, and maps them to regression coverage.
 
 ## Scope
 
@@ -31,7 +31,7 @@ The following are not guaranteed by safe Kizu v0.1:
 - C ABI call safety
 - allocator primitive safety
 - full numeric overflow, truncation, or float semantics
-- LLVM/WASM backend parity with the interpreter
+- WASM backend coverage of the language the native path already runs
 
 ## Core Invariants
 
@@ -153,8 +153,7 @@ policy.
 
 - v0.1 fixes the async and multi-threading stdlib API shape and checker rules,
   not a real asynchronous runtime.
-- The v0.1 interpreter may execute task, queue, thread, and data-parallel APIs
-  synchronously.
+- Task, queue, thread, and data-parallel APIs may execute synchronously.
 - Tasks must be awaited or canceled.
 - `await` propagates task body errors.
 - `cancel` waits for task completion in v0.1 and discards the result or error.

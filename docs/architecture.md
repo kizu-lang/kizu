@@ -23,7 +23,6 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   token, lexer, parser, ast     字句・構文・AST
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
-  interp                        tree-walking interpreter(挙動の正)
   project, stdlib, manifest     パッケージ/モジュール解決、std 取り込み、kizu.toml
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
   unsafecap                     @unsafe capability の定義
@@ -42,10 +41,12 @@ source.kizu
   → internal/lexer → internal/parser → internal/ast
   → internal/stdlib が std/src/*.kizu の宣言を合流(demand-load)
   → internal/types(型)→ internal/ownership(所有権)
-  → 実行系: internal/interp(tree-walking、挙動の正)
-  → 生成系: internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
-                                    → internal/wasm(wasm32-wasi)
+  → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
+                           → internal/wasm(wasm32-wasi)
 ```
+
+`run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
+ありません(ADR-0083)。挙動の正は conformance manifest が持ちます。
 
 CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `why-rebuild`
@@ -89,7 +90,7 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 1. `README.ja.md` → `SPEC.md` の冒頭と §13 あたりまで(言語像)
 2. `examples/hello.kizu` を `kizu run` / `check` / `build --emit-llvm` で触る
 3. `cmd/kizu/main.go` の `dispatch`(CLI の入口)
-4. `internal/interp` と `internal/types`(挙動の正がどう決まるか)
+4. `internal/types` と `internal/ownership`(何が拒否されるか)
 5. `internal/ir` → `internal/llvm`(生成系)
 6. 必要になった領域の docs/ と docs/adr/(下の索引)
 

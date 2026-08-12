@@ -12,13 +12,13 @@ to Kizu source.
 
 ## Current Model
 
-Kizu v0.2 implements `std` as trusted compiler/interpreter builtins.
+Kizu v0.2 implements `std` as trusted compiler builtins.
 
 The implementation is intentionally split by compiler responsibility:
 
 - `internal/types`: type signatures, return types, and static type errors.
 - `internal/ownership`: move, borrow, arena, concurrency, and std safety rules.
-- `internal/interp`: runtime behavior for the interpreter.
+- `internal/ir` and the backends: runtime behavior.
 - `examples`: positive and negative user-facing behavior.
 - `tests/conformance`: reusable behavior corpus for future compiler implementations.
 
@@ -76,8 +76,7 @@ rules can be specified explicitly.
 ## Builtin Thinning Policy
 
 `std::builtin::*` is not a permanent home for ordinary library behavior. It is a
-temporary trusted boundary used while the Go interpreter remains the execution
-oracle.
+temporary trusted boundary for what Kizu source cannot yet express.
 
 Every builtin falls into one of three classes:
 

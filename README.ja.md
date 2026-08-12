@@ -87,11 +87,11 @@ language core 周辺の tooling:
 - `std/` の Kizu 標準ライブラリ(`std/src/kizu/` の自己記述 lexer / parser / AST を含む)
 - LSP server (`cmd/kizu-lsp`)
 
-tree-walking interpreter はもはや正しい挙動の定義ではありません。`kizu test` が
-使う実行系として残っているだけで、その用途が無くなった時点で削除します。
+interpreter はありません。`kizu test` は `kizu run` が `main` をビルドして実行するのと
+同じ経路で test block をビルドして実行します。言語機能の実装は 1 つだけです。
 
-`kizu run` は host の `clang` と libc を必要とします。native build path が元から
-持っていた要件がそのまま run にも及びます。no-libc / freestanding build は
+`kizu run` と `kizu test` は host の `clang` と libc を必要とします。native build path が
+元から持っていた要件がそのまま及びます。no-libc / freestanding build は
 build policy としては受理済みですが、未実装です。
 
 このリポジトリはまだ実験的です。言語設計の検証中は、構文と実装の詳細が変わり得ます。
@@ -104,7 +104,7 @@ fn main() {
 }
 ```
 
-interpreter で実行します。
+ビルドして実行します。
 
 ```sh
 go run ./cmd/kizu run examples/hello.kizu

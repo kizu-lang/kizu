@@ -436,6 +436,35 @@ void kizu_panic_bounds(int64_t index, int64_t length) {
     abort();
 }
 
+void kizu_panic_test_fail(const unsigned char *s, int64_t len) {
+    fputs("runtime error: ", stderr);
+    fwrite(s, 1, (size_t)len, stderr);
+    fputc('\n', stderr);
+    abort();
+}
+
+void kizu_panic_expect_equal_int(int64_t expected, int64_t actual) {
+    fprintf(stderr, "runtime error: expected %lld, got %lld\n",
+            (long long)expected, (long long)actual);
+    abort();
+}
+
+void kizu_panic_expect_equal_bool(_Bool expected, _Bool actual) {
+    fprintf(stderr, "runtime error: expected %s, got %s\n",
+            expected ? "true" : "false", actual ? "true" : "false");
+    abort();
+}
+
+void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expected_len,
+                                   const unsigned char *actual, int64_t actual_len) {
+    fputs("runtime error: expected \"", stderr);
+    fwrite(expected, 1, (size_t)expected_len, stderr);
+    fputs("\", got \"", stderr);
+    fwrite(actual, 1, (size_t)actual_len, stderr);
+    fputs("\"\n", stderr);
+    abort();
+}
+
 void kizu_panic_range(int64_t start, int64_t end, int64_t length) {
     fprintf(stderr, "runtime error: range out of bounds\n");
     fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",

@@ -91,7 +91,59 @@ func (l *lowerer) lower() (*Module, error) {
 			l.module.Functions = append(l.module.Functions, lowered)
 		}
 	}
+	if err := l.lowerTests(); err != nil {
+		return nil, err
+	}
 	return l.module, nil
+}
+
+// lowerTests lowers each `test "name" { ... }` block into a function, so a
+// test runs through the same lowering as the rest of the program.
+func (l *lowerer) lowerTests() error {
+	for _, decl := range l.program.Decls {
+		test, ok := decl.(*ast.TestDecl)
+		if !ok {
+			continue
+		}
+		// A test body may `try`, so it lowers as a function returning `!void`.
+		fn := &ast.FunctionDecl{
+			Name:       TestFunctionName(test.Name),
+			ReturnType: "!void",
+			Body:       test.Body,
+		}
+		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
+		if err != nil {
+			return err
+		}
+		l.module.Functions = append(l.module.Functions, lowered)
+	}
+	return nil
+}
+
+// TestFunctionName returns the IR symbol a test block lowers to.
+func TestFunctionName(name string) string {
+	var out strings.Builder
+	out.WriteString("test.")
+	for _, r := range name {
+		if r == '_' || r == '.' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			out.WriteRune(r)
+			continue
+		}
+		out.WriteByte('_')
+	}
+	return out.String()
+}
+
+// TestFunctionNames returns the lowered test symbols in declaration order.
+func TestFunctionNames(module *Module) []string {
+	names := []string{}
+	for _, fn := range module.Functions {
+		if strings.HasPrefix(fn.Name, "test.") {
+			names = append(names, fn.Name)
+		}
+	}
+	return names
 }
 
 // collectDecls records signatures and struct layouts.
