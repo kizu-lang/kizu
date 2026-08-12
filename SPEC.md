@@ -1050,8 +1050,7 @@ container 内部の structural element cleanup は、`array.deinit()` のよう�
 owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
 payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の
 payload storage は cleanup しません。tag が初期化済みと示す payload だけを処理します。
-selfhost backend の tagged-union payload layout と所有 payload の cleanup 規約は
-`docs/selfhost-runtime-abi.md` の Tagged-Union Payload Layout で定めます。
+inline payload の size と alignment は compile time に確定している必要があります。
 
 ```kizu
 union MirStmt {
