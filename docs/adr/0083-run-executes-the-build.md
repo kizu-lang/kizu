@@ -27,8 +27,9 @@ conformance の 366 ケースはすべて interpreter 経路でしか走らな�
 緑のまま何ヶ月も残っていた。`mutable_borrow.kizu` は借用経由の変更が反映されて
 おらず、メモリ安全を掲げる言語で借用の意味論が経路ごとに違っていた。
 
-さらに negative example を native で走らせると、範囲外 index が **trap せずに
-素通り**していた。安全性の保証そのものが片方の経路にしか無かった。
+さらに negative example を native で走らせると、範囲外 index は trap するものの
+**診断を一切出さずに落ちて**いた。interpreter は `index out of bounds` と言って
+止まる。同じ失敗が経路によって別の見え方をしていた。
 
 これは ADR-0081 / ADR-0082 が selfhost で踏んだ失敗と同型である。違いは、
 第二実装が Kizu で書かれていたか Go で書かれていたかだけで、構造は同じ。
@@ -72,8 +73,8 @@ native が満たせないケースは manifest に理由付きで登録する。
 
 - `examples/` の 82 本のうち `run` が通るのは 60 本。22 本を `pending` に登録した。
   内訳は lowering 未実装 16、結果が違う 6。
-- negative example 14 本も `pending`。うち 6 本は「native が trap しない」もので、
-  これは診断の差ではなく**安全性の欠落**である。最優先で埋める。
+- negative example 14 本も `pending`。うち 6 本は診断が出ないか capability が
+  効かないもので、範囲外アクセス自体は `llvm.trap()` で止まっている。
 - `go test ./...` は 16 秒から 40 秒になった。run が clang link を通るため。
   120 秒の目標内に収まっている。
 - `kizu run` は clang を必要とする。native path が host clang と libc を使う
@@ -81,9 +82,11 @@ native が満たせないケースは manifest に理由付きで登録する。
 
 ## 埋める順序
 
-1. native が trap しない 6 本(安全性)
-2. 結果が違う 6 本(enum 名の欠落 3、借用の反映、配列長、error union の exit)
+1. 黙って違う答えを返す 6 本(失敗しないため気づけない)
+2. 診断が出ない・capability が効かない 6 本(enum 名の欠落 3、借用の反映、配列長、error union の exit)
 3. lowering 未実装 16 本(`task_group` 6、`Channel<T>` / `Atomic<T>` 4、
    明示 generics、dyn contract method、Box borrow、if 式、scoped thread)
+
+範囲外 index と slice の診断は ADR-0084 で埋めた。
 
 進捗は `just backend-matrix` が表にする。

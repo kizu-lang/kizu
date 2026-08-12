@@ -148,3 +148,13 @@ func splitFirstLine(defaultSeverity Severity, first string) (Severity, string, s
 	}
 	return defaultSeverity, "", first
 }
+
+// Checked runtime failures. A failure must read the same way whichever path
+// runs the program, so the interpreter and the backends share these strings
+// rather than each spelling their own.
+const (
+	// IndexOutOfBounds reports a byte index outside a slice.
+	IndexOutOfBounds = "index out of bounds"
+	// RangeOutOfBounds reports slice bounds outside a slice, or start > end.
+	RangeOutOfBounds = "range out of bounds"
+)

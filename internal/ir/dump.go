@@ -48,6 +48,8 @@ func formatInstr(instr *Instr) string {
 		return fmt.Sprintf("%s = phi %s", instr.Result.String(), formatIncoming(instr.Incoming))
 	case "struct.new":
 		return fmt.Sprintf("%s = struct.new {%s}", instr.Result.String(), formatFields(instr.Fields))
+	case "cond_fail":
+		return fmt.Sprintf("cond_fail %s, %q", formatValues(instr.Args), instr.Immediate)
 	default:
 		return formatGenericInstr(instr)
 	}
