@@ -84,6 +84,9 @@ type Token struct {
 	Line        int
 	Column      int
 	DocComments []string
+	// File is the source path the token was read from, carried so spans built
+	// from it can name the file a diagnostic points into.
+	File string
 }
 
 var keywords = map[string]Type{

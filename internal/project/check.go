@@ -115,7 +115,7 @@ func (c *graphChecker) load(graph Graph) error {
 // parseModule parses one graph module from an override or its source file.
 func (c *graphChecker) parseModule(module Module) (*ast.Program, error) {
 	if source, ok := c.sourceOverrides[filepath.Clean(module.File)]; ok {
-		return parseModuleSource(module.Path, source)
+		return parseModuleSource(module.File, source)
 	}
 	return parseModuleFile(module)
 }
@@ -126,12 +126,12 @@ func parseModuleFile(module Module) (*ast.Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseModuleSource(module.Path, string(source))
+	return parseModuleSource(module.File, string(source))
 }
 
 // parseModuleSource parses one graph module source string.
-func parseModuleSource(_ string, source string) (*ast.Program, error) {
-	p := parser.New(lexer.New(source))
+func parseModuleSource(file string, source string) (*ast.Program, error) {
+	p := parser.New(lexer.NewFile(file, source))
 	program := p.ParseProgram()
 	if diagnostics := p.Diagnostics(); len(diagnostics) > 0 {
 		return nil, &diagnostics[0]
