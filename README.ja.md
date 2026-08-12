@@ -17,58 +17,70 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 
 ## 現在の状態
 
-Kizu は Go 製の初期プロトタイプです。
+Kizu は Go 製の初期プロトタイプです。正となる挙動は interpreter です。
+`kizu check` と `kizu run` が正しい挙動を定義し、下の表に出てくる example は
+すべて conformance を通っています。backend はその subset を受け付けます。
 
-v0.1 の対象は interpreter-first の language core です。
-現在の v0.2 baseline では、言語挙動を検証し続けるための最小 stdlib surface と tooling を追加しています。
-正となる挙動は引き続き Go 製 interpreter と `kizu check` です。
+| 機能 | 例の数 | interp | LLVM | native | WASM |
+| --- | ---: | :--: | :--: | :--: | :--: |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
+| while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
+| if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
+| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 9 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 16 | ✅ | 15/16 | 15/16 | 4/16 |
+| deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
+| comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
+| cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
+| contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
+| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
+| std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
+| std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
+| TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
+| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
-実装済み language core:
+`✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は
+1 つも通らないことを表します。runnable example は 82 件、測定は 2026-08-12 に
+`go run ./scripts/backend-matrix` で実施しました。backend を触ったら回し直してください。
 
-- lexer, parser, AST, CLI
-- interpreter
-- type checker
-- move checker
-- local borrow checker
-- `std::arena::Arena<T>` / `std::arena::Handle<T>`
-- `while`、`break`、`continue`、labeled loop branch、bounded `for`
-- unsafe 境界と C ABI 宣言の検査
-- 限定的な `comptime` expression / parameter / branch selection
-- 低レベル型変換向けの明示 `cast<T>(value)`
-- 最小の `!T` と `try` error propagation
-- Zig/C-style tag `enum`、tagged `union`、exhaustive `match`
-- `std::io::blocking/threaded/failing` と `TaskGroup` structured task model
-- `std::channel::Channel<T>` owned message passing
-- `std::task::Queue` deterministic deferred task queue
-- `std::task::parallel_for` / `std::task::parallel_map` safe data-parallel prototype
-- scoped thread、`Atomic<T>`、`Mutex<T>` boundary prototype
-- `contract`、`impl Contract for Type`、`&dyn Contract`
-- 最小の `std::mem`、`std::array::Array<T>`、`std::string::String`、
-  `std::map::Map<K, V>`、`std::testing`
-- explicit-Io の `std::fs`、`std::path`、`std::io`、`std::process` helper
-- `kizu test <file>` single-file test runner
+| 経路 | 通過 |
+| --- | --- |
+| `kizu check` + `kizu run` (interpreter) | 82/82 |
+| `kizu build --emit-llvm` | 66/82 |
+| `kizu build --target native` | 66/82 |
+| `kizu build --target wasm32-wasi` | 17/82 |
 
-実験的な compiler / tooling:
+LLVM 段階を通った example は全て clang link まで成功するため、native 固有の穴は
+LLVM subset の外にはありません。
 
-- `std/` の Kizu stdlib 移行用 layout
-- typed SSA IR
-- LLVM IR text backend
+backend が受け付けないもの:
+
+- LLVM / native: `std::builtin::task_group` (6 件)、明示 generics と
+  `Channel<T>` / `Atomic<T>` の typed call (5 件)、それと `if` の式利用、
+  未知の `borrow` / `write` method、`&i64` と `i64` の比較が各 1 件。
+- WASM: `slice.len` (28 件)、`unary.!` (5 件)、`struct.new` (4 件)、
+  `error.ok` (4 件)、`union.load` / `error.try` / 整数以外の const (各 2 件)。
+  加えて上の IR 段階の穴も同じく効きます。
+
+language core 周辺の tooling:
+
+- typed SSA IR と opt-in の最適化 pipeline
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
-- WASI-compatible WebAssembly text backend
 - extern function 宣言向けの限定的な C header import
-- opt-in の IR optimization pipeline
-- LLVM IR と clang 経由の限定的な native executable generation
+- `std/` の Kizu 標準ライブラリ(`std/src/kizu/` の自己記述 lexer / parser / AST を含む)
+- LSP server (`cmd/kizu-lsp`)
 
-これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱います。native build は
-LLVM lowering 済み subset と小さな `kizu_print_*` runtime shim に限定します。
-現時点の native path は host `clang` と libc を使いますが、将来の no-libc /
-freestanding build は採用済みの build policy として扱います。
+native 経路は host の `clang` と libc を使います。no-libc / freestanding build は
+build policy としては受理済みですが、未実装です。
 
-現時点で open な v0.2 Issue はありません。将来の compiler migration work は、
-明確な受け入れ条件を持つ新しい GitHub Issues から開始します。
-
-まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
+このリポジトリはまだ実験的です。言語設計の検証中は、構文と実装の詳細が変わり得ます。
 
 ## 例
 
@@ -99,8 +111,8 @@ go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 機能ごとの実行例と失敗すべき安全性ルールは
 [examples catalog](examples/README.md) にまとめています。
 機械判定用の conformance manifest は
-[tests/conformance/v0_1.json](tests/conformance/v0_1.json) です。現在は v0.1 language-core と
-v0.2 stdlib prototype coverage の両方に再利用しています。
+language core が [tests/conformance/v0_1.json](tests/conformance/v0_1.json)、
+stdlib prototype が [tests/conformance/v0_2.json](tests/conformance/v0_2.json) です。
 safe code のメモリ安全契約は
 [docs/memory-safety.md](docs/memory-safety.md) に明文化しています。
 
