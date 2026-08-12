@@ -118,7 +118,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_slice` | Removed | Implemented in `std/src/mem.kizu` using checked slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as the small runtime primitive behind stable `std::mem::page_allocator() -> Allocator`; custom allocators are deferred to #549 |
 | `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `std/src/mem.kizu`; direct user calls are rejected |
-| `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary. The selfhost hosted runtime template may still expose ABI-level String byte-buffer symbols for bootstrap artifacts; those are not public std builtins. |
+| `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary. |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
 | `std::builtin::process_exit_code` | Removed | Implemented in `std/src/process.kizu` as a pure value helper |
@@ -252,12 +252,6 @@ specified.
 The Kizu `String` implementation uses std-only Array storage helpers for
 reserve, truncate, clear, and byte-slice exposure. Those helpers are not public
 `std::array` API in v0.2.
-
-The selfhost hosted runtime template has a separate ABI-level String
-byte-buffer slice for bootstrap artifacts. That slice exists only behind the
-`selfhost-abi-v0` storage template so hosted artifacts can execute without Go
-stdprim storage; it does not reintroduce public `std::builtin::string_*` calls
-or change the Kizu-facing `String` design from ADR 0057.
 
 The migration path is:
 

@@ -17,7 +17,6 @@ import (
 
 const (
 	parserParityExamplesRoot = "../../examples"
-	parserParitySelfhostRoot = "../../selfhost"
 	parserParityStdRoot      = "../../std"
 	parserParityCaseStart    = "@@KIZU_PARSER_PARITY_CASE@@"
 	parserParityCaseEnd      = "@@KIZU_PARSER_PARITY_END@@"
@@ -729,15 +728,7 @@ func TestStdKizuParserParityExamples(t *testing.T) {
 	logUnsupportedParserParityReasons(t, stats.unsupportedReasons, stats.unsupportedSamples)
 }
 
-// TestStdKizuParserParitySelfhostPackage gates the agreed selfhost source surface.
-func TestStdKizuParserParitySelfhostPackage(t *testing.T) {
-	cases := collectParserParitySelfhostSources(t)
-	got := runStdKizuParserParityHarness(t, cases)
-	assertParserParityCases(t, cases, got)
-	t.Logf("selfhost sources compared=%d", len(cases))
-}
-
-// TestStdKizuParserParsesFrontendStdSources gates std sources parsed by the selfhost frontend.
+// TestStdKizuParserParsesFrontendStdSources gates std sources parsed by the Kizu-written parser.
 func TestStdKizuParserParsesFrontendStdSources(t *testing.T) {
 	cases := collectParserFrontendStdSources(t)
 	runStdKizuParserParityHarness(t, cases)
@@ -786,43 +777,6 @@ func collectParserParityExamples(t *testing.T) ([]parserParityCase, parserParity
 	return cases, stats
 }
 
-// collectParserParitySelfhostSources finds every selfhost source file and rejects gaps.
-func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
-	t.Helper()
-	cases := []parserParityCase{}
-	err := filepath.WalkDir(parserParitySelfhostRoot, func(
-		path string,
-		entry fs.DirEntry,
-		err error,
-	) error {
-		if err != nil || entry.IsDir() || filepath.Ext(path) != ".kizu" {
-			return err
-		}
-		if isParserParityNegativeCLIFixture(path) {
-			return nil
-		}
-		next, ok, reason, parseErrs := parserParityFileCase(
-			path,
-			parserParitySelfhostRoot,
-			"selfhost",
-		)
-		switch {
-		case len(parseErrs) > 0:
-			t.Fatalf("%s Go parse errors: %v", next.name, parseErrs)
-		case !ok:
-			t.Fatalf("%s is unsupported: %s", next.name, reason)
-		default:
-			cases = append(cases, next)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
-	return cases
-}
-
 // collectParserFrontendStdSources returns std files the selfhost frontend can demand-load.
 func collectParserFrontendStdSources(t *testing.T) []parserParityCase {
 	t.Helper()
@@ -840,25 +794,6 @@ func collectParserFrontendStdSources(t *testing.T) []parserParityCase {
 	}
 	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
 	return cases
-}
-
-// isParserParityNegativeCLIFixture excludes intentional CLI parse-error cases.
-func isParserParityNegativeCLIFixture(path string) bool {
-	rel, err := filepath.Rel(parserParitySelfhostRoot, path)
-	if err != nil {
-		return false
-	}
-	switch filepath.ToSlash(rel) {
-	case "tests/cli/parse_invalid_missing_expr.kizu",
-		"tests/cli/parse_invalid_missing_expr_alias.kizu",
-		"tests/cli/parse_invalid_missing_assign.kizu",
-		"tests/cli/parse_invalid_missing_assign_alias.kizu",
-		"tests/cli/run_invalid_missing_expr.kizu",
-		"tests/cli/run_invalid_missing_expr_alias.kizu":
-		return true
-	default:
-		return false
-	}
 }
 
 // parserParityExampleCase summarizes one example when both parser subsets can handle it.

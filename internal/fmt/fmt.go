@@ -25,12 +25,12 @@ func Format(source string) string {
 		atLineStart: true,
 		generic:     generic,
 		tokens:      tokens,
-		comments:    fullLineComments(source),
+		comments:    lineComments(source),
 	}
 	for i := 0; i < len(tokens); i++ {
 		t := tokens[i]
 		if t.Type == token.RBrace {
-			b.emitEnumTrailingCommaBeforeClose()
+			b.emitTrailingCommaBeforeClose()
 		}
 		b.emitCommentsBefore(t)
 		if t.Type == token.EOF {
@@ -117,22 +117,48 @@ type lineComment struct {
 	blankAfter  bool
 }
 
-// fullLineComments records line comments that can be preserved as standalone lines.
-func fullLineComments(source string) []lineComment {
+// lineComments records every line comment in source, whether it stands alone or
+// trails code. The canonical form puts each one on its own line, so a trailing
+// comment is recorded against the line it was written on and emitted before the
+// next line's content. Dropping them instead would lose what the author wrote.
+func lineComments(source string) []lineComment {
 	lines := strings.Split(source, "\n")
 	comments := make([]lineComment, 0)
 	for idx, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t\r")
-		if strings.HasPrefix(trimmed, "//") {
-			comments = append(comments, lineComment{
-				line:        idx + 1,
-				text:        strings.TrimRight(trimmed, "\r"),
-				blankBefore: hasBlankLineBefore(lines, idx),
-				blankAfter:  hasBlankLineAfter(lines, idx),
-			})
+		start := commentStart(line)
+		if start < 0 {
+			continue
 		}
+		standalone := strings.TrimSpace(line[:start]) == ""
+		comments = append(comments, lineComment{
+			line:        idx + 1,
+			text:        strings.TrimRight(strings.TrimSpace(line[start:]), "\r"),
+			blankBefore: standalone && hasBlankLineBefore(lines, idx),
+			blankAfter:  standalone && hasBlankLineAfter(lines, idx),
+		})
 	}
 	return comments
+}
+
+// commentStart returns the index of the `//` that opens a line comment, or -1
+// when the line has none. A `//` inside a string literal is not a comment.
+func commentStart(line string) int {
+	inString := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			if inString {
+				i++
+			}
+		case '"':
+			inString = !inString
+		case '/':
+			if !inString && i+1 < len(line) && line[i+1] == '/' {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // hasBlankLineBefore reports whether a standalone comment had a blank line before it.
@@ -239,7 +265,10 @@ type blockKind int
 
 const (
 	normalBlock blockKind = iota
-	enumBlock
+	// commaTerminatedBlock is a block whose entries the grammar requires to end
+	// with a comma, so dropping the trailing one produces source that no longer
+	// parses. Enum variants and match arms are both written this way.
+	commaTerminatedBlock
 )
 
 // emit appends a token using current layout state.
@@ -410,9 +439,10 @@ func (b *builder) emitRBrace(t token.Token, next token.Token) {
 	}
 }
 
-// emitEnumTrailingCommaBeforeClose attaches the canonical enum comma to the last variant.
-func (b *builder) emitEnumTrailingCommaBeforeClose() {
-	if b.currentBlockKind() != enumBlock ||
+// emitTrailingCommaBeforeClose restores the comma that isTrailingCommaBeforeClose
+// dropped, for the blocks whose grammar requires it on the last entry.
+func (b *builder) emitTrailingCommaBeforeClose() {
+	if b.currentBlockKind() != commaTerminatedBlock ||
 		!b.hasPrev ||
 		b.prev.Type == token.Comma ||
 		b.prev.Type == token.LBrace {
@@ -428,8 +458,8 @@ func (b *builder) emitEnumTrailingCommaBeforeClose() {
 
 // currentOpenBlockKind reports the kind of block opened by the current `{`.
 func (b *builder) currentOpenBlockKind() blockKind {
-	if opensEnumBlockAtCurrentIndex(b.tokens, b.index) {
-		return enumBlock
+	if opensCommaTerminatedBlockAtCurrentIndex(b.tokens, b.index) {
+		return commaTerminatedBlock
 	}
 	return normalBlock
 }
@@ -454,13 +484,16 @@ func (b *builder) popBlockKind() blockKind {
 }
 
 // opensEnumBlockAtCurrentIndex reports whether tokens[index] opens an enum body.
-func opensEnumBlockAtCurrentIndex(tokens []token.Token, index int) bool {
+func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bool {
 	if index < 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
 		return false
 	}
+	// Walk back to the keyword that introduced this `{`. Another brace or a
+	// semicolon means the keyword belongs to an enclosing construct, not this
+	// block, which is what keeps a match arm's own `{ ... }` body normal.
 	for cursor := index - 1; cursor >= 0; cursor-- {
 		switch tokens[cursor].Type {
-		case token.Enum:
+		case token.Enum, token.Match:
 			return true
 		case token.LBrace, token.RBrace, token.Semicolon:
 			return false

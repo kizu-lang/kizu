@@ -305,24 +305,6 @@ func TestStdKizuLexerTokenizeParitySeeds(t *testing.T) {
 	assertLexerParityCases(t, cases, got)
 }
 
-// TestStdKizuLexerParitySelfhostPackage gates the selfhost source lexer surface.
-func TestStdKizuLexerParitySelfhostPackage(t *testing.T) {
-	cases := collectLexerParitySelfhostSources(t)
-	got := runStdKizuLexerParityHarness(t, cases)
-
-	assertLexerParityCases(t, cases, got)
-	t.Logf("selfhost sources compared=%d unsupported=0", len(cases))
-}
-
-// TestStdKizuLexerTokenizeParitySelfhostPackage gates Array-backed tokenization.
-func TestStdKizuLexerTokenizeParitySelfhostPackage(t *testing.T) {
-	cases := collectLexerParitySelfhostSources(t)
-	got := runStdKizuLexerTokenizeParityHarness(t, cases)
-
-	assertLexerParityCases(t, cases, got)
-	t.Logf("selfhost sources compared=%d unsupported=0", len(cases))
-}
-
 // collectLexerParityExamples finds examples supported by the current std lexer subset.
 func collectLexerParityExamples(t *testing.T) ([]lexerParityCase, lexerParityStats) {
 	t.Helper()
