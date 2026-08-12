@@ -7,6 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
@@ -2229,5 +2230,16 @@ func checkSource(source string) error {
 	if len(p.Errors()) > 0 {
 		return errors.New(p.Errors()[0])
 	}
+	// The checker reads std container method signatures from std's own
+	// declarations, so a program is only checkable with std merged in, which is
+	// what every real invocation does.
+	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	if err != nil {
+		return err
+	}
+	if len(stdErrs) > 0 {
+		return errors.New(stdErrs[0].Error())
+	}
+	program.Decls = append(stdDecls, program.Decls...)
 	return New().Check(program)
 }

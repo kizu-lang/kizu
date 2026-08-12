@@ -1,6 +1,7 @@
 package project
 
 import (
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,7 @@ func TestModuleConformanceFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := ParseManifest(string(source))
+	manifest, err := manifest.ParseManifest(string(source))
 	if err != nil {
 		t.Fatalf("parse manifest failed: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestResolveModules(t *testing.T) {
 	writeFile(t, root, "src/parser/mod.kizu")
 	writeFile(t, root, "src/parser/ast.kizu")
 
-	graph, err := ResolveModules(root, Manifest{
+	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
 		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
@@ -84,7 +85,7 @@ func TestResolveModulesRecordsExplicitExports(t *testing.T) {
 	writeFile(t, root, "src/main.kizu")
 	writeFile(t, root, "src/lexer.kizu")
 
-	graph, err := ResolveModules(root, Manifest{
+	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
 		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
@@ -103,7 +104,7 @@ func TestResolveModulesRejectsMissingExport(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "src/main.kizu")
 
-	_, err := ResolveModules(root, Manifest{
+	_, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
 		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
@@ -121,7 +122,7 @@ func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
 	writeFile(t, root, "src/parser.kizu")
 	writeFile(t, root, "src/parser/mod.kizu")
 
-	_, err := ResolveModules(root, Manifest{
+	_, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
 		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
@@ -292,7 +293,7 @@ func TestLoadProgramWithSourcesPrefersOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := ParseManifest(string(source))
+	manifest, err := manifest.ParseManifest(string(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +465,7 @@ func checkTempModuleGraph(t *testing.T, root string) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := ParseManifest(string(source))
+	manifest, err := manifest.ParseManifest(string(source))
 	if err != nil {
 		t.Fatal(err)
 	}
