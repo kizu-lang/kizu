@@ -28,6 +28,7 @@ type conformanceCase struct {
 	Args           []string `json:"args"`
 	Stdout         *string  `json:"stdout"`
 	StderrContains string   `json:"stderr_contains"`
+	Pending        string   `json:"pending"`
 	Features       []string `json:"features"`
 }
 
@@ -68,6 +69,10 @@ func TestConformanceManifestShape(t *testing.T) {
 // runConformanceCase dispatches one manifest entry.
 func runConformanceCase(t *testing.T, tt conformanceCase) {
 	t.Helper()
+	if tt.Pending != "" {
+		runPendingCase(t, tt)
+		return
+	}
 	switch tt.Mode {
 	case "run":
 		runReferenceCheckOK(t, tt.Path)
@@ -100,26 +105,66 @@ func conformanceExpectedStdout(t *testing.T, tt conformanceCase) string {
 	return *tt.Stdout
 }
 
-// runConformanceErrorCase checks one expected failure entry.
-func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
+// runPendingCase asserts a declared gap is still a gap. A case that starts
+// passing has to lose its `pending` entry in the change that fixes it, so the
+// list cannot outlive the gaps it names.
+func runPendingCase(t *testing.T, tt conformanceCase) {
 	t.Helper()
+	if conformanceCasePasses(tt) {
+		t.Fatalf("%s passes now; remove its `pending` entry (%s)", tt.Name, tt.Pending)
+	}
+}
+
+// conformanceCasePasses reports whether a case already meets its manifest
+// expectation, without failing the test when it does not.
+func conformanceCasePasses(tt conformanceCase) bool {
+	switch tt.Mode {
+	case "run", "test":
+		if tt.Stdout == nil {
+			return false
+		}
+		if _, err := runReferenceCheck(tt.Path); err != nil {
+			return false
+		}
+		args := runArgs(tt)
+		if tt.Mode == "test" {
+			args = []string{"test", tt.Path}
+		}
+		out, err := runKizu(args...)
+		return err == nil && out == *tt.Stdout
+	case "error":
+		out, err := runErrorCaseCommand(tt)
+		return err != nil && strings.Contains(out, "error:") &&
+			strings.Contains(out, tt.StderrContains)
+	default:
+		return false
+	}
+}
+
+// runErrorCaseCommand runs the command an expected-failure entry names.
+func runErrorCaseCommand(tt conformanceCase) (string, error) {
 	command := tt.Command
 	if command == "" {
 		command = "check"
 	}
-	var out string
-	var err error
-	if command == "check" {
-		out, err = runReferenceCheck(tt.Path)
-	} else if command == "parse" {
-		out, err = runReferenceParse(tt.Path)
-	} else {
+	switch command {
+	case "check":
+		return runReferenceCheck(tt.Path)
+	case "parse":
+		return runReferenceParse(tt.Path)
+	default:
 		args := []string{command, tt.Path}
 		if command == "run" || command == "test" {
 			args = append(args, tt.Args...)
 		}
-		out, err = runKizu(args...)
+		return runKizu(args...)
 	}
+}
+
+// runConformanceErrorCase checks one expected failure entry.
+func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
+	t.Helper()
+	out, err := runErrorCaseCommand(tt)
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
@@ -148,6 +193,9 @@ func validateConformanceCase(t *testing.T, tt conformanceCase, seen map[string]b
 	}
 	if len(tt.Features) == 0 {
 		t.Fatalf("%s: features must not be empty", tt.Name)
+	}
+	if tt.Pending != "" && tt.Mode == "check" {
+		t.Fatalf("%s: a check case cannot be pending", tt.Name)
 	}
 	switch tt.Mode {
 	case "run":
