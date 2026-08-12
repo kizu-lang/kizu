@@ -208,7 +208,7 @@ func splitProbeValues(text string) []string {
 }
 
 // runProbeStageCommand runs `stage selfhost` inside the scratch package.
-func runProbeStageCommand(runner string, dir string) bootstrapCommandResult {
+func runProbeStageCommand(runner string, dir string) selfhostCommandResult {
 	absRunner, err := filepath.Abs(runner)
 	if err != nil {
 		absRunner = runner
@@ -219,7 +219,7 @@ func runProbeStageCommand(runner string, dir string) bootstrapCommandResult {
 	stage.Stdout = &stdout
 	stage.Stderr = &stderr
 	runErr := stage.Run()
-	return bootstrapCommandResult{
+	return selfhostCommandResult{
 		name:    "stage selfhost",
 		command: absRunner + " stage selfhost",
 		stdout:  stdout.String(),

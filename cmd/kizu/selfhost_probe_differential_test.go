@@ -45,8 +45,8 @@ type probeCase struct {
 // probeObservation is what one gate run measured for one probe.
 type probeObservation struct {
 	name        string
-	reference   bootstrapCommandResult
-	subject     bootstrapCommandResult
+	reference   selfhostCommandResult
+	subject     selfhostCommandResult
 	runStatus   string
 	stageStatus string
 	stageStdout string
@@ -163,7 +163,7 @@ func TestSelfhostProbeDifferentialRecipes(t *testing.T) {
 	gate := justRecipe(string(content), "selfhost-probe-gate")
 	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_PROBES=1 go test")
 	requireRecipeFragment(t, gate, "TestSelfhostProbeDifferentialGate$")
-	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	fast := justRecipe(string(content), "selfhost-fast-gate")
 	requireRecipeFragment(t, fast, "just selfhost-probe-gate")

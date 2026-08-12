@@ -130,30 +130,30 @@ func dispatchTest(args []string) error {
 	return testFile(path, programArgs)
 }
 
-const nativeSelfhostBinary = "target/selfhost/stage2/selfhost"
+const nativeSelfhostBinary = "target/selfhost/stage0-native/selfhost"
 
 // nativeRunEnvVar is a prototype switch for delegating `kizu run` to the stage2
 // native selfhost binary. It defaults off while native run coverage is incomplete.
 const nativeRunEnvVar = "KIZU_NATIVE_RUN"
 
-// nativeRunEnabled reports whether `run` should exec the stage2 native selfhost
+// nativeRunEnabled reports whether `run` should exec the stage0-native selfhost
 // binary instead of taking the Go-owned dispatch path.
 func nativeRunEnabled() bool {
 	return os.Getenv(nativeRunEnvVar) == "1"
 }
 
 // nativeTestEnvVar is a prototype switch for delegating `kizu test` to the
-// stage2 native selfhost binary. It defaults off while native test coverage is
+// stage0-native selfhost binary. It defaults off while native test coverage is
 // incomplete.
 const nativeTestEnvVar = "KIZU_NATIVE_TEST"
 
-// nativeTestEnabled reports whether `test` should exec the stage2 native selfhost
+// nativeTestEnabled reports whether `test` should exec the stage0-native selfhost
 // binary instead of taking the Go-owned dispatch path.
 func nativeTestEnabled() bool {
 	return os.Getenv(nativeTestEnvVar) == "1"
 }
 
-// runNativeSelfhostDelegate delegates a public command to the existing stage2
+// runNativeSelfhostDelegate delegates a public command to the existing stage0-native
 // native selfhost artifact, preserving argv, stdio, cwd, and the child exit code.
 func runNativeSelfhostDelegate(command string, args []string) error {
 	bin, err := nativeSelfhostBinaryPath()
@@ -178,7 +178,7 @@ func runNativeSelfhostDelegate(command string, args []string) error {
 	return nil
 }
 
-// nativeSelfhostBinaryPath resolves the stage2 native selfhost executable path.
+// nativeSelfhostBinaryPath resolves the stage0-native selfhost executable path.
 func nativeSelfhostBinaryPath() (string, error) {
 	bin, err := findRepoFile(nativeSelfhostBinary)
 	if err != nil {
@@ -205,8 +205,8 @@ func nativeSelfhostEnv(bin string) []string {
 	return append(os.Environ(), "KIZU_REPO_ROOT="+nativeSelfhostRepoRoot(bin))
 }
 
-// nativeSelfhostRepoRoot derives the repo root from the stage2 binary path,
-// which lives at target/selfhost/stage2/selfhost.
+// nativeSelfhostRepoRoot derives the repo root from the stage0-native binary path,
+// which lives at target/selfhost/stage0-native/selfhost.
 func nativeSelfhostRepoRoot(bin string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bin))))
 }

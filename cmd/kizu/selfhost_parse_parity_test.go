@@ -48,7 +48,7 @@ func runSelfhostParseParity(t *testing.T) (string, int) {
 		return "", 1
 	}
 	defer restore()
-	runner := "target/selfhost/stage2/selfhost"
+	runner := "target/selfhost/stage0-native/selfhost"
 	if err := requireSupportedCorpusRunner(runner); err != nil {
 		t.Errorf("require selfhost parse parity runner: %v", err)
 		return "", 1
@@ -134,7 +134,7 @@ func countParseParityCaseFailures(
 			failures++
 			continue
 		}
-		result := runBootstrapCommand(t, runner, item.command, item.fixture)
+		result := runSelfhostCommand(t, runner, item.command, item.fixture)
 		if result.code != item.exitCode ||
 			result.stdout != expectedOut ||
 			result.stderr != expectedErr {
@@ -168,7 +168,7 @@ func countParseParityGuardFailures(
 	t.Helper()
 	failures := 0
 	for _, item := range parseParityGuardCases() {
-		result := runBootstrapCommand(t, runner, item.args...)
+		result := runSelfhostCommand(t, runner, item.args...)
 		if result.code != item.exitCode ||
 			!parseParityGuardStdoutMatches(result.stdout, item) ||
 			result.stderr != item.stderr {
@@ -217,7 +217,7 @@ func parseParityGuardCases() []parseParityGuardCase {
 			name:     "unsupported_command",
 			args:     []string{"bad", "selfhost"},
 			exitCode: 64,
-			stderr:   "unsupported selfhost command\n",
+			stderr:   "usage: selfhost <check|parse|run|test|fmt> <target>\n",
 		},
 	}
 }
@@ -240,7 +240,7 @@ func parseParityGuardStdoutMatches(stdout string, item parseParityGuardCase) boo
 
 // selfhostUsageStderr returns the stable hosted CLI usage line.
 func selfhostUsageStderr() string {
-	return "usage: selfhost <check|stage|parse|run|test|fmt> <target>\n"
+	return "usage: selfhost <check|parse|run|test|fmt> <target>\n"
 }
 
 // appendParseParityHeader writes durable #525 gate metadata.
@@ -249,9 +249,9 @@ func appendParseParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "issue #525/#665\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/parse-parity.tsv\n")
-	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
-	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
-	fmt.Fprintf(out, "validation.path hosted-stage2-artifact\n")
+	fmt.Fprintf(out, "runner target/selfhost/stage0-native/selfhost\n")
+	fmt.Fprintf(out, "runner.build stage0-native (go backend)\n")
+	fmt.Fprintf(out, "validation.path stage0-native-artifact\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
 	fmt.Fprintf(out, "cases %d\n", count)
 }
@@ -260,7 +260,7 @@ func appendParseParityHeader(out *strings.Builder, count int) {
 func appendParseParityResult(
 	out *strings.Builder,
 	item parseParityCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "case.%s.command %s %s\n", item.name, item.command, item.fixture)
 	fmt.Fprintf(out, "case.%s.fixture %s\n", item.name, item.fixture)
@@ -276,7 +276,7 @@ func appendParseParityResult(
 func appendParseParityGuardResult(
 	out *strings.Builder,
 	item parseParityGuardCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "guard.%s.command %s\n", item.name, strings.Join(item.args, " "))
 	fmt.Fprintf(out, "guard.%s.exit.expected %d\n", item.name, item.exitCode)

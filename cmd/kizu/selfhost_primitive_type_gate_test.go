@@ -6,7 +6,7 @@ import "testing"
 // rejects malformed, three-digit, and unsupported primitive widths.
 func TestSelfhostPrimitiveTypeGate(t *testing.T) {
 	const entry = "selfhost::types::primitive_type_gate::gate"
-	out, err := runSelfhostAbiParamsGate(t, entry)
+	out, err := runSelfhostPackageGate(t, entry)
 	if err != nil {
 		t.Fatalf("primitive type gate failed: %v\n%s", err, out)
 	}

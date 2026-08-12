@@ -1,14 +1,9 @@
-# ADR-0080: main は green のみ。push/PR ごとに daily suite、nightly に
-# bootstrap + hosted parity を回す。nightly の bootstrap red は
-# docs/selfhost-backend-generalization.md の記録済み gap と突き合わせて
-# 退行かどうかを判定する。
+# ADR-0080/0081: main は green のみ。push/PR ごとに daily suite、nightly に
+# stage0-native ビルドと hosted parity gate を回す。
 #
-# runner は開発環境と同じ macOS/arm64。バックエンドの artifact gate は
-# 「dominance violation を拒否する検証器」を要求し Apple clang はそれを
-# 満たさないため、nightly は brew llvm の opt を PATH の先頭に置く。
-# ただし露出するのは opt だけ: brew llvm の clang まで PATH 先頭に置くと
-# Xcode の as に -Q を渡して "can't specify -Q with -arch arm64" で
-# アセンブルが落ちるため、コンパイル/リンクは Apple clang のままにする。
+# ADR-0081 で自己コンパイル backend を撤去したので、nightly が確認するのは
+# 「Go backend(stage0)が selfhost をコンパイルでき、その実行ファイルが Go と
+# 同じ答えを返すこと」であって、selfhost 自身のコンパイル能力ではない。
 name: ci
 
 on:
@@ -35,7 +30,7 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l cmd internal)"
 
-  nightly-bootstrap:
+  nightly-parity:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     timeout-minutes: 90
@@ -44,20 +39,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install LLVM verifier
+      - name: Build selfhost natively (stage0)
+        run: >
+          go run ./cmd/kizu build --target native --opt --libc on
+          --runtime hosted --emit exe --linker clang
+          -o target/selfhost/stage0-native/selfhost selfhost
+      - name: Parity gates
         run: |
-          brew install llvm
-          mkdir -p "$HOME/llvm-verifier-bin"
-          ln -sf "$(brew --prefix llvm)/bin/opt" "$HOME/llvm-verifier-bin/opt"
-      - name: Bootstrap (stage0 -> stage1 -> stage2)
-        run: |
-          export PATH="$HOME/llvm-verifier-bin:$PATH"
-          KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
-      - name: Hosted parity gates
-        run: |
-          export PATH="$HOME/llvm-verifier-bin:$PATH"
           KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1
           KIZU_RUN_SELFHOST_CHECK_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostCheckParityGate$' -count=1
           KIZU_RUN_SELFHOST_PARSE_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostParseParityGate$' -count=1
-          KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1
+          KIZU_RUN_SELFHOST_FMT_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostFmtParityGate$' -count=1
+          KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=30m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1
           KIZU_RUN_SELFHOST_TEST_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostTestParityGate$' -count=1
+          KIZU_RUN_SELFHOST_CORPUS=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostSupportedCorpusGate$' -count=1

@@ -63,14 +63,14 @@ func TestSelfhostRunFlipParityRecipes(t *testing.T) {
 	gate := justRecipe(content, "selfhost-run-flip-parity-gate")
 	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_FLIP_PARITY=1 go test")
 	requireRecipeFragment(t, gate, "TestSelfhostRunFlipParityGate$")
-	requireNoRecipeFragment(t, gate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "just selfhost-native")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	one := justRecipe(content, "selfhost-run-flip-one case")
 	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_FLIP_PARITY=1")
 	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_FLIP_PARITY_CASE='{{case}}'")
 	requireRecipeFragment(t, one, "TestSelfhostRunFlipParityGate$")
-	requireNoRecipeFragment(t, one, "just selfhost-bootstrap")
+	requireNoRecipeFragment(t, one, "just selfhost-native")
 }
 
 // TestSelectFlipParityCases covers name and fixture selectors for the inner loop.

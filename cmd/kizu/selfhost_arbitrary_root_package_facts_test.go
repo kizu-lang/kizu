@@ -12,7 +12,7 @@ import (
 // selection is identity-based rather than name-based, and a root that cannot be
 // trusted is refused instead of narrowed.
 func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
-	out, err := runSelfhostAbiParamsGate(
+	out, err := runSelfhostPackageGate(
 		t,
 		"selfhost::ir::source_root_facts_gate::"+
 			"arbitrary_source_root_facts_gate",
@@ -120,7 +120,7 @@ func assertCheckedEntryRootsFailClosed(t *testing.T) {
 			message: "checked entry root source identity mismatch",
 		},
 	} {
-		failureOut, failureErr := runSelfhostAbiParamsGate(
+		failureOut, failureErr := runSelfhostPackageGate(
 			t,
 			"selfhost::ir::source_root_facts_gate::"+failure.entry,
 		)
