@@ -3548,9 +3548,6 @@ func (c *Checker) checkNonArenaMethod(
 	if value.typeName == "TaskGroup" {
 		return c.checkTaskGroupMethod(name, args, env)
 	}
-	if value.typeName == "std::kizu::ast::Ast" {
-		return c.checkAstMethod(value, name, args, env)
-	}
 	if elem, ok := taskElement(value.typeName); ok {
 		return c.checkTaskMethod(value, name, elem, args)
 	}
@@ -3673,9 +3670,6 @@ func (c *Checker) checkDirectFieldReceiverByType(
 	if ok && base == "std::arena::Arena" {
 		return c.checkFieldArenaMethod(value, name, args, env)
 	}
-	if value.typeName == "std::kizu::ast::Ast" {
-		return c.checkAstMethod(value, name, args, env)
-	}
 	return c.checkNonArenaMethod(value, name, args, env)
 }
 
@@ -3720,43 +3714,6 @@ func (c *Checker) checkFieldArenaGet(
 	return arg, nil
 }
 
-// checkAstMethod validates selfhost AST arena helper methods.
-func (c *Checker) checkAstMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "add_node":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::AstData",
-		}, "std::kizu::ast::NodeId")
-	case "get":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::AstNode")
-	case "len", "begin_children":
-		return c.checkAstMethodArgs(receiver, name, args, env, nil, "i64")
-	case "add_child":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::NodeId",
-		}, "!void")
-	case "finish_children":
-		return c.checkAstMethodArgs(
-			receiver, name, args, env, []string{"i64"}, "std::kizu::ast::ChildRange",
-		)
-	case "child_at":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::ChildRange", "i64",
-		}, "!std::kizu::ast::NodeId")
-	case "deinit":
-		return c.checkAstMethodArgs(receiver, name, args, env, nil, "void")
-	default:
-		return c.checkAstAddMethod(receiver, name, args, env)
-	}
-}
-
 // checkAstNodeIDProvenance rejects known AST-owned values from a different Ast.
 func (c *Checker) checkAstNodeIDProvenance(
 	receiver *binding,
@@ -3793,422 +3750,6 @@ func (c *Checker) checkAstChildRangeProvenance(
 		return errorf("ast error: ChildRange does not belong to Ast `%s`", receiver.name)
 	}
 	return nil
-}
-
-// checkAstAddMethod validates selfhost AST node-construction helper methods.
-func (c *Checker) checkAstAddMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if result, ok, err := c.checkAstAddExprMethod(receiver, name, args, env); ok || err != nil {
-		return result, err
-	}
-	if result, ok, err := c.checkAstAddStmtMethod(receiver, name, args, env); ok || err != nil {
-		return result, err
-	}
-	if result, ok, err := c.checkAstAddShapeMethod(receiver, name, args, env); ok || err != nil {
-		return result, err
-	}
-	return "", errorf("move error: unknown Ast method `%s`", name)
-}
-
-// checkAstAddExprMethod validates expression AST constructors.
-func (c *Checker) checkAstAddExprMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if result, ok, err := c.checkAstAddDocExprMethod(receiver, name, args, env); ok || err != nil {
-		return result, ok, err
-	}
-	switch name {
-	case "add_int":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_string":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_type_name":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_var":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_bool":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_prefix":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::PrefixOp",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_binary":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::BinaryOp",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_field_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "bool",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_deref_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_call":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_try_expr", "add_comptime_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	default:
-		return c.checkAstAddExtendedExprMethod(receiver, name, args, env)
-	}
-}
-
-// checkAstAddDocExprMethod validates expression constructors carrying doc metadata.
-func (c *Checker) checkAstAddDocExprMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "add_var_with_doc":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
-			"std::kizu::ast::Span",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	default:
-		return "", false, nil
-	}
-}
-
-// checkAstAddExtendedExprMethod validates expression constructors added for parser parity.
-func (c *Checker) checkAstAddExtendedExprMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "add_type_apply_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_cast_expr", "add_struct_field_init":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_index_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId", "bool",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_struct_literal_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_arena_new_expr":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	default:
-		return "", false, nil
-	}
-}
-
-// checkAstAddStmtMethod validates statement and block AST constructors.
-func (c *Checker) checkAstAddStmtMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "add_block":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_if":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_let":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_assign":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_return", "add_defer", "add_err_defer", "add_expr_stmt":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_while":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_for":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_break", "add_continue":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_unsafe":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_comptime_if":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	default:
-		return "", false, nil
-	}
-}
-
-// checkAstAddShapeMethod validates declaration and structural AST constructors.
-func (c *Checker) checkAstAddShapeMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "add_program":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_match":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_match_arm":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_empty":
-		result, err := c.checkAstMethodArgs(
-			receiver, name, args, env, []string{"i64"}, "std::kizu::ast::NodeId",
-		)
-		return result, true, err
-	default:
-		return c.checkAstAddDeclMethod(receiver, name, args, env)
-	}
-}
-
-// checkAstAddDeclMethod validates declaration-oriented AST constructors.
-func (c *Checker) checkAstAddDeclMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if result, ok, err := c.checkAstAddDocDeclMethod(receiver, name, args, env); ok || err != nil {
-		return result, ok, err
-	}
-	switch name {
-	case "add_param":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_import_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_field":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_struct_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_enum_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_union_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_union_variant":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_impl_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-			"std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_fn_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "bool", "bool",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	default:
-		return "", false, nil
-	}
-}
-
-// checkAstAddDocDeclMethod validates declaration constructors carrying doc metadata.
-func (c *Checker) checkAstAddDocDeclMethod(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "add_field_with_doc":
-		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
-			"bool", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		})
-	case "add_struct_decl_with_doc", "add_union_decl_with_doc":
-		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
-			"bool", "std::kizu::ast::NodeId",
-			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
-		})
-	case "add_enum_decl_with_doc":
-		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
-			"bool", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-		})
-	case "add_union_variant_with_doc":
-		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		})
-	case "add_fn_decl_with_doc":
-		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
-			"bool", "bool", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-			"std::kizu::ast::NodeId",
-		})
-	default:
-		return "", false, nil
-	}
-}
-
-// checkAstDocMethodArgs validates constructor args with leading and trailing doc spans.
-func (c *Checker) checkAstDocMethodArgs(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-	middle []string,
-) (string, bool, error) {
-	want := append([]string{"std::kizu::ast::Span"}, middle...)
-	want = append(want, "std::kizu::ast::Span")
-	result, err := c.checkAstMethodArgs(receiver, name, args, env, want, "std::kizu::ast::NodeId")
-	return result, true, err
-}
-
-// checkAstMethodArgs checks AST helper arguments without moving copy-like ids.
-func (c *Checker) checkAstMethodArgs(
-	receiver *binding,
-	name string,
-	args []ast.Expression,
-	env *scope,
-	want []string,
-	result string,
-) (string, error) {
-	if len(args) != len(want) {
-		return "", errorf("move error: `Ast.%s` expects %d args, got %d", name, len(want), len(args))
-	}
-	for idx, arg := range args {
-		if isAstNodeIDType(want[idx]) {
-			if err := c.checkAstNodeIDProvenance(receiver, []ast.Expression{arg}, env); err != nil {
-				return "", err
-			}
-		}
-		if isAstChildRangeType(want[idx]) {
-			if err := c.checkAstChildRangeProvenance(receiver, arg, env); err != nil {
-				return "", err
-			}
-		}
-		got, err := c.moveExpr(arg, env)
-		if err != nil {
-			return "", err
-		}
-		if got != want[idx] {
-			return "", errorf("move error: `Ast.%s` arg %d expects %s, got %s",
-				name, idx+1, want[idx], got)
-		}
-	}
-	return result, nil
 }
 
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
@@ -5070,6 +4611,9 @@ func (c *Checker) checkImplMethodCall(
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))
 	}
+	if err := c.checkAstHandleProvenance(value, method, args, env); err != nil {
+		return "", true, err
+	}
 	if err := c.checkImplMethodArgs(method, args, env); err != nil {
 		return "", true, err
 	}
@@ -5077,6 +4621,36 @@ func (c *Checker) checkImplMethodCall(
 		value.moved = true
 	}
 	return returnTypeName(method), true, nil
+}
+
+// checkAstHandleProvenance rejects an AST handle produced by a different arena.
+//
+// A NodeId or ChildRange only means anything relative to the Ast that issued it,
+// and nothing in the type says which one that was. Which parameters are handles
+// is read off the signature std declares, so adding a method to `impl Ast` does
+// not require restating its shape here.
+func (c *Checker) checkAstHandleProvenance(
+	receiver *binding,
+	method *functionInfo,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if receiver.arenaID == 0 || len(method.params) != len(args)+1 {
+		return nil
+	}
+	for idx, arg := range args {
+		switch {
+		case isAstNodeIDType(method.params[idx+1].typeName):
+			if err := c.checkAstNodeIDProvenance(receiver, []ast.Expression{arg}, env); err != nil {
+				return err
+			}
+		case isAstChildRangeType(method.params[idx+1].typeName):
+			if err := c.checkAstChildRangeProvenance(receiver, arg, env); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // checkImplMethodArgs applies ownership effects for explicit method arguments.
