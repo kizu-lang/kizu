@@ -35,11 +35,11 @@ type lowerer struct {
 	pending      []genericInstance
 }
 
-// genericInstance is one generic function bound to one type argument.
+// genericInstance is one generic function with its type parameters bound.
 type genericInstance struct {
-	decl    *ast.FunctionDecl
-	typeArg string
-	symbol  string
+	decl     *ast.FunctionDecl
+	bindings map[string]string
+	symbol   string
 }
 
 type loopContext struct {
@@ -84,26 +84,60 @@ func (l *lowerer) resolveType(name string) string {
 // type argument, and returns the symbol it will be lowered under. Lowering
 // happens after the current function finishes, so an instantiation never
 // interrupts the function that asked for it.
-func (l *lowerer) requestGenericInstance(name string, typeArg string) (string, string, error) {
+func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, string, error) {
 	decl := l.genericDecl(name)
 	if decl == nil {
 		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
-	if len(decl.TypeParams) != 1 {
-		return "", "", fmt.Errorf(
-			"ir error: `%s` takes %d type parameters, only one is supported",
-			name, len(decl.TypeParams))
+	args := splitTypeArgs(typeArgs)
+	if len(args) != len(decl.TypeParams) {
+		return "", "", fmt.Errorf("ir error: `%s` takes %d type parameters, got %d",
+			name, len(decl.TypeParams), len(args))
 	}
-	symbol := genericInstanceName(name, typeArg)
+	bindings := map[string]string{}
+	for i, param := range decl.TypeParams {
+		// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
+		// argument T is currently bound to, not the parameter name.
+		bindings[param] = l.resolveType(args[i])
+	}
+	symbol := genericInstanceName(name, decl.TypeParams, bindings)
 	if !l.instantiated[symbol] {
 		l.instantiated[symbol] = true
-		l.pending = append(l.pending, genericInstance{decl: decl, typeArg: typeArg, symbol: symbol})
+		l.pending = append(l.pending,
+			genericInstance{decl: decl, bindings: bindings, symbol: symbol})
 	}
 	ret := decl.ReturnType
-	if ret == decl.TypeParams[0] {
-		ret = typeArg
+	if bound, ok := bindings[ret]; ok {
+		ret = bound
 	}
 	return symbol, returnType(ret), nil
+}
+
+// splitTypeArgs splits a static argument list on the commas that separate its
+// arguments, leaving a nested spelling such as `Map<[]u8, i64>` in one piece.
+func splitTypeArgs(list string) []string {
+	args := []string{}
+	depth := 0
+	var current strings.Builder
+	for _, r := range list {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(current.String()))
+				current.Reset()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+	if strings.TrimSpace(current.String()) != "" {
+		args = append(args, strings.TrimSpace(current.String()))
+	}
+	return args
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -112,7 +146,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 	for len(l.pending) > 0 {
 		next := l.pending[0]
 		l.pending = l.pending[1:]
-		l.typeBindings = map[string]string{next.decl.TypeParams[0]: next.typeArg}
+		l.typeBindings = next.bindings
 		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
 		l.typeBindings = map[string]string{}
 		if err != nil {
@@ -137,9 +171,14 @@ func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
 	return nil
 }
 
-// genericInstanceName is the symbol one instantiation is lowered under.
-func genericInstanceName(name string, typeArg string) string {
-	return name + "<" + typeArg + ">"
+// genericInstanceName is the symbol one instantiation is lowered under. Type
+// parameters are listed in declaration order so the symbol is stable.
+func genericInstanceName(name string, params []string, bindings map[string]string) string {
+	args := make([]string, 0, len(params))
+	for _, param := range params {
+		args = append(args, bindings[param])
+	}
+	return name + "<" + strings.Join(args, ", ") + ">"
 }
 
 // lower performs declaration collection and function lowering.
@@ -796,9 +835,7 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		}
 		return l.emit("test.expect_equal", "void", args, typeArg), nil
 	default:
-		// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
-		// argument T is currently bound to, not the parameter name.
-		symbol, ret, err := l.requestGenericInstance(name, l.resolveType(typeArg))
+		symbol, ret, err := l.requestGenericInstance(name, typeArg)
 		if err != nil {
 			return Value{}, err
 		}
