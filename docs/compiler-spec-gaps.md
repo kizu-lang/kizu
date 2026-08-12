@@ -135,9 +135,7 @@ Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
 
 ### Selfhost Runtime ABI
 
-Source: [`docs/selfhost-runtime-abi.md`](selfhost-runtime-abi.md).
-
-The first selfhost compiler artifact uses ABI version `selfhost-abi-v0`. The
+The first compiler artifact ABI is versioned. The
 contract maps the #453 IR manifest shapes to LLVM value layouts, direct and
 std-primitive call conventions, recoverable error representation, cleanup hooks,
 and explicit runtime symbols. Any backend/runtime issue that needs a new
@@ -153,7 +151,7 @@ tests, and self-check/build.
 
 Self-host component migration readiness is tracked by
 [ADR-0054](adr/0054-self-host-readiness-gate.md) and
-[`docs/selfhost-readiness.md`](selfhost-readiness.md). A component should not
+A component should not
 replace a Go production path until its language features, stdlib dependencies,
 diagnostics, memory-safety cases, and oracle tests are explicit.
 

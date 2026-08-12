@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/cimport"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	kizufmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -77,11 +77,19 @@ func printParserDiagnostics(diags []parser.Diagnostic) {
 func dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "parse":
-		return runSelfhostFrontendCommand("parse", args)
+		if len(args) != 1 {
+			usage()
+			return fmt.Errorf("parse takes one target")
+		}
+		return parseFile(args[0])
 	case "run":
 		return dispatchRun(args)
 	case "check":
-		return runSelfhostFrontendCommand("check", args)
+		if len(args) != 1 {
+			usage()
+			return fmt.Errorf("check takes one target")
+		}
+		return checkFile(args[0])
 	case "test":
 		return dispatchTest(args)
 	case "fmt":
@@ -104,216 +112,16 @@ func dispatch(cmd string, args []string) error {
 	}
 }
 
-// dispatchRun routes `kizu run` through the native, selfhost, or Go-owned path,
-// preserving the nativeRun → selfhostRun → runFile priority order.
+// dispatchRun runs a program through the Go-owned path.
 func dispatchRun(args []string) error {
-	if nativeRunEnabled() {
-		return runNativeSelfhostDelegate("run", args)
-	}
-	if selfhostRunEnabled() {
-		return runSelfhostFrontendCommand("run", args)
-	}
 	path, programArgs := splitProgramArgs(args)
 	return runFile(path, programArgs)
 }
 
-// dispatchTest routes `kizu test` through the native, selfhost, or Go-owned path,
-// preserving the nativeTest → selfhostTest → testFile priority order.
+// dispatchTest runs a program's tests through the Go-owned path.
 func dispatchTest(args []string) error {
-	if nativeTestEnabled() {
-		return runNativeSelfhostDelegate("test", args)
-	}
-	if selfhostTestEnabled() {
-		return runSelfhostFrontendCommand("test", args)
-	}
 	path, programArgs := splitProgramArgs(args)
 	return testFile(path, programArgs)
-}
-
-const nativeSelfhostBinary = "target/selfhost/stage0-native/selfhost"
-
-// nativeRunEnvVar is a prototype switch for delegating `kizu run` to the stage2
-// native selfhost binary. It defaults off while native run coverage is incomplete.
-const nativeRunEnvVar = "KIZU_NATIVE_RUN"
-
-// nativeRunEnabled reports whether `run` should exec the stage0-native selfhost
-// binary instead of taking the Go-owned dispatch path.
-func nativeRunEnabled() bool {
-	return os.Getenv(nativeRunEnvVar) == "1"
-}
-
-// nativeTestEnvVar is a prototype switch for delegating `kizu test` to the
-// stage0-native selfhost binary. It defaults off while native test coverage is
-// incomplete.
-const nativeTestEnvVar = "KIZU_NATIVE_TEST"
-
-// nativeTestEnabled reports whether `test` should exec the stage0-native selfhost
-// binary instead of taking the Go-owned dispatch path.
-func nativeTestEnabled() bool {
-	return os.Getenv(nativeTestEnvVar) == "1"
-}
-
-// runNativeSelfhostDelegate delegates a public command to the existing stage0-native
-// native selfhost artifact, preserving argv, stdio, cwd, and the child exit code.
-func runNativeSelfhostDelegate(command string, args []string) error {
-	bin, err := nativeSelfhostBinaryPath()
-	if err != nil {
-		return err
-	}
-	processArgs := make([]string, 0, len(args)+1)
-	processArgs = append(processArgs, command)
-	processArgs = append(processArgs, args...)
-	cmd := exec.Command(bin, processArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = nativeSelfhostEnv(bin)
-	if err := cmd.Run(); err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return exitStatus{code: exit.ExitCode()}
-		}
-		return err
-	}
-	return nil
-}
-
-// nativeSelfhostBinaryPath resolves the stage0-native selfhost executable path.
-func nativeSelfhostBinaryPath() (string, error) {
-	bin, err := findRepoFile(nativeSelfhostBinary)
-	if err != nil {
-		return "", fmt.Errorf(
-			"native selfhost delegate requires %s; "+
-				"run `just selfhost-production-from-scratch` to build it: %w",
-			nativeSelfhostBinary,
-			err,
-		)
-	}
-	info, err := os.Stat(bin)
-	if err != nil {
-		return "", err
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("native selfhost delegate requires executable file %s, got directory", bin)
-	}
-	return filepath.Abs(bin)
-}
-
-// nativeSelfhostEnv augments the current environment with the repo root the
-// native selfhost binary expects.
-func nativeSelfhostEnv(bin string) []string {
-	return append(os.Environ(), "KIZU_REPO_ROOT="+nativeSelfhostRepoRoot(bin))
-}
-
-// nativeSelfhostRepoRoot derives the repo root from the stage0-native binary path,
-// which lives at target/selfhost/stage0-native/selfhost.
-func nativeSelfhostRepoRoot(bin string) string {
-	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bin))))
-}
-
-// selfhostRunEnvVar is the rollback-friendly switch point for routing the public
-// `kizu run <file>` command through the selfhost-owned compiled artifact path
-// (selfhost::cli::execute::run_file_cli, which lowers a run-codegen program, links
-// it, and executes the native artifact) instead of the Go interpreter. It defaults
-// off so the general Go-owned run surface is unchanged; supported shapes that the
-// selfhost backend can lower are owned end to end when it is on, and unsupported
-// shapes surface explicit selfhost diagnostics rather than falling back to Go.
-//
-// This gate is the deliberate switch boundary for #1151 / parent #1070. It is not a
-// permanent compatibility branch: it is removed (default flipped to selfhost) once
-// `run` is selfhost-owned for the general language/runtime surface tracked by #1070.
-const selfhostRunEnvVar = "KIZU_SELFHOST_RUN"
-
-// selfhostRunEnabled reports whether the public `run` command is routed through the
-// selfhost-owned compiled artifact path. See selfhostRunEnvVar.
-func selfhostRunEnabled() bool {
-	return os.Getenv(selfhostRunEnvVar) == "1"
-}
-
-// selfhostTestEnvVar is the rollback-friendly switch point for routing the public
-// `kizu test <file>` command through the selfhost-owned compiled artifact path
-// (selfhost::cli::execute::test_file_cli, which lowers a test executable, emits
-// LLVM, links the artifact, and executes the native artifact) instead of the Go
-// interpreter `testFile` path. It defaults off so the general Go-owned test surface
-// is unchanged; supported selected test shapes that the selfhost backend can lower
-// are owned end to end when it is on, and unsupported shapes surface explicit
-// selfhost diagnostics rather than falling back to Go.
-//
-// This gate is the deliberate switch boundary for #1157 / parent #1070. It is not a
-// permanent compatibility branch: it is removed (default flipped to selfhost) once
-// `test` is selfhost-owned for the general discovery/runtime surface tracked by
-// #1070.
-const selfhostTestEnvVar = "KIZU_SELFHOST_TEST"
-
-// selfhostTestEnabled reports whether the public `test` command is routed through
-// the selfhost-owned compiled artifact path. See selfhostTestEnvVar.
-func selfhostTestEnabled() bool {
-	return os.Getenv(selfhostTestEnvVar) == "1"
-}
-
-// runSelfhostFrontendCommand executes frontend commands through Kizu-owned code.
-func runSelfhostFrontendCommand(command string, args []string) error {
-	processArgs, err := selfhostFrontendProcessArgs(command, args)
-	if err != nil {
-		return err
-	}
-	manifestPath, err := findRepoFile("selfhost/kizu.toml")
-	if err != nil {
-		return err
-	}
-	repoRoot := filepath.Dir(filepath.Dir(manifestPath))
-	oldWd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	if err := os.Chdir(repoRoot); err != nil {
-		return err
-	}
-	defer func() {
-		_ = os.Chdir(oldWd)
-	}()
-
-	_, program, err := loadPackageProgram("selfhost")
-	if err != nil {
-		return err
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	code, err := interp.NewWithProcessIO(os.Stdout, os.Stderr, processArgs).
-		RunEntryInt(program, "selfhost::cli_main")
-	if err != nil {
-		return err
-	}
-	if code != 0 {
-		return exitStatus{code: int(code)}
-	}
-	return nil
-}
-
-// selfhostFrontendProcessArgs preserves CLI validation for Kizu while normalizing real targets.
-func selfhostFrontendProcessArgs(command string, args []string) ([]string, error) {
-	processArgs := make([]string, 0, len(args)+1)
-	processArgs = append(processArgs, command)
-	processArgs = append(processArgs, args...)
-	if len(args) == 1 && !strings.HasPrefix(args[0], "-") {
-		absTarget, err := filepath.Abs(args[0])
-		if err != nil {
-			return nil, err
-		}
-		processArgs[1] = absTarget
-		return processArgs, nil
-	}
-	if command != "fmt" || len(args) != 2 || !isFmtWriteFlag(args[0]) ||
-		strings.HasPrefix(args[1], "-") {
-		return processArgs, nil
-	}
-	absTarget, err := filepath.Abs(args[1])
-	if err != nil {
-		return nil, err
-	}
-	processArgs[2] = absTarget
-	return processArgs, nil
 }
 
 // usage prints the supported command line shape.
@@ -531,7 +339,34 @@ func splitProgramArgs(args []string) (string, []string) {
 //
 //	--write: rewrite the file in-place.
 func fmtCommand(args []string) error {
-	return runSelfhostFrontendCommand("fmt", args)
+	write := false
+	if len(args) == 2 && isFmtWriteFlag(args[0]) {
+		write = true
+		args = args[1:]
+	}
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		usage()
+		return fmt.Errorf("fmt takes an optional --write and one target")
+	}
+	source, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	// The formatter is token based and will happily lay out source that does not
+	// parse, so validate first: rewriting a file whose syntax is broken would
+	// bake the breakage into a "formatted" result.
+	if _, errs, err := parsePath(args[0]); err != nil {
+		return err
+	} else if len(errs) > 0 {
+		printParserDiagnostics(errs)
+		return fmt.Errorf("parse failed")
+	}
+	formatted := kizufmt.Format(string(source))
+	if !write {
+		_, _ = fmt.Print(formatted)
+		return nil
+	}
+	return os.WriteFile(args[0], []byte(formatted), 0o644)
 }
 
 // isFmtWriteFlag reports whether an argument selects in-place formatting.
@@ -970,9 +805,4 @@ func parsePathWithStd(path string) (*ast.Program, []parser.Diagnostic, error) {
 // resolveStdModules returns std modules in dependency-before-dependent order.
 func resolveStdModules(source string) ([]string, error) {
 	return stdlib.ResolveModules(source)
-}
-
-// findRepoFile searches upward for a repository-relative file.
-func findRepoFile(name string) (string, error) {
-	return stdlib.FindRepoFile(name)
 }

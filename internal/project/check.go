@@ -48,6 +48,7 @@ func CheckGraph(graph Graph) error {
 }
 
 type graphChecker struct {
+	packageRoot     string
 	modules         map[string]*moduleUnit
 	modulePaths     map[string]bool
 	types           map[string]typeExport
@@ -58,7 +59,33 @@ type graphChecker struct {
 type moduleUnit struct {
 	path    string
 	program *ast.Program
+	// imports is the declared import set and defines the dependency edges the
+	// ordering and cycle checks walk.
 	imports map[string]string
+	// namespaces is what name resolution sees: the imports plus the package root
+	// namespace, which is reachable without an import and is not an edge.
+	namespaces map[string]string
+}
+
+// moduleNamespaces returns the namespaces module can name. ADR-0049 makes
+// [package].name the package root namespace, so every other module reaches the
+// root module's declarations by that name -- a module cannot import the package
+// it is part of, and treating the root as an import edge would make every
+// package with a non-empty root a cycle.
+func (c *graphChecker) moduleNamespaces(
+	module *moduleUnit,
+	imports map[string]string,
+) map[string]string {
+	namespaces := make(map[string]string, len(imports)+1)
+	for alias, path := range imports {
+		namespaces[alias] = path
+	}
+	if c.packageRoot != "" && c.modulePaths[c.packageRoot] && module.path != c.packageRoot {
+		if _, taken := namespaces[c.packageRoot]; !taken {
+			namespaces[c.packageRoot] = c.packageRoot
+		}
+	}
+	return namespaces
 }
 
 type typeExport struct {
@@ -73,6 +100,7 @@ type functionExport struct {
 
 // load parses every source file and indexes module paths.
 func (c *graphChecker) load(graph Graph) error {
+	c.packageRoot = graph.Root
 	for _, module := range graph.Modules {
 		program, err := c.parseModule(module)
 		if err != nil {
@@ -184,6 +212,7 @@ func (c *graphChecker) program() (*ast.Program, error) {
 			return nil, err
 		}
 		module.imports = imports
+		module.namespaces = c.moduleNamespaces(module, imports)
 	}
 	modules, err := c.orderedModules()
 	if err != nil {
@@ -952,7 +981,7 @@ func (c *graphChecker) resolveNamespaceParts(
 	if len(parts) == 0 {
 		return "", false, nil
 	}
-	if target, ok := module.imports[parts[0]]; ok {
+	if target, ok := module.namespaces[parts[0]]; ok {
 		if len(parts) == 1 {
 			return "", false, nil
 		}
@@ -992,7 +1021,7 @@ func (c *graphChecker) resolveTypeNamespaceParts(
 	if len(parts) == 0 {
 		return "", false
 	}
-	if target, ok := module.imports[parts[0]]; ok && len(parts) > 1 {
+	if target, ok := module.namespaces[parts[0]]; ok && len(parts) > 1 {
 		name := target + "::" + strings.Join(parts[1:], "::")
 		if _, exists := c.types[name]; exists {
 			return name, true
@@ -1121,7 +1150,7 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 // resolveQualifiedBase resolves an imported module type by last-segment alias.
 func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 	parts := strings.Split(name, "::")
-	targetModule, ok := r.module.imports[parts[0]]
+	targetModule, ok := r.module.namespaces[parts[0]]
 	if !ok {
 		return "", fmt.Errorf("module error: `%s` is not imported in `%s`", parts[0], r.module.path)
 	}

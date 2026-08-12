@@ -1,11 +1,7 @@
-# ADR-0080/0081: main は green のみ。すべての gate を push/PR ごとに回す。
+# ADR-0082: main は green のみ。全ての gate を push/PR ごとに回す。
 #
 # 定時実行(nightly)は置かない。壊れたことに翌朝まで気づけない仕組みは、
 # 気づける仕組みより弱い。gate は速く保ち、PR のたびに全部通す。
-#
-# 2 つの job は並列に走る。parity job の支配項は stage0 ビルド(runner 実測 36s)で、
-# compiler(cmd/ internal/)と被コンパイル側(selfhost/src std/src)が両方とも
-# 変わっていない PR では cache が効いて丸ごと飛ぶ。
 name: ci
 
 on:
@@ -23,45 +19,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Daily suite
+      - name: Test
         run: go test ./... -count=1 -timeout=15m
       - name: gofmt
         run: test -z "$(gofmt -l cmd internal)"
-
-  parity:
-    runs-on: macos-14
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      # The binary is a pure function of the Go compiler and the Kizu it compiles,
-      # so anything that changes either one must miss the cache.
-      - name: Restore stage0-native selfhost
-        id: selfhost-cache
-        uses: actions/cache@v4
-        with:
-          path: target/selfhost/stage0-native
-          key: >-
-            stage0-native-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum',
-            'cmd/**/*.go', 'internal/**/*.go', 'selfhost/**/*.kizu',
-            'selfhost/kizu.toml', 'std/**/*.kizu') }}
-
-      - name: Build selfhost natively (stage0)
-        if: steps.selfhost-cache.outputs.cache-hit != 'true'
-        run: >
-          go run ./cmd/kizu build --target native --opt --libc on
-          --runtime hosted --emit exe --linker clang
-          -o target/selfhost/stage0-native/selfhost selfhost
-
-      - name: Parity gates
-        run: |
-          KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1
-          KIZU_RUN_SELFHOST_CHECK_PARITY=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostCheckParityGate$' -count=1
-          KIZU_RUN_SELFHOST_PARSE_PARITY=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostParseParityGate$' -count=1
-          KIZU_RUN_SELFHOST_FMT_PARITY=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostFmtParityGate$' -count=1
-          KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=15m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1
-          KIZU_RUN_SELFHOST_TEST_PARITY=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostTestParityGate$' -count=1
-          KIZU_RUN_SELFHOST_CORPUS=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostSupportedCorpusGate$' -count=1
