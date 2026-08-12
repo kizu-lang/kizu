@@ -70,15 +70,16 @@ forces its entry to be removed in the same change.
 
 What is missing, in the order it should be closed:
 
-1. **Six negative examples do not trap.** An out-of-range index, an out-of-range
-   slice, `Array.get_or_panic` bounds, and a failing `Io` capability are all
-   caught by the checker's runtime counterpart in the manifest's expectation but
-   pass straight through the native binary. This is a safety hole, not a
-   diagnostic difference.
-2. **Six examples compute the wrong answer.** Three drop the enum name from
+1. **Six examples compute the wrong answer.** Three drop the enum name from
    `print`, one does not observe a mutation made through a mutable borrow, one
    reports a wrong array length, and one exits non-zero on a recovered error
-   union.
+   union. These are the worst of the three groups: they do not fail, so nothing
+   tells the caller the answer is wrong.
+2. **Four negative examples report the wrong failure.** `Array.get_or_panic`
+   still traps without a message, a failing `Io` capability is ignored so the
+   program succeeds, and a returned error union is not surfaced. Out-of-range
+   index and slice access now report `index out of bounds` and
+   `range out of bounds` (ADR-0084).
 3. **Sixteen examples have no lowering yet.** `std::builtin::task_group` (6),
    `Channel<T>` and `Atomic<T>` (4), explicit generics, a `dyn` contract method,
    a `Box` borrow, `if` as an expression, and the scoped-thread worker value.

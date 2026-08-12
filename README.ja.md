@@ -68,12 +68,13 @@ pending なケースは「今も通らないこと」を検査するので、穴
 
 埋めるべき順序:
 
-1. **negative example 6 件が trap しない。** 範囲外 index、範囲外 slice、
-   `Array.get_or_panic` の境界、failing な `Io` capability のいずれも、
-   native バイナリでは素通りします。診断の差ではなく安全性の欠落です。
-2. **6 件が違う答えを出す。** 3 件は `print` から enum 名が落ち、1 件は mutable borrow
+1. **6 件が違う答えを出す。** 3 件は `print` から enum 名が落ち、1 件は mutable borrow
    経由の変更を観測せず、1 件は配列長を誤り、1 件は回復済み error union で
-   非ゼロ終了します。
+   非ゼロ終了します。失敗しないため呼び出し側が気づけない、3 つの中で最も悪い種類です。
+2. **negative example 4 件が違う失敗を報告する。** `Array.get_or_panic` は今も
+   メッセージ無しで trap し、failing な `Io` capability は無視されてプログラムが
+   成功し、返された error union が surface されません。範囲外 index と slice は
+   `index out of bounds` / `range out of bounds` を報告するようになりました(ADR-0084)。
 3. **16 件は lowering が未実装。** `std::builtin::task_group` (6)、
    `Channel<T>` と `Atomic<T>` (4)、明示 generics、`dyn` contract method、
    `Box` borrow、`if` 式、scoped thread の worker 値。

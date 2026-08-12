@@ -37,6 +37,7 @@ type emitter struct {
 	blockExitLabel  map[string]string
 	entryParamLoads []string
 	wroteParamLoads bool
+	condFailGlobals map[string]string
 }
 
 type valueInfo struct {
@@ -120,6 +121,49 @@ func (e *emitter) writeHeader() {
 	if e.usesBoundsTrap() {
 		e.out.WriteString("declare void @llvm.trap()\n\n")
 	}
+	e.writeCondFailGlobals()
+}
+
+// writeCondFailGlobals declares the panic entry and one constant per distinct
+// cond_fail message, so a message costs one global however often it is tested.
+func (e *emitter) writeCondFailGlobals() {
+	messages := e.condFailMessages()
+	if len(messages) == 0 {
+		return
+	}
+	e.out.WriteString("declare void @kizu_panic(ptr, i64)\n\n")
+	e.condFailGlobals = make(map[string]string, len(messages))
+	for i, message := range messages {
+		global := fmt.Sprintf("@.kizu.panic.%d", i)
+		e.condFailGlobals[message] = global
+		e.writeStaticStringGlobal(global, message)
+	}
+	e.out.WriteString("\n")
+}
+
+// condFailMessages returns the distinct cond_fail messages in sorted order.
+func (e *emitter) condFailMessages() []string {
+	seen := map[string]bool{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "cond_fail" {
+					seen[instr.Immediate] = true
+				}
+			}
+		}
+	}
+	messages := make([]string, 0, len(seen))
+	for message := range seen {
+		messages = append(messages, message)
+	}
+	sort.Strings(messages)
+	return messages
+}
+
+// condFailMessageGlobal returns the global holding one panic message.
+func (e *emitter) condFailMessageGlobal(message string) string {
+	return e.condFailGlobals[message]
 }
 
 // writeErrorUnionTypes writes named recoverable-result ABI definitions.
@@ -614,6 +658,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeFieldInstr(instr)
 	case instr.Op == "ref.store":
 		return e.writeRefStore(instr)
+	case instr.Op == "cond_fail":
+		return e.writeCondFail(instr)
 	default:
 		return e.writeRuntimeInstr(instr)
 	}
@@ -1299,7 +1345,8 @@ func (e *emitter) writeSliceLen(instr *ir.Instr) error {
 	return nil
 }
 
-// writeSliceIndex lowers checked byte indexing and traps before invalid memory access.
+// writeSliceIndex loads one byte. The bounds test reaches the backend as a
+// preceding cond_fail instruction, so no check is generated here.
 func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	if len(instr.Args) != 2 ||
 		instr.Args[0].Type != "[]u8" ||
@@ -1310,20 +1357,6 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	slice := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
-	lenName := resultName + ".len"
-	negName := resultName + ".index.neg"
-	highName := resultName + ".index.high"
-	badName := resultName + ".index.bad"
-	badLabel := helperLabel(instr.Result.Name, "index.oob")
-	okLabel := helperLabel(instr.Result.Name, "index.ok")
-	e.markCurrentBlockExit(okLabel)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", negName, index.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, %s\n", highName, index.operand, lenName)
-	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badName, negName, highName)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badName, badLabel, okLabel)
-	e.writeTrapBlock(badLabel)
-	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	ptrName := resultName + ".ptr"
 	elemPtrName := resultName + ".elem.ptr"
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
@@ -1334,7 +1367,8 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	return nil
 }
 
-// writeSliceSlice lowers checked byte slicing and traps before invalid memory access.
+// writeSliceSlice builds a sub-slice. The bounds test reaches the backend as
+// preceding cond_fail instructions, so no check is generated here.
 func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	if len(instr.Args) != 3 ||
 		instr.Args[0].Type != "[]u8" ||
@@ -1347,24 +1381,6 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	start := e.value(instr.Args[1])
 	end := e.value(instr.Args[2])
 	resultName := localName(instr.Result.Name)
-	lenName := resultName + ".source.len"
-	startNegName := resultName + ".start.neg"
-	endBeforeName := resultName + ".end.before.start"
-	endHighName := resultName + ".end.high"
-	badLowerName := resultName + ".bad.lower"
-	badName := resultName + ".bad"
-	badLabel := helperLabel(instr.Result.Name, "slice.oob")
-	okLabel := helperLabel(instr.Result.Name, "slice.ok")
-	e.markCurrentBlockExit(okLabel)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", startNegName, start.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, %s\n", endBeforeName, end.operand, start.operand)
-	fmt.Fprintf(&e.out, "  %s = icmp sgt i64 %s, %s\n", endHighName, end.operand, lenName)
-	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badLowerName, startNegName, endBeforeName)
-	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badName, badLowerName, endHighName)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badName, badLabel, okLabel)
-	e.writeTrapBlock(badLabel)
-	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	ptrName := resultName + ".source.ptr"
 	slicePtrName := resultName + ".ptr"
 	baseName := resultName + ".base"
@@ -1378,6 +1394,26 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
 		resultName, baseName, sliceLenName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeCondFail aborts with a message when the tested condition holds.
+func (e *emitter) writeCondFail(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "bool" || instr.Immediate == "" {
+		return fmt.Errorf("llvm error: cond_fail expects bool and a message")
+	}
+	cond := e.value(instr.Args[0])
+	global := e.condFailMessageGlobal(instr.Immediate)
+	failLabel := helperLabel(instr.Args[0].Name, "fail")
+	okLabel := helperLabel(instr.Args[0].Name, "pass")
+	e.markCurrentBlockExit(okLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n",
+		cond.operand, failLabel, okLabel)
+	fmt.Fprintf(&e.out, "%s:\n", failLabel)
+	fmt.Fprintf(&e.out, "  call void @kizu_panic(ptr %s, i64 %d)\n",
+		global, len(instr.Immediate))
+	e.out.WriteString("  unreachable\n")
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	return nil
 }
 
@@ -1675,10 +1711,8 @@ func continuationLabel(instr *ir.Instr) (string, bool) {
 	switch instr.Op {
 	case "error.try":
 		return helperLabel(instr.Result.Name, "try.ok"), true
-	case "slice.index":
-		return helperLabel(instr.Result.Name, "index.ok"), true
-	case "slice.slice":
-		return helperLabel(instr.Result.Name, "slice.ok"), true
+	case "cond_fail":
+		return helperLabel(instr.Args[0].Name, "pass"), true
 	case "array.pop", "array.get", "map.get":
 		return helperLabel(instr.Result.Name, "array.join"), true
 	case "array.at", "array.at_mut":

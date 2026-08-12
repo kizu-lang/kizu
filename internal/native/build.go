@@ -423,6 +423,13 @@ void kizu_main_error_message(const unsigned char *s, int64_t len) {
     fputc('\n', stderr);
 }
 
+void kizu_panic(const unsigned char *s, int64_t len) {
+    fwrite("error: ", 1, 7, stderr);
+    fwrite(s, 1, (size_t)len, stderr);
+    fputc('\n', stderr);
+    abort();
+}
+
 void kizu_print_int(int64_t v) {
     printf("%lld\n", (long long)v);
 }

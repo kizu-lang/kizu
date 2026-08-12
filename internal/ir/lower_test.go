@@ -211,10 +211,13 @@ func TestLowerByteSliceAccess(t *testing.T) {
 }`)
 	got := Dump(module)
 	for _, want := range []string{
-		"  %3: u8 = slice.index %1: []u8, %2: i64\n",
-		"  %6: []u8 = slice.slice %1: []u8, %4: i64, %5: i64\n",
-		"  call.print %3: u8\n",
-		"  call.print %6: []u8\n",
+		"  cond_fail %4: bool, \"index out of bounds\"\n",
+		"  cond_fail %5: bool, \"index out of bounds\"\n",
+		"  %6: u8 = slice.index %1: []u8, %2: i64\n",
+		"  cond_fail %12: bool, \"range out of bounds\"\n",
+		"  %13: []u8 = slice.slice %1: []u8, %7: i64, %8: i64\n",
+		"  call.print %6: u8\n",
+		"  call.print %13: []u8\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)

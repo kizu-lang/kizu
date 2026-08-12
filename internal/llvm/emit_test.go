@@ -402,7 +402,7 @@ func TestEmitTrySuccessLabelFeedsFollowingPhi(t *testing.T) {
 // aligned after bounds-check helper labels are emitted inside an IR block.
 func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
 	got := emitTestModule(t, checkedSlicePhiModule())
-	want := "%kizu.result = phi i1 [ %kizu.ok, %kizu.byte.index.ok ], [ false, %logical.const ]"
+	want := "%kizu.result = phi i1 [ %kizu.ok, %kizu.bad.pass ], [ false, %logical.const ]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring %q", got, want)
 	}
@@ -524,6 +524,7 @@ func checkedSlicePhiParams() []ir.Value {
 		{Name: "%source", Type: "[]u8"},
 		{Name: "%index", Type: "i64"},
 		{Name: "%target", Type: "u8"},
+		{Name: "%bad", Type: "bool"},
 	}
 }
 
@@ -540,6 +541,11 @@ func checkedSlicePhiEntryBlock() *ir.Block {
 // checkedSlicePhiRightBlock returns the block that emits a slice bounds check.
 func checkedSlicePhiRightBlock() *ir.Block {
 	return &ir.Block{Name: "logical.right", Instrs: []*ir.Instr{
+		{
+			Op:        "cond_fail",
+			Args:      []ir.Value{{Name: "%bad", Type: "bool"}},
+			Immediate: "index out of bounds",
+		},
 		{
 			Result: ir.Value{Name: "%byte", Type: "u8"},
 			Op:     "slice.index",
@@ -694,13 +700,12 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"declare void @llvm.trap()",
-		"br i1 %kizu.3.index.bad, label %kizu.3.index.oob, label %kizu.3.index.ok",
-		"kizu.3.index.oob:\n  call void @llvm.trap()\n  unreachable",
-		"%kizu.3 = load i8, ptr %kizu.3.elem.ptr",
-		"br i1 %kizu.6.bad, label %kizu.6.slice.oob, label %kizu.6.slice.ok",
-		"%kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 %kizu.6.len, 1",
-		"= zext i8 %kizu.3 to i64",
+		"declare void @kizu_panic(ptr, i64)",
+		"br i1 %kizu.5, label %kizu.5.fail, label %kizu.5.pass",
+		"kizu.5.fail:\n  call void @kizu_panic(ptr @.kizu.panic.0, i64 19)\n  unreachable",
+		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
+		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
+		"= zext i8 %kizu.6 to i64",
 		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
 	} {
 		if !strings.Contains(got, want) {

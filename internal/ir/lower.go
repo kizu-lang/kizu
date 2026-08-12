@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"github.com/kizu-lang/kizu/internal/diagnostic"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -926,6 +927,10 @@ func (l *lowerer) lowerEnumTagExpr(expr *ast.FieldExpr) (Value, bool) {
 }
 
 // lowerIndexExpr lowers checked byte-slice indexing and slicing.
+//
+// The bounds test lives here rather than in a backend, so every backend
+// inherits the same check and the same message from one place, and `kizu ir`
+// shows what a program checks before it reads memory.
 func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 	target, err := l.lowerExpr(expr.Target)
 	if err != nil {
@@ -936,9 +941,12 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
+		length := l.emit("slice.len", "i64", []Value{target}, "")
+		l.condFail("binary.<", index, zeroIndex, diagnostic.IndexOutOfBounds)
+		l.condFail("binary.>=", index, length, diagnostic.IndexOutOfBounds)
 		return l.emit("slice.index", "u8", []Value{target, index}, ""), nil
 	}
-	start, err := l.lowerSliceBound(expr.Start, Value{Name: "0", Type: "i64"})
+	start, err := l.lowerSliceBound(expr.Start, zeroIndex)
 	if err != nil {
 		return Value{}, err
 	}
@@ -946,7 +954,22 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	length := l.emit("slice.len", "i64", []Value{target}, "")
+	l.condFail("binary.<", start, zeroIndex, diagnostic.RangeOutOfBounds)
+	l.condFail("binary.>", start, end, diagnostic.RangeOutOfBounds)
+	l.condFail("binary.>", end, length, diagnostic.RangeOutOfBounds)
 	return l.emit("slice.slice", "[]u8", []Value{target, start, end}, ""), nil
+}
+
+// zeroIndex is the constant a negative bound is tested against.
+var zeroIndex = Value{Name: "0", Type: "i64"}
+
+// condFail emits a comparison and aborts the program when it holds.
+func (l *lowerer) condFail(op string, left Value, right Value, message string) {
+	bad := l.emit(op, "bool", []Value{left, right}, "")
+	l.block.Instrs = append(l.block.Instrs, &Instr{
+		Op: "cond_fail", Args: []Value{bad}, Immediate: message,
+	})
 }
 
 // lowerSliceBound lowers an optional slice bound or returns the supplied default.
