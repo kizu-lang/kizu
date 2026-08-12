@@ -18,65 +18,70 @@ code, and less likely to grow heavy CI and build caches.
 
 ## Status
 
-Kizu is an early prototype implemented in Go. The interpreter is the oracle:
-`kizu check` and `kizu run` define correct behavior, and every example in the
-table below is a passing conformance case. The backends accept subsets of it.
+Kizu is an early prototype implemented in Go.
 
-| Feature | Examples | interp | LLVM | native | WASM |
+`kizu run` builds the same native executable `kizu build --target native`
+writes, and then runs it. The only difference between the two commands is
+whether the result is executed, so a program cannot behave one way under `run`
+and another way under `build` -- there is one lowering, not two (ADR-0083).
+What a program is *supposed* to do is defined by the conformance manifests, not
+by any one execution path.
+
+| Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 23/25 | 22/25 | 9/25 |
+| fn / let / struct / literals | 25 | ✅ | 22/25 | 23/25 | 9/25 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | ✅ | 5/8 | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | ✅ | 7/9 | ❌ |
-| move / borrow | 16 | ✅ | 15/16 | 14/16 | 4/16 |
+| enum / union | 8 | ✅ | 5/8 | ✅ | ❌ |
+| error union `!T` / try / errdefer | 9 | ✅ | 7/9 | ✅ | ❌ |
+| move / borrow | 16 | ✅ | 14/16 | 15/16 | 4/16 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
 | cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
 | contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
-| std::array | 10 | ✅ | 9/10 | 7/10 | ❌ |
+| std::array | 10 | ✅ | 7/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 8/9 | 7/9 | ❌ |
-| std::mem / allocator | 8 | ✅ | 7/8 | 6/8 | ❌ |
+| std::map | 9 | ✅ | 7/9 | 8/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 6/8 | 7/8 | ❌ |
 | std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 10/11 | 9/11 | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 9/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 82 runnable examples, measured on 2026-08-12 with
-`go run ./scripts/backend-matrix` (or `just backend-matrix`) -- re-run it after
-touching a backend. The native column runs the linked binary and compares its
-output with the interpreter's, so it reports agreement; the LLVM and WASM
-columns only report that lowering succeeded.
+`❌` means none do. 82 runnable examples, measured on 2026-08-13 with
+`just backend-matrix` -- re-run it after touching a backend. `run` is judged on
+the program's output, `llvm` and `wasm` on whether lowering succeeded.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` + `kizu run` (interpreter) | 82/82 |
+| `kizu check` | 82/82 |
+| `kizu run` | 60/82 |
 | `kizu build --emit-llvm` | 66/82 |
-| `kizu build --target native` | 60/82 |
 | `kizu build --target wasm32-wasi` | 17/82 |
 
-Six examples lower to LLVM and link, then disagree with the interpreter at
-runtime. Those are counted as native failures above.
+The 22 examples `run` cannot reproduce are registered in the manifests with a
+`pending` reason. A pending case is tested for *still failing*, so closing a gap
+forces its entry to be removed in the same change.
 
-What the backends still reject:
+What is missing, in the order it should be closed:
 
-- LLVM and native: `std::builtin::task_group` (6 examples); typed calls for
-  explicit generics and for `Channel<T>` / `Atomic<T>` (5); and one case each of
-  `if` used as an expression, an unknown `borrow` / `write` method, and a
-  `&i64` versus `i64` comparison.
-- WASM: `slice.len` (28), `unary.!` (5), `struct.new` (4), `error.ok` (4), and
-  `union.load` / `error.try` / non-integer constants (2 each), on top of the
-  IR-stage gaps above.
-- native, after a successful link: `enum.kizu`, `std_array_token_list.kizu`, and
-  `std_map_symbol_table.kizu` drop the enum name from `print`;
-  `mutable_borrow.kizu` prints the pre-mutation value; `std_array.kizu` prints a
-  wrong length; `error_union_try.kizu` exits 2.
+1. **Six negative examples do not trap.** An out-of-range index, an out-of-range
+   slice, `Array.get_or_panic` bounds, and a failing `Io` capability are all
+   caught by the checker's runtime counterpart in the manifest's expectation but
+   pass straight through the native binary. This is a safety hole, not a
+   diagnostic difference.
+2. **Six examples compute the wrong answer.** Three drop the enum name from
+   `print`, one does not observe a mutation made through a mutable borrow, one
+   reports a wrong array length, and one exits non-zero on a recovered error
+   union.
+3. **Sixteen examples have no lowering yet.** `std::builtin::task_group` (6),
+   `Channel<T>` and `Atomic<T>` (4), explicit generics, a `dyn` contract method,
+   a `Box` borrow, `if` as an expression, and the scoped-thread worker value.
 
 Tooling around the language core:
 
@@ -87,8 +92,12 @@ Tooling around the language core:
   `std/src/kizu/` lexer, parser, and AST
 - an LSP server (`cmd/kizu-lsp`)
 
-The native path uses host `clang` and libc; no-libc / freestanding builds are
-part of the accepted build policy but are not implemented.
+The tree-walking interpreter is no longer the definition of correct behavior. It
+remains only as what `kizu test` runs, and is removed once that use ends.
+
+`kizu run` needs host `clang` and libc, the same requirement the native build
+path already had. no-libc / freestanding builds are part of the accepted build
+policy but are not implemented.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -185,7 +194,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu parse <file>` parses a `.kizu` source file.
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
 - `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. `--write` currently rejects files with line comments until comment trivia is preserved.
-- `kizu run <file>` executes the file with the interpreter.
+- `kizu run <file>` builds a native executable and runs it.
 - `kizu test <file-or-package>` runs checked top-level test blocks without invoking `main`.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.

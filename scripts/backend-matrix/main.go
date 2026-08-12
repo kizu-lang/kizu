@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -75,8 +76,10 @@ var groups = []featureGroup{
 		"token-list", "resolver", "pure-helper", "artifact", "app"}},
 }
 
-// routes are the compilation paths each example is put through.
-var routes = []string{"interp", "llvm", "native", "wasm"}
+// routes are the CLI paths each example is put through. `run` builds a native
+// executable and runs it, so it is judged against the manifest stdout rather
+// than against the weaker fact that the command exited zero.
+var routes = []string{"check", "run", "llvm", "wasm"}
 
 // manifestCase is the subset of a conformance entry this command reads.
 type manifestCase struct {
@@ -155,16 +158,16 @@ func buildKizu() (string, func(), error) {
 }
 
 // routeArgs returns the CLI arguments for one route and example.
-func routeArgs(route string, entry manifestCase, out string) []string {
+func routeArgs(route string, entry manifestCase) []string {
 	switch route {
-	case "interp":
+	case "check":
+		return []string{"check", entry.Path}
+	case "run":
 		return append([]string{"run", entry.Path}, entry.Args...)
 	case "llvm":
 		return []string{"build", "--emit-llvm", entry.Path}
-	case "wasm":
-		return []string{"build", "--target", "wasm32-wasi", entry.Path}
 	default:
-		return []string{"build", "--target", "native", "-o", out, entry.Path}
+		return []string{"build", "--target", "wasm32-wasi", entry.Path}
 	}
 }
 
@@ -193,56 +196,28 @@ func runAll(bin string, cases map[string]manifestCase) map[string]*result {
 // runRoutes runs one example through every route.
 func runRoutes(bin string, entry manifestCase) *result {
 	res := &result{features: entry.Features, ok: map[string]bool{}, err: map[string]string{}}
-	dir, err := os.MkdirTemp("", "backend-matrix-out")
-	if err != nil {
-		fail(err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
 	for _, route := range routes {
-		args := routeArgs(route, entry, filepath.Join(dir, "a.out"))
-		cmd := exec.Command(bin, args...)
+		cmd := exec.Command(bin, routeArgs(route, entry)...)
 		cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
-		out, err := cmd.CombinedOutput()
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
 		res.ok[route] = err == nil
 		if err != nil {
-			res.err[route] = firstLine(string(out))
+			res.err[route] = firstLine(stderr.String() + stdout.String())
 			continue
 		}
-		if route != "native" {
+		if route != "run" || entry.Stdout == nil {
 			continue
 		}
-		if msg := runNative(filepath.Join(dir, "a.out"), entry); msg != "" {
+		if got := stdout.String(); got != *entry.Stdout {
 			res.ok[route] = false
-			res.err[route] = msg
+			res.err[route] = fmt.Sprintf("output mismatch: want %q, got %q",
+				truncate(*entry.Stdout), truncate(got))
 		}
 	}
 	return res
-}
-
-// runNative executes a linked binary and compares it with the manifest
-// stdout, so the native column reports agreement with the interpreter rather
-// than the weaker fact that the backend accepted the source.
-func runNative(exe string, entry manifestCase) string {
-	if entry.Stdout == nil {
-		return ""
-	}
-	args := make([]string, 0, len(entry.Args))
-	for _, arg := range entry.Args {
-		if arg != "--" {
-			args = append(args, arg)
-		}
-	}
-	cmd := exec.Command(exe, args...)
-	cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
-	out, err := cmd.Output()
-	if err != nil {
-		return fmt.Sprintf("binary failed: %v", err)
-	}
-	if string(out) != *entry.Stdout {
-		return fmt.Sprintf("output mismatch: want %q, got %q",
-			truncate(*entry.Stdout), truncate(string(out)))
-	}
-	return ""
 }
 
 // truncate keeps a mismatch report short enough to read.
@@ -311,8 +286,14 @@ func cell(ok int, total int) string {
 
 // printTable writes the Markdown table README.md embeds.
 func printTable(results map[string]*result) {
-	fmt.Println("| Feature | Examples | interp | LLVM | native | WASM |")
-	fmt.Println("| --- | ---: | :--: | :--: | :--: | :--: |")
+	header := "| Feature | Examples"
+	divider := "| --- | ---:"
+	for _, route := range routes {
+		header += " | " + route
+		divider += " | :--:"
+	}
+	fmt.Println(header + " |")
+	fmt.Println(divider + " |")
 	for _, group := range groups {
 		total, ok := tally(results, group)
 		cells := make([]string, 0, len(routes))

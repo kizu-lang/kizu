@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/kizu-lang/kizu/internal/manifest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -153,36 +154,69 @@ func parseFile(path string) error {
 	return nil
 }
 
-// runFile parses a source file and executes it with the interpreter.
+// runFile builds a source file or package into a native executable and runs it.
+//
+// `run` and `build` are one path: run links the executable `build --target
+// native` writes and then executes it. A program cannot behave one way under
+// run and another way under build, because there is only one lowering.
 func runFile(path string, args []string) error {
-	if isPackageRoot(path) {
-		return runPackage(path, args)
-	}
-	program, errs, err := parsePathWithStd(path)
+	exe, cleanup, err := buildRunExecutable(path)
 	if err != nil {
 		return err
 	}
-	if len(errs) > 0 {
-		printParserDiagnostics(errs)
-		return fmt.Errorf("parse failed")
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).Run(program)
+	defer cleanup()
+	return executeBuilt(exe, args)
 }
 
-// runPackage resolves a package root and executes the root module main.
-func runPackage(path string, args []string) error {
-	graph, program, err := loadPackageProgram(path)
+// buildRunExecutable lowers a run target and links it into a temporary binary.
+func buildRunExecutable(path string) (string, func(), error) {
+	noCleanup := func() {}
+	module, err := lowerRunTarget(path)
 	if err != nil {
+		return "", noCleanup, err
+	}
+	llvmIR, err := llvm.Emit(module)
+	if err != nil {
+		return "", noCleanup, err
+	}
+	dir, err := os.MkdirTemp("", "kizu-run-*")
+	if err != nil {
+		return "", noCleanup, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	exe := filepath.Join(dir, "main")
+	if err := native.Build(native.Options{
+		LLVMIR: llvmIR, Output: exe,
+		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
+	}); err != nil {
+		cleanup()
+		return "", noCleanup, err
+	}
+	return exe, cleanup, nil
+}
+
+// lowerRunTarget lowers either a package root or a single source file.
+func lowerRunTarget(path string) (*ir.Module, error) {
+	if isPackageRoot(path) {
+		return lowerPackage(path, false)
+	}
+	return lowerFile(path, false)
+}
+
+// executeBuilt runs a linked executable and forwards its exit status.
+func executeBuilt(exe string, args []string) error {
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exitStatus{code: exit.ExitCode()}
+		}
 		return err
 	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	entry := graph.Root + "::main"
-	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunEntry(program, entry)
+	return nil
 }
 
 // checkFile parses a source file and runs static checks.
@@ -728,17 +762,18 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 	if opt {
 		ir.Optimize(module)
 	}
-	addPackageMain(module, graph.Root+"::cli_main")
+	addPackageMain(module, graph.Root+"::main")
 	return module, nil
 }
 
-// addPackageMain exposes a package CLI entry as the native executable entrypoint.
+// addPackageMain exposes the root module main as the native entrypoint, so a
+// package uses the same entry rule as a single file: `fn main`.
 func addPackageMain(module *ir.Module, entry string) {
 	if moduleFunction(module, "main") != nil {
 		return
 	}
 	entryFn := moduleFunction(module, entry)
-	if entryFn == nil || len(entryFn.Params) != 0 || entryFn.Return != "!i64" {
+	if entryFn == nil || len(entryFn.Params) != 0 {
 		return
 	}
 	result := ir.Value{Name: "%1", Type: entryFn.Return}
