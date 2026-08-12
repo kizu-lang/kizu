@@ -100,3 +100,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0079: struct literal field initializers name each field once](0079-struct-literal-field-initializers.md)
 - [ADR-0083: run executes the build](0083-run-executes-the-build.md)
 - [ADR-0084: bounds checks live in the IR](0084-bounds-checks-live-in-the-ir.md)
+- [ADR-0085: main returns void, growth is implementation-defined](0085-main-returns-void-and-growth-is-implementation-defined.md)

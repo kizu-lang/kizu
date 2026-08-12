@@ -501,9 +501,10 @@ const castSource = `fn main() {
 const errorUnionSource = `fn parse() -> !i64 {
     return 1;
 }
-fn main() -> !i64 {
+fn main() -> !void {
     let value = try parse();
-    return value;
+    print(value);
+    return;
 }`
 
 const helloSnapshot = `fn main() -> void {
@@ -610,10 +611,11 @@ entry:
   %2: !i64 = error.ok %1: i64
   return %2: !i64
 }
-fn main() -> !i64 {
+fn main() -> !void {
 entry:
   %1: !i64 = call.parse
   %2: i64 = error.try %1: !i64
-  %3: !i64 = error.ok %2: i64
-  return %3: !i64
+  call.print %2: i64
+  %4: !void = error.ok
+  return %4: !void
 }`

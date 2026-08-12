@@ -1055,6 +1055,28 @@ void kizu_arena_deinit(void *handle) {
     free(arena);
 }
 
+/* One cache line's worth of elements, at least one, so a small Array does not
+ * start with a sub-cache-line allocation. */
+static int64_t kizu_array_init_capacity(int64_t elem_size) {
+    const int64_t cache_line = 64;
+    if (elem_size <= 0 || elem_size >= cache_line) {
+        return 1;
+    }
+    return cache_line / elem_size;
+}
+
+/* Grow by half again plus the initial capacity, following Zig's
+ * ArrayList.growCapacity. A factor below the golden ratio lets a later
+ * allocation reuse blocks freed by earlier ones; doubling never can. */
+static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
+    int64_t half = minimum / 2;
+    int64_t init = kizu_array_init_capacity(elem_size);
+    if (minimum > INT64_MAX - half - init) {
+        return INT64_MAX;
+    }
+    return minimum + half + init;
+}
+
 static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed) {
     if (!array || needed < 0) {
         return 0;
@@ -1062,10 +1084,7 @@ static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed) {
     if (needed <= array->cap) {
         return 1;
     }
-    int64_t next = array->cap == 0 ? 4 : array->cap * 2;
-    while (next < needed) {
-        next *= 2;
-    }
+    int64_t next = kizu_array_grow_capacity(needed, array->elem_size);
     if (array->elem_size > 0 && next > INT64_MAX / array->elem_size) {
         return 0;
     }
