@@ -69,6 +69,10 @@ native が満たせないケースは manifest に理由付きで登録する。
 が使う実行系として残るだけになる。この 1 用途が無くなった時点で
 `internal/interp` は削除する。
 
+**実施済み**: `kizu test` も同じ経路に移し、`internal/interp`(6,954 行)を
+削除した。`test "name" { ... }` は `!void` を返す IR 関数に lower され、
+entry が各 test を `try` で呼ぶ。test の診断も runtime に移った。
+
 ## 影響
 
 - `examples/` の 82 本のうち `run` が通るのは 60 本。22 本を `pending` に登録した。

@@ -93,12 +93,13 @@ Tooling around the language core:
   `std/src/kizu/` lexer, parser, and AST
 - an LSP server (`cmd/kizu-lsp`)
 
-The tree-walking interpreter is no longer the definition of correct behavior. It
-remains only as what `kizu test` runs, and is removed once that use ends.
+There is no interpreter. `kizu test` builds and runs test blocks the same way
+`kizu run` builds and runs `main`, so a language feature has exactly one
+implementation.
 
-`kizu run` needs host `clang` and libc, the same requirement the native build
-path already had. no-libc / freestanding builds are part of the accepted build
-policy but are not implemented.
+`kizu run` and `kizu test` need host `clang` and libc, the same requirement the
+native build path already had. no-libc / freestanding builds are part of the
+accepted build policy but are not implemented.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -111,7 +112,7 @@ fn main() {
 }
 ```
 
-Run it with the interpreter:
+Build and run it:
 
 ```sh
 go run ./cmd/kizu run examples/hello.kizu
