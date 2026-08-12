@@ -2,19 +2,25 @@
 
 This document defines the test tiers for Kizu-owned selfhost compiler work.
 The goal is to keep daily development fast while preserving explicit,
-bootstrap-critical selfhost checks.
+build-critical selfhost checks.
 
-## Policy update (2026-08-11, ADR-0080)
+## Policy update (2026-08-12, ADR-0081)
 
-Selfhost sources are written in full Kizu. The REQUIRED selfhost gate is that
-the Go backend (stage0) compiles and checks them: `just selfhost-native-source-gate`
-covers this, and the daily `go test ./...` covers the interpreted surface.
+Selfhost sources are written in full Kizu, and the Go backend (stage0) is the
+only thing that builds a selfhost executable: `just selfhost-native`. The
+self-compilation comparison is gone along with the backend that performed it.
 
-The stage0→stage1→stage2 self-compilation comparison (`just selfhost-bootstrap`)
-is a FLIP-READINESS gate. A red caused by a recorded backend-subset gap
-(see docs/selfhost-backend-generalization.md §3) does not block frontend work;
-a red with no recorded gap is a regression. CI runs the daily suite on every
-push and bootstrap + parity nightly.
+There is no nightly. Every gate runs on every push and pull request, because a
+gate whose red surfaces the next morning is weaker than one that surfaces in the
+PR. That constrains what the gates may cost: they are kept fast rather than
+deferred. Runner measurements at the time of the change: stage0 build 36s (cached
+when neither the compiler nor the Kizu it compiles changed), the seven parity
+gates 41s together.
+
+`--opt` stays on the stage0 build deliberately. Dropping it takes the build from
+79s to 3s locally, but the resulting binary is ~2.5x slower on compute-bound
+gates (production 4.3s -> 10.7s), which nets out to roughly 12s saved on CI and a
+slower binary for everyone running gates locally.
 
 ## Gate Taxonomy
 
@@ -24,16 +30,14 @@ direct heavyweight gates into routine hosted artifact validation.
 | Change type | Primary gate | Tier | Notes |
 | --- | --- | --- | --- |
 | Ordinary Go/compiler edit | `go test ./...` and `pre-commit run --all-files` | daily | Default validation path. |
-| Existing stage2 selfhost artifact validation | `just selfhost-fast-gate` | daily selfhost loop | Reuses `target/selfhost/stage2/selfhost`; does not rebuild bootstrap artifacts. |
-| Selfhost source checkpoint | `just selfhost-production-from-scratch` | checkpoint | Rebuilds through `just selfhost-bootstrap`, then runs the fast hosted artifact gates. |
-| Control-flow lowering behavior | `just selfhost-control-flow-execution` | daily, and whenever branch/merge/field lowering changes | Renders selfhost MIR to LLVM through the interpreter, links each gate with a driver, and runs it. Behaviour is checked by exit code, so a wrong branch edge, arm merge, or field hop fails outright. Needs no staged artifact, so it works while `stage selfhost` is still blocked. |
-| Backend/runtime artifact contract | `just selfhost-backend-artifact-gate` | focused stage0-native gate | Builds a native stage0 selfhost executable, runs `stage selfhost`, then reuses the textual metadata, runtime, host, and hosted CLI smoke checks. |
+| Existing selfhost artifact validation | `just selfhost-fast-gate` | daily selfhost loop | Reuses `target/selfhost/stage0-native/selfhost`; does not rebuild the stage0 binary. |
+| Selfhost source checkpoint | `just selfhost-production-from-scratch` | checkpoint | Rebuilds through `just selfhost-native`, then runs the fast artifact gates. |
+| Control-flow lowering behavior | `just selfhost-control-flow-execution` | daily, and whenever branch/merge/field lowering changes | Renders selfhost MIR to LLVM through the interpreter, links each gate with a driver, and runs it. Behaviour is checked by exit code, so a wrong branch edge, arm merge, or field hop fails outright. Needs no staged artifact. |
 | Run/test executable lowering, backend executable metadata, or native selfhost source behavior | `just selfhost-native-source-gate` | focused source-path gate | Builds the selfhost package from Kizu source as a native executable and exercises checked-AST executable artifacts. |
 | Production ownership switch review | `just selfhost-switch-gate` | production switch | Runs production-from-scratch, native-source-gate, package skeleton checks, and project/type/ownership package tests. It intentionally excludes `just selfhost-oracle`. |
 | Frontend parity or Go/Kizu oracle evidence | `just selfhost-oracle` | explicit oracle | Functional parity gate; logs but does not enforce the wall-time budget. |
 | Oracle performance or budget changes | `just selfhost-oracle-budget` | explicit performance gate | Same oracle with budget enforcement enabled. |
 | Debugging one interpreted selfhost stage or the CLI contract | `just selfhost-integration-gates` or `just selfhost-cli-gate` | focused debugging | Direct heavyweight interpreter gates; not routine preflight. |
-| Run tape / renderer internals that only exist as interpreter entry points | raw `go test` with the explicit `KIZU_RUN_SELFHOST_RUN_*` env | last-resort debugging | No `just` recipe on purpose. Prefer hosted stage2 parity, native-source, or production-from-scratch gates first. |
 | Package dependency numeric identity blockers | raw `go test` with `KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1` | last-resort debugging | Two `interp.New(...).RunEntry(...)` gates that pin the next interpreted-consumer blocker. Measured together at 2043s. No `just` recipe on purpose; write full output to a log file. |
 
 ## Daily Gate
@@ -104,7 +108,7 @@ or fixed, rather than absorbed.
 
 ## Aggregate Selfhost Oracle
 
-The aggregate oracle is the bootstrap preflight tier:
+The aggregate oracle is the checkpoint tier:
 
 ```sh
 just selfhost-oracle
@@ -130,8 +134,8 @@ oracle must not duplicate them.
 The pipeline oracle writes its fixed `target/selfhost` artifact paths while it
 runs, but the Go harness isolates that target by moving any existing
 `target/selfhost` aside and restoring it afterward. A slow or failing aggregate
-oracle must not destroy a previously bootstrapped
-`target/selfhost/stage2/selfhost` artifact used by fast hosted gates.
+oracle must not destroy a previously built
+`target/selfhost/stage0-native/selfhost` artifact used by fast hosted gates.
 
 Measured locally during #456/#503:
 
@@ -261,137 +265,57 @@ Measured locally on 2026-05-22 during #604:
 
 ## Direct Heavyweight Gates
 
-Direct heavyweight gates are for debugging one selfhost stage without running
-the whole aggregate oracle:
+Direct heavyweight gates debug one selfhost stage without running the whole
+aggregate oracle:
 
 ```sh
 just selfhost-integration-gates
-just selfhost-backend-artifact-gate
 just selfhost-cli-gate
+just selfhost-control-flow-execution
 ```
 
-This tier runs with `KIZU_RUN_SELFHOST_GATES=1`. It should not be chained after
-`just selfhost-oracle` in routine preflight. Use it when a specific resolver,
-type, ownership, IR, one-pass pipeline, backend artifact, CLI contract, or
-format-driver gate needs focused output.
+They run with `KIZU_RUN_SELFHOST_GATES=1` and drive selfhost entry points through
+`interp.New(...).RunEntry(...)`. Use them when a specific resolver, type,
+ownership, IR, or CLI contract gate needs focused output; do not chain them after
+`just selfhost-oracle` in routine preflight.
 
-The format driver facts/lowering gates also execute selfhost internals through
-`interp.New(...).RunEntry(...)`. They are env-gated by `KIZU_RUN_SELFHOST_GATES=1`
-and should be run as raw focused commands only when pinning #1165 / #1162
-blockers, not as part of default `go test ./cmd/kizu`.
-
-The run tape and run renderer internal gates are heavier than ordinary focused
-debugging. They call `interp.New(...).RunEntry(...)` on selfhost backend entry
-points such as `selfhost::backend::run_tape_gate::run_tape_lowering_gate`,
-build source-driven facts, and run compiled-MIR lowering through the Go
-interpreter. They are not routine validation and intentionally have no `just`
-recipes. Use them only when a measured blocker cannot be pinned by the hosted
-stage2 parity gates, `just selfhost-native-source-gate`, or
-`just selfhost-production-from-scratch`.
-
-When one of these interpreter-only internals is necessary, run the raw command
-with a clear budget and keep full logs, for example:
+Run them raw, with a budget, and keep full logs:
 
 ```sh
 mkdir -p target/selfhost/reports
-KIZU_RUN_SELFHOST_RUN_TAPE=1 \
-  go test -timeout=30m ./cmd/kizu \
-  -run 'TestSelfhostRunTapeLoweringGate$' -count=1 -v \
-  > target/selfhost/reports/run-tape-debug.log 2>&1
+KIZU_RUN_SELFHOST_GATES=1 go test -timeout=30m ./cmd/kizu \
+  -run 'TestSelfhostCLIContractGate$' -count=1 -v \
+  > target/selfhost/reports/cli-gate-debug.log 2>&1
 ```
 
-Do not pipe these gates through `tail` or start multiple background watcher
-shells. Hidden output makes timeout and failure diagnosis slower than the gate
-itself.
+Do not pipe these through `tail` or start background watcher shells. Hidden
+output makes timeout and failure diagnosis slower than the gate itself.
 
-`just selfhost-integration-gates` intentionally excludes the CLI contract and
-backend artifact gates. The CLI gate still uses an interpreted CLI contract
-entry, while the backend artifact gate now builds a native stage0 selfhost
-executable and validates artifacts generated by `stage selfhost`; both have
-their own explicit recipes:
+## Stage0 Native Build
+
+`just selfhost-native` is the required gate (ADR-0081). It compiles the selfhost
+package to a native executable with the Go backend and smokes `check`, `run`, and
+`fmt` through the result. Nothing else produces a selfhost binary, so a red here
+means selfhost cannot be built at all.
 
 ```sh
-just selfhost-backend-artifact-gate
-just selfhost-cli-gate
+just selfhost-native
 ```
 
-`TestSelfhostBackendArtifactGate` records the old BackendArtifactGate contract
-inventory in `target/selfhost/reports/backend-artifact-stage0-native.txt`:
+Every parity gate below runs against `target/selfhost/stage0-native/selfhost` and
+requires this to have been run first. The `*-from-scratch` recipes chain it.
 
-```text
-contract.report artifact-paths-and-byte-counts
-contract.textual-llvm required-runtime-cli-executable-fragments
-contract.textual-llvm forbids-fixed-cli-fixture-paths
-contract.textual-llvm forbids-source-shape-dispatch
-contract.metadata selfhost-checked-package-no-go-fallback
-contract.runtime-storage textual-metadata-link-smoke
-contract.host-capability textual-metadata-link-smoke
-contract.hosted-cli link-and-smoke
-```
+Measured on the CI runner (macos-14) on 2026-08-12:
 
-The gate applies that contract to native-source stage0 artifacts; bootstrap and
-production gates then carry the same artifacts through stage1/stage2.
-
-Measured locally during #456/#503:
-
-| Command | Elapsed |
+| Step | Elapsed |
 | --- | ---: |
-| `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -timeout=10m -v` | 55.8s |
+| stage0 native build | 36s |
+| seven parity gates together | 41s |
 
-Measured locally on 2026-05-31 after moving BackendArtifactGate to the explicit
-stage0 native bootstrap path:
-
-| Command | Elapsed |
-| --- | ---: |
-| `just selfhost-backend-artifact-gate` | 10.14s real / 9.97s go test |
-
-Measured locally on 2026-05-21 after #506:
-
-| Command | Elapsed |
-| --- | ---: |
-| `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostPipelineGate -count=1 -timeout=10m -v` | 56.4s |
-
-Measured locally on 2026-05-21 during #458 CLI work:
-
-| Command | Elapsed |
-| --- | ---: |
-| initial `TestSelfhostCLIGate` with separate `check selfhost` and `stage selfhost` runs | 114.7s |
-| one-pass `just selfhost-cli-gate` contract gate | 59.6s |
-| `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -timeout=10m -v` with hosted artifact CLI smoke | 60.3s |
-
-## Bootstrap Preflight
-
-Bootstrap-oriented work uses:
-
-```sh
-just selfhost-bootstrap-preflight
-just selfhost-bootstrap
-```
-
-The preflight runs `just selfhost-switch-gate` and then runs cache smoke
-coverage. After #461 and #752, the switch gate includes
-production-from-scratch, the native selfhost source gate, package skeleton
-checks, and the small Go package checks required by the switch review. The
-aggregate selfhost oracle is kept as an explicit parity/performance preflight
-instead of being chained into the switch gate, because it executes the
-interpreted production pipeline and has a separate wall-time budget.
-
-`just selfhost-bootstrap` is the #459 stage0-stage1-stage2 comparison runner. It
-uses the explicit Go native stage0 bootstrap compiler to build a selfhost
-executable, emits the supported artifact set through that executable's `stage
-selfhost`, then links and runs stage1 and stage2 in hosted no-Go mode. It
-compares stdout/stderr/exit codes and deterministic SHA-256 artifact
-fingerprints, and writes `target/selfhost/reports/bootstrap.txt`.
-
-Measured locally on 2026-05-21 during #459 bootstrap runner work:
-
-| Command | Elapsed |
-| --- | ---: |
-| `just selfhost-bootstrap` | 61.4s |
 
 ## Production Boundary Gate
 
-The #461 production boundary gate runs only the hosted stage2 artifact for the
+The #461 production boundary gate runs only the stage0-native artifact for the
 #458 command surface:
 
 ```sh
@@ -399,33 +323,33 @@ just selfhost-production-gate
 just selfhost-fast-gate
 ```
 
-It requires the same `target/selfhost/stage2/selfhost` executable and passing
-bootstrap report as the corpus gate. It does not rebuild artifacts. From a clean
+It requires the same `target/selfhost/stage0-native/selfhost` executable and passing
+stage0-native binary as the corpus gate. It does not rebuild it. From a clean
 workspace, run:
 
 ```sh
 just selfhost-production-from-scratch
 ```
 
-That command runs `just selfhost-bootstrap` followed by `just selfhost-fast-gate`.
-`just selfhost-fast-gate` reuses the existing stage2 artifact and runs
+That command runs `just selfhost-native` followed by `just selfhost-fast-gate`.
+`just selfhost-fast-gate` reuses the existing stage0-native binary and runs
 `selfhost-production-gate`, `selfhost-corpus-gate`, `selfhost-parse-parity-gate`,
 `selfhost-check-parity-gate`, `selfhost-fmt-parity-gate`,
 `selfhost-run-parity-gate`, and `selfhost-test-parity-gate` without rebuilding.
 Go is present only as the
-explicit stage0 native bootstrap compiler in the first step and as the test
+explicit stage0 native compiler in the first step and as the test
 runner for the gate; the production commands are direct executions of the
 hosted artifact.
 
 `just selfhost-native-source-gate` is a focused #752 source-path gate. It builds
 the selfhost package from Kizu source as a native executable, runs `check
-selfhost` and `stage selfhost`, then emits and executes representative `run` and
+selfhost`, then emits and executes representative `run` and
 `test` artifacts through `selfhost::backend::executable`. The gate validates the
 artifact metadata marker
 `executable_lowering selfhost::backend::executable checked-ast` and the root
 host runtime path `target/selfhost/selfhost.host.ll`. This proves the Kizu-owned
 checked-AST lowering path works, including a run fixture with a local string
-`let`, `print(local)`, and multiple statements. The hosted stage2 executable
+`let`, `print(local)`, and multiple statements. The stage0-native executable
 path is validated through the direct bounded renderer before artifact emission.
 
 Measured locally on 2026-05-21 during #461:
@@ -439,44 +363,43 @@ Measured locally on 2026-05-22 during #569:
 
 | Command | Elapsed |
 | --- | ---: |
-| `just selfhost-run-parity-gate` after bootstrap | 0.52s |
+| `just selfhost-run-parity-gate` after `just selfhost-native` | 0.52s |
 | `just selfhost-production-from-scratch` including run parity | about 58s |
 
 Measured locally on 2026-05-22 during #570:
 
 | Command | Elapsed |
 | --- | ---: |
-| `just selfhost-test-parity-gate` after bootstrap | 0.69s |
+| `just selfhost-test-parity-gate` after `just selfhost-native` | 0.69s |
 | `just selfhost-production-from-scratch` including run/test parity | 61.6s |
 
 ## Supported Corpus Gate
 
-The #460 supported corpus gate uses the hosted stage2 artifact produced by the
-bootstrap runner:
+The #460 supported corpus gate uses the stage0-native artifact:
 
 ```sh
-just selfhost-bootstrap
+just selfhost-native
 just selfhost-corpus-gate
 ```
 
 `just selfhost-corpus-gate` intentionally does not call
 `runSelfhostBootstrap` internally. It requires
-`target/selfhost/stage2/selfhost` plus a passing
-`target/selfhost/reports/bootstrap.txt` report, then runs only the active
+`target/selfhost/stage0-native/selfhost` plus a passing
+stage0-native binary, then runs only the active
 manifest rows from `selfhost/tests/supported-corpus.tsv`.
 
 Measured locally on 2026-05-21 during #460:
 
 | Command | Elapsed |
 | --- | ---: |
-| initial `TestSelfhostSupportedCorpusGate` with embedded bootstrap | 60.6s |
+| initial `TestSelfhostSupportedCorpusGate` with an embedded build | 60.6s |
 | corpus execution inside that report | 9ms |
-| `just selfhost-corpus-gate` after bootstrap separation | 0.36s |
+| `just selfhost-corpus-gate` after separating the build | 0.36s |
 | `just selfhost-corpus-gate-from-scratch` | 61.2s |
 
 The 60s path was not caused by corpus size. It came from rebuilding and running
-the stage0-stage1-stage2 bootstrap inside the corpus test. Profiling that path
-showed the same interpreter-heavy bootstrap cost as the direct backend artifact
+the whole build inside the corpus test. Profiling that path
+showed the same interpreter-heavy cost as the direct backend artifact
 gate: CPU samples were dominated by interpreter evaluation, allocation/copying,
 and GC, with allocation profile top entries in `internal/interp.(*Env).Define`,
 `evalStructLiteralExpr`, `NewEnv`, and `qualifiedName`.
@@ -537,20 +460,20 @@ effects.
 
 Instead, the aggregate oracle uses one explicit selfhost production pipeline
 entry point. The backend artifact contract uses the explicit native stage0
-bootstrap path instead of the interpreter. That keeps the Go compiler layer
+stage0 native path instead of the interpreter. That keeps the Go compiler layer
 thin, leaves direct focused gates available for debugging, and avoids silently
 sharing mutable interpreter state.
 
 The accepted policy for now is:
 
 - daily gate: fast default `go test ./...`;
-- aggregate oracle: explicit bootstrap/preflight command with a 60s local budget;
+- aggregate oracle: explicit preflight command with a 60s local budget;
 - aggregate oracle budget: explicit performance gate, not a routine switch gate;
 - direct heavyweight interpreter gates: explicit debugging commands;
 - run tape/render interpreter internals: no routine `just` recipe; raw command
   only for a measured blocker with full logs and an explicit time budget;
 - backend artifact contract: explicit stage0-native gate, not the daily loop;
-- hosted artifact fast gate: routine selfhost CLI parity loop after bootstrap;
+- artifact fast gate: routine selfhost CLI parity loop after `just selfhost-native`;
 - production switch gate: production-from-scratch plus native source-path and
   package checks, without aggregate oracle;
 - aggregate production checks: one pass through `selfhost::pipeline_oracle`;

@@ -151,7 +151,7 @@ baseline.tsv が既知の一致/不一致を記録します。
 | 言語仕様 | SPEC.md |
 | 開発ルール・禁止事項 | AGENTS.md |
 | テスト層の使い分けと実測 | docs/selfhost-test-tiers.md |
-| stage0 ビルドと parity の詳細 | docs/selfhost-bootstrap.md |
+| stage0 ビルドと parity の詳細 | docs/selfhost-test-tiers.md |
 | selfhost 実行体の runtime ABI | docs/selfhost-runtime-abi.md |
 | CLI parity の枠組み | docs/selfhost-cli-parity.md |
 | メモリ安全モデル | docs/memory-safety.md |

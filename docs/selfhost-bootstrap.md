@@ -1,5 +1,10 @@
 # No-Go Selfhost Bootstrap Contract
 
+> **この文書は履歴です。** ADR-0081(2026-08-12)で自己コンパイル backend を削除し、
+> `stage` コマンドと stage0→stage1→stage2 bootstrap は無くなりました。現在の
+> selfhost ビルドと gate 構成は `docs/selfhost-test-tiers.md` と
+> `docs/architecture.md` を見てください。以下は撤去前の記録です。
+
 This document defines the stage contract for turning Kizu source into a compiler
 binary whose production path does not depend on the Go implementation.
 
