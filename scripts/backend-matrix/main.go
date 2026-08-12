@@ -83,6 +83,7 @@ type manifestCase struct {
 	Mode     string   `json:"mode"`
 	Path     string   `json:"path"`
 	Args     []string `json:"args"`
+	Stdout   *string  `json:"stdout"`
 	Features []string `json:"features"`
 }
 
@@ -205,9 +206,51 @@ func runRoutes(bin string, entry manifestCase) *result {
 		res.ok[route] = err == nil
 		if err != nil {
 			res.err[route] = firstLine(string(out))
+			continue
+		}
+		if route != "native" {
+			continue
+		}
+		if msg := runNative(filepath.Join(dir, "a.out"), entry); msg != "" {
+			res.ok[route] = false
+			res.err[route] = msg
 		}
 	}
 	return res
+}
+
+// runNative executes a linked binary and compares it with the manifest
+// stdout, so the native column reports agreement with the interpreter rather
+// than the weaker fact that the backend accepted the source.
+func runNative(exe string, entry manifestCase) string {
+	if entry.Stdout == nil {
+		return ""
+	}
+	args := make([]string, 0, len(entry.Args))
+	for _, arg := range entry.Args {
+		if arg != "--" {
+			args = append(args, arg)
+		}
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Sprintf("binary failed: %v", err)
+	}
+	if string(out) != *entry.Stdout {
+		return fmt.Sprintf("output mismatch: want %q, got %q",
+			truncate(*entry.Stdout), truncate(string(out)))
+	}
+	return ""
+}
+
+// truncate keeps a mismatch report short enough to read.
+func truncate(text string) string {
+	if len(text) > 60 {
+		return text[:60] + "..."
+	}
+	return text
 }
 
 // firstLine trims command output to its first line for reporting.

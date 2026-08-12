@@ -23,42 +23,45 @@ Kizu は Go 製の初期プロトタイプです。正となる挙動は interpr
 
 | 機能 | 例の数 | interp | LLVM | native | WASM |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 22/25 | 9/25 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 16 | ✅ | 15/16 | 15/16 | 4/16 |
+| enum / union | 8 | ✅ | ✅ | 5/8 | ❌ |
+| error union `!T` / try / errdefer | 9 | ✅ | ✅ | 7/9 | ❌ |
+| move / borrow | 16 | ✅ | 15/16 | 14/16 | 4/16 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
 | cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
 | contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
-| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
+| std::array | 10 | ✅ | 9/10 | 7/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
-| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 7/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 6/8 | ❌ |
 | std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 9/11 | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は
 1 つも通らないことを表します。runnable example は 82 件、測定は 2026-08-12 に
-`go run ./scripts/backend-matrix` で実施しました。backend を触ったら回し直してください。
+`go run ./scripts/backend-matrix`(または `just backend-matrix`)で実施しました。
+backend を触ったら回し直してください。native 列は link したバイナリを実行して
+interpreter の出力と比較するため「一致するか」を表します。LLVM と WASM 列は
+lowering が通ったかどうかだけを表します。
 
 | 経路 | 通過 |
 | --- | --- |
 | `kizu check` + `kizu run` (interpreter) | 82/82 |
 | `kizu build --emit-llvm` | 66/82 |
-| `kizu build --target native` | 66/82 |
+| `kizu build --target native` | 60/82 |
 | `kizu build --target wasm32-wasi` | 17/82 |
 
-LLVM 段階を通った example は全て clang link まで成功するため、native 固有の穴は
-LLVM subset の外にはありません。
+6 件は LLVM に lower して link も通りますが、実行結果が interpreter と食い違います。
+上の native 列ではそれらを失敗として数えています。
 
 backend が受け付けないもの:
 
@@ -68,6 +71,9 @@ backend が受け付けないもの:
 - WASM: `slice.len` (28 件)、`unary.!` (5 件)、`struct.new` (4 件)、
   `error.ok` (4 件)、`union.load` / `error.try` / 整数以外の const (各 2 件)。
   加えて上の IR 段階の穴も同じく効きます。
+- link 成功後の native: `enum.kizu` / `std_array_token_list.kizu` /
+  `std_map_symbol_table.kizu` は `print` から enum 名が落ち、`mutable_borrow.kizu` は
+  変更前の値を出力し、`std_array.kizu` は長さを誤り、`error_union_try.kizu` は exit 2。
 
 language core 周辺の tooling:
 
