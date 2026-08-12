@@ -72,7 +72,7 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 		resultName, arena.operand, valueSlot)
 	badName := resultName + ".bad"
 	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", badName, resultName)
-	e.writeBoolTrapInverse(badName, "arena.add")
+	e.writeBoolFailure(badName, "arena.add", "arena_add")
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -87,7 +87,7 @@ func (e *emitter) writeArenaGet(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
 		ptrName, arena.operand, handle.operand)
-	e.writeNullTrap(ptrName, "arena.get")
+	e.writeNullFailure(ptrName, "arena.get", "arena_handle")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)
@@ -106,13 +106,15 @@ func (e *emitter) writeArenaDeinit(instr *ir.Instr) error {
 	return nil
 }
 
-// writeBoolTrapInverse traps when badOperand is true.
-func (e *emitter) writeBoolTrapInverse(badOperand string, prefix string) {
-	trapLabel := helperLabel(badOperand, prefix+".fail")
+// writeBoolFailure reports the named failure when badOperand is true.
+func (e *emitter) writeBoolFailure(badOperand string, prefix string, key string) {
+	failLabel := helperLabel(badOperand, prefix+".fail")
 	okLabel := helperLabel(badOperand, "ok")
 	e.markCurrentBlockExit(okLabel)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badOperand, trapLabel, okLabel)
-	e.writeTrapBlock(trapLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badOperand, failLabel, okLabel)
+	fmt.Fprintf(&e.out, "%s:\n", failLabel)
+	fmt.Fprintf(&e.out, "  call void @%s()\n", panicEntries[key].entry)
+	e.out.WriteString("  unreachable\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 }
 

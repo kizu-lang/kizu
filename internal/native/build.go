@@ -465,6 +465,21 @@ void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expect
     abort();
 }
 
+void kizu_panic_array_empty(void) {
+    fputs("runtime error: array pop from empty\n", stderr);
+    abort();
+}
+
+void kizu_panic_arena_handle(void) {
+    fputs("runtime error: invalid arena handle\n", stderr);
+    abort();
+}
+
+void kizu_panic_arena_add(void) {
+    fputs("runtime error: arena add failed\n", stderr);
+    abort();
+}
+
 void kizu_panic_range(int64_t start, int64_t end, int64_t length) {
     fprintf(stderr, "runtime error: range out of bounds\n");
     fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",

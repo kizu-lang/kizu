@@ -72,8 +72,8 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 }
 
-// TestEmitArrayPopOrPanicMovesAfterNullTrap fixes the native lowering sequence.
-func TestEmitArrayPopOrPanicMovesAfterNullTrap(t *testing.T) {
+// TestEmitArrayPopOrPanicReportsBeforeMoving fixes the native lowering sequence.
+func TestEmitArrayPopOrPanicReportsBeforeMoving(t *testing.T) {
 	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
     let value = values.pop_or_panic();
     values.deinit();
@@ -87,7 +87,7 @@ fn main() {}`)
 	for _, fragment := range []string{
 		"call ptr @kizu_array_pop(",
 		"icmp eq ptr",
-		"call void @llvm.trap()",
+		"call void @kizu_panic_array_empty()",
 		"load i64, ptr",
 	} {
 		if !strings.Contains(got, fragment) {
