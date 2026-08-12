@@ -55,23 +55,43 @@ cond_fail %5: bool, "index out of bounds"
 `internal/ir` が `slice.index` と `slice.slice` の前に検査を置く。backend は
 検査を書かない。`slice.index` は「検査済みの load」を意味する。
 
-### 3. メッセージは静的文字列にする
+### 3. 失敗の種類と値を `cond_fail` が運び、文言は runtime に置く
 
-`internal/diagnostic` の定数を interpreter と lowering が共有する。実際の index
-と長さは含めない。Kizu は freestanding build を build policy に持っており、
-Rust が踏んだ整形コードの混入を避ける。必要になれば `cond_fail.index` のような
-専用形を後から足せる。
+```
+cond_fail %4: bool, bounds(%2: i64, %3: i64)
+```
 
-### 4. panic は runtime 関数にする
+失敗の種類と、その失敗が報告する値を命令が持つ。文言は runtime の C コードに
+だけあり、IR にも backend にも診断文字列は無い。ADR-0072 の形が出せる。
 
-`kizu_panic(msg, len)` を呼ぶ。展開せず関数呼び出しにすることでコードサイズを
-抑え、freestanding では別実装をリンクするだけで済む。
+```text
+runtime error: index out of bounds
+note: index is 3, length is 3
+```
+
+Rust の `AssertKind` と同じく、値を持つ失敗と持たない失敗を種類で区別する。
+`Assert` が terminator なのに対し `cond_fail` は通常命令だが、どちらも比較は
+別命令であり、検査と失敗を分けている点は同じである。分けているのは最適化の
+ためで、比較が普通の値として見えていれば既存の畳み込みや共通部分式除去が効き、
+Swift のようにループ外へ巻き上げられる。
+
+初版では「静的文字列にして、Rust が踏んだ整形コードの混入を避ける」と判断したが、
+これは誤りだった。Kizu の runtime は `kizu_print_int` で既に `printf` を
+リンクしており、整数を出す費用は支払い済みである。Rust の問題は `core::fmt` が
+丸ごと入ることで、専用の runtime 関数へ値を渡す形では起きない。
+
+### 4. panic は種類ごとの runtime 関数にする
+
+`kizu_panic_bounds(index, len)` のように、種類ごとに entry を持つ。展開せず
+関数呼び出しにすることでコードサイズを抑え、freestanding では別実装をリンク
+するだけで済む。
 
 ## 影響
 
 - `internal/llvm` の `writeSliceIndex` / `writeSliceSlice` から検査生成が消えた。
   backend のコードは減っている。
-- 同じメッセージは何度検査しても global 1 つで済む。
+- 診断文字列は Go 側から消えた。`internal/diagnostic` の runtime failure 定数も
+  不要になり削除した。
 - wasm は `cond_fail` を実装するだけで安全になる。slice の検査を書き直す必要はない。
 - `kizu ir` の出力を読めば、メモリを読む前に何を検査しているかが見える。
 - conformance の `negative_slice_syntax_index_out_of_bounds` と
