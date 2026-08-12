@@ -7,23 +7,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-const (
-	mapInsertMessage        = "map insert failed"
-	mapInsertMessageGlobal  = "@.kizu.map.insert_failed"
-	mapMissingMessage       = "map key not found"
-	mapMissingMessageGlobal = "@.kizu.map.missing"
-)
-
-// writeMapRuntimeGlobals writes static messages used by runtime Map errors.
-func (e *emitter) writeMapRuntimeGlobals() {
-	if !e.usesMapRuntime() {
-		return
-	}
-	e.writeStaticStringGlobal(mapInsertMessageGlobal, mapInsertMessage)
-	e.writeStaticStringGlobal(mapMissingMessageGlobal, mapMissingMessage)
-	e.out.WriteByte('\n')
-}
-
 // writeMapRuntimeDecls writes declarations for the hosted Map runtime.
 func (e *emitter) writeMapRuntimeDecls() {
 	if !e.usesMapRuntime() {
@@ -98,7 +81,7 @@ func (e *emitter) writeMapInsert(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)\n",
 		okName, mapValue.operand, keyPtr, keyLen, valueSlot)
-	e.writeArrayBoolResult(instr.Result, okName, mapInsertMessageGlobal, len(mapInsertMessage))
+	e.writeArrayBoolResult(instr.Result, okName, "map_insert")
 	return nil
 }
 
@@ -116,7 +99,7 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
-	e.writeArrayOptionalLoadResult(instr, ptrName, mapMissingMessageGlobal, len(mapMissingMessage))
+	e.writeArrayOptionalLoadResult(instr, ptrName, "map_missing")
 	return nil
 }
 

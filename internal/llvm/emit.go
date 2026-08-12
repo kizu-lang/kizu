@@ -96,8 +96,7 @@ func (e *emitter) writeHeader() {
 	e.writeErrorUnionTypes()
 	e.writeUnionTypes()
 	e.writeStructTypes()
-	e.writeArrayRuntimeGlobals()
-	e.writeMapRuntimeGlobals()
+	e.writeFailureValueGlobals()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -117,59 +116,174 @@ func (e *emitter) writeHeader() {
 	e.writeArenaRuntimeDecls()
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
-	if e.usesBoundsTrap() {
-		e.out.WriteString("declare void @llvm.trap()\n\n")
-	}
-	e.writeCondFailDecls()
+	e.writePanicDecls()
 }
 
-// panicKind describes one cond_fail failure: the runtime entry that reports it
-// and how many values it carries. The wording lives in the runtime, so a
-// failure reads the same however it is reached.
-type panicKind struct {
+// panicEntry is one runtime failure report: the entry that prints it and the
+// values it takes. Every checked failure the backend can raise is listed here,
+// and the wording for all of them lives in the runtime, so a failure reads the
+// same however the program reached it.
+type panicEntry struct {
 	entry  string
-	values int
+	params []string
 }
 
-// panicKinds are the failures cond_fail can name.
-var panicKinds = map[string]panicKind{
-	"bounds": {entry: "kizu_panic_bounds", values: 2},
-	"range":  {entry: "kizu_panic_range", values: 3},
+// panicEntries are the failures a backend can report, keyed by the name an
+// instruction uses to select one. `cond_fail` takes its key from the IR; the
+// other keys are chosen by the instruction that reports the failure.
+var panicEntries = map[string]panicEntry{
+	"bounds":       {entry: "kizu_panic_bounds", params: []string{"i64", "i64"}},
+	"range":        {entry: "kizu_panic_range", params: []string{"i64", "i64", "i64"}},
+	"array_empty":  {entry: "kizu_panic_array_empty"},
+	"arena_handle": {entry: "kizu_panic_arena_handle"},
+	"arena_add":    {entry: "kizu_panic_arena_add"},
+	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
+	"expect_int":   {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
+	"expect_bool":  {entry: "kizu_panic_expect_equal_bool", params: []string{"i1", "i1"}},
+	"expect_bytes": {
+		entry:  "kizu_panic_expect_equal_bytes",
+		params: []string{"ptr", "i64", "ptr", "i64"},
+	},
 }
 
-// writeCondFailDecls declares the runtime entries the module's failures use.
-func (e *emitter) writeCondFailDecls() {
-	for _, kind := range e.condFailKinds() {
-		spec := panicKinds[kind]
-		params := make([]string, spec.values)
-		for i := range params {
-			params[i] = "i64"
-		}
-		fmt.Fprintf(&e.out, "declare void @%s(%s)\n", spec.entry, strings.Join(params, ", "))
+// failureValues are the messages a std container returns as a failure *value*
+// rather than reporting through the runtime. They travel back into Kizu code as
+// an `!T` payload, so unlike a panic message they must exist as module data.
+var failureValues = map[string]string{
+	"array_append":   "array append failed",
+	"array_bounds":   "array index out of bounds",
+	"array_pop":      "array pop from empty",
+	"array_reserve":  "array reserve failed",
+	"array_truncate": "array truncate out of bounds",
+	"map_insert":     "map insert failed",
+	"map_missing":    "map key not found",
+}
+
+// failureValueGlobal returns the global holding one failure message.
+func failureValueGlobal(key string) string {
+	return "@.kizu.fail." + key
+}
+
+// writeFailureValueGlobals defines the failure messages this module can return.
+func (e *emitter) writeFailureValueGlobals() {
+	keys := e.usedFailureValues()
+	for _, key := range keys {
+		e.writeStaticStringGlobal(failureValueGlobal(key), failureValues[key])
 	}
-	if len(e.condFailKinds()) > 0 {
-		e.out.WriteString("\n")
+	if len(keys) > 0 {
+		e.out.WriteByte('\n')
 	}
 }
 
-// condFailKinds returns the distinct failure kinds used, in sorted order.
-func (e *emitter) condFailKinds() []string {
+// usedFailureValues returns the failure messages the module can return, sorted.
+func (e *emitter) usedFailureValues() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "cond_fail" {
-					seen[instr.Immediate] = true
+				if key := instrFailureValue(instr.Op); key != "" {
+					seen[key] = true
 				}
 			}
 		}
 	}
-	kinds := make([]string, 0, len(seen))
-	for kind := range seen {
-		kinds = append(kinds, kind)
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
 	}
-	sort.Strings(kinds)
-	return kinds
+	sort.Strings(keys)
+	return keys
+}
+
+// instrFailureValue returns the message one instruction can return on failure.
+func instrFailureValue(op string) string {
+	switch op {
+	case "array.append":
+		return "array_append"
+	case "array.reserve":
+		return "array_reserve"
+	case "array.pop":
+		return "array_pop"
+	case "array.truncate":
+		return "array_truncate"
+	case "array.get", "array.at", "array.at_mut", "array.set":
+		return "array_bounds"
+	case "map.insert":
+		return "map_insert"
+	case "map.get":
+		return "map_missing"
+	default:
+		return ""
+	}
+}
+
+// writePanicDecls declares the failure entries this module reports through.
+func (e *emitter) writePanicDecls() {
+	keys := e.usedPanicEntries()
+	for _, key := range keys {
+		spec := panicEntries[key]
+		fmt.Fprintf(&e.out, "declare void @%s(%s)\n", spec.entry, strings.Join(spec.params, ", "))
+	}
+	if len(keys) > 0 {
+		e.out.WriteString("\n")
+	}
+}
+
+// usedPanicEntries returns the failure keys the module reports, sorted.
+func (e *emitter) usedPanicEntries() []string {
+	seen := map[string]bool{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				for _, key := range instrPanicEntries(instr) {
+					seen[key] = true
+				}
+			}
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// instrPanicEntries returns the failure keys one instruction can report.
+func instrPanicEntries(instr *ir.Instr) []string {
+	switch instr.Op {
+	case "cond_fail":
+		return []string{instr.Immediate}
+	case "array.get_or_panic":
+		return []string{"bounds"}
+	case "array.pop_or_panic":
+		return []string{"array_empty"}
+	case "arena.get":
+		return []string{"arena_handle"}
+	case "arena.add":
+		return []string{"arena_add"}
+	case "test.fail":
+		return []string{"test_fail"}
+	case "test.expect_equal":
+		return []string{expectEntryKey(instr)}
+	default:
+		return nil
+	}
+}
+
+// expectEntryKey selects the reporting entry for one equality assertion.
+func expectEntryKey(instr *ir.Instr) string {
+	if len(instr.Args) == 0 {
+		return "expect_int"
+	}
+	switch instr.Args[0].Type {
+	case "bool":
+		return "expect_bool"
+	case "[]u8":
+		return "expect_bytes"
+	default:
+		return "expect_int"
+	}
 }
 
 // writeErrorUnionTypes writes named recoverable-result ABI definitions.
@@ -397,23 +511,6 @@ func instrHasSliceType(instr *ir.Instr) bool {
 	for _, incoming := range instr.Incoming {
 		if isSliceType(incoming.Value.Type) {
 			return true
-		}
-	}
-	return false
-}
-
-// usesBoundsTrap reports whether checked slice access can trap on invalid bounds.
-func (e *emitter) usesBoundsTrap() bool {
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if instr.Op == "slice.index" || instr.Op == "slice.slice" ||
-					instr.Op == "array.get_or_panic" ||
-					instr.Op == "arena.add" || instr.Op == "arena.get" ||
-					instr.Op == "test.fail" || instr.Op == "test.expect_equal" {
-					return true
-				}
-			}
 		}
 	}
 	return false
@@ -1405,18 +1502,18 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 
 // writeCondFail reports the named failure when the tested condition holds.
 func (e *emitter) writeCondFail(instr *ir.Instr) error {
-	spec, ok := panicKinds[instr.Immediate]
+	spec, ok := panicEntries[instr.Immediate]
 	if !ok {
 		return fmt.Errorf("llvm error: unknown cond_fail kind `%s`", instr.Immediate)
 	}
-	if len(instr.Args) != spec.values+1 || instr.Args[0].Type != "bool" {
+	if len(instr.Args) != len(spec.params)+1 || instr.Args[0].Type != "bool" {
 		return fmt.Errorf("llvm error: cond_fail `%s` expects bool and %d values",
-			instr.Immediate, spec.values)
+			instr.Immediate, len(spec.params))
 	}
 	cond := e.value(instr.Args[0])
-	args := make([]string, 0, spec.values)
-	for _, arg := range instr.Args[1:] {
-		args = append(args, "i64 "+e.value(arg).operand)
+	args := make([]string, 0, len(spec.params))
+	for i, arg := range instr.Args[1:] {
+		args = append(args, spec.params[i]+" "+e.value(arg).operand)
 	}
 	failLabel := helperLabel(instr.Args[0].Name, "fail")
 	okLabel := helperLabel(instr.Args[0].Name, "pass")
@@ -1428,13 +1525,6 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 	e.out.WriteString("  unreachable\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	return nil
-}
-
-// writeTrapBlock emits an immediate trap for failed checked slice bounds.
-func (e *emitter) writeTrapBlock(label string) {
-	fmt.Fprintf(&e.out, "%s:\n", label)
-	e.out.WriteString("  call void @llvm.trap()\n")
-	e.out.WriteString("  unreachable\n")
 }
 
 // writeErrorOK builds a successful error-union value.

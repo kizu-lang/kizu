@@ -7,32 +7,12 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
-// writeTestRuntimeDecls declares helpers used by test intrinsics.
+// writeTestRuntimeDecls declares helpers used by test intrinsics. The failure
+// reporting entries are declared with every other failure by writePanicDecls.
 func (e *emitter) writeTestRuntimeDecls() {
 	if e.usesByteEqualityRuntime() {
 		e.out.WriteString("declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)\n\n")
 	}
-	if !e.usesTestRuntime() {
-		return
-	}
-	e.out.WriteString("declare void @kizu_panic_test_fail(ptr, i64)\n")
-	e.out.WriteString("declare void @kizu_panic_expect_equal_int(i64, i64)\n")
-	e.out.WriteString("declare void @kizu_panic_expect_equal_bool(i1, i1)\n")
-	e.out.WriteString("declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64)\n\n")
-}
-
-// usesTestRuntime reports whether the module reports a test failure.
-func (e *emitter) usesTestRuntime() bool {
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if instr.Op == "test.fail" || instr.Op == "test.expect_equal" {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // usesByteEqualityRuntime reports whether []u8 equality is needed.

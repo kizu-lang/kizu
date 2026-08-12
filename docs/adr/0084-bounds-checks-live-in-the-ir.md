@@ -97,9 +97,32 @@ Swift のようにループ外へ巻き上げられる。
 - conformance の `negative_slice_syntax_index_out_of_bounds` と
   `negative_slice_syntax_range_out_of_bounds` の `pending` を外した。
 
+## 失敗の 2 分類
+
+その後 `Array` / `Map` / `Arena` も同じ整理に寄せた。分けるべきなのは「文言が
+どこにあるか」ではなく、**失敗が停止するのか値として返るのか**だった。
+
+| | 例 | 文言の置き場所 |
+| --- | --- | --- |
+| 停止する | 範囲外 index、`get_or_panic`、空 `Array` の pop、無効な arena handle、test の失敗 | runtime C |
+| 値として返る | `Array.append` の `!void`、`Array.get` の `!T`、`Map.get` の `!T` | module global |
+
+停止する失敗は、報告して終わるので runtime に文言を置ける。値として返る失敗は
+`!T` の payload として Kizu コードに戻るため、module のデータとして存在しなければ
+ならない。この 2 つを混ぜていたのが、同じ「範囲外」が 4 通りに実装されていた
+理由である。
+
+それぞれ 1 つのテーブルが持つ。
+
+- `panicEntries`: 停止する失敗。key → runtime entry と引数型
+- `failureValues`: 値として返る失敗。key → メッセージ
+
+どちらも「モジュールが実際に使う分だけ」宣言する。以前は `Array` を使うだけで
+5 つのメッセージ global が無条件に出ていた。
+
+これで backend から `llvm.trap()` が消えた。停止する失敗はすべて診断を出す。
+
 ## まだやっていないこと
 
-- `Array` の 6 種のメッセージ機構は `internal/llvm/array.go` に残っている。
-  `get_or_panic` のような停止するものは `cond_fail` に寄せられる。optional を
-  返す `get` は別の話であり、寄せない。
 - 検査の巻き上げとマージは `ir.Optimize` に置ける。今は入れていない。
+- 位置情報(`at <line>:<column>`)。`ast.IndexExpr` が span を持たない。
