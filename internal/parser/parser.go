@@ -1115,7 +1115,7 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 
 // parseIndexExpr parses checked index and one-dimensional slice expressions.
 func (p *Parser) parseIndexExpr(target ast.Expression) ast.Expression {
-	expr := &ast.IndexExpr{Target: target}
+	expr := &ast.IndexExpr{Target: target, Span: tokenSpan(p.cur)}
 	p.nextToken()
 	if p.cur.Type == token.Range {
 		expr.Slice = true

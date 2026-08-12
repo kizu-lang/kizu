@@ -889,6 +889,8 @@ type IndexExpr struct {
 	Start  Expression
 	End    Expression
 	Slice  bool
+	// Span points at the `[`, so a bounds failure can name where it happened.
+	Span Span
 }
 
 // expressionNode marks IndexExpr as an expression node.
