@@ -525,6 +525,7 @@ func checkedSlicePhiParams() []ir.Value {
 		{Name: "%index", Type: "i64"},
 		{Name: "%target", Type: "u8"},
 		{Name: "%bad", Type: "bool"},
+		{Name: "%len", Type: "i64"},
 	}
 }
 
@@ -542,9 +543,13 @@ func checkedSlicePhiEntryBlock() *ir.Block {
 func checkedSlicePhiRightBlock() *ir.Block {
 	return &ir.Block{Name: "logical.right", Instrs: []*ir.Instr{
 		{
-			Op:        "cond_fail",
-			Args:      []ir.Value{{Name: "%bad", Type: "bool"}},
-			Immediate: "index out of bounds",
+			Op: "cond_fail",
+			Args: []ir.Value{
+				{Name: "%bad", Type: "bool"},
+				{Name: "%index", Type: "i64"},
+				{Name: "%len", Type: "i64"},
+			},
+			Immediate: "bounds",
 		},
 		{
 			Result: ir.Value{Name: "%byte", Type: "u8"},
@@ -700,9 +705,10 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"declare void @kizu_panic(ptr, i64)",
+		"declare void @kizu_panic_bounds(i64, i64)",
+		"declare void @kizu_panic_range(i64, i64, i64)",
 		"br i1 %kizu.5, label %kizu.5.fail, label %kizu.5.pass",
-		"kizu.5.fail:\n  call void @kizu_panic(ptr @.kizu.panic.0, i64 19)\n  unreachable",
+		"kizu.5.fail:\n  call void @kizu_panic_bounds(i64 1, i64 %kizu.3)\n  unreachable",
 		"%kizu.6 = load i8, ptr %kizu.6.elem.ptr",
 		"%kizu.13 = insertvalue %kizu.slice.u8 %kizu.13.base, i64 %kizu.13.len, 1",
 		"= zext i8 %kizu.6 to i64",

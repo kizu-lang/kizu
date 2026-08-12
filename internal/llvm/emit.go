@@ -37,7 +37,6 @@ type emitter struct {
 	blockExitLabel  map[string]string
 	entryParamLoads []string
 	wroteParamLoads bool
-	condFailGlobals map[string]string
 }
 
 type valueInfo struct {
@@ -121,28 +120,40 @@ func (e *emitter) writeHeader() {
 	if e.usesBoundsTrap() {
 		e.out.WriteString("declare void @llvm.trap()\n\n")
 	}
-	e.writeCondFailGlobals()
+	e.writeCondFailDecls()
 }
 
-// writeCondFailGlobals declares the panic entry and one constant per distinct
-// cond_fail message, so a message costs one global however often it is tested.
-func (e *emitter) writeCondFailGlobals() {
-	messages := e.condFailMessages()
-	if len(messages) == 0 {
-		return
-	}
-	e.out.WriteString("declare void @kizu_panic(ptr, i64)\n\n")
-	e.condFailGlobals = make(map[string]string, len(messages))
-	for i, message := range messages {
-		global := fmt.Sprintf("@.kizu.panic.%d", i)
-		e.condFailGlobals[message] = global
-		e.writeStaticStringGlobal(global, message)
-	}
-	e.out.WriteString("\n")
+// panicKind describes one cond_fail failure: the runtime entry that reports it
+// and how many values it carries. The wording lives in the runtime, so a
+// failure reads the same however it is reached.
+type panicKind struct {
+	entry  string
+	values int
 }
 
-// condFailMessages returns the distinct cond_fail messages in sorted order.
-func (e *emitter) condFailMessages() []string {
+// panicKinds are the failures cond_fail can name.
+var panicKinds = map[string]panicKind{
+	"bounds": {entry: "kizu_panic_bounds", values: 2},
+	"range":  {entry: "kizu_panic_range", values: 3},
+}
+
+// writeCondFailDecls declares the runtime entries the module's failures use.
+func (e *emitter) writeCondFailDecls() {
+	for _, kind := range e.condFailKinds() {
+		spec := panicKinds[kind]
+		params := make([]string, spec.values)
+		for i := range params {
+			params[i] = "i64"
+		}
+		fmt.Fprintf(&e.out, "declare void @%s(%s)\n", spec.entry, strings.Join(params, ", "))
+	}
+	if len(e.condFailKinds()) > 0 {
+		e.out.WriteString("\n")
+	}
+}
+
+// condFailKinds returns the distinct failure kinds used, in sorted order.
+func (e *emitter) condFailKinds() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
@@ -153,17 +164,12 @@ func (e *emitter) condFailMessages() []string {
 			}
 		}
 	}
-	messages := make([]string, 0, len(seen))
-	for message := range seen {
-		messages = append(messages, message)
+	kinds := make([]string, 0, len(seen))
+	for kind := range seen {
+		kinds = append(kinds, kind)
 	}
-	sort.Strings(messages)
-	return messages
-}
-
-// condFailMessageGlobal returns the global holding one panic message.
-func (e *emitter) condFailMessageGlobal(message string) string {
-	return e.condFailGlobals[message]
+	sort.Strings(kinds)
+	return kinds
 }
 
 // writeErrorUnionTypes writes named recoverable-result ABI definitions.
@@ -1397,21 +1403,28 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	return nil
 }
 
-// writeCondFail aborts with a message when the tested condition holds.
+// writeCondFail reports the named failure when the tested condition holds.
 func (e *emitter) writeCondFail(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || instr.Args[0].Type != "bool" || instr.Immediate == "" {
-		return fmt.Errorf("llvm error: cond_fail expects bool and a message")
+	spec, ok := panicKinds[instr.Immediate]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown cond_fail kind `%s`", instr.Immediate)
+	}
+	if len(instr.Args) != spec.values+1 || instr.Args[0].Type != "bool" {
+		return fmt.Errorf("llvm error: cond_fail `%s` expects bool and %d values",
+			instr.Immediate, spec.values)
 	}
 	cond := e.value(instr.Args[0])
-	global := e.condFailMessageGlobal(instr.Immediate)
+	args := make([]string, 0, spec.values)
+	for _, arg := range instr.Args[1:] {
+		args = append(args, "i64 "+e.value(arg).operand)
+	}
 	failLabel := helperLabel(instr.Args[0].Name, "fail")
 	okLabel := helperLabel(instr.Args[0].Name, "pass")
 	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n",
 		cond.operand, failLabel, okLabel)
 	fmt.Fprintf(&e.out, "%s:\n", failLabel)
-	fmt.Fprintf(&e.out, "  call void @kizu_panic(ptr %s, i64 %d)\n",
-		global, len(instr.Immediate))
+	fmt.Fprintf(&e.out, "  call void @%s(%s)\n", spec.entry, strings.Join(args, ", "))
 	e.out.WriteString("  unreachable\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	return nil

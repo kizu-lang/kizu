@@ -423,10 +423,23 @@ void kizu_main_error_message(const unsigned char *s, int64_t len) {
     fputc('\n', stderr);
 }
 
-void kizu_panic(const unsigned char *s, int64_t len) {
-    fwrite("error: ", 1, 7, stderr);
-    fwrite(s, 1, (size_t)len, stderr);
-    fputc('\n', stderr);
+/* Checked runtime failures. The wording lives here so that a failure reads the
+ * same however the program reached it, per ADR-0072:
+ *
+ *   runtime error: <summary>
+ *   note: <context>
+ */
+void kizu_panic_bounds(int64_t index, int64_t length) {
+    fprintf(stderr, "runtime error: index out of bounds\n");
+    fprintf(stderr, "note: index is %lld, length is %lld\n",
+            (long long)index, (long long)length);
+    abort();
+}
+
+void kizu_panic_range(int64_t start, int64_t end, int64_t length) {
+    fprintf(stderr, "runtime error: range out of bounds\n");
+    fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",
+            (long long)start, (long long)end, (long long)length);
     abort();
 }
 
