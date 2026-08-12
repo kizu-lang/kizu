@@ -24,11 +24,14 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
   interp                        tree-walking interpreter(挙動の正)
-  project, stdlib               パッケージ/モジュール解決、std の取り込み
+  project, stdlib, manifest     パッケージ/モジュール解決、std 取り込み、kizu.toml
+  stdmethod, stdprim            std の method 署名と builtin primitive の一覧
+  unsafecap                     @unsafe capability の定義
   fmt, diagnostic, buildcache, cimport, lsp
 std/src/             Kizu で書かれた標準ライブラリ
   kizu/              言語の自己記述層(Kizu で書かれた lexer/parser/AST)
 examples/            言語機能ごとの実例(conformance の対象)
+tests/conformance/   conformance manifest(examples の登録簿: v0_*.json)
 docs/, docs/adr/     設計ドキュメントと ADR
 ```
 
@@ -55,9 +58,12 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
   `std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
 - `std/src/kizu/` は**言語の自己記述層**で、Kizu で書かれた lexer/parser/AST です。
   Kizu が Kizu を記述する層はここだけに保ちます。
-- Go 側は `internal/stdlib`(+ `internal/types` の allowlist)経由で std の宣言を
-  取り込みます。std に public 型を足すときは **wrapper の allowlist 更新が必要**
-  (漏れると checked コードでその型名が unknown type になります)。
+- Go 側は `internal/stdlib`(+ `internal/types` の `knownTypes`)経由で std の宣言を
+  取り込みます。std に public 型を足すときは **`knownTypes` の更新が必要**
+  (漏れると checked コードでその型名が `unknown type` になります)。
+- std が宣言する method 署名は `internal/stdmethod` が、その裏の `std::builtin::*`
+  primitive の形は `internal/stdprim` が一本化します。checker と backend は署名を
+  書き直さずにここを読みます。
 
 ## 5. テスト体系
 

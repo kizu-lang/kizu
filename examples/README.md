@@ -91,7 +91,7 @@ go test ./...
 | source artifact builder | `std_source_builder_artifact.kizu` | builds emitted text with `String` and `std::fmt` |
 | owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
-| resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]u8, V>` for selfhost-style symbol lookup |
+| resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]u8, V>` for compiler-style symbol lookup |
 | loop-built string map key | `std_map_string_key_loop.kizu` | builds copied map keys from `String.as_bytes()` and deinitializes builders inside a loop |
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&var Map` |
 | deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |

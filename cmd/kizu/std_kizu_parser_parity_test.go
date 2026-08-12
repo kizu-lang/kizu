@@ -777,7 +777,7 @@ func collectParserParityExamples(t *testing.T) ([]parserParityCase, parserParity
 	return cases, stats
 }
 
-// collectParserFrontendStdSources returns std files the selfhost frontend can demand-load.
+// collectParserFrontendStdSources returns std files the std::kizu frontend can demand-load.
 func collectParserFrontendStdSources(t *testing.T) []parserParityCase {
 	t.Helper()
 	cases := make([]parserParityCase, 0, len(parserParityFrontendStdPaths))
@@ -953,7 +953,7 @@ func parserParityFunctionBodySeedCases() []parserParityCase {
 	}
 }
 
-// parserParityExpressionSeedCases covers expression forms needed by selfhost source.
+// parserParityExpressionSeedCases covers expression forms needed by std::kizu source.
 func parserParityExpressionSeedCases() []parserParityCase {
 	return []parserParityCase{
 		{
@@ -1136,7 +1136,7 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 	case *kizuast.ImplDecl:
 		return summarizeImplDeclSubset(node)
 	case *kizuast.ContractDecl:
-		return nil, "non-selfhost contract declaration outside std parser subset"
+		return nil, "contract declaration outside std parser subset"
 	default:
 		return nil, "top-level declaration outside std parser subset"
 	}
@@ -1168,7 +1168,7 @@ func summarizeTestDeclSubset(decl *kizuast.TestDecl) ([]string, string) {
 // summarizeImplDeclSubset summarizes inherent impl methods in the shared subset.
 func summarizeImplDeclSubset(decl *kizuast.ImplDecl) ([]string, string) {
 	if decl.ContractName != "" {
-		return nil, "non-selfhost contract declaration outside std parser subset"
+		return nil, "contract declaration outside std parser subset"
 	}
 	if !isStdParserIdent(decl.TypeName) {
 		return nil, "identifier outside std parser subset"

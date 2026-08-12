@@ -636,7 +636,7 @@ func noSpaceAfter(t token.Token) bool {
 	return false
 }
 
-// canFollowSliceMarker mirrors the selfhost formatter rule for `[]T`-style slices.
+// canFollowSliceMarker reports the tokens that may follow `[]` in a `[]T` slice type.
 func canFollowSliceMarker(t token.Token) bool {
 	switch t.Type {
 	case token.Ident, token.Amp, token.Bang, token.Question, token.LBracket:

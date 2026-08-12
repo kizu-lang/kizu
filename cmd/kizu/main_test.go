@@ -64,7 +64,7 @@ func TestIRCommandSmoke(t *testing.T) {
 	}
 }
 
-// TestFmtWriteUpdatesFile checks --write rewrites through the selfhost CLI path.
+// TestFmtWriteUpdatesFile checks --write rewrites through the fmt CLI path.
 func TestFmtWriteUpdatesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unformatted.kizu")
 	if err := os.WriteFile(path, []byte("fn main(){print(\"hello, kizu\");}\n"), 0o644); err != nil {
@@ -294,7 +294,7 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	}
 }
 
-// TestCheckPackageCommandRejectsDuplicateModules keeps module graph invariants in selfhost.
+// TestCheckPackageCommandRejectsDuplicateModules keeps module graph invariants intact.
 func TestCheckPackageCommandRejectsDuplicateModules(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(
@@ -716,9 +716,9 @@ func TestFmtCommandOutputParses(t *testing.T) {
 
 // TestFmtCommandSortsLeadingImports keeps the public formatter import block canonical.
 func TestFmtCommandSortsLeadingImports(t *testing.T) {
-	path := writeTempKizuSource(t, "imports.kizu", `import selfhost::parser;
-import selfhost;
-import selfhost::lexer;
+	path := writeTempKizuSource(t, "imports.kizu", `import app::parser;
+import app;
+import app::lexer;
 fn main(){return;}
 `)
 	got, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
@@ -728,9 +728,9 @@ fn main(){return;}
 	if stderr != "" {
 		t.Fatalf("got stderr %q, want empty", stderr)
 	}
-	want := "import selfhost;\n" +
-		"import selfhost::lexer;\n" +
-		"import selfhost::parser;\n" +
+	want := "import app;\n" +
+		"import app::lexer;\n" +
+		"import app::parser;\n" +
 		"\n" +
 		"fn main() {\n" +
 		"    return;\n" +
@@ -796,7 +796,7 @@ func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
 	}
 }
 
-// TestFmtCommandPreservesFunctionDocComments keeps selfhost fmt from dropping docs.
+// TestFmtCommandPreservesFunctionDocComments keeps fmt from dropping doc comments.
 func TestFmtCommandPreservesFunctionDocComments(t *testing.T) {
 	path := writeTempKizuSource(t, "doc-commented.kizu",
 		"/// keep this doc\nfn main(){print(\"hello, kizu\");}\n")
@@ -848,7 +848,7 @@ func TestFmtCommandPreservesInlineLineComments(t *testing.T) {
 	}
 }
 
-// TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through selfhost.
+// TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through the CLI.
 func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.kizu")
 	if err := os.WriteFile(path, []byte("fn main( { return; }\n"), 0o644); err != nil {
@@ -993,7 +993,7 @@ func TestTestFileCommandDoesNotRunMain(t *testing.T) {
 	}
 }
 
-// TestRunCompilerPhasesPackageSmoke checks self-host phase-shaped APIs.
+// TestRunCompilerPhasesPackageSmoke checks the compiler-phase-shaped module APIs.
 func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
 	cmd := kizuCommand("run", "../../examples/modules/compiler_phases")
 	out, err := cmd.CombinedOutput()

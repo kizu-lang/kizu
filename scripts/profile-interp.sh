@@ -1,11 +1,9 @@
 #!/usr/bin/env sh
 # Fast interpreter hot-path profiling loop for perf work (issue #976).
 #
-# BenchmarkInterpHotPath is a seconds-scale proxy for the ~350s selfhost
-# backend gate: it exercises the same dominant interpreter functions (eval
+# BenchmarkInterpHotPath exercises the dominant interpreter functions (eval
 # dispatch, binary/logical operators, identifier resolution, calls, loops),
-# so a change that speeds those up shows here too. Use it to iterate quickly,
-# then confirm real wall-time deltas with the ground-truth gate (see bottom).
+# so a change that speeds those up shows here too.
 #
 # Usage:
 #   scripts/profile-interp.sh                 # profile, then show top hotspots
@@ -38,8 +36,3 @@ if [ "$mode" = "list" ]; then
 else
 	go tool pprof -top -nodecount="${NODES:-20}" "$prof"
 fi
-
-# Ground truth (slow, ~350s) -- confirm wall-time deltas with the real gate:
-#   KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu \
-#     -run '^TestSelfhostBackendArtifactGate$' \
-#     -cpuprofile /tmp/kizu-gate.prof -timeout 20m -count=1 -v

@@ -178,13 +178,13 @@ func TestFormatPreservesBlankLineAfterTopLevelComment(t *testing.T) {
 
 // TestFormatSortsLeadingImports keeps the import block canonical without blank lines inside it.
 func TestFormatSortsLeadingImports(t *testing.T) {
-	src := `import selfhost::parser;
-import selfhost;
-import selfhost::lexer;
+	src := `import app::parser;
+import app;
+import app::lexer;
 fn main(){return;}`
-	want := "import selfhost;\n" +
-		"import selfhost::lexer;\n" +
-		"import selfhost::parser;\n" +
+	want := "import app;\n" +
+		"import app::lexer;\n" +
+		"import app::parser;\n" +
 		"\n" +
 		"fn main() {\n" +
 		"    return;\n" +

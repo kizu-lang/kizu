@@ -133,13 +133,10 @@ Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
   are build inputs and cache-key inputs
 - unsupported lowered features must fail before invoking clang
 
-### Selfhost Runtime ABI
+### Tagged-Union Payload Layout
 
-The first compiler artifact ABI is versioned. The
-contract maps the #453 IR manifest shapes to LLVM value layouts, direct and
-std-primitive call conventions, recoverable error representation, cleanup hooks,
-and explicit runtime symbols. Any backend/runtime issue that needs a new
-reachable ABI shape must update that document or link a blocker under #495.
+Inline tagged-union payloads must have a compile-time known size and alignment.
+Heap-indirected and recursive payload shapes are tracked by #495.
 
 ### Bootstrap
 
@@ -150,8 +147,7 @@ lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
 tests, and self-check/build.
 
 Self-host component migration readiness is tracked by
-[ADR-0054](adr/0054-self-host-readiness-gate.md) and
-A component should not
+[ADR-0054](adr/0054-self-host-readiness-gate.md). A component should not
 replace a Go production path until its language features, stdlib dependencies,
 diagnostics, memory-safety cases, and oracle tests are explicit.
 

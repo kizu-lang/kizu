@@ -8,7 +8,7 @@ import (
 // unwraps the union to a void value and the return wraps it again, so the wrap
 // was handed a payload a `!void` union has no room for. `kizu run` never saw it
 // -- the interpreter does not build the union -- and no example carried the
-// shape, so the emitter rejected its own IR only once selfhost first wrote it:
+// shape, so the emitter rejected its own IR the first time a program wrote it:
 // `llvm error: error.ok !void expects 0 args`.
 const voidTailPropagationSource = `fn sink(v: i64) -> !void {
     print(v);
