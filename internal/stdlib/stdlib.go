@@ -3,6 +3,7 @@ package stdlib
 
 import (
 	"fmt"
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,7 +12,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
-	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -141,7 +141,7 @@ func loadModuleExports() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := project.ParseStdManifest(string(source))
+	manifest, err := manifest.ParseStdManifest(string(source))
 	if err != nil {
 		return nil, err
 	}

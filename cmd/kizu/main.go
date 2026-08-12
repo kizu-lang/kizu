@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,7 +239,7 @@ func loadPackageGraph(path string) (project.Graph, error) {
 	if err != nil {
 		return project.Graph{}, err
 	}
-	manifest, err := project.ParseManifest(string(source))
+	manifest, err := manifest.ParseManifest(string(source))
 	if err != nil {
 		return project.Graph{}, err
 	}

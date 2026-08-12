@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
@@ -201,6 +202,9 @@ type Checker struct {
 	typeParams      map[string]bool
 	typeArgValues   map[string]Type
 	loopLabels      []string
+	// stdMethods indexes the signatures std declares for its container methods,
+	// so this checker reads them instead of restating them.
+	stdMethods stdmethod.MethodIndex
 }
 
 type enumType struct {
@@ -262,6 +266,7 @@ func New() *Checker {
 
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
+	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -5677,51 +5682,54 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
 	}
-	if typ, handled, err := checkArrayNullaryMethod(elem, name, args); handled {
-		return typ, err
-	}
+	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow, and
+	// `get` copies out of the array.
 	switch name {
-	case "append":
-		return c.checkArrayAppendArg(elem, args, env, unsafe)
-	case "reserve":
-		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		return "!void", nil
-	case "get", "get_or_panic":
-		return c.checkArrayGet(elem, name, args, env, unsafe)
 	case "at", "at_mut":
 		return "", errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
-	case "set":
-		return c.checkArraySet(elem, args, env, unsafe)
-	default:
-		return "", errorf("type error: Array has no method `%s`", name)
+	case "get", "get_or_panic":
+		if !c.isCopyType(elem) {
+			return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
+		}
 	}
+	return c.checkStdMethod("std::array::Array", []Type{elem}, "Array", name, args, env, unsafe)
 }
 
-// checkArrayNullaryMethod validates the Array methods that take no arguments and
-// so differ only in the type they yield; folding them together keeps the arity
-// diagnostic spelled once instead of once per method. It reports handled=false
-// for everything else, leaving the argument-taking methods to the caller.
-func checkArrayNullaryMethod(elem Type, name string, args []ast.Expression) (Type, bool, error) {
-	var result Type
-	switch name {
-	case "pop":
-		result = Type("!" + string(elem))
-	case "pop_or_panic":
-		result = elem
-	case "len", "capacity":
-		result = typeI64
-	case "deinit":
-		result = typeVoid
-	default:
-		return "", false, nil
+// checkStdMethod checks a receiver call against the signature std declares for
+// it in std/src/*.kizu, with the receiver's static arguments substituted in.
+func (c *Checker) checkStdMethod(
+	receiver string,
+	typeArgs []Type,
+	label string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	method, ok := c.stdMethods[receiver][name]
+	if !ok {
+		return "", errorf("type error: %s has no method `%s`", label, name)
 	}
-	if len(args) != 0 {
-		return "", true, errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+	if len(args) != len(method.Params) {
+		return "", errorf("type error: `%s.%s` expects %d args, got %d",
+			label, name, len(method.Params), len(args))
 	}
-	return result, true, nil
+	subst := make([]string, 0, len(typeArgs))
+	for _, arg := range typeArgs {
+		subst = append(subst, string(arg))
+	}
+	for idx, arg := range args {
+		want := Type(method.Substitute(method.Params[idx].TypeName, subst))
+		got, err := c.checkContextualExpr(arg, want, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, want) {
+			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
+		}
+	}
+	return Type(method.Substitute(method.Return, subst)), nil
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
@@ -5756,26 +5764,6 @@ func isStdArrayStorageMethod(name string) bool {
 	return name == "truncate" || name == "clear" || name == "as_bytes"
 }
 
-// checkArrayAppendArg validates append's single element argument.
-func (c *Checker) checkArrayAppendArg(
-	elem Type,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeCaps,
-) (Type, error) {
-	if len(args) != 1 {
-		return "", errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
-	}
-	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if !sameType(got, elem) {
-		return "", errorf("type error: `Array.append` expects %s, got %s", elem, got)
-	}
-	return "!void", nil
-}
-
 // checkArrayAsBytes validates Array<u8> to byte-slice view conversion.
 func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
 	if elem != typeU8 {
@@ -5785,26 +5773,6 @@ func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
 		return "", errorf("type error: `Array.as_bytes` expects 0 args, got %d", len(args))
 	}
 	return typeByteString, nil
-}
-
-// checkArrayGet validates checked copy reads from an Array.
-func (c *Checker) checkArrayGet(
-	elem Type,
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeCaps,
-) (Type, error) {
-	if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
-		return "", err
-	}
-	if !c.isCopyType(elem) {
-		return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
-	}
-	if name == "get" {
-		return Type("!" + string(elem)), nil
-	}
-	return elem, nil
 }
 
 // isStdType reports whether a type belongs to the reserved std namespace.
@@ -5830,31 +5798,6 @@ func (c *Checker) checkArrayIndexArg(
 		return errorf("type error: `Array.%s` expects i64 index, got %s", name, got)
 	}
 	return nil
-}
-
-// checkArraySet validates checked element replacement.
-func (c *Checker) checkArraySet(
-	elem Type,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeCaps,
-) (Type, error) {
-	if len(args) != 2 {
-		return "", errorf("type error: `Array.set` expects 2 args, got %d", len(args))
-	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
-		return "", err
-	} else if got != typeI64 {
-		return "", errorf("type error: `Array.set` expects i64 index, got %s", got)
-	}
-	got, err := c.checkContextualExpr(args[1], elem, env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if !sameType(got, elem) {
-		return "", errorf("type error: `Array.set` expects %s value, got %s", elem, got)
-	}
-	return "!void", nil
 }
 
 // checkMapConstructorForArgs validates Map allocator construction for key and value types.

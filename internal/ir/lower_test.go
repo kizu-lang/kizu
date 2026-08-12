@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -416,6 +417,16 @@ func lowerSource(t *testing.T, source string) *Module {
 	if len(p.Errors()) > 0 {
 		t.Fatalf("parse failed: %v", p.Errors())
 	}
+	// std container method signatures come from std's declarations, so a
+	// program is only checkable with std merged in, as every real path does.
+	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	if err != nil {
+		t.Fatalf("load std: %v", err)
+	}
+	if len(stdErrs) > 0 {
+		t.Fatalf("load std: %v", stdErrs)
+	}
+	program.Decls = append(stdDecls, program.Decls...)
 	if err := types.New().Check(program); err != nil {
 		t.Fatalf("type check failed: %v", err)
 	}

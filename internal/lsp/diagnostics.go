@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"errors"
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -118,7 +119,7 @@ func loadPackageGraph(root string) (project.Graph, error) {
 	if err != nil {
 		return project.Graph{}, err
 	}
-	manifest, err := project.ParseManifest(string(source))
+	manifest, err := manifest.ParseManifest(string(source))
 	if err != nil {
 		return project.Graph{}, err
 	}

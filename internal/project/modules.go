@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -23,7 +24,7 @@ type Graph struct {
 }
 
 // ResolveModules maps configured source files to Kizu module paths.
-func ResolveModules(baseDir string, manifest Manifest) (Graph, error) {
+func ResolveModules(baseDir string, manifest manifest.Manifest) (Graph, error) {
 	rootFile := filepath.Clean(filepath.Join(baseDir, manifest.Root))
 	modules := map[string]string{}
 	for _, sourceRoot := range manifest.Paths {
@@ -51,7 +52,7 @@ func ResolveModules(baseDir string, manifest Manifest) (Graph, error) {
 // collectSourceRoot walks one source root and records Kizu source modules.
 func collectSourceRoot(
 	modules map[string]string,
-	manifest Manifest,
+	manifest manifest.Manifest,
 	rootFile string,
 	sourceRoot string,
 ) error {
