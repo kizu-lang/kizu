@@ -24,42 +24,45 @@ table below is a passing conformance case. The backends accept subsets of it.
 
 | Feature | Examples | interp | LLVM | native | WASM |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 22/25 | 9/25 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 16 | ✅ | 15/16 | 15/16 | 4/16 |
+| enum / union | 8 | ✅ | ✅ | 5/8 | ❌ |
+| error union `!T` / try / errdefer | 9 | ✅ | ✅ | 7/9 | ❌ |
+| move / borrow | 16 | ✅ | 15/16 | 14/16 | 4/16 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
 | cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
 | contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
-| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
+| std::array | 10 | ✅ | 9/10 | 7/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
-| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 7/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 6/8 | ❌ |
 | std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 9/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
 `❌` means none do. 82 runnable examples, measured on 2026-08-12 with
-`go run ./scripts/backend-matrix` -- re-run it after touching a backend.
+`go run ./scripts/backend-matrix` (or `just backend-matrix`) -- re-run it after
+touching a backend. The native column runs the linked binary and compares its
+output with the interpreter's, so it reports agreement; the LLVM and WASM
+columns only report that lowering succeeded.
 
 | Route | Passing |
 | --- | --- |
 | `kizu check` + `kizu run` (interpreter) | 82/82 |
 | `kizu build --emit-llvm` | 66/82 |
-| `kizu build --target native` | 66/82 |
+| `kizu build --target native` | 60/82 |
 | `kizu build --target wasm32-wasi` | 17/82 |
 
-Every example the LLVM stage accepts also links with clang, so the native path
-has no gap of its own beyond the LLVM subset.
+Six examples lower to LLVM and link, then disagree with the interpreter at
+runtime. Those are counted as native failures above.
 
 What the backends still reject:
 
@@ -70,6 +73,10 @@ What the backends still reject:
 - WASM: `slice.len` (28), `unary.!` (5), `struct.new` (4), `error.ok` (4), and
   `union.load` / `error.try` / non-integer constants (2 each), on top of the
   IR-stage gaps above.
+- native, after a successful link: `enum.kizu`, `std_array_token_list.kizu`, and
+  `std_map_symbol_table.kizu` drop the enum name from `print`;
+  `mutable_borrow.kizu` prints the pre-mutation value; `std_array.kizu` prints a
+  wrong length; `error_union_try.kizu` exits 2.
 
 Tooling around the language core:
 
