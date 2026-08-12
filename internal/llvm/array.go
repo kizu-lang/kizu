@@ -177,7 +177,7 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
-	e.writeNullFailure(ptrName, "array.pop.panic", "array_empty")
+	e.writeNullFailure(instr, ptrName, "array.pop.panic", "array_empty")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)
@@ -211,7 +211,7 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_array_len(ptr %s)\n", lenName, array.operand)
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	e.writeNullFailure(ptrName, "array.get.panic", "bounds", index.operand, lenName)
+	e.writeNullFailure(instr, ptrName, "array.get.panic", "bounds", index.operand, lenName)
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, e.llvmType(instr.Result.Type), ptrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -430,7 +430,13 @@ func (e *emitter) writeErrorFailureValue(
 
 // writeNullFailure reports the named failure when the pointer is null, which is
 // how the hosted Array runtime signals a refused access.
-func (e *emitter) writeNullFailure(ptrName string, prefix string, key string, args ...string) {
+func (e *emitter) writeNullFailure(
+	instr *ir.Instr,
+	ptrName string,
+	prefix string,
+	key string,
+	args ...string,
+) {
 	spec := panicEntries[key]
 	nullName := "%" + e.nextSyntheticValue(prefix+".is_null")
 	failLabel := helperLabel(ptrName, prefix+".null")
@@ -439,10 +445,11 @@ func (e *emitter) writeNullFailure(ptrName string, prefix string, key string, ar
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
 	fmt.Fprintf(&e.out, "%s:\n", failLabel)
-	typed := make([]string, 0, len(args))
+	typed := make([]string, 0, len(args)+2)
 	for i, arg := range args {
 		typed = append(typed, spec.params[i]+" "+arg)
 	}
+	typed = append(typed, panicPosition(instr.Span)...)
 	fmt.Fprintf(&e.out, "  call void @%s(%s)\n", spec.entry, strings.Join(typed, ", "))
 	e.out.WriteString("  unreachable\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)

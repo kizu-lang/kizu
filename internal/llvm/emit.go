@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
@@ -146,6 +147,21 @@ var panicEntries = map[string]panicEntry{
 	},
 }
 
+// panicParams returns one entry's parameter types. Every entry takes the source
+// line and column last, so any failure can say where it happened; the runtime
+// omits the position when the line is zero.
+func panicParams(key string) []string {
+	return append(append([]string{}, panicEntries[key].params...), "i64", "i64")
+}
+
+// panicPosition renders the source position arguments for a failure call.
+func panicPosition(span ast.Span) []string {
+	return []string{
+		fmt.Sprintf("i64 %d", span.Start.Line),
+		fmt.Sprintf("i64 %d", span.Start.Column),
+	}
+}
+
 // failureValues are the messages a std container returns as a failure *value*
 // rather than reporting through the runtime. They travel back into Kizu code as
 // an `!T` payload, so unlike a panic message they must exist as module data.
@@ -221,8 +237,8 @@ func instrFailureValue(op string) string {
 func (e *emitter) writePanicDecls() {
 	keys := e.usedPanicEntries()
 	for _, key := range keys {
-		spec := panicEntries[key]
-		fmt.Fprintf(&e.out, "declare void @%s(%s)\n", spec.entry, strings.Join(spec.params, ", "))
+		fmt.Fprintf(&e.out, "declare void @%s(%s)\n",
+			panicEntries[key].entry, strings.Join(panicParams(key), ", "))
 	}
 	if len(keys) > 0 {
 		e.out.WriteString("\n")
@@ -1511,10 +1527,11 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 			instr.Immediate, len(spec.params))
 	}
 	cond := e.value(instr.Args[0])
-	args := make([]string, 0, len(spec.params))
+	args := make([]string, 0, len(spec.params)+2)
 	for i, arg := range instr.Args[1:] {
 		args = append(args, spec.params[i]+" "+e.value(arg).operand)
 	}
+	args = append(args, panicPosition(instr.Span)...)
 	failLabel := helperLabel(instr.Args[0].Name, "fail")
 	okLabel := helperLabel(instr.Args[0].Name, "pass")
 	e.markCurrentBlockExit(okLabel)

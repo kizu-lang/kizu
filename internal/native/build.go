@@ -426,64 +426,87 @@ void kizu_main_error_message(const unsigned char *s, int64_t len) {
 /* Checked runtime failures. The wording lives here so that a failure reads the
  * same however the program reached it, per ADR-0072:
  *
- *   runtime error: <summary>
+ *   runtime error: <summary> at <line>:<column>
  *   note: <context>
+ *
+ * The position is omitted when the reporting instruction has no source span.
  */
-void kizu_panic_bounds(int64_t index, int64_t length) {
-    fprintf(stderr, "runtime error: index out of bounds\n");
+static void kizu_panic_at(int64_t line, int64_t column) {
+    if (line > 0) {
+        fprintf(stderr, " at %lld:%lld", (long long)line, (long long)column);
+    }
+    fputc('\n', stderr);
+}
+
+static void kizu_panic_summary(const char *summary, int64_t line, int64_t column) {
+    fputs("runtime error: ", stderr);
+    fputs(summary, stderr);
+    kizu_panic_at(line, column);
+}
+
+void kizu_panic_bounds(int64_t index, int64_t length, int64_t line, int64_t column) {
+    kizu_panic_summary("index out of bounds", line, column);
     fprintf(stderr, "note: index is %lld, length is %lld\n",
             (long long)index, (long long)length);
     abort();
 }
 
-void kizu_panic_test_fail(const unsigned char *s, int64_t len) {
+void kizu_panic_range(int64_t start, int64_t end, int64_t length,
+                      int64_t line, int64_t column) {
+    kizu_panic_summary("range out of bounds", line, column);
+    fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",
+            (long long)start, (long long)end, (long long)length);
+    abort();
+}
+
+void kizu_panic_array_empty(int64_t line, int64_t column) {
+    kizu_panic_summary("array pop from empty", line, column);
+    abort();
+}
+
+void kizu_panic_arena_handle(int64_t line, int64_t column) {
+    kizu_panic_summary("invalid arena handle", line, column);
+    abort();
+}
+
+void kizu_panic_arena_add(int64_t line, int64_t column) {
+    kizu_panic_summary("arena add failed", line, column);
+    abort();
+}
+
+void kizu_panic_test_fail(const unsigned char *s, int64_t len,
+                          int64_t line, int64_t column) {
     fputs("runtime error: ", stderr);
     fwrite(s, 1, (size_t)len, stderr);
-    fputc('\n', stderr);
+    kizu_panic_at(line, column);
     abort();
 }
 
-void kizu_panic_expect_equal_int(int64_t expected, int64_t actual) {
-    fprintf(stderr, "runtime error: expected %lld, got %lld\n",
+void kizu_panic_expect_equal_int(int64_t expected, int64_t actual,
+                                 int64_t line, int64_t column) {
+    fprintf(stderr, "runtime error: expected %lld, got %lld",
             (long long)expected, (long long)actual);
+    kizu_panic_at(line, column);
     abort();
 }
 
-void kizu_panic_expect_equal_bool(_Bool expected, _Bool actual) {
-    fprintf(stderr, "runtime error: expected %s, got %s\n",
+void kizu_panic_expect_equal_bool(_Bool expected, _Bool actual,
+                                  int64_t line, int64_t column) {
+    fprintf(stderr, "runtime error: expected %s, got %s",
             expected ? "true" : "false", actual ? "true" : "false");
+    kizu_panic_at(line, column);
     abort();
 }
 
 void kizu_panic_expect_equal_bytes(const unsigned char *expected, int64_t expected_len,
-                                   const unsigned char *actual, int64_t actual_len) {
+                                   const unsigned char *actual, int64_t actual_len,
+                                   int64_t line, int64_t column) {
     fputs("runtime error: expected \"", stderr);
     fwrite(expected, 1, (size_t)expected_len, stderr);
     fputs("\", got \"", stderr);
     fwrite(actual, 1, (size_t)actual_len, stderr);
-    fputs("\"\n", stderr);
-    abort();
-}
-
-void kizu_panic_array_empty(void) {
-    fputs("runtime error: array pop from empty\n", stderr);
-    abort();
-}
-
-void kizu_panic_arena_handle(void) {
-    fputs("runtime error: invalid arena handle\n", stderr);
-    abort();
-}
-
-void kizu_panic_arena_add(void) {
-    fputs("runtime error: arena add failed\n", stderr);
-    abort();
-}
-
-void kizu_panic_range(int64_t start, int64_t end, int64_t length) {
-    fprintf(stderr, "runtime error: range out of bounds\n");
-    fprintf(stderr, "note: range is %lld..%lld, length is %lld\n",
-            (long long)start, (long long)end, (long long)length);
+    fputc('"', stderr);
+    kizu_panic_at(line, column);
     abort();
 }
 

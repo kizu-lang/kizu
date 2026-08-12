@@ -122,7 +122,32 @@ Swift のようにループ外へ巻き上げられる。
 
 これで backend から `llvm.trap()` が消えた。停止する失敗はすべて診断を出す。
 
+## 位置
+
+`ir.Instr` が `Span` を持ち、失敗を報告する runtime entry は最後の 2 引数として
+line と column を取る。ADR-0072 の形になった。
+
+```text
+runtime error: index out of bounds at 2:21
+note: index is 3, length is 3
+```
+
+span を持たない箇所は line に 0 を渡し、runtime が位置を省略する。ADR-0072 が
+「`at <line>:<column>` は primary span を持つ diagnostic に付ける」としている
+通りである。
+
+期待値と実値を持つ失敗は、ADR-0072 に従って **summary に** 書く。
+
+```text
+runtime error: expected 4, got 3
+```
+
+`note:` は「なぜそう判断されたか」に使う。範囲外なら index と length がそれに
+あたる。
+
 ## まだやっていないこと
 
 - 検査の巻き上げとマージは `ir.Optimize` に置ける。今は入れていない。
-- 位置情報(`at <line>:<column>`)。`ast.IndexExpr` が span を持たない。
+- span を持つのは `ast.IndexExpr` だけである。`Array` の method 失敗や
+  `std::testing` の失敗はまだ位置を出せない。`ast.CallExpr` と `ast.FieldExpr`
+  が span を持てば、同じ経路で出るようになる。

@@ -993,8 +993,8 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 			return Value{}, err
 		}
 		length := l.emit("slice.len", "i64", []Value{target}, "")
-		l.condFail("binary.<", index, zeroIndex, "bounds", index, length)
-		l.condFail("binary.>=", index, length, "bounds", index, length)
+		l.condFail(expr.Span, "binary.<", index, zeroIndex, "bounds", index, length)
+		l.condFail(expr.Span, "binary.>=", index, length, "bounds", index, length)
 		return l.emit("slice.index", "u8", []Value{target, index}, ""), nil
 	}
 	start, err := l.lowerSliceBound(expr.Start, zeroIndex)
@@ -1006,9 +1006,9 @@ func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
 		return Value{}, err
 	}
 	length := l.emit("slice.len", "i64", []Value{target}, "")
-	l.condFail("binary.<", start, zeroIndex, "range", start, end, length)
-	l.condFail("binary.>", start, end, "range", start, end, length)
-	l.condFail("binary.>", end, length, "range", start, end, length)
+	l.condFail(expr.Span, "binary.<", start, zeroIndex, "range", start, end, length)
+	l.condFail(expr.Span, "binary.>", start, end, "range", start, end, length)
+	l.condFail(expr.Span, "binary.>", end, length, "range", start, end, length)
 	return l.emit("slice.slice", "[]u8", []Value{target, start, end}, ""), nil
 }
 
@@ -1019,11 +1019,18 @@ var zeroIndex = Value{Name: "0", Type: "i64"}
 //
 // The values a failure reports travel with it, so the wording lives in the
 // runtime rather than being spelled out here or in a backend.
-func (l *lowerer) condFail(op string, left Value, right Value, kind string, values ...Value) {
+func (l *lowerer) condFail(
+	span ast.Span,
+	op string,
+	left Value,
+	right Value,
+	kind string,
+	values ...Value,
+) {
 	bad := l.emit(op, "bool", []Value{left, right}, "")
 	args := append([]Value{bad}, values...)
 	l.block.Instrs = append(l.block.Instrs, &Instr{
-		Op: "cond_fail", Args: args, Immediate: kind,
+		Op: "cond_fail", Args: args, Immediate: kind, Span: span,
 	})
 }
 

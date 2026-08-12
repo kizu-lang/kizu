@@ -52,7 +52,8 @@ func (e *emitter) writeTestFail(instr *ir.Instr) error {
 	}
 	ptr, length := e.writeSliceParts(localName(instr.Result.Name)+".msg",
 		e.value(instr.Args[0]).operand)
-	fmt.Fprintf(&e.out, "  call void @kizu_panic_test_fail(ptr %s, i64 %s)\n", ptr, length)
+	fmt.Fprintf(&e.out, "  call void @kizu_panic_test_fail(ptr %s, i64 %s, %s)\n",
+		ptr, length, strings.Join(panicPosition(instr.Span), ", "))
 	e.out.WriteString("  unreachable\n")
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
@@ -66,25 +67,26 @@ func (e *emitter) writeTestExpectEqual(instr *ir.Instr) error {
 	left := e.value(instr.Args[0])
 	right := e.value(instr.Args[1])
 	okName := localName(instr.Result.Name) + ".ok"
+	position := strings.Join(panicPosition(instr.Span), ", ")
 	var report string
 	switch instr.Args[0].Type {
 	case "bool":
 		fmt.Fprintf(&e.out, "  %s = icmp eq i1 %s, %s\n", okName, left.operand, right.operand)
-		report = fmt.Sprintf("  call void @kizu_panic_expect_equal_bool(i1 %s, i1 %s)\n",
-			left.operand, right.operand)
+		report = fmt.Sprintf("  call void @kizu_panic_expect_equal_bool(i1 %s, i1 %s, %s)\n",
+			left.operand, right.operand, position)
 	case "[]u8":
 		leftPtr, leftLen := e.writeSliceParts(localName(instr.Result.Name)+".left", left.operand)
 		rightPtr, rightLen := e.writeSliceParts(localName(instr.Result.Name)+".right", right.operand)
 		fmt.Fprintf(&e.out, "  %s = call i1 @kizu_bytes_equal(ptr %s, i64 %s, ptr %s, i64 %s)\n",
 			okName, leftPtr, leftLen, rightPtr, rightLen)
 		report = fmt.Sprintf(
-			"  call void @kizu_panic_expect_equal_bytes(ptr %s, i64 %s, ptr %s, i64 %s)\n",
-			leftPtr, leftLen, rightPtr, rightLen)
+			"  call void @kizu_panic_expect_equal_bytes(ptr %s, i64 %s, ptr %s, i64 %s, %s)\n",
+			leftPtr, leftLen, rightPtr, rightLen, position)
 	default:
 		fmt.Fprintf(&e.out, "  %s = icmp eq %s %s, %s\n",
 			okName, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
-		report = fmt.Sprintf("  call void @kizu_panic_expect_equal_int(i64 %s, i64 %s)\n",
-			left.operand, right.operand)
+		report = fmt.Sprintf("  call void @kizu_panic_expect_equal_int(i64 %s, i64 %s, %s)\n",
+			left.operand, right.operand, position)
 	}
 	e.writeReportedFailure(okName, report)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}

@@ -1,6 +1,10 @@
 package ir
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/kizu-lang/kizu/internal/ast"
+)
 
 // Module is a lowered Kizu source file.
 type Module struct {
@@ -80,6 +84,10 @@ type Instr struct {
 	Fields    []FieldArg
 	Incoming  []Incoming
 	Cleanups  []Cleanup
+	// Span is set where a runtime failure must name a source position. It is
+	// zero for instructions that cannot fail, and for failures whose source
+	// node does not carry a span yet.
+	Span ast.Span
 }
 
 // Cleanup is a deferred void instruction that must run before a scope exits.
