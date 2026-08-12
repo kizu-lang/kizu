@@ -18,57 +18,70 @@ code, and less likely to grow heavy CI and build caches.
 
 ## Status
 
-Kizu is an early prototype implemented in Go.
+Kizu is an early prototype implemented in Go. The interpreter is the oracle:
+`kizu check` and `kizu run` define correct behavior, and every example in the
+table below is a passing conformance case. The backends accept subsets of it.
 
-The v0.1 target is the interpreter-first language core. The current v0.2
-baseline adds the minimal standard-library surface and tooling needed to keep
-language behavior testable. The authoritative behavior is still the Go
-interpreter plus `kizu check`.
+| Feature | Examples | interp | LLVM | native | WASM |
+| --- | ---: | :--: | :--: | :--: | :--: |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
+| while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
+| if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
+| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 9 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 16 | ✅ | 15/16 | 15/16 | 4/16 |
+| deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
+| comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
+| cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
+| contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
+| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
+| std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
+| std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
+| TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
+| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
-Implemented language-core pieces:
+`✅` means every example in the row passes, a fraction means only some do, and
+`❌` means none do. 82 runnable examples, measured on 2026-08-12 with
+`go run ./scripts/backend-matrix` -- re-run it after touching a backend.
 
-- lexer, parser, AST, and CLI
-- interpreter
-- type checker
-- move checker
-- local borrow checker
-- `std::arena::Arena<T>` / `std::arena::Handle<T>`
-- `while`, `break`, `continue`, labeled loop branches, and bounded `for`
-- limited `comptime` expressions, parameters, and branch selection
-- minimal `!T` and `try` error propagation
-- unsafe boundary and C ABI declaration checks
-- explicit `cast<T>(value)` checker policy
-- Zig/C-style tag `enum`, tagged `union`, and exhaustive `match`
-- `std::io::blocking/threaded/failing` and `TaskGroup` structured task model
-- `std::channel::Channel<T>` owned message passing
-- `std::task::Queue` deterministic deferred task queue
-- `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes
-- scoped thread, `Atomic<T>`, and `Mutex<T>` boundary prototypes
-- `contract`, `impl Contract for Type`, and `&dyn Contract`
-- minimal `std::mem`, `std::array::Array<T>`, `std::string::String`,
-  `std::map::Map<K, V>`, and `std::testing`
-- explicit-Io `std::fs`, `std::path`, `std::io`, and `std::process` helpers
-- `kizu test <file-or-package>` top-level `test "name" { ... }` runner
+| Route | Passing |
+| --- | --- |
+| `kizu check` + `kizu run` (interpreter) | 82/82 |
+| `kizu build --emit-llvm` | 66/82 |
+| `kizu build --target native` | 66/82 |
+| `kizu build --target wasm32-wasi` | 17/82 |
 
-Experimental compiler and tooling pieces:
+Every example the LLVM stage accepts also links with clang, so the native path
+has no gap of its own beyond the LLVM subset.
 
-- Kizu stdlib migration layout in `std/`
-- typed SSA IR
-- LLVM IR text backend
+What the backends still reject:
+
+- LLVM and native: `std::builtin::task_group` (6 examples); typed calls for
+  explicit generics and for `Channel<T>` / `Atomic<T>` (5); and one case each of
+  `if` used as an expression, an unknown `borrow` / `write` method, and a
+  `&i64` versus `i64` comparison.
+- WASM: `slice.len` (28), `unary.!` (5), `struct.new` (4), `error.ok` (4), and
+  `union.load` / `error.try` / non-integer constants (2 each), on top of the
+  IR-stage gaps above.
+
+Tooling around the language core:
+
+- typed SSA IR with an opt-in optimization pipeline
 - bounded local build cache and rebuild explanations
-- WASI-compatible WebAssembly text backend
 - limited C header import for extern function declarations
-- opt-in IR optimization pipeline
-- limited native executable generation through LLVM IR and clang
+- the Kizu standard library in `std/`, including the self-describing
+  `std/src/kizu/` lexer, parser, and AST
+- an LSP server (`cmd/kizu-lsp`)
 
-These experimental pieces are not the language oracle yet. LLVM and WASM
-currently support more limited target subsets than the interpreter. Native
-builds are limited to the LLVM-lowered subset and a small `kizu_print_*`
-runtime shim. The current native path uses host `clang` and libc; future
-no-libc / freestanding builds are part of the accepted build policy.
-
-There are no open v0.2 issues at the time of writing. Future compiler migration
-work should start from new GitHub Issues with explicit acceptance criteria.
+The native path uses host `clang` and libc; no-libc / freestanding builds are
+part of the accepted build policy but are not implemented.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -107,8 +120,9 @@ go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 
 See the [examples catalog](examples/README.md) for runnable feature
 examples and negative safety-rule examples. The machine-readable conformance
-manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json); it is
-currently reused for both v0.1 language-core and v0.2 stdlib prototype coverage.
+manifests are [tests/conformance/v0_1.json](tests/conformance/v0_1.json) for the
+language core and [tests/conformance/v0_2.json](tests/conformance/v0_2.json) for
+the stdlib prototypes.
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
 Open compiler specification gaps are tracked in

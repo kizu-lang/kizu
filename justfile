@@ -112,6 +112,10 @@ cache-prune:
 why file="examples/hello.kizu":
     go run ./cmd/kizu why-rebuild {{file}}
 
+# Report which backends accept each conformance example.
+backend-matrix:
+    go run ./scripts/backend-matrix
+
 # Run the broad baseline timing script.
 perf:
     scripts/measure-baseline.sh
