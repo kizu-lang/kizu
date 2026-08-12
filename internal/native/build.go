@@ -514,6 +514,16 @@ void kizu_print_int(int64_t v) {
     printf("%lld\n", (long long)v);
 }
 
+/* Print an enum by its tag. The table holds one Enum::Tag spelling per tag, in
+ * tag order, so the backend indexes rather than branches. */
+void kizu_print_enum(const KizuSliceU8 *names, int64_t count, int64_t tag) {
+    if (tag < 0 || tag >= count) {
+        kizu_panic_bounds(tag, count, 0, 0);
+    }
+    fwrite(names[tag].ptr, 1, (size_t)names[tag].len, stdout);
+    fputc('\n', stdout);
+}
+
 void kizu_print_bool(_Bool v) {
     fputs(v ? "true\n" : "false\n", stdout);
 }

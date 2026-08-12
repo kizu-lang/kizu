@@ -1683,6 +1683,25 @@ v0.1 の最小 builtin は `print` です。
 print
 ```
 
+`print` は診断用です。値を 1 つ受け取り、改行付きで stdout に書きます。
+
+- `Io` capability を取りません。
+- **失敗を報告しません。** 書き込みに失敗しても error を返さず、静かに続行します。
+- したがって `!void` ではなく `void` を返し、`try` は要りません。
+
+これは Zig の `std.debug.print` と同じ位置づけです。捨てているのは事実であり、
+ここに書くことで隠していないことになります。
+
+プログラムの出力としての書き込みは `std::io` を使います。capability を取り、
+失敗を `!void` で返します。
+
+```kizu
+let io = std::io::blocking();
+try std::io::write_stdout(io, bytes);
+```
+
+`print` が受け取れない型は診断になります。黙って何も出さないことはありません。
+
 加えて、v0.1 は concurrency / async の安全境界を固めるために、
 `std::task`、`std::channel`、`std::thread`、`std::atomic`、`std::sync`
 の prototype API を interpreter builtin として持ちます。

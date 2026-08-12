@@ -98,6 +98,7 @@ func (e *emitter) writeHeader() {
 	e.writeUnionTypes()
 	e.writeStructTypes()
 	e.writeFailureValueGlobals()
+	e.writeEnumNameTables()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -110,6 +111,9 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n")
+	if len(e.printedEnums()) > 0 {
+		e.out.WriteString("declare void @kizu_print_enum(ptr, i64, i64)\n")
+	}
 	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
 	e.writeArrayRuntimeDecls()
@@ -1757,9 +1761,80 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	case "bool":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)
 	default:
-		fmt.Fprintf(&e.out, "  ; unsupported print type %s\n", args[0].Type)
+		if _, ok := e.module.Enums[args[0].Type]; ok {
+			e.writePrintEnum(args[0].Type, value.operand)
+			return nil
+		}
+		return fmt.Errorf("llvm error: print does not support `%s`", args[0].Type)
 	}
 	return nil
+}
+
+// writePrintEnum prints an enum by indexing its name table, so a new tag costs
+// a table row rather than a branch in the backend.
+func (e *emitter) writePrintEnum(typ string, operand string) {
+	fmt.Fprintf(&e.out, "  call void @kizu_print_enum(ptr %s, i64 %d, i64 %s)\n",
+		enumNameTable(typ), len(e.module.Enums[typ].Tags), operand)
+}
+
+// enumNameTable returns the global holding one enum's tag spellings.
+func enumNameTable(typ string) string {
+	return "@.kizu.enum." + mangleGlobalName(typ)
+}
+
+// mangleGlobalName makes a type name usable inside an LLVM global identifier.
+func mangleGlobalName(typ string) string {
+	return strings.NewReplacer(":", "_", "<", "_", ">", "_", ",", "_", " ", "").Replace(typ)
+}
+
+// printedEnums returns the enums this module prints, in sorted order.
+func (e *emitter) printedEnums() []string {
+	seen := map[string]bool{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op != "call.print" || len(instr.Args) != 1 {
+					continue
+				}
+				if _, ok := e.module.Enums[instr.Args[0].Type]; ok {
+					seen[instr.Args[0].Type] = true
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// writeEnumNameTables defines the `Enum::Tag` spellings the module prints.
+func (e *emitter) writeEnumNameTables() {
+	names := e.printedEnums()
+	for _, typ := range names {
+		tags := e.module.Enums[typ].Tags
+		spellings := make([]string, len(tags))
+		for tag, index := range tags {
+			spellings[index] = typ + "::" + tag
+		}
+		rows := make([]string, 0, len(spellings))
+		for index, spelling := range spellings {
+			global := fmt.Sprintf("%s.%d", enumNameTable(typ), index)
+			e.writeStaticStringGlobal(global, spelling)
+			rows = append(rows,
+				fmt.Sprintf("{ ptr, i64 } { ptr %s, i64 %d }", global, len(spelling)))
+		}
+		// A literal { ptr, i64 } rather than %kizu.slice.u8: the named type is
+		// only defined when the module otherwise uses slices, and a module can
+		// print an enum without ever touching one.
+		fmt.Fprintf(&e.out, "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]\n",
+			enumNameTable(typ), len(rows), strings.Join(rows, ", "))
+	}
+	if len(names) > 0 {
+		e.out.WriteByte('\n')
+	}
 }
 
 // printIntegerOperand widens narrow integer values to the runtime print ABI.
