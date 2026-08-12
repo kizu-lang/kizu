@@ -1036,14 +1036,14 @@ func ensureSelfhostStage2RuntimeArtifacts(t *testing.T) {
 			source: "selfhost/runtime/selfhost.host.ll",
 			targets: []string{
 				"target/selfhost/selfhost.host.ll",
-				"target/selfhost/stage2/selfhost.host.ll",
+				"selfhost/runtime/selfhost.host.ll",
 			},
 		},
 		{
 			source: "selfhost/runtime/selfhost.storage.ll",
 			targets: []string{
 				"target/selfhost/selfhost.storage.ll",
-				"target/selfhost/stage2/selfhost.storage.ll",
+				"selfhost/runtime/selfhost.storage.ll",
 			},
 		},
 	} {

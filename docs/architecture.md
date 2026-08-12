@@ -62,7 +62,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `why-rebuild`
 `import-c-header`。基本の実行経路は `kizu run examples/hello.kizu`。
 
-## 4. selfhost 実装と bootstrap
+## 4. selfhost 実装と stage0 ビルド
 
 `selfhost/src/` の構成(トップの `<name>.kizu` が module の facade、同名 dir が実装):
 
@@ -70,39 +70,35 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 lexer/ parser/ resolver  types/ ownership/   frontend(std::kizu::* を土台に構築)
 comptime_eval / comptime_diagnostic          typed comptime 評価器と check 段 gate
 ir/            checked AST → テキスト IR facts(executable_* / codegen / code_render)
-backend/       facts → MIR(compiled_mir_*)→ LLVM テキスト、hosted CLI の描画(cli_*_llvm)
+backend/       run/test artifact の emit・リンク・実行(host 境界)
 cli/           hosted CLI の check/実行系
 abi/ cache/ source/                          ABI 契約・ビルドキャッシュ・ソース管理
 *_oracle.kizu  Go 実装との突き合わせ用エントリポイント
 ```
 
-backend の内部は一貫して**テキスト表現のパイプライン**です:
-`stage` コマンドが checked AST を IR facts(`body-node` / `body-token` / `struct-field` /
-`type-llvm` … の行指向テキスト、値もテキストで運ぶ)に落とし、`compiled_mir_lower` が
-facts を MIR に、`compiled_mir_llvm` が LLVM テキストに描画します。
-
-bootstrap(`just selfhost-bootstrap`)は 3 段の自己コンパイル比較です:
+selfhost の実行ファイルを作るのは **Go backend(stage0)だけ**です(ADR-0081)。
 
 ```
-stage0-native : Go backend が selfhost パッケージを native 実行体にコンパイル
-stage         : stage0 が selfhost 自身をコンパイルし LLVM artifacts を emit
-stage1/stage2 : その artifacts を clang でリンク → stage1 が再び自身を emit → stage2
-                stage1 と stage2 の出力・fingerprint の一致を検証
+just selfhost-native
+  = kizu build --target native --opt --libc on --runtime hosted --emit exe --linker clang
+      -o target/selfhost/stage0-native/selfhost selfhost
 ```
 
-stage2 実行体(`target/selfhost/stage2/selfhost`)が「hosted artifact」で、
-parity gate 群はこれを Go 実装と突き合わせます。
+parity gate 群はこの実行ファイル(`target/selfhost/stage0-native/selfhost`)を
+Go 実装と突き合わせます。
+
+selfhost 自身が selfhost をコンパイルする経路(`stage` コマンドと stage0→stage1→stage2
+bootstrap)は ADR-0081 で撤去しました。ソースの形ごとに MIR payload 型と renderer を
+足す構造になっていて、backend だけで 63,590 行(Go 参照実装の 10 倍超)に膨らみ、
+形状 template がソースの成長に追随せず黙って壊れていたためです。自己コンパイルは、
+backend を Go の `internal/ir` + `internal/llvm` の構造(op を持つ汎用命令 1 種)に
+合わせて作り直したあとに再導入します。
 
 ### selfhost コードを書くときの注意
 
 selfhost のソースは**フル Kizu で書きます**(ADR-0080)。必須要件は
-Go backend(stage0)でコンパイル・検査が通ることです。
-
-selfhost backend の自己コンパイル(bootstrap)は flip-readiness の指標であり、
-backend が受けない形(`compiled mir: ...` の関数名付き refusal)に出会っても
-ソースを subset に書き下げず、`docs/selfhost-backend-generalization.md` に
-gap として記録します。backend 側は一般 lowering の拡張でのみ成長させ、
-形状 lowering・関数名分岐の追加は禁止です(AGENTS.md / ADR-0080)。
+Go backend(stage0)でコンパイル・検査が通ることです。今は backend が
+subset を課さないので、書き下げの必要そのものがありません。
 新しいループ形状の挙動確認には `selfhost/tests/probes/` を使います。
 
 ## 5. std の二層構造
@@ -123,10 +119,10 @@ gap として記録します。backend 側は一般 lowering の拡張でのみ�
 | --- | --- | --- |
 | daily | `go test ./...`(pre-push hook で自動) | 約 90 秒。ユニット + CLI smoke + std lexer/parser parity(native 実行)|
 | commit hooks | `pre-commit run --all-files`(pre-commit hook) | gofmt / golangci-lint / コメント検査。数秒 |
-| opt-in gates | `KIZU_RUN_SELFHOST_*` 環境変数 + `just` レシピ | bootstrap、check/run/test/fmt parity、backend artifact、probe 差分など |
+| opt-in gates | `KIZU_RUN_SELFHOST_*` 環境変数 + `just` レシピ | check/parse/run/test/fmt parity、supported corpus、probe 差分など |
 
 parity 系 gate は manifest(`selfhost/tests/cli/*.tsv`)+ golden 比較で、
-stage2 実行体と Go 実装の出力一致を固定します。`selfhost/tests/probes/` は
+stage0-native 実行体と Go 実装の出力一致を固定します。`selfhost/tests/probes/` は
 「同じ関数を両 backend でコンパイルして実行結果を突き合わせる」最小再現の置き場で、
 baseline.tsv が既知の一致/不一致を記録します。
 
@@ -134,7 +130,7 @@ baseline.tsv が既知の一致/不一致を記録します。
 
 - 作業は topic branch + PR(`main` 直 push 禁止)。PR には目的・主要変更・検証結果を書く。
 - コミット時に fast hooks、push 時に `go test ./...` が走る(120 秒以内が目標)。
-- backend/codegen を触ったら: focused gate で iteration → `just selfhost-bootstrap` →
+- backend/codegen を触ったら: focused gate で iteration → `just selfhost-native` →
   関連 parity gate、の順で検証してから PR。
 - 仕様に関わる判断をしたら SPEC.md か docs/adr/ を必ず更新する。
 
@@ -155,11 +151,11 @@ baseline.tsv が既知の一致/不一致を記録します。
 | 言語仕様 | SPEC.md |
 | 開発ルール・禁止事項 | AGENTS.md |
 | テスト層の使い分けと実測 | docs/selfhost-test-tiers.md |
-| bootstrap の詳細 | docs/selfhost-bootstrap.md |
+| stage0 ビルドと parity の詳細 | docs/selfhost-test-tiers.md |
 | selfhost 実行体の runtime ABI | docs/selfhost-runtime-abi.md |
 | CLI parity の枠組み | docs/selfhost-cli-parity.md |
 | メモリ安全モデル | docs/memory-safety.md |
 | stdlib の設計 | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
-| backend 一般化の台帳(shapes 棚卸し・gap 記録) | docs/selfhost-backend-generalization.md |
-| 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0080 full-Kizu selfhost) |
+| backend 撤去の記録(履歴) | docs/adr/0081-remove-self-compiling-backend.md、docs/selfhost-backend-generalization.md |
+| 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0080 full-Kizu selfhost、0081 backend 撤去) |

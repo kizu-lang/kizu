@@ -121,7 +121,7 @@ func TestFrontendCommandsUseSelfhostArgValidation(t *testing.T) {
 			if !errors.As(runErr, &status) || status.code != 64 {
 				t.Fatalf("got error %v, want exit status 64", runErr)
 			}
-			want := "usage: selfhost <check|stage|parse|run|test|fmt> <target>\n"
+			want := "usage: selfhost <check|parse|run|test|fmt> <target>\n"
 			if out != want {
 				t.Fatalf("got %q, want %q", out, want)
 			}
@@ -194,51 +194,6 @@ func TestFmtCommandHasNoGoWriteFallback(t *testing.T) {
 		if strings.Contains(body, fragment) {
 			t.Fatalf("fmt command keeps Go fallback fragment %q", fragment)
 		}
-	}
-}
-
-// TestFmtWriteUsesAtomicRenameCapability keeps --write on temp-write plus rename.
-func TestFmtWriteUsesAtomicRenameCapability(t *testing.T) {
-	selfhostMain, err := os.ReadFile("../../selfhost/src/main.kizu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mainSource := string(selfhostMain)
-	requiredMain := []string{
-		"var temp_path = try fmt_write_temp_path(allocator, path);",
-		"try std::fs::write_file(io, temp_bytes, formatted_bytes);",
-		"try std::fs::rename(io, temp_bytes, path);",
-	}
-	for _, fragment := range requiredMain {
-		if !strings.Contains(mainSource, fragment) {
-			t.Fatalf("selfhost fmt --write path missing %q", fragment)
-		}
-	}
-	if strings.Contains(mainSource, "std::fs::write_file(io, path, formatted_bytes)") {
-		t.Fatalf("selfhost fmt --write still writes directly to the target path")
-	}
-
-	hostedLLVM, err := os.ReadFile("../../selfhost/src/backend/cli_parse_llvm.kizu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostedSource := string(hostedLLVM)
-	hostedTempWrite := "@kizu_rt_fs_write_file(%kizu.owned %io, " +
-		"%kizu.slice.u8 %temp_path, %kizu.slice.u8 %formatted_bytes)"
-	hostedDirectWrite := "@kizu_rt_fs_write_file(%kizu.owned %io, " +
-		"%kizu.slice.u8 %path, %kizu.slice.u8 %formatted_bytes)"
-	requiredHosted := []string{
-		"@kizu_selfhost__parse_temp_path(%kizu.slice.u8 %path)",
-		hostedTempWrite,
-		"@kizu_rt_fs_rename(%kizu.owned %io, %kizu.slice.u8 %temp_path, %kizu.slice.u8 %path)",
-	}
-	for _, fragment := range requiredHosted {
-		if !strings.Contains(hostedSource, fragment) {
-			t.Fatalf("hosted fmt --write path missing %q", fragment)
-		}
-	}
-	if strings.Contains(hostedSource, hostedDirectWrite) {
-		t.Fatalf("hosted fmt --write still writes directly to the target path")
 	}
 }
 

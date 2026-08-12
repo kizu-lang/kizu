@@ -22,11 +22,11 @@ type fmtParityCase struct {
 }
 
 type fmtParityResult struct {
-	command            bootstrapCommandResult
+	command            selfhostCommandResult
 	content            string
 	contentChecked     bool
 	targetPath         string
-	writeMirror        bootstrapCommandResult
+	writeMirror        selfhostCommandResult
 	writeMirrorContent string
 	writeMirrorChecked bool
 	writeMirrorTarget  string
@@ -54,17 +54,17 @@ func TestSelfhostFmtParityRecipes(t *testing.T) {
 	gate := justRecipe(content, "selfhost-fmt-parity-gate")
 	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_FMT_PARITY=1 go test")
 	requireRecipeFragment(t, gate, "TestSelfhostFmtParityGate$")
-	requireNoRecipeFragment(t, gate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "just selfhost-native")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	fromScratch := justRecipe(content, "selfhost-fmt-parity-gate-from-scratch")
-	requireRecipeFragment(t, fromScratch, "just selfhost-bootstrap")
+	requireRecipeFragment(t, fromScratch, "just selfhost-native")
 	requireRecipeFragment(t, fromScratch, "just selfhost-fmt-parity-gate")
 
 	fastGate := justRecipe(content, "selfhost-fast-gate")
 	requireRecipeFragment(t, fastGate, "just selfhost-fmt-parity-gate")
-	requireNoRecipeFragment(t, fastGate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, fastGate, "just selfhost-native")
+	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_NATIVE=1")
 }
 
 // runSelfhostFmtParity executes the #1073 manifest with the hosted artifact.
@@ -76,7 +76,7 @@ func runSelfhostFmtParity(t *testing.T) (string, int) {
 		return "", 1
 	}
 	defer restore()
-	runner := "target/selfhost/stage2/selfhost"
+	runner := "target/selfhost/stage0-native/selfhost"
 	if err := requireSupportedCorpusRunner(runner); err != nil {
 		t.Errorf("require selfhost fmt parity runner: %v", err)
 		return "", 1
@@ -91,10 +91,9 @@ func runSelfhostFmtParity(t *testing.T) (string, int) {
 	appendFmtParityHeader(&report, len(cases))
 	failures := countFmtParityCaseFailures(t, &report, runner, cases)
 	appendFmtParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/fmt-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write fmt parity report: %v", err)
 		failures++
@@ -208,7 +207,7 @@ func executeFmtParityCase(
 			return fmtParityResult{}, "", 1
 		}
 		return fmtParityResult{
-			command:    runBootstrapCommand(t, runner, "fmt", item.fixture),
+			command:    runSelfhostCommand(t, runner, "fmt", item.fixture),
 			targetPath: item.fixture,
 		}, "", 0
 	case "fmt-write":
@@ -239,7 +238,7 @@ func countFmtWriteMirrorFailures(
 		return 1
 	}
 	result.writeMirrorTarget = target
-	result.writeMirror = runBootstrapCommand(t, runner, "fmt", "--write", target)
+	result.writeMirror = runSelfhostCommand(t, runner, "fmt", "--write", target)
 	written, err := os.ReadFile(target)
 	if err != nil {
 		t.Errorf("read fmt parity mirror fixture %s: %v", target, err)
@@ -286,7 +285,7 @@ func executeFmtWriteParityCase(
 		return fmtParityResult{}, "", 1
 	}
 	result := fmtParityResult{
-		command:        runBootstrapCommand(t, runner, "fmt", "--write", target),
+		command:        runSelfhostCommand(t, runner, "fmt", "--write", target),
 		contentChecked: true,
 		targetPath:     target,
 	}
@@ -354,9 +353,9 @@ func appendFmtParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "issue #1073\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/fmt-parity.tsv\n")
-	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
-	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
-	fmt.Fprintf(out, "validation.path hosted-stage2-artifact\n")
+	fmt.Fprintf(out, "runner target/selfhost/stage0-native/selfhost\n")
+	fmt.Fprintf(out, "runner.build stage0-native (go backend)\n")
+	fmt.Fprintf(out, "validation.path stage0-native-artifact\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
 	fmt.Fprintf(out, "cases %d\n", count)
 }

@@ -31,8 +31,8 @@ type runParityGuardCase struct {
 }
 
 type runParityResult struct {
-	compiler      bootstrapCommandResult
-	program       bootstrapCommandResult
+	compiler      selfhostCommandResult
+	program       selfhostCommandResult
 	llPath        string
 	metadataPath  string
 	exePath       string
@@ -62,18 +62,18 @@ func TestSelfhostRunParityRecipes(t *testing.T) {
 	gate := justRecipe(content, "selfhost-run-parity-gate")
 	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_RUN_PARITY=1 go test")
 	requireRecipeFragment(t, gate, "TestSelfhostRunParityGate$")
-	requireNoRecipeFragment(t, gate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "just selfhost-native")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	one := justRecipe(content, "selfhost-run-one case")
 	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_RUN_PARITY=1")
 	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_RUN_PARITY_CASE='{{case}}'")
 	requireRecipeFragment(t, one, "TestSelfhostRunParityGate$")
-	requireNoRecipeFragment(t, one, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, one, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, one, "just selfhost-native")
+	requireNoRecipeFragment(t, one, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	fromScratch := justRecipe(content, "selfhost-run-parity-gate-from-scratch")
-	requireRecipeFragment(t, fromScratch, "just selfhost-bootstrap")
+	requireRecipeFragment(t, fromScratch, "just selfhost-native")
 	requireRecipeFragment(t, fromScratch, "just selfhost-run-parity-gate")
 }
 
@@ -106,7 +106,7 @@ func runSelfhostRunParity(t *testing.T) (string, int) {
 		return "", 1
 	}
 	defer restore()
-	runner := "target/selfhost/stage2/selfhost"
+	runner := "target/selfhost/stage0-native/selfhost"
 	if err := requireSupportedCorpusRunner(runner); err != nil {
 		t.Errorf("require selfhost run parity runner: %v", err)
 		return "", 1
@@ -242,7 +242,7 @@ func runRunParityCase(
 	item runParityCase,
 ) (runParityResult, int) {
 	t.Helper()
-	result := runParityResult{compiler: runBootstrapCommand(t, runner, item.command, item.fixture)}
+	result := runParityResult{compiler: runSelfhostCommand(t, runner, item.command, item.fixture)}
 	expectedOut, expectedErr, err := readRunParityGoldens(item)
 	if err != nil {
 		t.Errorf("read run parity goldens for %s: %v", item.name, err)
@@ -281,7 +281,7 @@ func countUnexpectedRunArtifacts(t *testing.T, item runParityCase) int {
 func compareRunCompilerResult(
 	t *testing.T,
 	item runParityCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 	expectedOut string,
 	expectedErr string,
 ) int {
@@ -358,7 +358,7 @@ func linkRunParityExecutable(clang string, llPath string, exePath string) error 
 	return linkRunParityExecutableWithHost(
 		clang,
 		llPath,
-		"target/selfhost/stage2/selfhost.host.ll",
+		"selfhost/runtime/selfhost.host.ll",
 		exePath,
 	)
 }
@@ -393,7 +393,7 @@ func countRunParityGuardFailures(
 	t.Helper()
 	failures := 0
 	for _, item := range runParityGuardCases() {
-		result := runBootstrapCommand(t, runner, item.args...)
+		result := runSelfhostCommand(t, runner, item.args...)
 		if result.code != item.exitCode ||
 			result.stdout != item.stdout ||
 			result.stderr != item.stderr {
@@ -432,7 +432,7 @@ func runParityGuardCases() []runParityGuardCase {
 			name:     "unsupported_command",
 			args:     []string{"bad", "selfhost"},
 			exitCode: 64,
-			stderr:   "unsupported selfhost command\n",
+			stderr:   "usage: selfhost <check|parse|run|test|fmt> <target>\n",
 		},
 	}
 }
@@ -443,9 +443,9 @@ func appendRunParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "issue #569\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/run-parity.tsv\n")
-	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
-	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
-	fmt.Fprintf(out, "validation.path hosted-stage2-artifact-run\n")
+	fmt.Fprintf(out, "runner target/selfhost/stage0-native/selfhost\n")
+	fmt.Fprintf(out, "runner.build stage0-native (go backend)\n")
+	fmt.Fprintf(out, "validation.path stage0-native-artifact-run\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
 	fmt.Fprintf(out, "artifact.dir target/selfhost/cache/run\n")
 	fmt.Fprintf(out, "cases %d\n", count)
@@ -526,7 +526,7 @@ func appendRunParityArtifactResult(
 func appendRunParityGuardResult(
 	out *strings.Builder,
 	item runParityGuardCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "guard.%s.command %s\n", item.name, strings.Join(item.args, " "))
 	fmt.Fprintf(out, "guard.%s.exit.expected %d\n", item.name, item.exitCode)
@@ -553,5 +553,5 @@ func appendRunParityFooter(out *strings.Builder, start time.Time, failures int) 
 
 // writeRunParityReport persists the #569 gate report.
 func writeRunParityReport(report string) error {
-	return os.WriteFile("target/selfhost/reports/run-parity.txt", []byte(report), 0o644)
+	return writeSelfhostGateReport("target/selfhost/reports/run-parity.txt", report)
 }

@@ -43,15 +43,6 @@ selfhost-oracle:
 selfhost-oracle-budget:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 KIZU_ENFORCE_SELFHOST_ORACLE_BUDGET=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
-# Run the stage0-native backend artifact contract gate.
-#
-# The gate hands the staged module to an LLVM reader that it first PROVES is a verifier,
-# by making it reject a dominance violation. Apple clang -- what an unadorned PATH
-# resolves on macOS -- accepts one, so a keg-only Homebrew LLVM is put ahead of it when
-# brew has one. On a machine without brew the substitution is empty and PATH is unchanged.
-selfhost-backend-artifact-gate:
-    PATH="$(brew --prefix llvm 2>/dev/null)/bin:$PATH" KIZU_RUN_SELFHOST_GATES=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
-
 # Execute selfhost-emitted control-flow LLVM: each gate is clang-compiled with a driver and run,
 # so a wrong branch edge, arm merge, or field hop fails by exit code rather than by text diff.
 selfhost-control-flow-execution:
@@ -67,24 +58,19 @@ selfhost-cli-gate:
 
 # Run the selfhost production switch review gate without the aggregate oracle.
 selfhost-switch-gate:
+    just selfhost-native
     just selfhost-production-from-scratch
-    just selfhost-native-source-gate
     just selfhost-run-cli-switch-gate
     go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
-# Run the no-Go bootstrap contract preflight before starting stage work.
-selfhost-bootstrap-preflight:
-    just selfhost-switch-gate
-    just cache-smoke
+# Build the selfhost compiler natively with the Go backend (stage0). ADR-0081: this
+# is the only backend that produces a selfhost executable, and every parity gate
+# below runs against the binary it writes.
+selfhost-native:
+    KIZU_RUN_SELFHOST_NATIVE=1 go test -timeout=30m ./cmd/kizu -run 'TestSelfhostStage0NativeGate$' -count=1 -v
 
-# Run the stage0-stage1-stage2 selfhost bootstrap comparison. The embedded backend
-# artifact gate needs a proven LLVM verifier, so brew's llvm goes ahead of Apple clang
-# the same way selfhost-backend-artifact-gate arranges it.
-selfhost-bootstrap:
-    PATH="$(brew --prefix llvm 2>/dev/null)/bin:$PATH" KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
-
-# Run #458 commands through the hosted stage2 production artifact.
+# Run #458 commands through the stage0-native artifact.
 selfhost-production-gate:
     KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1 -v
 
@@ -110,7 +96,7 @@ selfhost-fast-gate:
 
 # Build the hosted artifact once, then run production, corpus, and CLI parity gates.
 selfhost-production-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-fast-gate
 
 # Run the supported corpus through the hosted selfhost artifact.
@@ -119,7 +105,7 @@ selfhost-corpus-gate:
 
 # Build the hosted artifact once, then run the supported corpus.
 selfhost-corpus-gate-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-corpus-gate
 
 # Run #525 parse <file> parity through the hosted selfhost artifact.
@@ -132,7 +118,7 @@ selfhost-check-parity-gate:
 
 # Build the hosted artifact once, then run check <file> parity.
 selfhost-check-parity-gate-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-check-parity-gate
 
 # Run #1073 fmt <file> parity through the hosted selfhost artifact.
@@ -141,20 +127,20 @@ selfhost-fmt-parity-gate:
 
 # Build the hosted artifact once, then run fmt <file> parity.
 selfhost-fmt-parity-gate-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-fmt-parity-gate
 
 # Run #569 run <file> parity through the hosted selfhost artifact.
 selfhost-run-parity-gate:
     KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1 -v
 
-# Run one #569 run parity case by manifest name or fixture path through stage2.
+# Run one #569 run parity case by manifest name or fixture path through the stage0-native binary.
 selfhost-run-one case:
     KIZU_RUN_SELFHOST_RUN_PARITY=1 KIZU_RUN_SELFHOST_RUN_PARITY_CASE='{{case}}' go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1 -v
 
 # Build the hosted artifact once, then run run <file> parity.
 selfhost-run-parity-gate-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-run-parity-gate
 
 # Run #1070 flip-path parity gate (KIZU_SELFHOST_RUN run_file_cli vs Go interp baseline).
@@ -179,12 +165,8 @@ selfhost-test-parity-gate:
 
 # Build the hosted artifact once, then run test <file> parity.
 selfhost-test-parity-gate-from-scratch:
-    just selfhost-bootstrap
+    just selfhost-native
     just selfhost-test-parity-gate
-
-# Build selfhost from source as a native executable and run checked-AST executable artifacts.
-selfhost-native-source-gate:
-    KIZU_RUN_SELFHOST_NATIVE_SOURCE=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostNativeSourceExecutableGate$' -count=1 -v
 
 # Install local git hooks.
 hooks:

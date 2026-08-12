@@ -18,7 +18,6 @@ The current hosted stage2 artifact supports these command slices:
 | Slice | Scope | Validation |
 | --- | --- | --- |
 | `check selfhost` | Minimum compiler package check from #458 | `just selfhost-production-gate` |
-| `stage selfhost` | Stage2 artifact materialization from #459 | `just selfhost-production-gate` |
 | `check <print-hello source file>` | #530/#592 positive source-shape check slice | `just selfhost-check-parity-gate` |
 | `check <minimal-main-return source file>` | #602 positive return-statement source-shape check slice | `just selfhost-check-parity-gate` |
 | `check <std::testing::expect source file>` | #604 positive qualified-call source-shape check slices for expect true/false | `just selfhost-check-parity-gate` |
@@ -48,7 +47,7 @@ paths. The positive minimal-main-return, positive print-call, positive
 declaration/record/field/call, negative missing-expression, and negative
 missing-assign rows each include the original fixture plus an alias fixture
 with the same source bytes, proving the hosted paths are no longer bound to one
-fixed path. The gate runs through `target/selfhost/stage2/selfhost` and records
+fixed path. The gate runs through `target/selfhost/stage0-native/selfhost` and records
 `go.cmd-kizu-fallback none`.
 
 `selfhost/tests/cli/check-parity.tsv` is the #530/#602/#604/#646 check
@@ -65,7 +64,7 @@ to cover another parse-diagnostic check source shape.
 These rows prove the hosted dispatch paths are no longer bound to one fixed
 path. The fast
 `just selfhost-check-parity-gate` recipe reuses an existing passing
-`target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
+`target/selfhost/stage0-native/selfhost` artifact and records `go.cmd-kizu-fallback
 none`; it does not bootstrap from scratch by default.
 
 `selfhost/tests/cli/fmt-parity.tsv` is the #1073 formatter parity manifest. It
@@ -77,7 +76,7 @@ comments, inline comments, and stable leading import sorting. Every successful
 stdout row also runs a copied `fmt --write` mirror check and asserts that file
 content matches the same formatted bytes as stdout minus the CLI newline. The
 explicit write failure row asserts that parse failures preserve the original
-file. The gate runs through `target/selfhost/stage2/selfhost`,
+file. The gate runs through `target/selfhost/stage0-native/selfhost`,
 records `go.cmd-kizu-fallback none`, and does not use BackendArtifactGate as the
 formatter ownership gate.
 

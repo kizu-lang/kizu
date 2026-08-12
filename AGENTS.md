@@ -15,17 +15,17 @@ Kizu はメモリ安全な systems programming language です。
 - parser / AST / checker / backend は読みやすく保つ。
 - ファイルが 1000 行を超える場合、分割を検討し、関心が分離できていない可能性を疑う。
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
-- selfhost のソースは**フル Kizu で書く**(ADR-0080)。必須要件は Go backend(stage0)で
-  コンパイル・検査が通ること。selfhost backend の subset に合わせた書き下げはせず、
-  backend が受けない形は `docs/selfhost-backend-generalization.md` に gap として記録する。
+- selfhost のソースは**フル Kizu で書く**(ADR-0080)。唯一の実行ファイル生成経路は
+  Go backend(stage0)で、`just selfhost-native` がそれを行う(ADR-0081)。
 
 ## 禁止事項
 
 - テストを pass させるだけの場当たり的変更やハードコードを入れない。
 - selfhost 実装で 静的コード生成に分岐する実装を増やさない。
-- selfhost backend に**新しい形状 lowering・関数名分岐を追加しない**(ADR-0080)。
-  一般 lowering(generic while 系)を拡張し、既存 shapes は退役させる。
-- `backend.kizu` に静的 LLVM 文字列を積み増すだけの変更をしない。
+- LLVM を文字列リテラルで書き下ろさない(ADR-0073 / ADR-0081)。backend を書き直す
+  ときは Go の `internal/ir` + `internal/llvm` の構造 —— op を持つ汎用命令 1 種、
+  AST を歩く lowering、命令 1:1 の renderer —— に合わせる。ソースの形ごとの
+  payload 型・関数名分岐・形状 template を作らない。
 - hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
 - 関数の内部形状や生成テキスト断片を grep で固定する**構造 pin を新規に追加しない**
   (ADR-0080)。検証は probe 差分・parity manifest・実行 golden で行う。
@@ -40,7 +40,7 @@ Kizu はメモリ安全な systems programming language です。
 commit 前は原則 `pre-commit run --all-files` を通してください。
 `go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
 
-selfhost 作業では、毎回 full bootstrap しないで検証段階を分けます。
+selfhost 作業では、`just selfhost-native` でビルドしてから focused gate を回します。
 
 ## PR Workflow
 

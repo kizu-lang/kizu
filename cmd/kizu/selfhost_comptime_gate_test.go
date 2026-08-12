@@ -5,7 +5,7 @@ import "testing"
 // TestSelfhostComptimeGate exercises the shared Kizu-owned evaluator directly.
 func TestSelfhostComptimeGate(t *testing.T) {
 	const entry = "selfhost::comptime_gate::gate"
-	out, err := runSelfhostAbiParamsGate(t, entry)
+	out, err := runSelfhostPackageGate(t, entry)
 	if err != nil {
 		t.Fatalf("comptime gate failed: %v\n%s", err, out)
 	}

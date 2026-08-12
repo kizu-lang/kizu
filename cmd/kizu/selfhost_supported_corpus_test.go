@@ -19,7 +19,7 @@ type supportedCorpusCase struct {
 	stderrKey string
 }
 
-// TestSelfhostSupportedCorpusGate runs the #460 manifest through the artifact.
+// TestSelfhostSupportedCorpusGate runs the #460 manifest through the stage0-native artifact.
 func TestSelfhostSupportedCorpusGate(t *testing.T) {
 	if os.Getenv("KIZU_RUN_SELFHOST_CORPUS") != "1" {
 		t.Skip("set KIZU_RUN_SELFHOST_CORPUS=1 to run selfhost corpus")
@@ -31,7 +31,7 @@ func TestSelfhostSupportedCorpusGate(t *testing.T) {
 	t.Logf("selfhost supported corpus report:\n%s", report)
 }
 
-// runSelfhostSupportedCorpus executes manifest entries with the stage2 artifact.
+// runSelfhostSupportedCorpus executes manifest entries with the stage0-native artifact.
 func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	t.Helper()
 	restore, err := chdirRepoRoot()
@@ -40,7 +40,7 @@ func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 		return "", 1
 	}
 	defer restore()
-	runner := "target/selfhost/stage2/selfhost"
+	runner := "target/selfhost/stage0-native/selfhost"
 	if err := requireSupportedCorpusRunner(runner); err != nil {
 		t.Errorf("require supported corpus runner: %v", err)
 		return "", 1
@@ -55,7 +55,7 @@ func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	appendSupportedCorpusHeader(&report, len(cases))
 	failures := 0
 	for _, item := range cases {
-		result := runBootstrapCommand(
+		result := runSelfhostCommand(
 			t,
 			runner,
 			item.command,
@@ -76,10 +76,9 @@ func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	} else {
 		fmt.Fprintf(&report, "comparison.status fail\n")
 	}
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/supported-corpus.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write supported corpus report: %v", err)
 		failures++
@@ -87,24 +86,18 @@ func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	return report.String(), failures
 }
 
-// requireSupportedCorpusRunner checks that bootstrap produced the hosted runner.
+// requireSupportedCorpusRunner checks that the stage0-native selfhost
+// executable exists and can be run.
 func requireSupportedCorpusRunner(runner string) error {
 	info, err := os.Stat(runner)
 	if err != nil {
-		return fmt.Errorf("%s missing; run `just selfhost-bootstrap` first: %w", runner, err)
+		return fmt.Errorf("%s missing; run `just selfhost-native` first: %w", runner, err)
 	}
 	if info.IsDir() {
 		return fmt.Errorf("%s is a directory", runner)
 	}
 	if info.Mode()&0o111 == 0 {
 		return fmt.Errorf("%s is not executable", runner)
-	}
-	report, err := os.ReadFile("target/selfhost/reports/bootstrap.txt")
-	if err != nil {
-		return fmt.Errorf("bootstrap report missing; run `just selfhost-bootstrap` first: %w", err)
-	}
-	if !strings.Contains(string(report), "comparison.status pass\n") {
-		return fmt.Errorf("bootstrap report is not passing")
 	}
 	return nil
 }
@@ -173,8 +166,8 @@ func appendSupportedCorpusHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "manifest selfhost/tests/supported-corpus.tsv\n")
 	fmt.Fprintf(out, "selector manifest-active-rows\n")
 	fmt.Fprintf(out, "excluded outside-selector issues #497 #495\n")
-	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
-	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
+	fmt.Fprintf(out, "runner target/selfhost/stage0-native/selfhost\n")
+	fmt.Fprintf(out, "runner.build stage0-native (go backend)\n")
 	fmt.Fprintf(out, "cases %d\n", count)
 }
 
@@ -182,7 +175,7 @@ func appendSupportedCorpusHeader(out *strings.Builder, count int) {
 func appendSupportedCorpusResult(
 	out *strings.Builder,
 	item supportedCorpusCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "case.%s.kind %s\n", item.name, item.kind)
 	fmt.Fprintf(out, "case.%s.command %s %s\n", item.name, item.command, item.target)

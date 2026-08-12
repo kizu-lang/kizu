@@ -50,7 +50,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		timedSelfhostOracle(t, "format", runSelfhostFormatOracle),
 	}
 	pipelineStart := time.Now()
-	results = append(results, runSelfhostPipelineOracle(t)...)
+	results = append(results, timedSelfhostOracle(t, "pipeline", runSelfhostPipelineOracle))
 	t.Logf("oracle elapsed pipeline=%s", time.Since(pipelineStart))
 	failures := 0
 	for _, result := range results {
@@ -211,4 +211,17 @@ func logSelfhostOracleUnsupported(t *testing.T, result selfhostOracleResult) {
 			result.unsupportedSamples[reason],
 		)
 	}
+}
+
+// runSelfhostPipelineOracle drives selfhost::pipeline_oracle::gate, which walks a
+// real package through resolver, types, ownership, and IR and asserts each stage's
+// counts. ADR-0081 removed its backend/LLVM tail along with the staged artifacts.
+func runSelfhostPipelineOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	out, err := runSelfhostPackageGate(t, "selfhost::pipeline_oracle::gate")
+	if err != nil {
+		t.Errorf("selfhost pipeline oracle failed: %v\n%s", err, out)
+		return selfhostOracleResult{component: "pipeline", failures: 1}
+	}
+	return selfhostOracleResult{component: "pipeline"}
 }

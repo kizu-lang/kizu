@@ -53,7 +53,7 @@ func linkRunParityExecutableWithHost(
 }
 
 // runRunParityExecutable captures stdout, stderr, and exit code for run output.
-func runRunParityExecutable(t *testing.T, exePath string) bootstrapCommandResult {
+func runRunParityExecutable(t *testing.T, exePath string) selfhostCommandResult {
 	t.Helper()
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
@@ -66,7 +66,7 @@ func runRunParityExecutable(t *testing.T, exePath string) bootstrapCommandResult
 	run.Stdout = &stdout
 	run.Stderr = &stderr
 	err = run.Run()
-	return bootstrapCommandResult{
+	return selfhostCommandResult{
 		name:    filepath.Base(exePath),
 		command: absExe,
 		stdout:  stdout.String(),

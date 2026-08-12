@@ -14,7 +14,7 @@ supported subset is intentionally small:
 - `check examples/negative/moved_value.kizu`
 
 The gate runs these entries through the hosted selfhost compiler artifact built
-by `just selfhost-bootstrap`, then compares user-visible stdout, stderr, and
+by `just selfhost-native`, then compares user-visible stdout, stderr, and
 exit code. It does not compare internal oracle counts.
 
 Run the corpus against an existing passing bootstrap artifact with:
@@ -23,8 +23,8 @@ Run the corpus against an existing passing bootstrap artifact with:
 just selfhost-corpus-gate
 ```
 
-That command requires `target/selfhost/stage2/selfhost` and
-`target/selfhost/reports/bootstrap.txt` from a passing `just selfhost-bootstrap`
+That command requires `target/selfhost/stage0-native/selfhost` and
+a passing `just selfhost-native`
 run. It does not rebuild bootstrap artifacts itself, so corpus validation stays
 sub-second during local iteration. From a clean workspace, run:
 

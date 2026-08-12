@@ -28,7 +28,7 @@ func TestSelfhostSemanticFacade(t *testing.T) {
 		},
 	} {
 		t.Run(test.entry, func(t *testing.T) {
-			out, err := runSelfhostAbiParamsGate(
+			out, err := runSelfhostPackageGate(
 				t,
 				"selfhost::semantic_gate::"+test.entry,
 			)
@@ -41,7 +41,7 @@ func TestSelfhostSemanticFacade(t *testing.T) {
 		})
 	}
 
-	out, err := runSelfhostAbiParamsGate(
+	out, err := runSelfhostPackageGate(
 		t,
 		"selfhost::semantic_gate::parse_failure_gate",
 	)

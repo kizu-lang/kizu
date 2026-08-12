@@ -48,16 +48,16 @@ func TestSelfhostCheckParityRecipes(t *testing.T) {
 	gate := justRecipe(content, "selfhost-check-parity-gate")
 	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_CHECK_PARITY=1 go test")
 	requireRecipeFragment(t, gate, "TestSelfhostCheckParityGate$")
-	requireNoRecipeFragment(t, gate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "just selfhost-native")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_NATIVE=1")
 
 	fromScratch := justRecipe(content, "selfhost-production-from-scratch")
 	requireRecipeFragment(t, fromScratch, "just selfhost-fast-gate")
 
 	fastGate := justRecipe(content, "selfhost-fast-gate")
 	requireRecipeFragment(t, fastGate, "just selfhost-check-parity-gate")
-	requireNoRecipeFragment(t, fastGate, "just selfhost-bootstrap")
-	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, fastGate, "just selfhost-native")
+	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_NATIVE=1")
 }
 
 // runSelfhostCheckParity executes the #530 manifest with the hosted artifact.
@@ -69,7 +69,7 @@ func runSelfhostCheckParity(t *testing.T) (string, int) {
 		return "", 1
 	}
 	defer restore()
-	runner := "target/selfhost/stage2/selfhost"
+	runner := "target/selfhost/stage0-native/selfhost"
 	if err := requireSupportedCorpusRunner(runner); err != nil {
 		t.Errorf("require selfhost check parity runner: %v", err)
 		return "", 1
@@ -85,10 +85,9 @@ func runSelfhostCheckParity(t *testing.T) (string, int) {
 	failures := countCheckParityCaseFailures(t, &report, runner, cases)
 	failures += countCheckParityGuardFailures(t, &report, runner)
 	appendCheckParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/check-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write check parity report: %v", err)
 		failures++
@@ -155,7 +154,7 @@ func countCheckParityCaseFailures(
 			failures++
 			continue
 		}
-		result := runBootstrapCommand(t, runner, item.command, item.fixture)
+		result := runSelfhostCommand(t, runner, item.command, item.fixture)
 		if result.code != item.exitCode ||
 			result.stdout != expectedOut ||
 			result.stderr != expectedErr {
@@ -189,7 +188,7 @@ func countCheckParityGuardFailures(
 	t.Helper()
 	failures := 0
 	for _, item := range checkParityGuardCases() {
-		result := runBootstrapCommand(t, runner, item.args...)
+		result := runSelfhostCommand(t, runner, item.args...)
 		if result.code != item.exitCode ||
 			result.stdout != item.stdout ||
 			result.stderr != item.stderr {
@@ -237,7 +236,7 @@ func checkParityGuardCases() []checkParityGuardCase {
 			// reports an unknown type. Pinning ok there would assert a package-context
 			// capability `check <file>` has never had.
 			name:     "real_source_target",
-			args:     []string{"check", "selfhost/src/backend/ir_contract.kizu"},
+			args:     []string{"check", "selfhost/src/backend/data.kizu"},
 			exitCode: 0,
 			stdout:   "check: ok\n",
 		},
@@ -245,7 +244,7 @@ func checkParityGuardCases() []checkParityGuardCase {
 			name:     "unsupported_command",
 			args:     []string{"bad", "selfhost"},
 			exitCode: 64,
-			stderr:   "unsupported selfhost command\n",
+			stderr:   "usage: selfhost <check|parse|run|test|fmt> <target>\n",
 		},
 	}
 }
@@ -256,9 +255,9 @@ func appendCheckParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "issue #530/#602/#604/#646/#665\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/check-parity.tsv\n")
-	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
-	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
-	fmt.Fprintf(out, "validation.path hosted-stage2-artifact\n")
+	fmt.Fprintf(out, "runner target/selfhost/stage0-native/selfhost\n")
+	fmt.Fprintf(out, "runner.build stage0-native (go backend)\n")
+	fmt.Fprintf(out, "validation.path stage0-native-artifact\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
 	fmt.Fprintf(out, "cases %d\n", count)
 }
@@ -267,7 +266,7 @@ func appendCheckParityHeader(out *strings.Builder, count int) {
 func appendCheckParityResult(
 	out *strings.Builder,
 	item checkParityCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "case.%s.command %s %s\n", item.name, item.command, item.fixture)
 	fmt.Fprintf(out, "case.%s.fixture %s\n", item.name, item.fixture)
@@ -283,7 +282,7 @@ func appendCheckParityResult(
 func appendCheckParityGuardResult(
 	out *strings.Builder,
 	item checkParityGuardCase,
-	result bootstrapCommandResult,
+	result selfhostCommandResult,
 ) {
 	fmt.Fprintf(out, "guard.%s.command %s\n", item.name, strings.Join(item.args, " "))
 	fmt.Fprintf(out, "guard.%s.exit.expected %d\n", item.name, item.exitCode)

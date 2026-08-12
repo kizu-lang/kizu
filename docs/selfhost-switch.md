@@ -1,4 +1,7 @@
 # Selfhost Production Switch Gate
+> **注(2026-08-12)**: ADR-0081 で自己コンパイル backend と `stage` コマンドを削除しました。
+> 以下の表に残る `stage selfhost` 行と stage1/stage2 の記述は撤去前の記録です。
+> 現在の gate 構成は `docs/selfhost-test-tiers.md` を見てください。
 
 This document defines the review gate for replacing Go-owned compiler paths with
 Kizu-owned components. It does not switch production behavior by itself.
@@ -59,7 +62,7 @@ just perf-cache-isolated
 | interpreter | none | Go interpreter | Go-owned | No switch planned before Kizu compiler frontend can emit a stable execution IR. |
 | IR / backend | `selfhost::{ir, backend}` skeleton | Go IR / backend | Go-owned | Requires a separate backend fingerprint and artifact/cache issue before any production switch. |
 | build cache / artifacts | none | Go cache / target paths | Go-owned | Requires explicit cache-key, prune, status, no-op rebuild, and artifact-size evidence. |
-| #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity is tracked by #1075, which #1071 and #1072 feed. |
+| #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage0-native/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity is tracked by #1075, which #1071 and #1072 feed. |
 | #752 run/test executable lowering | `selfhost::cli::execute`, `selfhost::backend::executable`, `selfhost::backend::hosted` | hosted stage2 uses the direct bounded executable renderer; native selfhost source executable uses checked AST | switched for bounded source path | `just selfhost-native-source-gate` builds the selfhost source package as a native executable and verifies run/test artifacts carry `executable_lowering selfhost::backend::executable checked-ast`, including local string `let` plus `print(local)` multiple-statement run lowering; hosted stage2 no longer depends on the old generated source-shape matcher module. |
 
 ## Phase Replacement Checklist
@@ -120,7 +123,7 @@ The first selected parse CLI switch remains the bounded
 print-call, qualified `std::testing::expect`, moved-value declarations, missing
 expression, and missing assignment cases. The gate is
 `just selfhost-parse-parity-gate`; it runs through
-`target/selfhost/stage2/selfhost`, compares checked-in goldens, and records
+`target/selfhost/stage0-native/selfhost`, compares checked-in goldens, and records
 `go.cmd-kizu-fallback none`.
 
 Broader parse behavior is explicitly deferred until a future command-slice issue
@@ -293,7 +296,7 @@ is wired into `fmt` / `fmt --write` and the from-scratch parity gates are green.
 ## Run CLI Switch Point For #1151
 
 The first public `cmd/kizu` CLI command routed through the selfhost-owned
-compiled artifact path (beyond the `target/selfhost/stage2/selfhost` parity
+compiled artifact path (beyond the `target/selfhost/stage0-native/selfhost` parity
 gates) is `run <file>`, behind the rollback-friendly switch point
 `KIZU_SELFHOST_RUN=1`.
 
@@ -396,8 +399,8 @@ For this release boundary, only the #458 command surface is production-owned by
 the artifact:
 
 ```sh
-target/selfhost/stage2/selfhost check selfhost
-target/selfhost/stage2/selfhost stage selfhost
+target/selfhost/stage0-native/selfhost check selfhost
+target/selfhost/stage0-native/selfhost stage selfhost
 ```
 
 The artifact may also run the manifest-selected #460 supported corpus. It must
@@ -446,4 +449,4 @@ separate `just selfhost-oracle` preflight described above.
 | --- | --- | --- |
 | `just selfhost-switch-gate` | passed, `real 143.71s` | Ran production-from-scratch, aggregate oracle, package skeleton check, and project/type/ownership Go package tests. |
 | `just selfhost-production-from-scratch` | passed, `real 61.03s` | Built stage2 through explicit bootstrap, then ran production and corpus gates through the hosted artifact. |
-| `just selfhost-production-gate` | passed, `real 0.31s` | Ran `check selfhost`, `stage selfhost`, and unsupported command diagnostics through `target/selfhost/stage2/selfhost`; report wrote `go.production none`. |
+| `just selfhost-production-gate` | passed, `real 0.31s` | Ran `check selfhost`, `stage selfhost`, and unsupported command diagnostics through `target/selfhost/stage0-native/selfhost`; report wrote `go.production none`. |

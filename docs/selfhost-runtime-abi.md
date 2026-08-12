@@ -1,4 +1,6 @@
 # Minimum Selfhost Runtime ABI
+> **注(2026-08-12)**: ADR-0081 で `stage` コマンドを削除しました。以下の `stage selfhost`
+> に関する記述は撤去前の記録です。runtime ABI 自体(`selfhost/runtime/`)は現役です。
 
 This document defines `selfhost-abi-v0`, the runtime ABI contract required by
 #455 for the first selfhost compiler artifact. It covers only the shapes listed
@@ -596,7 +598,7 @@ recognizes the print-hello, minimal-main-return, testing-expect,
 missing-expression, missing-assignment, and moved-value-use source shapes
 instead of branching on those fixed fixture paths.
 The check parity gate runs through
-`target/selfhost/stage2/selfhost`, records `go.cmd-kizu-fallback none`, and does
+`target/selfhost/stage0-native/selfhost`, records `go.cmd-kizu-fallback none`, and does
 not bootstrap from scratch by default. This does not claim general
 parse/type/move/borrow checker parity and does not extend `selfhost-abi-v0`.
 
@@ -621,7 +623,7 @@ selfhost parse selfhost/tests/cli/parse_invalid_missing_assign_alias.kizu
 ```
 
 The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
-against checked-in goldens and runs through `target/selfhost/stage2/selfhost`.
+against checked-in goldens and runs through `target/selfhost/stage0-native/selfhost`.
 It does not invoke Go `cmd/kizu` as a fallback. For #579, the positive minimal
 parse shape is source-driven: any file containing exactly the newline-terminated
 `fn main() { return; }` source uses the same hosted parse path. For #594, the

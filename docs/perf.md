@@ -71,7 +71,7 @@ Hosted `run <file>` and `kizu test <file>` parity gates use backend artifact
 emit/link/execute as decided by #531. Those gates must record elapsed time,
 emitted artifact paths, emitted artifact byte size, report byte size, and the
 explicit link/execute command in `target/selfhost/reports/`. The first gates
-must reuse an existing passing `target/selfhost/stage2/selfhost` artifact by
+must reuse an existing passing `target/selfhost/stage0-native/selfhost` artifact by
 default and keep generated files under bounded `target/selfhost/run/` or
 `target/selfhost/test/` subdirectories. They must not introduce a persistent
 cache outside the cache design above; if a run/test cache is added later, the
@@ -89,7 +89,7 @@ selfhost backend(`compiled_*` を mini MIR 経由で LLVM に落とす経路)は
 
 interpreter hot path の ground truth は `just selfhost-oracle` または focused な
 `just selfhost-integration-gates` で確認する。`TestSelfhostBackendArtifactGate` は
-2026-05-31 時点で stage0 native bootstrap + `stage selfhost` の artifact contract
+2026-05-31 時点で stage0 native build + staged artifact contract
 gate になり、backend artifact rendering を Go interpreter 上で走らせない。秒単位で
 回せる proxy を併用し、最後に該当する oracle / integration gate で確認する二段
 ループにする。2026-05-31 の `just selfhost-backend-artifact-gate` 実測は 10.14s real

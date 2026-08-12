@@ -129,7 +129,7 @@ func observeProbeRun(reference string, runner string, item probeCase) *probeObse
 // that answers it wrongly. A refusal is loud and ships no wrong answer; a mismatch
 // is a wrong answer nobody sees. They are different findings and the baseline keeps
 // them apart.
-func classifyProbeDisagreement(subject bootstrapCommandResult) string {
+func classifyProbeDisagreement(subject selfhostCommandResult) string {
 	if subject.code != 0 && strings.Contains(subject.stderr, "not supported") {
 		return "refused"
 	}
@@ -167,7 +167,7 @@ func buildProbeReference() (string, error) {
 }
 
 // runProbeCommand runs one compiler command and captures its user-visible result.
-func runProbeCommand(exePath string, args ...string) bootstrapCommandResult {
+func runProbeCommand(exePath string, args ...string) selfhostCommandResult {
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
 	if err != nil {
@@ -180,7 +180,7 @@ func runProbeCommand(exePath string, args ...string) bootstrapCommandResult {
 	run.Stdout = &stdout
 	run.Stderr = &stderr
 	err = run.Run()
-	return bootstrapCommandResult{
+	return selfhostCommandResult{
 		name:    strings.Join(args, " "),
 		command: absExe + " " + strings.Join(args, " "),
 		stdout:  stdout.String(),
@@ -289,9 +289,8 @@ func appendProbeGateFooter(out *strings.Builder, start time.Time, failures int) 
 
 // writeProbeGateReport persists the probe gate report.
 func writeProbeGateReport(report string) error {
-	return os.WriteFile(
+	return writeSelfhostGateReport(
 		"target/selfhost/reports/probe-differential.txt",
-		[]byte(report),
-		0o644,
+		report,
 	)
 }
