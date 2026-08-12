@@ -442,5 +442,5 @@ func appendTestParityFooter(out *strings.Builder, start time.Time, failures int)
 
 // writeTestParityReport persists the #570 gate report.
 func writeTestParityReport(report string) error {
-	return os.WriteFile("target/selfhost/reports/test-parity.txt", []byte(report), 0o644)
+	return writeSelfhostGateReport("target/selfhost/reports/test-parity.txt", report)
 }

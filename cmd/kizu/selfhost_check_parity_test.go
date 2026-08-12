@@ -85,10 +85,9 @@ func runSelfhostCheckParity(t *testing.T) (string, int) {
 	failures := countCheckParityCaseFailures(t, &report, runner, cases)
 	failures += countCheckParityGuardFailures(t, &report, runner)
 	appendCheckParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/check-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write check parity report: %v", err)
 		failures++

@@ -289,9 +289,8 @@ func appendProbeGateFooter(out *strings.Builder, start time.Time, failures int) 
 
 // writeProbeGateReport persists the probe gate report.
 func writeProbeGateReport(report string) error {
-	return os.WriteFile(
+	return writeSelfhostGateReport(
 		"target/selfhost/reports/probe-differential.txt",
-		[]byte(report),
-		0o644,
+		report,
 	)
 }

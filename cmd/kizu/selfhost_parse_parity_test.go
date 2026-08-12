@@ -64,10 +64,9 @@ func runSelfhostParseParity(t *testing.T) (string, int) {
 	failures := countParseParityCaseFailures(t, &report, runner, cases)
 	failures += countParseParityGuardFailures(t, &report, runner)
 	appendParseParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/parse-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write parse parity report: %v", err)
 		failures++

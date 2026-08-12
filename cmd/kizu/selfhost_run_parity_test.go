@@ -553,5 +553,5 @@ func appendRunParityFooter(out *strings.Builder, start time.Time, failures int) 
 
 // writeRunParityReport persists the #569 gate report.
 func writeRunParityReport(report string) error {
-	return os.WriteFile("target/selfhost/reports/run-parity.txt", []byte(report), 0o644)
+	return writeSelfhostGateReport("target/selfhost/reports/run-parity.txt", report)
 }

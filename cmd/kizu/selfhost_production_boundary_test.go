@@ -100,10 +100,9 @@ func runSelfhostProductionBoundary(t *testing.T) (string, int) {
 	} else {
 		fmt.Fprintf(&report, "comparison.status fail\n")
 	}
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/production-boundary.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write production boundary report: %v", err)
 		failures++

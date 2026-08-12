@@ -91,10 +91,9 @@ func runSelfhostFmtParity(t *testing.T) (string, int) {
 	appendFmtParityHeader(&report, len(cases))
 	failures := countFmtParityCaseFailures(t, &report, runner, cases)
 	appendFmtParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/fmt-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write fmt parity report: %v", err)
 		failures++

@@ -19,7 +19,7 @@ type supportedCorpusCase struct {
 	stderrKey string
 }
 
-// TestSelfhostSupportedCorpusGate runs the #460 manifest through the artifact.
+// TestSelfhostSupportedCorpusGate runs the #460 manifest through the stage0-native artifact.
 func TestSelfhostSupportedCorpusGate(t *testing.T) {
 	if os.Getenv("KIZU_RUN_SELFHOST_CORPUS") != "1" {
 		t.Skip("set KIZU_RUN_SELFHOST_CORPUS=1 to run selfhost corpus")
@@ -31,7 +31,7 @@ func TestSelfhostSupportedCorpusGate(t *testing.T) {
 	t.Logf("selfhost supported corpus report:\n%s", report)
 }
 
-// runSelfhostSupportedCorpus executes manifest entries with the stage2 artifact.
+// runSelfhostSupportedCorpus executes manifest entries with the stage0-native artifact.
 func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	t.Helper()
 	restore, err := chdirRepoRoot()
@@ -76,10 +76,9 @@ func runSelfhostSupportedCorpus(t *testing.T) (string, int) {
 	} else {
 		fmt.Fprintf(&report, "comparison.status fail\n")
 	}
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/supported-corpus.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write supported corpus report: %v", err)
 		failures++

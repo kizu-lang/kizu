@@ -150,10 +150,9 @@ func runSelfhostRunFlipParity(t *testing.T) (string, int) {
 		appendFlipParityResult(&report, item, result)
 	}
 	appendFlipParityFooter(&report, start, failures)
-	if err := os.WriteFile(
+	if err := writeSelfhostGateReport(
 		"target/selfhost/reports/run-flip-parity.txt",
-		[]byte(report.String()),
-		0o644,
+		report.String(),
 	); err != nil {
 		t.Errorf("write flip parity report: %v", err)
 		failures++

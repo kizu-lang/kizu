@@ -155,3 +155,13 @@ func isolateSelfhostTarget(t *testing.T) (func() error, error) {
 	}
 	return restore, nil
 }
+
+// writeSelfhostGateReport writes one gate's durable report, creating the reports
+// directory. Nothing else creates it now that the bootstrap step is gone, so a
+// gate that assumed it existed fails on a fresh checkout after passing.
+func writeSelfhostGateReport(path string, report string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(report), 0o644)
+}
