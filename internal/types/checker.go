@@ -1502,10 +1502,28 @@ func (c *Checker) isPublicType(name string) bool {
 	return false
 }
 
+// checkMainReturnType keeps the entry point returning `void` or an error union
+// over void (ADR-0085). A program does not choose its own exit status: an exit
+// status is platform-shaped, and a value returned from `main` cannot express it
+// portably.
+func checkMainReturnType(fn *functionType) error {
+	if fn.name != "main" || fn.decl == nil {
+		return nil
+	}
+	returned := strings.TrimSpace(fn.decl.ReturnType)
+	if returned == "" || returned == "void" || strings.HasSuffix(returned, "!void") {
+		return nil
+	}
+	return errorf("type error: `main` returns `%s`, expected `void` or `!void`", returned)
+}
+
 // checkFunction validates one function body against its signature.
 func (c *Checker) checkFunction(fn *functionType) error {
 	if fn.externABI != "" {
 		return nil
+	}
+	if err := checkMainReturnType(fn); err != nil {
+		return err
 	}
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {

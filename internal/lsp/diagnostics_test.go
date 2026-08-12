@@ -158,7 +158,7 @@ fn main() { print(Color::Red); }
 
 // TestAnalyzeAcceptsValidSource checks clean source publishes no diagnostics.
 func TestAnalyzeAcceptsValidSource(t *testing.T) {
-	source := "fn main() -> i64 { return 7; }\n"
+	source := "fn main() -> void { print(7); return; }\n"
 	diagnostics := Analyze(source)
 	if len(diagnostics) != 0 {
 		t.Fatalf("got diagnostics %#v, want none", diagnostics)

@@ -1824,9 +1824,10 @@ func TestCheckAcceptsErrorUnionTry(t *testing.T) {
 	source := `fn parse() -> !i64 {
     return 1;
 }
-fn main() -> !i64 {
+fn main() -> !void {
     let value = try parse();
-    return value + 1;
+    print(value + 1);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1838,9 +1839,10 @@ func TestCheckAcceptsErrorUnionError(t *testing.T) {
 	source := `fn parse() -> !i64 {
     return error("bad");
 }
-fn main() -> !i64 {
+fn main() -> !void {
     let value = try parse();
-    return value;
+    print(value);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1910,15 +1912,16 @@ fn main() {
 		},
 		{
 			name: "non error-union expression",
-			source: `fn main() -> !i64 {
+			source: `fn main() -> !void {
     let x = try 1;
-    return x;
+    print(x);
+    return;
 }`,
 			want: "try expects !T, got i64",
 		},
 		{
 			name: "error message type",
-			source: `fn main() -> !i64 {
+			source: `fn main() -> !void {
     return error(1);
 }`,
 			want: "`error` expects []u8",

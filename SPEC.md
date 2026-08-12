@@ -310,6 +310,10 @@ fn main() -> void {
 }
 ```
 
+`main` は `void` または `<E>!void` を返します。値は返せません。
+exit status は platform ごとに形が違い、返り値 1 つでは表せないためです(ADR-0085)。
+error を返した `main` は診断を出して非ゼロで終了します。
+
 ### 6.2 変数
 
 ```kizu
@@ -1751,6 +1755,8 @@ string.deinit() -> void
 `reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
 `truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
 `capacity` は現在の capacity を `i64` で返します。
+capacity の増加戦略は実装が決めます。保証するのは `capacity() >= len()` だけであり、
+特定の値に依存するコードは実装を固定してしまうため書けません。
 `as_bytes` は owned buffer への local read-only view です。
 `as_bytes` の戻り値は local binding に束縛する必要があります。
 view が生きている間は `append_bytes`、`append_byte`、`truncate`、`clear`、`deinit` を禁止します。
