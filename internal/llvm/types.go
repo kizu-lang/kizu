@@ -199,7 +199,9 @@ func llvmUnionTypeName(name string) string {
 	return "%kizu.union." + llvmNamePart(name)
 }
 
-// llvmFunctionName returns a stable LLVM symbol for a Kizu function name.
+// llvmFunctionName returns a stable LLVM symbol for a Kizu function name. The
+// substitution is what the C runtime spells its own entry points with, so a
+// host-runtime primitive links only while both sides agree on it.
 func llvmFunctionName(name string) string {
 	return llvmNamePart(name)
 }

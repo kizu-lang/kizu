@@ -56,7 +56,7 @@ var groups = []featureGroup{
 		"cast", "deref", "slice", "slice-syntax", "index-slice", "[]u8", "box",
 		"local-buffer", "capacity"}},
 	{"contract / dyn / generics", []string{
-		"contract", "dyn", "impl", "generics", "type-apply"}},
+		"contract", "dyn", "impl", "generics", "type-apply", "static-arguments"}},
 	{"std::array", []string{"std-array"}},
 	{"std::string", []string{"std-string"}},
 	{"std::map", []string{"std-map", "symbol-table"}},
@@ -78,7 +78,9 @@ var groups = []featureGroup{
 
 // routes are the CLI paths each example is put through. `run` builds a native
 // executable and runs it, so it is judged against the manifest stdout rather
-// than against the weaker fact that the command exited zero.
+// than against the weaker fact that the command exited zero. `wasm` is judged
+// the same way, by running what it emitted: a module that exits zero while
+// emitting text no runtime can load is not a working backend.
 var routes = []string{"check", "run", "llvm", "wasm"}
 
 // manifestCase is the subset of a conformance entry this command reads.
@@ -208,16 +210,51 @@ func runRoutes(bin string, entry manifestCase) *result {
 			res.err[route] = firstLine(stderr.String() + stdout.String())
 			continue
 		}
-		if route != "run" || entry.Stdout == nil {
+		got := stdout.String()
+		if route == "wasm" {
+			got, err = runWat(stdout.Bytes(), entry.Args)
+			if err != nil {
+				res.ok[route] = false
+				res.err[route] = firstLine(err.Error())
+				continue
+			}
+		}
+		if entry.Stdout == nil || (route != "run" && route != "wasm") {
 			continue
 		}
-		if got := stdout.String(); got != *entry.Stdout {
+		if got != *entry.Stdout {
 			res.ok[route] = false
 			res.err[route] = fmt.Sprintf("output mismatch: want %q, got %q",
 				truncate(*entry.Stdout), truncate(got))
 		}
 	}
 	return res
+}
+
+// runWat loads emitted WebAssembly text with wasmtime and returns what it
+// printed, so the wasm column reports whether a module runs rather than whether
+// the emitter exited zero.
+func runWat(wat []byte, args []string) (string, error) {
+	file, err := os.CreateTemp("", "kizu-matrix-*.wat")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(wat); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("wasmtime", append([]string{file.Name()}, args...)...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("wasmtime: %s", firstLine(stderr.String()+err.Error()))
+	}
+	return stdout.String(), nil
 }
 
 // truncate keeps a mismatch report short enough to read.

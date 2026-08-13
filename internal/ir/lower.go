@@ -201,15 +201,36 @@ func genericInstanceName(
 	bindings map[string]string,
 	values map[string]staticValue,
 ) string {
-	args := make([]string, 0, len(order))
+	parts := make([]string, 0, len(order)+1)
+	parts = append(parts, name)
 	for _, param := range order {
 		if bound, ok := bindings[param]; ok {
-			args = append(args, bound)
+			parts = append(parts, encodeStaticArg(bound))
 			continue
 		}
-		args = append(args, values[param].text)
+		parts = append(parts, encodeStaticArg(values[param].text))
 	}
-	return name + "<" + strings.Join(args, ", ") + ">"
+	return strings.Join(parts, ".")
+}
+
+// encodeStaticArg spells one static argument in the character set every backend
+// accepts, so a lowered name needs no further mangling on the way out. A byte a
+// source identifier can hold passes through, which keeps `i64` and `4096`
+// readable; every other byte is escaped, so two different arguments cannot
+// collide on one symbol.
+func encodeStaticArg(arg string) string {
+	var out strings.Builder
+	for _, ch := range []byte(arg) {
+		switch {
+		case ch == '_':
+			out.WriteString("__")
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
+			out.WriteByte(ch)
+		default:
+			fmt.Fprintf(&out, "_%02x", ch)
+		}
+	}
+	return out.String()
 }
 
 // resolveStaticValue forwards a static value through an outer binding, so a
