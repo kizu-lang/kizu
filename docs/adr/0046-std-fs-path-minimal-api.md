@@ -61,6 +61,6 @@ is_dir: bool
 ## Consequences
 
 - Compiler path construction can be tested without filesystem side effects.
-- Filesystem APIs remain explicit and testable with `std::io::failing()`.
+- Filesystem APIs remain explicit and testable with `std::testing::failing_io()`.
 - Metadata is not a stable platform abstraction yet; more fields require a
   later ADR.

@@ -28,7 +28,14 @@ I/O を行う関数は `Io` を受け取り、task / future / group は `Io` に
 let io = std::io::blocking();
 let io = std::io::threaded();
 let io = std::io::evented();
-let io = std::io::failing();
+```
+
+失敗する implementation は test 用の道具なので `std::testing` に置く。Zig が
+`std.testing.FailingAllocator` を、Go が `testing/iotest` を production module の
+外に置いているのと同じ理由で、production の I/O 実装の一覧には入れない。
+
+```kizu
+let io = std::testing::failing_io();
 ```
 
 platform-specific backend は後続で追加する。
@@ -38,8 +45,8 @@ let io = std::io::uring();  // Linux
 let io = std::io::kqueue(); // BSD / macOS
 ```
 
-v0.1 interpreter は `std::io::blocking()`、`std::io::threaded()`、
-`std::io::failing()` を実装する。
+v0.1 は `std::io::blocking()`、`std::io::threaded()`、
+`std::testing::failing_io()` を実装する。
 ただし `evented` / platform backend は後続で扱う。
 
 ## Safe Boundary
@@ -68,7 +75,6 @@ Kizu は低レベル制御を残しつつ、safe code の memory safety を優�
 ```text
 std::io::blocking()  simple blocking I/O
 std::io::threaded()  thread-backed I/O and task execution
-std::io::failing()   test implementation that supports no external I/O
 std::fs::read_file   explicit-Io file read returning ![]u8
 std::fs::write_file  explicit-Io file write returning !void
 ```

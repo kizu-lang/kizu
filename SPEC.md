@@ -2018,7 +2018,7 @@ fn read_config(io: Io, path: []u8) -> ![]u8 {
 * shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う
 
 v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
-`std::io::blocking()` と `std::io::failing()` は同期評価します。
+`std::io::blocking()` と `std::testing::failing_io()` は同期評価します。
 `std::io::threaded()` は `group.spawn` を goroutine で実行し、`await` / `cancel` が
 完了を待ちます。
 
@@ -2046,7 +2046,6 @@ v0.1 の `std::io` implementation:
 ```text
 std::io::blocking()  simple blocking I/O
 std::io::threaded()  thread-backed I/O and task execution
-std::io::failing()   test implementation that supports no external I/O
 ```
 
 将来の `std::io` implementation 候補:
@@ -2108,7 +2107,8 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
-* `std::io::failing()` は deterministic failing I/O として、テストで I/O error path を確認する
+* `std::testing::failing_io()` は deterministic failing I/O として、テストで I/O error path を確認する。
+  失敗する implementation は test 用の道具なので `std::io` ではなく `std::testing` が持つ
 
 `std::path`:
 
