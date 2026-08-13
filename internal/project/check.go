@@ -1194,20 +1194,11 @@ func splitTypeArgs(args string) ([]string, error) {
 
 // splitTypedErrorUnion separates Error!T while leaving prefix !T to resolvePrefixed.
 func splitTypedErrorUnion(name string) (string, string, bool) {
-	depth := 0
-	for index, ch := range name {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case '!':
-			if depth == 0 && index > 0 && index < len(name)-1 {
-				return name[:index], name[index+1:], true
-			}
-		}
+	errorType, ok, isUnion := typ.ErrorUnionParts(name)
+	if !isUnion || errorType == "" {
+		return "", "", false
 	}
-	return "", "", false
+	return errorType, ok, true
 }
 
 // sortedModuleUnits returns modules in deterministic path order.

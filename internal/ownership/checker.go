@@ -5368,15 +5368,7 @@ func errorUnionElement(typeName string) (string, bool) {
 
 // errorUnionParts extracts error and success types from !T or Error!T.
 func errorUnionParts(typeName string) (string, string, bool) {
-	if len(typeName) > 1 && typeName[0] == '!' {
-		return "", typeName[1:], true
-	}
-	for idx, ch := range typeName {
-		if ch == '!' && idx > 0 && idx < len(typeName)-1 {
-			return typeName[:idx], typeName[idx+1:], true
-		}
-	}
-	return "", "", false
+	return typ.ErrorUnionParts(typeName)
 }
 
 // returnTypeName returns void for functions without an explicit return type.

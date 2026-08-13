@@ -194,12 +194,5 @@ func errorUnionSuccessType(result string) (string, bool) {
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
 func errorUnionParts(result string) (string, string, bool) {
-	if strings.HasPrefix(result, "!") && len(result) > 1 {
-		return "", strings.TrimPrefix(result, "!"), true
-	}
-	idx := strings.Index(result, "!")
-	if idx <= 0 || idx == len(result)-1 {
-		return "", "", false
-	}
-	return result[:idx], result[idx+1:], true
+	return typ.ErrorUnionParts(result)
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Emit formats a typed SSA IR module as LLVM IR.
@@ -621,10 +622,18 @@ func (e *emitter) unionPayloadCapacity(name string) (int, error) {
 }
 
 // collectErrorUnionName records concrete !T / Error!T type names.
-func (e *emitter) collectErrorUnionName(seen map[string]bool, typ string) {
-	if _, ok := errorUnionSuccessType(typ); ok {
-		seen[typ] = true
+func (e *emitter) collectErrorUnionName(seen map[string]bool, name string) {
+	parsed, err := typ.Parse(name)
+	if err != nil {
+		return
 	}
+	// An error union nested in a static argument needs its named type too:
+	// `std::array::Array<!i64>` stores `!i64`, so the element has to be sized.
+	typ.Walk(parsed, func(node typ.Type) {
+		if _, ok := node.(*typ.ErrorUnion); ok {
+			seen[node.String()] = true
+		}
+	})
 }
 
 // writeFunction writes one LLVM function.

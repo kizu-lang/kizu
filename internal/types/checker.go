@@ -1228,36 +1228,51 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	return strings.Join(args, ", ")
 }
 
-// parseType validates a source-level type name.
+// parseType validates a source-level type name. The spelling is read once, so
+// which type this is comes from its structure rather than from where a byte
+// happens to sit: the `!` in `Array<!i64>` belongs to the argument, not to this
+// type.
 func (c *Checker) parseType(name string) (Type, error) {
-	if strings.HasPrefix(name, "!") {
-		return c.parseErrorUnionType(name)
+	parsed, err := typ.Parse(name)
+	if err != nil {
+		return "", errorf("type error: unknown type `%s`", name)
 	}
-	if strings.HasPrefix(name, "&") {
-		return c.parseBorrowType(name)
-	}
-	if errorType, successType, ok := typedErrorUnionParts(name); ok {
-		if _, err := c.parseType(errorType); err != nil {
-			return "", err
+	switch node := parsed.(type) {
+	case *typ.ErrorUnion:
+		return c.parseErrorUnionType(name, node)
+	case *typ.Borrow:
+		return c.parseWrappingType(name, node.Elem)
+	case *typ.Slice:
+		return c.parseWrappingType(name, node.Elem)
+	case *typ.Optional:
+		return c.parseNullableType(name, node.Elem)
+	case *typ.Dyn:
+		return c.parseDynType(name, node.Contract)
+	case *typ.Name:
+		if len(node.Args) == 0 {
+			return c.parseNamedType(name)
 		}
-		if _, err := c.parseType(successType); err != nil {
-			return "", err
-		}
-		return Type(name), nil
+		return c.parseGenericType(name, strings.Join(node.Path, "::"), argTexts(node.Args))
+	default:
+		return "", errorf("type error: unknown type `%s`", name)
 	}
-	if strings.HasPrefix(name, "[]") {
-		return c.parseSliceType(name)
+}
+
+// argTexts returns the spelling of each static argument.
+func argTexts(args []typ.Type) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		out = append(out, arg.String())
 	}
-	if strings.HasPrefix(name, "?") {
-		return c.parseNullableType(name)
+	return out
+}
+
+// parseWrappingType validates the element of a type that wraps one.
+func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
+	if _, err := c.parseType(elem.String()); err != nil {
+		return "", err
 	}
-	if strings.HasPrefix(name, "dyn ") {
-		return c.parseDynType(name)
-	}
-	if base, arg, ok := splitGenericType(name); ok {
-		return c.parseGenericType(name, base, arg)
-	}
-	return c.parseNamedType(name)
+	return Type(name), nil
 }
 
 // parseNamedType validates primitive, declared, and type-parameter names.
@@ -1276,49 +1291,18 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 	return typ, nil
 }
 
-// parseBorrowType validates local borrow type spellings used by std wrappers.
-func (c *Checker) parseBorrowType(name string) (Type, error) {
-	inner := strings.TrimPrefix(name, "&")
-	inner = strings.TrimPrefix(inner, "var ")
-	if inner == "" {
-		return "", errorf("type error: & must wrap a type")
+// parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
+func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
+	if node.Err != nil {
+		if _, err := c.parseType(node.Err.String()); err != nil {
+			return "", err
+		}
 	}
-	if _, err := c.parseType(inner); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseSliceType validates slice view type spellings.
-func (c *Checker) parseSliceType(name string) (Type, error) {
-	rest := strings.TrimPrefix(name, "[]")
-	if rest == "" {
-		return "", errorf("type error: [] must wrap a type")
-	}
-	if _, err := c.parseType(rest); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseErrorUnionType validates Zig-style !T error union types.
-func (c *Checker) parseErrorUnionType(name string) (Type, error) {
-	inner := strings.TrimPrefix(name, "!")
-	if inner == "" {
-		return "", errorf("type error: ! must wrap a type")
-	}
-	if _, err := c.parseType(inner); err != nil {
-		return "", err
-	}
-	return Type(name), nil
+	return c.parseWrappingType(name, node.Ok)
 }
 
 // parseGenericType validates supported generic-like type spellings.
-func (c *Checker) parseGenericType(name string, base string, arg string) (Type, error) {
-	args, ok := splitGenericArgs(arg)
-	if !ok {
-		return "", errorf("type error: invalid static arguments for `%s`", base)
-	}
+func (c *Checker) parseGenericType(name string, base string, args []string) (Type, error) {
 	switch base {
 	case "std::mem::Box":
 		arg, err := singleGenericArg(base, args)
@@ -1379,11 +1363,8 @@ func (c *Checker) parseUserGenericType(
 }
 
 // parseDynType validates dynamic contract object type spellings.
-func (c *Checker) parseDynType(name string) (Type, error) {
-	contractName := strings.TrimPrefix(name, "dyn ")
-	if contractName == "" {
-		return "", errorf("type error: dyn must name a contract")
-	}
+func (c *Checker) parseDynType(name string, contract typ.Type) (Type, error) {
+	contractName := contract.String()
 	if c.contracts[contractName] == nil {
 		return "", errorf("type error: unknown contract `%s`", contractName)
 	}
@@ -1419,13 +1400,12 @@ func isKnownSingleArgGeneric(base string) bool {
 }
 
 // parseNullableType validates nullable pointer types.
-func (c *Checker) parseNullableType(name string) (Type, error) {
-	inner := strings.TrimPrefix(name, "?")
-	base, arg, ok := splitGenericType(inner)
-	if !ok || base != "ptr" {
+func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
+	inner, ok := elem.(*typ.Name)
+	if !ok || len(inner.Path) != 1 || inner.Path[0] != "ptr" || len(inner.Args) != 1 {
 		return "", errorf("type error: nullable type `%s` must wrap ptr<T>", name)
 	}
-	if _, err := c.parsePointerType(inner, arg); err != nil {
+	if _, err := c.parsePointerType(elem.String(), inner.Args[0].String()); err != nil {
 		return "", err
 	}
 	return Type(name), nil
@@ -7512,21 +7492,17 @@ func errorUnionElement(typ Type) (string, bool) {
 }
 
 // errorUnionParts extracts error and success types from !T or Error!T.
-func errorUnionParts(typ Type) (string, string, bool) {
-	name := string(typ)
-	if strings.HasPrefix(name, "!") && len(name) > 1 {
-		return "", strings.TrimPrefix(name, "!"), true
-	}
-	return typedErrorUnionParts(name)
+func errorUnionParts(union Type) (string, string, bool) {
+	return typ.ErrorUnionParts(string(union))
 }
 
 // typedErrorUnionParts extracts Error and T from Error!T.
 func typedErrorUnionParts(name string) (string, string, bool) {
-	idx := strings.Index(name, "!")
-	if idx <= 0 || idx == len(name)-1 {
+	errorType, ok, isUnion := typ.ErrorUnionParts(name)
+	if !isUnion || errorType == "" {
 		return "", "", false
 	}
-	return name[:idx], name[idx+1:], true
+	return errorType, ok, true
 }
 
 // checkPrintCall validates the print builtin.

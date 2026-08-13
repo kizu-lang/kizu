@@ -183,6 +183,54 @@ func SplitArgs(text string) ([]string, error) {
 	return parts, nil
 }
 
+// Walk calls visit for t and for every type inside it, outermost first. A
+// caller that needs the types a spelling mentions -- not just the one it names
+// -- asks here rather than searching the text for a punctuation mark.
+func Walk(t Type, visit func(Type)) {
+	visit(t)
+	switch node := t.(type) {
+	case *Name:
+		for _, arg := range node.Args {
+			Walk(arg, visit)
+		}
+	case *Slice:
+		Walk(node.Elem, visit)
+	case *Borrow:
+		Walk(node.Elem, visit)
+	case *Optional:
+		Walk(node.Elem, visit)
+	case *Dyn:
+		Walk(node.Contract, visit)
+	case *Const:
+		Walk(node.Elem, visit)
+	case *ErrorUnion:
+		if node.Err != nil {
+			Walk(node.Err, visit)
+		}
+		Walk(node.Ok, visit)
+	}
+}
+
+// ErrorUnionParts returns the error type and T of an error union, and reports
+// whether text is one. `!T` gives an empty error type. The answer comes from
+// the structure, so the `!` inside `Array<!i64>` does not make that type an
+// error union.
+func ErrorUnionParts(text string) (string, string, bool) {
+	parsed, err := Parse(text)
+	if err != nil {
+		return "", "", false
+	}
+	node, ok := parsed.(*ErrorUnion)
+	if !ok {
+		return "", "", false
+	}
+	errorType := ""
+	if node.Err != nil {
+		errorType = node.Err.String()
+	}
+	return errorType, node.Ok.String(), true
+}
+
 // SplitApply separates `Base` and `Args` in a `Base<Args>` spelling, without
 // looking inside either. It is the one place that knows the closing `>` of a
 // name is its last byte.

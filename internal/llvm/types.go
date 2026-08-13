@@ -1,6 +1,10 @@
 package llvm
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
+)
 
 // localName turns Kizu SSA names into valid named LLVM local identifiers.
 func localName(name string) string {
@@ -237,15 +241,8 @@ func errorUnionSuccessType(typ string) (string, bool) {
 }
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
-func errorUnionParts(typ string) (string, string, bool) {
-	if strings.HasPrefix(typ, "!") && len(typ) > 1 {
-		return "", strings.TrimPrefix(typ, "!"), true
-	}
-	idx := strings.Index(typ, "!")
-	if idx <= 0 || idx == len(typ)-1 {
-		return "", "", false
-	}
-	return typ[:idx], typ[idx+1:], true
+func errorUnionParts(name string) (string, string, bool) {
+	return typ.ErrorUnionParts(name)
 }
 
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.
