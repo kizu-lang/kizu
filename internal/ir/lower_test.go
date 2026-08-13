@@ -179,7 +179,7 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 func TestLowerErrDeferRunsOnlyOnErrorReturn(t *testing.T) {
 	errorReturn := lowerSource(t, `struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     return error("boom");
@@ -192,7 +192,7 @@ fn main() {}`)
 
 	successReturn := lowerSource(t, `struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     return users;

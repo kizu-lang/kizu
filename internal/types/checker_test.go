@@ -1323,7 +1323,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
     name: []u8,
 }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
@@ -1340,7 +1340,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
     name: []u8,
 }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
@@ -1416,7 +1416,7 @@ func TestCheckAcceptsErrDeferredCleanup(t *testing.T) {
     name: []u8,
 }
 fn build() -> !std::arena::Arena<User> {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     return users;
@@ -1466,7 +1466,7 @@ func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 			name: "arg",
 			source: `struct User { name: []u8 }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     users.deinit(1);
 }`,
@@ -1477,7 +1477,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     let registry = Registry { users: users };
     registry.users.deinit();
@@ -1499,7 +1499,7 @@ impl Registry {
     }
 }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     let registry = Registry { users: users };
     registry.deinit();
@@ -1798,7 +1798,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 			name: "handle is not pointer",
 			source: `struct User { name: []u8 }
 fn main() {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     let p = cast<ptr<User>>(alice);

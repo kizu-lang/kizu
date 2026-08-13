@@ -3428,10 +3428,27 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if err := c.rejectReservedBuiltin(name); err != nil {
+		return "", true, err
+	}
 	if typ, ok, err := c.checkStdCoreBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
 	return c.checkStdRuntimeBuiltin(name, args, env, unsafe)
+}
+
+// rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
+// std. Being a primitive is what reserves it, so a new one is closed the moment
+// it joins the registry rather than when someone remembers to guard its family.
+func (c *Checker) rejectReservedBuiltin(name string) error {
+	if c.currentStd {
+		return nil
+	}
+	replacement, ok := stdprim.ReservedBuiltin(name)
+	if !ok {
+		return nil
+	}
+	return errorf("type error: `%s` is reserved; use %s", name, replacement)
 }
 
 // checkStdCoreBuiltin validates pure, filesystem, I/O, and process std calls.
@@ -3629,9 +3646,6 @@ func (c *Checker) checkTaskBuiltin(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
-		return "", true, errorf("type error: `%s` is reserved; use std::task", name)
-	}
 	switch name {
 	case "std.builtin.task_group":
 		return c.checkTaskGroup(args, env, unsafe)
@@ -3658,9 +3672,6 @@ func (c *Checker) checkBuiltinTaskTypeApply(
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.task_parallel_for", "std.builtin.task_parallel_map":
-		if !c.currentStd {
-			return "", true, errorf("type error: `%s` is reserved; use std::task", name)
-		}
 	}
 	switch name {
 	case "std.builtin.task_parallel_for":
@@ -3943,6 +3954,19 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeCaps, 
 	return nil
 }
 
+// typeApplyTarget resolves the callee and static arguments of a `<...>` call,
+// and closes the reserved namespace before any of them is looked at.
+func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return "", "", errorf("type error: unsupported type application `%s`", expr.String())
+	}
+	if err := c.rejectReservedBuiltin(name); err != nil {
+		return "", "", err
+	}
+	return name, c.instantiateTypeArgText(expr.TypeArg), nil
+}
+
 // checkTypeApplyCallExpr validates typed std constructor calls.
 func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
@@ -3950,11 +3974,10 @@ func (c *Checker) checkTypeApplyCallExpr(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, error) {
-	name, ok := qualifiedName(expr.Callee)
-	if !ok {
-		return "", errorf("type error: unsupported type application `%s`", expr.String())
+	name, typeArg, err := c.typeApplyTarget(expr)
+	if err != nil {
+		return "", err
 	}
-	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if name == "ptr_from_int" {
 		return c.checkPtrFromInt(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
@@ -4065,9 +4088,6 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	if name != "std.builtin.test_fail_equal" {
 		return "", false, nil
 	}
-	if !c.currentStd {
-		return "", true, errorf("type error: `%s` is reserved; use std::testing", name)
-	}
 	arg, err := c.parseType(typeArg)
 	if err != nil {
 		return "", true, err
@@ -4086,9 +4106,6 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.channel":
-		if !c.currentStd {
-			return "", true, errorf("type error: `%s` is reserved; use std::channel", name)
-		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
@@ -4096,9 +4113,6 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		typ, err := checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
 		return typ, true, err
 	case "std.builtin.atomic":
-		if !c.currentStd {
-			return "", true, errorf("type error: `%s` is reserved; use std::atomic", name)
-		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
@@ -4106,9 +4120,6 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
 		return typ, true, err
 	case "std.builtin.mutex":
-		if !c.currentStd {
-			return "", true, errorf("type error: `%s` is reserved; use std::sync", name)
-		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
@@ -4116,9 +4127,6 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, true, err
 	case "std.builtin.array":
-		if !c.currentStd {
-			return "", true, errorf("type error: `%s` is reserved; use std::array", name)
-		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
@@ -4212,9 +4220,6 @@ func (c *Checker) checkBoxConstructor(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if !c.currentStd {
-		return "", true, errorf("type error: `std.builtin.box` is reserved; use std::mem::Box")
-	}
 	if len(args) != 2 {
 		return "", true, errorf("type error: `std::mem::Box<%s>` expects allocator and value",
 			elem)
@@ -4372,9 +4377,6 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if !c.currentStd {
-		return "", true, errorf("type error: `%s` is reserved", name)
-	}
 	if len(args) == 0 {
 		return "", true, errorf("type error: `%s` expects receiver", name)
 	}
@@ -4457,9 +4459,6 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	}
 	if name != "std.builtin.map" {
 		return "", false, nil
-	}
-	if !c.currentStd {
-		return "", true, errorf("type error: `%s` is reserved; use std::map", name)
 	}
 	mapArgs, err := c.checkedMapArgsAllowTypeParams(typeArg)
 	if err != nil {
@@ -4569,9 +4568,6 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 ) (Type, bool, error) {
 	if name != "std.builtin.thread_scoped" {
 		return "", false, nil
-	}
-	if !c.currentStd {
-		return "", true, errorf("type error: `%s` is reserved; use std::thread", name)
 	}
 	staticArgs, ok := splitGenericArgs(typeArg)
 	if !ok || len(staticArgs) != 2 {

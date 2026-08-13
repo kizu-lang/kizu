@@ -1,0 +1,83 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/kizu-lang/kizu/internal/stdprim"
+)
+
+// builtinCallPattern finds the `std::builtin::` calls std source makes.
+var builtinCallPattern = regexp.MustCompile(`std::builtin::([a-z_0-9]+)`)
+
+// TestReservedBuiltinsAreClosedToUserCode keeps the `std::builtin::` namespace
+// shut. A primitive reachable from user code hands out what std exists to
+// control: `std::builtin::io_blocking()` once returned an Io capability to any
+// program that asked for one, because the guard was written per family and that
+// family never got one.
+func TestReservedBuiltinsAreClosedToUserCode(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range stdprim.BuiltinNames() {
+		call := "std::" + strings.Join(strings.Split(strings.TrimPrefix(name, "std."), "."), "::")
+		source := "fn main() -> void {\n    print(1);\n    " + call + "();\n}\n"
+		path := filepath.Join(dir, "reserved.kizu")
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		raw, err := kizuCommand("check", path).CombinedOutput()
+		out := string(raw)
+		if err == nil {
+			t.Errorf("%s: user code accepted, output %q", call, out)
+			continue
+		}
+		if !strings.Contains(out, "is reserved") {
+			t.Errorf("%s: rejected for the wrong reason: %s", call, firstLineOf(out))
+		}
+	}
+}
+
+// TestReservedBuiltinRegistryCoversStd keeps the registry ahead of std. A
+// primitive std calls but the registry does not name is one nothing closes.
+func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
+	known := map[string]bool{}
+	for _, name := range stdprim.BuiltinNames() {
+		known[name] = true
+	}
+	missing := map[string]bool{}
+	for _, path := range kizuSourcePaths(t, "../../std") {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
+			name := "std.builtin." + match[1]
+			if !known[name] {
+				missing[name] = true
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	names := make([]string, 0, len(missing))
+	for name := range missing {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	t.Fatalf("std calls primitives the reserved registry does not name: %s",
+		strings.Join(names, ", "))
+}
+
+// firstLineOf trims command output to its first line.
+func firstLineOf(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return line
+		}
+	}
+	return ""
+}
