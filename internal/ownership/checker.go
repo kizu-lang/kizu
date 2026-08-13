@@ -7,6 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Checker validates ownership and move rules for a parsed program.
@@ -43,7 +44,6 @@ type paramInfo struct {
 	typeName  string
 	borrow    bool
 	mutBorrow bool
-	comptime  bool
 }
 
 type binding struct {
@@ -112,7 +112,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -147,7 +147,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -190,7 +190,7 @@ func (c *Checker) collectUnions(program *ast.Program) {
 		}
 		variants := map[string]string{}
 		for _, variant := range unionDecl.Variants {
-			variants[variant.Name] = variant.Payload
+			variants[variant.Name] = typ.Text(variant.Payload)
 		}
 		c.unions[unionDecl.Name] = variants
 	}
@@ -256,12 +256,11 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		params = append(params, paramInfo{
-			typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
-			comptime: param.Comptime,
+			typeName: typ.Text(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
 		})
 	}
 	return &functionInfo{
-		name: name, params: params, returnType: fn.ReturnType,
+		name: name, params: params, returnType: typ.Text(fn.ReturnType),
 		returnBorrow: fn.ReturnBorrow, decl: fn,
 	}
 }
@@ -282,6 +281,14 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return nil
 	}
 	env := newScope(nil)
+	// A `<...>` entry that declares a type is a compile-time value, in scope
+	// for the body like a parameter but never moved or borrowed.
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
 		value.borrowedParam = fn.params[idx].borrow
@@ -308,7 +315,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
 		Name:       "test " + strconv.Quote(decl.Name),
-		ReturnType: "!void",
+		ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 		Body:       decl.Body,
 	})
 	return c.checkFunction(fn)
@@ -340,7 +347,7 @@ func (c *Checker) seedMethodParamProvenance(fn *functionInfo, env *scope) {
 // checkImpl validates concrete impl method bodies after signatures are collected.
 func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
 	for _, method := range decl.Methods {
-		if len(method.TypeParams) > 0 {
+		if len(method.TypeParamNames()) > 0 {
 			continue
 		}
 		fn := c.implMethod(decl.TypeName, method.Name)
@@ -1436,7 +1443,7 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 	if _, err := c.readExpr(expr.Value, env); err != nil {
 		return "", err
 	}
-	return expr.TargetType, nil
+	return typ.Text(expr.TargetType), nil
 }
 
 // moveExpr checks an expression and consumes a non-copy identifier when present.
@@ -1745,7 +1752,7 @@ func (c *Checker) checkUserCall(
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
 	}
-	if len(fn.decl.TypeParams) > 0 {
+	if len(fn.decl.TypeParamNames()) > 0 {
 		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
@@ -1758,13 +1765,7 @@ func (c *Checker) checkUserCall(
 	}
 	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
-		if fn.params[idx].typeName == "Function" && fn.params[idx].comptime {
-			if err := c.checkFunctionNameParam(name, fn, idx, arg); err != nil {
-				return "", err
-			}
-		} else if fn.params[idx].comptime {
-			_, err = c.readExpr(arg, env)
-		} else if fn.params[idx].borrow {
+		if fn.params[idx].borrow {
 			if fn.params[idx].mutBorrow {
 				continue
 			}
@@ -1779,34 +1780,6 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
-}
-
-// checkFunctionNameParam validates a comptime Function argument without moving locals.
-func (c *Checker) checkFunctionNameParam(
-	name string,
-	fn *functionInfo,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("move error: undefined function `%s`", target.Name)
-	}
-	if !strings.HasPrefix(name, "std.task.") {
-		return nil
-	}
-	paramName := ""
-	if fn.decl != nil && idx < len(fn.decl.Params) {
-		paramName = fn.decl.Params[idx].Name
-	}
-	if paramName == "worker" {
-		return nil
-	}
-	return nil
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -1841,7 +1814,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if len(fn.decl.TypeParams) > 0 {
+	if len(fn.decl.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env)
@@ -1858,10 +1831,30 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if err := c.rejectReservedBuiltin(name); err != nil {
+		return "", true, err
+	}
 	if typ, ok, err := c.checkQualifiedStdCoreBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	return c.checkQualifiedStdRuntimeBuiltin(name, args, env)
+}
+
+// rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
+// std. The type checker rejects these first in a full run; this keeps the rule
+// true of this checker on its own, which is how its own tests read it.
+func (c *Checker) rejectReservedBuiltin(name string) error {
+	if !strings.HasPrefix(name, "std.builtin.") {
+		return nil
+	}
+	replacement, known := stdprim.ReservedBuiltin(name)
+	if !known {
+		return errorf("move error: `%s` is not a primitive", name)
+	}
+	if c.currentStd {
+		return nil
+	}
+	return errorf("move error: `%s` is reserved; use %s", name, replacement)
 }
 
 // checkQualifiedStdCoreBuiltin validates pure, fs, I/O, and process std calls.
@@ -2052,9 +2045,6 @@ func (c *Checker) checkTaskBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
-		return "", true, errorf("move error: `%s` is reserved; use std::task", name)
-	}
 	switch name {
 	case "std.builtin.task_group":
 		return c.checkTaskGroup(args, env)
@@ -2068,10 +2058,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkPartitionMut(args, env)
 	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env)
-	case "std.builtin.task_parallel_for":
-		return c.checkParallelFor(args, env)
-	case "std.builtin.task_parallel_map":
-		return c.checkParallelMap(args, env)
+
 	default:
 		return "", false, nil
 	}
@@ -2332,17 +2319,29 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	}
 }
 
+// typeApplyTarget resolves the callee and static arguments of a `<...>` call,
+// and closes the reserved namespace before any of them is looked at.
+func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return "", "", errorf("move error: unsupported type application `%s`", expr.String())
+	}
+	if err := c.rejectReservedBuiltin(name); err != nil {
+		return "", "", err
+	}
+	return name, c.instantiateTypeArgText(expr.TypeArg), nil
+}
+
 // checkTypeApplyCallExpr validates typed std constructor ownership effects.
 func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	name, ok := qualifiedName(expr.Callee)
-	if !ok {
-		return "", errorf("move error: unsupported type application `%s`", expr.String())
+	name, typeArg, err := c.typeApplyTarget(expr)
+	if err != nil {
+		return "", err
 	}
-	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
@@ -2353,6 +2352,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinMapTypeApply(name, typeArg, args, env); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkBuiltinTaskTypeApply(
+		name, typeArg, args, env,
+	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
@@ -2424,9 +2428,6 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	if name != "std.builtin.test_fail_equal" {
 		return "", false, nil
 	}
-	if !c.currentStd {
-		return "", true, errorf("move error: `%s` is reserved; use std::testing", name)
-	}
 	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
 	return typ, true, err
 }
@@ -2440,24 +2441,15 @@ func (c *Checker) checkBuiltinChannelSyncTypeApply(
 ) (string, bool, error) {
 	switch name {
 	case "std.builtin.channel":
-		if !c.currentStd {
-			return "", true, errorf("move error: `%s` is reserved; use std::channel", name)
-		}
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return fmt.Sprintf("Channel<%s>", typeArg), true, nil
 	case "std.builtin.atomic":
-		if !c.currentStd {
-			return "", true, errorf("move error: `%s` is reserved; use std::atomic", name)
-		}
 		typ, _, err := c.checkAtomic(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.mutex":
-		if !c.currentStd {
-			return "", true, errorf("move error: `%s` is reserved; use std::sync", name)
-		}
 		typ, _, err := c.checkMutex(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.channel_send", "std.builtin.channel_recv":
@@ -2507,9 +2499,6 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 ) (string, bool, error) {
 	switch name {
 	case "std.builtin.array":
-		if !c.currentStd {
-			return "", true, errorf("move error: `%s` is reserved; use std::array", name)
-		}
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
@@ -2532,9 +2521,6 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 ) (string, bool, error) {
 	switch name {
 	case "std.builtin.box":
-		if !c.currentStd {
-			return "", true, errorf("move error: `%s` is reserved; use std::mem", name)
-		}
 		typ, err := c.checkBoxConstructor(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.box_borrow", "std.builtin.box_borrow_mut", "std.builtin.box_deinit":
@@ -2663,9 +2649,6 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if !c.currentStd {
-		return "", true, errorf("move error: `%s` is reserved", name)
-	}
 	if len(args) == 0 {
 		return "", true, errorf("move error: `%s` expects receiver", name)
 	}
@@ -2736,9 +2719,6 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	}
 	if name != "std.builtin.map" {
 		return "", false, nil
-	}
-	if !c.currentStd {
-		return "", true, errorf("move error: `%s` is reserved; use std::map", name)
 	}
 	typ, err := c.checkMapConstructorAllowTypeParams(typeArg, args, env)
 	return typ, true, err
@@ -2831,6 +2811,33 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	return nil
 }
 
+// checkBuiltinTaskTypeApply validates the task primitives whose worker arrives
+// as a static argument.
+func (c *Checker) checkBuiltinTaskTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.task_parallel_for", "std.builtin.task_parallel_map":
+	}
+	switch name {
+	case "std.builtin.task_parallel_for":
+		return c.checkParallelFor(typeArg, args, env)
+	case "std.builtin.task_parallel_map":
+		return c.checkParallelMap(typeArg, args, env)
+	default:
+		return "", false, nil
+	}
+}
+
+// forwardsWorker reports whether this name is the wrapper's own static value.
+func (c *Checker) forwardsWorker(target string, env *scope) bool {
+	value, ok := env.lookup(target)
+	return ok && value != nil && value.typeName == "Function"
+}
+
 // checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
 func (c *Checker) checkBuiltinThreadScopedTypeApply(
 	name string,
@@ -2841,10 +2848,12 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 	if name != "std.builtin.thread_scoped" {
 		return "", false, nil
 	}
-	if !c.currentStd {
-		return "", true, errorf("move error: `%s` is reserved; use std::thread", name)
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != 2 {
+		return "", true, errorf(
+			"thread error: `std::thread::scoped` expects a type and a function name")
 	}
-	typ, err := c.checkThreadScopedTyped(typeArg, args, env)
+	typ, err := c.checkThreadScopedTyped(strings.TrimSpace(staticArgs[0]), args, env)
 	return typ, true, err
 }
 
@@ -2879,23 +2888,31 @@ func (c *Checker) checkGenericUserTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	fn := c.functions[name]
-	if fn == nil || len(fn.decl.TypeParams) == 0 {
+	if fn == nil || len(fn.decl.StaticParams) == 0 {
 		return "", false, nil
 	}
 	if len(args) != len(fn.params) {
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
-	typeArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(typeArgs) != len(fn.decl.TypeParams) {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.decl.StaticParams) {
 		return "", true, errorf("move error: `%s` expects %d static arguments",
-			name, len(fn.decl.TypeParams))
+			name, len(fn.decl.StaticParams))
+	}
+	// Only the entries that declare types take part in substitution; a
+	// compile-time value carries no ownership.
+	typeArgs := []string{}
+	for idx, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			typeArgs = append(typeArgs, staticArgs[idx])
+		}
 	}
 	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
 		return "", true, err
 	}
 	subst := map[string]string{}
-	for idx, param := range fn.decl.TypeParams {
+	for idx, param := range fn.decl.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
 	for idx, arg := range args {
@@ -2912,6 +2929,14 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
 	env := newScope(nil)
+	// A `<...>` entry that declares a type is a compile-time value, in scope
+	// for the body like a parameter but never moved or borrowed.
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
 		value.borrowedParam = fn.params[idx].borrow
@@ -2970,9 +2995,6 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	if want == "Function" && fn.params[idx].comptime {
-		return c.checkGenericFunctionNameArg(name, fn, subst, idx, arg)
-	}
 	if name == "std.sync.Mutex" {
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return err
@@ -3003,7 +3025,9 @@ func (c *Checker) checkGenericUserMoveArg(
 	arg ast.Expression,
 	env *scope,
 ) (bool, error) {
-	if name == "std.thread.scoped" && idx == 2 {
+	// The worker moved to the static list, so the value crossing the boundary
+	// is now the second runtime argument.
+	if name == "std.thread.scoped" && idx == 1 {
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return true, err
 		}
@@ -3032,38 +3056,6 @@ func (c *Checker) checkMovedGenericArg(
 			idx+1, name, want, got)
 	}
 	return nil
-}
-
-// checkGenericFunctionNameArg validates Function args in generic std wrappers.
-func (c *Checker) checkGenericFunctionNameArg(
-	name string,
-	fn *functionInfo,
-	subst map[string]string,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("move error: undefined function `%s`", target.Name)
-	}
-	if name == "std.thread.scoped" && ownershipFunctionParamName(fn, idx) == "worker" {
-		return c.checkThreadScopedWorker(
-			substituteOwnershipType(returnTypeName(fn), subst), target.Name, targetFn,
-		)
-	}
-	return nil
-}
-
-// ownershipFunctionParamName returns the source parameter name when available.
-func ownershipFunctionParamName(fn *functionInfo, idx int) string {
-	if fn.decl == nil || idx >= len(fn.decl.Params) {
-		return ""
-	}
-	return fn.decl.Params[idx].Name
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
@@ -4681,13 +4673,6 @@ func (c *Checker) checkImplMethodArg(
 	env *scope,
 ) error {
 	param := method.params[paramIndex]
-	if param.typeName == "Function" && param.comptime {
-		return c.checkFunctionNameParam(method.name, method, paramIndex, arg)
-	}
-	if param.comptime {
-		_, err := c.readExpr(arg, env)
-		return err
-	}
 	if param.borrow {
 		if param.mutBorrow {
 			return nil
@@ -5382,15 +5367,7 @@ func errorUnionElement(typeName string) (string, bool) {
 
 // errorUnionParts extracts error and success types from !T or Error!T.
 func errorUnionParts(typeName string) (string, string, bool) {
-	if len(typeName) > 1 && typeName[0] == '!' {
-		return "", typeName[1:], true
-	}
-	for idx, ch := range typeName {
-		if ch == '!' && idx > 0 && idx < len(typeName)-1 {
-			return typeName[:idx], typeName[idx+1:], true
-		}
-	}
-	return "", "", false
+	return typ.ErrorUnionParts(typeName)
 }
 
 // returnTypeName returns void for functions without an explicit return type.
@@ -5403,24 +5380,11 @@ func returnTypeName(fn *functionInfo) string {
 
 // substituteSelfTypeName replaces only standalone Self segments in a type spelling.
 func substituteSelfTypeName(name string, typeName string) string {
-	var out strings.Builder
-	for idx := 0; idx < len(name); {
-		if strings.HasPrefix(name[idx:], "Self") &&
-			(idx == 0 || !isTypeIdentByte(name[idx-1])) &&
-			(idx+len("Self") == len(name) || !isTypeIdentByte(name[idx+len("Self")])) {
-			out.WriteString(typeName)
-			idx += len("Self")
-			continue
-		}
-		out.WriteByte(name[idx])
-		idx++
+	out, err := typ.SubstituteText(name, map[string]string{"Self": typeName})
+	if err != nil {
+		return name
 	}
-	return out.String()
-}
-
-// isTypeIdentByte reports whether b belongs to an identifier segment in a type name.
-func isTypeIdentByte(b byte) bool {
-	return b == '_' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
+	return out
 }
 
 // implMethod returns the concrete method signature for typeName when known.
@@ -5437,19 +5401,11 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	if replacement, ok := subst[typeName]; ok {
 		return replacement
 	}
-	out := typeName
-	for name, replacement := range subst {
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "!&var "+name, "!&var "+replacement)
-		out = strings.ReplaceAll(out, "!&"+name, "!&"+replacement)
-		out = strings.ReplaceAll(out, "&var "+name, "&var "+replacement)
-		out = strings.ReplaceAll(out, "&"+name, "&"+replacement)
-		out = strings.ReplaceAll(out, "<"+name+">", "<"+replacement+">")
-		out = strings.ReplaceAll(out, "<"+name+",", "<"+replacement+",")
-		out = strings.ReplaceAll(out, ", "+name+",", ", "+replacement+",")
-		out = strings.ReplaceAll(out, ", "+name+">", ", "+replacement+">")
+	out, err := typ.SubstituteText(typeName, subst)
+	if err != nil {
+		// A spelling this checker cannot parse is left as it stands; rejecting
+		// it belongs to the type checker and its diagnostic.
+		return typeName
 	}
 	return out
 }
@@ -5459,8 +5415,8 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	if len(c.typeArgValues) == 0 {
 		return typeArg
 	}
-	args, ok := splitGenericArgs(typeArg)
-	if !ok {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil {
 		return substituteOwnershipType(typeArg, c.typeArgValues)
 	}
 	for idx, arg := range args {
@@ -5517,12 +5473,12 @@ func sameOwnershipType(left string, right string) bool {
 // fieldOwnershipType returns the full field type, including borrow prefixes.
 func fieldOwnershipType(field ast.Field) string {
 	if !field.Borrow {
-		return field.TypeName
+		return typ.Text(field.TypeName)
 	}
 	if field.MutBorrow {
-		return "&var " + field.TypeName
+		return "&var " + typ.Text(field.TypeName)
 	}
-	return "&" + field.TypeName
+	return "&" + typ.Text(field.TypeName)
 }
 
 // explicitOwnershipBorrowType extracts &T and &var T spellings.
@@ -5695,43 +5651,46 @@ func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, b
 }
 
 // checkParallelFor validates ownership for a safe data-parallel call.
-func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 4 {
-		return "", true, errorf("parallel error: `std::task::parallel_for` expects 4 args")
+func (c *Checker) checkParallelFor(
+	worker string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if len(args) != 3 {
+		return "", true, errorf("parallel error: `std::task::parallel_for` expects 3 args")
 	}
 	for idx := 0; idx < 3; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
 			return "", true, err
 		}
 	}
-	target, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
-	if !ok {
-		return "", true, errorf("parallel error: `std::task::parallel_for` expects function name")
+	target := strings.TrimSpace(worker)
+	if c.forwardsWorker(target, env) {
+		return "!void", true, nil
 	}
 	fn := c.functions[target]
-	if fn == nil && !forwarded {
+	if fn == nil {
 		return "", true, errorf("parallel error: undefined function `%s`", target)
-	}
-	if forwarded {
-		return "!void", true, nil
 	}
 	return returnTypeName(fn), true, nil
 }
 
 // checkParallelMap validates ownership for disjoint partition output.
-func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 5 {
-		return "", true, errorf("parallel error: `std::task::parallel_map` expects 5 args")
+func (c *Checker) checkParallelMap(
+	worker string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if len(args) != 4 {
+		return "", true, errorf("parallel error: `std::task::parallel_map` expects 4 args")
 	}
 	for idx := 0; idx < 4; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
 			return "", true, err
 		}
 	}
-	target, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
-	if !ok {
-		return "", true, errorf("parallel error: `std::task::parallel_map` expects function name")
-	}
+	target := strings.TrimSpace(worker)
+	forwarded := c.forwardsWorker(target, env)
 	fn := c.functions[target]
 	if fn == nil && !forwarded {
 		return "", true, errorf("parallel error: undefined function `%s`", target)
@@ -5742,37 +5701,19 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 	return returnTypeName(fn), true, nil
 }
 
-// resolveFunctionNameArg accepts direct functions or comptime Function parameters.
-func (c *Checker) resolveFunctionNameArg(arg ast.Expression, env *scope) (string, bool, bool) {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return "", false, false
-	}
-	if value, ok := env.lookup(target.Name); ok && value.typeName == "Function" {
-		return target.Name, true, true
-	}
-	if c.functions[target.Name] != nil {
-		return target.Name, false, true
-	}
-	return target.Name, false, true
-}
-
 // checkThreadScopedTyped validates ownership for the std-only scoped primitive.
 func (c *Checker) checkThreadScopedTyped(
 	argType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if len(args) != 3 {
-		return "", errorf("thread error: `std::thread::scoped` expects io, function, and arg")
+	if len(args) != 2 {
+		return "", errorf("thread error: `std::thread::scoped` expects io and arg")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
-	if _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
-		return "", errorf("thread error: `std::thread::scoped` expects function name")
-	}
-	got, err := c.moveContextualExpr(args[2], argType, env)
+	got, err := c.moveContextualExpr(args[1], argType, env)
 	if err != nil {
 		return "", err
 	}
@@ -5781,24 +5722,6 @@ func (c *Checker) checkThreadScopedTyped(
 			argType, got)
 	}
 	return argType, nil
-}
-
-// checkThreadScopedWorker validates the one-argument scoped worker signature.
-func (c *Checker) checkThreadScopedWorker(
-	typeName string,
-	target string,
-	targetFn *functionInfo,
-) error {
-	if len(targetFn.params) != 1 || targetFn.params[0].typeName != typeName {
-		return errorf("thread error: thread worker `%s` must accept %s", target, typeName)
-	}
-	if targetFn.params[0].borrow || targetFn.params[0].mutBorrow {
-		return errorf("thread error: thread cannot capture borrow parameter `%s`", target)
-	}
-	if returnTypeName(targetFn) != typeName {
-		return errorf("thread error: thread worker `%s` must return %s", target, typeName)
-	}
-	return nil
 }
 
 // checkAtomic validates ownership for a seq_cst atomic constructor.
@@ -5997,55 +5920,16 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 
 // splitGenericType extracts base and raw arguments from base<args>.
 func splitGenericType(name string) (string, string, bool) {
-	for idx, ch := range name {
-		if ch != '<' {
-			continue
-		}
-		if len(name) < idx+3 || name[len(name)-1] != '>' {
-			return "", "", false
-		}
-		arg := name[idx+1 : len(name)-1]
-		if arg == "" {
-			return "", "", false
-		}
-		return name[:idx], arg, true
-	}
-	return "", "", false
+	return typ.SplitApply(name)
 }
 
 // splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
-	args := []string{}
-	start := 0
-	depth := 0
-	for idx, ch := range arg {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			if depth == 0 {
-				return nil, false
-			}
-			depth--
-		case ',':
-			if depth == 0 {
-				item := strings.TrimSpace(arg[start:idx])
-				if item == "" {
-					return nil, false
-				}
-				args = append(args, item)
-				start = idx + 1
-			}
-		}
-	}
-	if depth != 0 {
+	args, err := typ.SplitArgs(arg)
+	if err != nil {
 		return nil, false
 	}
-	item := strings.TrimSpace(arg[start:])
-	if item == "" {
-		return nil, false
-	}
-	return append(args, item), true
+	return args, true
 }
 
 // newScope creates a lexical ownership scope.

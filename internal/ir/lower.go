@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
@@ -33,13 +34,22 @@ type lowerer struct {
 	// the symbol they were given.
 	instantiated map[string]bool
 	pending      []genericInstance
+	// staticValues binds the compile-time values of the instance being lowered.
+	staticValues map[string]staticValue
 }
 
-// genericInstance is one generic function with its type parameters bound.
+// genericInstance is one generic function with its static parameters bound.
 type genericInstance struct {
 	decl     *ast.FunctionDecl
 	bindings map[string]string
+	values   map[string]staticValue
 	symbol   string
+}
+
+// staticValue is one compile-time value bound to a static parameter.
+type staticValue struct {
+	typ  string
+	text string
 }
 
 type loopContext struct {
@@ -68,16 +78,39 @@ func newLowerer(program *ast.Program) *lowerer {
 		signatures:   map[string]Signature{},
 		typeBindings: map[string]string{},
 		instantiated: map[string]bool{},
+		staticValues: map[string]staticValue{},
 	}
 }
 
-// resolveType binds a type parameter to the type argument in force, and leaves
-// every other name alone.
+// resolveType binds the type parameters in force, wherever they stand. A
+// parameter inside a static argument list counts: `std::array::Array<T>` is the
+// receiver of every Array method, and lowering it as written would leave the
+// instance carrying the parameter it was instantiated away from.
 func (l *lowerer) resolveType(name string) string {
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}
-	return name
+	if len(l.typeBindings) == 0 {
+		return name
+	}
+	resolved, err := typ.SubstituteText(name, l.typeBindings)
+	if err != nil {
+		return name
+	}
+	return resolved
+}
+
+// resolveTypeArgs binds the type parameters in force across a static argument
+// list. A list is not a type, so each entry is resolved on its own.
+func (l *lowerer) resolveTypeArgs(list string) string {
+	args := splitStaticArgs(list)
+	if len(args) == 0 {
+		return l.resolveType(list)
+	}
+	for idx, arg := range args {
+		args[idx] = l.resolveType(arg)
+	}
+	return strings.Join(args, ", ")
 }
 
 // requestGenericInstance records that one generic function is needed for one
@@ -89,55 +122,44 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 	if decl == nil {
 		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
-	args := splitTypeArgs(typeArgs)
-	if len(args) != len(decl.TypeParams) {
-		return "", "", fmt.Errorf("ir error: `%s` takes %d type parameters, got %d",
-			name, len(decl.TypeParams), len(args))
+	args, err := typ.SplitArgs(typeArgs)
+	if err != nil {
+		return "", "", fmt.Errorf("ir error: `%s`: %w", name, err)
+	}
+	if len(args) != len(decl.StaticParams) {
+		return "", "", fmt.Errorf("ir error: `%s` takes %d static parameters, got %d",
+			name, len(decl.StaticParams), len(args))
 	}
 	bindings := map[string]string{}
-	for i, param := range decl.TypeParams {
-		// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
-		// argument T is currently bound to, not the parameter name.
-		bindings[param] = l.resolveType(args[i])
+	values := map[string]staticValue{}
+	order := make([]string, 0, len(decl.StaticParams))
+	for i, param := range decl.StaticParams {
+		order = append(order, param.Name)
+		if param.IsType() {
+			// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
+			// argument T is currently bound to, not the parameter name.
+			bindings[param.Name] = l.resolveType(args[i])
+			continue
+		}
+		// A compile-time value reaches the body as a constant, or -- for a
+		// `Function` parameter -- as the name of the function to forward to.
+		values[param.Name] = staticValue{typ: typ.Text(param.Type), text: l.resolveStaticValue(args[i])}
 	}
-	symbol := genericInstanceName(name, decl.TypeParams, bindings)
+	symbol := genericInstanceName(name, order, bindings, values)
 	if !l.instantiated[symbol] {
 		l.instantiated[symbol] = true
-		l.pending = append(l.pending,
-			genericInstance{decl: decl, bindings: bindings, symbol: symbol})
+		l.pending = append(l.pending, genericInstance{
+			decl: decl, bindings: bindings, values: values, symbol: symbol,
+		})
 	}
-	ret := decl.ReturnType
-	if bound, ok := bindings[ret]; ok {
-		ret = bound
+	// The caller sees the instance's return type, not the declaration's: `!T`
+	// has to arrive as `!i64` or the call result carries a parameter that no
+	// longer exists.
+	ret := typ.Text(decl.ReturnType)
+	if resolved, err := typ.SubstituteText(ret, bindings); err == nil {
+		ret = resolved
 	}
 	return symbol, returnType(ret), nil
-}
-
-// splitTypeArgs splits a static argument list on the commas that separate its
-// arguments, leaving a nested spelling such as `Map<[]u8, i64>` in one piece.
-func splitTypeArgs(list string) []string {
-	args := []string{}
-	depth := 0
-	var current strings.Builder
-	for _, r := range list {
-		switch r {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				args = append(args, strings.TrimSpace(current.String()))
-				current.Reset()
-				continue
-			}
-		}
-		current.WriteRune(r)
-	}
-	if strings.TrimSpace(current.String()) != "" {
-		args = append(args, strings.TrimSpace(current.String()))
-	}
-	return args
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -147,8 +169,10 @@ func (l *lowerer) lowerPendingGenerics() error {
 		next := l.pending[0]
 		l.pending = l.pending[1:]
 		l.typeBindings = next.bindings
+		l.staticValues = next.values
 		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
 		l.typeBindings = map[string]string{}
+		l.staticValues = map[string]staticValue{}
 		if err != nil {
 			return err
 		}
@@ -161,7 +185,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
 	for _, decl := range l.program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok || len(fn.TypeParams) == 0 {
+		if !ok || len(fn.StaticParams) == 0 {
 			continue
 		}
 		if fn.Name == name {
@@ -171,14 +195,53 @@ func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
 	return nil
 }
 
-// genericInstanceName is the symbol one instantiation is lowered under. Type
+// genericInstanceName is the symbol one instantiation is lowered under. Static
 // parameters are listed in declaration order so the symbol is stable.
-func genericInstanceName(name string, params []string, bindings map[string]string) string {
-	args := make([]string, 0, len(params))
-	for _, param := range params {
-		args = append(args, bindings[param])
+func genericInstanceName(
+	name string,
+	order []string,
+	bindings map[string]string,
+	values map[string]staticValue,
+) string {
+	parts := make([]string, 0, len(order)+1)
+	parts = append(parts, name)
+	for _, param := range order {
+		if bound, ok := bindings[param]; ok {
+			parts = append(parts, encodeStaticArg(bound))
+			continue
+		}
+		parts = append(parts, encodeStaticArg(values[param].text))
 	}
-	return name + "<" + strings.Join(args, ", ") + ">"
+	return strings.Join(parts, ".")
+}
+
+// encodeStaticArg spells one static argument in the character set every backend
+// accepts, so a lowered name needs no further mangling on the way out. A byte a
+// source identifier can hold passes through, which keeps `i64` and `4096`
+// readable; every other byte is escaped, so two different arguments cannot
+// collide on one symbol.
+func encodeStaticArg(arg string) string {
+	var out strings.Builder
+	for _, ch := range []byte(arg) {
+		switch {
+		case ch == '_':
+			out.WriteString("__")
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
+			out.WriteByte(ch)
+		default:
+			fmt.Fprintf(&out, "_%02x", ch)
+		}
+	}
+	return out.String()
+}
+
+// resolveStaticValue forwards a static value through an outer binding, so a
+// generic passing its own static value on keeps the caller's argument.
+func (l *lowerer) resolveStaticValue(text string) string {
+	if bound, ok := l.staticValues[text]; ok {
+		return bound.text
+	}
+	return text
 }
 
 // lower performs declaration collection and function lowering.
@@ -192,7 +255,7 @@ func (l *lowerer) lower() (*Module, error) {
 		if fn.ExternABI != "" {
 			continue
 		}
-		if len(fn.TypeParams) > 0 {
+		if len(fn.StaticParams) > 0 {
 			continue
 		}
 		lowered, err := l.lowerFunction(fn)
@@ -207,7 +270,7 @@ func (l *lowerer) lower() (*Module, error) {
 			continue
 		}
 		for _, method := range impl.Methods {
-			if method.ExternABI != "" || len(method.TypeParams) > 0 {
+			if method.ExternABI != "" || len(method.StaticParams) > 0 {
 				continue
 			}
 			name := implMethodName(impl.TypeName, method.Name)
@@ -238,7 +301,7 @@ func (l *lowerer) lowerTests() error {
 		// A test body may `try`, so it lowers as a function returning `!void`.
 		fn := &ast.FunctionDecl{
 			Name:       TestFunctionName(test.Name),
-			ReturnType: "!void",
+			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 			Body:       test.Body,
 		}
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
@@ -305,7 +368,7 @@ func lowerUnion(decl *ast.UnionDecl) Union {
 	variants := map[string]UnionVariant{}
 	for index, variant := range decl.Variants {
 		variants[variant.Name] = UnionVariant{
-			Name: variant.Name, Index: index, Payload: variant.Payload,
+			Name: variant.Name, Index: index, Payload: typ.Text(variant.Payload),
 		}
 	}
 	return Union{Name: decl.Name, Variants: variants}
@@ -324,7 +387,7 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 func lowerStruct(decl *ast.StructDecl) Struct {
 	fields := make([]Field, 0, len(decl.Fields))
 	for _, field := range decl.Fields {
-		fields = append(fields, Field{Name: field.Name, Type: field.TypeName})
+		fields = append(fields, Field{Name: field.Name, Type: typ.Text(field.TypeName)})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
 }
@@ -335,7 +398,7 @@ func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
 	for _, param := range fn.Params {
 		params = append(params, l.paramIRTypeName(param))
 	}
-	return Signature{Params: params, Return: returnType(fn.ReturnType)}
+	return Signature{Params: params, Return: returnType(typ.Text(fn.ReturnType))}
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -345,7 +408,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 
 // lowerFunctionNamed lowers one function using an explicit IR symbol name.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	l.current = &Function{Name: name, Return: returnType(l.resolveType(fn.ReturnType))}
+	l.current = &Function{Name: name, Return: returnType(l.resolveType(typ.Text(fn.ReturnType)))}
 	l.env = map[string]Value{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -368,7 +431,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 
 // paramIRTypeName preserves borrow ABI only for unions that need pointer matching.
 func (l *lowerer) paramIRTypeName(param ast.Param) string {
-	typeName := l.resolveType(param.TypeName)
+	typeName := l.resolveType(typ.Text(param.TypeName))
 	if !param.Borrow && !param.MutBorrow {
 		return typeName
 	}
@@ -666,11 +729,17 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 	}
 }
 
-// lowerIdentExpr lowers a local binding or the built-in void value.
+// lowerIdentExpr lowers a local binding, a static value, or the built-in void.
 func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	value, ok := l.env[expr.Name]
 	if ok {
 		return value, nil
+	}
+	// A static value is known at this point, so it lowers to the constant it
+	// was instantiated with. `Function` is a name, not a value, and is read by
+	// the call that forwards it rather than here.
+	if static, ok := l.staticValues[expr.Name]; ok && static.typ != "Function" {
+		return l.emitConst(static.typ, static.text), nil
 	}
 	if expr.Name == "void" {
 		return Value{Name: "void", Type: "void"}, nil
@@ -684,7 +753,7 @@ func (l *lowerer) lowerCastExpr(expr *ast.CastExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("cast", expr.TargetType, []Value{value}, expr.TargetType), nil
+	return l.emit("cast", typ.Text(expr.TargetType), []Value{value}, typ.Text(expr.TargetType)), nil
 }
 
 // lowerPrefixExpr lowers unary operators.
@@ -779,6 +848,12 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if _, ok := runtimeBuiltinReturnType(qualified); ok {
 		return qualified, true
 	}
+	if _, ok := arrayPrimitives[qualified]; ok {
+		return qualified, true
+	}
+	if _, ok := mapPrimitives[qualified]; ok {
+		return qualified, true
+	}
 	return "", false
 }
 
@@ -820,6 +895,12 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	args, err := l.lowerArgs(rawArgs)
 	if err != nil {
 		return Value{}, err
+	}
+	if method, ok := arrayPrimitives[name]; ok {
+		return l.lowerArrayMethod(method, l.resolveType(typeArg), args)
+	}
+	if method, ok := mapPrimitives[name]; ok {
+		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
 	}
 	switch name {
 	case "std.testing.expect_equal", "std.builtin.test_fail_equal":
@@ -915,10 +996,12 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
 	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerArrayMethod(field.Name, elem, allArgs)
+		return l.lowerStdContainerMethod("std.array", field.Name, elem, allArgs,
+			func() (Value, error) { return l.lowerArrayMethod(field.Name, elem, allArgs) })
 	}
 	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerMapMethod(field.Name, valueType, allArgs)
+		return l.lowerStdContainerMethod("std.map", field.Name, valueType, allArgs,
+			func() (Value, error) { return l.lowerMapMethod(field.Name, valueType, allArgs) })
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -933,6 +1016,28 @@ func (l *lowerer) lowerMethodCallExpr(
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
 	}
+}
+
+// lowerStdContainerMethod runs the wrapper std declares for a container method,
+// so the body in std/src/*.kizu is what the call does rather than a description
+// of it. Array.truncate, Array.clear and Array.as_bytes have no declaration to
+// run, so those still lower straight to their instruction.
+func (l *lowerer) lowerStdContainerMethod(
+	module string,
+	method string,
+	typeArg string,
+	args []Value,
+	undeclared func() (Value, error),
+) (Value, error) {
+	name := module + "." + method
+	if l.genericDecl(name) == nil {
+		return undeclared()
+	}
+	symbol, ret, err := l.requestGenericInstance(name, typeArg)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call."+symbol, ret, args, ""), nil
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
@@ -951,6 +1056,47 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 		return Value{}, fmt.Errorf("ir error: unknown impl method `%s`", name)
 	}
 	return l.emit("call."+name, sig.Return, args, ""), nil
+}
+
+// arrayPrimitives maps a std::builtin Array primitive to the method it lowers
+// as. std/src/array.kizu forwards each method to one of these, and lowering the
+// forward is what makes that line the implementation rather than a description
+// of one.
+var arrayPrimitives = map[string]string{
+	"std.builtin.array_append":       "append",
+	"std.builtin.array_as_bytes":     "as_bytes",
+	"std.builtin.array_at":           "at",
+	"std.builtin.array_at_mut":       "at_mut",
+	"std.builtin.array_capacity":     "capacity",
+	"std.builtin.array_clear":        "clear",
+	"std.builtin.array_deinit":       "deinit",
+	"std.builtin.array_get":          "get",
+	"std.builtin.array_get_or_panic": "get_or_panic",
+	"std.builtin.array_len":          "len",
+	"std.builtin.array_pop":          "pop",
+	"std.builtin.array_pop_or_panic": "pop_or_panic",
+	"std.builtin.array_reserve":      "reserve",
+	"std.builtin.array_set":          "set",
+	"std.builtin.array_truncate":     "truncate",
+}
+
+// mapPrimitives maps a std::builtin Map primitive to the method it lowers as.
+var mapPrimitives = map[string]string{
+	"std.builtin.map_contains": "contains",
+	"std.builtin.map_deinit":   "deinit",
+	"std.builtin.map_get":      "get",
+	"std.builtin.map_insert":   "insert",
+	"std.builtin.map_len":      "len",
+}
+
+// mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map
+// primitive is applied to.
+func mapPrimitiveValueType(typeArg string) string {
+	args := splitStaticArgs(typeArg)
+	if len(args) != 2 {
+		return typeArg
+	}
+	return args[1]
 }
 
 // lowerMapMethod lowers runtime-backed std::map::Map<[]u8, V> methods.

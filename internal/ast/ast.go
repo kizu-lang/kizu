@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Position identifies a source position using one-based line and column values.
@@ -83,17 +85,50 @@ func (p *Program) String() string {
 
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
-	Name           string
-	Doc            string
-	TypeParams     []string
+	Name string
+	Doc  string
+	// StaticParams is the `<...>` list. An entry with no declared type is a
+	// type parameter; one with a type is a compile-time value. Both are
+	// compile-time, which is why they live here and not in Params.
+	StaticParams   []StaticParam
 	Params         []Param
-	ReturnType     string
+	ReturnType     typ.Type
 	ReturnBorrow   string
 	Body           *BlockStmt
 	RequiresUnsafe bool
 	ExternABI      string
 	Public         bool
 	Std            bool
+}
+
+// StaticParam is one entry of a `<...>` static argument list.
+type StaticParam struct {
+	Name string
+	// Type is absent for a type parameter, and names the value's type for a
+	// compile-time value such as `<n: i64>` or `<worker: Function>`.
+	Type typ.Type
+}
+
+// IsType reports whether this entry declares a type parameter.
+func (p StaticParam) IsType() bool { return p.Type == nil }
+
+// String renders the parameter as it is written in source.
+func (p StaticParam) String() string {
+	if p.IsType() {
+		return p.Name
+	}
+	return p.Name + ": " + p.Type.String()
+}
+
+// TypeParamNames returns the names of the entries that declare types.
+func (d *FunctionDecl) TypeParamNames() []string {
+	names := []string{}
+	for _, param := range d.StaticParams {
+		if param.IsType() {
+			names = append(names, param.Name)
+		}
+	}
+	return names
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -106,13 +141,13 @@ func (d *FunctionDecl) String() string {
 		params = append(params, p.String())
 	}
 	ret := ""
-	if d.ReturnType != "" {
-		ret = " -> " + d.ReturnType
+	if d.ReturnType != nil {
+		ret = " -> " + d.ReturnType.String()
 		if d.ReturnBorrow != "" {
 			ret += " borrows " + d.ReturnBorrow
 		}
 	}
-	typeParams := typeParamText(d.TypeParams)
+	typeParams := staticParamText(d.StaticParams)
 	if typeParams != "" {
 		typeParams = "<" + typeParams + ">"
 	}
@@ -237,12 +272,12 @@ func (d *UnionDecl) String() string {
 type UnionVariant struct {
 	Name    string
 	Doc     string
-	Payload string
+	Payload typ.Type
 }
 
 // String returns a compact debug representation of the union variant.
 func (v UnionVariant) String() string {
-	if v.Payload == "" {
+	if v.Payload == nil {
 		return v.Name
 	}
 	return fmt.Sprintf("%s(%s)", v.Name, v.Payload)
@@ -298,7 +333,7 @@ func (d *ImplDecl) String() string {
 type Field struct {
 	Name      string
 	Doc       string
-	TypeName  string
+	TypeName  typ.Type
 	Borrow    bool
 	MutBorrow bool
 	Public    bool
@@ -322,10 +357,9 @@ func (f Field) String() string {
 // Param represents a function parameter.
 type Param struct {
 	Name      string
-	TypeName  string
+	TypeName  typ.Type
 	Borrow    bool
 	MutBorrow bool
-	Comptime  bool
 }
 
 // String returns a compact debug representation of the parameter.
@@ -336,15 +370,21 @@ func (p Param) String() string {
 	} else if p.Borrow {
 		prefix = borrowPrefix(false)
 	}
-	if !p.Comptime {
-		return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
-	}
-	return fmt.Sprintf("comptime %s: %s%s", p.Name, prefix, p.TypeName)
+	return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
 }
 
 // typeParamText renders static type parameters.
 func typeParamText(types []string) string {
 	return strings.Join(types, ", ")
+}
+
+// staticParamText renders a `<...>` declaration list.
+func staticParamText(params []StaticParam) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		parts = append(parts, param.String())
+	}
+	return strings.Join(parts, ", ")
 }
 
 // borrowPrefix renders a borrow marker.
@@ -856,7 +896,7 @@ func (e *TypeApplyExpr) String() string {
 
 // CastExpr represents an explicit cast<T>(value) conversion.
 type CastExpr struct {
-	TargetType  string
+	TargetType  typ.Type
 	Value       Expression
 	KeywordSpan Span
 }

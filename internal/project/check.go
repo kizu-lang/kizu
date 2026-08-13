@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -372,11 +373,11 @@ func (c *graphChecker) qualifyStruct(
 	cp.Name = module.path + "::" + decl.Name
 	cp.Fields = append([]ast.Field(nil), decl.Fields...)
 	for idx := range cp.Fields {
-		typ, err := c.resolveType(module, cp.Fields[idx].TypeName)
+		resolved, err := c.resolveTypeNode(module, cp.Fields[idx].TypeName)
 		if err != nil {
 			return nil, err
 		}
-		cp.Fields[idx].TypeName = typ
+		cp.Fields[idx].TypeName = resolved
 	}
 	return &cp, nil
 }
@@ -390,14 +391,14 @@ func (c *graphChecker) qualifyUnion(
 	cp.Name = module.path + "::" + decl.Name
 	cp.Variants = append([]ast.UnionVariant(nil), decl.Variants...)
 	for idx := range cp.Variants {
-		if cp.Variants[idx].Payload == "" {
+		if cp.Variants[idx].Payload == nil {
 			continue
 		}
-		typ, err := c.resolveType(module, cp.Variants[idx].Payload)
+		resolved, err := c.resolveTypeNode(module, cp.Variants[idx].Payload)
 		if err != nil {
 			return nil, err
 		}
-		cp.Variants[idx].Payload = typ
+		cp.Variants[idx].Payload = resolved
 	}
 	return &cp, nil
 }
@@ -456,18 +457,18 @@ func (c *graphChecker) qualifyFunction(
 	cp.Name = name
 	cp.Params = append([]ast.Param(nil), decl.Params...)
 	for idx := range cp.Params {
-		typ, err := c.resolveType(module, cp.Params[idx].TypeName)
+		resolved, err := c.resolveTypeNode(module, cp.Params[idx].TypeName)
 		if err != nil {
 			return nil, err
 		}
-		cp.Params[idx].TypeName = typ
+		cp.Params[idx].TypeName = resolved
 	}
-	if cp.ReturnType != "" {
-		typ, err := c.resolveType(module, cp.ReturnType)
+	if cp.ReturnType != nil {
+		resolved, err := c.resolveTypeNode(module, cp.ReturnType)
 		if err != nil {
 			return nil, err
 		}
-		cp.ReturnType = typ
+		cp.ReturnType = resolved
 	}
 	body, err := c.qualifyBlock(module, decl.Body)
 	if err != nil {
@@ -775,11 +776,11 @@ func (c *graphChecker) qualifyCastExpr(
 	expr *ast.CastExpr,
 ) (*ast.CastExpr, error) {
 	cp := *expr
-	typ, err := c.resolveType(module, expr.TargetType)
+	resolved, err := c.resolveTypeNode(module, expr.TargetType)
 	if err != nil {
 		return nil, err
 	}
-	cp.TargetType = typ
+	cp.TargetType = resolved
 	cp.Value, err = c.qualifyExpr(module, expr.Value)
 	return &cp, err
 }
@@ -1055,81 +1056,33 @@ func namespaceParts(expr ast.Expression) ([]string, bool) {
 
 // resolveType rewrites a source type name into its package-qualified form.
 func (c *graphChecker) resolveType(module *moduleUnit, name string) (string, error) {
+	parsed, err := typ.Parse(name)
+	if err != nil {
+		return "", fmt.Errorf("module error: unknown type `%s`", name)
+	}
+	resolved, err := c.resolveTypeNode(module, parsed)
+	if err != nil {
+		return "", err
+	}
+	return typ.Text(resolved), nil
+}
+
+// resolveTypeNode rewrites every name a type mentions to its package-qualified
+// form, keeping the structure around it.
+func (c *graphChecker) resolveTypeNode(module *moduleUnit, t typ.Type) (typ.Type, error) {
 	resolver := typeResolver{checker: c, module: module}
-	return resolver.resolve(name)
+	return typ.MapNames(t, func(path []string) ([]string, error) {
+		resolved, err := resolver.resolveBase(strings.Join(path, "::"))
+		if err != nil {
+			return nil, err
+		}
+		return strings.Split(resolved, "::"), nil
+	})
 }
 
 type typeResolver struct {
 	checker *graphChecker
 	module  *moduleUnit
-}
-
-// resolve handles wrappers such as borrows, error unions, slices, and generics.
-func (r typeResolver) resolve(name string) (string, error) {
-	switch {
-	case strings.HasPrefix(name, "!"):
-		return r.resolvePrefixed(name, "!")
-	case strings.HasPrefix(name, "&var "):
-		return r.resolvePrefixed(name, "&var ")
-	case strings.HasPrefix(name, "&"):
-		return r.resolvePrefixed(name, "&")
-	case strings.HasPrefix(name, "?"):
-		return r.resolvePrefixed(name, "?")
-	case strings.HasPrefix(name, "[]"):
-		return r.resolvePrefixed(name, "[]")
-	case strings.HasPrefix(name, "const "):
-		return r.resolvePrefixed(name, "const ")
-	case strings.HasPrefix(name, "dyn "):
-		return r.resolvePrefixed(name, "dyn ")
-	}
-	if errorType, successType, ok := splitTypedErrorUnion(name); ok {
-		return r.resolveTypedErrorUnion(errorType, successType)
-	}
-	if base, args, ok := splitTypeApply(name); ok {
-		return r.resolveGeneric(base, args)
-	}
-	return r.resolveBase(name)
-}
-
-// resolvePrefixed resolves a type wrapper after removing prefix.
-func (r typeResolver) resolvePrefixed(name string, prefix string) (string, error) {
-	inner, err := r.resolve(strings.TrimPrefix(name, prefix))
-	if err != nil {
-		return "", err
-	}
-	return prefix + inner, nil
-}
-
-// resolveGeneric resolves a generic base and each static type argument.
-func (r typeResolver) resolveGeneric(base string, args string) (string, error) {
-	resolvedBase, err := r.resolveBase(base)
-	if err != nil {
-		return "", err
-	}
-	parts, err := splitTypeArgs(args)
-	if err != nil {
-		return "", err
-	}
-	for idx, part := range parts {
-		parts[idx], err = r.resolve(part)
-		if err != nil {
-			return "", err
-		}
-	}
-	return resolvedBase + "<" + strings.Join(parts, ", ") + ">", nil
-}
-
-// resolveTypedErrorUnion resolves Error!T names across module boundaries.
-func (r typeResolver) resolveTypedErrorUnion(errorType string, successType string) (string, error) {
-	resolvedError, err := r.resolve(errorType)
-	if err != nil {
-		return "", err
-	}
-	resolvedSuccess, err := r.resolve(successType)
-	if err != nil {
-		return "", err
-	}
-	return resolvedError + "!" + resolvedSuccess, nil
 }
 
 // resolveBase resolves one non-generic type base.
@@ -1177,59 +1130,13 @@ func isPrimitiveType(name string) bool {
 	}
 }
 
-// splitTypeApply separates Base<Args> type spellings.
-func splitTypeApply(name string) (string, string, bool) {
-	start := strings.Index(name, "<")
-	if start < 0 || !strings.HasSuffix(name, ">") {
-		return "", "", false
-	}
-	return name[:start], strings.TrimSuffix(name[start+1:], ">"), true
-}
-
 // splitTypeArgs splits comma-separated static type arguments with nested angle support.
 func splitTypeArgs(args string) ([]string, error) {
-	parts := []string{}
-	depth := 0
-	start := 0
-	for idx, ch := range args {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				parts = append(parts, strings.TrimSpace(args[start:idx]))
-				start = idx + 1
-			}
-		}
-		if depth < 0 {
-			return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
-		}
-	}
-	if depth != 0 {
+	parts, err := typ.SplitArgs(args)
+	if err != nil {
 		return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
 	}
-	parts = append(parts, strings.TrimSpace(args[start:]))
 	return parts, nil
-}
-
-// splitTypedErrorUnion separates Error!T while leaving prefix !T to resolvePrefixed.
-func splitTypedErrorUnion(name string) (string, string, bool) {
-	depth := 0
-	for index, ch := range name {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case '!':
-			if depth == 0 && index > 0 && index < len(name)-1 {
-				return name[:index], name[index+1:], true
-			}
-		}
-	}
-	return "", "", false
 }
 
 // sortedModuleUnits returns modules in deterministic path order.

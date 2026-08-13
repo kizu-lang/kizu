@@ -27,8 +27,12 @@ Kizu adopts a minimal explicit static argument subset for function generics.
 
 - The `<...>` list on declarations and calls is a compile-time/static argument
   list, separate from the runtime argument list `(...)`.
-- v0.2 accepts only type parameters in static argument lists:
-  `fn f<T>(value: T) -> T`.
+- A static argument list holds type parameters and compile-time values. A bare
+  name declares a type, `name: Type` declares a value: `fn f<T>(value: T) -> T`,
+  `fn sized<n: i64>()`, `fn parallel_for<worker: Function>(io: Io)`.
+- A compile-time value cannot be a runtime parameter. `comptime n: i64` in
+  `(...)` is rejected: the reason this ADR gives for keeping types out of the
+  runtime list applies to any value that cannot exist at runtime.
 - Calls must pass explicit static arguments: `f<i64>(1)`.
 - Namespace-qualified calls use the same syntax:
   `std::testing::expect_equal<i64>(expected, actual)`.
@@ -51,9 +55,8 @@ Kizu adopts a minimal explicit static argument subset for function generics.
 This subset deliberately excludes:
 
 - implicit type argument inference
-- non-type static arguments in v0.2; future phases may add integer, bool, or
-  string static arguments to the same `<...>` list when a concrete self-host
-  need appears, for example a fixed-size buffer capacity
+- static arguments beyond integers, bools, and `Function`; a string static
+  argument can join the same list when a concrete need appears
 - generic methods or impl-level generic parameters
 - generic structs outside the existing std container type spellings
 - bounds, associated types, higher-kinded types, specialization, and reflection

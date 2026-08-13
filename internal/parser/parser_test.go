@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // TestParseHello checks that a minimal program parses cleanly.
@@ -933,7 +934,7 @@ func TestParseRequiresUnsafeImplMethod(t *testing.T) {
 
 // TestParseComptime checks Phase 13 compile-time expression and parameter syntax.
 func TestParseComptime(t *testing.T) {
-	input := `fn sized(comptime n: i64) -> i64 {
+	input := `fn sized<n: i64>() -> i64 {
     return n;
 }
 fn main() {
@@ -949,7 +950,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn sized(comptime n: i64) -> i64 { return n; }
+	want := `fn sized<n: i64>() -> i64 { return n; }
 fn main() { let size = comptime (4 * 1024); ` +
 		`comptime if ((1 + 1) == 2) { print(sized(comptime size)); } else { print(0); } }`
 	if got := program.String(); got != want {
@@ -983,21 +984,24 @@ fn main() { print(is_i64<i64>(1)); print(is_i64<bool>(false)); }`
 	}
 }
 
-// TestParseRejectsNonTypeStaticArg keeps v0.2 static arguments type-only.
-func TestParseRejectsNonTypeStaticArg(t *testing.T) {
-	input := `fn identity<T>(value: T) -> T {
-    return value;
+// TestParseAcceptsValueStaticArg keeps a compile-time value in the static
+// argument list parseable. Whether the parameter accepts it is a type-check
+// question, not a syntax one.
+func TestParseAcceptsValueStaticArg(t *testing.T) {
+	input := `fn sized<n: i64>() -> i64 {
+    return n;
 }
 fn main() {
-    print(identity<1>(1));
+    print(sized<4096>());
 }`
 	p := New(lexer.New(input))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		t.Fatalf("expected parser error")
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("got parser errors %v", p.Errors())
 	}
-	if !strings.Contains(p.Errors()[0], "expected static type argument") {
-		t.Fatalf("got %q", p.Errors()[0])
+	fn := program.Decls[0].(*ast.FunctionDecl)
+	if len(fn.StaticParams) != 1 || typ.Text(fn.StaticParams[0].Type) != "i64" {
+		t.Fatalf("got static params %#v", fn.StaticParams)
 	}
 }
 

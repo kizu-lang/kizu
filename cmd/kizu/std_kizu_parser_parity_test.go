@@ -13,6 +13,7 @@ import (
 	kizuast "github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 const (
@@ -873,7 +874,7 @@ func parserParityFunctionSignatureSeedCases() []parserParityCase {
 		{name: "seed/fn_slice_param", source: "fn write(bytes: []u8) {}"},
 		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
 		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &var i64) {}"},
-		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
+		{name: "seed/fn_static_value_param", source: "fn scoped<worker: Function>() {}"},
 		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
 		{
 			name:   "seed/fn_slice_return",
@@ -1198,7 +1199,13 @@ func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	typeParams, reason := summarizeGenericParamsSubset(fn.TypeParams)
+	// Every `<...>` entry is summarized, whether it declares a type or a
+	// compile-time value: the point is what the parser read.
+	staticNames := make([]string, 0, len(fn.StaticParams))
+	for _, param := range fn.StaticParams {
+		staticNames = append(staticNames, param.Name)
+	}
+	typeParams, reason := summarizeGenericParamsSubset(staticNames)
 	if reason != "" {
 		return nil, reason
 	}
@@ -1206,7 +1213,7 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	returnType, reason := summarizeReturnTypeSubset(fn.ReturnType)
+	returnType, reason := summarizeReturnTypeSubset(typ.Text(fn.ReturnType))
 	if reason != "" {
 		return nil, reason
 	}
@@ -1312,11 +1319,9 @@ func summarizeParamSubset(param kizuast.Param) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	mode := "Runtime"
-	if param.Comptime {
-		mode = "Comptime"
-	}
-	lines := []string{"Param", mode, "Var", param.Name}
+	// Every parameter is a runtime parameter: a compile-time value is a static
+	// argument, so it never reaches this list.
+	lines := []string{"Param", "Runtime", "Var", param.Name}
 	return append(lines, typeName...), ""
 }
 
@@ -1359,11 +1364,11 @@ func summarizeFieldSubset(field kizuast.Field) ([]string, string) {
 func parserParityFieldTypeName(field kizuast.Field) string {
 	switch {
 	case field.MutBorrow:
-		return "&var " + field.TypeName
+		return "&var " + typ.Text(field.TypeName)
 	case field.Borrow:
-		return "&" + field.TypeName
+		return "&" + typ.Text(field.TypeName)
 	default:
-		return field.TypeName
+		return typ.Text(field.TypeName)
 	}
 }
 
@@ -1411,10 +1416,10 @@ func summarizeUnionVariantSubset(variant kizuast.UnionVariant) ([]string, string
 		return nil, "identifier outside std parser subset"
 	}
 	lines := []string{"UnionVariant", "Var", variant.Name}
-	if variant.Payload == "" {
+	if variant.Payload == nil {
 		return append(lines, "Empty"), ""
 	}
-	payload, reason := summarizeTypeNameSubset(variant.Payload)
+	payload, reason := summarizeTypeNameSubset(typ.Text(variant.Payload))
 	if reason != "" {
 		return nil, reason
 	}
@@ -1441,11 +1446,11 @@ func summarizeTypeNameSubset(typeName string) ([]string, string) {
 func parserParityParamTypeName(param kizuast.Param) string {
 	switch {
 	case param.MutBorrow:
-		return "&var " + param.TypeName
+		return "&var " + typ.Text(param.TypeName)
 	case param.Borrow:
-		return "&" + param.TypeName
+		return "&" + typ.Text(param.TypeName)
 	default:
-		return param.TypeName
+		return typ.Text(param.TypeName)
 	}
 }
 
@@ -1962,7 +1967,7 @@ func splitTopLevelTypeArgs(typeArgs string) []string {
 
 // summarizeCastExprSubset summarizes cast<T>(value).
 func summarizeCastExprSubset(expr *kizuast.CastExpr) ([]string, string) {
-	target, reason := summarizeTypeNameSubset(expr.TargetType)
+	target, reason := summarizeTypeNameSubset(typ.Text(expr.TargetType))
 	if reason != "" {
 		return nil, reason
 	}

@@ -3,6 +3,8 @@ package ir
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // newBlock appends a basic block to the current function.
@@ -29,9 +31,11 @@ func (l *lowerer) emitConst(typ string, immediate string) Value {
 	return l.emit("const", typ, nil, immediate)
 }
 
-// emit appends a generic instruction.
+// emit appends a generic instruction. The result type is resolved against the
+// instantiation in force, so a type parameter never reaches the backend: every
+// instruction in a generic body carries the type its instance was built for.
 func (l *lowerer) emit(op string, typ string, args []Value, immediate string) Value {
-	result := l.next(typ)
+	result := l.next(l.resolveType(typ))
 	instr := &Instr{Result: result, Op: op, Args: args, Immediate: immediate}
 	l.block.Instrs = append(l.block.Instrs, instr)
 	return result
@@ -84,40 +88,27 @@ func mapValueType(name string) (string, bool) {
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
 		return "", false
 	}
-	args := splitTopLevelTypeArgs(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"))
+	args := splitStaticArgs(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"))
 	if len(args) != 2 || args[0] != "[]u8" {
 		return "", false
 	}
 	return args[1], true
 }
 
-// splitTopLevelTypeArgs splits comma-separated type arguments without recursing into generics.
-func splitTopLevelTypeArgs(args string) []string {
-	out := []string{}
-	depth := 0
-	start := 0
-	for index, ch := range args {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			if depth > 0 {
-				depth--
-			}
-		case ',':
-			if depth == 0 {
-				out = append(out, strings.TrimSpace(args[start:index]))
-				start = index + 1
-			}
-		}
+// splitStaticArgs splits a static argument list, and reports no arguments for a
+// spelling that is not one. Every caller checks the count it wanted, so a
+// malformed list falls through the same path a wrong count does.
+func splitStaticArgs(args string) []string {
+	parts, err := typ.SplitArgs(args)
+	if err != nil {
+		return nil
 	}
-	out = append(out, strings.TrimSpace(args[start:]))
-	return out
+	return parts
 }
 
 // mapTypeName returns std::map::Map<[]u8, V>.
 func mapTypeName(typeArg string) (string, string, bool) {
-	args := splitTopLevelTypeArgs(typeArg)
+	args := splitStaticArgs(typeArg)
 	if len(args) != 2 || args[0] != "[]u8" {
 		return "", "", false
 	}
@@ -205,12 +196,5 @@ func errorUnionSuccessType(result string) (string, bool) {
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
 func errorUnionParts(result string) (string, string, bool) {
-	if strings.HasPrefix(result, "!") && len(result) > 1 {
-		return "", strings.TrimPrefix(result, "!"), true
-	}
-	idx := strings.Index(result, "!")
-	if idx <= 0 || idx == len(result)-1 {
-		return "", "", false
-	}
-	return result[:idx], result[idx+1:], true
+	return typ.ErrorUnionParts(result)
 }

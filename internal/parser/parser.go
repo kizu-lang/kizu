@@ -8,6 +8,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
@@ -252,8 +253,8 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 	fn.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		fn.TypeParams = p.parseGenericParamList()
-		if len(fn.TypeParams) == 0 || !p.expectTypeClose() {
+		fn.StaticParams = p.parseStaticParamList()
+		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
 			return fn
 		}
 	}
@@ -268,7 +269,7 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 		p.nextToken()
 		p.nextToken()
 		fn.ReturnType = p.parseTypeName()
-		if fn.ReturnType == "" {
+		if fn.ReturnType == nil {
 			return fn
 		}
 		if p.peek.Type == token.Ident && p.peek.Literal == "borrows" {
@@ -443,7 +444,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		}
 	}
 	field.TypeName = p.parseTypeName()
-	if field.TypeName == "" {
+	if field.TypeName == nil {
 		return field, false
 	}
 	return field, true
@@ -556,7 +557,7 @@ func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
 	p.nextToken()
 	p.nextToken()
 	variant.Payload = p.parseTypeName()
-	if variant.Payload == "" || !p.expectPeek(token.RParen) {
+	if variant.Payload == nil || !p.expectPeek(token.RParen) {
 		return variant, false
 	}
 	return variant, true
@@ -572,8 +573,10 @@ func (p *Parser) parseParams() []ast.Param {
 	for {
 		param := ast.Param{}
 		if p.cur.Type == token.Comptime {
-			param.Comptime = true
-			p.nextToken()
+			// A compile-time value belongs in the `<...>` list, not among
+			// values that move and borrow.
+			p.errorf("compile-time parameter belongs in `<...>`, not `(...)`")
+			return params
 		}
 		if p.cur.Type != token.Ident {
 			p.errorf("expected parameter name, got %s", tokenDescription(p.cur))
@@ -593,7 +596,7 @@ func (p *Parser) parseParams() []ast.Param {
 			}
 		}
 		param.TypeName = p.parseTypeName()
-		if param.TypeName == "" {
+		if param.TypeName == nil {
 			return params
 		}
 		params = append(params, param)
@@ -1075,7 +1078,11 @@ var precedences = map[token.Type]int{
 // parseExpression parses an expression using Pratt parser precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
 	left := p.parsePrefixExpression()
-	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
+	// A `<` that opens a static argument list binds like a call rather than
+	// like a comparison, so `try f<T>(x)` reads as `try (f<T>(x))`.
+	for p.peek.Type != token.Semicolon &&
+		(precedence < p.peekPrecedence() ||
+			(p.peek.Type == token.LT && p.shouldParseTypeApply(left))) {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
 			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
@@ -1244,7 +1251,7 @@ func (p *Parser) parseCastExpr() ast.Expression {
 	}
 	p.nextToken()
 	expr.TargetType = p.parseTypeName()
-	if expr.TargetType == "" || !p.expectPeek(token.GT) {
+	if expr.TargetType == nil || !p.expectPeek(token.GT) {
 		return expr
 	}
 	if !p.expectPeek(token.LParen) {
@@ -1257,7 +1264,7 @@ func (p *Parser) parseCastExpr() ast.Expression {
 }
 
 // parseTypeName parses a plain, borrow, pointer, or generic type name.
-func (p *Parser) parseTypeName() string {
+func (p *Parser) parseTypeName() typ.Type {
 	switch p.cur.Type {
 	case token.Bang:
 		return p.parseErrorUnionTypeName()
@@ -1273,111 +1280,129 @@ func (p *Parser) parseTypeName() string {
 		return p.parseNamedTypeName()
 	default:
 		p.errorf("expected type, got %s", tokenDescription(p.cur))
-		return ""
+		return nil
 	}
 }
 
 // parseNullableTypeName parses ?T type spellings.
-func (p *Parser) parseNullableTypeName() string {
+func (p *Parser) parseNullableTypeName() typ.Type {
 	p.nextToken()
 	inner := p.parseTypeName()
-	if inner == "" {
-		return ""
+	if inner == nil {
+		return nil
 	}
-	return "?" + inner
+	return &typ.Optional{Elem: inner}
 }
 
 // parseNamedTypeName parses named, typed-error-union, and generic type spellings.
-func (p *Parser) parseNamedTypeName() string {
-	name := p.parseTypeBaseName()
+func (p *Parser) parseNamedTypeName() typ.Type {
+	name := &typ.Name{Path: p.parseTypeBaseName()}
 	if p.peek.Type == token.Bang {
 		p.nextToken()
 		p.nextToken()
 		success := p.parseTypeName()
-		if success == "" {
-			return ""
+		if success == nil {
+			return nil
 		}
-		return name + "!" + success
+		return &typ.ErrorUnion{Err: name, Ok: success}
 	}
 	if p.peek.Type != token.LT {
 		return name
 	}
 	p.nextToken()
 	p.nextToken()
-	args := p.parseTypeArgList(name == "ptr")
-	if args == "" || !p.expectTypeClose() {
-		return ""
+	args := p.parseTypeArgNodes(len(name.Path) == 1 && name.Path[0] == "ptr")
+	if len(args) == 0 || !p.expectTypeClose() {
+		return nil
 	}
-	return fmt.Sprintf("%s<%s>", name, args)
+	name.Args = args
+	return name
+}
+
+// parseTypeArgNodes parses the `<...>` list of a type, whose entries are types.
+func (p *Parser) parseTypeArgNodes(allowConst bool) []typ.Type {
+	args := []typ.Type{}
+	for {
+		arg := p.parseTypeArg(allowConst)
+		if arg == nil {
+			return nil
+		}
+		args = append(args, arg)
+		if p.peek.Type != token.Comma {
+			break
+		}
+		p.nextToken()
+		if p.peek.Type == token.GT {
+			break
+		}
+		p.nextToken()
+	}
+	return args
 }
 
 // parseDynTypeName parses dyn Contract type spellings.
-func (p *Parser) parseDynTypeName() string {
+func (p *Parser) parseDynTypeName() typ.Type {
 	p.nextToken()
 	if p.cur.Type != token.Ident {
 		p.errorf("expected contract after dyn, got %s", tokenDescription(p.cur))
-		return ""
+		return nil
 	}
 	name := p.parseTypeBaseName()
 	if p.peek.Type == token.LT {
 		p.errorf("dyn expects a contract name")
-		return ""
+		return nil
 	}
-	return "dyn " + name
+	return &typ.Dyn{Contract: &typ.Name{Path: name}}
 }
 
 // parseErrorUnionTypeName parses !T type spellings.
-func (p *Parser) parseErrorUnionTypeName() string {
+func (p *Parser) parseErrorUnionTypeName() typ.Type {
 	p.nextToken()
 	inner := p.parseTypeName()
-	if inner == "" {
-		return ""
+	if inner == nil {
+		return nil
 	}
-	return "!" + inner
+	return &typ.ErrorUnion{Ok: inner}
 }
 
 // parseBorrowTypeName parses &T and &var T type spellings.
-func (p *Parser) parseBorrowTypeName() string {
+func (p *Parser) parseBorrowTypeName() typ.Type {
 	p.nextToken()
-	if p.cur.Type == token.Var {
+	mut := p.cur.Type == token.Var
+	if mut {
 		p.nextToken()
-		inner := p.parseTypeName()
-		if inner == "" {
-			return ""
-		}
-		return "&var " + inner
 	}
 	inner := p.parseTypeName()
-	if inner == "" {
-		return ""
+	if inner == nil {
+		return nil
 	}
-	return "&" + inner
+	return &typ.Borrow{Elem: inner, Mut: mut}
 }
 
 // parseSliceTypeName parses []T type spellings.
-func (p *Parser) parseSliceTypeName() string {
+func (p *Parser) parseSliceTypeName() typ.Type {
 	if !p.expectPeek(token.RBracket) {
-		return ""
+		return nil
 	}
 	p.nextToken()
 	arg := p.parseTypeArg(false)
-	if arg == "" {
-		return ""
+	if arg == nil {
+		return nil
 	}
-	return "[]" + arg
+	return &typ.Slice{Elem: arg}
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.
-func (p *Parser) parseTypeBaseName() string {
+func (p *Parser) parseTypeBaseName() []string {
 	parts := []string{p.cur.Literal}
 	for p.peek.Type == token.DoubleColon {
 		p.nextToken()
 		if !p.expectPeek(token.Ident) {
-			return strings.Join(parts, "::")
+			return parts
 		}
 		parts = append(parts, p.cur.Literal)
 	}
-	return strings.Join(parts, "::")
+	return parts
 }
 
 // parseTypeArgList parses one or more comma-separated v0.2 static type arguments.
@@ -1403,22 +1428,40 @@ func (p *Parser) parseTypeArgList(allowConst bool) string {
 
 // parseGenericParamList parses type parameters.
 func (p *Parser) parseGenericParamList() []string {
-	types := []string{}
+	names := []string{}
+	for _, param := range p.parseStaticParamList() {
+		if !param.IsType() {
+			p.errorf("expected type parameter, got %s", param.String())
+			return nil
+		}
+		names = append(names, param.Name)
+	}
+	return names
+}
+
+// parseStaticParamList parses a `<...>` declaration list. A bare name declares
+// a type parameter; `name: Type` declares a compile-time value.
+func (p *Parser) parseStaticParamList() []ast.StaticParam {
+	params := []ast.StaticParam{}
 	seen := map[string]bool{}
 	p.nextToken()
 	for {
-		switch p.cur.Type {
-		case token.Ident:
-			if seen[p.cur.Literal] {
-				p.errorf("duplicate type parameter %s", p.cur.Literal)
-				return nil
-			}
-			seen[p.cur.Literal] = true
-			types = append(types, p.cur.Literal)
-		default:
-			p.errorf("expected type parameter, got %s", tokenDescription(p.cur))
+		if p.cur.Type != token.Ident {
+			p.errorf("expected static parameter, got %s", tokenDescription(p.cur))
 			return nil
 		}
+		if seen[p.cur.Literal] {
+			p.errorf("duplicate static parameter %s", p.cur.Literal)
+			return nil
+		}
+		param := ast.StaticParam{Name: p.cur.Literal}
+		seen[param.Name] = true
+		if p.peek.Type == token.Colon {
+			p.nextToken()
+			p.nextToken()
+			param.Type = p.parseTypeName()
+		}
+		params = append(params, param)
 		if p.peek.Type != token.Comma {
 			break
 		}
@@ -1428,7 +1471,7 @@ func (p *Parser) parseGenericParamList() []string {
 		}
 		p.nextToken()
 	}
-	return types
+	return params
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
@@ -1442,30 +1485,35 @@ func (p *Parser) expectTypeClose() bool {
 	return p.expectPeek(token.GT)
 }
 
-// parseStaticTypeArg parses a v0.2 static argument whose value must be a type.
+// parseStaticTypeArg parses one entry of a `<...>` argument list. An entry is a
+// type, or a compile-time value for a parameter that declared one.
 func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
 	case token.Ident, token.Bang, token.Amp, token.Dyn, token.LBracket, token.Question:
-		return p.parseTypeArg(allowConst)
+		return typ.Text(p.parseTypeArg(allowConst))
+	case token.Int:
+		return p.cur.Literal
+	case token.True, token.False:
+		return p.cur.Literal
 	default:
-		p.errorf("expected static type argument, got %s", tokenDescription(p.cur))
+		p.errorf("expected static argument, got %s", tokenDescription(p.cur))
 		return ""
 	}
 }
 
 // parseTypeArg parses a type embedded inside a generic-like type spelling.
-func (p *Parser) parseTypeArg(allowConst bool) string {
+func (p *Parser) parseTypeArg(allowConst bool) typ.Type {
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
 		if !allowConst {
 			p.errorf("expected static type argument, got const")
-			return ""
+			return nil
 		}
 		p.nextToken()
 		inner := p.parseTypeName()
-		if inner == "" {
-			return ""
+		if inner == nil {
+			return nil
 		}
-		return "const " + inner
+		return &typ.Const{Elem: inner}
 	}
 	return p.parseTypeName()
 }

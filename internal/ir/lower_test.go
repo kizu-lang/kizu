@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -134,16 +135,18 @@ fn main() {}`)
 func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name:       "std.mem.len",
-			Params:     []ast.Param{{Name: "bytes", TypeName: "[]u8"}},
-			ReturnType: "i64",
+			Name: "std.mem.len",
+			Params: []ast.Param{
+				{Name: "bytes", TypeName: &typ.Slice{Elem: &typ.Name{Path: []string{"u8"}}}},
+			},
+			ReturnType: &typ.Name{Path: []string{"i64"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IntExpr{Value: "1"}},
 			}},
 		},
 		&ast.FunctionDecl{
 			Name:       "main",
-			ReturnType: "i64",
+			ReturnType: &typ.Name{Path: []string{"i64"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.CallExpr{
 					Callee: &ast.FieldExpr{
@@ -176,7 +179,7 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 func TestLowerErrDeferRunsOnlyOnErrorReturn(t *testing.T) {
 	errorReturn := lowerSource(t, `struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     return error("boom");
@@ -189,7 +192,7 @@ fn main() {}`)
 
 	successReturn := lowerSource(t, `struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
-    let allocator = std::builtin::mem_page_allocator();
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     return users;
@@ -345,10 +348,10 @@ func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name:       "unused",
-			TypeParams: []string{"T"},
-			Params:     []ast.Param{{Name: "value", TypeName: "T"}},
-			ReturnType: "T",
+			Name:         "unused",
+			StaticParams: []ast.StaticParam{{Name: "T"}},
+			Params:       []ast.Param{{Name: "value", TypeName: &typ.Name{Path: []string{"T"}}}},
+			ReturnType:   &typ.Name{Path: []string{"T"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
 			}},

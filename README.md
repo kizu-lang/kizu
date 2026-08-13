@@ -33,56 +33,55 @@ by any one execution path.
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | 5/8 | ✅ | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | 7/9 | ✅ | ❌ |
-| move / borrow | 16 | ✅ | 14/16 | 15/16 | 4/16 |
+| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 16 | ✅ | 14/16 | 15/16 | 2/16 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
-| comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
+| comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
-| contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
-| std::array | 10 | ✅ | 7/10 | 9/10 | ❌ |
+| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
+| std::array | 11 | ✅ | 10/11 | 10/11 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 7/9 | 8/9 | ❌ |
-| std::mem / allocator | 8 | ✅ | 6/8 | 7/8 | ❌ |
-| std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::testing | 13 | ✅ | 11/13 | 11/13 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 9/11 | 10/11 | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 82 runnable examples, measured on 2026-08-13 with
-`just backend-matrix` -- re-run it after touching a backend. `run` is judged on
-the program's output, `llvm` and `wasm` on whether lowering succeeded.
+`❌` means none do. 84 runnable examples, measured on 2026-08-13 with
+`just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
+are judged on the program's output: `run` executes the native build, `wasm`
+loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
+succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 82/82 |
-| `kizu run` | 60/82 |
-| `kizu build --emit-llvm` | 66/82 |
-| `kizu build --target wasm32-wasi` | 17/82 |
+| `kizu check` | 84/84 |
+| `kizu run` | 68/84 |
+| `kizu build --emit-llvm` | 69/84 |
+| `kizu build --target wasm32-wasi` | 16/84 |
 
-The 22 examples `run` cannot reproduce are registered in the manifests with a
+The 16 examples `run` cannot reproduce are registered in the manifests with a
 `pending` reason. A pending case is tested for *still failing*, so closing a gap
 forces its entry to be removed in the same change.
 
 What is missing, in the order it should be closed:
 
-1. **Six examples compute the wrong answer.** Three drop the enum name from
-   `print`, one does not observe a mutation made through a mutable borrow, one
-   reports a wrong array length, and one exits non-zero on a recovered error
-   union. These are the worst of the three groups: they do not fail, so nothing
-   tells the caller the answer is wrong.
-2. **Four negative examples report the wrong failure.** `Array.get_or_panic`
-   still traps without a message, a failing `Io` capability is ignored so the
-   program succeeds, and a returned error union is not surfaced. Out-of-range
-   index and slice access now report `index out of bounds` and
-   `range out of bounds` (ADR-0084).
-3. **Sixteen examples have no lowering yet.** `std::builtin::task_group` (6),
-   `Channel<T>` and `Atomic<T>` (4), explicit generics, a `dyn` contract method,
-   a `Box` borrow, `if` as an expression, and the scoped-thread worker value.
+1. **One example computes the wrong answer.** It does not observe a mutation
+   made through a mutable borrow. This is the worst of the three groups: it does
+   not fail, so nothing tells the caller the answer is wrong.
+2. **Five negative examples report the wrong failure.** A failing `Io`
+   capability is ignored so the program succeeds (2), a returned error union is
+   not surfaced, and two report a message other than the one the manifest wants.
+3. **Fourteen examples have no lowering yet.** `std::builtin::task_group` (6),
+   `Channel<T>` (3) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
+   `if` as an expression, and the scoped-thread worker value. One more compares
+   a borrow against a value in LLVM and is rejected there.
 
 Tooling around the language core:
 
