@@ -1075,7 +1075,11 @@ var precedences = map[token.Type]int{
 // parseExpression parses an expression using Pratt parser precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
 	left := p.parsePrefixExpression()
-	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
+	// A `<` that opens a static argument list binds like a call rather than
+	// like a comparison, so `try f<T>(x)` reads as `try (f<T>(x))`.
+	for p.peek.Type != token.Semicolon &&
+		(precedence < p.peekPrecedence() ||
+			(p.peek.Type == token.LT && p.shouldParseTypeApply(left))) {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
 			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:

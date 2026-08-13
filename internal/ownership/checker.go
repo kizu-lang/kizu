@@ -2076,10 +2076,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkPartitionMut(args, env)
 	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env)
-	case "std.builtin.task_parallel_for":
-		return c.checkParallelFor(args, env)
-	case "std.builtin.task_parallel_map":
-		return c.checkParallelMap(args, env)
+
 	default:
 		return "", false, nil
 	}
@@ -2361,6 +2358,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinMapTypeApply(name, typeArg, args, env); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkBuiltinTaskTypeApply(
+		name, typeArg, args, env,
+	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
@@ -2839,6 +2841,36 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	return nil
 }
 
+// checkBuiltinTaskTypeApply validates the task primitives whose worker arrives
+// as a static argument.
+func (c *Checker) checkBuiltinTaskTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.task_parallel_for", "std.builtin.task_parallel_map":
+		if !c.currentStd {
+			return "", true, errorf("move error: `%s` is reserved; use std::task", name)
+		}
+	}
+	switch name {
+	case "std.builtin.task_parallel_for":
+		return c.checkParallelFor(typeArg, args, env)
+	case "std.builtin.task_parallel_map":
+		return c.checkParallelMap(typeArg, args, env)
+	default:
+		return "", false, nil
+	}
+}
+
+// forwardsWorker reports whether this name is the wrapper's own static value.
+func (c *Checker) forwardsWorker(target string, env *scope) bool {
+	value, ok := env.lookup(target)
+	return ok && value != nil && value.typeName == "Function"
+}
+
 // checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
 func (c *Checker) checkBuiltinThreadScopedTypeApply(
 	name string,
@@ -2852,7 +2884,12 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 	if !c.currentStd {
 		return "", true, errorf("move error: `%s` is reserved; use std::thread", name)
 	}
-	typ, err := c.checkThreadScopedTyped(typeArg, args, env)
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != 2 {
+		return "", true, errorf(
+			"thread error: `std::thread::scoped` expects a type and a function name")
+	}
+	typ, err := c.checkThreadScopedTyped(strings.TrimSpace(staticArgs[0]), args, env)
 	return typ, true, err
 }
 
@@ -3027,7 +3064,9 @@ func (c *Checker) checkGenericUserMoveArg(
 	arg ast.Expression,
 	env *scope,
 ) (bool, error) {
-	if name == "std.thread.scoped" && idx == 2 {
+	// The worker moved to the static list, so the value crossing the boundary
+	// is now the second runtime argument.
+	if name == "std.thread.scoped" && idx == 1 {
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return true, err
 		}
@@ -5719,43 +5758,46 @@ func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, b
 }
 
 // checkParallelFor validates ownership for a safe data-parallel call.
-func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 4 {
-		return "", true, errorf("parallel error: `std::task::parallel_for` expects 4 args")
+func (c *Checker) checkParallelFor(
+	worker string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if len(args) != 3 {
+		return "", true, errorf("parallel error: `std::task::parallel_for` expects 3 args")
 	}
 	for idx := 0; idx < 3; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
 			return "", true, err
 		}
 	}
-	target, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
-	if !ok {
-		return "", true, errorf("parallel error: `std::task::parallel_for` expects function name")
+	target := strings.TrimSpace(worker)
+	if c.forwardsWorker(target, env) {
+		return "!void", true, nil
 	}
 	fn := c.functions[target]
-	if fn == nil && !forwarded {
+	if fn == nil {
 		return "", true, errorf("parallel error: undefined function `%s`", target)
-	}
-	if forwarded {
-		return "!void", true, nil
 	}
 	return returnTypeName(fn), true, nil
 }
 
 // checkParallelMap validates ownership for disjoint partition output.
-func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 5 {
-		return "", true, errorf("parallel error: `std::task::parallel_map` expects 5 args")
+func (c *Checker) checkParallelMap(
+	worker string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if len(args) != 4 {
+		return "", true, errorf("parallel error: `std::task::parallel_map` expects 4 args")
 	}
 	for idx := 0; idx < 4; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
 			return "", true, err
 		}
 	}
-	target, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
-	if !ok {
-		return "", true, errorf("parallel error: `std::task::parallel_map` expects function name")
-	}
+	target := strings.TrimSpace(worker)
+	forwarded := c.forwardsWorker(target, env)
 	fn := c.functions[target]
 	if fn == nil && !forwarded {
 		return "", true, errorf("parallel error: undefined function `%s`", target)
@@ -5766,37 +5808,19 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 	return returnTypeName(fn), true, nil
 }
 
-// resolveFunctionNameArg accepts direct functions or comptime Function parameters.
-func (c *Checker) resolveFunctionNameArg(arg ast.Expression, env *scope) (string, bool, bool) {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return "", false, false
-	}
-	if value, ok := env.lookup(target.Name); ok && value.typeName == "Function" {
-		return target.Name, true, true
-	}
-	if c.functions[target.Name] != nil {
-		return target.Name, false, true
-	}
-	return target.Name, false, true
-}
-
 // checkThreadScopedTyped validates ownership for the std-only scoped primitive.
 func (c *Checker) checkThreadScopedTyped(
 	argType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if len(args) != 3 {
-		return "", errorf("thread error: `std::thread::scoped` expects io, function, and arg")
+	if len(args) != 2 {
+		return "", errorf("thread error: `std::thread::scoped` expects io and arg")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
-	if _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
-		return "", errorf("thread error: `std::thread::scoped` expects function name")
-	}
-	got, err := c.moveContextualExpr(args[2], argType, env)
+	got, err := c.moveContextualExpr(args[1], argType, env)
 	if err != nil {
 		return "", err
 	}

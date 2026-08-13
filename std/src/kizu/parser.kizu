@@ -2174,7 +2174,7 @@ fn parse_type_arg_end(
         Return => return error("expected static type argument");,
         Defer => return error("expected static type argument");,
         ErrDefer => return error("expected static type argument");,
-        Number => return error("expected static type argument");,
+        Number => return std::kizu::lexer::next_token(text, token);,
         String => return error("expected static type argument");,
         LBrace => return error("expected static type argument");,
         RBrace => return error("expected static type argument");,
@@ -2207,8 +2207,8 @@ fn parse_type_arg_end(
         At => return error("expected static type argument");,
         Comptime => return error("expected static type argument");,
         Try => return error("expected static type argument");,
-        True => return error("expected static type argument");,
-        False => return error("expected static type argument");,
+        True => return std::kizu::lexer::next_token(text, token);,
+        False => return std::kizu::lexer::next_token(text, token);,
         And => return error("expected static type argument");,
         Or => return error("expected static type argument");,
         Assign => return error("expected static type argument");,
@@ -4356,6 +4356,36 @@ fn parse_type_apply_expr(
     return try result;
 }
 
+// parse_static_arg parses one `<...>` argument. An argument is a type, or a
+// compile-time value for a parameter that declared one.
+fn parse_static_arg(
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    if std::kizu::parser::is_static_value_token(token.kind) {
+        let node = ast.add_type_name(
+            std::kizu::ast::span(token.start, token.end),
+            std::kizu::ast::symbol_id(token.start)
+        );
+        return std::kizu::parser::parse_node(
+            node,
+            std::kizu::lexer::next_token(text, token)
+        );
+    }
+    return std::kizu::parser::parse_type_name(ast, text, token);
+}
+
+// is_static_value_token reports whether a token spells a compile-time value.
+fn is_static_value_token(kind: std::kizu::lexer::TokenKind) -> bool {
+    return match kind {
+        Number => true,
+        True => true,
+        False => true,
+        _ => false,
+    };
+}
+
 fn parse_type_apply_expr_with_args(
     type_args: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
@@ -4364,7 +4394,7 @@ fn parse_type_apply_expr_with_args(
 ) -> !ParseNode {
     var current = std::kizu::lexer::next_token(text, left.next);
     while true {
-        let arg = try std::kizu::parser::parse_type_name(ast, text, current);
+        let arg = try std::kizu::parser::parse_static_arg(ast, text, current);
         try type_args.append(arg.node);
         if std::kizu::parser::is_single_token_byte(text, arg.next, cast<u8>(62)) {
             let start = ast.begin_children();
@@ -4798,6 +4828,9 @@ fn is_static_type_argument_token(
         LT => true,
         GT => true,
         Question => true,
+        Number => true,
+        True => true,
+        False => true,
         _ => false,
     };
 }
