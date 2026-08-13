@@ -106,7 +106,7 @@ var reserved = map[string]string{
 	"std.builtin.fs_write_file":            "std::fs",
 	"std.builtin.io_blocking":              "std::io",
 	"std.builtin.io_evented":               "std::io",
-	"std.builtin.io_failing":               "std::io",
+	"std.builtin.io_failing":               "std::testing",
 	"std.builtin.io_read_stdin":            "std::io",
 	"std.builtin.io_threaded":              "std::io",
 	"std.builtin.io_write_stderr":          "std::io",
