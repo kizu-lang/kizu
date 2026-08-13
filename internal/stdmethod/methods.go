@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Method is one std method: a std function whose first parameter is `self`.
@@ -38,46 +39,17 @@ func (m Method) Substitute(typeName string, typeArgs []string) string {
 	if len(m.TypeParams) == 0 || len(typeArgs) != len(m.TypeParams) {
 		return typeName
 	}
-	out := typeName
+	subst := make(map[string]string, len(m.TypeParams))
 	for idx, param := range m.TypeParams {
-		out = substituteTypeParam(out, param, typeArgs[idx])
+		subst[param] = typeArgs[idx]
+	}
+	out, err := typ.SubstituteText(typeName, subst)
+	if err != nil {
+		// std declares this type, so it parses; a spelling that does not is a
+		// std source error the type checker reports against the declaration.
+		return typeName
 	}
 	return out
-}
-
-// substituteTypeParam replaces one type parameter where it stands as a whole
-// type name, so `T` in `!T`, `[]T`, `&T` and `Array<T>` resolves but `Text`
-// does not.
-func substituteTypeParam(typeName string, param string, arg string) string {
-	var out strings.Builder
-	for i := 0; i < len(typeName); {
-		if !strings.HasPrefix(typeName[i:], param) ||
-			isTypeNameChar(byteAt(typeName, i-1)) ||
-			isTypeNameChar(byteAt(typeName, i+len(param))) {
-			out.WriteByte(typeName[i])
-			i++
-			continue
-		}
-		out.WriteString(arg)
-		i += len(param)
-	}
-	return out.String()
-}
-
-// byteAt returns the byte at index, or 0 when the index is out of range.
-func byteAt(text string, index int) byte {
-	if index < 0 || index >= len(text) {
-		return 0
-	}
-	return text[index]
-}
-
-// isTypeNameChar reports whether b can appear inside a type name.
-func isTypeNameChar(b byte) bool {
-	return b == '_' ||
-		(b >= '0' && b <= '9') ||
-		(b >= 'a' && b <= 'z') ||
-		(b >= 'A' && b <= 'Z')
 }
 
 // MethodIndex maps a receiver's base type name to its std methods by name.
@@ -126,8 +98,8 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 // baseTypeName strips static arguments, so `std::array::Array<T>` keys as
 // `std::array::Array`.
 func baseTypeName(typeName string) string {
-	if idx := strings.Index(typeName, "<"); idx >= 0 {
-		return typeName[:idx]
+	if base, _, ok := typ.SplitApply(typeName); ok {
+		return base
 	}
 	return typeName
 }

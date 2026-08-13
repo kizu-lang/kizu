@@ -5389,24 +5389,11 @@ func returnTypeName(fn *functionInfo) string {
 
 // substituteSelfTypeName replaces only standalone Self segments in a type spelling.
 func substituteSelfTypeName(name string, typeName string) string {
-	var out strings.Builder
-	for idx := 0; idx < len(name); {
-		if strings.HasPrefix(name[idx:], "Self") &&
-			(idx == 0 || !isTypeIdentByte(name[idx-1])) &&
-			(idx+len("Self") == len(name) || !isTypeIdentByte(name[idx+len("Self")])) {
-			out.WriteString(typeName)
-			idx += len("Self")
-			continue
-		}
-		out.WriteByte(name[idx])
-		idx++
+	out, err := typ.SubstituteText(name, map[string]string{"Self": typeName})
+	if err != nil {
+		return name
 	}
-	return out.String()
-}
-
-// isTypeIdentByte reports whether b belongs to an identifier segment in a type name.
-func isTypeIdentByte(b byte) bool {
-	return b == '_' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
+	return out
 }
 
 // implMethod returns the concrete method signature for typeName when known.
