@@ -2246,3 +2246,37 @@ func checkSource(source string) error {
 	program.Decls = append(stdDecls, program.Decls...)
 	return New().Check(program)
 }
+
+// TestReferencedTypeNamesSeesThroughEveryWrapper covers the public API boundary
+// check. Reading the names off the spelling stopped at the first wrapper it
+// recognized, so `&[]Secret` answered `[]Secret` and a private type reached a
+// public signature unreported.
+func TestReferencedTypeNamesSeesThroughEveryWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		spelling string
+		want     []string
+	}{
+		{"Secret", []string{"Secret"}},
+		{"[]Secret", []string{"Secret"}},
+		{"&Secret", []string{"Secret"}},
+		{"&[]Secret", []string{"Secret"}},
+		{"&var []Secret", []string{"Secret"}},
+		{"[]&Secret", []string{"Secret"}},
+		{"!&[]Secret", []string{"Secret"}},
+		{"?ptr<const Secret>", []string{"ptr", "Secret"}},
+		{"dyn Secret", []string{"Secret"}},
+		{"Error!Secret", []string{"Error", "Secret"}},
+		{"std::array::Array<&[]Secret>", []string{"std::array::Array", "Secret"}},
+		{"std::map::Map<[]u8, &Secret>", []string{"std::map::Map", "u8", "Secret"}},
+	} {
+		got := referencedTypeNames(tc.spelling)
+		if len(got) != len(tc.want) {
+			t.Fatalf("referencedTypeNames(%q) = %q, want %q", tc.spelling, got, tc.want)
+		}
+		for idx := range tc.want {
+			if got[idx] != tc.want[idx] {
+				t.Fatalf("referencedTypeNames(%q) = %q, want %q", tc.spelling, got, tc.want)
+			}
+		}
+	}
+}

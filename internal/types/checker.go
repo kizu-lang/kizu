@@ -1454,35 +1454,22 @@ func (c *Checker) rejectPrivateType(typeName string, context string) error {
 	return nil
 }
 
-// referencedTypeNames returns source type names used inside one type spelling.
+// referencedTypeNames returns the names a type spelling mentions. The names come
+// from the parsed structure, so every wrapper is seen however they nest: reading
+// the names off the text instead stopped at the first wrapper it recognized, and
+// `&[]Secret` answered `[]Secret`, a name no declaration can have.
 func referencedTypeNames(typeName string) []string {
-	typeName = strings.TrimPrefix(typeName, "!")
-	if errorType, successType, ok := typedErrorUnionParts(typeName); ok {
-		return append(referencedTypeNames(errorType), referencedTypeNames(successType)...)
+	parsed, err := typ.Parse(typeName)
+	if err != nil {
+		return []string{typeName}
 	}
-	typeName = strings.TrimPrefix(typeName, "?")
-	typeName = strings.TrimPrefix(typeName, "[]")
-	typeName = strings.TrimPrefix(typeName, "const ")
-	typeName = strings.TrimPrefix(typeName, "&var ")
-	typeName = strings.TrimPrefix(typeName, "&")
-	typeName = strings.TrimPrefix(typeName, "dyn ")
-	if base, arg, ok := splitGenericType(typeName); ok {
-		names := []string{base}
-		for _, part := range splitPublicTypeArgs(arg) {
-			names = append(names, referencedTypeNames(part)...)
+	var names []string
+	typ.Walk(parsed, func(node typ.Type) {
+		if name, ok := node.(*typ.Name); ok {
+			names = append(names, strings.Join(name.Path, "::"))
 		}
-		return names
-	}
-	return []string{typeName}
-}
-
-// splitPublicTypeArgs splits a static argument list for public API checks.
-func splitPublicTypeArgs(args string) []string {
-	parts, ok := splitGenericArgs(args)
-	if ok {
-		return parts
-	}
-	return []string{args}
+	})
+	return names
 }
 
 // isUserDeclaredType reports whether name is declared by the current program.
@@ -7557,15 +7544,6 @@ func errorUnionElement(typ Type) (string, bool) {
 // errorUnionParts extracts error and success types from !T or Error!T.
 func errorUnionParts(union Type) (string, string, bool) {
 	return typ.ErrorUnionParts(string(union))
-}
-
-// typedErrorUnionParts extracts Error and T from Error!T.
-func typedErrorUnionParts(name string) (string, string, bool) {
-	errorType, ok, isUnion := typ.ErrorUnionParts(name)
-	if !isUnion || errorType == "" {
-		return "", "", false
-	}
-	return errorType, ok, true
 }
 
 // checkPrintCall validates the print builtin.
