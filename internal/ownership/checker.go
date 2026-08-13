@@ -257,7 +257,6 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	for _, param := range fn.Params {
 		params = append(params, paramInfo{
 			typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
-			comptime: param.Comptime,
 		})
 	}
 	return &functionInfo{

@@ -873,7 +873,7 @@ func parserParityFunctionSignatureSeedCases() []parserParityCase {
 		{name: "seed/fn_slice_param", source: "fn write(bytes: []u8) {}"},
 		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
 		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &var i64) {}"},
-		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
+		{name: "seed/fn_static_value_param", source: "fn scoped<worker: Function>() {}"},
 		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
 		{
 			name:   "seed/fn_slice_return",
@@ -1198,7 +1198,13 @@ func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	typeParams, reason := summarizeGenericParamsSubset(fn.TypeParamNames())
+	// Every `<...>` entry is summarized, whether it declares a type or a
+	// compile-time value: the point is what the parser read.
+	staticNames := make([]string, 0, len(fn.StaticParams))
+	for _, param := range fn.StaticParams {
+		staticNames = append(staticNames, param.Name)
+	}
+	typeParams, reason := summarizeGenericParamsSubset(staticNames)
 	if reason != "" {
 		return nil, reason
 	}
@@ -1312,11 +1318,9 @@ func summarizeParamSubset(param kizuast.Param) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	mode := "Runtime"
-	if param.Comptime {
-		mode = "Comptime"
-	}
-	lines := []string{"Param", mode, "Var", param.Name}
+	// Every parameter is a runtime parameter: a compile-time value is a static
+	// argument, so it never reaches this list.
+	lines := []string{"Param", "Runtime", "Var", param.Name}
 	return append(lines, typeName...), ""
 }
 

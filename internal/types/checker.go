@@ -225,7 +225,6 @@ type functionType struct {
 	params          []Type
 	borrowParams    []bool
 	mutBorrowParams []bool
-	comptimeParams  []bool
 	typeParams      []string
 	returnBorrow    string
 	returnType      Type
@@ -960,7 +959,6 @@ type functionParamInfo struct {
 	params          []Type
 	borrowParams    []bool
 	mutBorrowParams []bool
-	comptimeParams  []bool
 }
 
 // newFunctionType converts a parsed function declaration into its static type.
@@ -997,10 +995,10 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	}
 	return &functionType{
 		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
-		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
-		typeParams:   fn.TypeParamNames(),
-		returnBorrow: fn.ReturnBorrow,
-		returnType:   ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
+		mutBorrowParams: paramInfo.mutBorrowParams,
+		typeParams:      fn.TypeParamNames(),
+		returnBorrow:    fn.ReturnBorrow,
+		returnType:      ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
 		externABI: fn.ExternABI,
 	}, nil
 }
@@ -1011,27 +1009,24 @@ func (c *Checker) collectFunctionParams(fn *ast.FunctionDecl) (functionParamInfo
 		params:          make([]Type, 0, len(fn.Params)),
 		borrowParams:    make([]bool, 0, len(fn.Params)),
 		mutBorrowParams: make([]bool, 0, len(fn.Params)),
-		comptimeParams:  make([]bool, 0, len(fn.Params)),
 	}
 	for _, param := range fn.Params {
 		paramType, err := c.parseType(param.TypeName)
 		if err != nil {
 			return functionParamInfo{}, err
 		}
-		if err := c.checkFunctionParam(fn, param, paramType); err != nil {
+		if err := c.checkFunctionParam(param, paramType); err != nil {
 			return functionParamInfo{}, err
 		}
 		info.params = append(info.params, paramType)
 		info.borrowParams = append(info.borrowParams, param.Borrow)
 		info.mutBorrowParams = append(info.mutBorrowParams, param.MutBorrow)
-		info.comptimeParams = append(info.comptimeParams, param.Comptime)
 	}
 	return info, nil
 }
 
 // checkFunctionParam validates one function parameter type and lifetime boundary.
 func (c *Checker) checkFunctionParam(
-	fn *ast.FunctionDecl,
 	param ast.Param,
 	paramType Type,
 ) error {
@@ -1041,7 +1036,7 @@ func (c *Checker) checkFunctionParam(
 	if containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
 	}
-	if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
+	if err := checkFunctionParamPolicy(param, paramType); err != nil {
 		return err
 	}
 	if _, ok := dynContract(paramType); ok {
@@ -1057,21 +1052,14 @@ func (c *Checker) checkFunctionParam(
 	return nil
 }
 
-// checkFunctionParamPolicy keeps Function as a std-only compile-time token.
-func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) error {
+// checkFunctionParamPolicy keeps Function out of the runtime argument list. A
+// function name is a compile-time value, so it is a static argument.
+func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 	if typ != typeFunction {
 		return nil
 	}
-	if !fn.Std {
-		return errorf("type error: Function parameter `%s` is reserved for std", param.Name)
-	}
-	if !param.Comptime {
-		return errorf("type error: Function parameter `%s` must be comptime", param.Name)
-	}
-	if param.Borrow || param.MutBorrow {
-		return errorf("type error: Function parameter `%s` cannot be borrowed", param.Name)
-	}
-	return nil
+	return errorf(
+		"type error: Function parameter `%s` belongs in `<...>`, not `(...)`", param.Name)
 }
 
 // checkReturnBorrowPolicy validates source provenance for borrowed returns.
@@ -4846,9 +4834,6 @@ func (c *Checker) checkGenericUserArg(
 			return err
 		}
 	}
-	if want == typeFunction && fn.comptimeParams[idx] {
-		return c.checkGenericFunctionNameArg(name, fn, subst, idx, checkedArg)
-	}
 	if name == "std.sync.Mutex" {
 		if err := c.rejectThreadBoundaryArg(checkedArg, env, unsafe); err != nil {
 			return err
@@ -4873,38 +4858,6 @@ func (c *Checker) checkGenericUserArg(
 		return userCallArgError(name, fn, idx, got)
 	}
 	return nil
-}
-
-// checkGenericFunctionNameArg validates Function arguments in static std wrappers.
-func (c *Checker) checkGenericFunctionNameArg(
-	name string,
-	fn *functionType,
-	subst map[string]Type,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("type error: `%s` expects function name", diagnosticName(name))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("type error: undefined function `%s`", target.Name)
-	}
-	if name == "std.thread.scoped" && typeFunctionParamName(fn, idx) == "worker" {
-		return c.checkThreadScopedWorker(
-			substituteTypeParams(fn.returnType, subst), target.Name, targetFn,
-		)
-	}
-	return c.checkStdFunctionNameParam(name, fn, idx, target.Name, targetFn)
-}
-
-// typeFunctionParamName returns the source parameter name when available.
-func typeFunctionParamName(fn *functionType, idx int) string {
-	if fn.decl == nil || idx >= len(fn.decl.Params) {
-		return ""
-	}
-	return fn.decl.Params[idx].Name
 }
 
 // checkErrorCall validates error-union error construction.
@@ -4984,7 +4937,7 @@ func (c *Checker) checkUserCallArg(
 			return err
 		}
 	}
-	if fn.params[idx] == typeFunction && fn.comptimeParams[idx] {
+	if fn.params[idx] == typeFunction {
 		return c.checkFunctionNameParam(name, fn, idx, checkedArg)
 	}
 	got, err := c.checkExpr(checkedArg, env, unsafe)
@@ -4994,11 +4947,6 @@ func (c *Checker) checkUserCallArg(
 	got, err = c.coerceContextualIntegerLiteral(checkedArg, fn.params[idx], got)
 	if err != nil {
 		return err
-	}
-	if fn.comptimeParams[idx] {
-		if _, err := c.evalComptime(checkedArg); err != nil {
-			return err
-		}
 	}
 	if contractName, ok := dynContract(fn.params[idx]); ok {
 		if !c.satisfies(contractName, got) {
@@ -7530,8 +7478,7 @@ func methodMatches(typeName string, want *functionType, got *functionType) bool 
 		expected := substituteSelfType(wantParam, typeName)
 		if !sameType(expected, got.params[idx]) ||
 			want.borrowParams[idx] != got.borrowParams[idx] ||
-			want.mutBorrowParams[idx] != got.mutBorrowParams[idx] ||
-			want.comptimeParams[idx] != got.comptimeParams[idx] {
+			want.mutBorrowParams[idx] != got.mutBorrowParams[idx] {
 			return false
 		}
 	}

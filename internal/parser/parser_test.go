@@ -933,7 +933,7 @@ func TestParseRequiresUnsafeImplMethod(t *testing.T) {
 
 // TestParseComptime checks Phase 13 compile-time expression and parameter syntax.
 func TestParseComptime(t *testing.T) {
-	input := `fn sized(comptime n: i64) -> i64 {
+	input := `fn sized<n: i64>() -> i64 {
     return n;
 }
 fn main() {
@@ -949,7 +949,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn sized(comptime n: i64) -> i64 { return n; }
+	want := `fn sized<n: i64>() -> i64 { return n; }
 fn main() { let size = comptime (4 * 1024); ` +
 		`comptime if ((1 + 1) == 2) { print(sized(comptime size)); } else { print(0); } }`
 	if got := program.String(); got != want {

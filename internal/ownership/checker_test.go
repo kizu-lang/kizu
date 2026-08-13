@@ -955,10 +955,10 @@ fn main() { @unsafe(ptr_read) { print(1); } }`,
 
 // TestCheckComptimeDoesNotMoveRuntimeValues checks compile-time arguments are read-only.
 func TestCheckComptimeDoesNotMoveRuntimeValues(t *testing.T) {
-	source := `fn sized(comptime n: i64) -> i64 { return n ;}
+	source := `fn sized<n: i64>() -> i64 { return n ;}
 fn main() {
     let name = "alice";
-    print(sized(comptime 8));
+    print(sized<8>());
     print(name);
 }`
 	if err := checkSource(source); err != nil {

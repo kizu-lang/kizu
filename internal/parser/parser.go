@@ -572,8 +572,10 @@ func (p *Parser) parseParams() []ast.Param {
 	for {
 		param := ast.Param{}
 		if p.cur.Type == token.Comptime {
-			param.Comptime = true
-			p.nextToken()
+			// A compile-time value belongs in the `<...>` list, not among
+			// values that move and borrow.
+			p.errorf("compile-time parameter belongs in `<...>`, not `(...)`")
+			return params
 		}
 		if p.cur.Type != token.Ident {
 			p.errorf("expected parameter name, got %s", tokenDescription(p.cur))

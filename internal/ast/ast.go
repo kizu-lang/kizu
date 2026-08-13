@@ -358,7 +358,6 @@ type Param struct {
 	TypeName  string
 	Borrow    bool
 	MutBorrow bool
-	Comptime  bool
 }
 
 // String returns a compact debug representation of the parameter.
@@ -369,10 +368,7 @@ func (p Param) String() string {
 	} else if p.Borrow {
 		prefix = borrowPrefix(false)
 	}
-	if !p.Comptime {
-		return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
-	}
-	return fmt.Sprintf("comptime %s: %s%s", p.Name, prefix, p.TypeName)
+	return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
 }
 
 // typeParamText renders static type parameters.

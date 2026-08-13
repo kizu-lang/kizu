@@ -1570,21 +1570,30 @@ v0.1 の最小構文:
 let size = comptime 4 * 1024;
 ```
 
-comptime parameter:
+compile-time の値は static 引数リスト `<...>` に書きます。
 
 ```kizu
-fn sized(comptime n: i64) -> i64 {
+fn sized<n: i64>() -> i64 {
     return n;
 }
 ```
 
-v0.2 の最小 generics は、明示的な compile-time/static 引数リスト `<...>` を
-使う function generics に限定します。`<...>` は runtime 引数リスト `(...)` とは
-別の領域であり、v0.2 では type argument だけを受け付けます。
-宣言は `fn f<T>(value: T) -> T`、呼び出しは `f<i64>(value)` または
-`std::testing::expect_equal<i64>(expected, actual)` のように書きます。
-型引数推論、non-type static argument、generic methods、bounds、associated types、
-higher-kinded types、specialization、reflection は実装しません。
+`(...)` には書けません。実行時に存在しない値が、move / borrow される値と同じ
+括弧に並ぶと、所有権の境界が読めなくなるためです(ADR-0066)。
+
+`<...>` は runtime 引数リスト `(...)` とは別の領域で、次の 2 種類を受け付けます。
+
+- 型パラメータ: 名前だけを書きます。`fn f<T>(value: T) -> T`
+- compile-time 値: 名前に型を付けます。`fn sized<n: i64>()`、
+  `fn parallel_for<worker: Function>(io: Io, start: i64, end: i64)`
+
+呼び出しはどちらも `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
+`std::testing::expect_equal<i64>(expected, actual)`、
+`std::task::parallel_for<worker>(io, 0, 3)`。
+
+compile-time 値として書けるのは整数、`true` / `false`、および `Function`
+(top-level function 名)です。型引数推論、generic methods、bounds、
+associated types、higher-kinded types、specialization、reflection は実装しません。
 
 通常の function / method 名は、generic かどうかに関係なく snake_case にします。
 `<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
@@ -1664,10 +1673,10 @@ fn is_i64<T>(value: T) -> bool {
 }
 ```
 
-`comptime Function` parameter is a restricted function-name token for std
+A `Function` static parameter is a restricted function-name token for std
 wrappers that must forward a named function to a trusted primitive. It is not a
-closure, cannot capture locals, and cannot be stored in runtime data. A
-`Function` parameter must be marked `comptime`, and the argument must be a
+closure, cannot capture locals, and cannot be stored in runtime data. It is
+declared in `<...>` as `<worker: Function>`, and the argument must be a
 top-level function name.
 
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。

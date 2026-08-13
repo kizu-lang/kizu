@@ -665,9 +665,6 @@ func readFunctionParams(tokens []token.Token, start int) ([]localBinding, int) {
 	}
 	params := []localBinding{}
 	for i := open + 1; i < close; i++ {
-		if tokens[i].Type == token.Comptime {
-			i++
-		}
 		if i+1 >= close || tokens[i].Type != token.Ident || tokens[i+1].Type != token.Colon {
 			continue
 		}

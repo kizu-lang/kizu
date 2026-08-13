@@ -1561,13 +1561,13 @@ fn main() {}`
 
 // TestCheckAcceptsComptime checks Phase 13 compile-time values and branch selection.
 func TestCheckAcceptsComptime(t *testing.T) {
-	source := `fn sized(comptime n: i64) -> i64 {
+	source := `fn sized<n: i64>() -> i64 {
     return n;
 }
 fn main() {
     let size = comptime 4 * 1024;
     comptime if 1 + 1 == 2 {
-        print(sized(comptime 8));
+        print(sized<8>());
     } else {
         print("not checked");
     }
@@ -1603,13 +1603,13 @@ func TestCheckRejectsComptimeErrors(t *testing.T) {
 			want: "comptime error: division by zero",
 		},
 		{
-			name: "comptime parameter",
-			source: `fn sized(comptime n: i64) -> i64 { return n ;}
+			name: "runtime value as static argument",
+			source: `fn sized<n: i64>() -> i64 { return n ;}
 fn main() {
     let x = 8;
-    print(sized(x));
+    print(sized<x>());
 }`,
-			want: "comptime error: runtime value cannot be used",
+			want: "static argument `n` expects i64, got `x`",
 		},
 	}
 	runErrorCases(t, cases)
