@@ -192,6 +192,7 @@ type Checker struct {
 	functions       map[string]*functionType
 	structs         map[string]*ast.StructDecl
 	enums           map[string]*enumType
+	errorSets       map[string]*errorSetType
 	unions          map[string]*unionType
 	contracts       map[string]*contractType
 	impls           map[string]map[string]*functionType
@@ -220,6 +221,18 @@ type enumType struct {
 	name   string
 	tags   map[string]bool
 	public bool
+}
+
+// errorSetType is a declared set of failures. Its members carry nothing, so the
+// set is the whole of what a failure says about itself.
+type errorSetType struct {
+	name    string
+	members map[string]bool
+	public  bool
+	// tagged is the same set seen as something a match runs over. Asking which
+	// failure it is, is the question a match on an enum asks, so it is answered
+	// by the same code rather than a second copy of it.
+	tagged *enumType
 }
 
 type unionType struct {
@@ -264,6 +277,7 @@ func New() *Checker {
 		functions:        map[string]*functionType{},
 		structs:          map[string]*ast.StructDecl{},
 		enums:            map[string]*enumType{},
+		errorSets:        map[string]*errorSetType{},
 		unions:           map[string]*unionType{},
 		contracts:        map[string]*contractType{},
 		impls:            map[string]map[string]*functionType{},
@@ -380,6 +394,8 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 		return c.collectStruct(d)
 	case *ast.EnumDecl:
 		return c.collectEnum(d)
+	case *ast.ErrorSetDecl:
+		return c.collectErrorSet(d)
 	case *ast.UnionDecl:
 		return c.collectUnion(d)
 	case *ast.ContractDecl:
@@ -418,6 +434,8 @@ func declaredTypeName(decl ast.Decl) (string, bool) {
 	case *ast.StructDecl:
 		return d.Name, true
 	case *ast.EnumDecl:
+		return d.Name, true
+	case *ast.ErrorSetDecl:
 		return d.Name, true
 	case *ast.UnionDecl:
 		return d.Name, true
@@ -646,6 +664,40 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 		enum.tags[tag] = true
 	}
 	c.enums[decl.Name] = enum
+	return nil
+}
+
+// collectErrorSet registers and validates an error set declaration.
+func (c *Checker) collectErrorSet(decl *ast.ErrorSetDecl) error {
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
+	}
+	set := &errorSetType{name: decl.Name, members: map[string]bool{}, public: decl.Public}
+	for _, member := range decl.Members {
+		if set.members[member] {
+			return errorf("type error: duplicate error `%s::%s`", decl.Name, member)
+		}
+		set.members[member] = true
+	}
+	set.tagged = &enumType{name: set.name, tags: set.members, public: set.public}
+	c.errorSets[decl.Name] = set
+	return nil
+}
+
+// rejectDuplicateTypeName reports a name already taken by another declaration.
+func (c *Checker) rejectDuplicateTypeName(name string) error {
+	if _, exists := c.errorSets[name]; exists {
+		return errorf("type error: duplicate error set `%s`", name)
+	}
+	if _, exists := c.enums[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	if _, exists := c.structs[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	if _, exists := c.unions[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
 	return nil
 }
 
@@ -2562,6 +2614,18 @@ func (c *Checker) hasLoopLabel(label string) bool {
 	return false
 }
 
+// taggedType returns the named set of tags a match can run over. An enum is one,
+// and so is an error set: matching a failure asks which member of the set it is.
+func (c *Checker) taggedType(name Type) *enumType {
+	if enum := c.enums[string(name)]; enum != nil {
+		return enum
+	}
+	if set := c.errorSets[string(name)]; set != nil {
+		return set.tagged
+	}
+	return nil
+}
+
 // checkMatchStmt validates exhaustive simple enum tag matches.
 func (c *Checker) checkMatchStmt(
 	stmt *ast.MatchStmt,
@@ -2573,8 +2637,8 @@ func (c *Checker) checkMatchStmt(
 	if err != nil {
 		return false, err
 	}
-	if enumType := c.enums[string(valueType)]; enumType != nil {
-		return c.checkMatchArms(stmt.Arms, enumType, nil, env, wantReturn, unsafe)
+	if tagged := c.taggedType(valueType); tagged != nil {
+		return c.checkMatchArms(stmt.Arms, tagged, nil, env, wantReturn, unsafe)
 	}
 	unionType := c.unions[string(valueType)]
 	if unionType != nil {
@@ -2846,12 +2910,12 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeC
 	if err != nil {
 		return "", err
 	}
-	enumType := c.enums[string(valueType)]
+	tagged := c.taggedType(valueType)
 	unionType := c.unions[string(valueType)]
-	if enumType == nil && unionType == nil {
+	if tagged == nil && unionType == nil {
 		return "", errorf("type error: match expects enum or union, got %s", valueType)
 	}
-	return c.checkMatchExprArms(stmt.Arms, enumType, unionType, env, unsafe)
+	return c.checkMatchExprArms(stmt.Arms, tagged, unionType, env, unsafe)
 }
 
 // checkMatchExprArms validates match expression arms and returns their common type.
@@ -5179,6 +5243,9 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 		return "", errorf("type error: enum tag `%s.%s` must use `::`",
 			enumType.name, expr.Name)
 	}
+	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
+		return "", errorf("type error: error `%s.%s` must use `::`", set.name, expr.Name)
+	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
 		return "", errorf("type error: union variant `%s.%s` must use `::`",
 			unionType.name, expr.Name)
@@ -5279,6 +5346,12 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 				enumType.name, expr.Name)
 		}
 		return Type(enumType.name), nil
+	}
+	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
+		if !set.members[expr.Name] {
+			return "", errorf("type error: unknown error `%s::%s`", set.name, expr.Name)
+		}
+		return Type(set.name), nil
 	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
 		payload, exists := unionType.variants[expr.Name]
@@ -5419,6 +5492,19 @@ func enumReceiver(expr ast.Expression, enums map[string]*enumType) (*enumType, b
 	}
 	enumType, ok := enums[ident.Name]
 	return enumType, ok
+}
+
+// errorSetReceiver returns an error set namespace used by SetName::Member.
+func errorSetReceiver(
+	expr ast.Expression,
+	sets map[string]*errorSetType,
+) (*errorSetType, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	set, ok := sets[ident.Name]
+	return set, ok
 }
 
 // unionReceiver returns a union namespace used by UnionName.Variant expressions.

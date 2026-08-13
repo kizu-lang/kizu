@@ -238,6 +238,33 @@ func (d *EnumDecl) String() string {
 	return fmt.Sprintf("%senum %s { %s }", prefix, d.Name, strings.Join(d.Tags, ", "))
 }
 
+// ErrorSetDecl represents `error Name { A, B }`. An error set names the failures
+// a function can return. Its members carry nothing: an error says what went
+// wrong, and what else is worth knowing about it belongs to a diagnostic.
+//
+// It is not an enum. An enum is a closed set of values a program computes with,
+// while an error set is a set that grows by union as callers propagate what
+// they call, which is what lets `!T` be inferred from a function body.
+type ErrorSetDecl struct {
+	Name       string
+	Doc        string
+	Members    []string
+	MemberDocs map[string]string
+	Public     bool
+}
+
+// declNode marks ErrorSetDecl as a declaration node.
+func (*ErrorSetDecl) declNode() {}
+
+// String returns a compact debug representation of the error set declaration.
+func (d *ErrorSetDecl) String() string {
+	prefix := ""
+	if d.Public {
+		prefix = "pub "
+	}
+	return fmt.Sprintf("%serror %s { %s }", prefix, d.Name, strings.Join(d.Members, ", "))
+}
+
 // UnionDecl represents a tagged union declaration.
 type UnionDecl struct {
 	Name       string

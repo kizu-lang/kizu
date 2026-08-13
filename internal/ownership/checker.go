@@ -16,6 +16,7 @@ type Checker struct {
 	impls           map[string]map[string]*functionInfo
 	structs         map[string]map[string]string
 	enums           map[string]map[string]bool
+	errorSets       map[string]map[string]bool
 	unions          map[string]map[string]string
 	nextID          int
 	loopDepth       int
@@ -95,6 +96,7 @@ func New() *Checker {
 		impls:     map[string]map[string]*functionInfo{},
 		structs:   map[string]map[string]string{},
 		enums:     map[string]map[string]bool{},
+		errorSets: map[string]map[string]bool{},
 		unions:    map[string]map[string]string{},
 	}
 }
@@ -105,6 +107,7 @@ func (c *Checker) Check(program *ast.Program) error {
 		return err
 	}
 	c.collectEnums(program)
+	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
@@ -139,6 +142,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 		return []error{err}
 	}
 	c.collectEnums(program)
+	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
@@ -178,6 +182,22 @@ func (c *Checker) collectEnums(program *ast.Program) {
 			tags[tag] = true
 		}
 		c.enums[enumDecl.Name] = tags
+	}
+}
+
+// collectErrorSets records error set declarations for error value reads. An
+// error carries nothing, so reading one moves nothing.
+func (c *Checker) collectErrorSets(program *ast.Program) {
+	for _, decl := range program.Decls {
+		setDecl, ok := decl.(*ast.ErrorSetDecl)
+		if !ok {
+			continue
+		}
+		members := map[string]bool{}
+		for _, member := range setDecl.Members {
+			members[member] = true
+		}
+		c.errorSets[setDecl.Name] = members
 	}
 }
 
@@ -1213,6 +1233,11 @@ func (c *Checker) defineMatchArmPayload(
 func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string, bool) {
 	if tags := c.enums[typeName]; tags != nil {
 		return tags, nil, true
+	}
+	// An error carries nothing, so matching one moves nothing, which is what a
+	// tag enum arm already means here.
+	if members := c.errorSets[typeName]; members != nil {
+		return members, nil, true
 	}
 	payloads := c.unions[typeName]
 	if payloads == nil {
@@ -3252,6 +3277,13 @@ func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
 		if !tags[expr.Name] {
 			return "", errorAt(expr.Span,
 				"move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+		}
+		return ident.Name, nil
+	}
+	if members, exists := c.errorSets[ident.Name]; exists {
+		if !members[expr.Name] {
+			return "", errorAt(expr.Span,
+				"move error: unknown error `%s::%s`", ident.Name, expr.Name)
 		}
 		return ident.Name, nil
 	}

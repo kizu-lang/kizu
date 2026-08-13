@@ -62,11 +62,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseDirectiveDecl(false, docText(p.cur)))
 			p.nextToken()
 		case token.Ident:
-			if p.cur.Literal == "test" {
-				program.Decls = append(program.Decls, p.parseTestDecl())
-			} else {
-				p.errorExpectedDeclaration()
-			}
+			program.Decls = append(program.Decls, p.parseIdentLedDecl()...)
 			p.nextToken()
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
@@ -150,6 +146,12 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 		return p.parseUnionDeclWithDoc(docs)
 	case token.Contract:
 		return p.parseContractDecl()
+	case token.Ident:
+		if p.startsErrorSetDecl() {
+			return p.parseErrorSetDeclWithDoc(docs)
+		}
+		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
+		return &ast.FunctionDecl{Public: true, Doc: docs}
 	default:
 		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
 		return &ast.FunctionDecl{Public: true, Doc: docs}
@@ -168,6 +170,8 @@ func setPublicDecl(decl ast.Decl) {
 	case *ast.UnionDecl:
 		d.Public = true
 	case *ast.ContractDecl:
+		d.Public = true
+	case *ast.ErrorSetDecl:
 		d.Public = true
 	}
 }
@@ -467,6 +471,69 @@ func (p *Parser) parseEnumDeclWithDoc(docs string) ast.Decl {
 	}
 	decl.Tags, decl.TagDocs = p.parseEnumTags()
 	return decl
+}
+
+// parseIdentLedDecl parses the declarations that start with a plain name rather
+// than a keyword, and reports none when the name starts neither.
+func (p *Parser) parseIdentLedDecl() []ast.Decl {
+	switch {
+	case p.cur.Literal == "test":
+		return []ast.Decl{p.parseTestDecl()}
+	case p.startsErrorSetDecl():
+		return []ast.Decl{p.parseErrorSetDecl()}
+	default:
+		p.errorExpectedDeclaration()
+		return nil
+	}
+}
+
+// startsErrorSetDecl reports whether the current `error` begins a declaration.
+// `error` is not a keyword, because `error(message)` is a call to a function of
+// that name, so a declaration is told apart by what follows: a name and a brace,
+// which a call never has.
+func (p *Parser) startsErrorSetDecl() bool {
+	return p.cur.Literal == "error" && p.peek.Type == token.Ident
+}
+
+// parseErrorSetDecl parses `error Name { A, B }`.
+func (p *Parser) parseErrorSetDecl() ast.Decl {
+	return p.parseErrorSetDeclWithDoc(docText(p.cur))
+}
+
+// parseErrorSetDeclWithDoc parses an error set declaration with attached docs.
+func (p *Parser) parseErrorSetDeclWithDoc(docs string) ast.Decl {
+	decl := &ast.ErrorSetDecl{Doc: docs}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Members, decl.MemberDocs = p.parseErrorSetMembers()
+	return decl
+}
+
+// parseErrorSetMembers parses the comma-separated names in an error set.
+func (p *Parser) parseErrorSetMembers() ([]string, map[string]string) {
+	members := []string{}
+	memberDocs := map[string]string{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		if p.cur.Type != token.Ident {
+			p.errorf("expected error name, got %s", tokenDescription(p.cur))
+			return members, tagDocsOrNil(memberDocs)
+		}
+		members = append(members, p.cur.Literal)
+		if docs := docText(p.cur); docs != "" {
+			memberDocs[p.cur.Literal] = docs
+		}
+		if !p.consumeListDelimiter("error name") {
+			return members, tagDocsOrNil(memberDocs)
+		}
+		p.nextToken()
+	}
+	return members, tagDocsOrNil(memberDocs)
 }
 
 // parseEnumTags parses comma-separated enum tags.

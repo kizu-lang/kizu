@@ -1309,6 +1309,30 @@ fn main() -> ConfigError!void {
 }
 ```
 
+### 6.14.1 error set
+
+失敗の種類は `error` で宣言します。
+
+```kizu
+error FsError {
+    NotFound,
+    Denied,
+}
+
+fn read(path: []u8) -> FsError!i64 {
+    return FsError::NotFound;
+}
+```
+
+error 値は set の member そのものであり、**payload を持ちません**。error は
+「何が起きたか」だけを運び、位置や期待値のような詳細は diagnostic が持ちます
+(ADR-0086)。
+
+* `error Name { A, B }` で宣言する
+* member は `Name::A` で参照する
+* `match` で網羅的に分岐できる
+* error 値が `main` から出た場合、`runtime error: Name::A` として報告される
+
 ルール:
 
 * `try` は `!T` を返す関数内でだけ使える

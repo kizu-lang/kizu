@@ -1842,6 +1842,13 @@ func mangleGlobalName(typ string) string {
 func (e *emitter) printedEnums() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
+		// A failure that leaves `main` is reported by name, so the error set of
+		// its result needs the same table a printed enum does.
+		if errorName, _, ok := errorUnionParts(fn.Return); ok && errorName != "" {
+			if _, isEnum := e.module.Enums[errorName]; isEnum {
+				seen[errorName] = true
+			}
+		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
 				if instr.Op != "call.print" || len(instr.Args) != 1 {
@@ -2119,7 +2126,11 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 // payload rather than a message slice, so only string-message unions print.
 func (e *emitter) writeMainErrorMessage(source ir.Value) {
 	errorName, _, ok := errorUnionParts(source.Type)
-	if !ok || errorName != "" {
+	if !ok {
+		return
+	}
+	if errorName != "" {
+		e.writeMainErrorSetName(source, errorName)
 		return
 	}
 	sourceInfo := e.value(source)
@@ -2131,6 +2142,33 @@ func (e *emitter) writeMainErrorMessage(source ir.Value) {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, msgName)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, msgName)
 	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n", ptrName, lenName)
+}
+
+// writeMainErrorSetName reports a failure that leaves `main` by its name. An
+// error carries nothing, so the text comes from the table of names rather than
+// from the value, which is a number saying which member of the set it is.
+func (e *emitter) writeMainErrorSetName(source ir.Value, errorName string) {
+	set, ok := e.module.Enums[errorName]
+	if !ok {
+		return
+	}
+	sourceInfo := e.value(source)
+	tagName := "%" + e.nextSyntheticValue("main.err.tag")
+	rowName := tagName + ".row"
+	ptrName := tagName + ".ptr"
+	lenAddr := tagName + ".len.addr"
+	lenName := tagName + ".len"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		tagName, e.llvmType(source.Type), sourceInfo.operand,
+		errorUnionFailureIndex(source.Type))
+	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
+		rowName, len(set.Tags), enumNameTable(errorName), tagName)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
+		lenAddr, rowName)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
+	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n",
+		ptrName, lenName)
 }
 
 // writeErrorFailureReturn propagates a failed try from the current function.
