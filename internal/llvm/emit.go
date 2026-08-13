@@ -790,6 +790,10 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeFieldInstr(instr)
 	case instr.Op == "ref.store":
 		return e.writeRefStore(instr)
+	case instr.Op == "ref.load":
+		return e.writeRefLoad(instr)
+	case instr.Op == "local.slot":
+		return e.writeLocalSlot(instr)
 	case instr.Op == "cond_fail":
 		return e.writeCondFail(instr)
 	default:
@@ -1461,6 +1465,44 @@ func (e *emitter) writeRefStore(instr *ir.Instr) error {
 		e.value(receiver).operand,
 	)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
+	return nil
+}
+
+// writeLocalSlot gives a local storage and puts its first value there. A local
+// only reaches here when the function mutably borrows it, so the address it
+// yields is what the callee writes through.
+func (e *emitter) writeLocalSlot(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: local slot expects 1 arg")
+	}
+	initial := instr.Args[0]
+	if want := derefLLVMType(instr.Result.Type); want != initial.Type {
+		return fmt.Errorf("llvm error: local slot of %s holds %s, got %s",
+			instr.Result.Type, want, initial.Type)
+	}
+	slotName := localName(instr.Result.Name)
+	valueType := e.llvmType(initial.Type)
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, valueType)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		valueType, e.value(initial).operand, slotName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: slotName}
+	return nil
+}
+
+// writeRefLoad reads the value currently behind a borrow.
+func (e *emitter) writeRefLoad(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: borrow read expects 1 arg")
+	}
+	receiver := instr.Args[0]
+	if want := derefLLVMType(receiver.Type); want != instr.Result.Type {
+		return fmt.Errorf("llvm error: borrow read of `%s` gives %s, got %s",
+			receiver.Type, want, instr.Result.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+		resultName, e.llvmType(instr.Result.Type), e.value(receiver).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

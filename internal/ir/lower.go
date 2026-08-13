@@ -36,6 +36,10 @@ type lowerer struct {
 	pending      []genericInstance
 	// staticValues binds the compile-time values of the instance being lowered.
 	staticValues map[string]staticValue
+	// slots names the locals of the function being lowered that live in memory
+	// because something writes through a `&var` borrow of them. Their entry in
+	// env is the storage, not the value.
+	slots map[string]bool
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -410,6 +414,11 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
 	l.current = &Function{Name: name, Return: returnType(l.resolveType(typ.Text(fn.ReturnType)))}
 	l.env = map[string]Value{}
+	slots, err := l.mutablyBorrowedLocals(fn)
+	if err != nil {
+		return nil, err
+	}
+	l.slots = slots
 	l.nextValue = 0
 	l.nextBlock = 0
 	l.loops = nil
@@ -429,17 +438,21 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	return l.current, nil
 }
 
-// paramIRTypeName preserves borrow ABI only for unions that need pointer matching.
+// paramIRTypeName gives a parameter the type the callee sees. A `&var` parameter
+// keeps its borrow, because a write through it has to land in the caller's
+// storage rather than in a copy of it. A `&` parameter cannot write, so passing
+// the value is the same observation and stays the cheaper shape -- except for
+// unions, where matching already needs the pointer.
 func (l *lowerer) paramIRTypeName(param ast.Param) string {
 	typeName := l.resolveType(typ.Text(param.TypeName))
-	if !param.Borrow && !param.MutBorrow {
+	if param.MutBorrow {
+		return "&var " + typeName
+	}
+	if !param.Borrow {
 		return typeName
 	}
 	if _, ok := l.module.Unions[typeName]; !ok {
 		return typeName
-	}
-	if param.MutBorrow {
-		return "&var " + typeName
 	}
 	return "&" + typeName
 }
@@ -529,9 +542,7 @@ func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
 func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		value, err := l.lowerExpr(s.Value)
-		l.env[s.Name] = value
-		return err
+		return l.lowerLetStmt(s)
 	case *ast.AssignStmt:
 		value, err := l.lowerExpr(s.Value)
 		if err != nil {
@@ -566,6 +577,16 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	}
 }
 
+// lowerLetStmt binds one declaration to the value it was written with.
+func (l *lowerer) lowerLetStmt(stmt *ast.LetStmt) error {
+	value, err := l.lowerExpr(stmt.Value)
+	if err != nil {
+		return err
+	}
+	l.bindLocal(stmt.Name, value)
+	return nil
+}
+
 // lowerAssignTarget writes value into an assignment target. An identifier
 // rebinds the SSA name. A field of a borrowed receiver stores through the
 // borrow, while a field of a value receiver rebuilds the receiver aggregate and
@@ -576,10 +597,14 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 	switch t := target.(type) {
 	case *ast.IdentExpr:
+		if slot, ok := l.slotPointer(t); ok {
+			l.emit("ref.store", "void", []Value{slot, value}, "")
+			return nil
+		}
 		l.env[t.Name] = value
 		return nil
 	case *ast.FieldExpr:
-		receiver, err := l.lowerExpr(t.Receiver)
+		receiver, err := l.lowerReceiverAddress(t.Receiver)
 		if err != nil {
 			return err
 		}
@@ -731,6 +756,9 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 
 // lowerIdentExpr lowers a local binding, a static value, or the built-in void.
 func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
+	if slot, ok := l.slotPointer(expr); ok {
+		return l.emit("ref.load", derefType(slot.Type), []Value{slot}, ""), nil
+	}
 	value, ok := l.env[expr.Name]
 	if ok {
 		return value, nil
@@ -859,7 +887,7 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 
 // lowerNamedCallExpr lowers builtins and resolved function calls.
 func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Value, error) {
-	args, err := l.lowerArgs(rawArgs)
+	args, err := l.lowerCallArgs(name, rawArgs)
 	if err != nil {
 		return Value{}, err
 	}
@@ -989,6 +1017,11 @@ func (l *lowerer) lowerMethodCallExpr(
 	receiver, err := l.lowerExpr(field.Receiver)
 	if err != nil {
 		return Value{}, err
+	}
+	// A `&var` receiver is storage. No method takes `&var self`, so every one of
+	// them is asking for the value that is in there.
+	if isMutableReferenceType(receiver.Type) {
+		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
 	loweredArgs, err := l.lowerArgs(args)
 	if err != nil {
