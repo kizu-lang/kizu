@@ -3441,11 +3441,20 @@ func (c *Checker) checkQualifiedBuiltin(
 // std. Being a primitive is what reserves it, so a new one is closed the moment
 // it joins the registry rather than when someone remembers to guard its family.
 func (c *Checker) rejectReservedBuiltin(name string) error {
-	if c.currentStd {
+	if !strings.HasPrefix(name, "std.builtin.") {
 		return nil
 	}
-	replacement, ok := stdprim.ReservedBuiltin(name)
-	if !ok {
+	replacement, known := stdprim.ReservedBuiltin(name)
+	if !known {
+		if removed, ok := stdprim.RemovedBuiltinReplacement(name); ok {
+			return errorf("type error: `%s` was removed; use %s", name, removed)
+		}
+		// The registry is what primitives there are, so a name outside it is a
+		// misspelling. Nothing else reports one: std source is trusted, and a
+		// primitive it names that does not exist would lower to nothing.
+		return errorf("type error: `%s` is not a primitive", name)
+	}
+	if c.currentStd {
 		return nil
 	}
 	return errorf("type error: `%s` is reserved; use %s", name, replacement)

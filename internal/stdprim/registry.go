@@ -123,7 +123,6 @@ var reserved = map[string]string{
 	"std.builtin.process_env":              "std::process",
 	"std.builtin.process_env_or_empty":     "std::process",
 	"std.builtin.process_monotonic_millis": "std::process",
-	"std.builtin.process_spawn_wait":       "std::process",
 	"std.builtin.process_spawn_wait8":      "std::process",
 	"std.builtin.task_group":               "std::task",
 	"std.builtin.task_local_buffer":        "std::task",

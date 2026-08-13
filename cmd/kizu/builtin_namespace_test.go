@@ -14,6 +14,9 @@ import (
 // builtinCallPattern finds the `std::builtin::` calls std source makes.
 var builtinCallPattern = regexp.MustCompile(`std::builtin::([a-z_0-9]+)`)
 
+// goBuiltinPattern finds the primitives the Go sources name.
+var goBuiltinPattern = regexp.MustCompile(`"std\.builtin\.([a-z_0-9]+)"`)
+
 // TestReservedBuiltinsAreClosedToUserCode keeps the `std::builtin::` namespace
 // shut. A primitive reachable from user code hands out what std exists to
 // control: `std::builtin::io_blocking()` once returned an Io capability to any
@@ -70,6 +73,49 @@ func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
 	sort.Strings(names)
 	t.Fatalf("std calls primitives the reserved registry does not name: %s",
 		strings.Join(names, ", "))
+}
+
+// TestReservedBuiltinRegistryNamesRealPrimitives checks the registry the other
+// way. A name nothing implements reserves a spelling that does not exist, which
+// is how `std.builtin.process_spawn_wait` got in: it is the prefix of
+// `process_spawn_wait8`, and a pattern that stopped before the digit read it as
+// a separate primitive.
+func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
+	implemented := map[string]bool{}
+	for _, path := range kizuSourcePaths(t, "../../std") {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
+			implemented["std.builtin."+match[1]] = true
+		}
+	}
+	for _, path := range []string{
+		"../../internal/types/checker.go",
+		"../../internal/ownership/checker.go",
+		"../../internal/ir/lower.go",
+		"../../internal/ir/helpers.go",
+		"../../internal/stdprim/registry.go",
+	} {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, match := range goBuiltinPattern.FindAllStringSubmatch(string(source), -1) {
+			implemented["std.builtin."+match[1]] = true
+		}
+	}
+	unknown := []string{}
+	for _, name := range stdprim.BuiltinNames() {
+		if !implemented[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		t.Fatalf("the reserved registry names primitives nothing implements: %s",
+			strings.Join(unknown, ", "))
+	}
 }
 
 // firstLineOf trims command output to its first line.

@@ -1844,11 +1844,14 @@ func (c *Checker) checkQualifiedBuiltin(
 // std. The type checker rejects these first in a full run; this keeps the rule
 // true of this checker on its own, which is how its own tests read it.
 func (c *Checker) rejectReservedBuiltin(name string) error {
-	if c.currentStd {
+	if !strings.HasPrefix(name, "std.builtin.") {
 		return nil
 	}
-	replacement, ok := stdprim.ReservedBuiltin(name)
-	if !ok {
+	replacement, known := stdprim.ReservedBuiltin(name)
+	if !known {
+		return errorf("move error: `%s` is not a primitive", name)
+	}
+	if c.currentStd {
 		return nil
 	}
 	return errorf("move error: `%s` is reserved; use %s", name, replacement)
