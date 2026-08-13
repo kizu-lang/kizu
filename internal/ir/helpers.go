@@ -31,9 +31,11 @@ func (l *lowerer) emitConst(typ string, immediate string) Value {
 	return l.emit("const", typ, nil, immediate)
 }
 
-// emit appends a generic instruction.
+// emit appends a generic instruction. The result type is resolved against the
+// instantiation in force, so a type parameter never reaches the backend: every
+// instruction in a generic body carries the type its instance was built for.
 func (l *lowerer) emit(op string, typ string, args []Value, immediate string) Value {
-	result := l.next(typ)
+	result := l.next(l.resolveType(typ))
 	instr := &Instr{Result: result, Op: op, Args: args, Immediate: immediate}
 	l.block.Instrs = append(l.block.Instrs, instr)
 	return result

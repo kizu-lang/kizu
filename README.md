@@ -34,14 +34,14 @@ by any one execution path.
 | while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
 | enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
 | move / borrow | 16 | ✅ | 14/16 | 15/16 | 2/16 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
-| contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
-| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
+| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
+| std::array | 11 | ✅ | 10/11 | 10/11 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
 | std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
@@ -53,7 +53,7 @@ by any one execution path.
 | std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 83 runnable examples, measured on 2026-08-13 with
+`❌` means none do. 84 runnable examples, measured on 2026-08-13 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -61,10 +61,10 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 83/83 |
-| `kizu run` | 67/83 |
-| `kizu build --emit-llvm` | 68/83 |
-| `kizu build --target wasm32-wasi` | 16/83 |
+| `kizu check` | 84/84 |
+| `kizu run` | 68/84 |
+| `kizu build --emit-llvm` | 69/84 |
+| `kizu build --target wasm32-wasi` | 16/84 |
 
 The 16 examples `run` cannot reproduce are registered in the manifests with a
 `pending` reason. A pending case is tested for *still failing*, so closing a gap

@@ -211,6 +211,9 @@ type Checker struct {
 	// stdMethods indexes the signatures std declares for its container methods,
 	// so this checker reads them instead of restating them.
 	stdMethods stdmethod.MethodIndex
+	// checkedStdBodies records the std wrapper instantiations already checked,
+	// keyed by name and static arguments.
+	checkedStdBodies map[string]bool
 }
 
 type enumType struct {
@@ -258,14 +261,15 @@ type scope struct {
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
-		functions:     map[string]*functionType{},
-		structs:       map[string]*ast.StructDecl{},
-		enums:         map[string]*enumType{},
-		unions:        map[string]*unionType{},
-		contracts:     map[string]*contractType{},
-		impls:         map[string]map[string]*functionType{},
-		satisfactions: map[string]map[string]bool{},
-		declaredTypes: map[string]bool{},
+		functions:        map[string]*functionType{},
+		structs:          map[string]*ast.StructDecl{},
+		enums:            map[string]*enumType{},
+		unions:           map[string]*unionType{},
+		contracts:        map[string]*contractType{},
+		impls:            map[string]map[string]*functionType{},
+		satisfactions:    map[string]map[string]bool{},
+		declaredTypes:    map[string]bool{},
+		checkedStdBodies: map[string]bool{},
 	}
 }
 
@@ -4295,7 +4299,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
 		"std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
-		"std.builtin.array_set", "std.builtin.array_deinit":
+		"std.builtin.array_reserve", "std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
 		return "", false, nil
@@ -5873,6 +5877,9 @@ func (c *Checker) checkStdMethod(
 	if !ok {
 		return "", errorf("type error: %s has no method `%s`", label, name)
 	}
+	if err := c.checkStdMethodBody(method, typeArgs); err != nil {
+		return "", err
+	}
 	if len(args) != len(method.Params) {
 		return "", errorf("type error: `%s.%s` expects %d args, got %d",
 			label, name, len(method.Params), len(args))
@@ -5892,6 +5899,42 @@ func (c *Checker) checkStdMethod(
 		}
 	}
 	return Type(method.Substitute(method.Return, subst)), nil
+}
+
+// checkStdMethodBody checks the std wrapper a receiver call resolved to, with
+// this receiver's static arguments bound.
+//
+// A generic body is checked when a call instantiates it (ADR-0066), and no call
+// instantiates these: a container method is matched against the signature std
+// declares and lowered from the method name. That left the body unchecked, so
+// `return std::builtin::array_apend<T>(self, value)` -- or anything else -- sat
+// in std reading like the implementation while meaning nothing.
+func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
+	fn := c.functions[method.Decl.Name]
+	if fn == nil || fn.decl.Body == nil || len(method.TypeParams) != len(typeArgs) {
+		return nil
+	}
+	key := method.Decl.Name + "<" + joinTypes(typeArgs) + ">"
+	if c.checkedStdBodies[key] {
+		return nil
+	}
+	// Recorded before checking, so a body that reaches its own method through
+	// another wrapper stops here instead of recurring.
+	c.checkedStdBodies[key] = true
+	subst := make(map[string]Type, len(typeArgs))
+	for idx, param := range method.TypeParams {
+		subst[param] = typeArgs[idx]
+	}
+	return c.checkGenericInstantiation(fn, subst)
+}
+
+// joinTypes renders static arguments for an instantiation key.
+func joinTypes(types []Type) string {
+	parts := make([]string, 0, len(types))
+	for _, typ := range types {
+		parts = append(parts, string(typ))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.

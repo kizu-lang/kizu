@@ -82,13 +82,35 @@ func newLowerer(program *ast.Program) *lowerer {
 	}
 }
 
-// resolveType binds a type parameter to the type argument in force, and leaves
-// every other name alone.
+// resolveType binds the type parameters in force, wherever they stand. A
+// parameter inside a static argument list counts: `std::array::Array<T>` is the
+// receiver of every Array method, and lowering it as written would leave the
+// instance carrying the parameter it was instantiated away from.
 func (l *lowerer) resolveType(name string) string {
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}
-	return name
+	if len(l.typeBindings) == 0 {
+		return name
+	}
+	resolved, err := typ.SubstituteText(name, l.typeBindings)
+	if err != nil {
+		return name
+	}
+	return resolved
+}
+
+// resolveTypeArgs binds the type parameters in force across a static argument
+// list. A list is not a type, so each entry is resolved on its own.
+func (l *lowerer) resolveTypeArgs(list string) string {
+	args := splitStaticArgs(list)
+	if len(args) == 0 {
+		return l.resolveType(list)
+	}
+	for idx, arg := range args {
+		args[idx] = l.resolveType(arg)
+	}
+	return strings.Join(args, ", ")
 }
 
 // requestGenericInstance records that one generic function is needed for one
@@ -130,9 +152,12 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 			decl: decl, bindings: bindings, values: values, symbol: symbol,
 		})
 	}
+	// The caller sees the instance's return type, not the declaration's: `!T`
+	// has to arrive as `!i64` or the call result carries a parameter that no
+	// longer exists.
 	ret := typ.Text(decl.ReturnType)
-	if bound, ok := bindings[ret]; ok {
-		ret = bound
+	if resolved, err := typ.SubstituteText(ret, bindings); err == nil {
+		ret = resolved
 	}
 	return symbol, returnType(ret), nil
 }
@@ -823,6 +848,12 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if _, ok := runtimeBuiltinReturnType(qualified); ok {
 		return qualified, true
 	}
+	if _, ok := arrayPrimitives[qualified]; ok {
+		return qualified, true
+	}
+	if _, ok := mapPrimitives[qualified]; ok {
+		return qualified, true
+	}
 	return "", false
 }
 
@@ -864,6 +895,12 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	args, err := l.lowerArgs(rawArgs)
 	if err != nil {
 		return Value{}, err
+	}
+	if method, ok := arrayPrimitives[name]; ok {
+		return l.lowerArrayMethod(method, l.resolveType(typeArg), args)
+	}
+	if method, ok := mapPrimitives[name]; ok {
+		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
 	}
 	switch name {
 	case "std.testing.expect_equal", "std.builtin.test_fail_equal":
@@ -959,10 +996,12 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
 	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerArrayMethod(field.Name, elem, allArgs)
+		return l.lowerStdContainerMethod("std.array", field.Name, elem, allArgs,
+			func() (Value, error) { return l.lowerArrayMethod(field.Name, elem, allArgs) })
 	}
 	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerMapMethod(field.Name, valueType, allArgs)
+		return l.lowerStdContainerMethod("std.map", field.Name, valueType, allArgs,
+			func() (Value, error) { return l.lowerMapMethod(field.Name, valueType, allArgs) })
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -977,6 +1016,28 @@ func (l *lowerer) lowerMethodCallExpr(
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
 	}
+}
+
+// lowerStdContainerMethod runs the wrapper std declares for a container method,
+// so the body in std/src/*.kizu is what the call does rather than a description
+// of it. Array.truncate, Array.clear and Array.as_bytes have no declaration to
+// run, so those still lower straight to their instruction.
+func (l *lowerer) lowerStdContainerMethod(
+	module string,
+	method string,
+	typeArg string,
+	args []Value,
+	undeclared func() (Value, error),
+) (Value, error) {
+	name := module + "." + method
+	if l.genericDecl(name) == nil {
+		return undeclared()
+	}
+	symbol, ret, err := l.requestGenericInstance(name, typeArg)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call."+symbol, ret, args, ""), nil
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
@@ -995,6 +1056,44 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 		return Value{}, fmt.Errorf("ir error: unknown impl method `%s`", name)
 	}
 	return l.emit("call."+name, sig.Return, args, ""), nil
+}
+
+// arrayPrimitives maps a std::builtin Array primitive to the method it lowers
+// as. std/src/array.kizu forwards each method to one of these, and lowering the
+// forward is what makes that line the implementation rather than a description
+// of one.
+var arrayPrimitives = map[string]string{
+	"std.builtin.array_append":       "append",
+	"std.builtin.array_at":           "at",
+	"std.builtin.array_at_mut":       "at_mut",
+	"std.builtin.array_capacity":     "capacity",
+	"std.builtin.array_deinit":       "deinit",
+	"std.builtin.array_get":          "get",
+	"std.builtin.array_get_or_panic": "get_or_panic",
+	"std.builtin.array_len":          "len",
+	"std.builtin.array_pop":          "pop",
+	"std.builtin.array_pop_or_panic": "pop_or_panic",
+	"std.builtin.array_reserve":      "reserve",
+	"std.builtin.array_set":          "set",
+}
+
+// mapPrimitives maps a std::builtin Map primitive to the method it lowers as.
+var mapPrimitives = map[string]string{
+	"std.builtin.map_contains": "contains",
+	"std.builtin.map_deinit":   "deinit",
+	"std.builtin.map_get":      "get",
+	"std.builtin.map_insert":   "insert",
+	"std.builtin.map_len":      "len",
+}
+
+// mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map
+// primitive is applied to.
+func mapPrimitiveValueType(typeArg string) string {
+	args := splitStaticArgs(typeArg)
+	if len(args) != 2 {
+		return typeArg
+	}
+	return args[1]
 }
 
 // lowerMapMethod lowers runtime-backed std::map::Map<[]u8, V> methods.
