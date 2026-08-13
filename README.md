@@ -27,12 +27,13 @@ and another way under `build` -- there is one lowering, not two (ADR-0083).
 What a program is *supposed* to do is defined by the conformance manifests, not
 by any one execution path.
 
+warning: 2 manifest tags have no group: control-flow, expression
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
 | fn / let / struct / literals | 27 | ✅ | 25/27 | 25/27 | 9/27 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
-| if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
+| if / match | 8 | ✅ | ✅ | ✅ | 1/8 |
 | enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
 | error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
 | move / borrow | 18 | ✅ | 17/18 | 17/18 | 2/18 |
@@ -49,10 +50,9 @@ by any one execution path.
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
-| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 86 runnable examples, measured on 2026-08-13 with
+`❌` means none do. 87 runnable examples, measured on 2026-08-13 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -60,26 +60,25 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 86/86 |
-| `kizu run` | 71/86 |
-| `kizu build --emit-llvm` | 71/86 |
-| `kizu build --target wasm32-wasi` | 16/86 |
+| `kizu check` | 87/87 |
+| `kizu run` | 73/87 |
+| `kizu build --emit-llvm` | 73/87 |
+| `kizu build --target wasm32-wasi` | 16/87 |
 
-The 26 cases `run` cannot reproduce -- 15 programs and 11 negative cases -- are
+The 23 cases `run` cannot reproduce -- 14 programs and 9 negative cases -- are
 registered in the manifests with a `pending` reason. A pending case is tested
 for *still failing*, so closing a gap forces its entry to be removed in the same
 change.
 
 What is missing, in the order it should be closed:
 
-1. **Five negative cases report the wrong failure rather than none.** A failing
-   `Io` capability is ignored so the program succeeds (2), a returned error union
-   is not surfaced, and two report a message other than the one the manifest
-   wants.
-2. **Twenty-one cases have no lowering yet.** `std::builtin::task_group` (10),
+1. **Three negative cases report the wrong failure rather than none.** A
+   returned error union is not surfaced, and two report a message other than the
+   one the manifest wants.
+2. **Twenty cases have no lowering yet.** `std::builtin::task_group` (11),
    `Channel<T>` (4) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
-   `if` as an expression, and the scoped-thread worker value. One more compares
-   a borrow against a value in LLVM and is rejected there.
+   and the scoped-thread worker value. One more compares a borrow against a
+   value in LLVM and is rejected there.
 
 No case answers wrong. Every remaining one fails, and says so.
 
