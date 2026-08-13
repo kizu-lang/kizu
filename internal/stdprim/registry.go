@@ -27,12 +27,18 @@ type CoreSignature struct {
 var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.mem_page_allocator": {Return: "Allocator"},
 	"std.builtin.mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
-	"std.builtin.io_write_stdout":    {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
-	"std.builtin.io_write_stderr":    {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
-	"std.builtin.io_read_stdin":      {Args: []ArgKind{ArgIo}, Return: "![]u8"},
-	"std.builtin.process_arg_count":  {Return: "i64"},
-	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]u8"},
-	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]u8"},
+	"std.builtin.io_write_stdout": {
+		Args:   []ArgKind{ArgIo, ArgBytes},
+		Return: "std::io::Error!void",
+	},
+	"std.builtin.io_write_stderr": {
+		Args:   []ArgKind{ArgIo, ArgBytes},
+		Return: "std::io::Error!void",
+	},
+	"std.builtin.io_read_stdin":     {Args: []ArgKind{ArgIo}, Return: "std::io::Error![]u8"},
+	"std.builtin.process_arg_count": {Return: "i64"},
+	"std.builtin.process_arg":       {Args: []ArgKind{ArgI64}, Return: "std::process::Error![]u8"},
+	"std.builtin.process_env":       {Args: []ArgKind{ArgBytes}, Return: "std::process::Error![]u8"},
 	"std.builtin.process_env_or_empty": {
 		Args:   []ArgKind{ArgBytes},
 		Return: "[]u8",

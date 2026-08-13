@@ -29,7 +29,8 @@ func buildNativeParityHarness(t *testing.T, dir string, name string, source stri
 	}
 	binary := filepath.Join(dir, name)
 	err = native.Build(native.Options{
-		LLVMIR: llvmIR, Output: binary,
+		ErrorSets: stdErrorSets(),
+		LLVMIR:    llvmIR, Output: binary,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
 	})
 	if err != nil {

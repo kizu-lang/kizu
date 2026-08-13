@@ -1355,7 +1355,7 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 		return typ, nil
 	}
 	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
-		c.enums[name] == nil && c.unions[name] == nil {
+		c.enums[name] == nil && c.unions[name] == nil && c.errorSets[name] == nil {
 		return "", errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
@@ -1532,6 +1532,9 @@ func (c *Checker) isUserDeclaredType(name string) bool {
 	if c.enums[name] != nil {
 		return true
 	}
+	if c.errorSets[name] != nil {
+		return true
+	}
 	if c.unions[name] != nil {
 		return true
 	}
@@ -1548,6 +1551,9 @@ func (c *Checker) isPublicType(name string) bool {
 	}
 	if enum := c.enums[name]; enum != nil {
 		return enum.public
+	}
+	if set := c.errorSets[name]; set != nil {
+		return set.public
 	}
 	if union := c.unions[name]; union != nil {
 		return union.public
@@ -3698,7 +3704,7 @@ func (c *Checker) checkFsBuiltin(
 	case "std.builtin.fs_read_dir":
 		return c.checkFsReadDir(args, env, unsafe)
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
-		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
+		return c.checkFsPathOnly(name, args, env, unsafe, "std::fs::Error!void")
 	case "std.builtin.fs_rename":
 		return c.checkFsRename(args, env, unsafe)
 	default:
@@ -3770,7 +3776,7 @@ func (c *Checker) checkFsReadFile(
 		return "", true, errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]u8", true, nil
+	return "std::fs::Error![]u8", true, nil
 }
 
 // checkFsWriteFile validates std::fs::write_file.
@@ -3795,7 +3801,7 @@ func (c *Checker) checkFsWriteFile(
 				"type error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsRename validates std::fs::rename.
@@ -3820,7 +3826,7 @@ func (c *Checker) checkFsRename(
 				"type error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsExists validates std::fs::exists.
@@ -3830,7 +3836,7 @@ func (c *Checker) checkFsExists(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::exists", args, env, unsafe)
-	return "!bool", true, err
+	return "std::fs::Error!bool", true, err
 }
 
 // checkFsMetadata validates std::fs::metadata.
@@ -3840,7 +3846,7 @@ func (c *Checker) checkFsMetadata(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
-	return "!std::fs::Metadata", true, err
+	return "std::fs::Error!std::fs::Metadata", true, err
 }
 
 // checkFsReadDir validates std::fs::read_dir.
@@ -3850,7 +3856,7 @@ func (c *Checker) checkFsReadDir(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
-	return "!std::array::Array<std::fs::DirEntry>", true, err
+	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, err
 }
 
 // checkFsPathOnly validates an Io plus path API and returns result.

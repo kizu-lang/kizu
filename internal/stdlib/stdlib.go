@@ -312,6 +312,8 @@ func parseModuleDecls(module string) ([]ast.Decl, []parser.Diagnostic, error) {
 			renameStruct(module, d)
 		case *ast.EnumDecl:
 			renameEnum(module, d)
+		case *ast.ErrorSetDecl:
+			renameErrorSet(module, d)
 		case *ast.UnionDecl:
 			renameUnion(module, d)
 		case *ast.FunctionDecl:
@@ -359,6 +361,13 @@ func renameStruct(module string, decl *ast.StructDecl) {
 // renameEnum rewrites a std wrapper enum into its qualified form.
 func renameEnum(module string, decl *ast.EnumDecl) {
 	decl.Name = qualifyTypeName(module, decl.Name)
+}
+
+// renameErrorSet rewrites a std error set into its qualified form. The name
+// comes from the module it is declared in rather than from a table of known std
+// type names, so declaring one is all it takes to have it.
+func renameErrorSet(module string, decl *ast.ErrorSetDecl) {
+	decl.Name = "std::" + strings.ReplaceAll(module, "/", "::") + "::" + decl.Name
 }
 
 // renameUnion rewrites a std wrapper union into its qualified form.
@@ -588,7 +597,7 @@ func qualifySimpleType(module string, typ string) (string, bool) {
 			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "DeferNode",
 			"ErrDeferNode", "ExprStmtNode",
 			"WhileNode", "ForNode", "BreakNode", "ContinueNode", "ParamNode", "FieldNode",
-			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "UnionDeclNode",
+			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "ErrorSetDeclNode", "UnionDeclNode",
 			"ImplDeclNode", "UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
 			"FnDeclNode", "ContractDeclNode", "SynthLatchNode",
 			"ParseResult":
@@ -622,4 +631,32 @@ func splitGenericArgs(arg string) ([]string, bool) {
 		return nil, false
 	}
 	return args, true
+}
+
+// ErrorSets returns every error set std declares, with the number each member
+// lowers to. The runtime refers to them all whatever a program uses, so they
+// come from std rather than from the modules one program happened to load.
+func ErrorSets() (map[string]map[string]int, error) {
+	sets := map[string]map[string]int{}
+	for _, module := range sourceModuleOrder {
+		decls, errs, err := parseModuleDecls(module)
+		if err != nil {
+			return nil, err
+		}
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("std %s error: %v", module, errs[0])
+		}
+		for _, decl := range decls {
+			set, ok := decl.(*ast.ErrorSetDecl)
+			if !ok {
+				continue
+			}
+			members := map[string]int{}
+			for index, member := range set.Members {
+				members[member] = index
+			}
+			sets[set.Name] = members
+		}
+	}
+	return sets, nil
 }

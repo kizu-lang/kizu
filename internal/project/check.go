@@ -195,6 +195,8 @@ func declaredType(decl ast.Decl) (string, bool, bool) {
 		return d.Name, d.Public, true
 	case *ast.EnumDecl:
 		return d.Name, d.Public, true
+	case *ast.ErrorSetDecl:
+		return d.Name, d.Public, true
 	case *ast.UnionDecl:
 		return d.Name, d.Public, true
 	case *ast.ContractDecl:
@@ -314,6 +316,8 @@ func declaredTopLevelName(decl ast.Decl) (string, bool) {
 		return d.Name, true
 	case *ast.EnumDecl:
 		return d.Name, true
+	case *ast.ErrorSetDecl:
+		return d.Name, true
 	case *ast.UnionDecl:
 		return d.Name, true
 	case *ast.ContractDecl:
@@ -346,6 +350,10 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 	case *ast.StructDecl:
 		return c.qualifyStruct(module, d)
 	case *ast.EnumDecl:
+		cp := *d
+		cp.Name = module.path + "::" + d.Name
+		return &cp, nil
+	case *ast.ErrorSetDecl:
 		cp := *d
 		cp.Name = module.path + "::" + d.Name
 		return &cp, nil
