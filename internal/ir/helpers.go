@@ -149,19 +149,19 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
 		return "Io", true
 	case "std.builtin.fs_read_file":
-		return "![]u8", true
+		return "std::fs::Error![]u8", true
 	case "std.builtin.fs_write_file",
 		"std.builtin.fs_create_dir",
 		"std.builtin.fs_rename",
 		"std.builtin.fs_remove_dir",
 		"std.builtin.fs_remove_file":
-		return "!void", true
+		return "std::fs::Error!void", true
 	case "std.builtin.fs_exists":
-		return "!bool", true
+		return "std::fs::Error!bool", true
 	case "std.builtin.fs_metadata":
-		return "!std::fs::Metadata", true
+		return "std::fs::Error!std::fs::Metadata", true
 	case "std.builtin.fs_read_dir":
-		return "!std::array::Array<std::fs::DirEntry>", true
+		return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true
 	default:
 		return "", false
 	}

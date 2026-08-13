@@ -104,6 +104,7 @@ fn dump_node(
         Field(field_node) => try dump_field(source, ast, field_node);,
         StructDecl(struct_decl) => try dump_struct_decl(source, ast, struct_decl);,
         EnumDecl(enum_decl) => try dump_enum_decl(source, ast, enum_decl);,
+        ErrorSetDecl(error_set_decl) => try dump_error_set_decl(source, ast, error_set_decl);,
         UnionDecl(union_decl) => try dump_union_decl(source, ast, union_decl);,
         ImplDecl(impl_decl) => try dump_impl_decl(source, ast, impl_decl);,
         UnionVariant(union_variant) => try dump_union_variant(source, ast, union_variant);,
@@ -205,6 +206,18 @@ fn dump_enum_decl(
     dump_visibility(enum_decl.public);
     try dump_node(source, ast, enum_decl.name);
     try dump_range(source, ast, enum_decl.tags);
+    return;
+}
+
+fn dump_error_set_decl(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    error_set_decl: &std::kizu::ast::ErrorSetDeclNode
+) -> !void {
+    print("ErrorSetDecl");
+    dump_visibility(error_set_decl.public);
+    try dump_node(source, ast, error_set_decl.name);
+    try dump_range(source, ast, error_set_decl.members);
     return;
 }
 

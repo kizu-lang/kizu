@@ -62,11 +62,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseDirectiveDecl(false, docText(p.cur)))
 			p.nextToken()
 		case token.Ident:
-			if p.cur.Literal == "test" {
-				program.Decls = append(program.Decls, p.parseTestDecl())
-			} else {
-				p.errorExpectedDeclaration()
-			}
+			program.Decls = append(program.Decls, p.parseIdentLedDecl()...)
 			p.nextToken()
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
@@ -150,6 +146,12 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 		return p.parseUnionDeclWithDoc(docs)
 	case token.Contract:
 		return p.parseContractDecl()
+	case token.Ident:
+		if p.startsErrorSetDecl() {
+			return p.parseErrorSetDeclWithDoc(docs)
+		}
+		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
+		return &ast.FunctionDecl{Public: true, Doc: docs}
 	default:
 		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
 		return &ast.FunctionDecl{Public: true, Doc: docs}
@@ -168,6 +170,8 @@ func setPublicDecl(decl ast.Decl) {
 	case *ast.UnionDecl:
 		d.Public = true
 	case *ast.ContractDecl:
+		d.Public = true
+	case *ast.ErrorSetDecl:
 		d.Public = true
 	}
 }
@@ -465,30 +469,73 @@ func (p *Parser) parseEnumDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
-	decl.Tags, decl.TagDocs = p.parseEnumTags()
+	decl.Tags, decl.TagDocs = p.parseNameList("enum tag")
 	return decl
 }
 
-// parseEnumTags parses comma-separated enum tags.
-func (p *Parser) parseEnumTags() ([]string, map[string]string) {
-	tags := []string{}
-	tagDocs := map[string]string{}
+// parseIdentLedDecl parses the declarations that start with a plain name rather
+// than a keyword, and reports none when the name starts neither.
+func (p *Parser) parseIdentLedDecl() []ast.Decl {
+	switch {
+	case p.cur.Literal == "test":
+		return []ast.Decl{p.parseTestDecl()}
+	case p.startsErrorSetDecl():
+		return []ast.Decl{p.parseErrorSetDecl()}
+	default:
+		p.errorExpectedDeclaration()
+		return nil
+	}
+}
+
+// startsErrorSetDecl reports whether the current `error` begins a declaration.
+// `error` is not a keyword, because `error(message)` is a call to a function of
+// that name, so a declaration is told apart by what follows: a name and a brace,
+// which a call never has.
+func (p *Parser) startsErrorSetDecl() bool {
+	return p.cur.Literal == "error" && p.peek.Type == token.Ident
+}
+
+// parseErrorSetDecl parses `error Name { A, B }`.
+func (p *Parser) parseErrorSetDecl() ast.Decl {
+	return p.parseErrorSetDeclWithDoc(docText(p.cur))
+}
+
+// parseErrorSetDeclWithDoc parses an error set declaration with attached docs.
+func (p *Parser) parseErrorSetDeclWithDoc(docs string) ast.Decl {
+	decl := &ast.ErrorSetDecl{Doc: docs}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Members, decl.MemberDocs = p.parseNameList("error name")
+	return decl
+}
+
+// parseNameList parses the comma-separated names inside a brace. An enum tag and
+// an error set member are written the same way, so they are read the same way,
+// and label says which one a malformed list is reported as.
+func (p *Parser) parseNameList(label string) ([]string, map[string]string) {
+	names := []string{}
+	docs := map[string]string{}
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		if p.cur.Type != token.Ident {
-			p.errorf("expected enum tag, got %s", tokenDescription(p.cur))
-			return tags, tagDocsOrNil(tagDocs)
+			p.errorf("expected %s, got %s", label, tokenDescription(p.cur))
+			return names, tagDocsOrNil(docs)
 		}
-		tags = append(tags, p.cur.Literal)
-		if docs := docText(p.cur); docs != "" {
-			tagDocs[p.cur.Literal] = docs
+		names = append(names, p.cur.Literal)
+		if text := docText(p.cur); text != "" {
+			docs[p.cur.Literal] = text
 		}
-		if !p.consumeListDelimiter("enum tag") {
-			return tags, tagDocsOrNil(tagDocs)
+		if !p.consumeListDelimiter(label) {
+			return names, tagDocsOrNil(docs)
 		}
 		p.nextToken()
 	}
-	return tags, tagDocsOrNil(tagDocs)
+	return names, tagDocsOrNil(docs)
 }
 
 // tagDocsOrNil keeps empty enum doc metadata compact.

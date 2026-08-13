@@ -16,6 +16,7 @@ type Checker struct {
 	impls           map[string]map[string]*functionInfo
 	structs         map[string]map[string]string
 	enums           map[string]map[string]bool
+	errorSets       map[string]map[string]bool
 	unions          map[string]map[string]string
 	nextID          int
 	loopDepth       int
@@ -95,6 +96,7 @@ func New() *Checker {
 		impls:     map[string]map[string]*functionInfo{},
 		structs:   map[string]map[string]string{},
 		enums:     map[string]map[string]bool{},
+		errorSets: map[string]map[string]bool{},
 		unions:    map[string]map[string]string{},
 	}
 }
@@ -105,6 +107,7 @@ func (c *Checker) Check(program *ast.Program) error {
 		return err
 	}
 	c.collectEnums(program)
+	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
@@ -139,6 +142,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 		return []error{err}
 	}
 	c.collectEnums(program)
+	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
@@ -178,6 +182,22 @@ func (c *Checker) collectEnums(program *ast.Program) {
 			tags[tag] = true
 		}
 		c.enums[enumDecl.Name] = tags
+	}
+}
+
+// collectErrorSets records error set declarations for error value reads. An
+// error carries nothing, so reading one moves nothing.
+func (c *Checker) collectErrorSets(program *ast.Program) {
+	for _, decl := range program.Decls {
+		setDecl, ok := decl.(*ast.ErrorSetDecl)
+		if !ok {
+			continue
+		}
+		members := map[string]bool{}
+		for _, member := range setDecl.Members {
+			members[member] = true
+		}
+		c.errorSets[setDecl.Name] = members
 	}
 }
 
@@ -1214,6 +1234,11 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 	if tags := c.enums[typeName]; tags != nil {
 		return tags, nil, true
 	}
+	// An error carries nothing, so matching one moves nothing, which is what a
+	// tag enum arm already means here.
+	if members := c.errorSets[typeName]; members != nil {
+		return members, nil, true
+	}
 	payloads := c.unions[typeName]
 	if payloads == nil {
 		return nil, nil, false
@@ -2006,14 +2031,14 @@ func (c *Checker) checkFsBuiltin(
 	case "std.builtin.fs_write_file":
 		return c.checkFsWriteFile(args, env)
 	case "std.builtin.fs_exists":
-		return c.checkFsPathOnly("std::fs::exists", args, env, "!bool")
+		return c.checkFsPathOnly("std::fs::exists", args, env, "std::fs::Error!bool")
 	case "std.builtin.fs_metadata":
-		return c.checkFsPathOnly("std::fs::metadata", args, env, "!std::fs::Metadata")
+		return c.checkFsPathOnly("std::fs::metadata", args, env, "std::fs::Error!std::fs::Metadata")
 	case "std.builtin.fs_read_dir":
 		return c.checkFsPathOnly("std::fs::read_dir", args, env,
-			"!std::array::Array<std::fs::DirEntry>")
+			"std::fs::Error!std::array::Array<std::fs::DirEntry>")
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
-		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
+		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "std::fs::Error!void")
 	case "std.builtin.fs_rename":
 		return c.checkFsRename(args, env)
 	default:
@@ -2098,7 +2123,7 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 		return "", true, errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]u8", true, nil
+	return "std::fs::Error![]u8", true, nil
 }
 
 // checkFsWriteFile validates ownership effects for std::fs::write_file.
@@ -2119,7 +2144,7 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 				"move error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsRename validates ownership effects for std::fs::rename.
@@ -2140,7 +2165,7 @@ func (c *Checker) checkFsRename(args []ast.Expression, env *scope) (string, bool
 				"move error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsPathOnly validates common std::fs Io and path arguments.
@@ -3170,6 +3195,10 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			return "", errorAt(expr.Span, "move error: enum tag `%s.%s` must use `::`",
 				ident.Name, expr.Name)
 		}
+		if _, exists := c.errorSets[ident.Name]; exists {
+			return "", errorAt(expr.Span, "move error: error `%s.%s` must use `::`",
+				ident.Name, expr.Name)
+		}
 		if _, exists := c.unions[ident.Name]; exists {
 			return "", errorAt(expr.Span, "move error: union variant `%s.%s` must use `::`",
 				ident.Name, expr.Name)
@@ -3252,6 +3281,13 @@ func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
 		if !tags[expr.Name] {
 			return "", errorAt(expr.Span,
 				"move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+		}
+		return ident.Name, nil
+	}
+	if members, exists := c.errorSets[ident.Name]; exists {
+		if !members[expr.Name] {
+			return "", errorAt(expr.Span,
+				"move error: unknown error `%s::%s`", ident.Name, expr.Name)
 		}
 		return ident.Name, nil
 	}
@@ -5440,6 +5476,10 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	if isRawPointerType(typeName) {
+		return true
+	}
+	// An error carries nothing, so reading one leaves nothing behind to move.
+	if c.errorSets[typeName] != nil {
 		return true
 	}
 	if c.enums[typeName] != nil {

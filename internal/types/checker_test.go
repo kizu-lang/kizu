@@ -830,7 +830,7 @@ func TestCheckRejectsEnumErrors(t *testing.T) {
 			source: `enum Color { Red }
 enum Color { Green }
 fn main() {}`,
-			want: "duplicate enum `Color`",
+			want: "duplicate type `Color`",
 		},
 		{
 			name: "duplicate tag",

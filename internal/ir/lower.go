@@ -351,6 +351,8 @@ func (l *lowerer) collectDecls() {
 			l.module.Structs[d.Name] = lowerStruct(d)
 		case *ast.EnumDecl:
 			l.module.Enums[d.Name] = lowerEnum(d)
+		case *ast.ErrorSetDecl:
+			l.module.Enums[d.Name] = lowerErrorSet(d)
 		case *ast.UnionDecl:
 			l.module.Unions[d.Name] = lowerUnion(d)
 		}
@@ -385,6 +387,18 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 		tags[tag] = index
 	}
 	return Enum{Name: decl.Name, Tags: tags}
+}
+
+// lowerErrorSet converts an AST error set to IR metadata. An error carries
+// nothing, so below the checker it is a name mapped to a number, which is what
+// an enum already is here. The two stay apart in the checker, where one can be
+// inferred and merged and the other cannot.
+func lowerErrorSet(decl *ast.ErrorSetDecl) Enum {
+	members := map[string]int{}
+	for index, member := range decl.Members {
+		members[member] = index
+	}
+	return Enum{Name: decl.Name, Tags: members}
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.

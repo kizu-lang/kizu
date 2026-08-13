@@ -1309,13 +1309,39 @@ fn main() -> ConfigError!void {
 }
 ```
 
+### 6.14.1 error set
+
+失敗の種類は `error` で宣言します。
+
+```kizu
+error FsError {
+    NotFound,
+    Denied,
+}
+
+fn read(path: []u8) -> FsError!i64 {
+    return FsError::NotFound;
+}
+```
+
+error 値は set の member そのものであり、**payload を持ちません**。error は
+「何が起きたか」だけを運び、位置や期待値のような詳細は diagnostic が持ちます
+(ADR-0086)。
+
+* `error Name { A, B }` で宣言する
+* member は `Name::A` で参照する
+* `!T` は推論される error set である。宣言した set は他の set を受け取らない
+* `match` で網羅的に分岐できる
+* error 値が `main` から出た場合、`runtime error: Name::A` として報告される
+
 ルール:
 
 * `try` は `!T` を返す関数内でだけ使える
 * `try` の operand は `!T` でなければならない
 * `ErrorType!T` は typed error union を表す
 * `ErrorType!T` では `ErrorType` または `T` を返せる
-* `try` は同じ `ErrorType` の error union だけを伝播できる
+* `!T` は推論される error set を表し、body が伝播するものを受け取る
+* `ErrorType!T` と宣言した場合、`try` は同じ `ErrorType` だけを伝播できる
 * `cast<ErrorType!T>(expr)` は `expr: !T` を明示的に typed error union へ変換できる
 * typed error cast は `ErrorType::Message([]u8)` variant がある場合だけ有効で、
   untyped error message をその variant に包む

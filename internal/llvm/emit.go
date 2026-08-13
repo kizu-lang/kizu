@@ -1238,7 +1238,45 @@ func (e *emitter) convertFailurePayload(
 		}
 		return payloadName, e.llvmType(targetError), nil
 	}
+	if targetError == "" {
+		// `!T` describes its failure with text, so a set member reaching one is
+		// named. This goes away with the text itself once errors are only names.
+		name, err := e.errorSetNameSlice(resultName, sourceError, extractedName)
+		if err != nil {
+			return "", "", err
+		}
+		return name, "%kizu.slice.u8", nil
+	}
 	return "", "", fmt.Errorf("llvm error: cannot convert failure payload to `%s`", targetError)
+}
+
+// errorSetNameSlice materializes the spelling of one error set member, read from
+// the table of names the set already emits.
+func (e *emitter) errorSetNameSlice(
+	resultName string,
+	errorName string,
+	tagOperand string,
+) (string, error) {
+	set, ok := e.module.Enums[errorName]
+	if !ok {
+		return "", fmt.Errorf("llvm error: `%s` is not an error set", errorName)
+	}
+	rowName := resultName + ".row"
+	ptrName := resultName + ".ptr"
+	lenAddr := resultName + ".len.addr"
+	lenName := resultName + ".len"
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
+		rowName, len(set.Tags), enumNameTable(errorName), tagOperand)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
+		lenAddr, rowName)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+		baseName, ptrName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
+		resultName, baseName, lenName)
+	return resultName, nil
 }
 
 // writeStructNew lowers a checked struct literal to an LLVM aggregate value.
@@ -1744,7 +1782,7 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	if !ok {
 		return fmt.Errorf("llvm error: error.try requires function to return !T")
 	}
-	if sourceError != targetError {
+	if targetError != "" && sourceError != targetError {
 		return fmt.Errorf(
 			"llvm error: error.try cannot propagate %s into %s",
 			source.Type,
@@ -1842,6 +1880,13 @@ func mangleGlobalName(typ string) string {
 func (e *emitter) printedEnums() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
+		// A failure that leaves `main` is reported by name, so the error set of
+		// its result needs the same table a printed enum does.
+		if errorName, _, ok := errorUnionParts(fn.Return); ok && errorName != "" {
+			if _, isEnum := e.module.Enums[errorName]; isEnum {
+				seen[errorName] = true
+			}
+		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
 				if instr.Op != "call.print" || len(instr.Args) != 1 {
@@ -2047,6 +2092,9 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(value.Type), valueInfo.operand)
 		return nil
 	}
+	if e.absorbsErrorUnionReturn(value) {
+		return e.writeAbsorbedErrorUnionReturn(value)
+	}
 	if errorName != "" && value.Type == errorName {
 		valueInfo := e.value(value)
 		name := "%" + e.nextSyntheticValue("return.err")
@@ -2058,6 +2106,45 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		return e.writeImplicitErrorOKReturn(value)
 	}
 	return fmt.Errorf("llvm error: cannot return %s from %s", value.Type, e.currentReturn)
+}
+
+// absorbsErrorUnionReturn reports whether one error union is returned straight
+// from a function whose own set is inferred, which is the absorption `try` does
+// written as a return.
+func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
+	wantError, wantSuccess, ok := errorUnionParts(e.currentReturn)
+	if !ok || wantError != "" {
+		return false
+	}
+	gotError, gotSuccess, isUnion := errorUnionParts(value.Type)
+	return isUnion && gotError != "" && gotSuccess == wantSuccess
+}
+
+// writeAbsorbedErrorUnionReturn returns one error union as another, naming the
+// failure on the way because the target describes its own with text.
+func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
+	_, success, _ := errorUnionParts(value.Type)
+	source := e.value(value)
+	sourceType := e.llvmType(value.Type)
+	okName := "%" + e.nextSyntheticValue("absorb.ok")
+	okBool := okName + ".bool"
+	okLabel := e.nextSyntheticValue("absorb.ok.block")
+	errLabel := e.nextSyntheticValue("absorb.err.block")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, sourceType, source.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okName)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
+	fmt.Fprintf(&e.out, "%s:\n", errLabel)
+	if err := e.writeErrorFailureReturn(value); err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	if success == "void" {
+		return e.writeImplicitErrorOKReturn(ir.Value{Name: value.Name, Type: "void"})
+	}
+	successName := "%" + e.nextSyntheticValue("absorb.value")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, sourceType, source.operand)
+	e.values[successName] = valueInfo{typ: success, operand: successName}
+	return e.writeImplicitErrorOKReturn(ir.Value{Name: successName, Type: success})
 }
 
 // writeImplicitErrorOKReturn wraps legacy success returns from malformed IR.
@@ -2087,40 +2174,45 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	okName := "%" + e.nextSyntheticValue("main.ok")
 	okBoolName := okName + ".bool"
 	codeName := "%" + e.nextSyntheticValue("main.code")
-	errorName, success, _ := errorUnionParts(value.Type)
+	_, success, _ := errorUnionParts(value.Type)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, unionType, valueInfo.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBoolName, okName)
-	if errorName == "" {
-		okLabel := e.nextSyntheticValue("main.exit.ok")
-		failLabel := e.nextSyntheticValue("main.exit.fail")
-		fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBoolName, okLabel, failLabel)
-		fmt.Fprintf(&e.out, "%s:\n", failLabel)
-		e.writeMainErrorMessage(value)
-		e.out.WriteString("  ret i32 1\n")
-		fmt.Fprintf(&e.out, "%s:\n", okLabel)
-		if success == "i64" {
-			successName := "%" + e.nextSyntheticValue("main.success")
-			fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
-			fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, successName)
-			fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
-			return nil
-		}
-		e.out.WriteString("  ret i32 0\n")
+	okLabel := e.nextSyntheticValue("main.exit.ok")
+	failLabel := e.nextSyntheticValue("main.exit.fail")
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBoolName, okLabel, failLabel)
+	fmt.Fprintf(&e.out, "%s:\n", failLabel)
+	if err := e.writeMainErrorMessage(value); err != nil {
+		return err
+	}
+	e.out.WriteString("  ret i32 1\n")
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	if success == "i64" {
+		successName := "%" + e.nextSyntheticValue("main.success")
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
+		fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, successName)
+		fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, i32 0, i32 1\n", codeName, okBoolName)
-	fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
+	e.out.WriteString("  ret i32 0\n")
 	return nil
 }
 
 // writeMainErrorMessage writes a failed error union's message slice to stderr
 // through @kizu_main_error_message, so a process built from `main -> !T` reports
-// why it exits 1 instead of failing silently. Typed error unions carry an enum
-// payload rather than a message slice, so only string-message unions print.
-func (e *emitter) writeMainErrorMessage(source ir.Value) {
+// why it exits 1 instead of failing silently. A set member is named from the
+// table of names, and an untyped failure carries the text itself.
+func (e *emitter) writeMainErrorMessage(source ir.Value) error {
 	errorName, _, ok := errorUnionParts(source.Type)
-	if !ok || errorName != "" {
-		return
+	if !ok {
+		return nil
+	}
+	if errorName != "" {
+		// A union failure carries its own payload and has no table of names to
+		// read, so there is nothing to say about it until errors are only names.
+		if _, isSet := e.module.Enums[errorName]; !isSet {
+			return nil
+		}
+		return e.writeMainErrorSetName(source, errorName)
 	}
 	sourceInfo := e.value(source)
 	msgName := "%" + e.nextSyntheticValue("main.err.msg")
@@ -2131,12 +2223,43 @@ func (e *emitter) writeMainErrorMessage(source ir.Value) {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, msgName)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, msgName)
 	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n", ptrName, lenName)
+	return nil
+}
+
+// writeMainErrorSetName reports a failure that leaves `main` by its name. An
+// error carries nothing, so the text comes from the table of names rather than
+// from the value, which is a number saying which member of the set it is.
+func (e *emitter) writeMainErrorSetName(source ir.Value, errorName string) error {
+	set, ok := e.module.Enums[errorName]
+	if !ok {
+		return fmt.Errorf("llvm error: `%s` is not an error set", errorName)
+	}
+	sourceInfo := e.value(source)
+	tagName := "%" + e.nextSyntheticValue("main.err.tag")
+	rowName := tagName + ".row"
+	ptrName := tagName + ".ptr"
+	lenAddr := tagName + ".len.addr"
+	lenName := tagName + ".len"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		tagName, e.llvmType(source.Type), sourceInfo.operand,
+		errorUnionFailureIndex(source.Type))
+	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
+		rowName, len(set.Tags), enumNameTable(errorName), tagName)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
+		lenAddr, rowName)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
+	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n",
+		ptrName, lenName)
+	return nil
 }
 
 // writeErrorFailureReturn propagates a failed try from the current function.
 func (e *emitter) writeErrorFailureReturn(source ir.Value) error {
 	if e.mainReturnsInt {
-		e.writeMainErrorMessage(source)
+		if err := e.writeMainErrorMessage(source); err != nil {
+			return err
+		}
 		e.out.WriteString("  ret i32 1\n")
 		return nil
 	}

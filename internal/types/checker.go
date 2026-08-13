@@ -192,6 +192,7 @@ type Checker struct {
 	functions       map[string]*functionType
 	structs         map[string]*ast.StructDecl
 	enums           map[string]*enumType
+	errorSets       map[string]*errorSetType
 	unions          map[string]*unionType
 	contracts       map[string]*contractType
 	impls           map[string]map[string]*functionType
@@ -220,6 +221,18 @@ type enumType struct {
 	name   string
 	tags   map[string]bool
 	public bool
+}
+
+// errorSetType is a declared set of failures. Its members carry nothing, so the
+// set is the whole of what a failure says about itself.
+type errorSetType struct {
+	name    string
+	members map[string]bool
+	public  bool
+	// tagged is the same set seen as something a match runs over. Asking which
+	// failure it is, is the question a match on an enum asks, so it is answered
+	// by the same code rather than a second copy of it.
+	tagged *enumType
 }
 
 type unionType struct {
@@ -264,6 +277,7 @@ func New() *Checker {
 		functions:        map[string]*functionType{},
 		structs:          map[string]*ast.StructDecl{},
 		enums:            map[string]*enumType{},
+		errorSets:        map[string]*errorSetType{},
 		unions:           map[string]*unionType{},
 		contracts:        map[string]*contractType{},
 		impls:            map[string]map[string]*functionType{},
@@ -380,6 +394,8 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 		return c.collectStruct(d)
 	case *ast.EnumDecl:
 		return c.collectEnum(d)
+	case *ast.ErrorSetDecl:
+		return c.collectErrorSet(d)
 	case *ast.UnionDecl:
 		return c.collectUnion(d)
 	case *ast.ContractDecl:
@@ -418,6 +434,8 @@ func declaredTypeName(decl ast.Decl) (string, bool) {
 	case *ast.StructDecl:
 		return d.Name, true
 	case *ast.EnumDecl:
+		return d.Name, true
+	case *ast.ErrorSetDecl:
 		return d.Name, true
 	case *ast.UnionDecl:
 		return d.Name, true
@@ -629,14 +647,8 @@ func (c *Checker) newImplFunctionType(
 
 // collectEnum registers and validates a tag enum declaration.
 func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate enum `%s`", decl.Name)
-	}
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
 	for _, tag := range decl.Tags {
@@ -649,16 +661,47 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	return nil
 }
 
+// collectErrorSet registers and validates an error set declaration.
+func (c *Checker) collectErrorSet(decl *ast.ErrorSetDecl) error {
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
+	}
+	set := &errorSetType{name: decl.Name, members: map[string]bool{}, public: decl.Public}
+	for _, member := range decl.Members {
+		if set.members[member] {
+			return errorf("type error: duplicate error `%s::%s`", decl.Name, member)
+		}
+		set.members[member] = true
+	}
+	set.tagged = &enumType{name: set.name, tags: set.members, public: set.public}
+	c.errorSets[decl.Name] = set
+	return nil
+}
+
+// rejectDuplicateTypeName reports a name already taken by another declaration.
+// Every declaration asks here, so a name is taken whichever kind claimed it
+// first: checking only the kinds that came before leaves the answer depending
+// on the order two declarations were written in.
+func (c *Checker) rejectDuplicateTypeName(name string) error {
+	if _, exists := c.errorSets[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	if _, exists := c.enums[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	if _, exists := c.structs[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	if _, exists := c.unions[name]; exists {
+		return errorf("type error: duplicate type `%s`", name)
+	}
+	return nil
+}
+
 // collectUnion registers and validates a tagged union declaration.
 func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate union `%s`", decl.Name)
-	}
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	previousTypeParams := c.typeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
@@ -700,14 +743,8 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 
 // collectStruct registers and validates a struct declaration.
 func (c *Checker) collectStruct(decl *ast.StructDecl) error {
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate struct `%s`", decl.Name)
-	}
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams
@@ -1303,7 +1340,7 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 		return typ, nil
 	}
 	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
-		c.enums[name] == nil && c.unions[name] == nil {
+		c.enums[name] == nil && c.unions[name] == nil && c.errorSets[name] == nil {
 		return "", errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
@@ -1480,6 +1517,9 @@ func (c *Checker) isUserDeclaredType(name string) bool {
 	if c.enums[name] != nil {
 		return true
 	}
+	if c.errorSets[name] != nil {
+		return true
+	}
 	if c.unions[name] != nil {
 		return true
 	}
@@ -1496,6 +1536,9 @@ func (c *Checker) isPublicType(name string) bool {
 	}
 	if enum := c.enums[name]; enum != nil {
 		return enum.public
+	}
+	if set := c.errorSets[name]; set != nil {
+		return set.public
 	}
 	if union := c.unions[name]; union != nil {
 		return union.public
@@ -2050,6 +2093,18 @@ func (c *Checker) checkReturnValue(
 	return true, nil
 }
 
+// absorbsErrorUnion reports whether returning a result that fails one way from a
+// function whose own set is inferred is the same absorption `try` does. A
+// declared `E!T` is not this, because it named the one set it accepts.
+func absorbsErrorUnion(want Type, got Type) bool {
+	wantError, wantSuccess, ok := errorUnionParts(want)
+	if !ok || wantError != "" {
+		return false
+	}
+	gotError, gotSuccess, isUnion := errorUnionParts(got)
+	return isUnion && gotError != "" && sameType(Type(gotSuccess), Type(wantSuccess))
+}
+
 // checkErrorUnionReturn accepts success or error payloads for !T returns.
 func (c *Checker) checkErrorUnionReturn(
 	expr ast.Expression,
@@ -2070,6 +2125,9 @@ func (c *Checker) checkErrorUnionReturn(
 			}
 			return true, nil
 		}
+	}
+	if absorbsErrorUnion(want, got) {
+		return true, nil
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
 		success := Type(elem)
@@ -2562,6 +2620,18 @@ func (c *Checker) hasLoopLabel(label string) bool {
 	return false
 }
 
+// taggedType returns the named set of tags a match can run over. An enum is one,
+// and so is an error set: matching a failure asks which member of the set it is.
+func (c *Checker) taggedType(name Type) *enumType {
+	if enum := c.enums[string(name)]; enum != nil {
+		return enum
+	}
+	if set := c.errorSets[string(name)]; set != nil {
+		return set.tagged
+	}
+	return nil
+}
+
 // checkMatchStmt validates exhaustive simple enum tag matches.
 func (c *Checker) checkMatchStmt(
 	stmt *ast.MatchStmt,
@@ -2573,8 +2643,8 @@ func (c *Checker) checkMatchStmt(
 	if err != nil {
 		return false, err
 	}
-	if enumType := c.enums[string(valueType)]; enumType != nil {
-		return c.checkMatchArms(stmt.Arms, enumType, nil, env, wantReturn, unsafe)
+	if tagged := c.taggedType(valueType); tagged != nil {
+		return c.checkMatchArms(stmt.Arms, tagged, nil, env, wantReturn, unsafe)
 	}
 	unionType := c.unions[string(valueType)]
 	if unionType != nil {
@@ -2846,12 +2916,12 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeC
 	if err != nil {
 		return "", err
 	}
-	enumType := c.enums[string(valueType)]
+	tagged := c.taggedType(valueType)
 	unionType := c.unions[string(valueType)]
-	if enumType == nil && unionType == nil {
+	if tagged == nil && unionType == nil {
 		return "", errorf("type error: match expects enum or union, got %s", valueType)
 	}
-	return c.checkMatchExprArms(stmt.Arms, enumType, unionType, env, unsafe)
+	return c.checkMatchExprArms(stmt.Arms, tagged, unionType, env, unsafe)
 }
 
 // checkMatchExprArms validates match expression arms and returns their common type.
@@ -3310,7 +3380,10 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps)
 		return "", errorf("type error: try expects !T, got %s", source)
 	}
 	targetError, _, _ := errorUnionParts(c.currentReturn)
-	if sourceError != targetError {
+	// `!T` is the inferred set: it accepts whatever the body propagates, which
+	// is what makes a caller able to call things that fail in different ways
+	// without naming every one of them. A declared `E!T` still accepts only E.
+	if targetError != "" && sourceError != targetError {
 		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
 	return Type(elem), nil
@@ -3631,7 +3704,7 @@ func (c *Checker) checkFsBuiltin(
 	case "std.builtin.fs_read_dir":
 		return c.checkFsReadDir(args, env, unsafe)
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
-		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
+		return c.checkFsPathOnly(name, args, env, unsafe, "std::fs::Error!void")
 	case "std.builtin.fs_rename":
 		return c.checkFsRename(args, env, unsafe)
 	default:
@@ -3703,7 +3776,7 @@ func (c *Checker) checkFsReadFile(
 		return "", true, errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]u8", true, nil
+	return "std::fs::Error![]u8", true, nil
 }
 
 // checkFsWriteFile validates std::fs::write_file.
@@ -3728,7 +3801,7 @@ func (c *Checker) checkFsWriteFile(
 				"type error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsRename validates std::fs::rename.
@@ -3753,7 +3826,7 @@ func (c *Checker) checkFsRename(
 				"type error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsExists validates std::fs::exists.
@@ -3763,7 +3836,7 @@ func (c *Checker) checkFsExists(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::exists", args, env, unsafe)
-	return "!bool", true, err
+	return "std::fs::Error!bool", true, err
 }
 
 // checkFsMetadata validates std::fs::metadata.
@@ -3773,7 +3846,7 @@ func (c *Checker) checkFsMetadata(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
-	return "!std::fs::Metadata", true, err
+	return "std::fs::Error!std::fs::Metadata", true, err
 }
 
 // checkFsReadDir validates std::fs::read_dir.
@@ -3783,7 +3856,7 @@ func (c *Checker) checkFsReadDir(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
-	return "!std::array::Array<std::fs::DirEntry>", true, err
+	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, err
 }
 
 // checkFsPathOnly validates an Io plus path API and returns result.
@@ -5179,6 +5252,9 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 		return "", errorf("type error: enum tag `%s.%s` must use `::`",
 			enumType.name, expr.Name)
 	}
+	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
+		return "", errorf("type error: error `%s.%s` must use `::`", set.name, expr.Name)
+	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
 		return "", errorf("type error: union variant `%s.%s` must use `::`",
 			unionType.name, expr.Name)
@@ -5279,6 +5355,12 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 				enumType.name, expr.Name)
 		}
 		return Type(enumType.name), nil
+	}
+	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
+		if !set.members[expr.Name] {
+			return "", errorf("type error: unknown error `%s::%s`", set.name, expr.Name)
+		}
+		return Type(set.name), nil
 	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
 		payload, exists := unionType.variants[expr.Name]
@@ -5419,6 +5501,19 @@ func enumReceiver(expr ast.Expression, enums map[string]*enumType) (*enumType, b
 	}
 	enumType, ok := enums[ident.Name]
 	return enumType, ok
+}
+
+// errorSetReceiver returns an error set namespace used by SetName::Member.
+func errorSetReceiver(
+	expr ast.Expression,
+	sets map[string]*errorSetType,
+) (*errorSetType, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	set, ok := sets[ident.Name]
+	return set, ok
 }
 
 // unionReceiver returns a union namespace used by UnionName.Variant expressions.
@@ -7077,6 +7172,10 @@ func (c *Checker) isCopyType(typ Type) bool {
 		return true
 	}
 	if c.enums[string(typ)] != nil {
+		return true
+	}
+	// An error carries nothing, so reading one leaves nothing behind to move.
+	if c.errorSets[string(typ)] != nil {
 		return true
 	}
 	return copyTypes[typ]

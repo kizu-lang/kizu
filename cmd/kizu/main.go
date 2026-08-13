@@ -176,6 +176,13 @@ func buildRunExecutable(path string) (string, func(), error) {
 	return linkModule(module)
 }
 
+// stdErrorSets returns the numbers the runtime names its failures with. The
+// runtime refers to every std error set whatever a program uses, so a build
+// that cannot read them cannot say what it failed at.
+func stdErrorSets() (map[string]map[string]int, error) {
+	return stdlib.ErrorSets()
+}
+
 // linkModule emits and links one lowered module into a temporary executable.
 func linkModule(module *ir.Module) (string, func(), error) {
 	noCleanup := func() {}
@@ -189,8 +196,12 @@ func linkModule(module *ir.Module) (string, func(), error) {
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	exe := filepath.Join(dir, "main")
+	errorSets, err := stdErrorSets()
+	if err != nil {
+		return "", noCleanup, err
+	}
 	if err := native.Build(native.Options{
-		LLVMIR: llvmIR, Output: exe,
+		LLVMIR: llvmIR, Output: exe, ErrorSets: errorSets,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
 	}); err != nil {
 		cleanup()
@@ -565,9 +576,14 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	errorSets, err := stdErrorSets()
+	if err != nil {
+		return err
+	}
 	if err := native.Build(native.Options{
-		LLVMIR: llvmIR, Output: options.Output, Triple: options.Triple,
-		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
+		LLVMIR: llvmIR, Output: options.Output, ErrorSets: errorSets,
+		Triple: options.Triple,
+		CPU:    options.CPU, ABI: options.ABI, LibC: options.LibC,
 		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
 		Opt: options.Opt,
 	}); err != nil {
