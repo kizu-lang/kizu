@@ -112,7 +112,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -147,7 +147,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -282,6 +282,14 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return nil
 	}
 	env := newScope(nil)
+	// A `<...>` entry that declares a type is a compile-time value, in scope
+	// for the body like a parameter but never moved or borrowed.
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		env.define(c.newBinding(param.Name, param.Type))
+	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
 		value.borrowedParam = fn.params[idx].borrow
@@ -340,7 +348,7 @@ func (c *Checker) seedMethodParamProvenance(fn *functionInfo, env *scope) {
 // checkImpl validates concrete impl method bodies after signatures are collected.
 func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
 	for _, method := range decl.Methods {
-		if len(method.TypeParams) > 0 {
+		if len(method.TypeParamNames()) > 0 {
 			continue
 		}
 		fn := c.implMethod(decl.TypeName, method.Name)
@@ -1745,7 +1753,7 @@ func (c *Checker) checkUserCall(
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
 	}
-	if len(fn.decl.TypeParams) > 0 {
+	if len(fn.decl.TypeParamNames()) > 0 {
 		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
@@ -1841,7 +1849,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if len(fn.decl.TypeParams) > 0 {
+	if len(fn.decl.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env)
@@ -2879,23 +2887,31 @@ func (c *Checker) checkGenericUserTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	fn := c.functions[name]
-	if fn == nil || len(fn.decl.TypeParams) == 0 {
+	if fn == nil || len(fn.decl.StaticParams) == 0 {
 		return "", false, nil
 	}
 	if len(args) != len(fn.params) {
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
-	typeArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(typeArgs) != len(fn.decl.TypeParams) {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.decl.StaticParams) {
 		return "", true, errorf("move error: `%s` expects %d static arguments",
-			name, len(fn.decl.TypeParams))
+			name, len(fn.decl.StaticParams))
+	}
+	// Only the entries that declare types take part in substitution; a
+	// compile-time value carries no ownership.
+	typeArgs := []string{}
+	for idx, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			typeArgs = append(typeArgs, staticArgs[idx])
+		}
 	}
 	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
 		return "", true, err
 	}
 	subst := map[string]string{}
-	for idx, param := range fn.decl.TypeParams {
+	for idx, param := range fn.decl.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
 	for idx, arg := range args {
@@ -2912,6 +2928,14 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
 	env := newScope(nil)
+	// A `<...>` entry that declares a type is a compile-time value, in scope
+	// for the body like a parameter but never moved or borrowed.
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		env.define(c.newBinding(param.Name, param.Type))
+	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
 		value.borrowedParam = fn.params[idx].borrow

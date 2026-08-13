@@ -33,13 +33,22 @@ type lowerer struct {
 	// the symbol they were given.
 	instantiated map[string]bool
 	pending      []genericInstance
+	// staticValues binds the compile-time values of the instance being lowered.
+	staticValues map[string]staticValue
 }
 
-// genericInstance is one generic function with its type parameters bound.
+// genericInstance is one generic function with its static parameters bound.
 type genericInstance struct {
 	decl     *ast.FunctionDecl
 	bindings map[string]string
+	values   map[string]staticValue
 	symbol   string
+}
+
+// staticValue is one compile-time value bound to a static parameter.
+type staticValue struct {
+	typ  string
+	text string
 }
 
 type loopContext struct {
@@ -68,6 +77,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		signatures:   map[string]Signature{},
 		typeBindings: map[string]string{},
 		instantiated: map[string]bool{},
+		staticValues: map[string]staticValue{},
 	}
 }
 
@@ -90,21 +100,31 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
 	args := splitTypeArgs(typeArgs)
-	if len(args) != len(decl.TypeParams) {
-		return "", "", fmt.Errorf("ir error: `%s` takes %d type parameters, got %d",
-			name, len(decl.TypeParams), len(args))
+	if len(args) != len(decl.StaticParams) {
+		return "", "", fmt.Errorf("ir error: `%s` takes %d static parameters, got %d",
+			name, len(decl.StaticParams), len(args))
 	}
 	bindings := map[string]string{}
-	for i, param := range decl.TypeParams {
-		// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
-		// argument T is currently bound to, not the parameter name.
-		bindings[param] = l.resolveType(args[i])
+	values := map[string]staticValue{}
+	order := make([]string, 0, len(decl.StaticParams))
+	for i, param := range decl.StaticParams {
+		order = append(order, param.Name)
+		if param.IsType() {
+			// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
+			// argument T is currently bound to, not the parameter name.
+			bindings[param.Name] = l.resolveType(args[i])
+			continue
+		}
+		// A compile-time value reaches the body as a constant, or -- for a
+		// `Function` parameter -- as the name of the function to forward to.
+		values[param.Name] = staticValue{typ: param.Type, text: l.resolveStaticValue(args[i])}
 	}
-	symbol := genericInstanceName(name, decl.TypeParams, bindings)
+	symbol := genericInstanceName(name, order, bindings, values)
 	if !l.instantiated[symbol] {
 		l.instantiated[symbol] = true
-		l.pending = append(l.pending,
-			genericInstance{decl: decl, bindings: bindings, symbol: symbol})
+		l.pending = append(l.pending, genericInstance{
+			decl: decl, bindings: bindings, values: values, symbol: symbol,
+		})
 	}
 	ret := decl.ReturnType
 	if bound, ok := bindings[ret]; ok {
@@ -147,8 +167,10 @@ func (l *lowerer) lowerPendingGenerics() error {
 		next := l.pending[0]
 		l.pending = l.pending[1:]
 		l.typeBindings = next.bindings
+		l.staticValues = next.values
 		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
 		l.typeBindings = map[string]string{}
+		l.staticValues = map[string]staticValue{}
 		if err != nil {
 			return err
 		}
@@ -161,7 +183,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
 	for _, decl := range l.program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok || len(fn.TypeParams) == 0 {
+		if !ok || len(fn.StaticParams) == 0 {
 			continue
 		}
 		if fn.Name == name {
@@ -171,14 +193,32 @@ func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
 	return nil
 }
 
-// genericInstanceName is the symbol one instantiation is lowered under. Type
+// genericInstanceName is the symbol one instantiation is lowered under. Static
 // parameters are listed in declaration order so the symbol is stable.
-func genericInstanceName(name string, params []string, bindings map[string]string) string {
-	args := make([]string, 0, len(params))
-	for _, param := range params {
-		args = append(args, bindings[param])
+func genericInstanceName(
+	name string,
+	order []string,
+	bindings map[string]string,
+	values map[string]staticValue,
+) string {
+	args := make([]string, 0, len(order))
+	for _, param := range order {
+		if bound, ok := bindings[param]; ok {
+			args = append(args, bound)
+			continue
+		}
+		args = append(args, values[param].text)
 	}
 	return name + "<" + strings.Join(args, ", ") + ">"
+}
+
+// resolveStaticValue forwards a static value through an outer binding, so a
+// generic passing its own static value on keeps the caller's argument.
+func (l *lowerer) resolveStaticValue(text string) string {
+	if bound, ok := l.staticValues[text]; ok {
+		return bound.text
+	}
+	return text
 }
 
 // lower performs declaration collection and function lowering.
@@ -192,7 +232,7 @@ func (l *lowerer) lower() (*Module, error) {
 		if fn.ExternABI != "" {
 			continue
 		}
-		if len(fn.TypeParams) > 0 {
+		if len(fn.StaticParams) > 0 {
 			continue
 		}
 		lowered, err := l.lowerFunction(fn)
@@ -207,7 +247,7 @@ func (l *lowerer) lower() (*Module, error) {
 			continue
 		}
 		for _, method := range impl.Methods {
-			if method.ExternABI != "" || len(method.TypeParams) > 0 {
+			if method.ExternABI != "" || len(method.StaticParams) > 0 {
 				continue
 			}
 			name := implMethodName(impl.TypeName, method.Name)
@@ -666,11 +706,17 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 	}
 }
 
-// lowerIdentExpr lowers a local binding or the built-in void value.
+// lowerIdentExpr lowers a local binding, a static value, or the built-in void.
 func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	value, ok := l.env[expr.Name]
 	if ok {
 		return value, nil
+	}
+	// A static value is known at this point, so it lowers to the constant it
+	// was instantiated with. `Function` is a name, not a value, and is read by
+	// the call that forwards it rather than here.
+	if static, ok := l.staticValues[expr.Name]; ok && static.typ != "Function" {
+		return l.emitConst(static.typ, static.text), nil
 	}
 	if expr.Name == "void" {
 		return Value{Name: "void", Type: "void"}, nil

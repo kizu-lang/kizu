@@ -83,9 +83,12 @@ func (p *Program) String() string {
 
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
-	Name           string
-	Doc            string
-	TypeParams     []string
+	Name string
+	Doc  string
+	// StaticParams is the `<...>` list. An entry with no declared type is a
+	// type parameter; one with a type is a compile-time value. Both are
+	// compile-time, which is why they live here and not in Params.
+	StaticParams   []StaticParam
 	Params         []Param
 	ReturnType     string
 	ReturnBorrow   string
@@ -94,6 +97,36 @@ type FunctionDecl struct {
 	ExternABI      string
 	Public         bool
 	Std            bool
+}
+
+// StaticParam is one entry of a `<...>` static argument list.
+type StaticParam struct {
+	Name string
+	// Type is empty for a type parameter, and names the value's type for a
+	// compile-time value such as `<n: i64>` or `<worker: Function>`.
+	Type string
+}
+
+// IsType reports whether this entry declares a type parameter.
+func (p StaticParam) IsType() bool { return p.Type == "" }
+
+// String renders the parameter as it is written in source.
+func (p StaticParam) String() string {
+	if p.IsType() {
+		return p.Name
+	}
+	return p.Name + ": " + p.Type
+}
+
+// TypeParamNames returns the names of the entries that declare types.
+func (d *FunctionDecl) TypeParamNames() []string {
+	names := []string{}
+	for _, param := range d.StaticParams {
+		if param.IsType() {
+			names = append(names, param.Name)
+		}
+	}
+	return names
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -112,7 +145,7 @@ func (d *FunctionDecl) String() string {
 			ret += " borrows " + d.ReturnBorrow
 		}
 	}
-	typeParams := typeParamText(d.TypeParams)
+	typeParams := staticParamText(d.StaticParams)
 	if typeParams != "" {
 		typeParams = "<" + typeParams + ">"
 	}
@@ -345,6 +378,15 @@ func (p Param) String() string {
 // typeParamText renders static type parameters.
 func typeParamText(types []string) string {
 	return strings.Join(types, ", ")
+}
+
+// staticParamText renders a `<...>` declaration list.
+func staticParamText(params []StaticParam) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		parts = append(parts, param.String())
+	}
+	return strings.Join(parts, ", ")
 }
 
 // borrowPrefix renders a borrow marker.

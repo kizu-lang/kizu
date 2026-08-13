@@ -1198,7 +1198,7 @@ func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	typeParams, reason := summarizeGenericParamsSubset(fn.TypeParams)
+	typeParams, reason := summarizeGenericParamsSubset(fn.TypeParamNames())
 	if reason != "" {
 		return nil, reason
 	}

@@ -279,7 +279,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -316,7 +316,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParams) > 0 {
+			if len(d.TypeParamNames()) > 0 {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -966,7 +966,7 @@ type functionParamInfo struct {
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(fn.TypeParams)
+	c.typeParams = typeParamSet(fn.TypeParamNames())
 	defer func() {
 		c.typeParams = previousTypeParams
 	}()
@@ -998,7 +998,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	return &functionType{
 		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
-		typeParams:   fn.TypeParams,
+		typeParams:   fn.TypeParamNames(),
 		returnBorrow: fn.ReturnBorrow,
 		returnType:   ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
 		externABI: fn.ExternABI,
@@ -1526,6 +1526,16 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		return err
 	}
 	env := newScope(nil)
+	// A `<...>` entry that declares a type is a compile-time value the body can
+	// read, so it is in scope alongside the runtime parameters.
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
+			return err
+		}
+	}
 	for idx, param := range fn.decl.Params {
 		if err := env.defineParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow); err != nil {
 			return err
@@ -4526,18 +4536,22 @@ func (c *Checker) checkGenericUserTypeApply(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	fn := c.functions[name]
-	if fn == nil || len(fn.typeParams) == 0 {
+	if fn == nil || len(fn.decl.StaticParams) == 0 {
 		return "", false, nil
 	}
 	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
 		return "", true, err
 	}
 	argsText, ok := splitGenericArgs(typeArg)
-	if !ok || len(argsText) != len(fn.typeParams) {
+	if !ok || len(argsText) != len(fn.decl.StaticParams) {
 		return "", true, errorf("type error: `%s` expects %d static arguments",
-			name, len(fn.typeParams))
+			name, len(fn.decl.StaticParams))
 	}
-	typeArgs, err := c.parseGenericWrapperTypeArgs(argsText)
+	typeArgsText, err := c.checkStaticArgs(name, fn, argsText)
+	if err != nil {
+		return "", true, err
+	}
+	typeArgs, err := c.parseGenericWrapperTypeArgs(typeArgsText)
 	if err != nil {
 		return "", true, err
 	}
@@ -4562,9 +4576,80 @@ func (c *Checker) checkGenericUserTypeApply(
 	return substituteTypeParams(fn.returnType, subst), true, nil
 }
 
+// checkStaticArgs validates each `<...>` argument against what its parameter
+// declared, and returns the subset that are types, in declaration order.
+func (c *Checker) checkStaticArgs(
+	name string,
+	fn *functionType,
+	argsText []string,
+) ([]string, error) {
+	typeArgs := []string{}
+	for idx, param := range fn.decl.StaticParams {
+		arg := strings.TrimSpace(argsText[idx])
+		if param.IsType() {
+			typeArgs = append(typeArgs, arg)
+			continue
+		}
+		if err := checkStaticValueArg(name, param, arg); err != nil {
+			return nil, err
+		}
+	}
+	return typeArgs, nil
+}
+
+// checkStaticValueArg validates one compile-time value argument. The value is a
+// literal or, for a `Function` parameter, a top-level function name.
+func checkStaticValueArg(name string, param ast.StaticParam, arg string) error {
+	switch Type(param.Type) {
+	case typeFunction:
+		if !isIdentifierText(arg) {
+			return errorf("type error: `%s` static argument `%s` expects a function name, got `%s`",
+				name, param.Name, arg)
+		}
+		return nil
+	case typeBool:
+		if arg != "true" && arg != "false" {
+			return errorf("type error: `%s` static argument `%s` expects bool, got `%s`",
+				name, param.Name, arg)
+		}
+		return nil
+	default:
+		if _, err := strconv.ParseInt(arg, 10, 64); err != nil {
+			return errorf("type error: `%s` static argument `%s` expects %s, got `%s`",
+				name, param.Name, param.Type, arg)
+		}
+		return nil
+	}
+}
+
+// isIdentifierText reports whether text is a bare identifier.
+func isIdentifierText(text string) bool {
+	if text == "" {
+		return false
+	}
+	for i, r := range text {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
 	env := newScope(nil)
+	for _, param := range fn.decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
+			return err
+		}
+	}
 	for idx, param := range fn.decl.Params {
 		typ := substituteTypeParams(fn.params[idx], subst)
 		if err := env.defineParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {

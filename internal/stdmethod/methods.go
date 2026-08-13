@@ -117,7 +117,7 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 	}
 	return Method{
 		Decl:       fn,
-		TypeParams: fn.TypeParams,
+		TypeParams: fn.TypeParamNames(),
 		Params:     params,
 		Return:     fn.ReturnType,
 	}

@@ -345,10 +345,10 @@ func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name:       "unused",
-			TypeParams: []string{"T"},
-			Params:     []ast.Param{{Name: "value", TypeName: "T"}},
-			ReturnType: "T",
+			Name:         "unused",
+			StaticParams: []ast.StaticParam{{Name: "T"}},
+			Params:       []ast.Param{{Name: "value", TypeName: "T"}},
+			ReturnType:   "T",
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
 			}},

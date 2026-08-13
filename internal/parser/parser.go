@@ -252,8 +252,8 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 	fn.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		fn.TypeParams = p.parseGenericParamList()
-		if len(fn.TypeParams) == 0 || !p.expectTypeClose() {
+		fn.StaticParams = p.parseStaticParamList()
+		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
 			return fn
 		}
 	}
@@ -1403,22 +1403,40 @@ func (p *Parser) parseTypeArgList(allowConst bool) string {
 
 // parseGenericParamList parses type parameters.
 func (p *Parser) parseGenericParamList() []string {
-	types := []string{}
+	names := []string{}
+	for _, param := range p.parseStaticParamList() {
+		if !param.IsType() {
+			p.errorf("expected type parameter, got %s", param.String())
+			return nil
+		}
+		names = append(names, param.Name)
+	}
+	return names
+}
+
+// parseStaticParamList parses a `<...>` declaration list. A bare name declares
+// a type parameter; `name: Type` declares a compile-time value.
+func (p *Parser) parseStaticParamList() []ast.StaticParam {
+	params := []ast.StaticParam{}
 	seen := map[string]bool{}
 	p.nextToken()
 	for {
-		switch p.cur.Type {
-		case token.Ident:
-			if seen[p.cur.Literal] {
-				p.errorf("duplicate type parameter %s", p.cur.Literal)
-				return nil
-			}
-			seen[p.cur.Literal] = true
-			types = append(types, p.cur.Literal)
-		default:
-			p.errorf("expected type parameter, got %s", tokenDescription(p.cur))
+		if p.cur.Type != token.Ident {
+			p.errorf("expected static parameter, got %s", tokenDescription(p.cur))
 			return nil
 		}
+		if seen[p.cur.Literal] {
+			p.errorf("duplicate static parameter %s", p.cur.Literal)
+			return nil
+		}
+		param := ast.StaticParam{Name: p.cur.Literal}
+		seen[param.Name] = true
+		if p.peek.Type == token.Colon {
+			p.nextToken()
+			p.nextToken()
+			param.Type = p.parseTypeName()
+		}
+		params = append(params, param)
 		if p.peek.Type != token.Comma {
 			break
 		}
@@ -1428,7 +1446,7 @@ func (p *Parser) parseGenericParamList() []string {
 		}
 		p.nextToken()
 	}
-	return types
+	return params
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
@@ -1442,13 +1460,18 @@ func (p *Parser) expectTypeClose() bool {
 	return p.expectPeek(token.GT)
 }
 
-// parseStaticTypeArg parses a v0.2 static argument whose value must be a type.
+// parseStaticTypeArg parses one entry of a `<...>` argument list. An entry is a
+// type, or a compile-time value for a parameter that declared one.
 func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
 	case token.Ident, token.Bang, token.Amp, token.Dyn, token.LBracket, token.Question:
 		return p.parseTypeArg(allowConst)
+	case token.Int:
+		return p.cur.Literal
+	case token.True, token.False:
+		return p.cur.Literal
 	default:
-		p.errorf("expected static type argument, got %s", tokenDescription(p.cur))
+		p.errorf("expected static argument, got %s", tokenDescription(p.cur))
 		return ""
 	}
 }

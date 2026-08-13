@@ -983,21 +983,24 @@ fn main() { print(is_i64<i64>(1)); print(is_i64<bool>(false)); }`
 	}
 }
 
-// TestParseRejectsNonTypeStaticArg keeps v0.2 static arguments type-only.
-func TestParseRejectsNonTypeStaticArg(t *testing.T) {
-	input := `fn identity<T>(value: T) -> T {
-    return value;
+// TestParseAcceptsValueStaticArg keeps a compile-time value in the static
+// argument list parseable. Whether the parameter accepts it is a type-check
+// question, not a syntax one.
+func TestParseAcceptsValueStaticArg(t *testing.T) {
+	input := `fn sized<n: i64>() -> i64 {
+    return n;
 }
 fn main() {
-    print(identity<1>(1));
+    print(sized<4096>());
 }`
 	p := New(lexer.New(input))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		t.Fatalf("expected parser error")
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("got parser errors %v", p.Errors())
 	}
-	if !strings.Contains(p.Errors()[0], "expected static type argument") {
-		t.Fatalf("got %q", p.Errors()[0])
+	fn := program.Decls[0].(*ast.FunctionDecl)
+	if len(fn.StaticParams) != 1 || fn.StaticParams[0].Type != "i64" {
+		t.Fatalf("got static params %#v", fn.StaticParams)
 	}
 }
 
