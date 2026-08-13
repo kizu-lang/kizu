@@ -13,6 +13,7 @@ import (
 	kizuast "github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 const (
@@ -1212,7 +1213,7 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	returnType, reason := summarizeReturnTypeSubset(fn.ReturnType)
+	returnType, reason := summarizeReturnTypeSubset(typ.Text(fn.ReturnType))
 	if reason != "" {
 		return nil, reason
 	}
@@ -1363,11 +1364,11 @@ func summarizeFieldSubset(field kizuast.Field) ([]string, string) {
 func parserParityFieldTypeName(field kizuast.Field) string {
 	switch {
 	case field.MutBorrow:
-		return "&var " + field.TypeName
+		return "&var " + typ.Text(field.TypeName)
 	case field.Borrow:
-		return "&" + field.TypeName
+		return "&" + typ.Text(field.TypeName)
 	default:
-		return field.TypeName
+		return typ.Text(field.TypeName)
 	}
 }
 
@@ -1415,10 +1416,10 @@ func summarizeUnionVariantSubset(variant kizuast.UnionVariant) ([]string, string
 		return nil, "identifier outside std parser subset"
 	}
 	lines := []string{"UnionVariant", "Var", variant.Name}
-	if variant.Payload == "" {
+	if variant.Payload == nil {
 		return append(lines, "Empty"), ""
 	}
-	payload, reason := summarizeTypeNameSubset(variant.Payload)
+	payload, reason := summarizeTypeNameSubset(typ.Text(variant.Payload))
 	if reason != "" {
 		return nil, reason
 	}
@@ -1445,11 +1446,11 @@ func summarizeTypeNameSubset(typeName string) ([]string, string) {
 func parserParityParamTypeName(param kizuast.Param) string {
 	switch {
 	case param.MutBorrow:
-		return "&var " + param.TypeName
+		return "&var " + typ.Text(param.TypeName)
 	case param.Borrow:
-		return "&" + param.TypeName
+		return "&" + typ.Text(param.TypeName)
 	default:
-		return param.TypeName
+		return typ.Text(param.TypeName)
 	}
 }
 
@@ -1966,7 +1967,7 @@ func splitTopLevelTypeArgs(typeArgs string) []string {
 
 // summarizeCastExprSubset summarizes cast<T>(value).
 func summarizeCastExprSubset(expr *kizuast.CastExpr) ([]string, string) {
-	target, reason := summarizeTypeNameSubset(expr.TargetType)
+	target, reason := summarizeTypeNameSubset(typ.Text(expr.TargetType))
 	if reason != "" {
 		return nil, reason
 	}

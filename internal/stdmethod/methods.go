@@ -63,7 +63,7 @@ func IndexMethods(decls []ast.Decl) MethodIndex {
 		if !ok || !fn.Std || len(fn.Params) == 0 || fn.Params[0].Name != "self" {
 			continue
 		}
-		receiver := baseTypeName(fn.Params[0].TypeName)
+		receiver := baseTypeName(typ.Text(fn.Params[0].TypeName))
 		if receiver == "" {
 			continue
 		}
@@ -82,7 +82,7 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 	params := make([]ParamType, 0, len(fn.Params)-1)
 	for _, param := range fn.Params[1:] {
 		params = append(params, ParamType{
-			TypeName:  param.TypeName,
+			TypeName:  typ.Text(param.TypeName),
 			Borrow:    param.Borrow,
 			MutBorrow: param.MutBorrow,
 		})
@@ -91,7 +91,7 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 		Decl:       fn,
 		TypeParams: fn.TypeParamNames(),
 		Params:     params,
-		Return:     fn.ReturnType,
+		Return:     typ.Text(fn.ReturnType),
 	}
 }
 

@@ -352,7 +352,7 @@ func modulePath(module string) string {
 func renameStruct(module string, decl *ast.StructDecl) {
 	decl.Name = qualifyTypeName(module, decl.Name)
 	for idx := range decl.Fields {
-		decl.Fields[idx].TypeName = qualifyTypeName(module, decl.Fields[idx].TypeName)
+		decl.Fields[idx].TypeName = qualifyType(module, decl.Fields[idx].TypeName)
 	}
 }
 
@@ -365,7 +365,7 @@ func renameEnum(module string, decl *ast.EnumDecl) {
 func renameUnion(module string, decl *ast.UnionDecl) {
 	decl.Name = qualifyTypeName(module, decl.Name)
 	for idx := range decl.Variants {
-		decl.Variants[idx].Payload = qualifyTypeName(module, decl.Variants[idx].Payload)
+		decl.Variants[idx].Payload = qualifyType(module, decl.Variants[idx].Payload)
 	}
 }
 
@@ -389,9 +389,9 @@ func renameImpl(module string, decl *ast.ImplDecl) {
 
 // renameFunctionTypes qualifies module-local std type names in one function.
 func renameFunctionTypes(module string, fn *ast.FunctionDecl) {
-	fn.ReturnType = qualifyTypeName(module, fn.ReturnType)
+	fn.ReturnType = qualifyType(module, fn.ReturnType)
 	for idx := range fn.Params {
-		fn.Params[idx].TypeName = qualifyTypeName(module, fn.Params[idx].TypeName)
+		fn.Params[idx].TypeName = qualifyType(module, fn.Params[idx].TypeName)
 	}
 }
 
@@ -490,7 +490,7 @@ func renameTypeExpr(module string, expr ast.Expression) bool {
 		renameExpr(module, e.Callee)
 		e.TypeArg = qualifyTypeName(module, e.TypeArg)
 	case *ast.CastExpr:
-		e.TargetType = qualifyTypeName(module, e.TargetType)
+		e.TargetType = qualifyType(module, e.TargetType)
 		renameExpr(module, e.Value)
 	case *ast.ArenaNewExpr:
 		e.TypeName = qualifyTypeName(module, e.TypeName)
@@ -508,6 +508,44 @@ func renameNamespaceReceiver(module string, expr *ast.FieldExpr) {
 		return
 	}
 	renameExpr(module, expr.Receiver)
+}
+
+// qualifyType maps local std wrapper type names to public std names, wherever
+// they stand in a type. Walking the structure reaches a name inside `[]T` and
+// `&T` as well as inside `<...>`, which spelling-level rewriting did not.
+func qualifyType(module string, t typ.Type) typ.Type {
+	switch node := t.(type) {
+	case nil:
+		return nil
+	case *typ.Name:
+		args := make([]typ.Type, 0, len(node.Args))
+		for _, arg := range node.Args {
+			args = append(args, qualifyType(module, arg))
+		}
+		path := node.Path
+		if qualified, ok := qualifySimpleType(module, strings.Join(path, "::")); ok {
+			path = strings.Split(qualified, "::")
+		}
+		return &typ.Name{Path: path, Args: args}
+	case *typ.Slice:
+		return &typ.Slice{Elem: qualifyType(module, node.Elem)}
+	case *typ.Borrow:
+		return &typ.Borrow{Elem: qualifyType(module, node.Elem), Mut: node.Mut}
+	case *typ.Optional:
+		return &typ.Optional{Elem: qualifyType(module, node.Elem)}
+	case *typ.Dyn:
+		return &typ.Dyn{Contract: qualifyType(module, node.Contract)}
+	case *typ.Const:
+		return &typ.Const{Elem: qualifyType(module, node.Elem)}
+	case *typ.ErrorUnion:
+		out := &typ.ErrorUnion{Ok: qualifyType(module, node.Ok)}
+		if node.Err != nil {
+			out.Err = qualifyType(module, node.Err)
+		}
+		return out
+	default:
+		return t
+	}
 }
 
 // qualifyTypeName maps local std wrapper type names to public std names.

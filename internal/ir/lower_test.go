@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -135,15 +136,15 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
 			Name:       "std.mem.len",
-			Params:     []ast.Param{{Name: "bytes", TypeName: "[]u8"}},
-			ReturnType: "i64",
+			Params:     []ast.Param{{Name: "bytes", TypeName: &typ.Slice{Elem: typ.Named("u8")}}},
+			ReturnType: typ.Named("i64"),
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IntExpr{Value: "1"}},
 			}},
 		},
 		&ast.FunctionDecl{
 			Name:       "main",
-			ReturnType: "i64",
+			ReturnType: typ.Named("i64"),
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.CallExpr{
 					Callee: &ast.FieldExpr{
@@ -347,8 +348,8 @@ func TestLowerSkipsGenericDeclarations(t *testing.T) {
 		&ast.FunctionDecl{
 			Name:         "unused",
 			StaticParams: []ast.StaticParam{{Name: "T"}},
-			Params:       []ast.Param{{Name: "value", TypeName: "T"}},
-			ReturnType:   "T",
+			Params:       []ast.Param{{Name: "value", TypeName: typ.Named("T")}},
+			ReturnType:   typ.Named("T"),
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
 			}},

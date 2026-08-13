@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Position identifies a source position using one-based line and column values.
@@ -90,7 +92,7 @@ type FunctionDecl struct {
 	// compile-time, which is why they live here and not in Params.
 	StaticParams   []StaticParam
 	Params         []Param
-	ReturnType     string
+	ReturnType     typ.Type
 	ReturnBorrow   string
 	Body           *BlockStmt
 	RequiresUnsafe bool
@@ -102,20 +104,20 @@ type FunctionDecl struct {
 // StaticParam is one entry of a `<...>` static argument list.
 type StaticParam struct {
 	Name string
-	// Type is empty for a type parameter, and names the value's type for a
+	// Type is absent for a type parameter, and names the value's type for a
 	// compile-time value such as `<n: i64>` or `<worker: Function>`.
-	Type string
+	Type typ.Type
 }
 
 // IsType reports whether this entry declares a type parameter.
-func (p StaticParam) IsType() bool { return p.Type == "" }
+func (p StaticParam) IsType() bool { return p.Type == nil }
 
 // String renders the parameter as it is written in source.
 func (p StaticParam) String() string {
 	if p.IsType() {
 		return p.Name
 	}
-	return p.Name + ": " + p.Type
+	return p.Name + ": " + p.Type.String()
 }
 
 // TypeParamNames returns the names of the entries that declare types.
@@ -139,8 +141,8 @@ func (d *FunctionDecl) String() string {
 		params = append(params, p.String())
 	}
 	ret := ""
-	if d.ReturnType != "" {
-		ret = " -> " + d.ReturnType
+	if d.ReturnType != nil {
+		ret = " -> " + d.ReturnType.String()
 		if d.ReturnBorrow != "" {
 			ret += " borrows " + d.ReturnBorrow
 		}
@@ -270,12 +272,12 @@ func (d *UnionDecl) String() string {
 type UnionVariant struct {
 	Name    string
 	Doc     string
-	Payload string
+	Payload typ.Type
 }
 
 // String returns a compact debug representation of the union variant.
 func (v UnionVariant) String() string {
-	if v.Payload == "" {
+	if v.Payload == nil {
 		return v.Name
 	}
 	return fmt.Sprintf("%s(%s)", v.Name, v.Payload)
@@ -331,7 +333,7 @@ func (d *ImplDecl) String() string {
 type Field struct {
 	Name      string
 	Doc       string
-	TypeName  string
+	TypeName  typ.Type
 	Borrow    bool
 	MutBorrow bool
 	Public    bool
@@ -355,7 +357,7 @@ func (f Field) String() string {
 // Param represents a function parameter.
 type Param struct {
 	Name      string
-	TypeName  string
+	TypeName  typ.Type
 	Borrow    bool
 	MutBorrow bool
 }
@@ -894,7 +896,7 @@ func (e *TypeApplyExpr) String() string {
 
 // CastExpr represents an explicit cast<T>(value) conversion.
 type CastExpr struct {
-	TargetType  string
+	TargetType  typ.Type
 	Value       Expression
 	KeywordSpan Span
 }

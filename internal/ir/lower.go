@@ -121,7 +121,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 		}
 		// A compile-time value reaches the body as a constant, or -- for a
 		// `Function` parameter -- as the name of the function to forward to.
-		values[param.Name] = staticValue{typ: param.Type, text: l.resolveStaticValue(args[i])}
+		values[param.Name] = staticValue{typ: typ.Text(param.Type), text: l.resolveStaticValue(args[i])}
 	}
 	symbol := genericInstanceName(name, order, bindings, values)
 	if !l.instantiated[symbol] {
@@ -130,7 +130,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 			decl: decl, bindings: bindings, values: values, symbol: symbol,
 		})
 	}
-	ret := decl.ReturnType
+	ret := typ.Text(decl.ReturnType)
 	if bound, ok := bindings[ret]; ok {
 		ret = bound
 	}
@@ -276,7 +276,7 @@ func (l *lowerer) lowerTests() error {
 		// A test body may `try`, so it lowers as a function returning `!void`.
 		fn := &ast.FunctionDecl{
 			Name:       TestFunctionName(test.Name),
-			ReturnType: "!void",
+			ReturnType: typ.Err(typ.Named("void")),
 			Body:       test.Body,
 		}
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
@@ -343,7 +343,7 @@ func lowerUnion(decl *ast.UnionDecl) Union {
 	variants := map[string]UnionVariant{}
 	for index, variant := range decl.Variants {
 		variants[variant.Name] = UnionVariant{
-			Name: variant.Name, Index: index, Payload: variant.Payload,
+			Name: variant.Name, Index: index, Payload: typ.Text(variant.Payload),
 		}
 	}
 	return Union{Name: decl.Name, Variants: variants}
@@ -362,7 +362,7 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 func lowerStruct(decl *ast.StructDecl) Struct {
 	fields := make([]Field, 0, len(decl.Fields))
 	for _, field := range decl.Fields {
-		fields = append(fields, Field{Name: field.Name, Type: field.TypeName})
+		fields = append(fields, Field{Name: field.Name, Type: typ.Text(field.TypeName)})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
 }
@@ -373,7 +373,7 @@ func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
 	for _, param := range fn.Params {
 		params = append(params, l.paramIRTypeName(param))
 	}
-	return Signature{Params: params, Return: returnType(fn.ReturnType)}
+	return Signature{Params: params, Return: returnType(typ.Text(fn.ReturnType))}
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -383,7 +383,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 
 // lowerFunctionNamed lowers one function using an explicit IR symbol name.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	l.current = &Function{Name: name, Return: returnType(l.resolveType(fn.ReturnType))}
+	l.current = &Function{Name: name, Return: returnType(l.resolveType(typ.Text(fn.ReturnType)))}
 	l.env = map[string]Value{}
 	l.nextValue = 0
 	l.nextBlock = 0
@@ -406,7 +406,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 
 // paramIRTypeName preserves borrow ABI only for unions that need pointer matching.
 func (l *lowerer) paramIRTypeName(param ast.Param) string {
-	typeName := l.resolveType(param.TypeName)
+	typeName := l.resolveType(typ.Text(param.TypeName))
 	if !param.Borrow && !param.MutBorrow {
 		return typeName
 	}
@@ -728,7 +728,7 @@ func (l *lowerer) lowerCastExpr(expr *ast.CastExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("cast", expr.TargetType, []Value{value}, expr.TargetType), nil
+	return l.emit("cast", typ.Text(expr.TargetType), []Value{value}, typ.Text(expr.TargetType)), nil
 }
 
 // lowerPrefixExpr lowers unary operators.

@@ -183,6 +183,80 @@ func SplitArgs(text string) ([]string, error) {
 	return parts, nil
 }
 
+// Named builds a type from a `::` separated name and its static arguments.
+func Named(name string, args ...Type) Type {
+	return &Name{Path: strings.Split(name, "::"), Args: args}
+}
+
+// Err builds the `!T` error union.
+func Err(ok Type) Type {
+	return &ErrorUnion{Ok: ok}
+}
+
+// Text returns the spelling of t, and "" where a declaration wrote no type at
+// all. A missing type is not a type, so it has no node to print.
+func Text(t Type) string {
+	if t == nil {
+		return ""
+	}
+	return t.String()
+}
+
+// MapNames returns t with every name rewritten by rename, keeping the structure
+// around it. Qualifying or resolving a type is a question about the names it
+// mentions, so a caller says what a name becomes rather than walking a spelling
+// looking for one.
+func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error) {
+	switch node := t.(type) {
+	case nil:
+		return nil, nil
+	case *Name:
+		path, err := rename(node.Path)
+		if err != nil {
+			return nil, err
+		}
+		args := make([]Type, 0, len(node.Args))
+		for _, arg := range node.Args {
+			mapped, err := MapNames(arg, rename)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, mapped)
+		}
+		return &Name{Path: path, Args: args}, nil
+	case *Slice:
+		elem, err := MapNames(node.Elem, rename)
+		return &Slice{Elem: elem}, err
+	case *Borrow:
+		elem, err := MapNames(node.Elem, rename)
+		return &Borrow{Elem: elem, Mut: node.Mut}, err
+	case *Optional:
+		elem, err := MapNames(node.Elem, rename)
+		return &Optional{Elem: elem}, err
+	case *Dyn:
+		contract, err := MapNames(node.Contract, rename)
+		return &Dyn{Contract: contract}, err
+	case *Const:
+		elem, err := MapNames(node.Elem, rename)
+		return &Const{Elem: elem}, err
+	case *ErrorUnion:
+		ok, err := MapNames(node.Ok, rename)
+		if err != nil {
+			return nil, err
+		}
+		out := &ErrorUnion{Ok: ok}
+		if node.Err != nil {
+			out.Err, err = MapNames(node.Err, rename)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	default:
+		return t, nil
+	}
+}
+
 // Walk calls visit for t and for every type inside it, outermost first. A
 // caller that needs the types a spelling mentions -- not just the one it names
 // -- asks here rather than searching the text for a punctuation mark.

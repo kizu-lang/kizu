@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // TestParseHello checks that a minimal program parses cleanly.
@@ -999,7 +1000,7 @@ fn main() {
 		t.Fatalf("got parser errors %v", p.Errors())
 	}
 	fn := program.Decls[0].(*ast.FunctionDecl)
-	if len(fn.StaticParams) != 1 || fn.StaticParams[0].Type != "i64" {
+	if len(fn.StaticParams) != 1 || typ.Text(fn.StaticParams[0].Type) != "i64" {
 		t.Fatalf("got static params %#v", fn.StaticParams)
 	}
 }

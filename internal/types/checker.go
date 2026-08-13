@@ -429,7 +429,8 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if err := c.checkPublicFunctionSignature(d.Public, d.Name, d.Params, d.ReturnType); err != nil {
+			ret := typ.Text(d.ReturnType)
+			if err := c.checkPublicFunctionSignature(d.Public, d.Name, d.Params, ret); err != nil {
 				return err
 			}
 		case *ast.StructDecl:
@@ -460,7 +461,8 @@ func (c *Checker) checkPublicFunctionSignature(
 		return nil
 	}
 	for _, param := range params {
-		if err := c.rejectPrivateType(param.TypeName, "function `"+name+"` parameter"); err != nil {
+		label := "function `" + name + "` parameter"
+		if err := c.rejectPrivateType(typ.Text(param.TypeName), label); err != nil {
 			return err
 		}
 	}
@@ -477,7 +479,7 @@ func (c *Checker) checkPublicStructFields(decl *ast.StructDecl) error {
 			continue
 		}
 		context := "field `" + decl.Name + "." + field.Name + "`"
-		if err := c.rejectPrivateType(field.TypeName, context); err != nil {
+		if err := c.rejectPrivateType(typ.Text(field.TypeName), context); err != nil {
 			return err
 		}
 	}
@@ -490,11 +492,11 @@ func (c *Checker) checkPublicUnionVariants(decl *ast.UnionDecl) error {
 		return nil
 	}
 	for _, variant := range decl.Variants {
-		if variant.Payload == "" {
+		if variant.Payload == nil {
 			continue
 		}
 		context := "union variant `" + decl.Name + "::" + variant.Name + "`"
-		if err := c.rejectPrivateType(variant.Payload, context); err != nil {
+		if err := c.rejectPrivateType(typ.Text(variant.Payload), context); err != nil {
 			return err
 		}
 	}
@@ -508,7 +510,7 @@ func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
 	}
 	for _, method := range decl.Methods {
 		if err := c.checkPublicFunctionSignature(true, method.Name, method.Params,
-			method.ReturnType); err != nil {
+			typ.Text(method.ReturnType)); err != nil {
 			return err
 		}
 	}
@@ -668,24 +670,25 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			return errorf("type error: duplicate union variant `%s::%s`",
 				decl.Name, variant.Name)
 		}
-		if variant.Payload != "" {
-			typ, err := c.parseType(variant.Payload)
+		if variant.Payload != nil {
+			payload := typ.Text(variant.Payload)
+			parsed, err := c.parseType(payload)
 			if err != nil {
 				return err
 			}
-			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, variant.Payload); err != nil {
+			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, payload); err != nil {
 				return err
 			}
-			if containsTypeValue(typ) {
+			if containsTypeValue(parsed) {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
-			if containsDynType(typ) {
+			if containsDynType(parsed) {
 				return errorf("type error: union variant `%s::%s` cannot store dyn value",
 					decl.Name, variant.Name)
 			}
 		}
-		union.variants[variant.Name] = variant.Payload
+		union.variants[variant.Name] = typ.Text(variant.Payload)
 	}
 	c.unions[decl.Name] = union
 	return nil
@@ -709,7 +712,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		c.typeParams = previousTypeParams
 	}()
 	for _, field := range decl.Fields {
-		typ, err := c.parseType(field.TypeName)
+		typ, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
 			return err
 		}
@@ -766,7 +769,7 @@ func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bo
 	if st, ok := c.structs[base]; ok {
 		visited[base] = true
 		for _, field := range st.Fields {
-			if c.typeContainsOwner(field.TypeName, visited) {
+			if c.typeContainsOwner(typ.Text(field.TypeName), visited) {
 				return true
 			}
 		}
@@ -787,10 +790,10 @@ func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bo
 // unionHasOwnerPayload reports whether any variant payload is an owner payload.
 func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
 	for _, variant := range decl.Variants {
-		if variant.Payload == "" {
+		if variant.Payload == nil {
 			continue
 		}
-		if c.typeContainsOwner(variant.Payload, map[string]bool{decl.Name: true}) {
+		if c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
 			return true
 		}
 	}
@@ -884,8 +887,8 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *ast.Functio
 		armByTag[arm.Tag] = arm
 	}
 	for _, variant := range decl.Variants {
-		if variant.Payload == "" ||
-			!c.typeContainsOwner(variant.Payload, map[string]bool{decl.Name: true}) {
+		if variant.Payload == nil ||
+			!c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
 			continue
 		}
 		arm, ok := armByTag[variant.Name]
@@ -983,9 +986,9 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		return nil, err
 	}
 	ret := typeVoid
-	if fn.ReturnType != "" {
+	if fn.ReturnType != nil {
 		var err error
-		ret, err = c.parseType(fn.ReturnType)
+		ret, err = c.parseTypeNode(fn.ReturnType)
 		if err != nil {
 			return nil, err
 		}
@@ -1020,7 +1023,7 @@ func (c *Checker) collectFunctionParams(fn *ast.FunctionDecl) (functionParamInfo
 		mutBorrowParams: make([]bool, 0, len(fn.Params)),
 	}
 	for _, param := range fn.Params {
-		paramType, err := c.parseType(param.TypeName)
+		paramType, err := c.parseTypeNode(param.TypeName)
 		if err != nil {
 			return functionParamInfo{}, err
 		}
@@ -1067,7 +1070,7 @@ func (c *Checker) checkFunctionParam(
 // written rather than where the name fails to resolve.
 func checkStaticParamPolicy(fn *ast.FunctionDecl) error {
 	for _, param := range fn.StaticParams {
-		if Type(param.Type) != typeFunction || fn.Std {
+		if Type(typ.Text(param.Type)) != typeFunction || fn.Std {
 			continue
 		}
 		return errorf(
@@ -1088,21 +1091,21 @@ func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 
 // checkReturnBorrowPolicy validates source provenance for borrowed returns.
 func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
-	if fn.ReturnType == "" {
+	if fn.ReturnType == nil {
 		if fn.ReturnBorrow != "" {
 			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
 		}
 		return nil
 	}
 	if fn.ReturnBorrow == "" {
-		if isBorrowReturnType(Type(fn.ReturnType)) {
+		if isBorrowReturnType(Type(typ.Text(fn.ReturnType))) {
 			return errorf(
 				"type error: function `%s` borrow return requires `borrows <source>`",
 				fn.Name)
 		}
 		return nil
 	}
-	if !isBorrowedViewReturnType(Type(fn.ReturnType)) {
+	if !isBorrowedViewReturnType(Type(typ.Text(fn.ReturnType))) {
 		return errorf("type error: function `%s` `borrows` requires borrowed view return",
 			fn.Name)
 	}
@@ -1237,6 +1240,17 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if err != nil {
 		return "", errorf("type error: unknown type `%s`", name)
 	}
+	return c.parseTypeNode(parsed)
+}
+
+// parseTypeNode validates a type the parser already read, which is every type a
+// declaration writes. Only a type the compiler itself spells still arrives as
+// text, and parseType is the entry for those.
+func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
+	if parsed == nil {
+		return "", errorf("type error: missing type")
+	}
+	name := parsed.String()
 	switch node := parsed.(type) {
 	case *typ.ErrorUnion:
 		return c.parseErrorUnionType(name, node)
@@ -1509,7 +1523,7 @@ func checkMainReturnType(fn *functionType) error {
 	if fn.name != "main" || fn.decl == nil {
 		return nil
 	}
-	returned := strings.TrimSpace(fn.decl.ReturnType)
+	returned := strings.TrimSpace(typ.Text(fn.decl.ReturnType))
 	if returned == "" || returned == "void" || strings.HasSuffix(returned, "!void") {
 		return nil
 	}
@@ -1526,10 +1540,10 @@ func defineStaticValueParams(env *scope, decl *ast.FunctionDecl) (map[string]Typ
 		if param.IsType() {
 			continue
 		}
-		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
+		if err := env.defineParam(param.Name, Type(typ.Text(param.Type)), false, false); err != nil {
 			return nil, err
 		}
-		staticParams[param.Name] = Type(param.Type)
+		staticParams[param.Name] = Type(typ.Text(param.Type))
 	}
 	return staticParams, nil
 }
@@ -2425,7 +2439,7 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 
 // fieldDeclaredType returns the full field type, including borrow prefixes.
 func fieldDeclaredType(field ast.Field) Type {
-	return Type(borrowWrappedType(field.Borrow, field.MutBorrow, field.TypeName))
+	return Type(borrowWrappedType(field.Borrow, field.MutBorrow, typ.Text(field.TypeName)))
 }
 
 // addBorrowSources unions src into dst.
@@ -3235,7 +3249,7 @@ func isComparison(op string) bool {
 
 // checkCastExpr validates explicit low-level casts.
 func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCaps) (Type, error) {
-	target, err := c.parseType(expr.TargetType)
+	target, err := c.parseTypeNode(expr.TargetType)
 	if err != nil {
 		return "", err
 	}
@@ -3877,19 +3891,19 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 }
 
 // rejectArrayStorageStruct checks struct fields recursively for Array storage.
-func (c *Checker) rejectArrayStorageStruct(typ Type, seen map[Type]bool) error {
-	decl := c.structs[string(typ)]
+func (c *Checker) rejectArrayStorageStruct(target Type, seen map[Type]bool) error {
+	decl := c.structs[string(target)]
 	if decl == nil {
 		return nil
 	}
 	for _, field := range decl.Fields {
-		fieldType, err := c.parseType(field.TypeName)
+		fieldType, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
 			return err
 		}
 		if err := c.rejectArrayStorageType(fieldType, seen); err != nil {
 			return errorf("type error: struct `%s.%s` cannot be Array element: %w",
-				typ, field.Name, err)
+				target, field.Name, err)
 		}
 	}
 	return nil
@@ -4667,7 +4681,7 @@ func (c *Checker) checkStaticArgs(
 		if err := c.checkStaticValueArg(name, param, arg); err != nil {
 			return nil, err
 		}
-		if Type(param.Type) == typeFunction {
+		if Type(typ.Text(param.Type)) == typeFunction {
 			if err := c.checkStdWorkerContract(name, param.Name, arg, typeArgs); err != nil {
 				return nil, err
 			}
@@ -4720,10 +4734,10 @@ func (c *Checker) checkStdWorkerContract(
 // may also pass on a static parameter of its own, which is how one wrapper
 // forwards to another; the caller of the outer generic checked the real value.
 func (c *Checker) checkStaticValueArg(name string, param ast.StaticParam, arg string) error {
-	if c.staticParams[arg] == Type(param.Type) && param.Type != "" {
+	if param.Type != nil && c.staticParams[arg] == Type(typ.Text(param.Type)) {
 		return nil
 	}
-	switch Type(param.Type) {
+	switch Type(typ.Text(param.Type)) {
 	case typeFunction:
 		if !isIdentifierText(arg) {
 			return errorf("type error: `%s` static argument `%s` expects a function name, got `%s`",
@@ -5191,7 +5205,7 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
 				return "", err
 			}
-			return Type(field.TypeName), nil
+			return Type(typ.Text(field.TypeName)), nil
 		}
 	}
 	return "", errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
@@ -7311,19 +7325,19 @@ func (c *Checker) rejectThreadBoundaryAtomic(name string, seen map[Type]bool) er
 }
 
 // rejectThreadBoundaryStruct checks all struct fields recursively.
-func (c *Checker) rejectThreadBoundaryStruct(typ Type, seen map[Type]bool) error {
-	decl := c.structs[string(typ)]
+func (c *Checker) rejectThreadBoundaryStruct(target Type, seen map[Type]bool) error {
+	decl := c.structs[string(target)]
 	if decl == nil {
 		return nil
 	}
 	for _, field := range decl.Fields {
-		fieldType, err := c.parseType(field.TypeName)
+		fieldType, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
 			return err
 		}
 		if err := c.rejectThreadBoundaryType(fieldType, seen); err != nil {
 			return errorf("type error: struct `%s.%s` cannot cross concurrency boundary: %w",
-				typ, field.Name, err)
+				target, field.Name, err)
 		}
 	}
 	return nil

@@ -190,7 +190,7 @@ func (c *Checker) collectUnions(program *ast.Program) {
 		}
 		variants := map[string]string{}
 		for _, variant := range unionDecl.Variants {
-			variants[variant.Name] = variant.Payload
+			variants[variant.Name] = typ.Text(variant.Payload)
 		}
 		c.unions[unionDecl.Name] = variants
 	}
@@ -256,11 +256,11 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		params = append(params, paramInfo{
-			typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
+			typeName: typ.Text(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
 		})
 	}
 	return &functionInfo{
-		name: name, params: params, returnType: fn.ReturnType,
+		name: name, params: params, returnType: typ.Text(fn.ReturnType),
 		returnBorrow: fn.ReturnBorrow, decl: fn,
 	}
 }
@@ -287,7 +287,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, param.Type))
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
@@ -315,7 +315,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
 		Name:       "test " + strconv.Quote(decl.Name),
-		ReturnType: "!void",
+		ReturnType: typ.Err(typ.Named("void")),
 		Body:       decl.Body,
 	})
 	return c.checkFunction(fn)
@@ -1443,7 +1443,7 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 	if _, err := c.readExpr(expr.Value, env); err != nil {
 		return "", err
 	}
-	return expr.TargetType, nil
+	return typ.Text(expr.TargetType), nil
 }
 
 // moveExpr checks an expression and consumes a non-copy identifier when present.
@@ -2936,7 +2936,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 		if param.IsType() {
 			continue
 		}
-		env.define(c.newBinding(param.Name, param.Type))
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
@@ -5474,12 +5474,12 @@ func sameOwnershipType(left string, right string) bool {
 // fieldOwnershipType returns the full field type, including borrow prefixes.
 func fieldOwnershipType(field ast.Field) string {
 	if !field.Borrow {
-		return field.TypeName
+		return typ.Text(field.TypeName)
 	}
 	if field.MutBorrow {
-		return "&var " + field.TypeName
+		return "&var " + typ.Text(field.TypeName)
 	}
-	return "&" + field.TypeName
+	return "&" + typ.Text(field.TypeName)
 }
 
 // explicitOwnershipBorrowType extracts &T and &var T spellings.
