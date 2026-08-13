@@ -202,7 +202,12 @@ type Checker struct {
 	currentStd      bool
 	typeParams      map[string]bool
 	typeArgValues   map[string]Type
-	loopLabels      []string
+	// staticParams holds the compile-time value parameters of the generic being
+	// checked, by declared type. A runtime local of the same name is not one of
+	// these, which is what separates forwarding a static value from reading a
+	// value that only exists at run time.
+	staticParams map[string]Type
+	loopLabels   []string
 	// stdMethods indexes the signatures std declares for its container methods,
 	// so this checker reads them instead of restating them.
 	stdMethods stdmethod.MethodIndex
@@ -1513,6 +1518,24 @@ func checkMainReturnType(fn *functionType) error {
 	return errorf("type error: `main` returns `%s`, expected `void` or `!void`", returned)
 }
 
+// defineStaticValueParams puts the compile-time values a `<...>` list declares
+// into scope, and returns them by declared type. A body reads them like any
+// other name, and a static argument list needs to tell them apart from a
+// runtime local, so both callers set up a generic body through here.
+func defineStaticValueParams(env *scope, decl *ast.FunctionDecl) (map[string]Type, error) {
+	staticParams := map[string]Type{}
+	for _, param := range decl.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
+			return nil, err
+		}
+		staticParams[param.Name] = Type(param.Type)
+	}
+	return staticParams, nil
+}
+
 // checkFunction validates one function body against its signature.
 func (c *Checker) checkFunction(fn *functionType) error {
 	if fn.externABI != "" {
@@ -1522,15 +1545,9 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		return err
 	}
 	env := newScope(nil)
-	// A `<...>` entry that declares a type is a compile-time value the body can
-	// read, so it is in scope alongside the runtime parameters.
-	for _, param := range fn.decl.StaticParams {
-		if param.IsType() {
-			continue
-		}
-		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
-			return err
-		}
+	staticParams, err := defineStaticValueParams(env, fn.decl)
+	if err != nil {
+		return err
 	}
 	for idx, param := range fn.decl.Params {
 		if err := env.defineParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow); err != nil {
@@ -1541,17 +1558,20 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeParams := c.typeParams
+	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
 	c.typeParams = typeParamSet(fn.typeParams)
+	c.staticParams = staticParams
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeParams = previousTypeParams
+		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, nil)
@@ -4646,7 +4666,7 @@ func (c *Checker) checkStaticArgs(
 			continue
 		}
 		arg := strings.TrimSpace(argsText[idx])
-		if err := checkStaticValueArg(name, param, arg); err != nil {
+		if err := c.checkStaticValueArg(name, param, arg); err != nil {
 			return nil, err
 		}
 		if Type(param.Type) == typeFunction {
@@ -4698,8 +4718,13 @@ func (c *Checker) checkStdWorkerContract(
 }
 
 // checkStaticValueArg validates one compile-time value argument. The value is a
-// literal or, for a `Function` parameter, a top-level function name.
-func checkStaticValueArg(name string, param ast.StaticParam, arg string) error {
+// literal or, for a `Function` parameter, a top-level function name. A generic
+// may also pass on a static parameter of its own, which is how one wrapper
+// forwards to another; the caller of the outer generic checked the real value.
+func (c *Checker) checkStaticValueArg(name string, param ast.StaticParam, arg string) error {
+	if c.staticParams[arg] == Type(param.Type) && param.Type != "" {
+		return nil
+	}
 	switch Type(param.Type) {
 	case typeFunction:
 		if !isIdentifierText(arg) {
@@ -4742,13 +4767,9 @@ func isIdentifierText(text string) bool {
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
 	env := newScope(nil)
-	for _, param := range fn.decl.StaticParams {
-		if param.IsType() {
-			continue
-		}
-		if err := env.defineParam(param.Name, Type(param.Type), false, false); err != nil {
-			return err
-		}
+	staticParams, err := defineStaticValueParams(env, fn.decl)
+	if err != nil {
+		return err
 	}
 	for idx, param := range fn.decl.Params {
 		typ := substituteTypeParams(fn.params[idx], subst)
@@ -4762,12 +4783,14 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	previousStd := c.currentStd
 	previousTypeParams := c.typeParams
 	previousTypeArgValues := c.typeArgValues
+	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = returnType
 	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
 	c.typeParams = typeParamSet(fn.typeParams)
 	c.typeArgValues = subst
+	c.staticParams = staticParams
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
@@ -4775,6 +4798,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		c.currentStd = previousStd
 		c.typeParams = previousTypeParams
 		c.typeArgValues = previousTypeArgValues
+		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, returnType, nil)
@@ -4863,7 +4887,7 @@ func (c *Checker) checkGenericUserArg(
 			return errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 				want, want, got)
 		}
-		return userCallArgError(name, fn, idx, got)
+		return userCallArgError(name, fn, idx, want, got)
 	}
 	return nil
 }
@@ -4960,7 +4984,7 @@ func (c *Checker) checkUserCallArg(
 		return nil
 	}
 	if !sameType(got, fn.params[idx]) {
-		return userCallArgError(name, fn, idx, got)
+		return userCallArgError(name, fn, idx, fn.params[idx], got)
 	}
 	return nil
 }
@@ -4980,21 +5004,23 @@ func userCallArityError(name string, fn *functionType, got int) error {
 	return errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), got)
 }
 
-// userCallArgError reports source-call argument type mismatches.
-func userCallArgError(name string, fn *functionType, idx int, got Type) error {
+// userCallArgError reports source-call argument type mismatches. want is the
+// type this call expects, which for a generic is the parameter with its static
+// arguments filled in: a caller writing `id<i64>` is told i64, not T.
+func userCallArgError(name string, fn *functionType, idx int, want Type, got Type) error {
 	if strings.HasPrefix(name, "std.") && fn.decl != nil && idx < len(fn.decl.Params) {
 		paramName := fn.decl.Params[idx].Name
 		if paramName != "" {
 			if strings.HasPrefix(name, "std.fs.") {
 				return errorf("type error: `%s` expects %s %s, got %s",
-					diagnosticName(name), fn.params[idx], paramName, got)
+					diagnosticName(name), want, paramName, got)
 			}
 			return errorf("type error: `%s` %s expects %s, got %s",
-				diagnosticName(name), paramName, fn.params[idx], got)
+				diagnosticName(name), paramName, want, got)
 		}
 	}
 	return errorf("type error: arg %d of `%s` expects %s, got %s",
-		idx+1, name, fn.params[idx], got)
+		idx+1, name, want, got)
 }
 
 // diagnosticName formats internal qualified names as user-facing paths.
