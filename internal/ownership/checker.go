@@ -315,7 +315,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
 		Name:       "test " + strconv.Quote(decl.Name),
-		ReturnType: typ.Err(typ.Named("void")),
+		ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 		Body:       decl.Body,
 	})
 	return c.checkFunction(fn)

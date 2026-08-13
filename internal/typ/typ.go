@@ -16,6 +16,8 @@ import (
 type Type interface {
 	// String returns the spelling this type parsed from.
 	String() string
+	// equal reports whether other has the same structure.
+	equal(other Type) bool
 	typeNode()
 }
 
@@ -114,9 +116,13 @@ func (t *ErrorUnion) String() string {
 	return t.Err.String() + "!" + t.Ok.String()
 }
 
-// Parse reads one type spelling. It rejects text a Kizu type cannot be, so a
-// caller that ignores the error would be asking about a type that does not
-// exist.
+// Parse is the inverse of String. It reads a canonical spelling -- one this
+// package printed, or one the compiler itself writes in Go -- back into the
+// type it names.
+//
+// It is not the reader for source syntax: internal/parser reads what a source
+// file writes, and a type it read reaches here already parsed. The two agree on
+// every type the corpus contains, which TestTypeSpellingRoundTrip checks.
 func Parse(text string) (Type, error) {
 	p := &parser{input: text}
 	parsed, err := p.parseType()
@@ -127,25 +133,6 @@ func Parse(text string) (Type, error) {
 		return nil, fmt.Errorf("type error: trailing text in `%s`", text)
 	}
 	return parsed, nil
-}
-
-// ParseArgs reads a static argument list such as `[]u8, i64`, keeping a nested
-// spelling in one piece. It is the one place that knows a `,` inside `<...>`
-// does not separate arguments.
-func ParseArgs(text string) ([]Type, error) {
-	parts, err := SplitArgs(text)
-	if err != nil {
-		return nil, err
-	}
-	args := make([]Type, 0, len(parts))
-	for _, part := range parts {
-		parsed, err := Parse(part)
-		if err != nil {
-			return nil, err
-		}
-		args = append(args, parsed)
-	}
-	return args, nil
 }
 
 // SplitArgs splits a static argument list on the commas that separate its
@@ -183,14 +170,69 @@ func SplitArgs(text string) ([]string, error) {
 	return parts, nil
 }
 
-// Named builds a type from a `::` separated name and its static arguments.
-func Named(name string, args ...Type) Type {
-	return &Name{Path: strings.Split(name, "::"), Args: args}
+// Equal reports whether two types have the same structure. Two types are the
+// same type when they are built the same way, not when they happen to be the
+// same value in memory.
+func Equal(left Type, right Type) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.equal(right)
 }
 
-// Err builds the `!T` error union.
-func Err(ok Type) Type {
-	return &ErrorUnion{Ok: ok}
+// equal reports whether other is the same name with the same arguments.
+func (t *Name) equal(other Type) bool {
+	b, ok := other.(*Name)
+	if !ok || len(t.Path) != len(b.Path) || len(t.Args) != len(b.Args) {
+		return false
+	}
+	for i := range t.Path {
+		if t.Path[i] != b.Path[i] {
+			return false
+		}
+	}
+	for i := range t.Args {
+		if !Equal(t.Args[i], b.Args[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// equal reports whether other is a slice of the same element.
+func (t *Slice) equal(other Type) bool {
+	b, ok := other.(*Slice)
+	return ok && Equal(t.Elem, b.Elem)
+}
+
+// equal reports whether other is the same borrow of the same element.
+func (t *Borrow) equal(other Type) bool {
+	b, ok := other.(*Borrow)
+	return ok && t.Mut == b.Mut && Equal(t.Elem, b.Elem)
+}
+
+// equal reports whether other is a nullable of the same element.
+func (t *Optional) equal(other Type) bool {
+	b, ok := other.(*Optional)
+	return ok && Equal(t.Elem, b.Elem)
+}
+
+// equal reports whether other is a dyn of the same contract.
+func (t *Dyn) equal(other Type) bool {
+	b, ok := other.(*Dyn)
+	return ok && Equal(t.Contract, b.Contract)
+}
+
+// equal reports whether other is a const of the same element.
+func (t *Const) equal(other Type) bool {
+	b, ok := other.(*Const)
+	return ok && Equal(t.Elem, b.Elem)
+}
+
+// equal reports whether other is the same error union.
+func (t *ErrorUnion) equal(other Type) bool {
+	b, ok := other.(*ErrorUnion)
+	return ok && Equal(t.Err, b.Err) && Equal(t.Ok, b.Ok)
 }
 
 // Text returns the spelling of t, and "" where a declaration wrote no type at

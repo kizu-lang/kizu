@@ -276,7 +276,7 @@ func (l *lowerer) lowerTests() error {
 		// A test body may `try`, so it lowers as a function returning `!void`.
 		fn := &ast.FunctionDecl{
 			Name:       TestFunctionName(test.Name),
-			ReturnType: typ.Err(typ.Named("void")),
+			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
 			Body:       test.Body,
 		}
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)

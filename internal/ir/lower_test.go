@@ -135,16 +135,18 @@ fn main() {}`)
 func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name:       "std.mem.len",
-			Params:     []ast.Param{{Name: "bytes", TypeName: &typ.Slice{Elem: typ.Named("u8")}}},
-			ReturnType: typ.Named("i64"),
+			Name: "std.mem.len",
+			Params: []ast.Param{
+				{Name: "bytes", TypeName: &typ.Slice{Elem: &typ.Name{Path: []string{"u8"}}}},
+			},
+			ReturnType: &typ.Name{Path: []string{"i64"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IntExpr{Value: "1"}},
 			}},
 		},
 		&ast.FunctionDecl{
 			Name:       "main",
-			ReturnType: typ.Named("i64"),
+			ReturnType: &typ.Name{Path: []string{"i64"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.CallExpr{
 					Callee: &ast.FieldExpr{
@@ -348,8 +350,8 @@ func TestLowerSkipsGenericDeclarations(t *testing.T) {
 		&ast.FunctionDecl{
 			Name:         "unused",
 			StaticParams: []ast.StaticParam{{Name: "T"}},
-			Params:       []ast.Param{{Name: "value", TypeName: typ.Named("T")}},
-			ReturnType:   typ.Named("T"),
+			Params:       []ast.Param{{Name: "value", TypeName: &typ.Name{Path: []string{"T"}}}},
+			ReturnType:   &typ.Name{Path: []string{"T"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
 			}},
