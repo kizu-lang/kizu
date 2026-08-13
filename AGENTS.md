@@ -42,4 +42,6 @@ commit 前は原則 `pre-commit run --all-files` を通してください。
 ## PR Workflow
 
 作業は topic branch / Pull Request ベースで進めます。
+**commit の前に必ず停止し、ユーザーのコードチェックを受けてください。**
+自動での commit / push / merge は、ユーザーがその変更のチェックを終えてから行います。
 PR には目的、主要変更、検証結果、対応 Issue を短く書いてください。

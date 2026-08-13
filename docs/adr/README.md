@@ -93,7 +93,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0073: selfhost run artifact and host runtime boundary](0073-selfhost-run-artifact-and-host-runtime-boundary.md)
 - [ADR-0074: control expressions and statement semicolons](0074-control-expressions-and-statement-semicolons.md)
 - [ADR-0075: owner aggregate cleanup and errdefer](0075-owner-aggregate-cleanup-and-errdefer.md)
-- [ADR-0077: error union implicit widening](0077-error-union-implicit-widening.md)
+- [ADR-0077: error union implicit widening](0077-error-union-implicit-widening.md) (置換)
 - [ADR-0078: native diagnostic completeness](0078-native-diagnostic-completeness.md) (提案)
 - [ADR-0079: struct literal field initializers name each field once](0079-struct-literal-field-initializers.md)
 - [ADR-0083: run executes the build](0083-run-executes-the-build.md)

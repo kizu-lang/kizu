@@ -23,31 +23,14 @@ func (e *emitter) typeLayout(typ string) (size int, align int, ok bool) {
 // unknown type names) reports ok=false so it fails visibly rather than being
 // silently treated as a pointer.
 func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool) {
-	switch typ {
-	case "void":
-		return 0, 1, true
-	case "bool":
-		return 1, 1, true
-	case "i8", "u8":
-		return 1, 1, true
-	case "i64":
+	if size, align, ok := primitiveLayout(typ); ok {
+		return size, align, ok
+	}
+	if e.lowersToWord(typ) {
 		return 8, 8, true
-	case "[]u8":
-		return 16, 8, true
-	case "std::string::String":
-		return 8, 8, true // owned container handle lowers to ptr
-	}
-	if isArenaHandleType(typ) {
-		return 8, 8, true // arena handle lowers to i64
-	}
-	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) {
-		return 8, 8, true // owned container / arena handle lowers to ptr
 	}
 	if st, ok := e.module.Structs[typ]; ok {
 		return e.structLayout(typ, st, seen)
-	}
-	if _, ok := e.module.Enums[typ]; ok {
-		return 8, 8, true // enum tag lowers to i64
 	}
 	if union, ok := e.module.Unions[typ]; ok {
 		payload, _, ok := e.unionPayloadStorage(typ, union, seen)
@@ -57,6 +40,39 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 		return roundUp(8+payload, maxInlinePayloadAlign), maxInlinePayloadAlign, true
 	}
 	return 0, 0, false
+}
+
+// primitiveLayout returns the inline layout of a built-in scalar or view type.
+func primitiveLayout(typ string) (int, int, bool) {
+	switch typ {
+	case "void":
+		return 0, 1, true
+	case "bool", "i8", "u8":
+		return 1, 1, true
+	case "i64":
+		return 8, 8, true
+	case "[]u8":
+		return 16, 8, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// lowersToWord reports whether a type is stored inline as one 8-byte word: an
+// owned container or arena handle lowering to a pointer, or a tag lowering to
+// an i64. An enum tag and an error code are the same shape here.
+func (e *emitter) lowersToWord(typ string) bool {
+	if typ == "std::string::String" || isArenaHandleType(typ) {
+		return true
+	}
+	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) {
+		return true
+	}
+	if _, ok := e.module.Enums[typ]; ok {
+		return true
+	}
+	_, ok := e.module.ErrorSets[typ]
+	return ok
 }
 
 // structLayout computes the C-style layout LLVM uses for a non-packed struct.

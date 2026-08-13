@@ -488,9 +488,8 @@ func (p *Parser) parseIdentLedDecl() []ast.Decl {
 }
 
 // startsErrorSetDecl reports whether the current `error` begins a declaration.
-// `error` is not a keyword, because `error(message)` is a call to a function of
-// that name, so a declaration is told apart by what follows: a name and a brace,
-// which a call never has.
+// `error` is not a keyword, so a declaration is told apart by what follows:
+// a name and a brace.
 func (p *Parser) startsErrorSetDecl() bool {
 	return p.cur.Literal == "error" && p.peek.Type == token.Ident
 }

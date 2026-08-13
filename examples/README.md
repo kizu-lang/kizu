@@ -49,7 +49,6 @@ go test ./...
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
 | typed custom error propagation | `typed_error.kizu` | uses `ConfigError!i64` with `try` |
-| explicit typed error adaptation | `typed_error_cast.kizu` | maps `!T` into `ErrorType!T` with `cast` |
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
@@ -167,8 +166,7 @@ single source file. Run them with `kizu check <package-root>`.
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
-| `error(message)` cannot build typed errors | `negative/typed_error_untyped_constructor.kizu` | `cannot construct typed error` |
-| typed error casts need a message variant | `negative/typed_error_cast_missing_message.kizu` | `requires CompileError::Message` |
+| `error(message)` was removed | `negative/typed_error_untyped_constructor.kizu` | `` `error(message)` was removed `` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | extern calls require `@unsafe(extern_call)` | `negative/unsafe_call.kizu` | `requires @unsafe(extern_call)` |
 | caller-obligation calls require `@unsafe(unsafe_call)` | `negative/requires_unsafe_call.kizu` | `requires @unsafe(unsafe_call)` |
@@ -317,7 +315,7 @@ single source file. Run them with `kizu check <package-root>`.
 | parallel map workers must exist | `negative/parallel_map_undefined_worker.kizu` | `undefined function` |
 | parallel map workers must be names | `negative/parallel_map_non_function_name.kizu` | `function name` |
 | partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
-| parallel worker errors propagate | `negative/parallel_for_error.kizu` | `parallel failed` |
+| parallel worker errors propagate | `negative/parallel_for_error.kizu` | `WorkerError::Failed` |
 | partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
 | parallel map requires mutable partition owner | `negative/parallel_map_immutable_partition.kizu` | `&var argument` |

@@ -98,8 +98,8 @@ func (e *emitter) writeHeader() {
 	e.writeErrorUnionTypes()
 	e.writeUnionTypes()
 	e.writeStructTypes()
-	e.writeFailureValueGlobals()
 	e.writeEnumNameTables()
+	e.writeErrorNameTable()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -112,7 +112,7 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n")
-	if len(e.printedEnums()) > 0 {
+	if e.printsNamedTag() {
 		e.out.WriteString("declare void @kizu_print_enum(ptr, i64, i64)\n")
 	}
 	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
@@ -167,75 +167,88 @@ func panicPosition(span ast.Span) []string {
 	}
 }
 
-// failureValues are the messages a std container returns as a failure *value*
-// rather than reporting through the runtime. They travel back into Kizu code as
-// an `!T` payload, so unlike a panic message they must exist as module data.
-var failureValues = map[string]string{
-	"array_append":   "array append failed",
-	"array_bounds":   "array index out of bounds",
-	"array_pop":      "array pop from empty",
-	"array_reserve":  "array reserve failed",
-	"array_truncate": "array truncate out of bounds",
-	"map_insert":     "map insert failed",
-	"map_missing":    "map key not found",
+// failureErrors are the error set members a std container returns as a failure
+// *value* (a recoverable !T), as opposed to panicEntries, which abort. The
+// member is named here; its number comes from the set declaration in std.
+var failureErrors = map[string]struct{ set, member string }{
+	"array_append":   {"std::array::Error", "OutOfMemory"},
+	"array_bounds":   {"std::array::Error", "OutOfBounds"},
+	"array_pop":      {"std::array::Error", "Empty"},
+	"array_reserve":  {"std::array::Error", "OutOfMemory"},
+	"array_truncate": {"std::array::Error", "OutOfBounds"},
+	"map_insert":     {"std::map::Error", "OutOfMemory"},
+	"map_missing":    {"std::map::Error", "Missing"},
 }
 
-// failureValueGlobal returns the global holding one failure message.
-func failureValueGlobal(key string) string {
-	return "@.kizu.fail." + key
-}
-
-// writeFailureValueGlobals defines the failure messages this module can return.
-func (e *emitter) writeFailureValueGlobals() {
-	keys := e.usedFailureValues()
-	for _, key := range keys {
-		e.writeStaticStringGlobal(failureValueGlobal(key), failureValues[key])
+// failureErrorCode returns the global code one container failure lowers to.
+func (e *emitter) failureErrorCode(key string) (int, error) {
+	target, ok := failureErrors[key]
+	if !ok {
+		return 0, fmt.Errorf("llvm error: unknown failure `%s`", key)
 	}
-	if len(keys) > 0 {
-		e.out.WriteByte('\n')
+	set, ok := e.module.ErrorSets[target.set]
+	if !ok {
+		return 0, fmt.Errorf("llvm error: failure `%s` needs error set `%s`", key, target.set)
 	}
+	code, ok := set.Tags[target.member]
+	if !ok {
+		return 0, fmt.Errorf("llvm error: error set `%s` has no member `%s`",
+			target.set, target.member)
+	}
+	return code, nil
 }
 
-// usedFailureValues returns the failure messages the module can return, sorted.
-func (e *emitter) usedFailureValues() []string {
-	seen := map[string]bool{}
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				if key := instrFailureValue(instr.Op); key != "" {
-					seen[key] = true
-				}
+// errorNameTable is the global holding every error code's spelling.
+const errorNameTable = "@.kizu.error.names"
+
+// needsErrorNameTable reports whether any code in the module reads a spelling
+// out of the table: a failure leaving `main`, or a printed error value.
+func (e *emitter) needsErrorNameTable() bool {
+	return len(e.module.ErrorSets) > 0 || len(e.sortedErrorUnionNames()) > 0
+}
+
+// errorNameTableRows returns how many rows the error name table holds. The
+// table is indexed by the error code itself, so it spans 0..max, and row 0 is
+// the reserved "no error" entry.
+func (e *emitter) errorNameTableRows() int {
+	max := 0
+	for _, set := range e.module.ErrorSets {
+		for _, code := range set.Tags {
+			if code > max {
+				max = code
 			}
 		}
 	}
-	keys := make([]string, 0, len(seen))
-	for key := range seen {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return max + 1
 }
 
-// instrFailureValue returns the message one instruction can return on failure.
-func instrFailureValue(op string) string {
-	switch op {
-	case "array.append":
-		return "array_append"
-	case "array.reserve":
-		return "array_reserve"
-	case "array.pop":
-		return "array_pop"
-	case "array.truncate":
-		return "array_truncate"
-	case "array.get", "array.at", "array.at_mut", "array.set":
-		return "array_bounds"
-	case "map.insert":
-		return "map_insert"
-	case "map.get":
-		return "map_missing"
-	default:
-		return ""
+// writeErrorNameTable defines the spelling of every error code this module can
+// carry, indexed by the code itself. Codes are global, so one table serves all
+// sets; row 0 is the reserved "no error" entry and stays empty.
+func (e *emitter) writeErrorNameTable() {
+	if !e.needsErrorNameTable() {
+		return
 	}
+	spellings := map[int]string{}
+	for _, set := range e.module.ErrorSets {
+		for member, code := range set.Tags {
+			spellings[code] = set.Name + "::" + member
+		}
+	}
+	rows := make([]string, 0, e.errorNameTableRows())
+	for code := 0; code < e.errorNameTableRows(); code++ {
+		spelling, ok := spellings[code]
+		if !ok {
+			rows = append(rows, "{ ptr, i64 } { ptr null, i64 0 }")
+			continue
+		}
+		global := fmt.Sprintf("@.kizu.error.name.%d", code)
+		e.writeStaticStringGlobal(global, spelling)
+		rows = append(rows,
+			fmt.Sprintf("{ ptr, i64 } { ptr %s, i64 %d }", global, len(spelling)))
+	}
+	fmt.Fprintf(&e.out, "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]\n\n",
+		errorNameTable, len(rows), strings.Join(rows, ", "))
 }
 
 // writePanicDecls declares the failure entries this module reports through.
@@ -311,11 +324,8 @@ func expectEntryKey(instr *ir.Instr) string {
 func (e *emitter) writeErrorUnionTypes() {
 	names := e.sortedErrorUnionNames()
 	for _, name := range names {
-		errorName, success, _ := errorUnionParts(name)
-		failureType := "%kizu.slice.u8"
-		if errorName != "" {
-			failureType = e.llvmType(errorName)
-		}
+		_, success, _ := errorUnionParts(name)
+		failureType := "i64"
 		if success == "void" {
 			fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
 				llvmErrorUnionTypeName(name), failureType)
@@ -463,9 +473,6 @@ func (e *emitter) sortedUnionNames() []string {
 
 // usesSliceABI reports whether this module needs the byte-slice value ABI.
 func (e *emitter) usesSliceABI() bool {
-	if len(e.sortedErrorUnionNames()) > 0 {
-		return true
-	}
 	return e.moduleHasSliceType()
 }
 
@@ -872,6 +879,10 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
 		return nil
 	}
+	if _, ok := e.module.ErrorSets[instr.Result.Type]; ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
+		return nil
+	}
 	switch instr.Result.Type {
 	case "i64":
 		e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
@@ -1096,9 +1107,6 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 	}
 	source := instr.Args[0]
 	if _, sourceIsError := errorUnionSuccessType(source.Type); sourceIsError {
-		if _, targetIsError := errorUnionSuccessType(instr.Result.Type); targetIsError {
-			return e.writeErrorUnionCast(instr)
-		}
 		return fmt.Errorf(
 			"llvm error: cannot cast error union %s to %s",
 			source.Type,
@@ -1150,133 +1158,16 @@ func (e *emitter) writeIntegerCast(instr *ir.Instr) error {
 	return nil
 }
 
-// writeErrorUnionCast copies ok/value/message fields between compatible !T shapes.
-func (e *emitter) writeErrorUnionCast(instr *ir.Instr) error {
-	source := instr.Args[0]
-	sourceError, sourceSuccess, _ := errorUnionParts(source.Type)
-	targetError, targetSuccess, _ := errorUnionParts(instr.Result.Type)
-	if sourceSuccess != targetSuccess {
-		return fmt.Errorf(
-			"llvm error: cannot cast %s to %s",
-			source.Type,
-			instr.Result.Type,
-		)
-	}
-	if err := validateErrorUnionType(source.Type); err != nil {
-		return err
-	}
-	if err := validateErrorUnionType(instr.Result.Type); err != nil {
-		return err
-	}
-	sourceInfo := e.value(source)
-	sourceType := e.llvmType(source.Type)
-	targetType := e.llvmType(instr.Result.Type)
-	resultName := localName(instr.Result.Name)
-	okName := resultName + ".ok"
-	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, sourceType, sourceInfo.operand)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
-		baseName, targetType, okName)
-	aggregate := baseName
-	if sourceSuccess != "void" {
-		valueName := resultName + ".value"
-		valueBaseName := resultName + ".value.base"
-		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",
-			valueName, sourceType, sourceInfo.operand)
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-			valueBaseName, targetType, aggregate, e.llvmType(sourceSuccess), valueName)
-		aggregate = valueBaseName
-	}
-	failureName, failureType, err := e.convertFailurePayload(
-		resultName+".failure",
-		source.Type,
-		sourceType,
-		sourceInfo.operand,
-		sourceError,
-		targetError,
-	)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
-		resultName,
-		targetType,
-		aggregate,
-		failureType,
-		failureName,
-		errorUnionFailureIndex(instr.Result.Type),
-	)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
-// convertFailurePayload extracts and adapts an error-union failure payload.
-func (e *emitter) convertFailurePayload(
-	resultName string,
-	sourceResultType string,
-	sourceLLVMType string,
-	sourceOperand string,
-	sourceError string,
-	targetError string,
-) (string, string, error) {
-	extractedName := resultName + ".extracted"
+// failureCode extracts an error-union failure. A failure is one global code,
+// so it reads the same i64 out of every union and needs no conversion.
+func (e *emitter) failureCode(resultName string, source ir.Value) string {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		extractedName,
-		sourceLLVMType,
-		sourceOperand,
-		errorUnionFailureIndex(sourceResultType),
+		resultName,
+		e.llvmType(source.Type),
+		e.value(source).operand,
+		errorUnionFailureIndex(source.Type),
 	)
-	if sourceError == targetError {
-		return extractedName, e.errorUnionFailureLLVMType(sourceResultType), nil
-	}
-	if sourceError == "" && targetError != "" {
-		messageValue := ir.Value{Name: extractedName, Type: "[]u8"}
-		e.values[messageValue.Name] = valueInfo{typ: "[]u8", operand: extractedName}
-		payloadName := resultName + ".typed"
-		if err := e.writeTypedMessageErrorPayload(payloadName, targetError, messageValue); err != nil {
-			return "", "", err
-		}
-		return payloadName, e.llvmType(targetError), nil
-	}
-	if targetError == "" {
-		// `!T` describes its failure with text, so a set member reaching one is
-		// named. This goes away with the text itself once errors are only names.
-		name, err := e.errorSetNameSlice(resultName, sourceError, extractedName)
-		if err != nil {
-			return "", "", err
-		}
-		return name, "%kizu.slice.u8", nil
-	}
-	return "", "", fmt.Errorf("llvm error: cannot convert failure payload to `%s`", targetError)
-}
-
-// errorSetNameSlice materializes the spelling of one error set member, read from
-// the table of names the set already emits.
-func (e *emitter) errorSetNameSlice(
-	resultName string,
-	errorName string,
-	tagOperand string,
-) (string, error) {
-	set, ok := e.module.Enums[errorName]
-	if !ok {
-		return "", fmt.Errorf("llvm error: `%s` is not an error set", errorName)
-	}
-	rowName := resultName + ".row"
-	ptrName := resultName + ".ptr"
-	lenAddr := resultName + ".len.addr"
-	lenName := resultName + ".len"
-	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
-		rowName, len(set.Tags), enumNameTable(errorName), tagOperand)
-	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
-	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
-		lenAddr, rowName)
-	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
-		baseName, ptrName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
-		resultName, baseName, lenName)
-	return resultName, nil
+	return resultName
 }
 
 // writeStructNew lowers a checked struct literal to an LLVM aggregate value.
@@ -1674,92 +1565,49 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 	return nil
 }
 
-// writeErrorError builds a failed error-union value.
+// writeErrorError builds a failed error-union value. The failure payload is a
+// member of an error set, and its representation is already the global code.
 func (e *emitter) writeErrorError(instr *ir.Instr) error {
-	errorName, _, ok := errorUnionParts(instr.Result.Type)
-	if !ok {
+	if _, _, ok := errorUnionParts(instr.Result.Type); !ok {
 		return fmt.Errorf("llvm error: error.error result must be !T, got %s", instr.Result.Type)
 	}
 	if err := validateErrorUnionType(instr.Result.Type); err != nil {
 		return err
 	}
 	if len(instr.Args) != 1 {
-		return fmt.Errorf("llvm error: error.error expects one failure payload")
+		return fmt.Errorf("llvm error: error.error expects one error value")
+	}
+	arg := instr.Args[0]
+	if _, ok := e.module.ErrorSets[arg.Type]; !ok {
+		return fmt.Errorf("llvm error: error.error expects an error set member, got %s", arg.Type)
+	}
+	// A declared `E!T` accepts only E. Codes are global, so a member of another
+	// set would lower to a union that claims E while holding another set's code,
+	// and nothing below here records which set a union carries.
+	if errorName, _, _ := errorUnionParts(instr.Result.Type); errorName != "" &&
+		arg.Type != errorName {
+		return fmt.Errorf("llvm error: error.error cannot put %s into %s",
+			arg.Type, instr.Result.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	unionType := e.llvmType(instr.Result.Type)
-	if errorName != "" {
-		arg := instr.Args[0]
-		if arg.Type == errorName {
-			payload := e.value(arg)
-			e.writeErrorFailurePayloadValue(
-				resultName,
-				instr.Result.Type,
-				payload.operand,
-				e.llvmType(errorName),
-			)
-			e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-			return nil
-		}
-		if arg.Type != "[]u8" {
-			return fmt.Errorf(
-				"llvm error: error.error for %s expects %s or []u8, got %s",
-				instr.Result.Type,
-				errorName,
-				arg.Type,
-			)
-		}
-		payloadName := resultName + ".payload"
-		if err := e.writeTypedMessageErrorPayload(payloadName, errorName, arg); err != nil {
-			return err
-		}
-		e.writeErrorFailurePayloadValue(resultName, instr.Result.Type, payloadName, e.llvmType(errorName))
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-		return nil
-	}
-	if instr.Args[0].Type != "[]u8" {
-		return fmt.Errorf("llvm error: error.error expects one []u8 message")
-	}
-	message, err := e.sliceValue(instr.Args[0])
-	if err != nil {
-		return err
-	}
-	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
-		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		resultName, unionType, baseName, message, errorUnionFailureIndex(instr.Result.Type))
+	e.writeErrorFailureCode(resultName, instr.Result.Type, e.value(arg).operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 
-// writeTypedMessageErrorPayload builds Error::Message([]u8) for typed error
-// unions using the #991 inline payload layout.
-func (e *emitter) writeTypedMessageErrorPayload(
-	resultName string,
-	errorName string,
-	message ir.Value,
-) error {
-	_, variant, ok := e.unionVariant(errorName, "Message")
-	if !ok || variant.Payload != "[]u8" {
-		return fmt.Errorf("llvm error: typed error `%s` cannot be built from []u8", errorName)
-	}
-	return e.writeInlineUnion(resultName, errorName, variant, &message)
-}
-
-// writeErrorFailurePayloadValue builds a failed error union from an error payload.
-func (e *emitter) writeErrorFailurePayloadValue(
+// writeErrorFailureCode builds a failed error union around one error code.
+func (e *emitter) writeErrorFailureCode(
 	resultName string,
 	resultType string,
-	payloadName string,
-	payloadType string,
+	codeOperand string,
 ) {
 	unionType := e.llvmType(resultType)
 	baseName := resultName + ".base"
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
 		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
-		resultName, unionType, baseName, payloadType, payloadName, errorUnionFailureIndex(resultType))
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %s, %d\n",
+		resultName, unionType, baseName, codeOperand,
+		errorUnionFailureIndex(resultType))
 }
 
 // writeErrorTry unwraps success or returns failure from the current function.
@@ -1854,6 +1702,12 @@ func (e *emitter) writePrint(args []ir.Value) error {
 			e.writePrintEnum(args[0].Type, value.operand)
 			return nil
 		}
+		if _, ok := e.module.ErrorSets[args[0].Type]; ok {
+			// An error is a global code, so its spelling comes from the one
+			// table every error shares rather than from a per-type table.
+			e.writePrintNameTable(errorNameTable, e.errorNameTableRows(), value.operand)
+			return nil
+		}
 		return fmt.Errorf("llvm error: print does not support `%s`", args[0].Type)
 	}
 	return nil
@@ -1862,8 +1716,13 @@ func (e *emitter) writePrint(args []ir.Value) error {
 // writePrintEnum prints an enum by indexing its name table, so a new tag costs
 // a table row rather than a branch in the backend.
 func (e *emitter) writePrintEnum(typ string, operand string) {
+	e.writePrintNameTable(enumNameTable(typ), len(e.module.Enums[typ].Tags), operand)
+}
+
+// writePrintNameTable prints one tag by indexing a table of spellings.
+func (e *emitter) writePrintNameTable(table string, rows int, operand string) {
 	fmt.Fprintf(&e.out, "  call void @kizu_print_enum(ptr %s, i64 %d, i64 %s)\n",
-		enumNameTable(typ), len(e.module.Enums[typ].Tags), operand)
+		table, rows, operand)
 }
 
 // enumNameTable returns the global holding one enum's tag spellings.
@@ -1876,17 +1735,31 @@ func mangleGlobalName(typ string) string {
 	return strings.NewReplacer(":", "_", "<", "_", ">", "_", ",", "_", " ", "").Replace(typ)
 }
 
+// printsNamedTag reports whether the module prints an enum or an error set,
+// both of which name their value through a table of spellings.
+func (e *emitter) printsNamedTag() bool {
+	if len(e.printedEnums()) > 0 {
+		return true
+	}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op != "call.print" || len(instr.Args) != 1 {
+					continue
+				}
+				if _, ok := e.module.ErrorSets[instr.Args[0].Type]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // printedEnums returns the enums this module prints, in sorted order.
 func (e *emitter) printedEnums() []string {
 	seen := map[string]bool{}
 	for _, fn := range e.module.Functions {
-		// A failure that leaves `main` is reported by name, so the error set of
-		// its result needs the same table a printed enum does.
-		if errorName, _, ok := errorUnionParts(fn.Return); ok && errorName != "" {
-			if _, isEnum := e.module.Enums[errorName]; isEnum {
-				seen[errorName] = true
-			}
-		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
 				if instr.Op != "call.print" || len(instr.Args) != 1 {
@@ -2072,10 +1945,14 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 
 // writeErrorUnionReturn emits a return from a function declared as !T.
 func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
-	errorName, _, _ := errorUnionParts(e.currentReturn)
 	if e.mainReturnsInt {
 		if value.Type == e.currentReturn {
 			return e.writeMainErrorUnionReturn(value)
+		}
+		if _, isSet := e.module.ErrorSets[value.Type]; isSet {
+			e.writeMainErrorName(e.value(value).operand)
+			e.out.WriteString("  ret i32 1\n")
+			return nil
 		}
 		if value.Type == success || value.Type == "void" && success == "void" {
 			e.out.WriteString("  ret i32 0\n")
@@ -2095,10 +1972,10 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 	if e.absorbsErrorUnionReturn(value) {
 		return e.writeAbsorbedErrorUnionReturn(value)
 	}
-	if errorName != "" && value.Type == errorName {
+	if _, isSet := e.module.ErrorSets[value.Type]; isSet {
 		valueInfo := e.value(value)
 		name := "%" + e.nextSyntheticValue("return.err")
-		e.writeErrorFailurePayloadValue(name, e.currentReturn, valueInfo.operand, e.llvmType(value.Type))
+		e.writeErrorFailureCode(name, e.currentReturn, valueInfo.operand)
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
 		return nil
 	}
@@ -2197,61 +2074,34 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	return nil
 }
 
-// writeMainErrorMessage writes a failed error union's message slice to stderr
-// through @kizu_main_error_message, so a process built from `main -> !T` reports
-// why it exits 1 instead of failing silently. A set member is named from the
-// table of names, and an untyped failure carries the text itself.
+// writeMainErrorMessage names the failure a `main -> !T` process exits with,
+// so it reports why it exits 1 instead of failing silently. The failure is one
+// global code, and the spelling comes from the module's table of error names.
 func (e *emitter) writeMainErrorMessage(source ir.Value) error {
-	errorName, _, ok := errorUnionParts(source.Type)
-	if !ok {
+	if _, _, ok := errorUnionParts(source.Type); !ok {
 		return nil
 	}
-	if errorName != "" {
-		// A union failure carries its own payload and has no table of names to
-		// read, so there is nothing to say about it until errors are only names.
-		if _, isSet := e.module.Enums[errorName]; !isSet {
-			return nil
-		}
-		return e.writeMainErrorSetName(source, errorName)
-	}
-	sourceInfo := e.value(source)
-	msgName := "%" + e.nextSyntheticValue("main.err.msg")
-	ptrName := msgName + ".ptr"
-	lenName := msgName + ".len"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		msgName, e.llvmType(source.Type), sourceInfo.operand, errorUnionFailureIndex(source.Type))
-	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, msgName)
-	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, msgName)
-	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n", ptrName, lenName)
+	e.writeMainErrorName(e.failureCode("%"+e.nextSyntheticValue("main.err.code"), source))
 	return nil
 }
 
-// writeMainErrorSetName reports a failure that leaves `main` by its name. An
-// error carries nothing, so the text comes from the table of names rather than
-// from the value, which is a number saying which member of the set it is.
-func (e *emitter) writeMainErrorSetName(source ir.Value, errorName string) error {
-	set, ok := e.module.Enums[errorName]
-	if !ok {
-		return fmt.Errorf("llvm error: `%s` is not an error set", errorName)
-	}
-	sourceInfo := e.value(source)
-	tagName := "%" + e.nextSyntheticValue("main.err.tag")
-	rowName := tagName + ".row"
-	ptrName := tagName + ".ptr"
-	lenAddr := tagName + ".len.addr"
-	lenName := tagName + ".len"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		tagName, e.llvmType(source.Type), sourceInfo.operand,
-		errorUnionFailureIndex(source.Type))
+// writeMainErrorName reports one error code by its spelling. An error carries
+// nothing, so the text comes from the table of names rather than from the
+// value, which is the number saying which member it is.
+func (e *emitter) writeMainErrorName(codeOperand string) {
+	name := "%" + e.nextSyntheticValue("main.err.name")
+	rowName := name + ".row"
+	ptrName := name + ".ptr"
+	lenAddr := name + ".len.addr"
+	lenName := name + ".len"
 	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
-		rowName, len(set.Tags), enumNameTable(errorName), tagName)
+		rowName, e.errorNameTableRows(), errorNameTable, codeOperand)
 	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
 	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
 		lenAddr, rowName)
 	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
 	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n",
 		ptrName, lenName)
-	return nil
 }
 
 // writeErrorFailureReturn propagates a failed try from the current function.
@@ -2268,21 +2118,9 @@ func (e *emitter) writeErrorFailureReturn(source ir.Value) error {
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(source.Type), sourceInfo.operand)
 		return nil
 	}
-	sourceError, _, _ := errorUnionParts(source.Type)
-	targetError, _, _ := errorUnionParts(e.currentReturn)
 	name := "%" + e.nextSyntheticValue("try.err")
-	payloadName, payloadType, err := e.convertFailurePayload(
-		name+".payload",
-		source.Type,
-		e.llvmType(source.Type),
-		sourceInfo.operand,
-		sourceError,
-		targetError,
-	)
-	if err != nil {
-		return err
-	}
-	e.writeErrorFailurePayloadValue(name, e.currentReturn, payloadName, payloadType)
+	code := e.failureCode(name+".code", source)
+	e.writeErrorFailureCode(name, e.currentReturn, code)
 	fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
 	return nil
 }
@@ -2313,15 +2151,6 @@ func errorUnionFailureIndex(typ string) int {
 		return 1
 	}
 	return 2
-}
-
-// errorUnionFailureLLVMType returns the LLVM type carried on failure.
-func (e *emitter) errorUnionFailureLLVMType(typ string) string {
-	errorName, _, ok := errorUnionParts(typ)
-	if ok && errorName != "" {
-		return e.llvmType(errorName)
-	}
-	return "%kizu.slice.u8"
 }
 
 // nextSyntheticValue returns a unique helper value name without a leading percent.

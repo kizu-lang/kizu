@@ -1349,8 +1349,14 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 // parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
 func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
 	if node.Err != nil {
-		if _, err := c.parseType(node.Err.String()); err != nil {
+		errName, err := c.parseType(node.Err.String())
+		if err != nil {
 			return "", err
+		}
+		if c.errorSets[string(errName)] == nil {
+			return "", errorf(
+				"type error: the error of `E!T` must be an `error` set, got `%s`",
+				errName)
 		}
 	}
 	return c.parseWrappingType(name, node.Ok)
@@ -2130,6 +2136,11 @@ func (c *Checker) checkErrorUnionReturn(
 		return true, nil
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
+		// An inferred `!T` accepts a member of any error set, the same way it
+		// accepts a `try` from any set: the set is part of what is inferred.
+		if errorType == "" && c.errorSets[string(got)] != nil {
+			return true, nil
+		}
 		success := Type(elem)
 		coerced, err := c.coerceContextualIntegerLiteral(expr, success, got)
 		if err != nil {
@@ -2193,9 +2204,6 @@ func (c *Checker) checkReturnBorrowSources(
 	unsafe unsafeCaps,
 ) error {
 	if c.currentFunction == nil || c.currentFunction.returnBorrow == "" {
-		return nil
-	}
-	if isErrorConstruction(expr) {
 		return nil
 	}
 	if c.trustedStdBorrowReturn(expr) {
@@ -2456,16 +2464,6 @@ func callCalleeName(callee ast.Expression) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// isErrorConstruction reports whether expr constructs a recoverable error payload.
-func isErrorConstruction(expr ast.Expression) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	ident, ok := call.Callee.(*ast.IdentExpr)
-	return ok && ident.Name == "error"
 }
 
 // explicitBorrowType extracts &T and &var T spellings.
@@ -3318,9 +3316,6 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCap
 	if err != nil {
 		return "", err
 	}
-	if ok, err := c.checkErrorUnionCast(source, target); ok || err != nil {
-		return target, err
-	}
 	if numericTypes[source] && numericTypes[target] {
 		return target, nil
 	}
@@ -3336,34 +3331,6 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCap
 		return target, nil
 	}
 	return "", errorf("type error: cannot cast %s to %s", source, target)
-}
-
-// checkErrorUnionCast validates explicit untyped-to-typed error adaptation.
-func (c *Checker) checkErrorUnionCast(source Type, target Type) (bool, error) {
-	targetError, targetSuccess, targetOK := errorUnionParts(target)
-	if !targetOK || targetError == "" {
-		return false, nil
-	}
-	sourceError, sourceSuccess, sourceOK := errorUnionParts(source)
-	if !sourceOK || sourceError != "" || !sameType(Type(sourceSuccess), Type(targetSuccess)) {
-		return false, nil
-	}
-	if !c.unionHasMessageVariant(targetError) {
-		return true, errorf(
-			"type error: typed error cast requires %s::Message([]u8)",
-			targetError,
-		)
-	}
-	return true, nil
-}
-
-// unionHasMessageVariant reports whether a union can hold an untyped error message.
-func (c *Checker) unionHasMessageVariant(name string) bool {
-	union := c.unions[name]
-	if union == nil {
-		return false
-	}
-	return sameType(Type(union.variants["Message"]), typeByteString)
 }
 
 // checkTryExpr validates error-union propagation and returns the success type.
@@ -3415,9 +3382,6 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 	}
 	if name.Name == "volatile_write" {
 		return c.checkVolatileWrite(expr, env, unsafe)
-	}
-	if name.Name == "error" {
-		return c.checkErrorCall(expr, env, unsafe)
 	}
 	if name.Name == "Io" {
 		return "", errorf("type error: use `std::io::blocking()`")
@@ -4971,28 +4935,6 @@ func (c *Checker) checkGenericUserArg(
 	return nil
 }
 
-// checkErrorCall validates error-union error construction.
-func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
-	if len(expr.Args) != 1 {
-		return "", errorf("type error: `error` expects 1 arg, got %d", len(expr.Args))
-	}
-	got, err := c.checkExpr(expr.Args[0], env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if !sameType(got, typeByteString) {
-		return "", errorf("type error: `error` expects []u8, got %s", got)
-	}
-	errorType, _, ok := errorUnionParts(c.currentReturn)
-	if !ok {
-		return "", errorf("type error: `error` requires function to return !T")
-	}
-	if errorType != "" {
-		return "", errorf("type error: `error` cannot construct typed error %s", errorType)
-	}
-	return c.currentReturn, nil
-}
-
 // checkUserCall validates a declared function call.
 func (c *Checker) checkUserCall(
 	name string,
@@ -5505,11 +5447,11 @@ func errorSetReceiver(
 	expr ast.Expression,
 	sets map[string]*errorSetType,
 ) (*errorSetType, bool) {
-	ident, ok := expr.(*ast.IdentExpr)
+	name, ok := qualifiedName(expr)
 	if !ok {
 		return nil, false
 	}
-	set, ok := sets[ident.Name]
+	set, ok := sets[strings.ReplaceAll(name, ".", "::")]
 	return set, ok
 }
 

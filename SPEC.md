@@ -1230,23 +1230,24 @@ v0 core arena の構築は明示 allocator capability を要求し、
 Kizu は exception を使いません。
 error は値として扱います。
 
-v0.1 では Zig に近い `!T` を導入します。
+Zig に近い `!T` を導入します。
 `!T` は「成功時は `T`、失敗時は error」を表します。
-error payload は標準の `[]u8` message として扱います。
-domain 固有の custom error を型として扱いたい場合は、v0.1 では `union` と
-`match` を使います。
-typed error として伝播したい場合は `ErrorType!T` を使います。
+error 値は名前であり、payload を持ちません(ADR-0086)。
+失敗の種類は `error` set として宣言し、member を返します。
 
 成功時は通常の `T` をそのまま `return` します。
-error 値は `error(message)` で作ります。
 
 ```kizu
+error ParseError {
+    Bad,
+}
+
 fn parse() -> !i64 {
     return 1;
 }
 
 fn fail() -> !i64 {
-    return error("bad");
+    return ParseError::Bad;
 }
 ```
 
@@ -1260,38 +1261,15 @@ fn main() -> !i64 {
 }
 ```
 
-custom error type を明示的に扱う例:
-
-```kizu
-union ConfigError {
-    NotFound([]u8),
-    InvalidPort(i64),
-}
-
-union ConfigRead {
-    Ok(i64),
-    Err(ConfigError),
-}
-
-fn main() -> void {
-    let result = ConfigRead::Err(ConfigError::NotFound("config.kizu"));
-
-    match result {
-        Ok(port) => print(port),
-        Err(err) => match err {
-            NotFound(path) => print(path),
-            InvalidPort(port) => print(port),
-        },
-    }
-}
-```
+失敗の詳細(path、期待値、実際の値)を運びたい場合、error union には載せません。
+payload を持つ結果は通常の `union` を戻り値として返し、`match` で分岐します。
 
 typed error を `try` で伝播する例:
 
 ```kizu
-union ConfigError {
-    NotFound([]u8);
-    InvalidPort(i64);
+error ConfigError {
+    NotFound,
+    InvalidPort,
 }
 
 fn read_port(ok: bool) -> ConfigError!i64 {
@@ -1299,7 +1277,7 @@ fn read_port(ok: bool) -> ConfigError!i64 {
         return 8080;
     }
 
-    return ConfigError::NotFound("config.kizu");
+    return ConfigError::NotFound;
 }
 
 fn main() -> ConfigError!void {
@@ -1338,20 +1316,12 @@ error 値は set の member そのものであり、**payload を持ちません
 
 * `try` は `!T` を返す関数内でだけ使える
 * `try` の operand は `!T` でなければならない
-* `ErrorType!T` は typed error union を表す
-* `ErrorType!T` では `ErrorType` または `T` を返せる
-* `!T` は推論される error set を表し、body が伝播するものを受け取る
-* `ErrorType!T` と宣言した場合、`try` は同じ `ErrorType` だけを伝播できる
-* `cast<ErrorType!T>(expr)` は `expr: !T` を明示的に typed error union へ変換できる
-* typed error cast は `ErrorType::Message([]u8)` variant がある場合だけ有効で、
-  untyped error message をその variant に包む
-* `!T` 関数では `T` を返すと成功値として扱う
-* `error(message)` は `!T` を返す関数内でだけ使える
-* `error(message)` は typed error union では使えない
-* `error(message)` の message は `[]u8`
-* `error(message)` は message bytes を error payload に copy して所有する
-* `error(message)` は borrow view を保持しないため、local `String.as_bytes()` view から
-  diagnostic を作れる
+* `E!T` の `E` は宣言済みの `error` set でなければならない
+* `E!T` では `E` の member または `T` を返せる
+* `!T` は推論される error set を表し、body が伝播・返却するものを受け取る
+* `E!T` と宣言した場合、`try` は同じ `E` だけを伝播できる
+* `!T` 関数では `T` を返すと成功値、error set の member を返すと失敗値として扱う
+* error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
 * `!void` の成功 return は `return;` と書く
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない

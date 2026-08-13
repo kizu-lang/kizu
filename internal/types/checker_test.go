@@ -1836,8 +1836,11 @@ fn main() -> !void {
 
 // TestCheckAcceptsErrorUnionError checks explicit error value construction.
 func TestCheckAcceptsErrorUnionError(t *testing.T) {
-	source := `fn parse() -> !i64 {
-    return error("bad");
+	source := `error ParseError {
+    Bad,
+}
+fn parse() -> !i64 {
+    return ParseError::Bad;
 }
 fn main() -> !void {
     let value = try parse();
@@ -1863,34 +1866,33 @@ fn main() -> !void {
 	}
 }
 
-// TestCheckAcceptsErrorFromStringView fixes error payload copy semantics.
-func TestCheckAcceptsErrorFromStringView(t *testing.T) {
-	source := `fn fail(text: std::string::String) -> !void {
-    let bytes = text.as_bytes();
-    return error(bytes);
+// TestCheckAcceptsUserFunctionNamedError keeps `error` an ordinary name: the
+// removed error(message) form reserved nothing.
+func TestCheckAcceptsUserFunctionNamedError(t *testing.T) {
+	source := `fn error(code: i64) -> void {
+    print(code);
+    return;
+}
+fn main() -> void {
+    error(3);
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 }
 
-// TestCheckAcceptsTypedErrorCast checks explicit untyped-to-typed error mapping.
-func TestCheckAcceptsTypedErrorCast(t *testing.T) {
+// TestCheckRejectsUnionTypedErrorUnion keeps E!T limited to error sets.
+func TestCheckRejectsUnionTypedErrorUnion(t *testing.T) {
 	source := `union CompileError {
     Message([]u8),
 }
-fn lower(ok: bool) -> !i64 {
-    if ok {
-        return 1;
-    }
-    return error("bad");
-}
-fn parse(ok: bool) -> CompileError!i64 {
-    let value = try cast<CompileError!i64>(lower(ok));
-    return value;
+fn parse() -> CompileError!i64 {
+    return 1;
 }`
-	if err := checkSource(source); err != nil {
-		t.Fatalf("check failed: %v", err)
+	err := checkSource(source)
+	if err == nil || !strings.Contains(err.Error(), "must be an `error` set") {
+		t.Fatalf("got %v, want error-set requirement", err)
 	}
 }
 
@@ -1920,24 +1922,11 @@ fn main() {
 			want: "try expects !T, got i64",
 		},
 		{
-			name: "error message type",
+			name: "error message construction removed",
 			source: `fn main() -> !void {
     return error(1);
 }`,
-			want: "`error` expects []u8",
-		},
-		{
-			name: "typed cast requires message variant",
-			source: `union CompileError {
-    Diagnostic(i64),
-}
-fn lower() -> !i64 {
-    return error("bad");
-}
-fn parse() -> CompileError!i64 {
-    return try cast<CompileError!i64>(lower());
-}`,
-			want: "typed error cast requires CompileError::Message([]u8)",
+			want: "undefined function `error`",
 		},
 	}
 	runErrorCases(t, cases)

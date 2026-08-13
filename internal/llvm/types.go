@@ -50,6 +50,9 @@ func (e *emitter) llvmType(typ string) string {
 	if _, ok := e.module.Enums[typ]; ok {
 		return "i64"
 	}
+	if _, ok := e.module.ErrorSets[typ]; ok {
+		return "i64"
+	}
 	if _, ok := e.module.Unions[typ]; ok {
 		return llvmUnionTypeName(typ)
 	}

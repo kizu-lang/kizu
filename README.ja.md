@@ -32,12 +32,12 @@ conformance manifest であり、特定の実行経路ではありません。
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
 | enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 11 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
 | move / borrow | 18 | ✅ | ✅ | ✅ | 2/18 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
-| cast / slice / raw pointer / box | 10 | ✅ | 7/10 | 7/10 | 1/10 |
+| cast / slice / raw pointer / box | 9 | ✅ | 6/9 | 6/9 | 1/9 |
 | contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
 | std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
@@ -50,18 +50,18 @@ conformance manifest であり、特定の実行経路ではありません。
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
-通らないことを表します。runnable example は 84 件、測定は 2026-08-14 に
+通らないことを表します。runnable example は 83 件、測定は 2026-08-14 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run` はプログラムの出力で判定し、`llvm` と `wasm` は lowering が通ったかで判定します。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 84/84 |
-| `kizu run` | 71/84 |
-| `kizu build --emit-llvm` | 71/84 |
-| `kizu build --target wasm32-wasi` | 16/84 |
+| `kizu check` | 83/83 |
+| `kizu run` | 70/83 |
+| `kizu build --emit-llvm` | 70/83 |
+| `kizu build --target wasm32-wasi` | 16/83 |
 
-`run` が再現できない 20 件(program 13、negative 7)は、manifest に `pending` として理由付きで登録してあります。
+`run` が再現できない 19 件(program 13、negative 6)は、manifest に `pending` として理由付きで登録してあります。
 pending なケースは「今も通らないこと」を検査するので、穴を塞いだ変更は
 同じ変更で登録を消すことになります。
 

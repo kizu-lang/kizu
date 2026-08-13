@@ -585,16 +585,20 @@ func checkedSlicePhiEndBlock() *ir.Block {
 // mapGetPhiModule returns IR where Map.get emits a helper join before a phi.
 func mapGetPhiModule() *ir.Module {
 	mapType := "std::map::Map<[]u8,i64>"
-	return &ir.Module{Functions: []*ir.Function{{
-		Name:   "lookup",
-		Params: []ir.Value{{Name: "%map", Type: mapType}},
-		Return: "!i64",
-		Blocks: []*ir.Block{
-			mapGetPhiEntryBlock(mapType),
-			mapGetPhiAltBlock(),
-			mapGetPhiMergeBlock(),
-		},
-	}}}
+	return &ir.Module{
+		ErrorSets: map[string]ir.Enum{"std::map::Error": {
+			Name: "std::map::Error",
+			Tags: map[string]int{"OutOfMemory": 8, "Missing": 9},
+		}}, Functions: []*ir.Function{{
+			Name:   "lookup",
+			Params: []ir.Value{{Name: "%map", Type: mapType}},
+			Return: "!i64",
+			Blocks: []*ir.Block{
+				mapGetPhiEntryBlock(mapType),
+				mapGetPhiAltBlock(),
+				mapGetPhiMergeBlock(),
+			},
+		}}}
 }
 
 // mapGetPhiEntryBlock returns the map lookup predecessor block.
@@ -636,7 +640,8 @@ func mapGetPhiMergeBlock() *ir.Block {
 	}}, Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%result", Type: "!i64"}}}
 }
 
-// TestEmitErrorUnionFailure checks error("message") lowers to failed !T.
+// TestEmitErrorUnionFailure checks an error set member lowers to a failed !T
+// carrying the member's global code.
 func TestEmitErrorUnionFailure(t *testing.T) {
 	module := lowerSource(t, errorUnionFailureSource)
 	got, err := Emit(module)
@@ -645,10 +650,11 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 	}
 	for _, want := range []string{
 		"define %kizu.error.i64 @read()",
-		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.1, 2",
+		"%kizu.error.i64 = type { i8, i64, i64 }",
+		"= insertvalue %kizu.error.i64 %kizu.2.base, i64 ",
 		"ret %kizu.error.i64 %kizu.2",
-		// A failed try in main reports its message before exiting 1.
-		"kizu.2.try.err:\n  %kizu.main.err.msg",
+		// A failed try in main names the error before exiting 1.
+		"kizu.2.try.err:\n  %kizu.main.err.code",
 		"call void @kizu_main_error_message(",
 	} {
 		if !strings.Contains(got, want) {
@@ -665,7 +671,7 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
 		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
 		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
@@ -721,8 +727,8 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 	}
 }
 
-// TestEmitErrorUnionPropagatesMessage checks try preserves failure diagnostics.
-func TestEmitErrorUnionPropagatesMessage(t *testing.T) {
+// TestEmitErrorUnionPropagatesCode checks try copies the failure code across.
+func TestEmitErrorUnionPropagatesCode(t *testing.T) {
 	module := lowerSource(t, errorUnionMessagePropagationSource)
 	got, err := Emit(module)
 	if err != nil {
@@ -732,36 +738,8 @@ func TestEmitErrorUnionPropagatesMessage(t *testing.T) {
 		"= extractvalue %kizu.error.i64 %kizu.1, 2",
 		"= insertvalue %kizu.error.void zeroinitializer, i8 0, 0",
 		"= insertvalue %kizu.error.void %kizu.try.err.",
-		"%kizu.slice.u8 %kizu.try.err.",
+		"i64 %kizu.try.err.",
 		"ret %kizu.error.void %kizu.try.err.",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("got:\n%s\nwant substring %q", got, want)
-		}
-	}
-}
-
-// TestEmitTypedErrorCast adapts untyped !T into a concrete typed Error!T payload.
-func TestEmitTypedErrorCast(t *testing.T) {
-	module := lowerSource(t, typedErrorCastSource)
-	got, err := Emit(module)
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"%kizu.error.CompileError.i64 = type { i8, i64, %kizu.union.CompileError }",
-		"%kizu.union.CompileError = type { i64, [16 x i8] }",
-		"%kizu.2.failure.extracted = extractvalue %kizu.error.i64 %kizu.1, 2",
-		"store i64 0, ptr %kizu.2.failure.typed.tag.ptr, align 8",
-		"%kizu.2.failure.typed.payload.ptr = getelementptr %kizu.union.CompileError, " +
-			"ptr %kizu.2.failure.typed.slot, i32 0, i32 1",
-		"store %kizu.slice.u8 %kizu.2.failure.extracted, " +
-			"ptr %kizu.2.failure.typed.payload.ptr, align 8",
-		"%kizu.2.failure.typed = load %kizu.union.CompileError, " +
-			"ptr %kizu.2.failure.typed.slot, align 8",
-		"%kizu.2 = insertvalue %kizu.error.CompileError.i64 %kizu.2.value.base, " +
-			"%kizu.union.CompileError %kizu.2.failure.typed, 2",
-		"ret %kizu.error.CompileError.i64 %kizu.4",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -1073,8 +1051,11 @@ fn main() -> !void {
     return;
 }`
 
-const errorUnionFailureSource = `fn read() -> !i64 {
-    return error("bad");
+const errorUnionFailureSource = `error ReadError {
+    Bad,
+}
+fn read() -> !i64 {
+    return ReadError::Bad;
 }
 fn main() -> !void {
     let value = try read();
@@ -1082,8 +1063,11 @@ fn main() -> !void {
     return;
 }`
 
-const errorUnionMessagePropagationSource = `fn read() -> !i64 {
-    return error("bad");
+const errorUnionMessagePropagationSource = `error ReadError {
+    Bad,
+}
+fn read() -> !i64 {
+    return ReadError::Bad;
 }
 fn wrap() -> !void {
     let value = try read();
@@ -1092,25 +1076,6 @@ fn wrap() -> !void {
 }
 fn main() -> !void {
     try wrap();
-    return;
-}`
-
-const typedErrorCastSource = `union CompileError {
-    Message([]u8),
-}
-fn lower(ok: bool) -> !i64 {
-    if ok {
-        return 7;
-    }
-    return error("bad");
-}
-fn parse(ok: bool) -> CompileError!i64 {
-    let value = try cast<CompileError!i64>(lower(ok));
-    return value;
-}
-fn main() -> CompileError!void {
-    let value = try parse(true);
-    print(value);
     return;
 }`
 
@@ -1291,10 +1256,12 @@ entry:
   ret i32 0
 }`
 
+//nolint:lll // snapshot text matches emitter output byte for byte
 const errorUnionLLVM = `; Kizu LLVM IR
-%kizu.slice.u8 = type { ptr, i64 }
-%kizu.error.i64 = type { i8, i64, %kizu.slice.u8 }
-%kizu.error.void = type { i8, %kizu.slice.u8 }
+%kizu.error.i64 = type { i8, i64, i64 }
+%kizu.error.void = type { i8, i64 }
+
+@.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
 
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
@@ -1318,24 +1285,28 @@ entry:
   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
 kizu.2.try.err:
-  %kizu.main.err.msg.1 = extractvalue %kizu.error.i64 %kizu.1, 2
-  %kizu.main.err.msg.1.ptr = extractvalue %kizu.slice.u8 %kizu.main.err.msg.1, 0
-  %kizu.main.err.msg.1.len = extractvalue %kizu.slice.u8 %kizu.main.err.msg.1, 1
-  call void @kizu_main_error_message(ptr %kizu.main.err.msg.1.ptr, i64 %kizu.main.err.msg.1.len)
+  %kizu.main.err.code.1 = extractvalue %kizu.error.i64 %kizu.1, 2
+  %kizu.main.err.name.2.row = getelementptr [1 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.1
+  %kizu.main.err.name.2.ptr = load ptr, ptr %kizu.main.err.name.2.row
+  %kizu.main.err.name.2.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.2.row, i64 0, i32 1
+  %kizu.main.err.name.2.len = load i64, ptr %kizu.main.err.name.2.len.addr
+  call void @kizu_main_error_message(ptr %kizu.main.err.name.2.ptr, i64 %kizu.main.err.name.2.len)
   ret i32 1
 kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
   call void @kizu_print_int(i64 %kizu.2)
   %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-  %kizu.main.ok.2 = extractvalue %kizu.error.void %kizu.4, 0
-  %kizu.main.ok.2.bool = icmp ne i8 %kizu.main.ok.2, 0
-  br i1 %kizu.main.ok.2.bool, label %kizu.main.exit.ok.4, label %kizu.main.exit.fail.5
-kizu.main.exit.fail.5:
-  %kizu.main.err.msg.6 = extractvalue %kizu.error.void %kizu.4, 1
-  %kizu.main.err.msg.6.ptr = extractvalue %kizu.slice.u8 %kizu.main.err.msg.6, 0
-  %kizu.main.err.msg.6.len = extractvalue %kizu.slice.u8 %kizu.main.err.msg.6, 1
-  call void @kizu_main_error_message(ptr %kizu.main.err.msg.6.ptr, i64 %kizu.main.err.msg.6.len)
+  %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
+  %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0
+  br i1 %kizu.main.ok.3.bool, label %kizu.main.exit.ok.5, label %kizu.main.exit.fail.6
+kizu.main.exit.fail.6:
+  %kizu.main.err.code.7 = extractvalue %kizu.error.void %kizu.4, 1
+  %kizu.main.err.name.8.row = getelementptr [1 x { ptr, i64 }], ptr @.kizu.error.names, i64 0, i64 %kizu.main.err.code.7
+  %kizu.main.err.name.8.ptr = load ptr, ptr %kizu.main.err.name.8.row
+  %kizu.main.err.name.8.len.addr = getelementptr { ptr, i64 }, ptr %kizu.main.err.name.8.row, i64 0, i32 1
+  %kizu.main.err.name.8.len = load i64, ptr %kizu.main.err.name.8.len.addr
+  call void @kizu_main_error_message(ptr %kizu.main.err.name.8.ptr, i64 %kizu.main.err.name.8.len)
   ret i32 1
-kizu.main.exit.ok.4:
+kizu.main.exit.ok.5:
   ret i32 0
 }`

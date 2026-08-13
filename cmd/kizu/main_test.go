@@ -1224,7 +1224,7 @@ fn main() -> !void {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		"%kizu.error.i64 = type { i8, i64, %kizu.slice.u8 }",
+		"%kizu.error.i64 = type { i8, i64, i64 }",
 		"define %kizu.error.i64 @read()",
 		"insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0",
 		"br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err",
@@ -1268,7 +1268,7 @@ fn main() -> !void {
 	}
 	for _, want := range []string{
 		"%kizu.slice.u8 = type { ptr, i64 }",
-		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, i64 }",
 		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
 		"define %kizu.error.slice.u8 @read()",
 		"call %kizu.slice.u8 @identity(%kizu.slice.u8",
@@ -1407,10 +1407,20 @@ fn main() -> !void {
 	if got := string(runOut); got != "7\n" {
 		t.Fatalf("got %q", got)
 	}
+}
 
+// TestBuildTargetNativeErrorUnionFailureSmoke checks a failing main names its
+// error on stderr and exits 1.
+func TestBuildTargetNativeErrorUnionFailureSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
 	failSource := filepath.Join(t.TempDir(), "error_union_fail.kizu")
-	failCode := []byte(`fn read() -> !i64 {
-    return error("bad");
+	failCode := []byte(`error ReadError {
+    Bad,
+}
+fn read() -> !i64 {
+    return ReadError::Bad;
 }
 fn main() -> !void {
     let value = try read();
@@ -1438,9 +1448,9 @@ fn main() -> !void {
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("got err=%v output=%q, want exit 1", err, failRunOut)
 	}
-	// A failed main reports its error message on stderr before exiting 1.
-	if string(failRunOut) != "runtime error: bad\n" {
-		t.Fatalf("got output %q, want %q", failRunOut, "runtime error: bad\n")
+	// A failed main names its error on stderr before exiting 1.
+	if string(failRunOut) != "runtime error: ReadError::Bad\n" {
+		t.Fatalf("got output %q, want %q", failRunOut, "runtime error: ReadError::Bad\n")
 	}
 }
 
