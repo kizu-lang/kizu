@@ -29,13 +29,13 @@ by any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 22/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 27 | ✅ | 25/27 | 25/27 | 9/27 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
-| while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
+| while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | ✅ | ✅ | ❌ |
+| enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
 | error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 16 | ✅ | 14/16 | 15/16 | 2/16 |
+| move / borrow | 18 | ✅ | 17/18 | 17/18 | 2/18 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
@@ -50,10 +50,9 @@ by any one execution path.
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 84 runnable examples, measured on 2026-08-13 with
+`❌` means none do. 86 runnable examples, measured on 2026-08-13 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -61,27 +60,28 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 84/84 |
-| `kizu run` | 68/84 |
-| `kizu build --emit-llvm` | 69/84 |
-| `kizu build --target wasm32-wasi` | 16/84 |
+| `kizu check` | 86/86 |
+| `kizu run` | 71/86 |
+| `kizu build --emit-llvm` | 71/86 |
+| `kizu build --target wasm32-wasi` | 16/86 |
 
-The 16 examples `run` cannot reproduce are registered in the manifests with a
-`pending` reason. A pending case is tested for *still failing*, so closing a gap
-forces its entry to be removed in the same change.
+The 26 cases `run` cannot reproduce -- 15 programs and 11 negative cases -- are
+registered in the manifests with a `pending` reason. A pending case is tested
+for *still failing*, so closing a gap forces its entry to be removed in the same
+change.
 
 What is missing, in the order it should be closed:
 
-1. **One example computes the wrong answer.** It does not observe a mutation
-   made through a mutable borrow. This is the worst of the three groups: it does
-   not fail, so nothing tells the caller the answer is wrong.
-2. **Five negative examples report the wrong failure.** A failing `Io`
-   capability is ignored so the program succeeds (2), a returned error union is
-   not surfaced, and two report a message other than the one the manifest wants.
-3. **Fourteen examples have no lowering yet.** `std::builtin::task_group` (6),
-   `Channel<T>` (3) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
+1. **Five negative cases report the wrong failure rather than none.** A failing
+   `Io` capability is ignored so the program succeeds (2), a returned error union
+   is not surfaced, and two report a message other than the one the manifest
+   wants.
+2. **Twenty-one cases have no lowering yet.** `std::builtin::task_group` (10),
+   `Channel<T>` (4) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
    `if` as an expression, and the scoped-thread worker value. One more compares
    a borrow against a value in LLVM and is rejected there.
+
+No case answers wrong. Every remaining one fails, and says so.
 
 Tooling around the language core:
 

@@ -121,6 +121,12 @@ func isReferenceType(name string) bool {
 	return strings.HasPrefix(name, "&") || strings.HasPrefix(name, "&var ")
 }
 
+// isMutableReferenceType reports whether name is `&var T`, the borrow a write
+// can go through.
+func isMutableReferenceType(name string) bool {
+	return strings.HasPrefix(name, "&var ")
+}
+
 // derefType returns T for &T and &var T.
 func derefType(name string) string {
 	if strings.HasPrefix(name, "&var ") {
