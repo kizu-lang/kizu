@@ -7,6 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Checker validates ownership and move rules for a parsed program.
@@ -5422,19 +5423,11 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	if replacement, ok := subst[typeName]; ok {
 		return replacement
 	}
-	out := typeName
-	for name, replacement := range subst {
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "!&var "+name, "!&var "+replacement)
-		out = strings.ReplaceAll(out, "!&"+name, "!&"+replacement)
-		out = strings.ReplaceAll(out, "&var "+name, "&var "+replacement)
-		out = strings.ReplaceAll(out, "&"+name, "&"+replacement)
-		out = strings.ReplaceAll(out, "<"+name+">", "<"+replacement+">")
-		out = strings.ReplaceAll(out, "<"+name+",", "<"+replacement+",")
-		out = strings.ReplaceAll(out, ", "+name+",", ", "+replacement+",")
-		out = strings.ReplaceAll(out, ", "+name+">", ", "+replacement+">")
+	out, err := typ.SubstituteText(typeName, subst)
+	if err != nil {
+		// A spelling this checker cannot parse is left as it stands; rejecting
+		// it belongs to the type checker and its diagnostic.
+		return typeName
 	}
 	return out
 }
@@ -5444,8 +5437,8 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	if len(c.typeArgValues) == 0 {
 		return typeArg
 	}
-	args, ok := splitGenericArgs(typeArg)
-	if !ok {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil {
 		return substituteOwnershipType(typeArg, c.typeArgValues)
 	}
 	for idx, arg := range args {
@@ -5949,55 +5942,16 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 
 // splitGenericType extracts base and raw arguments from base<args>.
 func splitGenericType(name string) (string, string, bool) {
-	for idx, ch := range name {
-		if ch != '<' {
-			continue
-		}
-		if len(name) < idx+3 || name[len(name)-1] != '>' {
-			return "", "", false
-		}
-		arg := name[idx+1 : len(name)-1]
-		if arg == "" {
-			return "", "", false
-		}
-		return name[:idx], arg, true
-	}
-	return "", "", false
+	return typ.SplitApply(name)
 }
 
 // splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
-	args := []string{}
-	start := 0
-	depth := 0
-	for idx, ch := range arg {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			if depth == 0 {
-				return nil, false
-			}
-			depth--
-		case ',':
-			if depth == 0 {
-				item := strings.TrimSpace(arg[start:idx])
-				if item == "" {
-					return nil, false
-				}
-				args = append(args, item)
-				start = idx + 1
-			}
-		}
-	}
-	if depth != 0 {
+	args, err := typ.SplitArgs(arg)
+	if err != nil {
 		return nil, false
 	}
-	item := strings.TrimSpace(arg[start:])
-	if item == "" {
-		return nil, false
-	}
-	return append(args, item), true
+	return args, true
 }
 
 // newScope creates a lexical ownership scope.

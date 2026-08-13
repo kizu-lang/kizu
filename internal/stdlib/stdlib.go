@@ -13,6 +13,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/token"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // DeclsForSource loads std wrapper declarations referenced by one source.
@@ -573,37 +574,14 @@ func qualifySimpleType(module string, typ string) (string, bool) {
 
 // splitGenericType extracts base and raw arguments from a simple type string.
 func splitGenericType(name string) (string, string, bool) {
-	start := strings.Index(name, "<")
-	if start < 0 || !strings.HasSuffix(name, ">") {
-		return "", "", false
-	}
-	return name[:start], name[start+1 : len(name)-1], true
+	return typ.SplitApply(name)
 }
 
 // splitGenericArgs splits top-level generic arguments for std type rewriting.
 func splitGenericArgs(arg string) ([]string, bool) {
-	parts := []string{}
-	depth := 0
-	start := 0
-	for idx, r := range arg {
-		switch r {
-		case '<':
-			depth++
-		case '>':
-			depth--
-			if depth < 0 {
-				return nil, false
-			}
-		case ',':
-			if depth == 0 {
-				parts = append(parts, strings.TrimSpace(arg[start:idx]))
-				start = idx + 1
-			}
-		}
-	}
-	if depth != 0 {
+	args, err := typ.SplitArgs(arg)
+	if err != nil {
 		return nil, false
 	}
-	parts = append(parts, strings.TrimSpace(arg[start:]))
-	return parts, true
+	return args, true
 }

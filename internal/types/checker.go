@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
@@ -1161,25 +1162,32 @@ func sameType(left Type, right Type) bool {
 	return left == right
 }
 
-// substituteTypeParams instantiates the simple generic wrapper type spellings.
-func substituteTypeParams(typ Type, subst map[string]Type) Type {
-	if replacement, ok := subst[string(typ)]; ok {
+// substituteTypeParams instantiates a generic type spelling. A parameter is
+// replaced where the whole name matches, so `T` leaves `Timer` alone; a
+// spelling this checker cannot parse is left as it stands, because rejecting it
+// belongs to parseType and its diagnostic.
+func substituteTypeParams(declared Type, subst map[string]Type) Type {
+	if replacement, ok := subst[string(declared)]; ok {
 		return replacement
 	}
-	out := string(typ)
-	for name, replacement := range subst {
-		repl := string(replacement)
-		out = strings.ReplaceAll(out, "[]"+name, "[]"+repl)
-		out = strings.ReplaceAll(out, "!&var "+name, "!&var "+repl)
-		out = strings.ReplaceAll(out, "!&"+name, "!&"+repl)
-		out = strings.ReplaceAll(out, "&var "+name, "&var "+repl)
-		out = strings.ReplaceAll(out, "&"+name, "&"+repl)
-		out = strings.ReplaceAll(out, "<"+name+">", "<"+string(replacement)+">")
-		out = strings.ReplaceAll(out, "<"+name+",", "<"+repl+",")
-		out = strings.ReplaceAll(out, ", "+name+",", ", "+repl+",")
-		out = strings.ReplaceAll(out, ", "+name+">", ", "+repl+">")
+	parsed, err := typ.Parse(string(declared))
+	if err != nil {
+		return declared
 	}
-	return Type(out)
+	return Type(typ.Substitute(parsed, parsedSubst(subst)).String())
+}
+
+// parsedSubst parses the replacement types once per substitution.
+func parsedSubst(subst map[string]Type) map[string]typ.Type {
+	out := make(map[string]typ.Type, len(subst))
+	for name, replacement := range subst {
+		parsed, err := typ.Parse(string(replacement))
+		if err != nil {
+			continue
+		}
+		out[name] = parsed
+	}
+	return out
 }
 
 // instantiateTypeArgText replaces in-scope generic type parameters in a type-apply list.
@@ -1187,8 +1195,8 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	if len(c.typeArgValues) == 0 {
 		return typeArg
 	}
-	args, ok := splitGenericArgs(typeArg)
-	if !ok {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil {
 		return string(substituteTypeParams(Type(typeArg), c.typeArgValues))
 	}
 	for idx, arg := range args {
@@ -7621,50 +7629,16 @@ func (s *scope) lookupBorrowSource(name string) (string, bool) {
 
 // splitGenericType extracts base and raw arguments from base<args>.
 func splitGenericType(name string) (string, string, bool) {
-	start := strings.IndexByte(name, '<')
-	if start < 1 || !strings.HasSuffix(name, ">") {
-		return "", "", false
-	}
-	arg := name[start+1 : len(name)-1]
-	if arg == "" {
-		return "", "", false
-	}
-	return name[:start], arg, true
+	return typ.SplitApply(name)
 }
 
 // splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
-	args := []string{}
-	start := 0
-	depth := 0
-	for idx, ch := range arg {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			if depth == 0 {
-				return nil, false
-			}
-			depth--
-		case ',':
-			if depth == 0 {
-				item := strings.TrimSpace(arg[start:idx])
-				if item == "" {
-					return nil, false
-				}
-				args = append(args, item)
-				start = idx + 1
-			}
-		}
-	}
-	if depth != 0 {
+	args, err := typ.SplitArgs(arg)
+	if err != nil {
 		return nil, false
 	}
-	item := strings.TrimSpace(arg[start:])
-	if item == "" {
-		return nil, false
-	}
-	return append(args, item), true
+	return args, true
 }
 
 // singleGenericArg returns the only argument for one-parameter generic types.

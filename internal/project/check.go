@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/typ"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -1179,38 +1180,15 @@ func isPrimitiveType(name string) bool {
 
 // splitTypeApply separates Base<Args> type spellings.
 func splitTypeApply(name string) (string, string, bool) {
-	start := strings.Index(name, "<")
-	if start < 0 || !strings.HasSuffix(name, ">") {
-		return "", "", false
-	}
-	return name[:start], strings.TrimSuffix(name[start+1:], ">"), true
+	return typ.SplitApply(name)
 }
 
 // splitTypeArgs splits comma-separated static type arguments with nested angle support.
 func splitTypeArgs(args string) ([]string, error) {
-	parts := []string{}
-	depth := 0
-	start := 0
-	for idx, ch := range args {
-		switch ch {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				parts = append(parts, strings.TrimSpace(args[start:idx]))
-				start = idx + 1
-			}
-		}
-		if depth < 0 {
-			return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
-		}
-	}
-	if depth != 0 {
+	parts, err := typ.SplitArgs(args)
+	if err != nil {
 		return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
 	}
-	parts = append(parts, strings.TrimSpace(args[start:]))
 	return parts, nil
 }
 

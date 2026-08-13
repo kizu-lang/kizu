@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
@@ -99,7 +100,10 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 	if decl == nil {
 		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
-	args := splitTypeArgs(typeArgs)
+	args, err := typ.SplitArgs(typeArgs)
+	if err != nil {
+		return "", "", fmt.Errorf("ir error: `%s`: %w", name, err)
+	}
 	if len(args) != len(decl.StaticParams) {
 		return "", "", fmt.Errorf("ir error: `%s` takes %d static parameters, got %d",
 			name, len(decl.StaticParams), len(args))
@@ -131,33 +135,6 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 		ret = bound
 	}
 	return symbol, returnType(ret), nil
-}
-
-// splitTypeArgs splits a static argument list on the commas that separate its
-// arguments, leaving a nested spelling such as `Map<[]u8, i64>` in one piece.
-func splitTypeArgs(list string) []string {
-	args := []string{}
-	depth := 0
-	var current strings.Builder
-	for _, r := range list {
-		switch r {
-		case '<':
-			depth++
-		case '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				args = append(args, strings.TrimSpace(current.String()))
-				current.Reset()
-				continue
-			}
-		}
-		current.WriteRune(r)
-	}
-	if strings.TrimSpace(current.String()) != "" {
-		args = append(args, strings.TrimSpace(current.String()))
-	}
-	return args
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
