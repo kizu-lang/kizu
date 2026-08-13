@@ -512,30 +512,38 @@ func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
 	return err
 }
 
-// trailingExpr returns the expression a block ends with, and reports whether it
-// has one. A trailing expression is written without a semicolon, which is what
-// separates a block that gives a value from one that only runs.
+// statementValue returns the expression a statement produces when it stands in
+// value position, and reports whether it has one. An expression written without
+// a semicolon is the value of what it is written in, which is what separates a
+// block that gives a value from one that only runs.
 //
-// `if` and `match` are both a statement and an expression, so in trailing
-// position they stand on their own rather than inside an ExprStmt. A branch
-// ending in one of them is still a branch ending in an expression.
+// `if` and `match` are both a statement and an expression, so in value position
+// they stand on their own rather than inside an ExprStmt. Reading only ExprStmt
+// rejects an else branch that is itself an if, which is how anything with three
+// cases gets written.
+func statementValue(stmt ast.Statement) (ast.Expression, bool) {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if s.Semicolon {
+			return nil, false
+		}
+		return s.Expr, true
+	case *ast.IfStmt:
+		return s, true
+	case *ast.MatchStmt:
+		return s, true
+	default:
+		return nil, false
+	}
+}
+
+// trailingExpr returns the expression a block ends with, and reports whether it
+// has one.
 func trailingExpr(block *ast.BlockStmt) (ast.Expression, bool) {
 	if block == nil || len(block.Statements) == 0 {
 		return nil, false
 	}
-	switch stmt := block.Statements[len(block.Statements)-1].(type) {
-	case *ast.ExprStmt:
-		if stmt.Semicolon {
-			return nil, false
-		}
-		return stmt.Expr, true
-	case *ast.IfStmt:
-		return stmt, true
-	case *ast.MatchStmt:
-		return stmt, true
-	default:
-		return nil, false
-	}
+	return statementValue(block.Statements[len(block.Statements)-1])
 }
 
 // lowerBlockBody lowers the statements of a block, and its trailing expression

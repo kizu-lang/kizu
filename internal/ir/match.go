@@ -230,11 +230,11 @@ func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) error
 
 // lowerMatchArmValue lowers the expression value of a match expression arm.
 func (l *lowerer) lowerMatchArmValue(stmt ast.Statement) (Value, error) {
-	expr, ok := stmt.(*ast.ExprStmt)
-	if !ok || expr.Semicolon {
+	expr, ok := statementValue(stmt)
+	if !ok {
 		return Value{}, fmt.Errorf("ir error: match expression arms must be expressions")
 	}
-	return l.lowerExpr(expr.Expr)
+	return l.lowerExpr(expr)
 }
 
 // mergeMatchEnvs creates phi nodes for bindings changed by reachable arms.
