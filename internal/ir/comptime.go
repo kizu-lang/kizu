@@ -9,7 +9,7 @@ import (
 
 // lowerComptimeIfStmt lowers only the branch selected during compilation.
 func (l *lowerer) lowerComptimeIfStmt(stmt *ast.ComptimeIfStmt) error {
-	cond, ok := constBool(stmt.Condition)
+	cond, ok := l.constBool(stmt.Condition)
 	if !ok {
 		return fmt.Errorf("ir error: comptime if condition must be constant bool")
 	}
@@ -23,18 +23,23 @@ func (l *lowerer) lowerComptimeIfStmt(stmt *ast.ComptimeIfStmt) error {
 }
 
 // constBool evaluates constant boolean expressions used by comptime if.
-func constBool(expr ast.Expression) (bool, bool) {
+func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
-		return constBool(e.Expr)
+		return l.constBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
 	case *ast.PrefixExpr:
-		value, ok := constBool(e.Right)
+		value, ok := l.constBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
 		if e.Operator == "and" || e.Operator == "or" {
-			return constLogicalBool(e)
+			return l.constLogicalBool(e)
+		}
+		if e.Operator == "==" || e.Operator == "!=" {
+			if equal, ok := l.constTypeEqual(e.Left, e.Right); ok {
+				return equal == (e.Operator == "=="), true
+			}
 		}
 		left, leftOK := constInt(e.Left)
 		right, rightOK := constInt(e.Right)
@@ -45,9 +50,35 @@ func constBool(expr ast.Expression) (bool, bool) {
 	return false, false
 }
 
+// constTypeEqual compares two type-valued expressions, which is how a generic
+// body asks what its type parameter was bound to.
+func (l *lowerer) constTypeEqual(left ast.Expression, right ast.Expression) (bool, bool) {
+	leftName, leftOK := l.constTypeName(left)
+	rightName, rightOK := l.constTypeName(right)
+	if !leftOK || !rightOK {
+		return false, false
+	}
+	return leftName == rightName, true
+}
+
+// constTypeName resolves an expression that names a type.
+func (l *lowerer) constTypeName(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.ComptimeExpr:
+		return l.constTypeName(e.Expr)
+	case *ast.IdentExpr:
+		if bound, ok := l.typeBindings[e.Name]; ok {
+			return bound, true
+		}
+	case *ast.TypeExpr:
+		return e.TypeName, true
+	}
+	return "", false
+}
+
 // constLogicalBool evaluates boolean logic for comptime branch selection.
-func constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
-	left, leftOK := constBool(expr.Left)
+func (l *lowerer) constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
+	left, leftOK := l.constBool(expr.Left)
 	if !leftOK {
 		return false, false
 	}
@@ -57,7 +88,7 @@ func constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
 	if expr.Operator == "or" && left {
 		return true, true
 	}
-	right, rightOK := constBool(expr.Right)
+	right, rightOK := l.constBool(expr.Right)
 	if !rightOK {
 		return false, false
 	}
