@@ -1330,6 +1330,7 @@ error 値は set の member そのものであり、**payload を持ちません
 
 * `error Name { A, B }` で宣言する
 * member は `Name::A` で参照する
+* `!T` は推論される error set である。宣言した set は他の set を受け取らない
 * `match` で網羅的に分岐できる
 * error 値が `main` から出た場合、`runtime error: Name::A` として報告される
 
@@ -1339,7 +1340,8 @@ error 値は set の member そのものであり、**payload を持ちません
 * `try` の operand は `!T` でなければならない
 * `ErrorType!T` は typed error union を表す
 * `ErrorType!T` では `ErrorType` または `T` を返せる
-* `try` は同じ `ErrorType` の error union だけを伝播できる
+* `!T` は推論される error set を表し、body が伝播するものを受け取る
+* `ErrorType!T` と宣言した場合、`try` は同じ `ErrorType` だけを伝播できる
 * `cast<ErrorType!T>(expr)` は `expr: !T` を明示的に typed error union へ変換できる
 * typed error cast は `ErrorType::Message([]u8)` variant がある場合だけ有効で、
   untyped error message をその variant に包む

@@ -3374,7 +3374,10 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps)
 		return "", errorf("type error: try expects !T, got %s", source)
 	}
 	targetError, _, _ := errorUnionParts(c.currentReturn)
-	if sourceError != targetError {
+	// `!T` is the inferred set: it accepts whatever the body propagates, which
+	// is what makes a caller able to call things that fail in different ways
+	// without naming every one of them. A declared `E!T` still accepts only E.
+	if targetError != "" && sourceError != targetError {
 		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
 	return Type(elem), nil

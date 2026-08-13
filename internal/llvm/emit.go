@@ -1238,7 +1238,45 @@ func (e *emitter) convertFailurePayload(
 		}
 		return payloadName, e.llvmType(targetError), nil
 	}
+	if targetError == "" {
+		// `!T` describes its failure with text, so a set member reaching one is
+		// named. This goes away with the text itself once errors are only names.
+		name, err := e.errorSetNameSlice(resultName, sourceError, extractedName)
+		if err != nil {
+			return "", "", err
+		}
+		return name, "%kizu.slice.u8", nil
+	}
 	return "", "", fmt.Errorf("llvm error: cannot convert failure payload to `%s`", targetError)
+}
+
+// errorSetNameSlice materializes the spelling of one error set member, read from
+// the table of names the set already emits.
+func (e *emitter) errorSetNameSlice(
+	resultName string,
+	errorName string,
+	tagOperand string,
+) (string, error) {
+	set, ok := e.module.Enums[errorName]
+	if !ok {
+		return "", fmt.Errorf("llvm error: `%s` is not an error set", errorName)
+	}
+	rowName := resultName + ".row"
+	ptrName := resultName + ".ptr"
+	lenAddr := resultName + ".len.addr"
+	lenName := resultName + ".len"
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s\n",
+		rowName, len(set.Tags), enumNameTable(errorName), tagOperand)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", ptrName, rowName)
+	fmt.Fprintf(&e.out, "  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1\n",
+		lenAddr, rowName)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", lenName, lenAddr)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+		baseName, ptrName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
+		resultName, baseName, lenName)
+	return resultName, nil
 }
 
 // writeStructNew lowers a checked struct literal to an LLVM aggregate value.
@@ -1744,7 +1782,7 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	if !ok {
 		return fmt.Errorf("llvm error: error.try requires function to return !T")
 	}
-	if sourceError != targetError {
+	if targetError != "" && sourceError != targetError {
 		return fmt.Errorf(
 			"llvm error: error.try cannot propagate %s into %s",
 			source.Type,
