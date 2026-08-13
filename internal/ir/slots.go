@@ -208,6 +208,14 @@ func structLiteralValues(expr *ast.StructLiteralExpr) []ast.Expression {
 }
 
 // markMutBorrowArgs records the names this call passes to a `&var` parameter.
+//
+// `&var` is the whole question only because it is the only parameter the callee
+// receives as the caller's storage. paramIRTypeName decides that, and the two
+// have to agree: a parameter shape that starts being passed as storage without
+// being marked here gives the callee something to write into that nobody reads,
+// which is the bug this analysis exists to prevent. `&Union` is the one other
+// reference parameter today, and it is passed a copy with union payload
+// alignment rather than the local itself, so it does not belong here yet.
 func (l *lowerer) markMutBorrowArgs(expr *ast.CallExpr, found map[string]bool) {
 	name, ok := l.functionCalleeName(expr.Callee)
 	if !ok {
