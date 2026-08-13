@@ -975,6 +975,9 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		c.typeParams = previousTypeParams
 	}()
 
+	if err := checkStaticParamPolicy(fn); err != nil {
+		return nil, err
+	}
 	paramInfo, err := c.collectFunctionParams(fn)
 	if err != nil {
 		return nil, err
@@ -1054,6 +1057,21 @@ func (c *Checker) checkFunctionParam(
 		}
 	} else if containsDynType(paramType) {
 		return errorf("type error: dyn parameter `%s` must use &dyn Contract", param.Name)
+	}
+	return nil
+}
+
+// checkStaticParamPolicy validates what a `<...>` entry may declare. `Function`
+// is a function-name token a std wrapper forwards to a trusted primitive, not a
+// value a body can call, so declaring one outside std is rejected where it is
+// written rather than where the name fails to resolve.
+func checkStaticParamPolicy(fn *ast.FunctionDecl) error {
+	for _, param := range fn.StaticParams {
+		if Type(param.Type) != typeFunction || fn.Std {
+			continue
+		}
+		return errorf(
+			"type error: Function static parameter `%s` is reserved for std", param.Name)
 	}
 	return nil
 }
