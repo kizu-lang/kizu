@@ -48,10 +48,13 @@ Kizu は SPEC がまだ動いている。動く仕様を 2 つの実装で追い
 `examples/` の 373 本と `cmd/kizu/conformance_test.go` の manifest が、全 example を
 カバーすることを強制する。parity gate は不要になる。
 
-### 3. `std/src/kizu/*` は残す
+### 3. `std/src/kizu/*` も削除した(2026-08 改訂)
 
-`std::kizu::{lexer,parser,ast,diagnostic}` は std の一部であり、Go の checker が
-`internal/stdlib` 経由で取り込む。Kizu が Kizu を記述する層はここで小さく保つ。
+当初は「Kizu が Kizu を記述する層」として残したが、compiler は使っておらず、
+文法変更のたびに parser を二重に書く税だけが残った。7,178 行まで育って
+「小さく保つ」は破綻し、error() 2,442 箇所の message は維持されていなかった。
+決定 1 と同じ理由で削除した。ADR-0058 / ADR-0062 もこの層の設計だけを
+記述していたため、一緒に削除した。
 
 ### 4. self-host は言語が固まってから、Go の構造に沿って作り直す
 

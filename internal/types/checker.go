@@ -3934,9 +3934,6 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 		return nil
 	}
 	seen[typ] = true
-	if isAstNodeIDType(typ) {
-		return nil
-	}
 	if isPointerType(typ) {
 		return errorf("type error: Array element cannot be raw pointer in v0.2")
 	}
@@ -7159,15 +7156,6 @@ func isPointerType(typ Type) bool {
 
 // isCopyType reports whether values of typ can be duplicated in v0.1 safe code.
 func (c *Checker) isCopyType(typ Type) bool {
-	if isAstNodeIDType(typ) || isAstScalarType(typ) {
-		return true
-	}
-	if isDiagnosticScalarType(typ) {
-		return true
-	}
-	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
-		return true
-	}
 	if typ == typeByteString {
 		return true
 	}
@@ -7179,87 +7167,6 @@ func (c *Checker) isCopyType(typ Type) bool {
 		return true
 	}
 	return copyTypes[typ]
-}
-
-// isAstNodeIDType reports the std::kizu AST id wrapper allowed in child lists.
-func isAstNodeIDType(typ Type) bool {
-	return typ == "NodeId" || typ == "std::kizu::ast::NodeId"
-}
-
-// isAstScalarType reports small std::kizu AST metadata wrappers with copy fields.
-func isAstScalarType(typ Type) bool {
-	switch typ {
-	case "SourceFile", "std::kizu::ast::SourceFile",
-		"AstNode", "std::kizu::ast::AstNode",
-		"AstData", "std::kizu::ast::AstData",
-		"ProgramNode", "std::kizu::ast::ProgramNode",
-		"IntNode", "std::kizu::ast::IntNode",
-		"StringNode", "std::kizu::ast::StringNode",
-		"TypeNameNode", "std::kizu::ast::TypeNameNode",
-		"VarNode", "std::kizu::ast::VarNode",
-		"BoolNode", "std::kizu::ast::BoolNode",
-		"PrefixNode", "std::kizu::ast::PrefixNode",
-		"BinaryNode", "std::kizu::ast::BinaryNode",
-		"FieldExprNode", "std::kizu::ast::FieldExprNode",
-		"DerefExprNode", "std::kizu::ast::DerefExprNode",
-		"CallNode", "std::kizu::ast::CallNode",
-		"TypeApplyExprNode", "std::kizu::ast::TypeApplyExprNode",
-		"CastExprNode", "std::kizu::ast::CastExprNode",
-		"IndexExprNode", "std::kizu::ast::IndexExprNode",
-		"StructLiteralExprNode", "std::kizu::ast::StructLiteralExprNode",
-		"StructFieldInitNode", "std::kizu::ast::StructFieldInitNode",
-		"ArenaNewExprNode", "std::kizu::ast::ArenaNewExprNode",
-		"TryExprNode", "std::kizu::ast::TryExprNode",
-		"ComptimeExprNode", "std::kizu::ast::ComptimeExprNode",
-		"BlockNode", "std::kizu::ast::BlockNode",
-		"IfNode", "std::kizu::ast::IfNode",
-		"LetNode", "std::kizu::ast::LetNode",
-		"AssignNode", "std::kizu::ast::AssignNode",
-		"ReturnNode", "std::kizu::ast::ReturnNode",
-		"DeferNode", "std::kizu::ast::DeferNode",
-		"ErrDeferNode", "std::kizu::ast::ErrDeferNode",
-		"ExprStmtNode", "std::kizu::ast::ExprStmtNode",
-		"WhileNode", "std::kizu::ast::WhileNode",
-		"ForNode", "std::kizu::ast::ForNode",
-		"BreakNode", "std::kizu::ast::BreakNode",
-		"ContinueNode", "std::kizu::ast::ContinueNode",
-		"ParamNode", "std::kizu::ast::ParamNode",
-		"ImportDeclNode", "std::kizu::ast::ImportDeclNode",
-		"FieldNode", "std::kizu::ast::FieldNode",
-		"StructDeclNode", "std::kizu::ast::StructDeclNode",
-		"EnumDeclNode", "std::kizu::ast::EnumDeclNode",
-		"UnionDeclNode", "std::kizu::ast::UnionDeclNode",
-		"ImplDeclNode", "std::kizu::ast::ImplDeclNode",
-		"UnionVariantNode", "std::kizu::ast::UnionVariantNode",
-		"MatchNode", "std::kizu::ast::MatchNode",
-		"MatchArmNode", "std::kizu::ast::MatchArmNode",
-		"UnsafeNode", "std::kizu::ast::UnsafeNode",
-		"ComptimeIfNode", "std::kizu::ast::ComptimeIfNode",
-		"FnDeclNode", "std::kizu::ast::FnDeclNode",
-		"ContractDeclNode", "std::kizu::ast::ContractDeclNode",
-		"SynthLatchNode", "std::kizu::ast::SynthLatchNode",
-		"Span", "std::kizu::ast::Span",
-		"TokenId", "std::kizu::ast::TokenId",
-		"SymbolId", "std::kizu::ast::SymbolId",
-		"PrefixOp", "std::kizu::ast::PrefixOp",
-		"BinaryOp", "std::kizu::ast::BinaryOp",
-		"ChildRange", "std::kizu::ast::ChildRange",
-		"Position", "std::kizu::lexer::Position",
-		"std::kizu::lexer::Token":
-		return true
-	default:
-		return false
-	}
-}
-
-// isDiagnosticScalarType reports copyable compiler diagnostic metadata.
-func isDiagnosticScalarType(typ Type) bool {
-	switch typ {
-	case "std::kizu::diagnostic::FileSpan", "std::kizu::diagnostic::RelatedSpan":
-		return true
-	default:
-		return false
-	}
 }
 
 // isAtomicSupportedType reports whether Atomic<T> is available in v0.1.

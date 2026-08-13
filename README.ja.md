@@ -27,42 +27,41 @@ conformance manifest であり、特定の実行経路ではありません。
 
 | 機能 | 例の数 | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 22/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
-| while / break / continue / for / label | 6 | ✅ | ✅ | ✅ | 5/6 |
-| if / match | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| enum / union | 8 | ✅ | 5/8 | ✅ | ❌ |
-| error union `!T` / try / errdefer | 9 | ✅ | 7/9 | ✅ | ❌ |
-| move / borrow | 16 | ✅ | 14/16 | 15/16 | 4/16 |
+| while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
+| if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
+| enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 11 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 18 | ✅ | ✅ | ✅ | 2/18 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
-| comptime | 2 | ✅ | 1/2 | 1/2 | 1/2 |
-| cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
-| contract / dyn / generics | 4 | ✅ | 2/4 | 2/4 | ❌ |
-| std::array | 10 | ✅ | 7/10 | 9/10 | ❌ |
+| arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
+| comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
+| cast / slice / raw pointer / box | 10 | ✅ | 7/10 | 7/10 | 1/10 |
+| contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
+| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 7/9 | 8/9 | ❌ |
-| std::mem / allocator | 8 | ✅ | 6/8 | 7/8 | ❌ |
-| std::testing | 13 | ✅ | 10/13 | 10/13 | ❌ |
+| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
+| std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 9/11 | 10/11 | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
-通らないことを表します。runnable example は 82 件、測定は 2026-08-13 に
+通らないことを表します。runnable example は 84 件、測定は 2026-08-14 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run` はプログラムの出力で判定し、`llvm` と `wasm` は lowering が通ったかで判定します。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 82/82 |
-| `kizu run` | 60/82 |
-| `kizu build --emit-llvm` | 66/82 |
-| `kizu build --target wasm32-wasi` | 17/82 |
+| `kizu check` | 84/84 |
+| `kizu run` | 71/84 |
+| `kizu build --emit-llvm` | 71/84 |
+| `kizu build --target wasm32-wasi` | 16/84 |
 
-`run` が再現できない 22 件は、manifest に `pending` として理由付きで登録してあります。
+`run` が再現できない 20 件(program 13、negative 7)は、manifest に `pending` として理由付きで登録してあります。
 pending なケースは「今も通らないこと」を検査するので、穴を塞いだ変更は
 同じ変更で登録を消すことになります。
 
@@ -84,7 +83,7 @@ language core 周辺の tooling:
 - typed SSA IR と opt-in の最適化 pipeline
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
 - extern function 宣言向けの限定的な C header import
-- `std/` の Kizu 標準ライブラリ(`std/src/kizu/` の自己記述 lexer / parser / AST を含む)
+- `std/` の Kizu 標準ライブラリ
 - LSP server (`cmd/kizu-lsp`)
 
 interpreter はありません。`kizu test` は `kizu run` が `main` をビルドして実行するのと

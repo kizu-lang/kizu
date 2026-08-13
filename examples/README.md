@@ -81,7 +81,6 @@ go test ./...
 | contextual integer literals | `contextual_integer_literals.kizu` | narrows integer literals in explicit `u8` / `i32` std and user API contexts |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
-| parse result AST access | `std_kizu_ast_parse_result_access.kizu` | reads parser root metadata through `ParseResult` helper methods |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
@@ -112,7 +111,8 @@ single source file. Run them with `kizu check <package-root>`.
 
 | Feature | Example | Backing fixture |
 | --- | --- | --- |
-| imported module type references | `modules/cross_module_types/` | `tests/conformance/modules/basic` |
+| multi-module error phases | `modules/compiler_phases/` | `tests/conformance/v0_2.json` |
+| package test blocks and helper lookup | `modules/same_module_helper_lookup/` | `tests/conformance/v0_2.json` |
 
 ## Negative Examples
 

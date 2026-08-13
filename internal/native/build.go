@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -168,13 +167,6 @@ func runClang(irPath string, runtimePath string, options Options) ([]string, err
 	args := []string{}
 	if options.Triple != "" {
 		args = append(args, "-target", options.Triple)
-	}
-	// Kizu programs that recurse over large inputs, such as the std::kizu lexer
-	// and parser, overflow the default 8MiB main-thread stack. Reserve a 512MiB
-	// stack for the produced executable on darwin (address-space reservation
-	// only; pages commit on use).
-	if runtime.GOOS == "darwin" {
-		args = append(args, "-Wl,-stack_size,0x20000000")
 	}
 	args = append(args, clangOptimizationFlag(options.Opt), irPath, runtimePath, "-o", options.Output)
 	cmd := exec.Command(options.Linker, args...)

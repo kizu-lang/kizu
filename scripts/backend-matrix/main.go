@@ -32,7 +32,7 @@ type featureGroup struct {
 // groups define the README rows in source order.
 var groups = []featureGroup{
 	{"fn / let / struct / literals", []string{
-		"fn", "let", "var", "print", "i64", "bool", "void", "call", "return",
+		"fn", "let", "var", "print", "i64", "bool", "void", "call", "return", "app",
 		"assignment", "field", "field-access", "struct", "struct-literal",
 		"string-literal", "multiline-string", "contextual-integer-literal",
 		"copy", "block-exit", "edge-case", "error", "diagnostic", "diagnostics",
@@ -42,10 +42,11 @@ var groups = []featureGroup{
 	{"while / break / continue / for / label", []string{
 		"while", "break", "continue", "for", "loop", "label"}},
 	{"if / match", []string{
-		"if", "if-expression", "match", "match-expression", "wildcard"}},
+		"if", "if-expression", "match", "match-expression", "wildcard",
+		"control-flow", "expression"}},
 	{"enum / union", []string{"enum", "union"}},
 	{"error union `!T` / try / errdefer", []string{
-		"error-union", "try", "typed-error", "errdefer"}},
+		"error-union", "error-set", "try", "typed-error", "errdefer"}},
 	{"move / borrow", []string{
 		"move", "ownership", "borrow", "mutable-borrow", "borrow-provenance",
 		"field-borrow", "last-use", "escaping", "mutation"}},
@@ -54,26 +55,23 @@ var groups = []featureGroup{
 	{"comptime", []string{"comptime"}},
 	{"cast / slice / raw pointer / box", []string{
 		"cast", "deref", "slice", "slice-syntax", "index-slice", "[]u8", "box",
-		"local-buffer", "capacity"}},
+		"local-buffer", "capacity", "recursive-ast"}},
 	{"contract / dyn / generics", []string{
 		"contract", "dyn", "impl", "generics", "type-apply", "static-arguments"}},
-	{"std::array", []string{"std-array"}},
+	{"std::array", []string{"std-array", "token-list"}},
 	{"std::string", []string{"std-string"}},
-	{"std::map", []string{"std-map", "symbol-table"}},
+	{"std::map", []string{"std-map", "symbol-table", "resolver"}},
 	{"std::mem / allocator", []string{"std-mem", "allocator"}},
 	{"std::testing", []string{"std-testing"}},
-	{"std::fmt", []string{"std-fmt"}},
+	{"std::fmt", []string{"std-fmt", "artifact"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
-		"explicit-io", "blocking", "failing", "read-dir"}},
+		"explicit-io", "blocking", "failing", "read-dir", "pure-helper"}},
 	{"TaskGroup / channel / queue / parallel", []string{
 		"taskgroup", "task", "queue", "deferred-task", "channel",
 		"owned-message", "parallel-for", "parallel-map", "partition", "cancel"}},
 	{"thread / atomic / mutex", []string{
 		"thread", "threaded", "atomic", "seq-cst", "sync"}},
-	{"std::kizu self-describing layer", []string{
-		"std-kizu", "lexer-scan", "parser-ast", "parse-result", "recursive-ast",
-		"token-list", "resolver", "pure-helper", "artifact", "app"}},
 }
 
 // routes are the CLI paths each example is put through. `run` builds a native

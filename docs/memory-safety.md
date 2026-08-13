@@ -101,14 +101,6 @@ policy.
 - A handle cannot outlive its arena.
 - A known handle cannot be used after its source arena is deinitialized.
 - A handle cannot be cast to a raw pointer in safe Kizu.
-- For `std::kizu::ast` storage, `std::kizu::ast::NodeId` is the only handle wrapper
-  allowed in AST child lists and AST node relationships.
-- AST arena payloads cannot contain owned containers, allocator or I/O
-  capabilities, arbitrary arenas or handles, concurrency capabilities, or raw
-  pointers.
-- This AST storage rule is not the final general-purpose `std::arena::Arena<T>` payload
-  policy. Broader arena payload support may be added when explicit cleanup,
-  allocator, borrow, and checker rules are specified.
 - Runtime arena diagnostics cover mismatched or out-of-range handles with
   unknown provenance; known invalid handle use remains a static checker
   responsibility.
