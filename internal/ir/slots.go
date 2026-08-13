@@ -141,7 +141,7 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
-		l.markMutBorrowArgs(e, found)
+		l.markLentArgs(e, found)
 	case *ast.PrefixExpr:
 		if e.Operator == "&var" {
 			markIfName(e.Right, found)
@@ -207,16 +207,11 @@ func structLiteralValues(expr *ast.StructLiteralExpr) []ast.Expression {
 	return values
 }
 
-// markMutBorrowArgs records the names this call passes to a `&var` parameter.
-//
-// `&var` is the whole question only because it is the only parameter the callee
-// receives as the caller's storage. paramIRTypeName decides that, and the two
-// have to agree: a parameter shape that starts being passed as storage without
-// being marked here gives the callee something to write into that nobody reads,
-// which is the bug this analysis exists to prevent. `&Union` is the one other
-// reference parameter today, and it is passed a copy with union payload
-// alignment rather than the local itself, so it does not belong here yet.
-func (l *lowerer) markMutBorrowArgs(expr *ast.CallExpr, found map[string]bool) {
+// markLentArgs records the names this call hands over as the caller's storage.
+// It reads the answer lowerParam gave rather than deciding again from the type,
+// so a parameter that starts being passed this way is marked here by having
+// been passed this way.
+func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 	name, ok := l.functionCalleeName(expr.Callee)
 	if !ok {
 		return
@@ -229,7 +224,7 @@ func (l *lowerer) markMutBorrowArgs(expr *ast.CallExpr, found map[string]bool) {
 		if index >= len(sig.Params) {
 			return
 		}
-		if isMutableReferenceType(sig.Params[index]) {
+		if sig.Params[index].Passing == PassCallerStorage {
 			markIfName(arg, found)
 		}
 	}
@@ -275,7 +270,7 @@ func (l *lowerer) lowerReceiverAddress(expr ast.Expression) (Value, error) {
 }
 
 // lowerCallArgs lowers the arguments of a call to name. An argument the callee
-// takes as `&var` is passed as storage, because the callee writes through it.
+// receives as the caller's storage is passed as the local itself.
 func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, error) {
 	sig, known := l.signatures[name]
 	if !known {
@@ -283,7 +278,7 @@ func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, er
 	}
 	values := make([]Value, 0, len(args))
 	for index, arg := range args {
-		if index < len(sig.Params) && isMutableReferenceType(sig.Params[index]) {
+		if index < len(sig.Params) && sig.Params[index].Passing == PassCallerStorage {
 			if slot, ok := l.slotPointer(arg); ok {
 				values = append(values, slot)
 				continue

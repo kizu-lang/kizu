@@ -398,9 +398,9 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 
 // lowerSignature extracts the callable type of a function declaration.
 func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
-	params := make([]string, 0, len(fn.Params))
+	params := make([]Param, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, l.paramIRTypeName(param))
+		params = append(params, l.lowerParam(param))
 	}
 	return Signature{Params: params, Return: returnType(typ.Text(fn.ReturnType))}
 }
@@ -424,7 +424,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.loops = nil
 	l.deferFrames = nil
 	for _, param := range fn.Params {
-		value := Value{Name: "%" + param.Name, Type: l.paramIRTypeName(param)}
+		value := Value{Name: "%" + param.Name, Type: l.lowerParam(param).Type}
 		l.current.Params = append(l.current.Params, value)
 		l.env[param.Name] = value
 	}
@@ -438,23 +438,27 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	return l.current, nil
 }
 
-// paramIRTypeName gives a parameter the type the callee sees. A `&var` parameter
-// keeps its borrow, because a write through it has to land in the caller's
-// storage rather than in a copy of it. A `&` parameter cannot write, so passing
-// the value is the same observation and stays the cheaper shape -- except for
-// unions, where matching already needs the pointer.
-func (l *lowerer) paramIRTypeName(param ast.Param) string {
+// lowerParam gives a parameter the type the callee sees and how the call hands
+// it over. These are one decision, made here: what the callee receives and what
+// the caller has to prepare are two readings of the same fact, and asking them
+// separately is how they come apart.
+//
+// A `&var` parameter is the caller's own storage, because a write through it has
+// to land there rather than in a copy. A `&` parameter cannot write, so a copy
+// is the same observation and stays the cheaper shape -- except for unions,
+// where matching needs an address and the copy is made for the call.
+func (l *lowerer) lowerParam(param ast.Param) Param {
 	typeName := l.resolveType(typ.Text(param.TypeName))
 	if param.MutBorrow {
-		return "&var " + typeName
+		return Param{Type: "&var " + typeName, Passing: PassCallerStorage}
 	}
 	if !param.Borrow {
-		return typeName
+		return Param{Type: typeName, Passing: PassValue}
 	}
 	if _, ok := l.module.Unions[typeName]; !ok {
-		return typeName
+		return Param{Type: typeName, Passing: PassValue}
 	}
-	return "&" + typeName
+	return Param{Type: "&" + typeName, Passing: PassCopyAddress}
 }
 
 // scopedBinding remembers what a name meant before a block rebound it.

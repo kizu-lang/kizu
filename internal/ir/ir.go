@@ -121,6 +121,30 @@ type Terminator struct {
 
 // Signature stores a function's callable type.
 type Signature struct {
-	Params []string
+	Params []Param
 	Return string
 }
+
+// Param is one parameter of a callable: the type the callee sees, and how the
+// call hands it over. Both come from one decision, so a caller reading how a
+// parameter is passed reads the same answer the type was built from.
+type Param struct {
+	Type    string
+	Passing Passing
+}
+
+// Passing is how a call hands one parameter to the callee.
+type Passing int
+
+const (
+	// PassValue copies the parameter. The callee cannot write back through it.
+	PassValue Passing = iota
+	// PassCallerStorage hands over the caller's local itself, so a write in the
+	// callee lands in it. A local passed this way has to have storage to lend,
+	// which is what makes it more than an SSA value.
+	PassCallerStorage
+	// PassCopyAddress hands over the address of a copy made for the call. The
+	// callee reads through it and the caller keeps its own value, so nothing
+	// about the caller's local changes.
+	PassCopyAddress
+)
