@@ -1064,9 +1064,11 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 // of one.
 var arrayPrimitives = map[string]string{
 	"std.builtin.array_append":       "append",
+	"std.builtin.array_as_bytes":     "as_bytes",
 	"std.builtin.array_at":           "at",
 	"std.builtin.array_at_mut":       "at_mut",
 	"std.builtin.array_capacity":     "capacity",
+	"std.builtin.array_clear":        "clear",
 	"std.builtin.array_deinit":       "deinit",
 	"std.builtin.array_get":          "get",
 	"std.builtin.array_get_or_panic": "get_or_panic",
@@ -1075,6 +1077,7 @@ var arrayPrimitives = map[string]string{
 	"std.builtin.array_pop_or_panic": "pop_or_panic",
 	"std.builtin.array_reserve":      "reserve",
 	"std.builtin.array_set":          "set",
+	"std.builtin.array_truncate":     "truncate",
 }
 
 // mapPrimitives maps a std::builtin Map primitive to the method it lowers as.

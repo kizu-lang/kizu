@@ -4299,7 +4299,8 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
 		"std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
-		"std.builtin.array_reserve", "std.builtin.array_set", "std.builtin.array_deinit":
+		"std.builtin.array_reserve", "std.builtin.array_set", "std.builtin.array_deinit",
+		"std.builtin.array_truncate", "std.builtin.array_clear", "std.builtin.array_as_bytes":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
 		return "", false, nil
