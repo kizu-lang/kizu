@@ -418,7 +418,7 @@ void kizu_print_string(const unsigned char *s, int64_t len) {
 }
 
 void kizu_main_error_message(const unsigned char *s, int64_t len) {
-    fwrite("error: ", 1, 7, stderr);
+    fwrite("runtime error: ", 1, 15, stderr);
     fwrite(s, 1, (size_t)len, stderr);
     fputc('\n', stderr);
 }
@@ -532,20 +532,33 @@ void *std_builtin_mem_page_allocator(void) {
     return NULL;
 }
 
+// An Io capability is a token rather than a handle. std::io::failing() hands
+// out the one every operation refuses, so a program can be written against a
+// runtime that fails and the failure can be tested.
+#define KIZU_IO_WORKING ((void *)1)
+#define KIZU_IO_FAILING ((void *)2)
+#define KIZU_IO_FAILING_MESSAGE "io runtime is failing"
+
 void *std_builtin_io_blocking(void) {
-    return (void *)1;
+    return KIZU_IO_WORKING;
 }
 
 void *std_builtin_io_threaded(void) {
-    return (void *)1;
+    return KIZU_IO_WORKING;
 }
 
 void *std_builtin_io_failing(void) {
-    return (void *)2;
+    return KIZU_IO_FAILING;
+}
+
+static int kizu_io_is_failing(void *io) {
+    return io == KIZU_IO_FAILING;
 }
 
 static KizuErrorVoid kizu_std_builtin_io_write_stdout_result(void *io, KizuSliceU8 bytes) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     if (bytes.len > 0 && bytes.ptr) {
         fwrite(bytes.ptr, 1, (size_t)bytes.len, stdout);
     }
@@ -557,7 +570,9 @@ void std_builtin_io_write_stdout(KizuErrorVoid *out, void *io, const KizuSliceU8
 }
 
 static KizuErrorVoid kizu_std_builtin_io_write_stderr_result(void *io, KizuSliceU8 bytes) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     if (bytes.len > 0 && bytes.ptr) {
         fwrite(bytes.ptr, 1, (size_t)bytes.len, stderr);
     }
@@ -569,7 +584,9 @@ void std_builtin_io_write_stderr(KizuErrorVoid *out, void *io, const KizuSliceU8
 }
 
 static KizuErrorSliceU8 kizu_std_builtin_io_read_stdin_result(void *io) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_slice(KIZU_IO_FAILING_MESSAGE);
+    }
     int64_t len = 0;
     int64_t cap = 4096;
     unsigned char *data = (unsigned char *)malloc((size_t)cap);
@@ -728,7 +745,9 @@ void std_builtin_process_spawn_wait8(
 }
 
 static KizuErrorSliceU8 kizu_std_builtin_fs_read_file_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_slice(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_slice("invalid path");
@@ -776,7 +795,9 @@ static KizuErrorVoid kizu_std_builtin_fs_write_file_result(
     KizuSliceU8 path,
     KizuSliceU8 bytes
 ) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_void("invalid path");
@@ -808,7 +829,9 @@ static KizuErrorVoid kizu_std_builtin_fs_rename_result(
     KizuSliceU8 from,
     KizuSliceU8 to
 ) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cfrom = kizu_slice_to_cstr(from);
     char *cto = kizu_slice_to_cstr(to);
     if (!cfrom || !cto) {
@@ -835,7 +858,9 @@ void std_builtin_fs_rename(
 }
 
 static KizuErrorBool kizu_std_builtin_fs_exists_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_bool(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_bool("invalid path");
@@ -850,7 +875,9 @@ void std_builtin_fs_exists(KizuErrorBool *out, void *io, const KizuSliceU8 *path
 }
 
 static KizuErrorFsMetadata kizu_std_builtin_fs_metadata_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_metadata(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_metadata("invalid path");
@@ -872,7 +899,9 @@ void std_builtin_fs_metadata(KizuErrorFsMetadata *out, void *io, const KizuSlice
 }
 
 static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_ptr(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_ptr("invalid path");
@@ -919,7 +948,9 @@ void std_builtin_fs_read_dir(KizuErrorPtr *out, void *io, const KizuSliceU8 *pat
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_create_dir_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_void("invalid path");
@@ -937,7 +968,9 @@ void std_builtin_fs_create_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_remove_dir_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_void("invalid path");
@@ -955,7 +988,9 @@ void std_builtin_fs_remove_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_remove_file_result(void *io, KizuSliceU8 path) {
-    (void)io;
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_IO_FAILING_MESSAGE);
+    }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
         return kizu_err_void("invalid path");
