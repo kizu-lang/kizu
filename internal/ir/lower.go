@@ -508,38 +508,92 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 
 // lowerBlock lowers statements into the current block.
 func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
+	_, err := l.lowerBlockBody(block, false)
+	return err
+}
+
+// trailingExpr returns the expression a block ends with, and reports whether it
+// has one. A trailing expression is written without a semicolon, which is what
+// separates a block that gives a value from one that only runs.
+//
+// `if` and `match` are both a statement and an expression, so in trailing
+// position they stand on their own rather than inside an ExprStmt. A branch
+// ending in one of them is still a branch ending in an expression.
+func trailingExpr(block *ast.BlockStmt) (ast.Expression, bool) {
+	if block == nil || len(block.Statements) == 0 {
+		return nil, false
+	}
+	switch stmt := block.Statements[len(block.Statements)-1].(type) {
+	case *ast.ExprStmt:
+		if stmt.Semicolon {
+			return nil, false
+		}
+		return stmt.Expr, true
+	case *ast.IfStmt:
+		return stmt, true
+	case *ast.MatchStmt:
+		return stmt, true
+	default:
+		return nil, false
+	}
+}
+
+// lowerBlockBody lowers the statements of a block, and its trailing expression
+// as a value when one is wanted.
+func (l *lowerer) lowerBlockBody(block *ast.BlockStmt, wantValue bool) (Value, error) {
 	frame := l.pushDeferFrame()
 	restoreBindings := l.scopeBlockBindings(block)
 	defer restoreBindings()
-	for _, stmt := range block.Statements {
+	statements := block.Statements
+	var trailing ast.Expression
+	if wantValue {
+		expr, ok := trailingExpr(block)
+		if !ok {
+			l.popDeferFrame()
+			return Value{}, fmt.Errorf(
+				"ir error: a branch used as a value must end in an expression")
+		}
+		trailing = expr
+		statements = statements[:len(statements)-1]
+	}
+	for _, stmt := range statements {
 		if l.block.Terminator.Op != "" {
 			l.popDeferFrame()
-			return nil
+			return Value{}, nil
 		}
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := l.lowerDeferStmt(deferStmt); err != nil {
 				l.popDeferFrame()
-				return err
+				return Value{}, err
 			}
 			continue
 		}
 		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
 			if err := l.lowerErrDeferStmt(errDeferStmt); err != nil {
 				l.popDeferFrame()
-				return err
+				return Value{}, err
 			}
 			continue
 		}
 		if err := l.lowerStmt(stmt); err != nil {
 			l.popDeferFrame()
-			return err
+			return Value{}, err
 		}
+	}
+	var value Value
+	if trailing != nil && l.block.Terminator.Op == "" {
+		lowered, err := l.lowerExpr(trailing)
+		if err != nil {
+			l.popDeferFrame()
+			return Value{}, err
+		}
+		value = lowered
 	}
 	if l.block.Terminator.Op == "" {
 		l.emitCleanupFrame(frame)
 	}
 	l.popDeferFrame()
-	return nil
+	return value, nil
 }
 
 // lowerStmt lowers one statement.
@@ -712,22 +766,40 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
-	case *ast.MatchStmt:
-		return l.lowerMatchExpr(e)
+	case *ast.IfStmt, *ast.MatchStmt:
+		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr, *ast.IndexExpr, *ast.DerefExpr:
 		return l.lowerAccessExpr(e)
 	case *ast.ArenaNewExpr:
-		allocator, err := l.lowerExpr(e.Allocator)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.emit("arena.new", "std::arena::Arena<"+e.TypeName+">",
-			[]Value{allocator}, e.TypeName), nil
+		return l.lowerArenaNewExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
+}
+
+// lowerBranchingExpr lowers the two nodes that are both a statement and an
+// expression. Each ends in a phi over what its branches produced.
+func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		return l.lowerIfExpr(e)
+	case *ast.MatchStmt:
+		return l.lowerMatchExpr(e)
+	default:
+		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
+	}
+}
+
+// lowerArenaNewExpr lowers an arena constructor.
+func (l *lowerer) lowerArenaNewExpr(expr *ast.ArenaNewExpr) (Value, error) {
+	allocator, err := l.lowerExpr(expr.Allocator)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("arena.new", "std::arena::Arena<"+expr.TypeName+">",
+		[]Value{allocator}, expr.TypeName), nil
 }
 
 // lowerAccessExpr lowers field, index, and explicit dereference expressions.
