@@ -4937,9 +4937,6 @@ func (c *Checker) checkUserCallArg(
 			return err
 		}
 	}
-	if fn.params[idx] == typeFunction {
-		return c.checkFunctionNameParam(name, fn, idx, checkedArg)
-	}
 	got, err := c.checkExpr(checkedArg, env, unsafe)
 	if err != nil {
 		return err
@@ -4956,49 +4953,6 @@ func (c *Checker) checkUserCallArg(
 	}
 	if !sameType(got, fn.params[idx]) {
 		return userCallArgError(name, fn, idx, got)
-	}
-	return nil
-}
-
-// checkFunctionNameParam validates a comptime Function argument without creating closures.
-func (c *Checker) checkFunctionNameParam(
-	name string,
-	fn *functionType,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("type error: `%s` expects function name", diagnosticName(name))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("type error: undefined function `%s`", target.Name)
-	}
-	return c.checkStdFunctionNameParam(name, fn, idx, target.Name, targetFn)
-}
-
-// checkStdFunctionNameParam preserves worker contracts for std wrapper functions.
-func (c *Checker) checkStdFunctionNameParam(
-	name string,
-	fn *functionType,
-	idx int,
-	target string,
-	targetFn *functionType,
-) error {
-	paramName := ""
-	if fn.decl != nil && idx < len(fn.decl.Params) {
-		paramName = fn.decl.Params[idx].Name
-	}
-	switch {
-	case name == "std.task.parallel_for" && paramName == "worker":
-		if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
-			return errorf("type error: parallel worker `%s` must accept i64", target)
-		}
-		_, err := c.parallelReturnType(targetFn)
-		return err
-	case name == "std.task.parallel_map" && paramName == "worker":
-		return c.checkParallelMapWorker(target, targetFn)
 	}
 	return nil
 }

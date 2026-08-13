@@ -43,7 +43,6 @@ type paramInfo struct {
 	typeName  string
 	borrow    bool
 	mutBorrow bool
-	comptime  bool
 }
 
 type binding struct {
@@ -1765,13 +1764,7 @@ func (c *Checker) checkUserCall(
 	}
 	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
-		if fn.params[idx].typeName == "Function" && fn.params[idx].comptime {
-			if err := c.checkFunctionNameParam(name, fn, idx, arg); err != nil {
-				return "", err
-			}
-		} else if fn.params[idx].comptime {
-			_, err = c.readExpr(arg, env)
-		} else if fn.params[idx].borrow {
+		if fn.params[idx].borrow {
 			if fn.params[idx].mutBorrow {
 				continue
 			}
@@ -1786,34 +1779,6 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
-}
-
-// checkFunctionNameParam validates a comptime Function argument without moving locals.
-func (c *Checker) checkFunctionNameParam(
-	name string,
-	fn *functionInfo,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("move error: undefined function `%s`", target.Name)
-	}
-	if !strings.HasPrefix(name, "std.task.") {
-		return nil
-	}
-	paramName := ""
-	if fn.decl != nil && idx < len(fn.decl.Params) {
-		paramName = fn.decl.Params[idx].Name
-	}
-	if paramName == "worker" {
-		return nil
-	}
-	return nil
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -3030,9 +2995,6 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	if want == "Function" && fn.params[idx].comptime {
-		return c.checkGenericFunctionNameArg(name, fn, subst, idx, arg)
-	}
 	if name == "std.sync.Mutex" {
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return err
@@ -3094,38 +3056,6 @@ func (c *Checker) checkMovedGenericArg(
 			idx+1, name, want, got)
 	}
 	return nil
-}
-
-// checkGenericFunctionNameArg validates Function args in generic std wrappers.
-func (c *Checker) checkGenericFunctionNameArg(
-	name string,
-	fn *functionInfo,
-	subst map[string]string,
-	idx int,
-	arg ast.Expression,
-) error {
-	target, ok := arg.(*ast.IdentExpr)
-	if !ok {
-		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
-	}
-	targetFn := c.functions[target.Name]
-	if targetFn == nil {
-		return errorf("move error: undefined function `%s`", target.Name)
-	}
-	if name == "std.thread.scoped" && ownershipFunctionParamName(fn, idx) == "worker" {
-		return c.checkThreadScopedWorker(
-			substituteOwnershipType(returnTypeName(fn), subst), target.Name, targetFn,
-		)
-	}
-	return nil
-}
-
-// ownershipFunctionParamName returns the source parameter name when available.
-func ownershipFunctionParamName(fn *functionInfo, idx int) string {
-	if fn.decl == nil || idx >= len(fn.decl.Params) {
-		return ""
-	}
-	return fn.decl.Params[idx].Name
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
@@ -4743,13 +4673,6 @@ func (c *Checker) checkImplMethodArg(
 	env *scope,
 ) error {
 	param := method.params[paramIndex]
-	if param.typeName == "Function" && param.comptime {
-		return c.checkFunctionNameParam(method.name, method, paramIndex, arg)
-	}
-	if param.comptime {
-		_, err := c.readExpr(arg, env)
-		return err
-	}
 	if param.borrow {
 		if param.mutBorrow {
 			return nil
@@ -5828,24 +5751,6 @@ func (c *Checker) checkThreadScopedTyped(
 			argType, got)
 	}
 	return argType, nil
-}
-
-// checkThreadScopedWorker validates the one-argument scoped worker signature.
-func (c *Checker) checkThreadScopedWorker(
-	typeName string,
-	target string,
-	targetFn *functionInfo,
-) error {
-	if len(targetFn.params) != 1 || targetFn.params[0].typeName != typeName {
-		return errorf("thread error: thread worker `%s` must accept %s", target, typeName)
-	}
-	if targetFn.params[0].borrow || targetFn.params[0].mutBorrow {
-		return errorf("thread error: thread cannot capture borrow parameter `%s`", target)
-	}
-	if returnTypeName(targetFn) != typeName {
-		return errorf("thread error: thread worker `%s` must return %s", target, typeName)
-	}
-	return nil
 }
 
 // checkAtomic validates ownership for a seq_cst atomic constructor.
