@@ -163,7 +163,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 	if resolved, err := typ.SubstituteText(ret, bindings); err == nil {
 		ret = resolved
 	}
-	return symbol, returnType(ret), nil
+	return symbol, l.lowerReturnType(ret), nil
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -402,7 +402,7 @@ func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
 	for _, param := range fn.Params {
 		params = append(params, l.lowerParam(param))
 	}
-	return Signature{Params: params, Return: returnType(typ.Text(fn.ReturnType))}
+	return Signature{Params: params, Return: l.lowerReturnType(typ.Text(fn.ReturnType))}
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -412,7 +412,8 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 
 // lowerFunctionNamed lowers one function using an explicit IR symbol name.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	l.current = &Function{Name: name, Return: returnType(l.resolveType(typ.Text(fn.ReturnType)))}
+	declared := l.resolveType(typ.Text(fn.ReturnType))
+	l.current = &Function{Name: name, Return: l.lowerReturnType(declared)}
 	l.env = map[string]Value{}
 	slots, err := l.mutablyBorrowedLocals(fn)
 	if err != nil {
@@ -449,16 +450,40 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 // where matching needs an address and the copy is made for the call.
 func (l *lowerer) lowerParam(param ast.Param) Param {
 	typeName := l.resolveType(typ.Text(param.TypeName))
-	if param.MutBorrow {
-		return Param{Type: "&var " + typeName, Passing: PassCallerStorage}
-	}
-	if !param.Borrow {
+	if !param.Borrow && !param.MutBorrow {
 		return Param{Type: typeName, Passing: PassValue}
 	}
-	if _, ok := l.module.Unions[typeName]; !ok {
-		return Param{Type: typeName, Passing: PassValue}
+	spelling, passing := l.borrowIRType(typeName, param.MutBorrow)
+	return Param{Type: spelling, Passing: passing}
+}
+
+// borrowIRType decides how a borrow of elem travels: what it is spelled as, and
+// how it is handed over. A parameter and a return ask the same question, so
+// they get the same answer -- a borrow that reaches a callee as a value and
+// comes back as a pointer is a borrow with two meanings.
+func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
+	if mutable {
+		return "&var " + elem, PassCallerStorage
 	}
-	return Param{Type: "&" + typeName, Passing: PassCopyAddress}
+	if _, ok := l.module.Unions[elem]; ok {
+		return "&" + elem, PassCopyAddress
+	}
+	return elem, PassValue
+}
+
+// lowerReturnType gives a function's result the type it travels as, so a
+// returned borrow follows the same rule a borrowed parameter does.
+func (l *lowerer) lowerReturnType(name string) string {
+	parsed, err := typ.Parse(name)
+	if err != nil {
+		return returnType(name)
+	}
+	borrow, ok := parsed.(*typ.Borrow)
+	if !ok {
+		return returnType(name)
+	}
+	spelling, _ := l.borrowIRType(borrow.Elem.String(), borrow.Mut)
+	return returnType(spelling)
 }
 
 // scopedBinding remembers what a name meant before a block rebound it.
@@ -508,38 +533,100 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 
 // lowerBlock lowers statements into the current block.
 func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
+	_, err := l.lowerBlockBody(block, false)
+	return err
+}
+
+// statementValue returns the expression a statement produces when it stands in
+// value position, and reports whether it has one. An expression written without
+// a semicolon is the value of what it is written in, which is what separates a
+// block that gives a value from one that only runs.
+//
+// `if` and `match` are both a statement and an expression, so in value position
+// they stand on their own rather than inside an ExprStmt. Reading only ExprStmt
+// rejects an else branch that is itself an if, which is how anything with three
+// cases gets written.
+func statementValue(stmt ast.Statement) (ast.Expression, bool) {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if s.Semicolon {
+			return nil, false
+		}
+		return s.Expr, true
+	case *ast.IfStmt:
+		return s, true
+	case *ast.MatchStmt:
+		return s, true
+	default:
+		return nil, false
+	}
+}
+
+// trailingExpr returns the expression a block ends with, and reports whether it
+// has one.
+func trailingExpr(block *ast.BlockStmt) (ast.Expression, bool) {
+	if block == nil || len(block.Statements) == 0 {
+		return nil, false
+	}
+	return statementValue(block.Statements[len(block.Statements)-1])
+}
+
+// lowerBlockBody lowers the statements of a block, and its trailing expression
+// as a value when one is wanted.
+func (l *lowerer) lowerBlockBody(block *ast.BlockStmt, wantValue bool) (Value, error) {
 	frame := l.pushDeferFrame()
 	restoreBindings := l.scopeBlockBindings(block)
 	defer restoreBindings()
-	for _, stmt := range block.Statements {
+	statements := block.Statements
+	var trailing ast.Expression
+	if wantValue {
+		expr, ok := trailingExpr(block)
+		if !ok {
+			l.popDeferFrame()
+			return Value{}, fmt.Errorf(
+				"ir error: a branch used as a value must end in an expression")
+		}
+		trailing = expr
+		statements = statements[:len(statements)-1]
+	}
+	for _, stmt := range statements {
 		if l.block.Terminator.Op != "" {
 			l.popDeferFrame()
-			return nil
+			return Value{}, nil
 		}
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := l.lowerDeferStmt(deferStmt); err != nil {
 				l.popDeferFrame()
-				return err
+				return Value{}, err
 			}
 			continue
 		}
 		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
 			if err := l.lowerErrDeferStmt(errDeferStmt); err != nil {
 				l.popDeferFrame()
-				return err
+				return Value{}, err
 			}
 			continue
 		}
 		if err := l.lowerStmt(stmt); err != nil {
 			l.popDeferFrame()
-			return err
+			return Value{}, err
 		}
+	}
+	var value Value
+	if trailing != nil && l.block.Terminator.Op == "" {
+		lowered, err := l.lowerExpr(trailing)
+		if err != nil {
+			l.popDeferFrame()
+			return Value{}, err
+		}
+		value = lowered
 	}
 	if l.block.Terminator.Op == "" {
 		l.emitCleanupFrame(frame)
 	}
 	l.popDeferFrame()
-	return nil
+	return value, nil
 }
 
 // lowerStmt lowers one statement.
@@ -712,22 +799,54 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
-	case *ast.MatchStmt:
-		return l.lowerMatchExpr(e)
+	case *ast.IfStmt, *ast.MatchStmt:
+		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr, *ast.IndexExpr, *ast.DerefExpr:
 		return l.lowerAccessExpr(e)
 	case *ast.ArenaNewExpr:
-		allocator, err := l.lowerExpr(e.Allocator)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.emit("arena.new", "std::arena::Arena<"+e.TypeName+">",
-			[]Value{allocator}, e.TypeName), nil
+		return l.lowerArenaNewExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
+}
+
+// lowerBranchingExpr lowers the two nodes that are both a statement and an
+// expression. Each ends in a phi over what its branches produced.
+func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		return l.lowerIfExpr(e)
+	case *ast.MatchStmt:
+		return l.lowerMatchExpr(e)
+	default:
+		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
+	}
+}
+
+// lowerArenaNewExpr lowers an arena constructor.
+func (l *lowerer) lowerArenaNewExpr(expr *ast.ArenaNewExpr) (Value, error) {
+	allocator, err := l.lowerExpr(expr.Allocator)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("arena.new", "std::arena::Arena<"+expr.TypeName+">",
+		[]Value{allocator}, expr.TypeName), nil
+}
+
+// lowerDerefExpr reads what a borrow points at. The write side already stored
+// through the borrow while this side handed the borrow itself back, so a
+// dereferenced borrow was compared against the value it pointed at.
+func (l *lowerer) lowerDerefExpr(expr *ast.DerefExpr) (Value, error) {
+	receiver, err := l.lowerExpr(expr.Receiver)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isReferenceType(receiver.Type) {
+		return receiver, nil
+	}
+	return l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, ""), nil
 }
 
 // lowerAccessExpr lowers field, index, and explicit dereference expressions.
@@ -738,7 +857,7 @@ func (l *lowerer) lowerAccessExpr(expr ast.Expression) (Value, error) {
 	case *ast.IndexExpr:
 		return l.lowerIndexExpr(e)
 	case *ast.DerefExpr:
-		return l.lowerExpr(e.Receiver)
+		return l.lowerDerefExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported access `%s`", expr.String())
 	}

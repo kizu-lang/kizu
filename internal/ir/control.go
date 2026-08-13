@@ -10,6 +10,7 @@ type branchResult struct {
 	env       map[string]Value
 	end       string
 	reachable bool
+	value     Value
 }
 
 // lowerIfStmt lowers if/else into branches and a merge block.
@@ -24,7 +25,7 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
-	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name)
+	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, false)
 	if err != nil {
 		return err
 	}
@@ -32,7 +33,7 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	if elseBody == nil {
 		elseBody = &ast.BlockStmt{}
 	}
-	elseResult, err := l.lowerBranchBlock(elseBlock, elseBody, mergeBlock.Name)
+	elseResult, err := l.lowerBranchBlock(elseBlock, elseBody, mergeBlock.Name, false)
 	if err != nil {
 		return err
 	}
@@ -116,11 +117,13 @@ func (l *lowerer) lowerBranchBlock(
 	block *Block,
 	body *ast.BlockStmt,
 	target string,
+	wantValue bool,
 ) (branchResult, error) {
 	saved := l.copyEnv(l.env)
 	l.env = l.copyEnv(saved)
 	l.block = block
-	if err := l.lowerBlock(body); err != nil {
+	value, err := l.lowerBlockBody(body, wantValue)
+	if err != nil {
 		return branchResult{}, err
 	}
 	end := l.block.Name
@@ -130,7 +133,59 @@ func (l *lowerer) lowerBranchBlock(
 	}
 	out := l.copyEnv(l.env)
 	l.env = saved
-	return branchResult{env: out, end: end, reachable: reachable}, nil
+	return branchResult{env: out, end: end, reachable: reachable, value: value}, nil
+}
+
+// lowerIfExpr lowers an if used as a value. It is the branch lowering an if
+// statement already does, ended by a phi over the value each side produced,
+// which is how a match expression reaches its value too.
+func (l *lowerer) lowerIfExpr(stmt *ast.IfStmt) (Value, error) {
+	if stmt.Alternative == nil {
+		return Value{}, fmt.Errorf("ir error: an if used as a value needs an else branch")
+	}
+	cond, err := l.lowerExpr(stmt.Condition)
+	if err != nil {
+		return Value{}, err
+	}
+	thenBlock := l.newBlock(l.nextBlockName("if.then"))
+	elseBlock := l.newBlock(l.nextBlockName("if.else"))
+	mergeBlock := l.newBlock(l.nextBlockName("if.end"))
+	l.block.Terminator = Terminator{
+		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
+	}
+	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, true)
+	if err != nil {
+		return Value{}, err
+	}
+	elseResult, err := l.lowerBranchBlock(elseBlock, stmt.Alternative, mergeBlock.Name, true)
+	if err != nil {
+		return Value{}, err
+	}
+	l.block = mergeBlock
+	switch {
+	case thenResult.reachable && elseResult.reachable:
+		l.env = l.mergeEnvs(mergeBlock, thenResult.end, thenResult.env, elseResult.end, elseResult.env)
+	case thenResult.reachable:
+		l.env = thenResult.env
+	case elseResult.reachable:
+		l.env = elseResult.env
+	}
+	incoming := []Incoming{}
+	resultType := ""
+	for _, result := range []branchResult{thenResult, elseResult} {
+		if !result.reachable {
+			continue
+		}
+		if resultType == "" {
+			resultType = result.value.Type
+		}
+		incoming = append(incoming, Incoming{Block: result.end, Value: result.value})
+	}
+	if len(incoming) == 0 {
+		mergeBlock.Terminator = Terminator{Op: "unreachable"}
+		return Value{}, fmt.Errorf("ir error: an if used as a value has no branch that produces one")
+	}
+	return l.addPhi(mergeBlock, resultType, incoming), nil
 }
 
 // mergeEnvs creates phi nodes for values that differ across branches.
