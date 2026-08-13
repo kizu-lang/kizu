@@ -266,6 +266,36 @@ static KizuSliceU8 kizu_error_message(const char *value) {
     return kizu_slice_from_cstr(value);
 }
 
+/* An error message is handed to Kizu as a slice over the string it was built
+ * from, and nothing copies it, so every message has to outlive the call that
+ * produced it. These are the reasons the OS gives for a failed file operation,
+ * written out here rather than taken from strerror: a literal lives as long as
+ * the program does, and it reads the same on every platform. */
+static const char *kizu_errno_message(int code) {
+    switch (code) {
+    case ENOENT:
+        return "no such file or directory";
+    case EACCES:
+    case EPERM:
+        return "permission denied";
+    case EISDIR:
+        return "is a directory";
+    case ENOTDIR:
+        return "not a directory";
+    case EEXIST:
+        return "already exists";
+    case ENOTEMPTY:
+        return "directory not empty";
+    case ENOSPC:
+        return "no space left on device";
+    case EMFILE:
+    case ENFILE:
+        return "too many open files";
+    default:
+        return "file operation failed";
+    }
+}
+
 static KizuErrorVoid kizu_ok_void(void) {
     KizuErrorVoid out;
     out.ok = 1;
@@ -632,7 +662,7 @@ int64_t std_builtin_process_arg_count(void) {
 
 static KizuErrorSliceU8 kizu_std_builtin_process_arg_result(int64_t index) {
     if (index < 0 || index >= std_builtin_process_arg_count()) {
-        return kizu_err_slice("process arg index out of range");
+        return kizu_err_slice("process arg index out of bounds");
     }
     return kizu_ok_slice(kizu_slice_from_cstr(kizu_runtime_argv[index + 1]));
 }
@@ -753,9 +783,10 @@ static KizuErrorSliceU8 kizu_std_builtin_fs_read_file_result(void *io, KizuSlice
         return kizu_err_slice("invalid path");
     }
     FILE *file = fopen(cpath, "rb");
+    int code = errno;
     free(cpath);
     if (!file) {
-        return kizu_err_slice("read file failed");
+        return kizu_err_slice(kizu_errno_message(code));
     }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
@@ -803,9 +834,10 @@ static KizuErrorVoid kizu_std_builtin_fs_write_file_result(
         return kizu_err_void("invalid path");
     }
     FILE *file = fopen(cpath, "wb");
+    int code = errno;
     free(cpath);
     if (!file) {
-        return kizu_err_void("write file failed");
+        return kizu_err_void(kizu_errno_message(code));
     }
     if (bytes.len > 0 && fwrite(bytes.ptr, 1, (size_t)bytes.len, file) != (size_t)bytes.len) {
         fclose(file);
@@ -840,10 +872,11 @@ static KizuErrorVoid kizu_std_builtin_fs_rename_result(
         return kizu_err_void("invalid path");
     }
     int result = rename(cfrom, cto);
+    int code = errno;
     free(cfrom);
     free(cto);
     if (result != 0) {
-        return kizu_err_void("rename failed");
+        return kizu_err_void(kizu_errno_message(code));
     }
     return kizu_ok_void();
 }
@@ -884,8 +917,9 @@ static KizuErrorFsMetadata kizu_std_builtin_fs_metadata_result(void *io, KizuSli
     }
     struct stat st;
     if (stat(cpath, &st) != 0) {
+        int code = errno;
         free(cpath);
-        return kizu_err_metadata("metadata failed");
+        return kizu_err_metadata(kizu_errno_message(code));
     }
     free(cpath);
     KizuFsMetadata out;
@@ -908,8 +942,9 @@ static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 pa
     }
     DIR *dir = opendir(cpath);
     if (!dir) {
+        int code = errno;
         free(cpath);
-        return kizu_err_ptr("read dir failed");
+        return kizu_err_ptr(kizu_errno_message(code));
     }
     void *array = kizu_array_new((int64_t)sizeof(KizuFsDirEntry));
     if (!array) {
@@ -956,9 +991,10 @@ static KizuErrorVoid kizu_std_builtin_fs_create_dir_result(void *io, KizuSliceU8
         return kizu_err_void("invalid path");
     }
     int result = mkdir(cpath, 0755);
+    int code = errno;
     free(cpath);
-    if (result != 0 && errno != EEXIST) {
-        return kizu_err_void("create dir failed");
+    if (result != 0 && code != EEXIST) {
+        return kizu_err_void(kizu_errno_message(code));
     }
     return kizu_ok_void();
 }
@@ -976,9 +1012,10 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_dir_result(void *io, KizuSliceU8
         return kizu_err_void("invalid path");
     }
     int result = rmdir(cpath);
+    int code = errno;
     free(cpath);
     if (result != 0) {
-        return kizu_err_void("remove dir failed");
+        return kizu_err_void(kizu_errno_message(code));
     }
     return kizu_ok_void();
 }
@@ -996,9 +1033,10 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_file_result(void *io, KizuSliceU
         return kizu_err_void("invalid path");
     }
     int result = unlink(cpath);
+    int code = errno;
     free(cpath);
     if (result != 0) {
-        return kizu_err_void("remove file failed");
+        return kizu_err_void(kizu_errno_message(code));
     }
     return kizu_ok_void();
 }
