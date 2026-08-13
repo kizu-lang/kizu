@@ -1456,8 +1456,8 @@ fn main() -> !void {
 		t.Fatalf("got err=%v output=%q, want exit 1", err, failRunOut)
 	}
 	// A failed main reports its error message on stderr before exiting 1.
-	if string(failRunOut) != "error: bad\n" {
-		t.Fatalf("got output %q, want %q", failRunOut, "error: bad\n")
+	if string(failRunOut) != "runtime error: bad\n" {
+		t.Fatalf("got output %q, want %q", failRunOut, "runtime error: bad\n")
 	}
 }
 
