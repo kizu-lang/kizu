@@ -2093,6 +2093,18 @@ func (c *Checker) checkReturnValue(
 	return true, nil
 }
 
+// absorbsErrorUnion reports whether returning a result that fails one way from a
+// function whose own set is inferred is the same absorption `try` does. A
+// declared `E!T` is not this, because it named the one set it accepts.
+func absorbsErrorUnion(want Type, got Type) bool {
+	wantError, wantSuccess, ok := errorUnionParts(want)
+	if !ok || wantError != "" {
+		return false
+	}
+	gotError, gotSuccess, isUnion := errorUnionParts(got)
+	return isUnion && gotError != "" && sameType(Type(gotSuccess), Type(wantSuccess))
+}
+
 // checkErrorUnionReturn accepts success or error payloads for !T returns.
 func (c *Checker) checkErrorUnionReturn(
 	expr ast.Expression,
@@ -2113,6 +2125,9 @@ func (c *Checker) checkErrorUnionReturn(
 			}
 			return true, nil
 		}
+	}
+	if absorbsErrorUnion(want, got) {
+		return true, nil
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
 		success := Type(elem)

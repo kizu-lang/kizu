@@ -28,15 +28,16 @@ What a program is *supposed* to do is defined by the conformance manifests, not
 by any one execution path.
 
 warning: 2 manifest tags have no group: control-flow, expression
+warning: 3 manifest tags have no group: control-flow, error-set, expression
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
 | fn / let / struct / literals | 27 | ✅ | 25/27 | 25/27 | 9/27 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
-| if / match | 8 | ✅ | ✅ | ✅ | 1/8 |
+| if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
 | enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 18 | ✅ | 17/18 | 17/18 | 2/18 |
+| error union `!T` / try / errdefer | 11 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 18 | ✅ | ✅ | ✅ | 2/18 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
@@ -46,13 +47,15 @@ warning: 2 manifest tags have no group: control-flow, expression
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
 | std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
-| std::testing | 13 | ✅ | 11/13 | 11/13 | ❌ |
+| std::testing | 13 | ✅ | 12/13 | 12/13 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
+| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
+| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 87 runnable examples, measured on 2026-08-13 with
+`❌` means none do. 88 runnable examples, measured on 2026-08-13 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -60,25 +63,24 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 87/87 |
-| `kizu run` | 73/87 |
-| `kizu build --emit-llvm` | 73/87 |
-| `kizu build --target wasm32-wasi` | 16/87 |
+| `kizu check` | 88/88 |
+| `kizu run` | 75/88 |
+| `kizu build --emit-llvm` | 75/88 |
+| `kizu build --target wasm32-wasi` | 16/88 |
 
-The 23 cases `run` cannot reproduce -- 14 programs and 9 negative cases -- are
+The 20 cases `run` cannot reproduce -- 13 programs and 7 negative cases -- are
 registered in the manifests with a `pending` reason. A pending case is tested
 for *still failing*, so closing a gap forces its entry to be removed in the same
 change.
 
 What is missing, in the order it should be closed:
 
-1. **Three negative cases report the wrong failure rather than none.** A
-   returned error union is not surfaced, and two report a message other than the
-   one the manifest wants.
-2. **Twenty cases have no lowering yet.** `std::builtin::task_group` (11),
+1. **One negative case reports the wrong failure rather than none.** A returned
+   error union built from a `union` is not surfaced, which the stage that leaves
+   errors as only names closes.
+2. **Nineteen cases have no lowering yet.** `std::builtin::task_group` (11),
    `Channel<T>` (4) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
-   and the scoped-thread worker value. One more compares a borrow against a
-   value in LLVM and is rejected there.
+   and the scoped-thread worker value.
 
 No case answers wrong. Every remaining one fails, and says so.
 

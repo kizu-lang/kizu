@@ -2092,6 +2092,9 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(value.Type), valueInfo.operand)
 		return nil
 	}
+	if e.absorbsErrorUnionReturn(value) {
+		return e.writeAbsorbedErrorUnionReturn(value)
+	}
 	if errorName != "" && value.Type == errorName {
 		valueInfo := e.value(value)
 		name := "%" + e.nextSyntheticValue("return.err")
@@ -2103,6 +2106,45 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		return e.writeImplicitErrorOKReturn(value)
 	}
 	return fmt.Errorf("llvm error: cannot return %s from %s", value.Type, e.currentReturn)
+}
+
+// absorbsErrorUnionReturn reports whether one error union is returned straight
+// from a function whose own set is inferred, which is the absorption `try` does
+// written as a return.
+func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
+	wantError, wantSuccess, ok := errorUnionParts(e.currentReturn)
+	if !ok || wantError != "" {
+		return false
+	}
+	gotError, gotSuccess, isUnion := errorUnionParts(value.Type)
+	return isUnion && gotError != "" && gotSuccess == wantSuccess
+}
+
+// writeAbsorbedErrorUnionReturn returns one error union as another, naming the
+// failure on the way because the target describes its own with text.
+func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
+	_, success, _ := errorUnionParts(value.Type)
+	source := e.value(value)
+	sourceType := e.llvmType(value.Type)
+	okName := "%" + e.nextSyntheticValue("absorb.ok")
+	okBool := okName + ".bool"
+	okLabel := e.nextSyntheticValue("absorb.ok.block")
+	errLabel := e.nextSyntheticValue("absorb.err.block")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, sourceType, source.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okName)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
+	fmt.Fprintf(&e.out, "%s:\n", errLabel)
+	if err := e.writeErrorFailureReturn(value); err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	if success == "void" {
+		return e.writeImplicitErrorOKReturn(ir.Value{Name: value.Name, Type: "void"})
+	}
+	successName := "%" + e.nextSyntheticValue("absorb.value")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, sourceType, source.operand)
+	e.values[successName] = valueInfo{typ: success, operand: successName}
+	return e.writeImplicitErrorOKReturn(ir.Value{Name: successName, Type: success})
 }
 
 // writeImplicitErrorOKReturn wraps legacy success returns from malformed IR.
