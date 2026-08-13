@@ -56,7 +56,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 			ArgBytes,
 			ArgBytes,
 		},
-		Return: "!i64",
+		Return: "std::process::Error!i64",
 	},
 	"std.builtin.test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
 }

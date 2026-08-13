@@ -469,7 +469,7 @@ func (p *Parser) parseEnumDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
-	decl.Tags, decl.TagDocs = p.parseEnumTags()
+	decl.Tags, decl.TagDocs = p.parseNameList("enum tag")
 	return decl
 }
 
@@ -510,52 +510,32 @@ func (p *Parser) parseErrorSetDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
-	decl.Members, decl.MemberDocs = p.parseErrorSetMembers()
+	decl.Members, decl.MemberDocs = p.parseNameList("error name")
 	return decl
 }
 
-// parseErrorSetMembers parses the comma-separated names in an error set.
-func (p *Parser) parseErrorSetMembers() ([]string, map[string]string) {
-	members := []string{}
-	memberDocs := map[string]string{}
+// parseNameList parses the comma-separated names inside a brace. An enum tag and
+// an error set member are written the same way, so they are read the same way,
+// and label says which one a malformed list is reported as.
+func (p *Parser) parseNameList(label string) ([]string, map[string]string) {
+	names := []string{}
+	docs := map[string]string{}
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		if p.cur.Type != token.Ident {
-			p.errorf("expected error name, got %s", tokenDescription(p.cur))
-			return members, tagDocsOrNil(memberDocs)
+			p.errorf("expected %s, got %s", label, tokenDescription(p.cur))
+			return names, tagDocsOrNil(docs)
 		}
-		members = append(members, p.cur.Literal)
-		if docs := docText(p.cur); docs != "" {
-			memberDocs[p.cur.Literal] = docs
+		names = append(names, p.cur.Literal)
+		if text := docText(p.cur); text != "" {
+			docs[p.cur.Literal] = text
 		}
-		if !p.consumeListDelimiter("error name") {
-			return members, tagDocsOrNil(memberDocs)
-		}
-		p.nextToken()
-	}
-	return members, tagDocsOrNil(memberDocs)
-}
-
-// parseEnumTags parses comma-separated enum tags.
-func (p *Parser) parseEnumTags() ([]string, map[string]string) {
-	tags := []string{}
-	tagDocs := map[string]string{}
-	p.nextToken()
-	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
-		if p.cur.Type != token.Ident {
-			p.errorf("expected enum tag, got %s", tokenDescription(p.cur))
-			return tags, tagDocsOrNil(tagDocs)
-		}
-		tags = append(tags, p.cur.Literal)
-		if docs := docText(p.cur); docs != "" {
-			tagDocs[p.cur.Literal] = docs
-		}
-		if !p.consumeListDelimiter("enum tag") {
-			return tags, tagDocsOrNil(tagDocs)
+		if !p.consumeListDelimiter(label) {
+			return names, tagDocsOrNil(docs)
 		}
 		p.nextToken()
 	}
-	return tags, tagDocsOrNil(tagDocs)
+	return names, tagDocsOrNil(docs)
 }
 
 // tagDocsOrNil keeps empty enum doc metadata compact.

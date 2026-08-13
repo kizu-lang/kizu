@@ -2031,14 +2031,14 @@ func (c *Checker) checkFsBuiltin(
 	case "std.builtin.fs_write_file":
 		return c.checkFsWriteFile(args, env)
 	case "std.builtin.fs_exists":
-		return c.checkFsPathOnly("std::fs::exists", args, env, "!bool")
+		return c.checkFsPathOnly("std::fs::exists", args, env, "std::fs::Error!bool")
 	case "std.builtin.fs_metadata":
-		return c.checkFsPathOnly("std::fs::metadata", args, env, "!std::fs::Metadata")
+		return c.checkFsPathOnly("std::fs::metadata", args, env, "std::fs::Error!std::fs::Metadata")
 	case "std.builtin.fs_read_dir":
 		return c.checkFsPathOnly("std::fs::read_dir", args, env,
-			"!std::array::Array<std::fs::DirEntry>")
+			"std::fs::Error!std::array::Array<std::fs::DirEntry>")
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
-		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
+		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "std::fs::Error!void")
 	case "std.builtin.fs_rename":
 		return c.checkFsRename(args, env)
 	default:
@@ -2123,7 +2123,7 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 		return "", true, errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]u8", true, nil
+	return "std::fs::Error![]u8", true, nil
 }
 
 // checkFsWriteFile validates ownership effects for std::fs::write_file.
@@ -2144,7 +2144,7 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 				"move error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsRename validates ownership effects for std::fs::rename.
@@ -2165,7 +2165,7 @@ func (c *Checker) checkFsRename(args []ast.Expression, env *scope) (string, bool
 				"move error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
-	return "!void", true, nil
+	return "std::fs::Error!void", true, nil
 }
 
 // checkFsPathOnly validates common std::fs Io and path arguments.
@@ -3193,6 +3193,10 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		if _, exists := c.enums[ident.Name]; exists {
 			return "", errorAt(expr.Span, "move error: enum tag `%s.%s` must use `::`",
+				ident.Name, expr.Name)
+		}
+		if _, exists := c.errorSets[ident.Name]; exists {
+			return "", errorAt(expr.Span, "move error: error `%s.%s` must use `::`",
 				ident.Name, expr.Name)
 		}
 		if _, exists := c.unions[ident.Name]; exists {
@@ -5472,6 +5476,10 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	if isRawPointerType(typeName) {
+		return true
+	}
+	// An error carries nothing, so reading one leaves nothing behind to move.
+	if c.errorSets[typeName] != nil {
 		return true
 	}
 	if c.enums[typeName] != nil {

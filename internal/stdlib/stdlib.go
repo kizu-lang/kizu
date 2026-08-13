@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -367,7 +368,7 @@ func renameEnum(module string, decl *ast.EnumDecl) {
 // comes from the module it is declared in rather than from a table of known std
 // type names, so declaring one is all it takes to have it.
 func renameErrorSet(module string, decl *ast.ErrorSetDecl) {
-	decl.Name = "std::" + strings.ReplaceAll(module, "/", "::") + "::" + decl.Name
+	decl.Name = modulePath(module) + "::" + decl.Name
 }
 
 // renameUnion rewrites a std wrapper union into its qualified form.
@@ -637,6 +638,20 @@ func splitGenericArgs(arg string) ([]string, bool) {
 // lowers to. The runtime refers to them all whatever a program uses, so they
 // come from std rather than from the modules one program happened to load.
 func ErrorSets() (map[string]map[string]int, error) {
+	errorSetsOnce.Do(func() {
+		errorSetsCache, errorSetsErr = readErrorSets()
+	})
+	return errorSetsCache, errorSetsErr
+}
+
+var (
+	errorSetsOnce  sync.Once
+	errorSetsCache map[string]map[string]int
+	errorSetsErr   error
+)
+
+// readErrorSets parses std once for the numbers its error set members lower to.
+func readErrorSets() (map[string]map[string]int, error) {
 	sets := map[string]map[string]int{}
 	for _, module := range sourceModuleOrder {
 		decls, errs, err := parseModuleDecls(module)

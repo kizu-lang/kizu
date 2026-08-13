@@ -339,10 +339,6 @@ static KizuSliceU8 kizu_slice_from_cstr(const char *value) {
     return out;
 }
 
-static KizuSliceU8 kizu_error_message(const char *value) {
-    return kizu_slice_from_cstr(value);
-}
-
 /* An error is a member of a declared set, and the numbers come from the
  * declarations rather than from a table written here, so the two cannot drift.
  * What the OS reports is mapped to the member that names the same thing. */
@@ -367,7 +363,7 @@ static int64_t kizu_errno_failure(int code) {
     case ENFILE:
         return KIZU_ERR_STD_FS_ERROR_TOO_MANY_OPEN_FILES;
     default:
-        return KIZU_ERR_STD_FS_ERROR_READ_FAILED;
+        return KIZU_ERR_STD_FS_ERROR_OPERATION_FAILED;
     }
 }
 
@@ -695,7 +691,7 @@ static KizuErrorSliceU8 kizu_std_builtin_io_read_stdin_result(void *io) {
     int64_t cap = 4096;
     unsigned char *data = (unsigned char *)malloc((size_t)cap);
     if (!data) {
-        return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
+        return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
     }
     for (;;) {
         if (len == cap) {
@@ -703,7 +699,7 @@ static KizuErrorSliceU8 kizu_std_builtin_io_read_stdin_result(void *io) {
             unsigned char *next = (unsigned char *)realloc(data, (size_t)cap);
             if (!next) {
                 free(data);
-                return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
+                return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
             }
             data = next;
         }

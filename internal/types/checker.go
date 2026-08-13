@@ -647,14 +647,8 @@ func (c *Checker) newImplFunctionType(
 
 // collectEnum registers and validates a tag enum declaration.
 func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate enum `%s`", decl.Name)
-	}
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
 	for _, tag := range decl.Tags {
@@ -685,9 +679,12 @@ func (c *Checker) collectErrorSet(decl *ast.ErrorSetDecl) error {
 }
 
 // rejectDuplicateTypeName reports a name already taken by another declaration.
+// Every declaration asks here, so a name is taken whichever kind claimed it
+// first: checking only the kinds that came before leaves the answer depending
+// on the order two declarations were written in.
 func (c *Checker) rejectDuplicateTypeName(name string) error {
 	if _, exists := c.errorSets[name]; exists {
-		return errorf("type error: duplicate error set `%s`", name)
+		return errorf("type error: duplicate type `%s`", name)
 	}
 	if _, exists := c.enums[name]; exists {
 		return errorf("type error: duplicate type `%s`", name)
@@ -703,14 +700,8 @@ func (c *Checker) rejectDuplicateTypeName(name string) error {
 
 // collectUnion registers and validates a tagged union declaration.
 func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate union `%s`", decl.Name)
-	}
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	previousTypeParams := c.typeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
@@ -752,14 +743,8 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 
 // collectStruct registers and validates a struct declaration.
 func (c *Checker) collectStruct(decl *ast.StructDecl) error {
-	if _, exists := c.structs[decl.Name]; exists {
-		return errorf("type error: duplicate struct `%s`", decl.Name)
-	}
-	if _, exists := c.enums[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
-	}
-	if _, exists := c.unions[decl.Name]; exists {
-		return errorf("type error: duplicate type `%s`", decl.Name)
+	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
+		return err
 	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams
@@ -7172,6 +7157,10 @@ func (c *Checker) isCopyType(typ Type) bool {
 		return true
 	}
 	if c.enums[string(typ)] != nil {
+		return true
+	}
+	// An error carries nothing, so reading one leaves nothing behind to move.
+	if c.errorSets[string(typ)] != nil {
 		return true
 	}
 	return copyTypes[typ]
