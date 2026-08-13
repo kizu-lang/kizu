@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed.
+Superseded by ADR-0086.
+
+`cast<ErrorType!T>` and the `[]u8` failure payload this ADR is written against
+were both removed when errors became names. An inferred `!T` now absorbs any
+error set directly, so the widening this ADR proposed has no cast to attach to.
 
 ## Context
 

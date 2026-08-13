@@ -1,6 +1,6 @@
 # ADR-0086: error は名前であって message ではない
 
-Status: 提案
+Status: 採用
 
 Supersedes: ADR-0030 の error payload 部分
 

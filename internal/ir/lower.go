@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -40,6 +41,9 @@ type lowerer struct {
 	// because something writes through a `&var` borrow of them. Their entry in
 	// env is the storage, not the value.
 	slots map[string]bool
+	// nextErrorCode is the next global code for an error set the program
+	// declares itself; std members keep the codes std assigns.
+	nextErrorCode int
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -75,9 +79,10 @@ func newLowerer(program *ast.Program) *lowerer {
 	return &lowerer{
 		program: program,
 		module: &Module{
-			Structs: map[string]Struct{},
-			Enums:   map[string]Enum{},
-			Unions:  map[string]Union{},
+			Structs:   map[string]Struct{},
+			Enums:     map[string]Enum{},
+			ErrorSets: map[string]Enum{},
+			Unions:    map[string]Union{},
 		},
 		signatures:   map[string]Signature{},
 		typeBindings: map[string]string{},
@@ -250,7 +255,9 @@ func (l *lowerer) resolveStaticValue(text string) string {
 
 // lower performs declaration collection and function lowering.
 func (l *lowerer) lower() (*Module, error) {
-	l.collectDecls()
+	if err := l.collectDecls(); err != nil {
+		return nil, err
+	}
 	for _, decl := range l.program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
@@ -344,7 +351,7 @@ func TestFunctionNames(module *Module) []string {
 }
 
 // collectDecls records signatures and struct layouts.
-func (l *lowerer) collectDecls() {
+func (l *lowerer) collectDecls() error {
 	for _, decl := range l.program.Decls {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
@@ -352,7 +359,11 @@ func (l *lowerer) collectDecls() {
 		case *ast.EnumDecl:
 			l.module.Enums[d.Name] = lowerEnum(d)
 		case *ast.ErrorSetDecl:
-			l.module.Enums[d.Name] = lowerErrorSet(d)
+			set, err := l.lowerErrorSet(d)
+			if err != nil {
+				return err
+			}
+			l.module.ErrorSets[d.Name] = set
 		case *ast.UnionDecl:
 			l.module.Unions[d.Name] = lowerUnion(d)
 		}
@@ -367,6 +378,7 @@ func (l *lowerer) collectDecls() {
 			}
 		}
 	}
+	return nil
 }
 
 // lowerUnion converts an AST union declaration to IR metadata.
@@ -389,16 +401,32 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 	return Enum{Name: decl.Name, Tags: tags}
 }
 
-// lowerErrorSet converts an AST error set to IR metadata. An error carries
-// nothing, so below the checker it is a name mapped to a number, which is what
-// an enum already is here. The two stay apart in the checker, where one can be
-// inferred and merged and the other cannot.
-func lowerErrorSet(decl *ast.ErrorSetDecl) Enum {
-	members := map[string]int{}
-	for index, member := range decl.Members {
-		members[member] = index
+// lowerErrorSet converts an AST error set to IR metadata. An error value is
+// one integer, globally unique across every set: std members keep the codes
+// std assigns, and sets a program declares take the codes after them. A
+// failure crossing from one union into another is therefore a copy, never a
+// conversion.
+func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
+	stdSets, err := stdlib.ErrorSets()
+	if err != nil {
+		return Enum{}, err
 	}
-	return Enum{Name: decl.Name, Tags: members}
+	if codes, ok := stdSets[decl.Name]; ok {
+		return Enum{Name: decl.Name, Tags: codes}, nil
+	}
+	if l.nextErrorCode == 0 {
+		base, err := stdlib.ErrorCodeBase()
+		if err != nil {
+			return Enum{}, err
+		}
+		l.nextErrorCode = base
+	}
+	members := map[string]int{}
+	for _, member := range decl.Members {
+		members[member] = l.nextErrorCode
+		l.nextErrorCode++
+	}
+	return Enum{Name: decl.Name, Tags: members}, nil
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.
@@ -747,7 +775,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		return err
 	}
 	errorReturn := l.producesErrorValue(value)
-	if errorName, success, ok := errorUnionParts(l.current.Return); ok {
+	if _, success, ok := errorUnionParts(l.current.Return); ok {
 		if value.Type == success {
 			// A `!void` success carries no payload, so its wrap takes no operand.
 			// `return try f();` on a `!void` callee unwraps to a void value, and
@@ -758,7 +786,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 				args = nil
 			}
 			value = l.emit("error.ok", l.current.Return, args, "")
-		} else if errorName != "" && value.Type == errorName {
+		} else if _, isSet := l.module.ErrorSets[value.Type]; isSet {
 			value = l.emit("error.error", l.current.Return, []Value{value}, "")
 			errorReturn = true
 		}
@@ -773,8 +801,8 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 }
 
 // producesErrorValue reports whether v was defined by an error.error
-// instruction in the current block, such as the `error(...)` builtin. Such a
-// return exits through the error path and must run errdefer cleanups.
+// instruction in the current block. Such a return exits through the error path
+// and must run errdefer cleanups.
 func (l *lowerer) producesErrorValue(v Value) bool {
 	for idx := len(l.block.Instrs) - 1; idx >= 0; idx-- {
 		if l.block.Instrs[idx].Result.Name == v.Name {
@@ -1027,9 +1055,6 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	args, err := l.lowerCallArgs(name, rawArgs)
 	if err != nil {
 		return Value{}, err
-	}
-	if name == "error" {
-		return l.emit("error.error", l.current.Return, args, ""), nil
 	}
 	if name == "std.builtin.mem_len" {
 		if len(args) != 1 {
@@ -1415,9 +1440,13 @@ func (l *lowerer) unionVariant(expr *ast.FieldExpr) (Union, UnionVariant, bool) 
 }
 
 // lowerEnumTagExpr lowers Enum::Tag namespace expressions to integer tags.
+// Error set members resolve the same way; their tags are global error codes.
 func (l *lowerer) lowerEnumTagExpr(expr *ast.FieldExpr) (Value, bool) {
 	enumName := expr.Receiver.String()
 	enumType, ok := l.module.Enums[enumName]
+	if !ok {
+		enumType, ok = l.module.ErrorSets[enumName]
+	}
 	if !ok {
 		return Value{}, false
 	}

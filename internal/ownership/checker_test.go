@@ -283,11 +283,14 @@ fn outer(user: &var User) {
 	}
 }
 
-// TestCheckAcceptsErrorFromStringView checks error copies local view bytes.
-func TestCheckAcceptsErrorFromStringView(t *testing.T) {
-	source := `fn fail(text: std::string::String) -> !void {
+// TestCheckAcceptsErrorReturnAfterLocalView checks a failure return can
+// follow a local borrowed view; the error value carries nothing from it.
+func TestCheckAcceptsErrorReturnAfterLocalView(t *testing.T) {
+	source := `error ViewError { Bad }
+fn fail(text: std::string::String) -> !void {
     let bytes = text.as_bytes();
-    return error(bytes);
+    print(bytes);
+    return ViewError::Bad;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -774,7 +777,8 @@ fn main() {
 // TestCheckAcceptsErrDeferReturnedOwner checks errdefer does not block the
 // success-path move of the owner it guards.
 func TestCheckAcceptsErrDeferReturnedOwner(t *testing.T) {
-	source := `struct User { name: []u8 }
+	source := `error BuildError { Boom }
+struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -853,13 +857,14 @@ fn build() -> !std::arena::Arena<User> {
 		},
 		{
 			name: "deinitialized before explicit error return",
-			source: `struct User { name: []u8 }
+			source: `error BuildError { Boom }
+struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
     errdefer users.deinit();
     users.deinit();
-    return error("boom");
+    return BuildError::Boom;
 }`,
 			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
 		},

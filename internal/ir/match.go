@@ -79,6 +79,9 @@ func (l *lowerer) lowerMatchValue(expr ast.Expression) (matchSubject, error) {
 		return matchSubject{}, err
 	}
 	enumType, ok := l.module.Enums[value.Type]
+	if !ok {
+		enumType, ok = l.module.ErrorSets[value.Type]
+	}
 	if ok {
 		return matchSubject{value: value, enum: enumType}, nil
 	}

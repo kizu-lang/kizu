@@ -114,8 +114,7 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s)\n",
 		okName, array.operand, elemSlot)
-	e.writeArrayBoolResult(instr.Result, okName, "array_append")
-	return nil
+	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
 }
 
 // writeArrayLen lowers Array.len().
@@ -153,8 +152,7 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_reserve(ptr %s, i64 %s)\n",
 		okName, array.operand, additional.operand)
-	e.writeArrayBoolResult(instr.Result, okName, "array_reserve")
-	return nil
+	return e.writeArrayBoolResult(instr.Result, okName, "array_reserve")
 }
 
 // writeArrayPop lowers Array.pop().
@@ -165,8 +163,7 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
-	e.writeArrayOptionalLoadResult(instr, ptrName, "array_pop")
-	return nil
+	return e.writeArrayOptionalLoadResult(instr, ptrName, "array_pop")
 }
 
 // writeArrayPopOrPanic moves the last element out or traps on an empty Array.
@@ -195,8 +192,7 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	e.writeArrayOptionalLoadResult(instr, ptrName, "array_bounds")
-	return nil
+	return e.writeArrayOptionalLoadResult(instr, ptrName, "array_bounds")
 }
 
 // writeArrayGetOrPanic lowers Array.get_or_panic(index).
@@ -228,12 +224,11 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	e.writeArrayOptionalPointerResult(
+	return e.writeArrayOptionalPointerResult(
 		instr,
 		ptrName,
 		"array_bounds",
 	)
-	return nil
 }
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.
@@ -247,8 +242,7 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_set(ptr %s, i64 %s, ptr %s)\n",
 		okName, array.operand, index.operand, elemSlot)
-	e.writeArrayBoolResult(instr.Result, okName, "array_bounds")
-	return nil
+	return e.writeArrayBoolResult(instr.Result, okName, "array_bounds")
 }
 
 // writeArrayTruncate lowers Array.truncate(length).
@@ -261,8 +255,7 @@ func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_truncate(ptr %s, i64 %s)\n",
 		okName, array.operand, length.operand)
-	e.writeArrayBoolResult(instr.Result, okName, "array_truncate")
-	return nil
+	return e.writeArrayBoolResult(instr.Result, okName, "array_truncate")
 }
 
 // writeArrayClear lowers Array.clear().
@@ -305,7 +298,7 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	instr *ir.Instr,
 	ptrName string,
 	failureKey string,
-) {
+) error {
 	success, _ := errorUnionSuccessType(instr.Result.Type)
 	resultName := localName(instr.Result.Name)
 	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array")
@@ -313,13 +306,15 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	nullName := resultName + ".is_null"
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
-	e.writeArrayFailureBlock(
+	if err := e.writeArrayFailureBlock(
 		failLabel,
 		resultName+".fail",
 		instr.Result.Type,
 		failureKey,
 		joinLabel,
-	)
+	); err != nil {
+		return err
+	}
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", valueName, e.llvmType(success), ptrName)
@@ -331,6 +326,7 @@ func (e *emitter) writeArrayOptionalLoadResult(
 	fmt.Fprintf(&e.out, "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]\n",
 		resultName, e.llvmType(instr.Result.Type), resultName+".fail", failLabel, okName, okLabel)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeArrayOptionalPointerResult converts a nullable element pointer to !&T.
@@ -338,7 +334,7 @@ func (e *emitter) writeArrayOptionalPointerResult(
 	instr *ir.Instr,
 	ptrName string,
 	failureKey string,
-) {
+) error {
 	success, _ := errorUnionSuccessType(instr.Result.Type)
 	resultName := localName(instr.Result.Name)
 	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array.ref")
@@ -346,13 +342,15 @@ func (e *emitter) writeArrayOptionalPointerResult(
 	nullName := resultName + ".is_null"
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
-	e.writeArrayFailureBlock(
+	if err := e.writeArrayFailureBlock(
 		failLabel,
 		resultName+".fail",
 		instr.Result.Type,
 		failureKey,
 		joinLabel,
-	)
+	); err != nil {
+		return err
+	}
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	e.values[ptrName] = valueInfo{typ: success, operand: ptrName}
 	okName := resultName + ".success"
@@ -362,6 +360,7 @@ func (e *emitter) writeArrayOptionalPointerResult(
 	fmt.Fprintf(&e.out, "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]\n",
 		resultName, e.llvmType(instr.Result.Type), resultName+".fail", failLabel, okName, okLabel)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeArrayBoolResult converts a runtime boolean into a !void result.
@@ -369,21 +368,22 @@ func (e *emitter) writeArrayBoolResult(
 	result ir.Value,
 	okOperand string,
 	failureKey string,
-) {
-	messageGlobal := failureValueGlobal(failureKey)
-	messageLen := len(failureValues[failureKey])
+) error {
+	code, err := e.failureErrorCode(failureKey)
+	if err != nil {
+		return err
+	}
 	resultName := localName(result.Name)
 	unionType := e.llvmType(result.Type)
 	baseName := resultName + ".base"
 	okByteName := resultName + ".ok.byte"
-	messageName := resultName + ".message"
-	e.writeStaticStringSlice(messageName, messageGlobal, messageLen)
 	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", okByteName, okOperand)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
 		baseName, unionType, okByteName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		resultName, unionType, baseName, messageName, errorUnionFailureIndex(result.Type))
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %d, %d\n",
+		resultName, unionType, baseName, code, errorUnionFailureIndex(result.Type))
 	e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}
+	return nil
 }
 
 // writeArrayFailureBlock writes one failed !T branch and jumps to joinLabel.
@@ -393,10 +393,13 @@ func (e *emitter) writeArrayFailureBlock(
 	resultType string,
 	failureKey string,
 	joinLabel string,
-) {
+) error {
 	fmt.Fprintf(&e.out, "%s:\n", label)
-	e.writeErrorFailureValue(resultName, resultType, failureKey)
+	if err := e.writeErrorFailureValue(resultName, resultType, failureKey); err != nil {
+		return err
+	}
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	return nil
 }
 
 // writeErrorSuccessValue writes an error-union success value.
@@ -410,22 +413,18 @@ func (e *emitter) writeErrorSuccessValue(resultName string, resultType string, v
 		resultName, unionType, baseName, e.llvmType(value.Type), valueInfo.operand)
 }
 
-// writeErrorFailureValue writes an error-union failure value with a static message.
+// writeErrorFailureValue writes an error-union failure value around one code.
 func (e *emitter) writeErrorFailureValue(
 	resultName string,
 	resultType string,
 	failureKey string,
-) {
-	messageGlobal := failureValueGlobal(failureKey)
-	messageLen := len(failureValues[failureKey])
-	unionType := e.llvmType(resultType)
-	baseName := resultName + ".base"
-	messageName := resultName + ".message"
-	e.writeStaticStringSlice(messageName, messageGlobal, messageLen)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
-		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		resultName, unionType, baseName, messageName, errorUnionFailureIndex(resultType))
+) error {
+	code, err := e.failureErrorCode(failureKey)
+	if err != nil {
+		return err
+	}
+	e.writeErrorFailureCode(resultName, resultType, fmt.Sprintf("%d", code))
+	return nil
 }
 
 // writeNullFailure reports the named failure when the pointer is null, which is
@@ -469,18 +468,6 @@ func (e *emitter) writeStackValue(baseName string, value ir.Value) string {
 func (e *emitter) writeStaticStringGlobal(name string, value string) {
 	fmt.Fprintf(&e.out, "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n",
 		name, len(value)+1, escapeString(value))
-}
-
-// writeStaticStringSlice materializes a %kizu.slice.u8 around a static global.
-func (e *emitter) writeStaticStringSlice(resultName string, global string, length int) {
-	ptrName := resultName + ".ptr"
-	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n",
-		ptrName, length+1, global)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
-		baseName, ptrName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
-		resultName, baseName, length)
 }
 
 // arrayResultLabels creates fail, success, and join labels for checked Array operations.

@@ -546,20 +546,42 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 }
 
 // returnTakesErrorPath reports whether returning expr exits through the error
-// path: the `error(...)` builtin or propagating an existing error-union value.
+// path. What decides it is the type of the returned value, not the shape of the
+// expression: a member of an error set fails, and so does an error union being
+// propagated, whether either is written out or bound to a local first.
 func (c *Checker) returnTakesErrorPath(expr ast.Expression, env *scope) bool {
-	if call, ok := expr.(*ast.CallExpr); ok {
-		if ident, ok := call.Callee.(*ast.IdentExpr); ok && ident.Name == "error" {
-			return true
-		}
+	typeName, ok := c.returnedTypeName(expr, env)
+	if !ok {
+		return false
 	}
-	if ident, ok := expr.(*ast.IdentExpr); ok {
-		if value, exists := env.lookup(ident.Name); exists &&
-			strings.HasPrefix(value.typeName, "!") {
-			return true
-		}
+	if c.errorSets[typeName] != nil {
+		return true
 	}
-	return false
+	_, _, isUnion := errorUnionParts(typeName)
+	return isUnion
+}
+
+// returnedTypeName reads the type of a returned expression without moving it.
+func (c *Checker) returnedTypeName(expr ast.Expression, env *scope) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		value, exists := env.lookup(e.Name)
+		if !exists {
+			return "", false
+		}
+		return value.typeName, true
+	case *ast.FieldExpr:
+		if !e.Namespace {
+			return "", false
+		}
+		name, err := c.readNamespaceExpr(e)
+		if err != nil {
+			return "", false
+		}
+		return name, true
+	default:
+		return "", false
+	}
 }
 
 // borrowedReturnAllowed permits returning the declared borrowed source parameter.
@@ -3065,9 +3087,6 @@ func (c *Checker) checkBuiltinCall(
 	case "ptr_read", "ptr_write", "volatile_read", "volatile_write":
 		result, err := c.checkPointerBuiltin(expr, env)
 		return result, true, err
-	case "error":
-		result, err := c.checkErrorCall(expr, env)
-		return result, true, err
 	case "Io":
 		return "", true, errorf("move error: use `std::io::blocking()`")
 	case "TaskGroup":
@@ -3075,17 +3094,6 @@ func (c *Checker) checkBuiltinCall(
 	default:
 		return "", false, nil
 	}
-}
-
-// checkErrorCall reads and copies the message into the error payload.
-func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error) {
-	if len(expr.Args) != 1 {
-		return "", errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))
-	}
-	if _, err := c.readExpr(expr.Args[0], env); err != nil {
-		return "", err
-	}
-	return "!unknown", nil
 }
 
 // readTryExpr reads a !T expression and returns T.
@@ -3242,38 +3250,39 @@ func readFsDirEntryFieldType(field string) (string, bool) {
 
 // readNamespaceExpr reads enum or payload-free union namespace lookup.
 func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
-	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	dotted, ok := qualifiedName(expr.Receiver)
 	if !ok {
 		return "", errorAt(expr.Span, "move error: invalid namespace lookup `%s`", expr.String())
 	}
-	if tags, exists := c.enums[ident.Name]; exists {
+	name := strings.ReplaceAll(dotted, ".", "::")
+	if tags, exists := c.enums[name]; exists {
 		if !tags[expr.Name] {
 			return "", errorAt(expr.Span,
-				"move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+				"move error: unknown enum tag `%s::%s`", name, expr.Name)
 		}
-		return ident.Name, nil
+		return name, nil
 	}
-	if members, exists := c.errorSets[ident.Name]; exists {
+	if members, exists := c.errorSets[name]; exists {
 		if !members[expr.Name] {
 			return "", errorAt(expr.Span,
-				"move error: unknown error `%s::%s`", ident.Name, expr.Name)
+				"move error: unknown error `%s::%s`", name, expr.Name)
 		}
-		return ident.Name, nil
+		return name, nil
 	}
-	if variants, exists := c.unions[ident.Name]; exists {
+	if variants, exists := c.unions[name]; exists {
 		payload, ok := variants[expr.Name]
 		if !ok {
 			return "", errorAt(expr.Span, "move error: unknown union variant `%s::%s`",
-				ident.Name, expr.Name)
+				name, expr.Name)
 		}
 		if payload != "" {
 			return "", errorAt(expr.Span,
 				"move error: union variant `%s::%s` expects payload",
-				ident.Name, expr.Name)
+				name, expr.Name)
 		}
-		return ident.Name, nil
+		return name, nil
 	}
-	return "", errorAt(expr.Span, "move error: unknown namespace `%s`", ident.Name)
+	return "", errorAt(expr.Span, "move error: unknown namespace `%s`", name)
 }
 
 // moveFieldExpr rejects partial moves from borrowed or aggregate values.

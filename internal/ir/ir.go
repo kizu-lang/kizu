@@ -8,8 +8,11 @@ import (
 
 // Module is a lowered Kizu source file.
 type Module struct {
-	Structs   map[string]Struct
-	Enums     map[string]Enum
+	Structs map[string]Struct
+	Enums   map[string]Enum
+	// ErrorSets are named like enums but numbered globally: an error value is
+	// one integer that means the same member in every error union it crosses.
+	ErrorSets map[string]Enum
 	Unions    map[string]Union
 	Functions []*Function
 }

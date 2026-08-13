@@ -611,14 +611,19 @@ func ErrorSets() (map[string]map[string]int, error) {
 }
 
 var (
-	errorSetsOnce  sync.Once
-	errorSetsCache map[string]map[string]int
-	errorSetsErr   error
+	errorSetsOnce      sync.Once
+	errorSetsCache     map[string]map[string]int
+	errorCodeBaseCache int
+	errorSetsErr       error
 )
 
 // readErrorSets parses std once for the numbers its error set members lower to.
+// Numbering is global: an error value is one integer, and that integer means
+// the same member in every error union it travels through, so no union-to-union
+// conversion exists. Code 0 is reserved for "no error".
 func readErrorSets() (map[string]map[string]int, error) {
 	sets := map[string]map[string]int{}
+	code := 1
 	for _, module := range sourceModuleOrder {
 		decls, errs, err := parseModuleDecls(module)
 		if err != nil {
@@ -633,11 +638,23 @@ func readErrorSets() (map[string]map[string]int, error) {
 				continue
 			}
 			members := map[string]int{}
-			for index, member := range set.Members {
-				members[member] = index
+			for _, member := range set.Members {
+				members[member] = code
+				code++
 			}
 			sets[set.Name] = members
 		}
 	}
+	errorCodeBaseCache = code
 	return sets, nil
+}
+
+// ErrorCodeBase returns the first code available to error sets a program
+// declares itself, one past the last code std claims. It is the counter
+// readErrorSets stopped at, so the two cannot drift.
+func ErrorCodeBase() (int, error) {
+	if _, err := ErrorSets(); err != nil {
+		return 0, err
+	}
+	return errorCodeBaseCache, nil
 }
