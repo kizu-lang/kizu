@@ -57,8 +57,6 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 - 実行時の組み込み(print、メモリ、fs、task 等)は Go 実装が提供し、
   `std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
-- `std/src/kizu/` は**言語の自己記述層**で、Kizu で書かれた lexer/parser/AST です。
-  Kizu が Kizu を記述する層はここだけに保ちます。
 - Go 側は `internal/stdlib`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std に public 型を足すときは **`knownTypes` の更新が必要**
   (漏れると checked コードでその型名が `unknown type` になります)。

@@ -27,11 +27,9 @@ and another way under `build` -- there is one lowering, not two (ADR-0083).
 What a program is *supposed* to do is defined by the conformance manifests, not
 by any one execution path.
 
-warning: 2 manifest tags have no group: control-flow, expression
-warning: 3 manifest tags have no group: control-flow, error-set, expression
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 27 | ✅ | 25/27 | 25/27 | 9/27 |
+| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
@@ -39,23 +37,22 @@ warning: 3 manifest tags have no group: control-flow, error-set, expression
 | error union `!T` / try / errdefer | 11 | ✅ | ✅ | ✅ | ❌ |
 | move / borrow | 18 | ✅ | ✅ | ✅ | 2/18 |
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 6 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
-| cast / slice / raw pointer / box | 11 | ✅ | 8/11 | 8/11 | 1/11 |
-| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
-| std::array | 11 | ✅ | 10/11 | 10/11 | ❌ |
+| cast / slice / raw pointer / box | 10 | ✅ | 7/10 | 7/10 | 1/10 |
+| contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
+| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
 | std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
-| std::testing | 13 | ✅ | 12/13 | 12/13 | ❌ |
+| std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
 | TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
 | thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
-| std::kizu self-describing layer | 11 | ✅ | 10/11 | 10/11 | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 88 runnable examples, measured on 2026-08-13 with
+`❌` means none do. 84 runnable examples, measured on 2026-08-14 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -63,10 +60,10 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 88/88 |
-| `kizu run` | 75/88 |
-| `kizu build --emit-llvm` | 75/88 |
-| `kizu build --target wasm32-wasi` | 16/88 |
+| `kizu check` | 84/84 |
+| `kizu run` | 71/84 |
+| `kizu build --emit-llvm` | 71/84 |
+| `kizu build --target wasm32-wasi` | 16/84 |
 
 The 20 cases `run` cannot reproduce -- 13 programs and 7 negative cases -- are
 registered in the manifests with a `pending` reason. A pending case is tested
@@ -89,8 +86,7 @@ Tooling around the language core:
 - typed SSA IR with an opt-in optimization pipeline
 - bounded local build cache and rebuild explanations
 - limited C header import for extern function declarations
-- the Kizu standard library in `std/`, including the self-describing
-  `std/src/kizu/` lexer, parser, and AST
+- the Kizu standard library in `std/`
 - an LSP server (`cmd/kizu-lsp`)
 
 There is no interpreter. `kizu test` builds and runs test blocks the same way

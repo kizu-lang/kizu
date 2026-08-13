@@ -927,19 +927,19 @@ func TestCheckPackageCommandSmoke(t *testing.T) {
 
 // TestRunPackageCommandSmoke checks package roots can execute root module main.
 func TestRunPackageCommandSmoke(t *testing.T) {
-	cmd := kizuCommand("run", "../../examples/modules/cross_module_types")
+	cmd := kizuCommand("run", "../../examples/modules/compiler_phases")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if string(out) != "0\n2\nfn\nmain\ntoken\n3\n8\n3\n3\n" {
+	if string(out) != "7\n" {
 		t.Fatalf("got %q, want package run output", out)
 	}
 }
 
 // TestTestPackageCommandSmoke checks package roots can run assertion tests.
 func TestTestPackageCommandSmoke(t *testing.T) {
-	cmd := kizuCommand("test", "../../examples/modules/cross_module_types")
+	cmd := kizuCommand("test", "../../examples/modules/same_module_helper_lookup")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
@@ -1046,23 +1046,6 @@ func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"testing"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-// TestResolveStdModulesOrdersNestedKizuDeps checks nested std modules and deps.
-func TestResolveStdModulesOrdersNestedKizuDeps(t *testing.T) {
-	got, err := resolveStdModules(`fn main() -> !void {
-    let allocator = std::mem::page_allocator();
-    let source = std::kizu::ast::source_file("main.kizu", "fn main");
-    let node = try std::kizu::parser::parse_first_node(allocator, source);
-    return;
-}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"mem", "array", "kizu::ast", "kizu::lexer", "kizu::parser"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

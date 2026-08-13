@@ -279,10 +279,6 @@ var sourceModuleOrder = []string{
 	"string",
 	"fmt",
 	"testing",
-	"kizu::ast",
-	"kizu::lexer",
-	"kizu::diagnostic",
-	"kizu::parser",
 	"fs",
 	"path_bits",
 	"path",
@@ -586,36 +582,6 @@ func qualifySimpleType(module string, typ string) (string, bool) {
 	}
 	if module == "fs" && (typ == "DirEntry" || typ == "Metadata") {
 		return "std::fs::" + typ, true
-	}
-	if module == "kizu::ast" {
-		switch typ {
-		case "SourceFile", "Span", "TokenId", "SymbolId", "BinaryOp", "PrefixOp", "ChildRange",
-			"NodeId", "Ast", "AstNode", "AstData", "ProgramNode", "IntNode",
-			"StringNode", "TypeNameNode", "VarNode", "BoolNode", "PrefixNode",
-			"BinaryNode", "FieldExprNode", "DerefExprNode", "CallNode", "TypeApplyExprNode",
-			"CastExprNode", "IndexExprNode", "StructLiteralExprNode", "StructFieldInitNode",
-			"ArenaNewExprNode", "TryExprNode", "ComptimeExprNode",
-			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "DeferNode",
-			"ErrDeferNode", "ExprStmtNode",
-			"WhileNode", "ForNode", "BreakNode", "ContinueNode", "ParamNode", "FieldNode",
-			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "ErrorSetDeclNode", "UnionDeclNode",
-			"ImplDeclNode", "UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
-			"FnDeclNode", "ContractDeclNode", "SynthLatchNode",
-			"ParseResult":
-			return "std::kizu::ast::" + typ, true
-		}
-	}
-	if module == "kizu::lexer" {
-		switch typ {
-		case "TokenKind", "Token", "Position":
-			return "std::kizu::lexer::" + typ, true
-		}
-	}
-	if module == "kizu::diagnostic" {
-		switch typ {
-		case "FileSpan", "RelatedSpan", "Diagnostic":
-			return "std::kizu::diagnostic::" + typ, true
-		}
 	}
 	return "", false
 }

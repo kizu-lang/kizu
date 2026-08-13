@@ -121,21 +121,19 @@ Zig の inferred error set と同じ規則である。明示したい場合は `
 - `union` による typed error(`ConfigError!T`)は error set に置き換わる
 - checker に error set の推論が入る
 - conformance で runtime message を検査している 25 case が error 名に変わる
-- `std/src/kizu/parser.kizu` の 2,442 箇所が `Diagnostic` を返す形になる。
-  これは移し替えであり、同時に ADR-0072 が要求する位置が付く
+- `std/src/kizu/parser.kizu` は削除された(ADR-0082 改訂)。2,442 箇所の
+  `error("...")` を `Diagnostic` に移す段階は不要になった
 
 ## 段階
 
 1. error set の宣言と `FsError!T` を通す(推論なし、明示のみ)
 2. `!T` の推論を入れる
 3. runtime の error を error set に載せ替える
-4. parser の診断を `Diagnostic` に移す
-5. `error(message)` と `[]u8` payload を削除する
+4. `error(message)` と `[]u8` payload を削除する
 
 推論が runtime の載せ替えより先に来る。`std::fs::read_file` が
 `std::fs::Error![]u8` を返すようになった時点で、`fn main() -> !void` からの `try`
 は error 型の完全一致を満たさなくなる。推論がそれを吸収する。順序を逆にすると、
 その間だけ通す規則を足すことになり、それは消える条件のない分岐になる。
 
-各段階が単独で green になるようにし、`error(message)` は 5 まで残す。段階 4 が
-最も大きく、ADR-0072 への準拠と同じ作業になる。
+各段階が単独で green になるようにし、`error(message)` は 4 まで残す。
