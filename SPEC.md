@@ -1914,6 +1914,9 @@ map.deinit() -> void
 v0.2 では key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `!V` の error として返します。
+`insert` / `get` / `contains` は amortized O(1) です。
+iteration は後続ですが、順序は先に決めてあります。**map は挿入順で反復します。**
+未定義の順序は露出しません。
 v0.2 の value type は copy type 限定です。
 non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
 `std::map::Map<K, V>()` のような hidden default allocator は使いません。

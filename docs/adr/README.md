@@ -101,3 +101,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0085: main returns void, growth is implementation-defined](0085-main-returns-void-and-growth-is-implementation-defined.md)
 - [ADR-0086: errors are names, not messages](0086-errors-are-names-not-messages.md) (決定 3 は置換)
 - [ADR-0087: `!T` declares no error set](0087-error-union-declares-no-set.md)
+- [ADR-0088: map iterates in insertion order](0088-map-iterates-in-insertion-order.md)
