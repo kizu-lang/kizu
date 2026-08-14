@@ -29,7 +29,7 @@ type lowerer struct {
 	signatures  map[string]Signature
 	current     *Function
 	block       *Block
-	env         map[string]Value
+	env         *env
 	nextValue   int
 	nextBlock   int
 	loops       []*loopContext
@@ -79,7 +79,13 @@ type loopContext struct {
 
 type loopEdge struct {
 	block string
-	env   map[string]Value
+	env   *env
+}
+
+// A loopPhi is a header phi and the name it carries around the loop.
+type loopPhi struct {
+	name string
+	phi  *Instr
 }
 
 // newLowerer prepares lookup tables used during lowering.
@@ -537,7 +543,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
 	signature := l.lowerSignature(fn)
 	l.current = &Function{Name: name, Params: signature.Params, Return: signature.Return}
-	l.env = map[string]Value{}
+	l.env = newEnv()
 	slots, err := l.mutablyBorrowedLocals(fn)
 	if err != nil {
 		return nil, err
@@ -548,7 +554,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.loops = nil
 	l.deferFrames = nil
 	for index, param := range fn.Params {
-		l.env[param.Name] = signature.Params[index].Value()
+		l.env.set(param.Name, signature.Params[index].Value())
 	}
 	l.block = l.newBlock("entry")
 	if err := l.lowerBlock(fn.Body); err != nil {
@@ -632,7 +638,7 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 		if !ok {
 			continue
 		}
-		previous, bound := l.env[declaration.Name]
+		previous, bound := l.env.get(declaration.Name)
 		saved = append(saved, scopedBinding{
 			name: declaration.Name, value: previous, bound: bound,
 		})
@@ -646,10 +652,10 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 		for index := len(saved) - 1; index >= 0; index-- {
 			binding := saved[index]
 			if binding.bound {
-				l.env[binding.name] = binding.value
+				l.env.set(binding.name, binding.value)
 				continue
 			}
-			delete(l.env, binding.name)
+			l.env.remove(binding.name)
 		}
 	}
 }
@@ -808,7 +814,7 @@ func (l *lowerer) lowerLetStmt(stmt *ast.LetStmt) error {
 func (l *lowerer) assignTargetType(target ast.Expression) string {
 	switch t := target.(type) {
 	case *ast.IdentExpr:
-		value, ok := l.env[t.Name]
+		value, ok := l.env.get(t.Name)
 		if !ok {
 			return ""
 		}
@@ -840,7 +846,7 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 			l.emit("ref.store", "void", []Value{slot, value}, "")
 			return nil
 		}
-		l.env[t.Name] = value
+		l.env.set(t.Name, value)
 		return nil
 	case *ast.FieldExpr:
 		receiver, err := l.lowerReceiverAddress(t.Receiver)
@@ -1079,7 +1085,7 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	if slot, ok := l.slotPointer(expr); ok {
 		return l.emit("ref.load", derefType(slot.Type), []Value{slot}, ""), nil
 	}
-	value, ok := l.env[expr.Name]
+	value, ok := l.env.get(expr.Name)
 	if ok {
 		return value, nil
 	}

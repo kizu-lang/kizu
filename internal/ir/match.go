@@ -9,7 +9,7 @@ import (
 
 type matchArmResult struct {
 	block   string
-	env     map[string]Value
+	env     *env
 	value   Value
 	reaches bool
 }
@@ -27,7 +27,7 @@ func (l *lowerer) lowerMatchStmt(stmt *ast.MatchStmt) error {
 	if err != nil {
 		return err
 	}
-	saved := l.copyEnv(l.env)
+	saved := l.env
 	end := l.newBlock(l.nextBlockName("match.end"))
 	results, err := l.lowerMatchArms(subject, stmt.Arms, end.Name, saved, false)
 	if err != nil {
@@ -47,7 +47,7 @@ func (l *lowerer) lowerMatchExpr(stmt *ast.MatchStmt) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	saved := l.copyEnv(l.env)
+	saved := l.env
 	end := l.newBlock(l.nextBlockName("match.end"))
 	results, err := l.lowerMatchArms(subject, stmt.Arms, end.Name, saved, true)
 	if err != nil {
@@ -107,7 +107,7 @@ func (l *lowerer) lowerMatchArms(
 	subject matchSubject,
 	arms []ast.MatchArm,
 	endLabel string,
-	saved map[string]Value,
+	saved *env,
 	wantValue bool,
 ) ([]matchArmResult, error) {
 	results := []matchArmResult{}
@@ -186,10 +186,10 @@ func (l *lowerer) lowerMatchArmBody(
 	arm ast.MatchArm,
 	block *Block,
 	endLabel string,
-	saved map[string]Value,
+	saved *env,
 	wantValue bool,
 ) (matchArmResult, error) {
-	l.env = l.copyEnv(saved)
+	l.env = saved.clone()
 	l.block = block
 	if err := l.bindMatchPayload(subject, arm); err != nil {
 		return matchArmResult{}, err
@@ -204,7 +204,7 @@ func (l *lowerer) lowerMatchArmBody(
 	if err != nil {
 		return matchArmResult{}, err
 	}
-	result := matchArmResult{block: l.block.Name, env: l.copyEnv(l.env), value: value}
+	result := matchArmResult{block: l.block.Name, env: l.env, value: value}
 	if l.block.Terminator.Op == "" {
 		l.block.Terminator = Terminator{Op: "jump", Target: endLabel}
 		result.reaches = true
@@ -222,12 +222,12 @@ func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) error
 	if !ok || variant.Payload == "" {
 		return nil
 	}
-	l.env[arm.Binding] = l.emit(
+	l.env.set(arm.Binding, l.emit(
 		"union.payload",
 		variant.Payload,
 		[]Value{subject.unionValue},
 		variant.Name,
-	)
+	))
 	return nil
 }
 
@@ -241,10 +241,7 @@ func (l *lowerer) lowerMatchArmValue(stmt ast.Statement) (Value, error) {
 }
 
 // mergeMatchEnvs creates phi nodes for bindings changed by reachable arms.
-func (l *lowerer) mergeMatchEnvs(
-	results []matchArmResult,
-	fallback map[string]Value,
-) map[string]Value {
+func (l *lowerer) mergeMatchEnvs(results []matchArmResult, fallback *env) *env {
 	incomingResults := []matchArmResult{}
 	for _, result := range results {
 		if result.reaches {
@@ -254,33 +251,33 @@ func (l *lowerer) mergeMatchEnvs(
 	if len(incomingResults) == 0 {
 		return fallback
 	}
-	merged := l.copyEnv(incomingResults[0].env)
-	names := map[string]bool{}
-	for name := range fallback {
-		names[name] = true
-	}
-	for name := range names {
-		first, ok := incomingResults[0].env[name]
-		if !ok {
-			first = fallback[name]
-		}
+	merged := incomingResults[0].env.clone()
+	for _, name := range fallback.names() {
+		first := armValue(incomingResults[0], name, fallback)
 		allSame := true
 		incoming := make([]Incoming, 0, len(incomingResults))
 		for _, result := range incomingResults {
-			value, ok := result.env[name]
-			if !ok {
-				value = fallback[name]
-			}
+			value := armValue(result, name, fallback)
 			if !sameValue(first, value) {
 				allSame = false
 			}
 			incoming = append(incoming, Incoming{Block: result.block, Value: value})
 		}
 		if !allSame {
-			merged[name] = l.addPhi(l.block, first.Type, incoming)
+			merged.set(name, l.addPhi(l.block, first.Type, incoming))
 		}
 	}
 	return merged
+}
+
+// armValue returns what name holds when an arm reaches the merge. An arm that
+// never touched the name leaves it at what the match started from.
+func armValue(result matchArmResult, name string, fallback *env) Value {
+	if value, ok := result.env.get(name); ok {
+		return value
+	}
+	value, _ := fallback.get(name)
+	return value
 }
 
 // matchHasReachableArm reports whether any arm jumps to the match merge block.

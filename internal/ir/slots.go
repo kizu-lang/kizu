@@ -242,10 +242,10 @@ func markIfName(expr ast.Expression, found map[string]bool) {
 // storage here, once, so every later use of the name means the same place.
 func (l *lowerer) bindLocal(name string, value Value) {
 	if !l.slots[name] {
-		l.env[name] = value
+		l.env.set(name, value)
 		return
 	}
-	l.env[name] = l.emit("local.slot", "&var "+value.Type, []Value{value}, "")
+	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
 }
 
 // slotPointer returns the storage behind a name, for the places that need the
@@ -255,7 +255,7 @@ func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
 	if !ok || !l.slots[ident.Name] {
 		return Value{}, false
 	}
-	value, bound := l.env[ident.Name]
+	value, bound := l.env.get(ident.Name)
 	return value, bound
 }
 

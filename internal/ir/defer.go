@@ -54,7 +54,7 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: defer cleanup receiver must be a local")
 	}
-	receiver, ok := l.env[ident.Name]
+	receiver, ok := l.env.get(ident.Name)
 	if !ok {
 		return Cleanup{}, fmt.Errorf("ir error: undefined defer receiver `%s`", ident.Name)
 	}
