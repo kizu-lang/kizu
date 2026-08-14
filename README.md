@@ -40,7 +40,7 @@ by any one execution path.
 | arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
+| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
 | std::array | 10 | ✅ | ✅ | ✅ | ❌ |
 | std::string | 11 | ✅ | ✅ | ✅ | ❌ |
 | std::map | 9 | ✅ | ✅ | ✅ | ❌ |
@@ -50,7 +50,7 @@ by any one execution path.
 | std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 73 runnable examples, measured on 2026-08-14 with
+`❌` means none do. 74 runnable examples, measured on 2026-08-14 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -58,10 +58,10 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 73/73 |
-| `kizu run` | 71/73 |
-| `kizu build --emit-llvm` | 71/73 |
-| `kizu build --target wasm32-wasi` | 16/73 |
+| `kizu check` | 74/74 |
+| `kizu run` | 72/74 |
+| `kizu build --emit-llvm` | 72/74 |
+| `kizu build --target wasm32-wasi` | 16/74 |
 
 The 2 programs `run` cannot reproduce are registered in the manifests with a
 `pending` reason. A pending case is tested for *still failing*, so closing a gap
@@ -101,7 +101,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it |
-| wasm backend beyond the current subset | **in progress.** 16 of 73 examples load and run today |
+| wasm backend beyond the current subset | **in progress.** 16 of 74 examples load and run today |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |

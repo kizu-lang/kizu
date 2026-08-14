@@ -38,7 +38,7 @@ conformance manifest であり、特定の実行経路ではありません。
 | arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
+| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
 | std::array | 10 | ✅ | ✅ | ✅ | ❌ |
 | std::string | 11 | ✅ | ✅ | ✅ | ❌ |
 | std::map | 9 | ✅ | ✅ | ✅ | ❌ |
@@ -48,16 +48,16 @@ conformance manifest であり、特定の実行経路ではありません。
 | std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
-通らないことを表します。runnable example は 73 件、測定は 2026-08-14 に
+通らないことを表します。runnable example は 74 件、測定は 2026-08-14 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run` はプログラムの出力で判定し、`llvm` と `wasm` は lowering が通ったかで判定します。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 73/73 |
-| `kizu run` | 71/73 |
-| `kizu build --emit-llvm` | 71/73 |
-| `kizu build --target wasm32-wasi` | 16/73 |
+| `kizu check` | 74/74 |
+| `kizu run` | 72/74 |
+| `kizu build --emit-llvm` | 72/74 |
+| `kizu build --target wasm32-wasi` | 16/74 |
 
 `run` が再現できない 2 件は、manifest に `pending` として理由付きで登録してあります。
 pending なケースは「今も通らないこと」を検査するので、穴を塞いだ変更は
@@ -94,7 +94,7 @@ build policy としては受理済みですが、未実装です。
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです |
-| 現在の subset を超える wasm backend | **進行中。** 73 件中 16 件が load して動きます |
+| 現在の subset を超える wasm backend | **進行中。** 74 件中 16 件が load して動きます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | float literal と float 演算 | **未着手。** `f32` / `f64` は型名として存在しますが、`1.5` は 1 つの literal として字句解析されません |
 | type alias | **未着手** |
