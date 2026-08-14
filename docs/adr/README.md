@@ -99,3 +99,5 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0083: run executes the build](0083-run-executes-the-build.md)
 - [ADR-0084: bounds checks live in the IR](0084-bounds-checks-live-in-the-ir.md)
 - [ADR-0085: main returns void, growth is implementation-defined](0085-main-returns-void-and-growth-is-implementation-defined.md)
+- [ADR-0086: errors are names, not messages](0086-errors-are-names-not-messages.md) (決定 3 は置換)
+- [ADR-0087: `!T` declares no error set](0087-error-union-declares-no-set.md)

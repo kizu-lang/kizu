@@ -170,9 +170,10 @@ func (a *typeAudit) checkReturn(path string, fn *ir.Function, block *ir.Block) {
 }
 
 // absorbsErrorSet reports whether returning a value of type got from a function
-// declaring want is the absorption `try` does, written as a return. `!T` infers
-// its error set (ADR-0086), so an `E!T` returned from it arrives as `!T` with E
-// absorbed -- the rule the LLVM emitter applies as absorbsErrorUnionReturn.
+// declaring want is the absorption `try` does, written as a return. `!T`
+// declares no error set (ADR-0087), so an `E!T` returned from it arrives as
+// `!T` with E absorbed -- the rule the LLVM emitter applies as
+// absorbsErrorUnionReturn.
 func absorbsErrorSet(want string, got string) bool {
 	wantSet, wantSuccess, isUnion := typ.ErrorUnionParts(want)
 	if !isUnion || wantSet != "" {

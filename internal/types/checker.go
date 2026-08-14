@@ -2073,7 +2073,7 @@ func (c *Checker) checkReturnValue(
 }
 
 // absorbsErrorUnion reports whether returning a result that fails one way from a
-// function whose own set is inferred is the same absorption `try` does. A
+// function that declares no error set is the same absorption `try` does. A
 // declared `E!T` is not this, because it named the one set it accepts.
 func absorbsErrorUnion(want Type, got Type) bool {
 	wantError, wantSuccess, ok := errorUnionParts(want)
@@ -2109,8 +2109,8 @@ func (c *Checker) checkErrorUnionReturn(
 		return true, nil
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
-		// An inferred `!T` accepts a member of any error set, the same way it
-		// accepts a `try` from any set: the set is part of what is inferred.
+		// `!T` declares no error set, so it accepts a member of any of them,
+		// the same way it accepts a `try` from any set (ADR-0087).
 		if errorType == "" && c.errorSets[string(got)] != nil {
 			return true, nil
 		}
@@ -3320,9 +3320,9 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps)
 		return "", errorf("type error: try expects !T, got %s", source)
 	}
 	targetError, _, _ := errorUnionParts(c.currentReturn)
-	// `!T` is the inferred set: it accepts whatever the body propagates, which
-	// is what makes a caller able to call things that fail in different ways
-	// without naming every one of them. A declared `E!T` still accepts only E.
+	// `!T` declares no error set, so it propagates whatever the body fails
+	// with, which is what lets a function call things that fail in different
+	// ways without naming every one. A declared `E!T` accepts only E.
 	if targetError != "" && sourceError != targetError {
 		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}

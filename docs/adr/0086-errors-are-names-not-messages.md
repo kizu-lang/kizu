@@ -4,6 +4,8 @@ Status: 採用
 
 Supersedes: ADR-0030 の error payload 部分
 
+Superseded by: 決定 3 のみ ADR-0087。決定 1 と決定 2 は有効。
+
 ## 背景
 
 ADR-0030 は error payload を「owned copy of `[]u8` message」に固定し、
@@ -102,6 +104,10 @@ payload は持たない。error 値は「何が起きたか」だけを運ぶ。
 失敗は `std::testing` が診断として出し、error 値は失敗したことだけを運ぶ。
 
 ## 決定 3: `!T` の error set は関数本体から推論する
+
+> **置換済み (ADR-0087)。** この推論は実装されなかった。checker が持つのは
+> 「`!T` はあらゆる set の member を受け取る」という受理規則 1 本であり、
+> set を求める場所はない。ADR-0087 はその挙動を仕様として採用した。
 
 ```kizu
 fn read_config() -> !i64 {
