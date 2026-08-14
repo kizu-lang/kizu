@@ -264,32 +264,43 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	}
 	previous, hadPrevious := l.env.get(stmt.Name)
 	defer l.restoreLoopVar(stmt.Name, previous, hadPrevious)
+	assigned := assignedNames(stmt.Body)
 	preheader := l.block
 	header := l.newBlock(l.nextBlockName("for.header"))
 	body := l.newBlock(l.nextBlockName("for.body"))
 	step := l.newBlock(l.nextBlockName("for.step"))
 	exit := l.newBlock(l.nextBlockName("for.end"))
 	l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
+	phis := l.createLoopPhis(header, assigned)
 	l.block = header
 	index := l.createForIndexPhi(header, preheader.Name, start)
 	l.env.set(stmt.Name, index.Result)
 	cond := l.emit("binary.<", "bool", []Value{index.Result, end}, "")
 	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
-	l.pushLoop(stmt.Label, exit.Name, step.Name)
+	loop := l.pushLoop(stmt.Label, exit.Name, step.Name)
 	if err := l.lowerBlock(stmt.Body); err != nil {
 		return err
 	}
 	l.popLoop()
+	bodyEnd := ""
+	bodyEnv := newEnv()
 	if l.block.Terminator.Op == "" {
+		bodyEnd = l.block.Name
+		// A copy, because finishForLoopPhis rebinds the same names in l.env
+		// while it reads what the body left them at.
+		bodyEnv = l.env.clone()
 		l.block.Terminator = Terminator{Op: "jump", Target: step.Name}
 	}
 	l.block = step
+	// Before the step instructions, so the merge phis stay at the top of step.
+	l.finishForLoopPhis(phis, step, bodyEnd, bodyEnv, loop.continueEdges)
 	one := l.emitConst("i64", "1")
 	next := l.emit("binary.+", "i64", []Value{index.Result, one}, "")
 	step.Terminator = Terminator{Op: "jump", Target: header.Name}
 	index.Incoming = append(index.Incoming, Incoming{Block: step.Name, Value: next})
 	l.block = exit
+	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
 	return nil
 }
 
@@ -402,6 +413,51 @@ func (l *lowerer) finishLoopPhis(
 			}
 		}
 		l.env.set(entry.name, phi.Result)
+	}
+}
+
+// finishForLoopPhis closes the header phis of a for loop. A for loop reaches
+// its header through the step block, so the back edge carries whatever reached
+// step: the body falling through, and every `continue`. Those are merged in
+// step, and the header takes the single value that comes out.
+func (l *lowerer) finishForLoopPhis(
+	phis []loopPhi,
+	step *Block,
+	bodyEnd string,
+	bodyEnv *env,
+	continueEdges []loopEdge,
+) {
+	for _, entry := range phis {
+		incoming := []Incoming{}
+		if bodyEnd != "" {
+			value, _ := bodyEnv.get(entry.name)
+			incoming = append(incoming, Incoming{Block: bodyEnd, Value: value})
+		}
+		for _, edge := range continueEdges {
+			value, ok := edge.env.get(entry.name)
+			if ok {
+				incoming = append(incoming, Incoming{Block: edge.block, Value: value})
+			}
+		}
+		entry.phi.Incoming = append(entry.phi.Incoming, Incoming{
+			Block: step.Name,
+			Value: l.stepValue(step, entry, incoming),
+		})
+		l.env.set(entry.name, entry.phi.Result)
+	}
+}
+
+// stepValue returns what a name holds where the step block starts. One edge
+// arrives with one value and needs nothing; several need a phi. None at all
+// means nothing reaches step, and the back edge reads the header phi itself.
+func (l *lowerer) stepValue(step *Block, entry loopPhi, incoming []Incoming) Value {
+	switch len(incoming) {
+	case 0:
+		return entry.phi.Result
+	case 1:
+		return incoming[0].Value
+	default:
+		return l.addPhi(step, entry.phi.Result.Type, incoming)
 	}
 }
 
