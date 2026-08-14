@@ -48,10 +48,12 @@ type Field struct {
 	Type string
 }
 
-// Function is a typed SSA function.
+// Function is a typed SSA function. Its parameters keep the Passing lowering
+// decided for them, so a reader asks how an argument travels instead of
+// inferring it back from the type's spelling.
 type Function struct {
 	Name   string
-	Params []Value
+	Params []Param
 	Return string
 	Blocks []*Block
 }
@@ -142,12 +144,30 @@ type Signature struct {
 	Return string
 }
 
-// Param is one parameter of a callable: the type the callee sees, and how the
-// call hands it over. Both come from one decision, so a caller reading how a
-// parameter is passed reads the same answer the type was built from.
+// Param is one parameter of a callable: its SSA name, the type the callee sees,
+// and how the call hands it over. The last two come from one decision, so a
+// caller reading how a parameter is passed reads the same answer the type was
+// built from.
 type Param struct {
+	Name    string
 	Type    string
 	Passing Passing
+}
+
+// Value is the parameter as the body reads it: the SSA value bound to its name
+// on entry. Passing is how the call gets it there and has no reading inside.
+func (p Param) Value() Value {
+	return Value{Name: p.Name, Type: p.Type}
+}
+
+// TakesAddressOf reports whether a parameter reading through an address is
+// being handed the value that address is taken of, rather than an address the
+// caller already held. The IR does not name an address, so both arrive spelled
+// like whatever the caller had, and this is the one question that separates
+// them. It stops being a question when taking an address is an instruction with
+// a result of its own.
+func (p Param) TakesAddressOf(argType string) bool {
+	return p.Passing == PassCopyAddress && p.Type != argType && derefType(p.Type) == argType
 }
 
 // Passing is how a call hands one parameter to the callee.

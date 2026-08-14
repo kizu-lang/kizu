@@ -49,6 +49,12 @@ func TestVerifyRejects(t *testing.T) {
 			name: "phi dominance", module: phiWithoutDominance(),
 			want: "does not dominate b",
 		},
+		{
+			// The address exemption is the declared Passing, not the `&`. A
+			// parameter taken by value is filled by its own type like any other.
+			name: "borrow spelling without the passing", module: valueParamSpelledAsBorrow(),
+			want: "call callee argument 0 in block entry is i64, declared &i64",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Verify(tc.module)
@@ -73,9 +79,11 @@ func TestVerifyAcceptsDeclaredExceptions(t *testing.T) {
 		name   string
 		module *Module
 	}{
-		// A borrow's address is never named in the IR, so a `&i64` parameter is
-		// handed the i64 whose address the call takes.
-		{"borrow parameter takes the borrowed value", borrowedArgument()},
+		// A borrow's address is never named in the IR, so a parameter read
+		// through one is handed either the value the address is taken of at the
+		// call, or an address the caller already held.
+		{"borrow parameter takes the borrowed value", borrowedArgument("i64")},
+		{"borrow parameter takes an address already held", borrowedArgument("&i64")},
 		// `!T` declares no error set (ADR-0087), so it absorbs an `E!T`.
 		{"undeclared error set absorbs a declared one", absorbedErrorSetReturn()},
 	} {
@@ -87,14 +95,18 @@ func TestVerifyAcceptsDeclaredExceptions(t *testing.T) {
 	}
 }
 
-// callee is a function taking one parameter of the given type and returning it.
-func callee(paramType string) *Function {
-	param := Value{Name: "%a", Type: paramType}
+// callee is a function taking one parameter, passed the given way, and
+// returning it.
+func callee(paramType string, passing Passing) *Function {
+	param := Param{Name: "%a", Type: paramType, Passing: passing}
 	return &Function{
 		Name:   "callee",
-		Params: []Value{param},
+		Params: []Param{param},
 		Return: paramType,
-		Blocks: []*Block{{Name: "entry", Terminator: Terminator{Op: "return", Value: param}}},
+		Blocks: []*Block{{
+			Name:       "entry",
+			Terminator: Terminator{Op: "return", Value: param.Value()},
+		}},
 	}
 }
 
@@ -123,20 +135,35 @@ func callArgumentMismatch() *Module {
 		Args:   []Value{{Name: "%wrong", Type: "i32"}},
 	}
 	return &Module{Functions: []*Function{
-		callee("i64"),
+		callee("i64", PassValue),
 		caller("void", returningBlock(Value{}, call)),
 	}}
 }
 
-// borrowedArgument hands a callee declaring `&i64` the i64 it borrows.
-func borrowedArgument() *Module {
+// borrowedArgument hands a callee reading through an address the given spelling
+// of what it borrows.
+func borrowedArgument(argType string) *Module {
+	call := &Instr{
+		Result: Value{Name: "%1", Type: "&i64"},
+		Op:     "call.callee",
+		Args:   []Value{{Name: "%value", Type: argType}},
+	}
+	return &Module{Functions: []*Function{
+		callee("&i64", PassCopyAddress),
+		caller("void", returningBlock(Value{}, call)),
+	}}
+}
+
+// valueParamSpelledAsBorrow hands a by-value parameter spelled `&i64` the i64
+// it points at, which only a parameter read through an address accepts.
+func valueParamSpelledAsBorrow() *Module {
 	call := &Instr{
 		Result: Value{Name: "%1", Type: "&i64"},
 		Op:     "call.callee",
 		Args:   []Value{{Name: "%value", Type: "i64"}},
 	}
 	return &Module{Functions: []*Function{
-		callee("&i64"),
+		callee("&i64", PassValue),
 		caller("void", returningBlock(Value{}, call)),
 	}}
 }
