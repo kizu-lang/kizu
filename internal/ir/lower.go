@@ -130,52 +130,97 @@ func (l *lowerer) resolveTypeArgs(list string) string {
 }
 
 // requestGenericInstance records that one generic function is needed for one
-// type argument, and returns the symbol it will be lowered under. Lowering
-// happens after the current function finishes, so an instantiation never
-// interrupts the function that asked for it.
-func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, string, error) {
+// type argument, and returns the symbol it will be lowered under together with
+// the signature the caller sees. Lowering happens after the current function
+// finishes, so an instantiation never interrupts the function that asked for it.
+func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, Signature, error) {
+	decl, instance, err := l.genericBindings(name, typeArgs)
+	if err != nil {
+		return "", Signature{}, err
+	}
+	symbol := genericInstanceName(name, instance.order, instance.bindings, instance.values)
+	if !l.instantiated[symbol] {
+		l.instantiated[symbol] = true
+		l.pending = append(l.pending, genericInstance{
+			decl: decl, bindings: instance.bindings, values: instance.values, symbol: symbol,
+		})
+	}
+	return symbol, l.instanceSignature(decl, instance.bindings), nil
+}
+
+// genericArguments is what one generic declaration's static parameters are bound
+// to for one call: the type arguments, the compile-time values, and the order
+// they were declared in, which is what names the instance.
+type genericArguments struct {
+	order    []string
+	bindings map[string]string
+	values   map[string]staticValue
+}
+
+// genericBindings binds one generic declaration's static parameters to the
+// arguments of one call. Every reader of an instantiation -- the request that
+// lowers its body and the caller that hands arguments to it -- reads this, so
+// they cannot disagree about what the instance is.
+func (l *lowerer) genericBindings(
+	name string,
+	typeArgs string,
+) (*ast.FunctionDecl, genericArguments, error) {
 	decl := l.genericDecl(name)
 	if decl == nil {
-		return "", "", fmt.Errorf("ir error: `%s` is not a generic function", name)
+		return nil, genericArguments{}, fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
 	args, err := typ.SplitArgs(typeArgs)
 	if err != nil {
-		return "", "", fmt.Errorf("ir error: `%s`: %w", name, err)
+		return nil, genericArguments{}, fmt.Errorf("ir error: `%s`: %w", name, err)
 	}
 	if len(args) != len(decl.StaticParams) {
-		return "", "", fmt.Errorf("ir error: `%s` takes %d static parameters, got %d",
+		return nil, genericArguments{}, fmt.Errorf(
+			"ir error: `%s` takes %d static parameters, got %d",
 			name, len(decl.StaticParams), len(args))
 	}
-	bindings := map[string]string{}
-	values := map[string]staticValue{}
-	order := make([]string, 0, len(decl.StaticParams))
+	instance := genericArguments{
+		order:    make([]string, 0, len(decl.StaticParams)),
+		bindings: map[string]string{},
+		values:   map[string]staticValue{},
+	}
 	for i, param := range decl.StaticParams {
-		order = append(order, param.Name)
+		instance.order = append(instance.order, param.Name)
 		if param.IsType() {
 			// Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs the
 			// argument T is currently bound to, not the parameter name.
-			bindings[param.Name] = l.resolveType(args[i])
+			instance.bindings[param.Name] = l.resolveType(args[i])
 			continue
 		}
 		// A compile-time value reaches the body as a constant, or -- for a
 		// `Function` parameter -- as the name of the function to forward to.
-		values[param.Name] = staticValue{typ: typ.Text(param.Type), text: l.resolveStaticValue(args[i])}
+		instance.values[param.Name] = staticValue{
+			typ: typ.Text(param.Type), text: l.resolveStaticValue(args[i]),
+		}
 	}
-	symbol := genericInstanceName(name, order, bindings, values)
-	if !l.instantiated[symbol] {
-		l.instantiated[symbol] = true
-		l.pending = append(l.pending, genericInstance{
-			decl: decl, bindings: bindings, values: values, symbol: symbol,
-		})
+	return decl, instance, nil
+}
+
+// declaredInstanceParams returns the parameters a generic declaration has at
+// these type arguments, without asking for the instance. A callee that lowers to
+// an instruction of its own never has its body called, so the caller needs the
+// types it hands over but not the instantiation.
+func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param, error) {
+	decl, instance, err := l.genericBindings(name, typeArgs)
+	if err != nil {
+		return nil, err
 	}
-	// The caller sees the instance's return type, not the declaration's: `!T`
-	// has to arrive as `!i64` or the call result carries a parameter that no
-	// longer exists.
-	ret := typ.Text(decl.ReturnType)
-	if resolved, err := typ.SubstituteText(ret, bindings); err == nil {
-		ret = resolved
-	}
-	return symbol, l.lowerReturnType(ret), nil
+	return l.instanceSignature(decl, instance.bindings).Params, nil
+}
+
+// instanceSignature returns the signature a generic declaration has once its
+// type arguments are bound. The caller sees the instance's types, not the
+// declaration's: `!T` has to come back as `!i64`, and a `u8` parameter has to be
+// handed a u8, or the call carries a parameter that no longer exists.
+func (l *lowerer) instanceSignature(decl *ast.FunctionDecl, bindings map[string]string) Signature {
+	previous := l.typeBindings
+	l.typeBindings = bindings
+	defer func() { l.typeBindings = previous }()
+	return l.lowerSignature(decl)
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -1092,13 +1137,6 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		}
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
-		if typeApply.Callee.String() == "std::testing::expect_equal" {
-			args, err := l.lowerArgs(expr.Args)
-			if err != nil {
-				return Value{}, err
-			}
-			return l.emit("test.expect_equal", "void", args, typeApply.TypeArg), nil
-		}
 		if typeApply.Callee.String() == "std::arena::Arena" {
 			return l.lowerArenaConstructor(typeApply.TypeArg, expr.Args)
 		}
@@ -1182,18 +1220,34 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	typeArg string,
 	rawArgs []ast.Expression,
 ) (Value, error) {
-	args, err := l.lowerArgs(rawArgs)
-	if err != nil {
-		return Value{}, err
-	}
+	// An array or map primitive carries its element type as an immediate the
+	// backend reads, so the call itself declares no parameter types to hand over.
 	if method, ok := arrayPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, err
+		}
 		return l.lowerArrayMethod(method, l.resolveType(typeArg), args)
 	}
 	if method, ok := mapPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, err
+		}
 		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
 	}
-	switch name {
-	case "std.testing.expect_equal", "std.builtin.test_fail_equal":
+	// expect_equal lowers to its own instruction, so its std wrapper body is
+	// never called. Its arguments still arrive at the types that wrapper
+	// declares, which is what makes `expect_equal<u8>(65, byte)` compare bytes.
+	if name == "std.testing.expect_equal" {
+		params, err := l.declaredInstanceParams(name, typeArg)
+		if err != nil {
+			return Value{}, err
+		}
+		args, err := l.lowerCallArgsAs(params, rawArgs)
+		if err != nil {
+			return Value{}, err
+		}
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("ir error: std::testing::expect_equal expects 2 args")
 		}
@@ -1205,13 +1259,16 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 			)
 		}
 		return l.emit("test.expect_equal", "void", args, typeArg), nil
-	default:
-		symbol, ret, err := l.requestGenericInstance(name, typeArg)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.emit("call."+symbol, ret, args, ""), nil
 	}
+	symbol, sig, err := l.requestGenericInstance(name, typeArg)
+	if err != nil {
+		return Value{}, err
+	}
+	args, err := l.lowerCallArgsAs(sig.Params, rawArgs)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call."+symbol, sig.Return, args, ""), nil
 }
 
 // lowerArenaConstructor lowers std::arena::Arena<T>(allocator).
@@ -1285,7 +1342,11 @@ func (l *lowerer) lowerMethodCallExpr(
 	if isMutableReferenceType(receiver.Type) {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
-	loweredArgs, err := l.lowerArgs(args)
+	params, err := l.methodCalleeParams(receiver.Type, field.Name)
+	if err != nil {
+		return Value{}, err
+	}
+	loweredArgs, err := l.lowerCallArgsAs(params, args)
 	if err != nil {
 		return Value{}, err
 	}
@@ -1313,6 +1374,50 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 }
 
+// methodCalleeParams returns the parameters a method call's callee declares
+// after self, so each argument is handed over at the type the callee receives it
+// as. nil means the lowerer cannot name them from the receiver alone, and those
+// arguments keep the types they carry themselves.
+func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
+	if elem, ok := arrayElementType(receiver); ok {
+		return l.stdContainerParams("std.array", method, elem)
+	}
+	if valueType, ok := mapValueType(receiver); ok {
+		return l.stdContainerParams("std.map", method, valueType)
+	}
+	if name, ok := l.implMethodCalleeName(receiver, method); ok {
+		return paramsAfterSelf(l.signatures[name].Params), nil
+	}
+	return nil, nil
+}
+
+// stdContainerParams returns the parameters std declares for one container
+// method at this element type. A method std has no declaration for lowers
+// straight to its instruction, which names no parameter types.
+func (l *lowerer) stdContainerParams(
+	module string,
+	method string,
+	typeArg string,
+) ([]Param, error) {
+	name := module + "." + method
+	if l.genericDecl(name) == nil {
+		return nil, nil
+	}
+	_, sig, err := l.requestGenericInstance(name, typeArg)
+	if err != nil {
+		return nil, err
+	}
+	return paramsAfterSelf(sig.Params), nil
+}
+
+// paramsAfterSelf drops the receiver, which a method call lowers on its own.
+func paramsAfterSelf(params []Param) []Param {
+	if len(params) == 0 {
+		return nil
+	}
+	return params[1:]
+}
+
 // lowerStdContainerMethod runs the wrapper std declares for a container method,
 // so the body in std/src/*.kizu is what the call does rather than a description
 // of it. Array.truncate, Array.clear and Array.as_bytes have no declaration to
@@ -1328,11 +1433,11 @@ func (l *lowerer) lowerStdContainerMethod(
 	if l.genericDecl(name) == nil {
 		return undeclared()
 	}
-	symbol, ret, err := l.requestGenericInstance(name, typeArg)
+	symbol, sig, err := l.requestGenericInstance(name, typeArg)
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("call."+symbol, ret, args, ""), nil
+	return l.emit("call."+symbol, sig.Return, args, ""), nil
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
@@ -1628,17 +1733,4 @@ func (l *lowerer) lowerSliceEnd(expr ast.Expression, target Value) (Value, error
 		return l.lowerExpr(expr)
 	}
 	return l.emit("slice.len", "i64", []Value{target}, ""), nil
-}
-
-// lowerArgs lowers call arguments from left to right.
-func (l *lowerer) lowerArgs(args []ast.Expression) ([]Value, error) {
-	values := make([]Value, 0, len(args))
-	for _, arg := range args {
-		value, err := l.lowerExpr(arg)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	return values, nil
 }

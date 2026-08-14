@@ -1704,7 +1704,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n",
 			ptrName, lenName)
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
-		operand := e.printIntegerOperand(args[0].Type, value.operand)
+		operand := e.runtimeIntegerOperand(args[0].Type, value.operand)
 		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", operand)
 	case "bool":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)
@@ -1817,15 +1817,18 @@ func (e *emitter) writeEnumNameTables() {
 	}
 }
 
-// printIntegerOperand widens narrow integer values to the runtime print ABI.
-func (e *emitter) printIntegerOperand(typ string, operand string) string {
+// runtimeIntegerOperand widens a narrow integer to the i64 the runtime helpers
+// take. Every helper that reports a value -- print, an expectation that failed
+// -- reads one i64, so the widening is the same one wherever a value crosses
+// into the runtime.
+func (e *emitter) runtimeIntegerOperand(typ string, operand string) string {
 	sourceType := e.llvmType(typ)
 	if sourceType == "i64" {
 		return operand
 	}
-	name := "%" + e.nextSyntheticValue("print.int")
+	name := "%" + e.nextSyntheticValue("runtime.int")
 	op := "sext"
-	if strings.HasPrefix(typ, "u") {
+	if isUnsignedIntegerType(typ) {
 		op = "zext"
 	}
 	fmt.Fprintf(&e.out, "  %s = %s %s %s to i64\n", name, op, sourceType, operand)
