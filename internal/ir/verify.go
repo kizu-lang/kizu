@@ -25,7 +25,7 @@ var ErrVerify = errors.New("ir verify error")
 // Checking here instead means the producer is told, in terms of the IR it
 // built, rather than each backend rejecting the subset it happens to read.
 func Verify(module *Module) error {
-	v := &verifier{module: module, params: map[string][]Value{}}
+	v := &verifier{module: module, params: map[string][]Param{}}
 	for _, fn := range module.Functions {
 		v.params[fn.Name] = fn.Params
 	}
@@ -41,7 +41,7 @@ func Verify(module *Module) error {
 // rule takes only what it checks and reports through one message.
 type verifier struct {
 	module *Module
-	params map[string][]Value
+	params map[string][]Param
 	fn     *Function
 	block  *Block
 	blocks map[string]bool
@@ -95,19 +95,19 @@ func (v *verifier) call(instr *Instr, callee string) error {
 	}
 	for index, param := range declared {
 		got := instr.Args[index].Type
-		// A callee that borrows its argument declares `&T` and is handed the T
-		// whose address the call takes. The IR never names that address, so the
-		// two spellings differ and `internal/llvm` re-derives the borrow from
-		// them. This exemption goes away when a function's parameters carry the
-		// Passing the lowerer already decided for them.
-		if param.Type == "&"+got {
-			continue
-		}
-		if param.Type != got {
+		if !argumentFits(param, got) {
 			return v.fail(fmt.Sprintf("call %s argument %d", callee, index), param.Type, got)
 		}
 	}
 	return nil
+}
+
+// argumentFits reports whether a value of type got can fill param. It is the
+// one slot not always filled by its own type: a parameter read through an
+// address also accepts the value that address is taken of, which is what
+// Param.TakesAddressOf names.
+func argumentFits(param Param, got string) bool {
+	return param.Type == got || param.TakesAddressOf(got)
 }
 
 // structLiteral checks what a struct literal puts in each declared field.

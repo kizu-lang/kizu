@@ -19,7 +19,7 @@ func Dump(module *Module) string {
 func writeFunction(out *bytes.Buffer, fn *Function) {
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, param.String())
+		params = append(params, param.Value().String())
 	}
 	fmt.Fprintf(out, "fn %s(%s) -> %s {\n", fn.Name, strings.Join(params, ", "), fn.Return)
 	for _, block := range fn.Blocks {

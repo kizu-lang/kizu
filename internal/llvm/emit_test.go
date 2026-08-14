@@ -370,7 +370,7 @@ func structParamABIMainFunction() *ir.Function {
 			Instrs: []*ir.Instr{{
 				Result: ir.Value{Name: "%value", Type: "i64"},
 				Op:     "call.read",
-				Args:   structParamABIParams(),
+				Args:   structParamABIArgs(),
 			}},
 			Terminator: ir.Terminator{
 				Op:    "return",
@@ -381,11 +381,22 @@ func structParamABIMainFunction() *ir.Function {
 }
 
 // structParamABIParams returns one Big and one Id parameter list.
-func structParamABIParams() []ir.Value {
-	return []ir.Value{
+func structParamABIParams() []ir.Param {
+	return []ir.Param{
 		{Name: "%big", Type: "Big"},
 		{Name: "%id", Type: "Id"},
 	}
+}
+
+// structParamABIArgs hands each parameter straight back, so the call carries
+// the types the function declares without a second list to keep in step.
+func structParamABIArgs() []ir.Value {
+	params := structParamABIParams()
+	args := make([]ir.Value, 0, len(params))
+	for _, param := range params {
+		args = append(args, param.Value())
+	}
+	return args
 }
 
 // TestEmitTrySuccessLabelFeedsFollowingPhi keeps phi predecessors aligned when
@@ -523,8 +534,8 @@ func checkedSlicePhiModule() *ir.Module {
 }
 
 // checkedSlicePhiParams returns parameters for checkedSlicePhiModule.
-func checkedSlicePhiParams() []ir.Value {
-	return []ir.Value{
+func checkedSlicePhiParams() []ir.Param {
+	return []ir.Param{
 		{Name: "%source", Type: "[]u8"},
 		{Name: "%index", Type: "i64"},
 		{Name: "%target", Type: "u8"},
@@ -595,7 +606,7 @@ func mapGetPhiModule() *ir.Module {
 			Tags: map[string]int{"OutOfMemory": 8, "Missing": 9},
 		}}, Functions: []*ir.Function{{
 			Name:   "lookup",
-			Params: []ir.Value{{Name: "%map", Type: mapType}},
+			Params: []ir.Param{{Name: "%map", Type: mapType}},
 			Return: "!i64",
 			Blocks: []*ir.Block{
 				mapGetPhiEntryBlock(mapType),

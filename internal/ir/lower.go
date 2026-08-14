@@ -530,10 +530,13 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 	return l.lowerFunctionNamed(fn, fn.Name)
 }
 
-// lowerFunctionNamed lowers one function using an explicit IR symbol name.
+// lowerFunctionNamed lowers one function using an explicit IR symbol name. The
+// function it builds wears the signature callers were given, rather than a
+// second reading of the same declaration: a body and its callers disagreeing
+// about what it takes is the one thing a call site cannot see.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	declared := l.resolveType(typ.Text(fn.ReturnType))
-	l.current = &Function{Name: name, Return: l.lowerReturnType(declared)}
+	signature := l.lowerSignature(fn)
+	l.current = &Function{Name: name, Params: signature.Params, Return: signature.Return}
 	l.env = map[string]Value{}
 	slots, err := l.mutablyBorrowedLocals(fn)
 	if err != nil {
@@ -544,10 +547,8 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.nextBlock = 0
 	l.loops = nil
 	l.deferFrames = nil
-	for _, param := range fn.Params {
-		value := Value{Name: "%" + param.Name, Type: l.lowerParam(param).Type}
-		l.current.Params = append(l.current.Params, value)
-		l.env[param.Name] = value
+	for index, param := range fn.Params {
+		l.env[param.Name] = signature.Params[index].Value()
 	}
 	l.block = l.newBlock("entry")
 	if err := l.lowerBlock(fn.Body); err != nil {
@@ -572,11 +573,11 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 // where matching needs an address and the copy is made for the call.
 func (l *lowerer) lowerParam(param ast.Param) Param {
 	typeName := l.resolveType(typ.Text(param.TypeName))
-	if !param.Borrow && !param.MutBorrow {
-		return Param{Type: typeName, Passing: PassValue}
+	lowered := Param{Name: "%" + param.Name, Type: typeName, Passing: PassValue}
+	if param.Borrow || param.MutBorrow {
+		lowered.Type, lowered.Passing = l.borrowIRType(typeName, param.MutBorrow)
 	}
-	spelling, passing := l.borrowIRType(typeName, param.MutBorrow)
-	return Param{Type: spelling, Passing: passing}
+	return lowered
 }
 
 // borrowIRType decides how a borrow of elem travels: what it is spelled as, and

@@ -31,7 +31,7 @@ type emitter struct {
 	strings         map[string]string
 	values          map[string]valueInfo
 	functionNames   map[string]bool
-	functionParams  map[string][]ir.Value
+	functionParams  map[string][]ir.Param
 	currentReturn   string
 	mainReturnsInt  bool
 	nextLabel       int
@@ -65,7 +65,7 @@ func (e *emitter) emit() error {
 // collectFunctionNames records module-local functions before call emission.
 func (e *emitter) collectFunctionNames() {
 	e.functionNames = map[string]bool{}
-	e.functionParams = map[string][]ir.Value{}
+	e.functionParams = map[string][]ir.Param{}
 	for _, fn := range e.module.Functions {
 		e.functionNames[fn.Name] = true
 		e.functionParams[fn.Name] = fn.Params
@@ -692,7 +692,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 }
 
 // functionParamABI returns the LLVM ABI parameter spelling for one Kizu value.
-func (e *emitter) functionParamABI(param ir.Value) string {
+func (e *emitter) functionParamABI(param ir.Param) string {
 	paramType := e.llvmType(param.Type)
 	paramName := localName(param.Name)
 	if !e.usesIndirectStructParamABI(param.Type) {
@@ -1012,11 +1012,13 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
 	params := e.functionParams[name]
 	for index, arg := range instr.Args {
-		targetType := ""
+		// A callee this module does not declare takes its arguments by value,
+		// which is what the zero Param says.
+		param := ir.Param{}
 		if index < len(params) {
-			targetType = params[index].Type
+			param = params[index]
 		}
-		callArg, err := e.internalCallArg(arg, targetType, index)
+		callArg, err := e.internalCallArg(arg, param, index)
 		if err != nil {
 			return err
 		}
@@ -1039,18 +1041,18 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 }
 
 // internalCallArg returns one module-local call argument in functionParamABI form.
-func (e *emitter) internalCallArg(arg ir.Value, targetType string, index int) (string, error) {
+// A parameter handed the value its address is taken of gets that address made
+// here, which is the one thing the callee's declared Passing decides.
+func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (string, error) {
 	value := e.value(arg)
 	argType := e.llvmType(arg.Type)
-	if targetType != "" && derefLLVMType(targetType) == arg.Type {
-		if _, ok := e.module.Unions[arg.Type]; ok && derefLLVMType(targetType) != targetType {
-			slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
-			fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
-				slotName, argType, maxInlinePayloadAlign)
-			fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
-				argType, value.operand, slotName, maxInlinePayloadAlign)
-			return "ptr " + slotName, nil
-		}
+	if param.TakesAddressOf(arg.Type) {
+		slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
+		fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
+			slotName, argType, maxInlinePayloadAlign)
+		fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+			argType, value.operand, slotName, maxInlinePayloadAlign)
+		return "ptr " + slotName, nil
 	}
 	if !e.usesIndirectStructParamABI(arg.Type) {
 		return argType + " " + value.operand, nil
