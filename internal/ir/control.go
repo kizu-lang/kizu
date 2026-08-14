@@ -7,7 +7,7 @@ import (
 )
 
 type branchResult struct {
-	env       map[string]Value
+	env       *env
 	end       string
 	reachable bool
 	value     Value
@@ -119,8 +119,8 @@ func (l *lowerer) lowerBranchBlock(
 	target string,
 	wantValue bool,
 ) (branchResult, error) {
-	saved := l.copyEnv(l.env)
-	l.env = l.copyEnv(saved)
+	saved := l.env
+	l.env = saved.clone()
 	l.block = block
 	value, err := l.lowerBlockBody(body, wantValue)
 	if err != nil {
@@ -131,7 +131,7 @@ func (l *lowerer) lowerBranchBlock(
 	if reachable {
 		l.block.Terminator = Terminator{Op: "jump", Target: target}
 	}
-	out := l.copyEnv(l.env)
+	out := l.env
 	l.env = saved
 	return branchResult{env: out, end: end, reachable: reachable, value: value}, nil
 }
@@ -192,15 +192,16 @@ func (l *lowerer) lowerIfExpr(stmt *ast.IfStmt) (Value, error) {
 func (l *lowerer) mergeEnvs(
 	block *Block,
 	leftBlock string,
-	left map[string]Value,
+	left *env,
 	rightBlock string,
-	right map[string]Value,
-) map[string]Value {
-	merged := l.copyEnv(left)
-	for name, rightValue := range right {
-		leftValue, ok := left[name]
+	right *env,
+) *env {
+	merged := left.clone()
+	for _, name := range right.names() {
+		rightValue, _ := right.get(name)
+		leftValue, ok := left.get(name)
 		if !ok {
-			merged[name] = rightValue
+			merged.set(name, rightValue)
 			continue
 		}
 		if sameValue(leftValue, rightValue) {
@@ -210,7 +211,7 @@ func (l *lowerer) mergeEnvs(
 			{Block: leftBlock, Value: leftValue},
 			{Block: rightBlock, Value: rightValue},
 		})
-		merged[name] = phi
+		merged.set(name, phi)
 	}
 	return merged
 }
@@ -237,10 +238,12 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	}
 	l.popLoop()
 	bodyEnd := ""
-	bodyEnv := map[string]Value{}
+	bodyEnv := newEnv()
 	if l.block.Terminator.Op == "" {
 		bodyEnd = l.block.Name
-		bodyEnv = l.copyEnv(l.env)
+		// A copy, because finishLoopPhis rebinds the same names in l.env while
+		// it reads what the body left them at.
+		bodyEnv = l.env.clone()
 		l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
 	}
 	l.finishLoopPhis(phis, bodyEnd, bodyEnv, loop.continueEdges)
@@ -259,7 +262,7 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	if err != nil {
 		return err
 	}
-	previous, hadPrevious := l.env[stmt.Name]
+	previous, hadPrevious := l.env.get(stmt.Name)
 	defer l.restoreLoopVar(stmt.Name, previous, hadPrevious)
 	preheader := l.block
 	header := l.newBlock(l.nextBlockName("for.header"))
@@ -269,7 +272,7 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
 	l.block = header
 	index := l.createForIndexPhi(header, preheader.Name, start)
-	l.env[stmt.Name] = index.Result
+	l.env.set(stmt.Name, index.Result)
 	cond := l.emit("binary.<", "bool", []Value{index.Result, end}, "")
 	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
@@ -304,10 +307,10 @@ func (l *lowerer) createForIndexPhi(block *Block, incoming string, start Value) 
 // restoreLoopVar removes the scoped for variable after lowering the loop.
 func (l *lowerer) restoreLoopVar(name string, previous Value, hadPrevious bool) {
 	if hadPrevious {
-		l.env[name] = previous
+		l.env.set(name, previous)
 		return
 	}
-	delete(l.env, name)
+	l.env.remove(name)
 }
 
 // lowerLoopBranch lowers break and continue as jumps to loop blocks.
@@ -321,12 +324,12 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 		target = loop.continueTo
 		loop.continueEdges = append(loop.continueEdges, loopEdge{
 			block: l.block.Name,
-			env:   l.copyEnv(l.env),
+			env:   l.env.clone(),
 		})
 	} else {
 		loop.breakEdges = append(loop.breakEdges, loopEdge{
 			block: l.block.Name,
-			env:   l.copyEnv(l.env),
+			env:   l.env.clone(),
 		})
 	}
 	l.emitCleanups(l.cleanupsFrom(loop.deferDepth, false))
@@ -360,10 +363,10 @@ func (l *lowerer) findLoop(label string) (*loopContext, bool) {
 }
 
 // createLoopPhis creates header phi nodes for assigned loop variables.
-func (l *lowerer) createLoopPhis(block *Block, assigned map[string]bool) map[string]*Instr {
-	phis := map[string]*Instr{}
-	for name := range assigned {
-		value, ok := l.env[name]
+func (l *lowerer) createLoopPhis(block *Block, assigned []string) []loopPhi {
+	phis := []loopPhi{}
+	for _, name := range assigned {
+		value, ok := l.env.get(name)
 		if !ok {
 			continue
 		}
@@ -373,48 +376,49 @@ func (l *lowerer) createLoopPhis(block *Block, assigned map[string]bool) map[str
 			Incoming: []Incoming{{Block: l.block.Name, Value: value}},
 		}
 		block.Instrs = append(block.Instrs, phi)
-		l.env[name] = phi.Result
-		phis[name] = phi
+		l.env.set(name, phi.Result)
+		phis = append(phis, loopPhi{name: name, phi: phi})
 	}
 	return phis
 }
 
 // finishLoopPhis adds fallthrough and explicit continue back-edges to loop phi nodes.
 func (l *lowerer) finishLoopPhis(
-	phis map[string]*Instr,
+	phis []loopPhi,
 	bodyEnd string,
-	bodyEnv map[string]Value,
+	bodyEnv *env,
 	continueEdges []loopEdge,
 ) {
-	for name, phi := range phis {
+	for _, entry := range phis {
+		phi := entry.phi
 		if bodyEnd != "" {
-			value := bodyEnv[name]
+			value, _ := bodyEnv.get(entry.name)
 			phi.Incoming = append(phi.Incoming, Incoming{Block: bodyEnd, Value: value})
 		}
 		for _, edge := range continueEdges {
-			value, ok := edge.env[name]
+			value, ok := edge.env.get(entry.name)
 			if ok {
 				phi.Incoming = append(phi.Incoming, Incoming{Block: edge.block, Value: value})
 			}
 		}
-		l.env[name] = phi.Result
+		l.env.set(entry.name, phi.Result)
 	}
 }
 
 // finishLoopExitPhis merges condition-false exits with explicit break edges.
 func (l *lowerer) finishLoopExitPhis(
 	exit *Block,
-	phis map[string]*Instr,
+	phis []loopPhi,
 	header string,
 	breakEdges []loopEdge,
 ) {
 	if len(breakEdges) == 0 {
 		return
 	}
-	for name, phi := range phis {
-		incoming := []Incoming{{Block: header, Value: phi.Result}}
+	for _, entry := range phis {
+		incoming := []Incoming{{Block: header, Value: entry.phi.Result}}
 		for _, edge := range breakEdges {
-			value, ok := edge.env[name]
+			value, ok := edge.env.get(entry.name)
 			if ok {
 				incoming = append(incoming, Incoming{Block: edge.block, Value: value})
 			}
@@ -422,7 +426,7 @@ func (l *lowerer) finishLoopExitPhis(
 		if len(incoming) == 1 {
 			continue
 		}
-		l.env[name] = l.addPhi(exit, phi.Result.Type, incoming)
+		l.env.set(entry.name, l.addPhi(exit, entry.phi.Result.Type, incoming))
 	}
 }
 
@@ -433,21 +437,23 @@ func (l *lowerer) addPhi(block *Block, typ string, incoming []Incoming) Value {
 	return instr.Result
 }
 
-// assignedNames returns names assigned in a block.
-func assignedNames(block *ast.BlockStmt) map[string]bool {
-	names := map[string]bool{}
+// assignedNames returns names assigned in a block, in the order they are first
+// assigned. The order is the order the header phis are created in, so it comes
+// from the source rather than from a set.
+func assignedNames(block *ast.BlockStmt) []string {
+	names := []string{}
 	for _, stmt := range block.Statements {
-		collectAssigned(stmt, names)
+		collectAssigned(stmt, &names)
 	}
 	return names
 }
 
 // collectAssigned records assigned names in nested statements.
-func collectAssigned(stmt ast.Statement, names map[string]bool) {
+func collectAssigned(stmt ast.Statement, names *[]string) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
 		if name, ok := assignTargetRoot(s.Target); ok {
-			names[name] = true
+			addAssigned(names, name)
 		}
 	case *ast.IfStmt:
 		collectBlockAssigned(s.Consequence, names)
@@ -494,8 +500,18 @@ func assignTargetRoot(target ast.Expression) (string, bool) {
 	}
 }
 
+// addAssigned records name once, keeping the order names are first assigned in.
+func addAssigned(names *[]string, name string) {
+	for _, existing := range *names {
+		if existing == name {
+			return
+		}
+	}
+	*names = append(*names, name)
+}
+
 // collectBlockAssigned records assignments inside a block.
-func collectBlockAssigned(block *ast.BlockStmt, names map[string]bool) {
+func collectBlockAssigned(block *ast.BlockStmt, names *[]string) {
 	for _, stmt := range block.Statements {
 		collectAssigned(stmt, names)
 	}
@@ -504,13 +520,4 @@ func collectBlockAssigned(block *ast.BlockStmt, names map[string]bool) {
 // sameValue reports whether two SSA value references are identical.
 func sameValue(left Value, right Value) bool {
 	return left.Name == right.Name && left.Type == right.Type
-}
-
-// copyEnv clones the current name-to-value environment.
-func (l *lowerer) copyEnv(env map[string]Value) map[string]Value {
-	out := make(map[string]Value, len(env))
-	for name, value := range env {
-		out[name] = value
-	}
-	return out
 }
