@@ -50,6 +50,18 @@ func TestVerifyRejects(t *testing.T) {
 			want: "does not dominate b",
 		},
 		{
+			name: "phi from a block that does not reach it", module: phiFromStranger(),
+			want: "takes a value from entry, which does not jump to merge",
+		},
+		{
+			name: "phi missing an edge", module: phiMissingEdge(),
+			want: "has no value for b, which jumps to merge",
+		},
+		{
+			name: "phi with more incoming than edges", module: phiWithSpareIncoming(),
+			want: "has 3 incoming for 2 edges into merge",
+		},
+		{
 			// The address exemption is the declared Passing, not the `&`. A
 			// parameter taken by value is filled by its own type like any other.
 			name: "borrow spelling without the passing", module: valueParamSpelledAsBorrow(),
@@ -236,6 +248,64 @@ func unknownBranchTarget() *Module {
 			Else:   "exit",
 		}},
 		&Block{Name: "exit", Terminator: Terminator{Op: "return"}},
+	)}}
+}
+
+// phiWithoutDominance defines a value on one arm of a branch and lets the merge
+// claim it arrives on the other arm too, where it has never been defined.
+// phiFromStranger names a block that does not jump to the phi's own. This is
+// the shape a loop exit had while it named the header rather than the block a
+// short-circuit condition ended in.
+func phiFromStranger() *Module {
+	return diamond([]Incoming{
+		{Block: "a", Value: Value{Name: "%x", Type: "i64"}},
+		{Block: "entry", Value: Value{Name: "%x", Type: "i64"}},
+	})
+}
+
+// phiMissingEdge leaves one of the blocks that jump to the phi's own without a
+// value, so the phi is undefined on an edge that exists.
+func phiMissingEdge() *Module {
+	return diamond([]Incoming{
+		{Block: "a", Value: Value{Name: "%x", Type: "i64"}},
+	})
+}
+
+// phiWithSpareIncoming covers one edge twice. Every block it names does jump
+// to the phi's own and every one that does is named, so only the count is left
+// to tell the two apart.
+func phiWithSpareIncoming() *Module {
+	defined := Value{Name: "%x", Type: "i64"}
+	return diamond([]Incoming{
+		{Block: "a", Value: defined},
+		{Block: "a", Value: defined},
+		{Block: "b", Value: defined},
+	})
+}
+
+// diamond builds entry -> {a, b} -> merge, with merge holding one phi over the
+// incoming it is given. `%x` is defined in entry, so only the edges are wrong.
+func diamond(incoming []Incoming) *Module {
+	defined := Value{Name: "%x", Type: "i64"}
+	merged := Value{Name: "%p", Type: "i64"}
+	return &Module{Functions: []*Function{caller("i64",
+		&Block{
+			Name:   "entry",
+			Instrs: []*Instr{{Result: defined, Op: "const", Immediate: "1"}},
+			Terminator: Terminator{
+				Op:     "branch",
+				Cond:   Value{Name: "%c", Type: "bool"},
+				Target: "a",
+				Else:   "b",
+			},
+		},
+		&Block{Name: "a", Terminator: Terminator{Op: "jump", Target: "merge"}},
+		&Block{Name: "b", Terminator: Terminator{Op: "jump", Target: "merge"}},
+		&Block{
+			Name:       "merge",
+			Instrs:     []*Instr{{Result: merged, Op: "phi", Incoming: incoming}},
+			Terminator: Terminator{Op: "return", Value: merged},
+		},
 	)}}
 }
 
