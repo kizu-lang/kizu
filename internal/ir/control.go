@@ -216,43 +216,95 @@ func (l *lowerer) mergeEnvs(
 	return merged
 }
 
-// lowerWhileStmt lowers while into header, body, and exit blocks.
-func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
-	assigned := assignedNames(stmt.Body)
+// A loopShape is the part of a loop that `while` and `for` do not share: what
+// the header tests, and what runs on every way back to it.
+//
+// A loop with no advance reaches its header directly, so `continue` jumps
+// there. A loop with an advance reaches its header through a latch block that
+// runs the advance, and `continue` jumps to the latch instead. That is the one
+// difference the phi work has to know about: with a latch, the header is
+// reached from a single block, so the values arriving from the body and from
+// each `continue` are merged in the latch rather than handed to the header
+// phis one by one.
+type loopShape struct {
+	name    string
+	label   string
+	body    *ast.BlockStmt
+	header  func(preheader string) (Value, error)
+	advance func(latch *Block)
+}
+
+// lowerLoop lowers one loop. It is the only place a loop's header phis are
+// made and closed, so what a name holds around the loop is decided once for
+// every loop form rather than once per form.
+func (l *lowerer) lowerLoop(shape loopShape) error {
+	assigned := assignedNames(shape.body)
 	preheader := l.block
-	header := l.newBlock(l.nextBlockName("while.header"))
-	body := l.newBlock(l.nextBlockName("while.body"))
-	exit := l.newBlock(l.nextBlockName("while.end"))
+	header := l.newBlock(l.nextBlockName(shape.name + ".header"))
+	body := l.newBlock(l.nextBlockName(shape.name + ".body"))
+	var latch *Block
+	if shape.advance != nil {
+		latch = l.newBlock(l.nextBlockName(shape.name + ".step"))
+	}
+	exit := l.newBlock(l.nextBlockName(shape.name + ".end"))
 	preheader.Terminator = Terminator{Op: "jump", Target: header.Name}
 	phis := l.createLoopPhis(header, assigned)
 	l.block = header
-	cond, err := l.lowerExpr(stmt.Condition)
+	cond, err := shape.header(preheader.Name)
 	if err != nil {
 		return err
 	}
+	// l.block, not header: a short-circuit condition splits the test across
+	// blocks of its own, and the branch belongs to the one it ended in.
 	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
+	back := header
+	if latch != nil {
+		back = latch
+	}
 	l.block = body
-	loop := l.pushLoop(stmt.Label, exit.Name, header.Name)
-	if err := l.lowerBlock(stmt.Body); err != nil {
+	loop := l.pushLoop(shape.label, exit.Name, back.Name)
+	if err := l.lowerBlock(shape.body); err != nil {
 		return err
 	}
 	l.popLoop()
-	bodyEnd := ""
-	bodyEnv := newEnv()
+	edges := loop.continueEdges
 	if l.block.Terminator.Op == "" {
-		bodyEnd = l.block.Name
-		// A copy, because finishLoopPhis rebinds the same names in l.env while
+		// The body falling through is one more edge back into the loop, and it
+		// comes first because it is the one the source reads as the loop.
+		// A copy, because closeLoopPhis rebinds the same names in l.env while
 		// it reads what the body left them at.
-		bodyEnv = l.env.clone()
-		l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
+		fallthroughEdge := loopEdge{block: l.block.Name, env: l.env.clone()}
+		edges = append([]loopEdge{fallthroughEdge}, edges...)
+		l.block.Terminator = Terminator{Op: "jump", Target: back.Name}
 	}
-	l.finishLoopPhis(phis, bodyEnd, bodyEnv, loop.continueEdges)
+	if latch != nil {
+		l.block = latch
+	}
+	// Before the advance, so a merge phi stays at the top of the latch.
+	l.closeLoopPhis(phis, latch, edges)
+	if latch != nil {
+		shape.advance(latch)
+		latch.Terminator = Terminator{Op: "jump", Target: header.Name}
+	}
 	l.block = exit
 	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
 	return nil
 }
 
-// lowerForStmt lowers a bounded i64 range loop.
+// lowerWhileStmt lowers a loop that tests a condition and goes straight back.
+func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
+	return l.lowerLoop(loopShape{
+		name:  "while",
+		label: stmt.Label,
+		body:  stmt.Body,
+		header: func(string) (Value, error) {
+			return l.lowerExpr(stmt.Condition)
+		},
+	})
+}
+
+// lowerForStmt lowers a bounded i64 range loop. The index is a header phi of
+// its own, and the advance that closes it is why the loop needs a latch.
 func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	start, err := l.lowerExpr(stmt.Start)
 	if err != nil {
@@ -264,44 +316,22 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	}
 	previous, hadPrevious := l.env.get(stmt.Name)
 	defer l.restoreLoopVar(stmt.Name, previous, hadPrevious)
-	assigned := assignedNames(stmt.Body)
-	preheader := l.block
-	header := l.newBlock(l.nextBlockName("for.header"))
-	body := l.newBlock(l.nextBlockName("for.body"))
-	step := l.newBlock(l.nextBlockName("for.step"))
-	exit := l.newBlock(l.nextBlockName("for.end"))
-	l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
-	phis := l.createLoopPhis(header, assigned)
-	l.block = header
-	index := l.createForIndexPhi(header, preheader.Name, start)
-	l.env.set(stmt.Name, index.Result)
-	cond := l.emit("binary.<", "bool", []Value{index.Result, end}, "")
-	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
-	l.block = body
-	loop := l.pushLoop(stmt.Label, exit.Name, step.Name)
-	if err := l.lowerBlock(stmt.Body); err != nil {
-		return err
-	}
-	l.popLoop()
-	bodyEnd := ""
-	bodyEnv := newEnv()
-	if l.block.Terminator.Op == "" {
-		bodyEnd = l.block.Name
-		// A copy, because finishForLoopPhis rebinds the same names in l.env
-		// while it reads what the body left them at.
-		bodyEnv = l.env.clone()
-		l.block.Terminator = Terminator{Op: "jump", Target: step.Name}
-	}
-	l.block = step
-	// Before the step instructions, so the merge phis stay at the top of step.
-	l.finishForLoopPhis(phis, step, bodyEnd, bodyEnv, loop.continueEdges)
-	one := l.emitConst("i64", "1")
-	next := l.emit("binary.+", "i64", []Value{index.Result, one}, "")
-	step.Terminator = Terminator{Op: "jump", Target: header.Name}
-	index.Incoming = append(index.Incoming, Incoming{Block: step.Name, Value: next})
-	l.block = exit
-	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
-	return nil
+	var index *Instr
+	return l.lowerLoop(loopShape{
+		name:  "for",
+		label: stmt.Label,
+		body:  stmt.Body,
+		header: func(preheader string) (Value, error) {
+			index = l.createForIndexPhi(l.block, preheader, start)
+			l.env.set(stmt.Name, index.Result)
+			return l.emit("binary.<", "bool", []Value{index.Result, end}, ""), nil
+		},
+		advance: func(latch *Block) {
+			one := l.emitConst("i64", "1")
+			next := l.emit("binary.+", "i64", []Value{index.Result, one}, "")
+			index.Incoming = append(index.Incoming, Incoming{Block: latch.Name, Value: next})
+		},
+	})
 }
 
 // createForIndexPhi creates the SSA loop variable for a for range.
@@ -393,71 +423,48 @@ func (l *lowerer) createLoopPhis(block *Block, assigned []string) []loopPhi {
 	return phis
 }
 
-// finishLoopPhis adds fallthrough and explicit continue back-edges to loop phi nodes.
-func (l *lowerer) finishLoopPhis(
-	phis []loopPhi,
-	bodyEnd string,
-	bodyEnv *env,
-	continueEdges []loopEdge,
-) {
+// closeLoopPhis adds the back edge to each header phi. With no latch the
+// header is reached from every edge directly, so each one is its own incoming.
+// With a latch the header is reached only from there, so the edges are merged
+// in the latch first.
+func (l *lowerer) closeLoopPhis(phis []loopPhi, latch *Block, edges []loopEdge) {
 	for _, entry := range phis {
-		phi := entry.phi
-		if bodyEnd != "" {
-			value, _ := bodyEnv.get(entry.name)
-			phi.Incoming = append(phi.Incoming, Incoming{Block: bodyEnd, Value: value})
+		incoming := loopIncoming(entry.name, edges)
+		if latch == nil {
+			entry.phi.Incoming = append(entry.phi.Incoming, incoming...)
+		} else {
+			entry.phi.Incoming = append(entry.phi.Incoming, Incoming{
+				Block: latch.Name,
+				Value: l.latchValue(latch, entry, incoming),
+			})
 		}
-		for _, edge := range continueEdges {
-			value, ok := edge.env.get(entry.name)
-			if ok {
-				phi.Incoming = append(phi.Incoming, Incoming{Block: edge.block, Value: value})
-			}
-		}
-		l.env.set(entry.name, phi.Result)
-	}
-}
-
-// finishForLoopPhis closes the header phis of a for loop. A for loop reaches
-// its header through the step block, so the back edge carries whatever reached
-// step: the body falling through, and every `continue`. Those are merged in
-// step, and the header takes the single value that comes out.
-func (l *lowerer) finishForLoopPhis(
-	phis []loopPhi,
-	step *Block,
-	bodyEnd string,
-	bodyEnv *env,
-	continueEdges []loopEdge,
-) {
-	for _, entry := range phis {
-		incoming := []Incoming{}
-		if bodyEnd != "" {
-			value, _ := bodyEnv.get(entry.name)
-			incoming = append(incoming, Incoming{Block: bodyEnd, Value: value})
-		}
-		for _, edge := range continueEdges {
-			value, ok := edge.env.get(entry.name)
-			if ok {
-				incoming = append(incoming, Incoming{Block: edge.block, Value: value})
-			}
-		}
-		entry.phi.Incoming = append(entry.phi.Incoming, Incoming{
-			Block: step.Name,
-			Value: l.stepValue(step, entry, incoming),
-		})
 		l.env.set(entry.name, entry.phi.Result)
 	}
 }
 
-// stepValue returns what a name holds where the step block starts. One edge
+// loopIncoming returns what name holds on each edge back into the loop.
+func loopIncoming(name string, edges []loopEdge) []Incoming {
+	incoming := make([]Incoming, 0, len(edges))
+	for _, edge := range edges {
+		value, ok := edge.env.get(name)
+		if ok {
+			incoming = append(incoming, Incoming{Block: edge.block, Value: value})
+		}
+	}
+	return incoming
+}
+
+// latchValue returns what a name holds where the latch starts. One edge
 // arrives with one value and needs nothing; several need a phi. None at all
-// means nothing reaches step, and the back edge reads the header phi itself.
-func (l *lowerer) stepValue(step *Block, entry loopPhi, incoming []Incoming) Value {
+// means nothing reaches the latch, and the back edge reads the header phi.
+func (l *lowerer) latchValue(latch *Block, entry loopPhi, incoming []Incoming) Value {
 	switch len(incoming) {
 	case 0:
 		return entry.phi.Result
 	case 1:
 		return incoming[0].Value
 	default:
-		return l.addPhi(step, entry.phi.Result.Type, incoming)
+		return l.addPhi(latch, entry.phi.Result.Type, incoming)
 	}
 }
 
