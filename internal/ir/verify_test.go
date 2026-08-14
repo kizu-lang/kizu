@@ -12,11 +12,35 @@ import (
 // the rules honest: an op renamed in the lowerer without renaming it here makes
 // the matching case stop failing, which fails this test.
 func TestVerifyRejects(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		module *Module
-		want   string
-	}{
+	cases := append(typeRejections(), ssaRejections()...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Verify(tc.module)
+			if err == nil {
+				t.Fatalf("%s: Verify accepted a module that breaks a rule", tc.name)
+			}
+			if !errors.Is(err, ErrVerify) {
+				t.Fatalf("%s: error is not an ErrVerify: %v", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s: want %q in %v", tc.name, tc.want, err)
+			}
+		})
+	}
+}
+
+// A rejection is a module that breaks exactly one rule, and the part of the
+// message that has to name it.
+type rejection struct {
+	name   string
+	module *Module
+	want   string
+}
+
+// typeRejections lists the modules that break a rule about what a declaration
+// asked for and what fills it.
+func typeRejections() []rejection {
+	return []rejection{
 		{
 			name: "call argument", module: callArgumentMismatch(),
 			want: "call callee argument 0 in block entry is i32, declared i64",
@@ -46,6 +70,19 @@ func TestVerifyRejects(t *testing.T) {
 			want: "block entry branches to nowhere, which does not exist",
 		},
 		{
+			// The address exemption is the declared Passing, not the `&`. A
+			// parameter taken by value is filled by its own type like any other.
+			name: "borrow spelling without the passing", module: valueParamSpelledAsBorrow(),
+			want: "call callee argument 0 in block entry is i64, declared &i64",
+		},
+	}
+}
+
+// ssaRejections lists the modules that break a rule about where a value is
+// defined against where it is read.
+func ssaRejections() []rejection {
+	return []rejection{
+		{
 			name: "phi dominance", module: phiWithoutDominance(),
 			want: "does not dominate b",
 		},
@@ -62,24 +99,13 @@ func TestVerifyRejects(t *testing.T) {
 			want: "has 3 incoming for 2 edges into merge",
 		},
 		{
-			// The address exemption is the declared Passing, not the `&`. A
-			// parameter taken by value is filled by its own type like any other.
-			name: "borrow spelling without the passing", module: valueParamSpelledAsBorrow(),
-			want: "call callee argument 0 in block entry is i64, declared &i64",
+			name: "use without dominance", module: useWithoutDominance(),
+			want: "block merge reads %x, which is defined in a, and a does not dominate merge",
 		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := Verify(tc.module)
-			if err == nil {
-				t.Fatalf("Verify accepted a module breaking %s", tc.name)
-			}
-			if !errors.Is(err, ErrVerify) {
-				t.Errorf("error does not carry ErrVerify: %v", err)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("got %q, want it to contain %q", err, tc.want)
-			}
-		})
+		{
+			name: "use above its definition", module: useAboveDefinition(),
+			want: "block entry reads %x before it is defined",
+		},
 	}
 }
 
@@ -281,6 +307,45 @@ func phiWithSpareIncoming() *Module {
 		{Block: "a", Value: defined},
 		{Block: "b", Value: defined},
 	})
+}
+
+// useWithoutDominance reads a value in the merge that only one arm defines.
+// This is the shape a loop had while a name assigned inside an `if` used as a
+// value got no header phi: the body's value escaped to after the loop.
+func useWithoutDominance() *Module {
+	defined := Value{Name: "%x", Type: "i64"}
+	return &Module{Functions: []*Function{caller("i64",
+		&Block{Name: "entry", Terminator: Terminator{
+			Op:     "branch",
+			Cond:   Value{Name: "%c", Type: "bool"},
+			Target: "a",
+			Else:   "b",
+		}},
+		&Block{
+			Name:       "a",
+			Instrs:     []*Instr{{Result: defined, Op: "const", Immediate: "1"}},
+			Terminator: Terminator{Op: "jump", Target: "merge"},
+		},
+		&Block{Name: "b", Terminator: Terminator{Op: "jump", Target: "merge"}},
+		&Block{Name: "merge", Terminator: Terminator{Op: "return", Value: defined}},
+	)}}
+}
+
+// useAboveDefinition reads a value earlier in the block that defines it. The
+// block dominates itself, so only the order within it tells this apart.
+func useAboveDefinition() *Module {
+	defined := Value{Name: "%x", Type: "i64"}
+	doubled := Value{Name: "%y", Type: "i64"}
+	return &Module{Functions: []*Function{caller("i64",
+		&Block{
+			Name: "entry",
+			Instrs: []*Instr{
+				{Result: doubled, Op: "binary.+", Args: []Value{defined, defined}},
+				{Result: defined, Op: "const", Immediate: "1"},
+			},
+			Terminator: Terminator{Op: "return", Value: doubled},
+		},
+	)}}
 }
 
 // diamond builds entry -> {a, b} -> merge, with merge holding one phi over the
