@@ -29,7 +29,7 @@ by any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 24 | ✅ | 23/24 | 23/24 | 9/24 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
@@ -39,7 +39,7 @@ by any one execution path.
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
-| cast / slice / raw pointer / box | 9 | ✅ | 6/9 | 6/9 | 1/9 |
+| cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
 | contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
 | std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
@@ -47,12 +47,10 @@ by any one execution path.
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
 | std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
-| TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
-| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
+| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 83 runnable examples, measured on 2026-08-14 with
+`❌` means none do. 73 runnable examples, measured on 2026-08-14 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -60,24 +58,21 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 83/83 |
-| `kizu run` | 70/83 |
-| `kizu build --emit-llvm` | 70/83 |
-| `kizu build --target wasm32-wasi` | 16/83 |
+| `kizu check` | 73/73 |
+| `kizu run` | 70/73 |
+| `kizu build --emit-llvm` | 70/73 |
+| `kizu build --target wasm32-wasi` | 16/73 |
 
-The 19 cases `run` cannot reproduce -- 13 programs and 6 negative cases -- are
-registered in the manifests with a `pending` reason. A pending case is tested
-for *still failing*, so closing a gap forces its entry to be removed in the same
-change.
+The 3 programs `run` cannot reproduce are registered in the manifests with a
+`pending` reason. A pending case is tested for *still failing*, so closing a gap
+forces its entry to be removed in the same change.
 
-What is missing, in the order it should be closed:
+What is missing:
 
-1. **One negative case reports the wrong failure rather than none.** A returned
-   error union built from a `union` is not surfaced, which the stage that leaves
-   errors as only names closes.
-2. **Nineteen cases have no lowering yet.** `std::builtin::task_group` (11),
-   `Channel<T>` (4) and `Atomic<T>`, a `dyn` contract method, a `Box` borrow,
-   and the scoped-thread worker value.
+1. **Two cases have no lowering yet.** A `dyn` contract method and a `Box`
+   borrow method.
+2. **One case lowers a literal at the wrong width.** An integer literal returned
+   from `!u8` becomes an `i64`.
 
 No case answers wrong. Every remaining one fails, and says so.
 
@@ -99,6 +94,28 @@ accepted build policy but are not implemented.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
+
+## Roadmap
+
+The table above measures what runs. This is what is planned, in progress, or
+deliberately excluded, so the two are not confused.
+
+| Feature | State |
+| --- | --- |
+| threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it |
+| wasm backend beyond the current subset | **in progress.** 16 of 73 examples load and run today |
+| raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
+| float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
+| type alias | **not started** |
+| `kizu lint` | **not started** |
+| full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
+| `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
+| Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
+| self-hosting compiler | **withdrawn.** One implementation, in Go (ADR-0082) |
+
+A feature is "implemented" here only when a conformance case runs it and checks
+its output. Rules that only a checker enforces are not counted as features --
+that is the mistake ADR-0025 exists to record.
 
 ## Example
 

@@ -146,7 +146,7 @@ func implMethodName(typeName string, method string) string {
 // runtimeBuiltinReturnType records checked host-runtime builtin result types.
 func runtimeBuiltinReturnType(name string) (string, bool) {
 	switch name {
-	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
+	case "std.builtin.io_blocking", "std.builtin.io_failing":
 		return "Io", true
 	case "std.builtin.fs_read_file":
 		return "std::fs::Error![]u8", true

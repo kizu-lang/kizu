@@ -29,7 +29,7 @@ Kizu adopts a minimal explicit static argument subset for function generics.
   list, separate from the runtime argument list `(...)`.
 - A static argument list holds type parameters and compile-time values. A bare
   name declares a type, `name: Type` declares a value: `fn f<T>(value: T) -> T`,
-  `fn sized<n: i64>()`, `fn parallel_for<worker: Function>(io: Io)`.
+  `fn sized<n: i64>()`, `fn each<worker: Function>(start: i64, end: i64)`.
 - A compile-time value cannot be a runtime parameter. `comptime n: i64` in
   `(...)` is rejected: the reason this ADR gives for keeping types out of the
   runtime list applies to any value that cannot exist at runtime.

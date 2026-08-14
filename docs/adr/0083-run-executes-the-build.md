@@ -86,11 +86,10 @@ entry が各 test を `try` で呼ぶ。test の診断も runtime に移った�
 
 ## 埋める順序
 
-1. 黙って違う答えを返す 6 本(失敗しないため気づけない)
-2. 診断が出ない・capability が効かない 6 本(enum 名の欠落 3、借用の反映、配列長、error union の exit)
-3. lowering 未実装 16 本(`task_group` 6、`Channel<T>` / `Atomic<T>` 4、
-   明示 generics、dyn contract method、Box borrow、if 式、scoped thread)
+1. lowering 未実装 2 本(dyn contract method、Box borrow method)
+2. `!u8` から返した整数 literal が `i64` になる 1 本
 
 範囲外 index と slice の診断は ADR-0084 で埋めた。
+並行 API 由来の未実装は ADR-0025 の撤回でなくなった。
 
 進捗は `just backend-matrix` が表にする。

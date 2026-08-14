@@ -55,7 +55,7 @@ var groups = []featureGroup{
 	{"comptime", []string{"comptime"}},
 	{"cast / slice / raw pointer / box", []string{
 		"cast", "deref", "slice", "slice-syntax", "index-slice", "[]u8", "box",
-		"local-buffer", "capacity", "recursive-ast"}},
+		"capacity", "recursive-ast"}},
 	{"contract / dyn / generics", []string{
 		"contract", "dyn", "impl", "generics", "type-apply", "static-arguments"}},
 	{"std::array", []string{"std-array", "token-list"}},
@@ -66,12 +66,7 @@ var groups = []featureGroup{
 	{"std::fmt", []string{"std-fmt", "artifact"}},
 	{"std::fs / path / io / process", []string{
 		"std-fs", "std-path", "std-io", "std-process", "fs", "io",
-		"explicit-io", "blocking", "failing", "read-dir", "pure-helper"}},
-	{"TaskGroup / channel / queue / parallel", []string{
-		"taskgroup", "task", "queue", "deferred-task", "channel",
-		"owned-message", "parallel-for", "parallel-map", "partition", "cancel"}},
-	{"thread / atomic / mutex", []string{
-		"thread", "threaded", "atomic", "seq-cst", "sync"}},
+		"explicit-io", "read-dir", "pure-helper"}},
 }
 
 // routes are the CLI paths each example is put through. `run` builds a native

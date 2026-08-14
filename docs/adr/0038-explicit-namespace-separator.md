@@ -18,7 +18,7 @@ Kizu では構文の混在を避け、読み手が式の意味を見た目で区
 let color = Color::Red;
 let shape = Shape::Circle(10);
 let io = std::io::blocking();
-let group = std::task::Group(io);
+let bytes = try std::fs::read_file(io, "config.toml");
 ```
 
 runtime value の field / method access は `.` を使う。

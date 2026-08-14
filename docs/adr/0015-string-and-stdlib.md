@@ -64,6 +64,9 @@ interpreter builtin として扱う。
 これらは full stdlib ではなく、memory-safety release gate の対象となる
 trusted std prototype とする。
 
+> この concurrency prototype API は ADR-0025 で撤回した。上の module 一覧は
+> 当時の決定の記録であり、現在の std module 構成ではない。
+
 ## 影響
 
 - Phase 2 interpreter では string literal を `[]u8` value として扱う
@@ -72,5 +75,5 @@ trusted std prototype とする。
 - C ABI では `std::string::String` を暗黙に `ptr<const u8>` へ変換しない
 - collection は `std::array::Array<T>` を先に検討し、`std::map::Map<K, V>` /
   `std::set::Set<T>` は後続 phase に回す
-- `Io` は将来 `std::io`、`Task` / `TaskGroup` は `std::task` 境界に寄せる
+- `Io` は `std::io` 境界に寄せる（`Task` / `TaskGroup` は ADR-0025 で撤回）
 - async runtime は stdlib API と分けて設計し、safe Kizu の ownership / borrow 制約を維持する
