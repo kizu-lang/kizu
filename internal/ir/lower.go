@@ -677,7 +677,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	case *ast.LetStmt:
 		return l.lowerLetStmt(s)
 	case *ast.AssignStmt:
-		value, err := l.lowerExpr(s.Value)
+		value, err := l.lowerContextualExpr(s.Value, l.assignTargetType(s.Target))
 		if err != nil {
 			return err
 		}
@@ -718,6 +718,31 @@ func (l *lowerer) lowerLetStmt(stmt *ast.LetStmt) error {
 	}
 	l.bindLocal(stmt.Name, value)
 	return nil
+}
+
+// assignTargetType returns the declared type an assignment writes into, read
+// without emitting anything so the value can be lowered against it. "" means
+// the lowerer cannot name the type from the target alone, and the value keeps
+// the type it carries itself.
+func (l *lowerer) assignTargetType(target ast.Expression) string {
+	switch t := target.(type) {
+	case *ast.IdentExpr:
+		value, ok := l.env[t.Name]
+		if !ok {
+			return ""
+		}
+		return derefType(value.Type)
+	case *ast.FieldExpr:
+		receiver := l.assignTargetType(t.Receiver)
+		if receiver == "" {
+			return ""
+		}
+		return l.fieldType(receiver, t.Name)
+	case *ast.DerefExpr:
+		return l.assignTargetType(t.Receiver)
+	default:
+		return ""
+	}
 }
 
 // lowerAssignTarget writes value into an assignment target. An identifier
@@ -770,7 +795,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		l.block.Terminator = Terminator{Op: "return", Value: l.returnVoidValue()}
 		return nil
 	}
-	value, err := l.lowerExpr(stmt.Value)
+	value, err := l.lowerContextualExpr(stmt.Value, l.returnValueType())
 	if err != nil {
 		return err
 	}
@@ -810,6 +835,15 @@ func (l *lowerer) producesErrorValue(v Value) bool {
 		}
 	}
 	return false
+}
+
+// returnValueType returns the type a returned value has to have: the success
+// type of a `!T` function, or the return type itself.
+func (l *lowerer) returnValueType() string {
+	if success, ok := errorUnionSuccessType(l.current.Return); ok {
+		return success
+	}
+	return l.current.Return
 }
 
 // returnVoidValue returns the correct SSA return value for void-like returns.
@@ -902,6 +936,46 @@ func (l *lowerer) lowerAccessExpr(expr ast.Expression) (Value, error) {
 		return l.lowerDerefExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported access `%s`", expr.String())
+	}
+}
+
+// lowerContextualExpr lowers an expression whose type the position it appears
+// in already fixes: a function return, a struct field, a union payload, a
+// parameter. An integer literal takes that type there, the way the checker
+// already read it, so `fn byte() -> u8 { return 9; }` returns a u8 rather than
+// an i64 a backend has to narrow after the fact. want may be "" or any
+// non-integer type; the expression then lowers with the type it carries itself.
+func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, error) {
+	want = l.resolveType(want)
+	if !narrowsIntegerLiteral(want) {
+		return l.lowerExpr(expr)
+	}
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		return l.emitConst(want, e.Value), nil
+	case *ast.PrefixExpr:
+		// A negated literal is still a literal in the position it is written
+		// in, and `unary.-` takes the type of its operand.
+		if _, ok := e.Right.(*ast.IntExpr); ok && e.Operator == "-" {
+			value, err := l.lowerContextualExpr(e.Right, want)
+			if err != nil {
+				return Value{}, err
+			}
+			return l.emit("unary."+e.Operator, value.Type, []Value{value}, ""), nil
+		}
+	}
+	return l.lowerExpr(expr)
+}
+
+// narrowsIntegerLiteral reports whether an integer literal written in a
+// position of this type lowers as that type. i64 is what a literal lowers as
+// on its own, so it needs no contextual form.
+func narrowsIntegerLiteral(typ string) bool {
+	switch typ {
+	case "i8", "i16", "i32", "u8", "u16", "u32", "u64", "usize", "isize":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1360,7 +1434,7 @@ func arrayMethodResultType(name string) (string, bool) {
 func (l *lowerer) lowerStructLiteralExpr(expr *ast.StructLiteralExpr) (Value, error) {
 	fields := make([]FieldArg, 0, len(expr.Fields))
 	for _, field := range expr.Fields {
-		value, err := l.lowerExpr(field.Value)
+		value, err := l.lowerContextualExpr(field.Value, l.fieldType(expr.TypeName, field.Name))
 		if err != nil {
 			return Value{}, err
 		}
@@ -1412,7 +1486,7 @@ func (l *lowerer) lowerUnionConstructor(
 		return Value{}, true, fmt.Errorf("ir error: union variant `%s::%s` expects one payload",
 			unionType.Name, variant.Name)
 	}
-	payload, err := l.lowerExpr(rawArgs[0])
+	payload, err := l.lowerContextualExpr(rawArgs[0], variant.Payload)
 	if err != nil {
 		return Value{}, true, err
 	}

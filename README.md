@@ -29,7 +29,7 @@ by any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 24 | ✅ | 23/24 | 23/24 | 9/24 |
+| fn / let / struct / literals | 24 | ✅ | ✅ | ✅ | 9/24 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
@@ -41,11 +41,11 @@ by any one execution path.
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
 | contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
-| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
-| std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::array | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 11 | ✅ | ✅ | ✅ | ❌ |
+| std::map | 9 | ✅ | ✅ | ✅ | ❌ |
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
-| std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::testing | 9 | ✅ | ✅ | ✅ | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
@@ -59,11 +59,11 @@ succeeded, because `run` already builds the native target from the same text.
 | Route | Passing |
 | --- | --- |
 | `kizu check` | 73/73 |
-| `kizu run` | 70/73 |
-| `kizu build --emit-llvm` | 70/73 |
+| `kizu run` | 71/73 |
+| `kizu build --emit-llvm` | 71/73 |
 | `kizu build --target wasm32-wasi` | 16/73 |
 
-The 3 programs `run` cannot reproduce are registered in the manifests with a
+The 2 programs `run` cannot reproduce are registered in the manifests with a
 `pending` reason. A pending case is tested for *still failing*, so closing a gap
 forces its entry to be removed in the same change.
 
@@ -71,8 +71,6 @@ What is missing:
 
 1. **Two cases have no lowering yet.** A `dyn` contract method and a `Box`
    borrow method.
-2. **One case lowers a literal at the wrong width.** An integer literal returned
-   from `!u8` becomes an `i64`.
 
 No case answers wrong. Every remaining one fails, and says so.
 

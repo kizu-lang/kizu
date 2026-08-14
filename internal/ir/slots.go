@@ -284,7 +284,11 @@ func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, er
 				continue
 			}
 		}
-		value, err := l.lowerExpr(arg)
+		want := ""
+		if index < len(sig.Params) {
+			want = sig.Params[index].Type
+		}
+		value, err := l.lowerContextualExpr(arg, want)
 		if err != nil {
 			return nil, err
 		}

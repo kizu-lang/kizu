@@ -714,11 +714,18 @@ func (e *emitter) registerFunctionConstants(fn *ir.Function) {
 			if instr.Op != "const" {
 				continue
 			}
-			switch instr.Result.Type {
-			case "i64":
-				e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
-			case "bool":
-				e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
+			if _, ok := integerBitWidth(instr.Result.Type); ok {
+				e.values[instr.Result.Name] = valueInfo{
+					typ:     instr.Result.Type,
+					operand: instr.Immediate,
+				}
+				continue
+			}
+			if instr.Result.Type == "bool" {
+				e.values[instr.Result.Name] = valueInfo{
+					typ:     "bool",
+					operand: llvmBool(instr.Immediate),
+				}
 			}
 		}
 	}
@@ -883,9 +890,13 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
 		return nil
 	}
+	if _, ok := integerBitWidth(instr.Result.Type); ok {
+		// An integer constant is written as its digits at whatever width the
+		// type says, so every scalar integer shares one case here.
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
+		return nil
+	}
 	switch instr.Result.Type {
-	case "i64":
-		e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
 	case "[]u8":
