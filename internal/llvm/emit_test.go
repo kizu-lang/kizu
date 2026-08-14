@@ -456,8 +456,12 @@ func tryPhiMainFunction() *ir.Function {
 		tryPhiEntryBlock(),
 		tryPhiHeaderBlock(),
 		tryPhiBodyBlock(),
-		{Name: "exit", Terminator: ir.Terminator{
-			Op: "return", Value: ir.Value{Name: "%loop", Type: "i64"},
+		{Name: "exit", Instrs: []*ir.Instr{{
+			Result: ir.Value{Name: "%exit.ok", Type: "!i64"},
+			Op:     "error.ok",
+			Args:   []ir.Value{{Name: "%loop", Type: "i64"}},
+		}}, Terminator: ir.Terminator{
+			Op: "return", Value: ir.Value{Name: "%exit.ok", Type: "!i64"},
 		}},
 	}}
 }
