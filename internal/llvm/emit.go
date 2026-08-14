@@ -1995,8 +1995,8 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value) error {
 }
 
 // absorbsErrorUnionReturn reports whether one error union is returned straight
-// from a function whose own set is inferred, which is the absorption `try` does
-// written as a return.
+// from a function that declares no error set, which is the absorption `try`
+// does written as a return.
 func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
 	wantError, wantSuccess, ok := errorUnionParts(e.currentReturn)
 	if !ok || wantError != "" {

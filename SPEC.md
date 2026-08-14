@@ -1307,8 +1307,9 @@ error 値は set の member そのものであり、**payload を持ちません
 
 * `error Name { A, B }` で宣言する
 * member は `Name::A` で参照する
-* `!T` は推論される error set である。宣言した set は他の set を受け取らない
-* `match` で網羅的に分岐できる
+* `!T` は error set を宣言しない error union で、あらゆる set の member を受け取る
+* `E!T` は宣言した set の member だけを受け取る
+* 宣言した set は `match` で網羅的に分岐できる。`!T` は set を持たないので分岐できない
 * error 値が `main` から出た場合、`runtime error: Name::A` として報告される
 
 ルール:
@@ -1317,7 +1318,7 @@ error 値は set の member そのものであり、**payload を持ちません
 * `try` の operand は `!T` でなければならない
 * `E!T` の `E` は宣言済みの `error` set でなければならない
 * `E!T` では `E` の member または `T` を返せる
-* `!T` は推論される error set を表し、body が伝播・返却するものを受け取る
+* `!T` は set を宣言しないので、body はどの set の member でも伝播・返却できる
 * `E!T` と宣言した場合、`try` は同じ `E` だけを伝播できる
 * `!T` 関数では `T` を返すと成功値、error set の member を返すと失敗値として扱う
 * error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
