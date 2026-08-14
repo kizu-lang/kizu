@@ -293,10 +293,15 @@ typedef struct {
     int64_t error;
 } KizuErrorPtr;
 
+/* A map is an array of entries in the order they were first inserted, plus an
+   open-addressed table of indices into it. The entries array is what iteration
+   and insertion order come from; the index is what makes lookup O(1). Splitting
+   them this way is why insertion order costs nothing here. */
 typedef struct {
     unsigned char *key;
     int64_t key_len;
     unsigned char *value;
+    uint64_t hash;
 } KizuMapEntry;
 
 typedef struct {
@@ -304,6 +309,11 @@ typedef struct {
     int64_t len;
     int64_t cap;
     int64_t value_size;
+    /* index[slot] is an entry number, or -1 for a free slot. index_cap is a
+       power of two and is kept above the entry count, so a probe always meets
+       a free slot and terminates. */
+    int64_t *index;
+    int64_t index_cap;
 } KizuMap;
 
 typedef struct {
@@ -1328,17 +1338,71 @@ void *kizu_map_new(int64_t value_size) {
     return map;
 }
 
+static uint64_t kizu_map_hash(const unsigned char *key, int64_t key_len) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (int64_t i = 0; i < key_len; i += 1) {
+        hash ^= (uint64_t)key[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+/* kizu_map_slot returns the slot holding key, or the free slot it belongs in.
+   The caller tells the two apart by reading index[slot]. */
+static int64_t kizu_map_slot(
+    KizuMap *map, const unsigned char *key, int64_t key_len, uint64_t hash) {
+    uint64_t mask = (uint64_t)map->index_cap - 1;
+    uint64_t slot = hash & mask;
+    while (map->index[slot] >= 0) {
+        KizuMapEntry *entry = &map->entries[map->index[slot]];
+        if (entry->hash == hash && entry->key_len == key_len &&
+            memcmp(entry->key, key, (size_t)key_len) == 0) {
+            return (int64_t)slot;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return (int64_t)slot;
+}
+
 static int64_t kizu_map_find(KizuMap *map, const unsigned char *key, int64_t key_len) {
-    if (!map || !key || key_len < 0) {
+    if (!map || !key || key_len < 0 || map->index_cap == 0) {
         return -1;
     }
-    for (int64_t i = 0; i < map->len; i += 1) {
-        if (map->entries[i].key_len == key_len &&
-            memcmp(map->entries[i].key, key, (size_t)key_len) == 0) {
-            return i;
+    return map->index[kizu_map_slot(map, key, key_len, kizu_map_hash(key, key_len))];
+}
+
+/* kizu_map_reindex grows the index to hold needed entries below a 3/4 load and
+   rebuilds it. Entries carry their hash, so nothing rehashes the key bytes. */
+static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
+    int64_t next = map->index_cap == 0 ? 16 : map->index_cap;
+    while (needed * 4 > next * 3) {
+        if (next > INT64_MAX / (int64_t)sizeof(int64_t) / 2) {
+            return 0;
         }
+        next *= 2;
     }
-    return -1;
+    if (next == map->index_cap) {
+        return 1;
+    }
+    int64_t *index = (int64_t *)malloc((size_t)next * sizeof(int64_t));
+    if (!index) {
+        return 0;
+    }
+    for (int64_t slot = 0; slot < next; slot += 1) {
+        index[slot] = -1;
+    }
+    free(map->index);
+    map->index = index;
+    map->index_cap = next;
+    uint64_t mask = (uint64_t)next - 1;
+    for (int64_t entry = 0; entry < map->len; entry += 1) {
+        uint64_t slot = map->entries[entry].hash & mask;
+        while (map->index[slot] >= 0) {
+            slot = (slot + 1) & mask;
+        }
+        map->index[slot] = entry;
+    }
+    return 1;
 }
 
 static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
@@ -1371,9 +1435,14 @@ _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, c
     if (!map || !key || key_len < 0 || !value) {
         return 0;
     }
-    int64_t found = kizu_map_find(map, key, key_len);
-    if (found >= 0) {
-        memcpy(map->entries[found].value, value, (size_t)map->value_size);
+    /* Before the slot is taken, because growing the index moves every slot. */
+    if (!kizu_map_reindex(map, map->len + 1)) {
+        return 0;
+    }
+    uint64_t hash = kizu_map_hash(key, key_len);
+    int64_t slot = kizu_map_slot(map, key, key_len, hash);
+    if (map->index[slot] >= 0) {
+        memcpy(map->entries[map->index[slot]].value, value, (size_t)map->value_size);
         return 1;
     }
     if (!kizu_map_reserve(map, map->len + 1)) {
@@ -1393,6 +1462,8 @@ _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, c
     map->entries[map->len].key = key_copy;
     map->entries[map->len].key_len = key_len;
     map->entries[map->len].value = value_copy;
+    map->entries[map->len].hash = hash;
+    map->index[slot] = map->len;
     map->len += 1;
     return 1;
 }
@@ -1425,6 +1496,7 @@ void kizu_map_deinit(void *handle) {
         free(map->entries[i].value);
     }
     free(map->entries);
+    free(map->index);
     free(map);
 }
 
