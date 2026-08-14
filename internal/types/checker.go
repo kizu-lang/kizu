@@ -2076,12 +2076,7 @@ func (c *Checker) checkReturnValue(
 // function that declares no error set is the same absorption `try` does. A
 // declared `E!T` is not this, because it named the one set it accepts.
 func absorbsErrorUnion(want Type, got Type) bool {
-	wantError, wantSuccess, ok := errorUnionParts(want)
-	if !ok || wantError != "" {
-		return false
-	}
-	gotError, gotSuccess, isUnion := errorUnionParts(got)
-	return isUnion && gotError != "" && sameType(Type(gotSuccess), Type(wantSuccess))
+	return typ.AbsorbsErrorSet(string(want), string(got))
 }
 
 // checkErrorUnionReturn accepts success or error payloads for !T returns.

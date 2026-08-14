@@ -44,7 +44,10 @@ func TestDumpSnapshots(t *testing.T) {
 
 // TestOptimizePasses checks constant folding, copy propagation, and DCE.
 func TestOptimizePasses(t *testing.T) {
-	module := &Module{Functions: []*Function{{Name: "main", Return: "void"}}}
+	// The function returns what its block returns: Optimize verifies the module
+	// it produced, and a fixture declaring otherwise is rejected before the
+	// passes can be read.
+	module := &Module{Functions: []*Function{{Name: "main", Return: "i64"}}}
 	fn := module.Functions[0]
 	block := &Block{Name: "entry"}
 	fn.Blocks = append(fn.Blocks, block)
@@ -61,9 +64,11 @@ func TestOptimizePasses(t *testing.T) {
 		{Result: dead, Op: "const", Immediate: "99"},
 	}
 	block.Terminator = Terminator{Op: "return", Value: copyValue}
-	Optimize(module)
+	if err := Optimize(module); err != nil {
+		t.Fatalf("optimize failed: %v", err)
+	}
 	got := Dump(module)
-	want := `fn main() -> void {
+	want := `fn main() -> i64 {
 entry:
   %3: i64 = const 3
   return %3: i64
@@ -100,7 +105,9 @@ func TestOptimizeKeepsStructFieldAndCleanupOperandsLive(t *testing.T) {
 	}
 	block.Terminator = Terminator{Op: "return", Value: holder}
 
-	Optimize(module)
+	if err := Optimize(module); err != nil {
+		t.Fatalf("optimize failed: %v", err)
+	}
 
 	if len(block.Instrs) != 2 {
 		t.Fatalf("optimized instruction count = %d, want producer + struct", len(block.Instrs))
@@ -624,3 +631,39 @@ entry:
   %4: !void = error.ok
   return %4: !void
 }`
+
+// blockScopedLetSource declares the same name in two sibling loop bodies, with
+// the second loop inside an if. Before block-scoped bindings, the name stayed in
+// the environment after each loop, so the if merge built a phi over one value
+// from each loop body -- and a loop that runs zero times never defines its
+// value, so neither dominated the merge. clang accepted the module only because
+// Apple's toolchain does not run the IR verifier; LLVM 21 rejected it.
+const blockScopedLetSource = `fn run(n: i64, flag: bool) -> i64 {
+    var total = 0;
+    var i = 0;
+    while i < n {
+        let entry = i * 2;
+        total = total + entry;
+        i = i + 1;
+    }
+    if flag {
+        var j = 0;
+        while j < n {
+            let entry = j * 3;
+            total = total + entry;
+            j = j + 1;
+        }
+    }
+    return total;
+}
+
+fn main() {
+    print(run(3, true));
+}`
+
+// TestLowerBlockScopedLetDominatesItsMerge keeps the source that exposed the
+// bug. Phi dominance is a Verify rule now and Lower ends in Verify, so lowering
+// this at all is the assertion; TestVerifyRejects covers the rule itself.
+func TestLowerBlockScopedLetDominatesItsMerge(t *testing.T) {
+	lowerSource(t, blockScopedLetSource)
+}

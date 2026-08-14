@@ -13,7 +13,14 @@ import (
 // Lower converts a checked Kizu AST into typed SSA IR.
 func Lower(program *ast.Program) (*Module, error) {
 	l := newLowerer(program)
-	return l.lower()
+	module, err := l.lower()
+	if err != nil {
+		return nil, err
+	}
+	if err := Verify(module); err != nil {
+		return nil, err
+	}
+	return module, nil
 }
 
 type lowerer struct {

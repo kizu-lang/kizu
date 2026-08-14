@@ -347,6 +347,19 @@ func ErrorUnionParts(text string) (string, string, bool) {
 	return errorType, node.Ok.String(), true
 }
 
+// AbsorbsErrorSet reports whether a value of type got fills a slot declared
+// want by the absorption `try` does. `!T` declares no error set (ADR-0087), so
+// an `E!T` reaching it arrives with E absorbed. A declared `E!T` named the one
+// set it takes and absorbs nothing.
+func AbsorbsErrorSet(want string, got string) bool {
+	wantSet, wantSuccess, isUnion := ErrorUnionParts(want)
+	if !isUnion || wantSet != "" {
+		return false
+	}
+	gotSet, gotSuccess, isUnion := ErrorUnionParts(got)
+	return isUnion && gotSet != "" && gotSuccess == wantSuccess
+}
+
 // SplitApply separates `Base` and `Args` in a `Base<Args>` spelling, without
 // looking inside either. It is the one place that knows the closing `>` of a
 // name is its last byte.

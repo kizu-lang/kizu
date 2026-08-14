@@ -354,7 +354,9 @@ func testFile(path string, args []string) error {
 	return nil
 }
 
-// addTestMain builds an entry that runs every lowered test block in order.
+// addTestMain builds an entry that runs every lowered test block in order. It
+// writes IR by hand, so it ends by verifying what it produced, the same way
+// `internal/ir` verifies what it returns.
 func addTestMain(module *ir.Module) error {
 	names := ir.TestFunctionNames(module)
 	if len(names) == 0 {
@@ -392,7 +394,7 @@ func addTestMain(module *ir.Module) error {
 			Terminator: ir.Terminator{Op: "return", Value: ok},
 		}},
 	})
-	return nil
+	return ir.Verify(module)
 }
 
 // splitProgramArgs separates the source path from optional Kizu process args.
@@ -784,7 +786,9 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 		return nil, err
 	}
 	if opt {
-		ir.Optimize(module)
+		if err := ir.Optimize(module); err != nil {
+			return nil, err
+		}
 	}
 	return module, nil
 }
@@ -803,21 +807,26 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 		return nil, err
 	}
 	if opt {
-		ir.Optimize(module)
+		if err := ir.Optimize(module); err != nil {
+			return nil, err
+		}
 	}
-	addPackageMain(module, graph.Root+"::main")
+	if err := addPackageMain(module, graph.Root+"::main"); err != nil {
+		return nil, err
+	}
 	return module, nil
 }
 
 // addPackageMain exposes the root module main as the native entrypoint, so a
-// package uses the same entry rule as a single file: `fn main`.
-func addPackageMain(module *ir.Module, entry string) {
+// package uses the same entry rule as a single file: `fn main`. It writes IR by
+// hand, so like addTestMain it verifies what it produced.
+func addPackageMain(module *ir.Module, entry string) error {
 	if moduleFunction(module, "main") != nil {
-		return
+		return nil
 	}
 	entryFn := moduleFunction(module, entry)
 	if entryFn == nil || len(entryFn.Params) != 0 {
-		return
+		return nil
 	}
 	result := ir.Value{Name: "%1", Type: entryFn.Return}
 	mainFn := &ir.Function{
@@ -833,6 +842,7 @@ func addPackageMain(module *ir.Module, entry string) {
 		}},
 	}
 	module.Functions = append(module.Functions, mainFn)
+	return ir.Verify(module)
 }
 
 // moduleFunction returns the lowered function with the requested symbol.
