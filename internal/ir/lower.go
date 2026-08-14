@@ -547,7 +547,9 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		return nil, err
 	}
 	if l.block.Terminator.Op == "" {
-		l.block.Terminator = Terminator{Op: "return", Value: Value{Name: "void", Type: "void"}}
+		// A body that runs off its end returns what a written `return;` returns,
+		// which for `!void` is a wrapped success rather than a bare void.
+		l.block.Terminator = Terminator{Op: "return", Value: l.returnVoidValue()}
 	}
 	return l.current, nil
 }

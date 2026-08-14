@@ -1930,8 +1930,8 @@ func helperLabel(base string, suffix string) string {
 func (e *emitter) writeTerminator(term ir.Terminator) error {
 	switch term.Op {
 	case "return":
-		if success, ok := errorUnionSuccessType(e.currentReturn); ok {
-			return e.writeErrorUnionReturn(term.Value, success)
+		if _, ok := errorUnionSuccessType(e.currentReturn); ok {
+			return e.writeErrorUnionReturn(term.Value)
 		}
 		if term.Value.Type == "void" {
 			if e.mainReturnsInt {
@@ -1957,8 +1957,10 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 	return nil
 }
 
-// writeErrorUnionReturn emits a return from a function declared as !T.
-func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
+// writeErrorUnionReturn emits a return from a function declared as !T. Lowering
+// wraps every success in error.ok before it gets here, so what arrives is the
+// union itself, a failure to name, or another union to absorb.
+func (e *emitter) writeErrorUnionReturn(value ir.Value) error {
 	if e.mainReturnsInt {
 		if value.Type == e.currentReturn {
 			return e.writeMainErrorUnionReturn(value)
@@ -1966,10 +1968,6 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		if _, isSet := e.module.ErrorSets[value.Type]; isSet {
 			e.writeMainErrorName(e.value(value).operand)
 			e.out.WriteString("  ret i32 1\n")
-			return nil
-		}
-		if value.Type == success || value.Type == "void" && success == "void" {
-			e.out.WriteString("  ret i32 0\n")
 			return nil
 		}
 		return fmt.Errorf(
@@ -1992,9 +1990,6 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		e.writeErrorFailureCode(name, e.currentReturn, valueInfo.operand)
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
 		return nil
-	}
-	if value.Type == success || value.Type == "void" && success == "void" {
-		return e.writeImplicitErrorOKReturn(value)
 	}
 	return fmt.Errorf("llvm error: cannot return %s from %s", value.Type, e.currentReturn)
 }
@@ -2030,16 +2025,19 @@ func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
 	}
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	if success == "void" {
-		return e.writeImplicitErrorOKReturn(ir.Value{Name: value.Name, Type: "void"})
+		return e.writeSuccessReturn(ir.Value{Name: value.Name, Type: "void"})
 	}
 	successName := "%" + e.nextSyntheticValue("absorb.value")
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, sourceType, source.operand)
 	e.values[successName] = valueInfo{typ: success, operand: successName}
-	return e.writeImplicitErrorOKReturn(ir.Value{Name: successName, Type: success})
+	return e.writeSuccessReturn(ir.Value{Name: successName, Type: success})
 }
 
-// writeImplicitErrorOKReturn wraps legacy success returns from malformed IR.
-func (e *emitter) writeImplicitErrorOKReturn(value ir.Value) error {
+// writeSuccessReturn returns a success value as the error union around it. An
+// absorbed return arrives holding the success the source union carried, so the
+// wrap is written here rather than by the lowerer that could not name the target
+// union yet.
+func (e *emitter) writeSuccessReturn(value ir.Value) error {
 	name := "%" + e.nextSyntheticValue("return.ok")
 	unionType := e.llvmType(e.currentReturn)
 	if value.Type == "void" {
