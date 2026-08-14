@@ -4,15 +4,20 @@ import "strings"
 
 // wasmType maps Kizu IR types to WebAssembly value types.
 func wasmType(typ string) string {
-	switch typ {
-	case "bool":
-		return "i32"
-	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+	if isIntegerType(typ) {
 		return "i64"
-	case "[]u8":
-		return "i32"
+	}
+	return "i32"
+}
+
+// isIntegerType reports whether a Kizu type is a scalar integer. Every integer
+// width is held in one wasm i64, so the width only matters to the frontend.
+func isIntegerType(typ string) bool {
+	switch typ {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+		return true
 	default:
-		return "i32"
+		return false
 	}
 }
 

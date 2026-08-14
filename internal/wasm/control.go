@@ -64,9 +64,16 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 
 // writeConst records scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
+	if isIntegerType(instr.Result.Type) {
+		// Every scalar integer is one wasm i64, so a constant of any width is
+		// written the same way.
+		e.values[instr.Result.Name] = valueInfo{
+			typ:  instr.Result.Type,
+			expr: "(i64.const " + instr.Immediate + ")",
+		}
+		return nil
+	}
 	switch instr.Result.Type {
-	case "i64":
-		e.values[instr.Result.Name] = valueInfo{typ: "i64", expr: "(i64.const " + instr.Immediate + ")"}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", expr: wasmBool(instr.Immediate)}
 	case "[]u8":

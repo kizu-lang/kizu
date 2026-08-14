@@ -27,7 +27,7 @@ conformance manifest であり、特定の実行経路ではありません。
 
 | 機能 | 例の数 | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 24 | ✅ | 23/24 | 23/24 | 9/24 |
+| fn / let / struct / literals | 24 | ✅ | ✅ | ✅ | 9/24 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
@@ -39,11 +39,11 @@ conformance manifest であり、特定の実行経路ではありません。
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
 | cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
 | contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
-| std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
-| std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
-| std::map | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::array | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 11 | ✅ | ✅ | ✅ | ❌ |
+| std::map | 9 | ✅ | ✅ | ✅ | ❌ |
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
-| std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
+| std::testing | 9 | ✅ | ✅ | ✅ | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
 | std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
@@ -55,18 +55,17 @@ conformance manifest であり、特定の実行経路ではありません。
 | 経路 | 通過 |
 | --- | --- |
 | `kizu check` | 73/73 |
-| `kizu run` | 70/73 |
-| `kizu build --emit-llvm` | 70/73 |
+| `kizu run` | 71/73 |
+| `kizu build --emit-llvm` | 71/73 |
 | `kizu build --target wasm32-wasi` | 16/73 |
 
-`run` が再現できない 3 件は、manifest に `pending` として理由付きで登録してあります。
+`run` が再現できない 2 件は、manifest に `pending` として理由付きで登録してあります。
 pending なケースは「今も通らないこと」を検査するので、穴を塞いだ変更は
 同じ変更で登録を消すことになります。
 
 埋めるべきもの:
 
 1. **2 件は lowering が未実装。** `dyn` contract method と `Box` borrow method。
-2. **1 件は literal の幅を誤る。** `!u8` から返した整数 literal が `i64` になります。
 
 違う答えを出すケースはありません。残りは全て失敗し、失敗したと言います。
 
