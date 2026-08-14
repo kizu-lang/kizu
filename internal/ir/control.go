@@ -255,8 +255,10 @@ func (l *lowerer) lowerLoop(shape loopShape) error {
 		return err
 	}
 	// l.block, not header: a short-circuit condition splits the test across
-	// blocks of its own, and the branch belongs to the one it ended in.
-	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
+	// blocks of its own, and the branch belongs to the one it ended in. That
+	// block, not the header, is also the one the exit is reached from.
+	test := l.block
+	test.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	back := header
 	if latch != nil {
 		back = latch
@@ -287,7 +289,7 @@ func (l *lowerer) lowerLoop(shape loopShape) error {
 		latch.Terminator = Terminator{Op: "jump", Target: header.Name}
 	}
 	l.block = exit
-	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
+	l.finishLoopExitPhis(exit, phis, test.Name, loop.breakEdges)
 	return nil
 }
 
@@ -469,17 +471,19 @@ func (l *lowerer) latchValue(latch *Block, entry loopPhi, incoming []Incoming) V
 }
 
 // finishLoopExitPhis merges condition-false exits with explicit break edges.
+// test is the block the condition ended in, which is the one the false edge
+// leaves from -- the header only when the condition did not split.
 func (l *lowerer) finishLoopExitPhis(
 	exit *Block,
 	phis []loopPhi,
-	header string,
+	test string,
 	breakEdges []loopEdge,
 ) {
 	if len(breakEdges) == 0 {
 		return
 	}
 	for _, entry := range phis {
-		incoming := []Incoming{{Block: header, Value: entry.phi.Result}}
+		incoming := []Incoming{{Block: test, Value: entry.phi.Result}}
 		for _, edge := range breakEdges {
 			value, ok := edge.env.get(entry.name)
 			if ok {

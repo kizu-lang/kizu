@@ -65,7 +65,11 @@ func (v *verifier) function(fn *Function) error {
 			return err
 		}
 	}
-	return v.phiIncomingDominates()
+	preds := blockPredecessors(fn)
+	if err := v.phiIncomingMatchesPredecessors(preds); err != nil {
+		return err
+	}
+	return v.phiIncomingDominates(preds)
 }
 
 // instr checks the declared slot an instruction fills, if it fills one.
@@ -181,18 +185,91 @@ func (v *verifier) fail(position string, want string, got string) error {
 		ErrVerify, v.fn.Name, position, v.block.Name, got, want)
 }
 
+// phiIncomingMatchesPredecessors checks the other half of what LLVM's verifier
+// asks of a phi: one incoming for each block that jumps to the phi's block, and
+// none from a block that does not. An incoming from a block that never reaches
+// here reads a value on an edge that does not exist, and a predecessor with no
+// incoming leaves the phi undefined on an edge that does.
+//
+// An edge out of an unreachable block is still an edge, so it is still counted.
+// phiIncomingDominates exempts unreachable blocks, which is not a disagreement:
+// that rule asks which paths reach a block, and an unreachable block is on
+// none, while this one asks which blocks name it as a target.
+func (v *verifier) phiIncomingMatchesPredecessors(preds map[string][]string) error {
+	for _, block := range v.fn.Blocks {
+		arrives := namesIn(preds[block.Name])
+		for _, instr := range block.Instrs {
+			if instr.Op != "phi" {
+				continue
+			}
+			if err := v.phiEdges(block, instr, preds[block.Name], arrives); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// phiEdges checks one phi against the blocks that jump to its own. Counting
+// after the two membership passes is what makes it edges rather than names: a
+// branch whose arms share a target reaches the block twice and needs two
+// incoming, and a phi naming one block twice covers one edge, not two.
+func (v *verifier) phiEdges(
+	block *Block,
+	instr *Instr,
+	preds []string,
+	arrives map[string]bool,
+) error {
+	named := make(map[string]bool, len(instr.Incoming))
+	for _, incoming := range instr.Incoming {
+		if !arrives[incoming.Block] {
+			return fmt.Errorf(
+				"%w: %s: phi %s in block %s takes a value from %s, "+
+					"which does not jump to %s",
+				ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
+				incoming.Block, block.Name)
+		}
+		named[incoming.Block] = true
+	}
+	for _, name := range preds {
+		if named[name] {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: %s: phi %s in block %s has no value for %s, "+
+				"which jumps to %s",
+			ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
+			name, block.Name)
+	}
+	if len(instr.Incoming) != len(preds) {
+		return fmt.Errorf(
+			"%w: %s: phi %s in block %s has %d incoming for %d edges into %s",
+			ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
+			len(instr.Incoming), len(preds), block.Name)
+	}
+	return nil
+}
+
+// namesIn returns the set of names in a list.
+func namesIn(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
 // phiIncomingDominates checks the SSA property LLVM's verifier enforces: a
 // phi's incoming value must be defined in a block that dominates the
 // predecessor it arrives from. A value that is not yet defined on that edge is
 // read as whatever the register held.
-func (v *verifier) phiIncomingDominates() error {
+func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
 	if len(v.fn.Blocks) == 0 {
 		return nil
 	}
 	definedIn := valueDefiningBlocks(v.fn)
-	tree := buildDominatorTree(v.fn)
+	tree := buildDominatorTree(v.fn, preds)
 	for _, block := range v.fn.Blocks {
-		v.block = block
 		for _, instr := range block.Instrs {
 			if instr.Op != "phi" {
 				continue
@@ -248,7 +325,7 @@ type dominatorTree struct {
 // predecessors. Storing sets instead costs a map per block and the entry count
 // grows with the square of the block count, which a function of a few dozen
 // blocks already feels.
-func buildDominatorTree(fn *Function) dominatorTree {
+func buildDominatorTree(fn *Function, preds map[string][]string) dominatorTree {
 	order := reversePostorder(fn)
 	tree := dominatorTree{index: make(map[string]int, len(order)), idom: make([]int, len(order))}
 	for position, name := range order {
@@ -259,7 +336,6 @@ func buildDominatorTree(fn *Function) dominatorTree {
 		return tree
 	}
 	tree.idom[0] = 0
-	preds := blockPredecessors(fn)
 	for changed := true; changed; {
 		changed = false
 		for position := 1; position < len(order); position++ {
