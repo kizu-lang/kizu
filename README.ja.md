@@ -27,7 +27,7 @@ conformance manifest であり、特定の実行経路ではありません。
 
 | 機能 | 例の数 | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 25 | ✅ | 23/25 | 23/25 | 9/25 |
+| fn / let / struct / literals | 24 | ✅ | 23/24 | 23/24 | 9/24 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
 | while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
 | if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
@@ -37,7 +37,7 @@ conformance manifest であり、特定の実行経路ではありません。
 | deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
 | arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
-| cast / slice / raw pointer / box | 9 | ✅ | 6/9 | 6/9 | 1/9 |
+| cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
 | contract / dyn / generics | 5 | ✅ | 4/5 | 4/5 | 1/5 |
 | std::array | 10 | ✅ | 9/10 | 9/10 | ❌ |
 | std::string | 11 | ✅ | 10/11 | 10/11 | ❌ |
@@ -45,38 +45,30 @@ conformance manifest であり、特定の実行経路ではありません。
 | std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
 | std::testing | 9 | ✅ | 8/9 | 8/9 | ❌ |
 | std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 9 | ✅ | 6/9 | 6/9 | ❌ |
-| TaskGroup / channel / queue / parallel | 9 | ✅ | 1/9 | 1/9 | ❌ |
-| thread / atomic / mutex | 5 | ✅ | ❌ | ❌ | ❌ |
+| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
-通らないことを表します。runnable example は 83 件、測定は 2026-08-14 に
+通らないことを表します。runnable example は 73 件、測定は 2026-08-14 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
 `run` はプログラムの出力で判定し、`llvm` と `wasm` は lowering が通ったかで判定します。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 83/83 |
-| `kizu run` | 70/83 |
-| `kizu build --emit-llvm` | 70/83 |
-| `kizu build --target wasm32-wasi` | 16/83 |
+| `kizu check` | 73/73 |
+| `kizu run` | 70/73 |
+| `kizu build --emit-llvm` | 70/73 |
+| `kizu build --target wasm32-wasi` | 16/73 |
 
-`run` が再現できない 19 件(program 13、negative 6)は、manifest に `pending` として理由付きで登録してあります。
+`run` が再現できない 3 件は、manifest に `pending` として理由付きで登録してあります。
 pending なケースは「今も通らないこと」を検査するので、穴を塞いだ変更は
 同じ変更で登録を消すことになります。
 
-埋めるべき順序:
+埋めるべきもの:
 
-1. **6 件が違う答えを出す。** 3 件は `print` から enum 名が落ち、1 件は mutable borrow
-   経由の変更を観測せず、1 件は配列長を誤り、1 件は回復済み error union で
-   非ゼロ終了します。失敗しないため呼び出し側が気づけない、3 つの中で最も悪い種類です。
-2. **negative example 4 件が違う失敗を報告する。** `Array.get_or_panic` は今も
-   メッセージ無しで trap し、failing な `Io` capability は無視されてプログラムが
-   成功し、返された error union が surface されません。範囲外 index と slice は
-   `index out of bounds` / `range out of bounds` を報告するようになりました(ADR-0084)。
-3. **16 件は lowering が未実装。** `std::builtin::task_group` (6)、
-   `Channel<T>` と `Atomic<T>` (4)、明示 generics、`dyn` contract method、
-   `Box` borrow、`if` 式、scoped thread の worker 値。
+1. **2 件は lowering が未実装。** `dyn` contract method と `Box` borrow method。
+2. **1 件は literal の幅を誤る。** `!u8` から返した整数 literal が `i64` になります。
+
+違う答えを出すケースはありません。残りは全て失敗し、失敗したと言います。
 
 language core 周辺の tooling:
 
@@ -94,6 +86,28 @@ interpreter はありません。`kizu test` は `kizu run` が `main` をビル
 build policy としては受理済みですが、未実装です。
 
 このリポジトリはまだ実験的です。言語設計の検証中は、構文と実装の詳細が変わり得ます。
+
+## Roadmap
+
+上の表は「今動くもの」を測った結果です。ここには予定・進行中・意図的に採らないものを
+書きます。両者を混同しないためです。
+
+| 機能 | 状態 |
+| --- | --- |
+| 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです |
+| 現在の subset を超える wasm backend | **進行中。** 73 件中 16 件が load して動きます |
+| raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
+| float literal と float 演算 | **未着手。** `f32` / `f64` は型名として存在しますが、`1.5` は 1 つの literal として字句解析されません |
+| type alias | **未着手** |
+| `kizu lint` | **未着手** |
+| full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
+| `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
+| Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません(ADR-0025) |
+| self-host compiler | **撤回済み。** 実装は Go 1 つ(ADR-0082) |
+
+ここで「実装済み」と呼ぶのは、conformance case がそれを実行して出力を検査している
+場合だけです。checker だけが強制する規則は機能に数えません。それが ADR-0025 の
+記録する失敗そのものだからです。
 
 ## 例
 

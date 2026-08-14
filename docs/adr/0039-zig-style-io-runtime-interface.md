@@ -1,6 +1,6 @@
 # ADR-0039: Io runtime は Zig 0.16 寄りの選択式 interface にする
 
-Status: 採用
+Status: 採用（`Io` interface 方針のみ。`TaskGroup` を前提にした節は ADR-0025 で撤回）
 
 ## 背景
 
@@ -26,7 +26,6 @@ I/O を行う関数は `Io` を受け取り、task / future / group は `Io` に
 
 ```kizu
 let io = std::io::blocking();
-let io = std::io::threaded();
 let io = std::io::evented();
 ```
 
@@ -45,28 +44,26 @@ let io = std::io::uring();  // Linux
 let io = std::io::kqueue(); // BSD / macOS
 ```
 
-v0.1 は `std::io::blocking()`、`std::io::threaded()`、
-`std::testing::failing_io()` を実装する。
-ただし `evented` / platform backend は後続で扱う。
+現時点で実装しているのは `std::io::blocking()` と
+`std::testing::failing_io()` である。`std::io::threaded()` は ADR-0025 で撤回した。
+thread 実行系が動いてから、意味のある実装と一緒に戻す。
+`evented` / platform backend は後続で扱う。
 
 ## Safe Boundary
 
-runtime implementation を切り替えても、safe Kizu の境界ルールは同じにする。
+runtime implementation を切り替えても、safe Kizu の境界ルールは弱めない。
 
-- detached task は許可しない
-- task は `TaskGroup` の structured scope を越えて escape できない
-- task は await または cancel されなければならない
-- task / future / thread / channel boundary に local borrow を渡せない
-- task / future / thread / channel boundary に mutable borrow を渡せない
-- task / future / thread / channel boundary に raw pointer を渡せない
-- raw pointer を field / payload に含む struct / union は boundary を越えられない
-- `std::arena::Arena<T>` / `std::arena::Handle<T>` / `dyn Contract` / `Mutex<T>` / `Task<T>` は
-  v0.1 では boundary を越えられない
-- non-copy value を boundary に渡す場合は move する
-- shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う
+具体的な境界ルールは ADR-0025 で撤回した。並行 API を持たない今、境界を越える
+値そのものが存在しないため、規則だけを先に固定し直すことはしない。thread 実行系が
+動いた時点で、その上で書く。
 
-これは Zig より制約が強い。
-Kizu は低レベル制御を残しつつ、safe code の memory safety を優先する。
+固定して残すのは方針だけである。
+
+- hidden global runtime を持たない
+- `Io` は明示的に渡す。function coloring を作らない
+- safe Kizu で data race を書ける API は採用しない
+
+3 番目が Zig との差である。Zig は data race を型で防がない。Kizu は防ぐ。
 
 ## Runtime Implementation Candidates
 
@@ -74,7 +71,6 @@ Kizu は低レベル制御を残しつつ、safe code の memory safety を優�
 
 ```text
 std::io::blocking()  simple blocking I/O
-std::io::threaded()  thread-backed I/O and task execution
 std::fs::read_file   explicit-Io file read returning ![]u8
 std::fs::write_file  explicit-Io file write returning !void
 ```
@@ -93,42 +89,23 @@ v0.1 で固定するのは API shape と memory-safety contract である。
 
 `std::fs` は hidden global runtime を持たない。`read_file` / `write_file` は必ず
 `Io` capability を第1引数に取り、I/O failure は `!T` error として返す。
-blocking I/O と task-based I/O の違いは、同じ API を direct call するか
-`TaskGroup` 経由で呼ぶかで表す。
+blocking I/O と task-based I/O の違いを、同じ API のどちらの呼び方で表すかは、
+thread 実行系と一緒に決める（ADR-0025）。
 
 ## Task API Direction
 
-Kizu の `TaskGroup` は structured concurrency の所有者である。
+当初この節は `std::task::Group(io)` と `group.spawn(...)` を v0.1 の実装対象として
+定めた。ADR-0025 でこの API を撤回したので、具体的な形はここでは決めない。
 
-将来的には `Io` が task runtime implementation を表し、`TaskGroup` が structured
-scope を所有する形に寄せる。
-
-```kizu
-let io = std::io::threaded();
-let group = std::task::Group(io);
-let task = group.spawn(load, "config.toml");
-```
-
-`io.async(...)` のように `Io` から detached-looking task を直接作る API は採用しない。
-task creation は `TaskGroup` を通す。
-
-v0.1 はこの API を実装する。
-旧 `Io()` / `std::task::Group()` / `group.spawn(io, ...)` 形式は採用しない。
+残すのは接続方針だけである。task runtime implementation は `Io` が表し、
+`io.async(...)` のように `Io` から detached-looking task を直接作る API は採らない。
 
 ## Cancellation
 
-task cancellation は cleanup 境界と一体で扱う。
+cancellation の具体的な意味論（`await` / `cancel` の順序規則、cleanup 境界との
+関係、cancellation error の型）は ADR-0025 で撤回した。実 runtime と一緒に決める。
 
-- `cancel` は task resource を解放する操作でもある
-- `await` と `cancel` は structured scope 内で完結する
-- `await` は task body の error を呼び出し側へ伝播する
-- `cancel` は v0.1 では cooperative cancellation ではない
-- `cancel` は task の完了を待ち、結果または error を破棄する
-- `await` 後の `cancel` と `cancel` 後の `await` はエラー
-- hidden background work は残さない
-
-v0.1 では cancellation request を task body に注入しない。
-実 runtime 導入時に cancellation 用の typed error を標準化する。
+方針として残すのは「hidden background work を残さない」ことだけである。
 
 ## 非目標
 
@@ -149,5 +126,4 @@ v0.1 では次を実装しない。
 - Kizu は Zig 0.16 に近い明示的な `Io` interface model を採用できる
 - library code は `Io` を受け取るだけで runtime implementation を選べる
 - safe Kizu の memory-safety rule は runtime implementation に依存しない
-- `Io` / `TaskGroup` / `Task<T>` は stdlib API として発展させる
-- v0.1 interpreter は同期実行のまま、将来 runtime の仕様負債を増やさずに済む
+- 並行 API の形は thread 実行系が動いてから決める（ADR-0025）

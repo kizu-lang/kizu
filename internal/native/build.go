@@ -635,10 +635,6 @@ void *std_builtin_io_blocking(void) {
     return KIZU_IO_WORKING;
 }
 
-void *std_builtin_io_threaded(void) {
-    return KIZU_IO_WORKING;
-}
-
 void *std_builtin_io_failing(void) {
     return KIZU_IO_FAILING;
 }

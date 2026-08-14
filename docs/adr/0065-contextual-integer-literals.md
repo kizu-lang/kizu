@@ -30,8 +30,7 @@ The accepted contexts are existing typed contexts, not new syntax:
 - struct literal fields
 - union payload constructors
 - typed std/container APIs such as `Array<u8>.append`, `String.append_byte`,
-  `Map<[]u8, u8>.insert`, `Channel<u8>.send`, `Mutex<u8>`,
-  `Box<u8>`, and `ptr_write(ptr<u8>, value)`
+  `Map<[]u8, u8>.insert`, `Box<u8>`, and `ptr_write(ptr<u8>, value)`
 
 `let x = 1;` still gives `x` type `i64`. Passing `x` to a narrower API still
 requires `cast<T>(x)`.

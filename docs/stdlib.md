@@ -121,13 +121,8 @@ Current builtin thinning candidates:
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
 | `std::builtin::process_exit_code` | Removed | Implemented in `std/src/process.kizu` as a pure value helper |
-| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for`, `std::builtin::task_parallel_map` | Host primitive | Public constructors, `parallel_for`, and `parallel_map` live in `std/src/task.kizu`; direct user calls are rejected |
-| `std::builtin::channel<T>`, `std::builtin::channel_send<T>`, `std::builtin::channel_recv<T>` | Runtime primitive | Public constructor and methods live in `std/src/channel.kizu`; direct user calls are rejected |
-| `std::builtin::atomic<T>`, `std::builtin::atomic_load<T>`, `std::builtin::atomic_store<T>` | Runtime primitive | Public constructor and methods live in `std/src/atomic.kizu`; direct user calls are rejected |
-| `std::builtin::mutex<T>`, `std::builtin::mutex_get<T>` | Runtime primitive | Public constructor and methods live in `std/src/sync.kizu`; direct user calls are rejected |
 | `std::builtin::array<T>`, `std::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `std/src/array.kizu`; direct user calls are rejected |
 | `std::builtin::map<K, V>`, `std::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `std/src/map.kizu`; direct user calls are rejected |
-| `std::builtin::thread_scoped<T>` | Runtime primitive | Public `std::thread::scoped<T>(io, worker, arg)` lives in `std/src/thread.kizu`; direct user calls are rejected |
 
 `std::testing` now keeps the public assertion surface in `std/src/testing.kizu`.
 `expect(condition)` returns `void` and uses the single explicit
@@ -137,25 +132,18 @@ over `std::builtin::test_fail_equal<T>` so callers get expected/got diagnostics
 without per-type assertion families. The builtin remains a std-only trap
 boundary, not a general formatting or reflection API.
 
-Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
-`std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`,
-`std::thread::scoped<T>`, `std::sync::Mutex`, and `std::atomic::Atomic` still
-keep Go runtime primitives where they own runtime storage, scheduler,
-synchronization, and borrow-safety rules. Treat those primitives as explicit
-runtime boundaries, not ordinary stdlib logic. The first wrapper split was
-tracked by #360 and must not leave dual public paths behind. Remaining stateful
-method wrappers are tracked by #382, and broader `std::thread::scoped`
-argument forwarding is tracked by #383. The
-task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
-Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
-uses a `comptime Function` parameter to forward the worker name through
-`std/src/task.kizu`. `parallel_map` uses an explicit `&var Partition` parameter
-to mutate partition output without moving the owner. `std::channel::Channel<T>()`,
-`std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`,
-`std::mem::Box<T>(allocator, value)`, `std::array::Array<T>(allocator)`,
-`std::map::Map<K, V>(allocator)`, and
-`std::thread::scoped<T>(io, worker, arg)` now use source-level type-argument
-forwarding through Kizu std source.
+Stateful runtime APIs such as `std::array::Array` and `std::map::Map` still keep
+Go runtime primitives where they own runtime storage and borrow-safety rules.
+Treat those primitives as explicit runtime boundaries, not ordinary stdlib logic.
+The first wrapper split was tracked by #360 and must not leave dual public paths
+behind. `std::mem::Box<T>(allocator, value)`, `std::array::Array<T>(allocator)`,
+and `std::map::Map<K, V>(allocator)` use source-level type-argument forwarding
+through Kizu std source.
+
+The concurrency modules (`std::task`, `std::channel`, `std::thread`,
+`std::sync`, `std::atomic`) and `std::io::threaded()` were withdrawn by
+ADR-0025. They had checker rules but no lowering and no runtime. Threads return
+for parallel work once a real execution path exists.
 
 ## Builtin Registry
 
@@ -169,13 +157,8 @@ forwarding through Kizu std source.
 | `std::testing` | `expect`, `expect_equal<T>`, `fail` | Kizu source over explicit `std::builtin::test_fail` and `std::builtin::test_fail_equal<T>` traps | keep Go limited to the runner, assertion trap, typed equality diagnostic trap, and error-union reporting boundary |
 | `std::fs` | `read_file`, `write_file`, `rename`, `exists`, `metadata`, `read_dir`, `create_dir`, `remove_dir`, `remove_file`, `Metadata`, `DirEntry` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
-| `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
+| `std::io` | `blocking`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu`; only arg count, arg, and env use host primitives | keep host process access primitives trusted |
-| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #382 |
-| `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor and method wrappers over reserved `std::builtin::channel_*`; Go owned message queue and boundary checks | keep queue primitive trusted |
-| `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #383 |
-| `std::sync` | `Mutex<T>` | Kizu constructor and `get` wrapper over reserved `std::builtin::mutex_get`; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted |
-| `std::atomic` | `Atomic<T>` | Kizu constructor plus `load`/`store` wrappers over reserved `std::builtin::atomic_*`; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API remains future work |
 
 ## Source Layout Target
 
@@ -196,11 +179,6 @@ std/
     path.kizu
     io.kizu
     process.kizu
-    task.kizu
-    channel.kizu
-    thread.kizu
-    sync.kizu
-    atomic.kizu
 ```
 
 The compiler still reserves the root namespace `std`. User packages cannot be

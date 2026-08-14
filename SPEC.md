@@ -76,8 +76,6 @@ std::arena::Arena<T> / std::arena::Handle<T>
 !T / error / try
 limited comptime
 Io capability
-Task / TaskGroup
-std::task structured API
 contract
 impl Contract for Type
 &dyn Contract
@@ -142,6 +140,7 @@ kizu lint
 native executable generation
 self-hosting compiler
 async fn / await syntax
+並行 API (task / channel / thread / mutex / atomic)
 OS thread / event loop / networking runtime
 Rust 同等以上の runtime performance guarantee
 ```
@@ -508,7 +507,7 @@ Kizu は型や名前空間に属する item lookup に `::` を使います。
 let color = Color::Red;
 let shape = Shape::Circle(10);
 let io = std::io::blocking();
-let group = std::task::Group(io);
+let bytes = try std::fs::read_file(io, "config.toml");
 ```
 
 `.` は runtime value の field / method access だけに使います。
@@ -1581,11 +1580,10 @@ fn sized<n: i64>() -> i64 {
 
 - 型パラメータ: 名前だけを書きます。`fn f<T>(value: T) -> T`
 - compile-time 値: 名前に型を付けます。`fn sized<n: i64>()`、
-  `fn parallel_for<worker: Function>(io: Io, start: i64, end: i64)`
+  `fn each<worker: Function>(start: i64, end: i64)`
 
 呼び出しはどちらも `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
-`std::testing::expect_equal<i64>(expected, actual)`、
-`std::task::parallel_for<worker>(io, 0, 3)`。
+`std::testing::expect_equal<i64>(expected, actual)`。
 
 compile-time 値として書けるのは整数、`true` / `false`、および `Function`
 (top-level function 名)です。型引数推論、generic methods、bounds、
@@ -1613,20 +1611,8 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-pub fn Channel<T>() -> Channel<T> {
-    return std::builtin::channel<T>();
-}
-
 pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
     return std::builtin::array<T>(allocator);
-}
-
-pub fn Atomic<T>(value: T) -> Atomic<T> {
-    return std::builtin::atomic<T>(value);
-}
-
-pub fn Mutex<T>(value: T) -> Mutex<T> {
-    return std::builtin::mutex<T>(value);
 }
 
 pub fn Map<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
@@ -1703,12 +1689,6 @@ try std::io::write_stdout(io, bytes);
 ```
 
 `print` が受け取れない型は診断になります。黙って何も出さないことはありません。
-
-加えて、v0.1 は concurrency / async の安全境界を固めるために、
-`std::task`、`std::channel`、`std::thread`、`std::atomic`、`std::sync`
-の prototype API を interpreter builtin として持ちます。
-これらは full stdlib ではなく、memory-safety release gate の対象となる
-trusted std prototype です。
 
 stdlib module は lowercase namespace names にします。
 
@@ -1913,9 +1893,9 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、
 その field は同じ body 内で以後使用できません。
 v0.2 の `Array<T>` element は arena、handle、nested array、`std::map::Map<K, V>` を
-含められます。raw pointer、dyn、concurrency capability type は入れられません。
+含められます。raw pointer と dyn は入れられません。
 この制限は struct field と union payload の中も再帰的に検査します。
-これらは provenance、dynamic dispatch、thread boundary の仕様を collection 向けに
+これらは provenance と dynamic dispatch の仕様を collection 向けに
 固めてから扱います。
 
 v0.2 の `std::map::Map<K, V>` は、self-host compiler の symbol table と
@@ -1937,7 +1917,6 @@ v0.2 の value type は copy type 限定です。
 non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
 `std::map::Map<K, V>()` のような hidden default allocator は使いません。
 `deinit` 後の map 使用は safe Kizu では禁止します。
-`std::map::Map<K, V>` は v0.2 では task/thread/channel boundary を越えられません。
 
 v0.2 の `std::testing` は、self-host compiler component test 用の
 最小 assertion API です。
@@ -1976,19 +1955,28 @@ diagnostics、message builder helper は後続で扱います。
 
 ## 15. concurrency / async 方針
 
-Kizu v0.1 では `async fn` / `await` syntax は実装しません。
-ただし、非同期・マルチスレッド周りの標準ライブラリ API 形状と
-safe Kizu の安全契約は v0.1 で固定します。
+Kizu は `async fn` / `await` syntax を実装しません。
 
-ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
-I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
-Kizu は Zig 0.16 寄りに、hidden global runtime ではなく、明示的な `Io`
-interface を渡す設計にします。
+並行 API も現在は持ちません。`std::task` / `std::channel` / `std::thread` /
+`std::sync` / `std::atomic` と `std::io::threaded()` は ADR-0025 で撤回しました。
+これらは checker rule だけが存在し、IR lowering も runtime も持たない状態が続いた
+ためです。安全規則が実行によって反証されない構造そのものを取り除きました。
 
-v0.1 で固定するのは API と checker rule です。
-実 OS thread、event loop、networking runtime、advanced atomic ordering は実装しません。
-interpreter は同期実行でもよいですが、将来の実並行 runtime でも同じ API と
-ownership / borrow rule を維持できる必要があります。
+**thread は入れます。** 並列処理は Kizu の目標であり、撤回したのは API の形だけです。
+順番だけを変えます。実行系が先で、安全規則は動く thread の上でだけ書きます。
+
+戻すときの制約は 2 つです。
+
+* Zig を参照します。hidden global runtime を持たず、`Io` と allocator を明示的に
+  渡し、function coloring を作りません(ADR-0039)
+* memory race safety は譲りません。Zig は data race を型で防ぎませんが、Kizu は
+  防ぎます。safe Kizu で data race を書ける API は採用しません
+
+API の形と個数は未定です。撤回した 8 個の型を一度に戻すことはしません。
+
+### 15.1 Io capability
+
+`Io` capability は残ります。並行 API とは独立した、外部世界に触る権限の表明です。
 
 ```kizu
 fn read_config(io: Io, path: []u8) -> ![]u8 {
@@ -1999,52 +1987,18 @@ fn read_config(io: Io, path: []u8) -> ![]u8 {
 方針:
 
 * I/O する関数は `Io` を受け取る
-* `Io` implementation は将来 `std::io` で明示的に選ぶ
-* hidden global async runtime は持たない
-* `TaskGroup` で structured concurrency に寄せる
-* detached task は許可しない
-* spawn された task は await または cancel される必要がある
-* task は local borrow を捕まえられない
-* task へ渡す non-copy value は move される
-* 野良 task は許可しない
-* task は `TaskGroup` の structured scope を越えて escape できない
-* safe Kizu では task 間で mutable state を暗黙共有できない
-* channel に送れる値は owned value または copy value に限定する
-* data parallelism は `std::task::parallel_for` のような structured API に閉じ込める
-* shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う
+* `Io` を受け取らない関数は local / pure な処理として読める
+* hidden global runtime を持たない
+* I/O failure は `!T` error として返す
 
-v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
-`std::io::blocking()` と `std::testing::failing_io()` は同期評価します。
-`std::io::threaded()` は `group.spawn` を goroutine で実行し、`await` / `cancel` が
-完了を待ちます。
-
-v0.1 で追加していく concurrency foundation:
+現在の `std::io` implementation:
 
 ```text
-std::task::Group          structured task scope
-Task<T>                   awaited or canceled task result
-std::task::Queue          deterministic deferred task queue
-std::task::parallel_for   safe data parallelism
-std::task::parallel_map   disjoint partition output
-std::channel::Channel<T>  owned message passing
-std::thread::scoped<T>    scoped thread boundary
-std::sync::Mutex<T>       explicit shared mutable state wrapper
-std::atomic::Atomic<T>   seq_cst-only atomic primitive
-Io                        explicit I/O capability
-std::fs::read_file        explicit-Io file read returning ![]u8
-std::fs::write_file       explicit-Io file write returning !void
-std::path                 pure path helpers with no hidden I/O
-std::process              explicit process argv/env helpers
+std::io::blocking()          simple blocking I/O
+std::testing::failing_io()   deterministic failing I/O for tests
 ```
 
-v0.1 の `std::io` implementation:
-
-```text
-std::io::blocking()  simple blocking I/O
-std::io::threaded()  thread-backed I/O and task execution
-```
-
-将来の `std::io` implementation 候補:
+将来の implementation 候補:
 
 ```text
 std::io::evented()   event-loop or coroutine backed I/O
@@ -2052,41 +2006,10 @@ std::io::uring()     Linux io_uring backend
 std::io::kqueue()    kqueue backend
 ```
 
-v0.1 では `evented` / `uring` / `kqueue` は実装しません。
-ただし、safe Kizu の checker rule はどの runtime implementation でも同じです。
+`evented` / `uring` / `kqueue` は実装しません。
+runtime selection の方針は ADR-0039 に従います。
 
-v0.1 では次の API 形状を正とします。
-
-```kizu
-let io = std::io::blocking();
-
-let group = std::task::Group(io);
-let task = group.spawn(load_config, "config.kizu");
-let value = try task.await();
-
-let ch = std::channel::Channel<i64>();
-ch.send(1);
-let n = ch.recv();
-
-let result = std::thread::scoped<i64>(io, worker, 41);
-let lock = std::sync::Mutex<i64>(3);
-let atomic = std::atomic::Atomic<i64>(0);
-```
-
-`Task<T>`:
-
-* `std::task::Group(io)` は task group を `Io` implementation に紐づける
-* `group.spawn(fn, args...)` は `Task<T>` を返す
-* spawn 対象関数は第1引数に `Io` を受け取る
-* `T` は spawn 対象関数の戻り値
-* `task.await()` は `T` または `!T` を返す
-* `task.cancel()` は `void` を返す
-* task は scope を抜ける前に await または cancel されなければならない
-* `await()` は task body の error を呼び出し側へ伝播する
-* `cancel()` は v0.1 では cooperative cancellation ではない
-* `cancel()` は task の完了を待ち、結果または error を破棄する
-* `await()` 後の `cancel()` と `cancel()` 後の `await()` はエラー
-* `threaded` runtime の `cancel()` は v0.1 では実行中 task の完了を待って結果を破棄する
+### 15.2 Io を取る標準 API
 
 `std::fs`:
 
@@ -2128,62 +2051,6 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::process::env(name)` は `![]u8` を返す
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process` helper は hidden I/O を持たない
-
-`std::channel::Channel<T>` is owned message passing:
-
-* `send(value)` moves non-copy values into the channel
-* `send(value)` requires `value: T`
-* `recv()` returns an owned `T`
-* borrow values and raw pointers cannot cross the channel boundary in safe Kizu
-* v0.1 では blocking semantics は定義しない
-* empty `recv()` は runtime error
-* v0.1 does not include `select`
-
-`std::task::parallel_for` is safe data parallelism:
-
-* v0.1 workers are `fn(i: i64) -> void` or `fn(i: i64) -> !void`
-* `std::task::partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
-* `partition.at(i)` reads or writes one checked slot
-* `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
-  as `&var Partition` and writes `worker(i)` to slot `i`
-* `std::task::LocalBuffer` is the trusted boundary for worker-local scratch
-* first error propagation uses the existing `!void` / `try` model
-* the interpreter may execute workers sequentially while preserving the API contract
-* v0.1 の `parallel_for` は range 専用で、collection iteration には接続しない
-* v0.1 の `parallel_map` output は `Partition` に限定する
-* mutable slice / array との接続は `std::mem` と `std::array::Array<T>` の仕様後に設計する
-* 詳細は ADR-0040 に従う
-
-Low-level concurrency boundary:
-
-* `std::thread::scoped<T>` is scoped and joined by construction
-* v0.2 の `std::thread::scoped<T>(io, fn, arg)` は 1 引数 worker に限定し、
-  `fn(arg)` の結果を返す
-* v0.1 interpreter では OS thread を作らず同期評価してよい
-* `std::sync::Mutex<T>` は explicit shared-mutable-state wrapper
-* v0.1 の `Mutex<T>` は copy value だけを受け取る
-* guard / lock mutation semantics と non-copy payload は後続で固める
-* `std::atomic::Atomic<T>` は v0.1 seq_cst-only。v0.1 の T は `bool` と `i64`
-* v0.1 では atomic ordering parameter を持たない
-* raw pointers cannot cross thread/task/channel/mutex boundaries in safe Kizu
-
-Send 相当ルール:
-
-* Rust の `Send` trait は採用しない
-* v0.1 では concurrency boundary を越えられる型を checker rule として明示する
-* copy primitive、enum、safe field だけを持つ owned struct / union は boundary を越えられる
-* `Atomic<T>` は `T` が v0.1 atomic 対応型なら boundary を越えられる
-* `Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる
-* local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない
-* raw pointer を field / payload に含む struct / union も boundary を越えられない
-* `std::arena::Arena<T>` / `std::arena::Handle<T>` / `dyn Contract` / `Mutex<T>` / `Task<T>` は
-  v0.1 では boundary を越えられない
-* arena / handle の thread-safe sharing は v0.1 では扱わない
-
-OS thread、event loop、networking runtime、atomic ordering の詳細 API は、
-safe structured API の後に追加します。
-実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
-詳細な runtime selection 方針は ADR-0039 に従います。
 
 ## 16. contract / impl / dyn 方針
 

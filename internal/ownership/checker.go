@@ -67,7 +67,6 @@ type binding struct {
 	arenaID          int
 	handleArenaID    int
 	deinitialized    bool
-	taskDone         bool
 }
 
 type scope struct {
@@ -384,10 +383,7 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 		}
 		env.releaseLastUseBorrows(idx, lastUses)
 	}
-	if err := c.checkDeferredCleanups(defers, env); err != nil {
-		return err
-	}
-	return env.checkPendingTasks()
+	return c.checkDeferredCleanups(defers, env)
 }
 
 // checkStmt validates one statement.
@@ -1853,10 +1849,13 @@ func (c *Checker) checkQualifiedBuiltin(
 	if err := c.rejectReservedBuiltin(name); err != nil {
 		return "", true, err
 	}
-	if typ, ok, err := c.checkQualifiedStdCoreBuiltin(name, args, env); ok || err != nil {
+	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
-	return c.checkQualifiedStdRuntimeBuiltin(name, args, env)
+	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
+		return typ, ok, err
+	}
+	return checkUntypedContainerConstructor(name)
 }
 
 // rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
@@ -1876,81 +1875,19 @@ func (c *Checker) rejectReservedBuiltin(name string) error {
 	return errorf("move error: `%s` is reserved; use %s", name, replacement)
 }
 
-// checkQualifiedStdCoreBuiltin validates pure, fs, I/O, and process std calls.
-func (c *Checker) checkQualifiedStdCoreBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	switch name {
-	case "std.channel.Channel":
-		return "", true, errorf("move error: use `std::channel::Channel<T>()`")
-	default:
-		return "", false, nil
-	}
-}
-
-// checkQualifiedStdRuntimeBuiltin validates std constructors and runtime helpers.
-func (c *Checker) checkQualifiedStdRuntimeBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkIoWriteBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkProcessBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkSimpleCoreBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
-		return typ, ok, err
-	}
-	return c.checkQualifiedStdRuntimeStateBuiltin(name, args, env)
-}
-
-// checkQualifiedStdRuntimeStateBuiltin validates stateful std runtime helpers.
-func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	return "", false, nil
-}
-
-// checkQualifiedStdBuiltin validates fs and mem ownership effects.
+// checkQualifiedStdBuiltin validates declarative core and fs ownership effects.
 func (c *Checker) checkQualifiedStdBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
+	if typ, ok, err := c.checkSimpleCoreBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	return "", false, nil
-}
-
-// checkMemBuiltin validates ownership effects for allocation-free std::mem calls.
-func (c *Checker) checkMemBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	return c.checkSimpleCoreBuiltin(name, args, env)
 }
 
 // checkSimpleCoreBuiltin validates declarative core primitive ownership effects.
@@ -2040,62 +1977,14 @@ func (c *Checker) checkFsBuiltin(
 	}
 }
 
-// checkIoWriteBuiltin validates explicit-Io stdio helpers.
-func (c *Checker) checkIoWriteBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	return c.checkSimpleCoreBuiltin(name, args, env)
-}
-
-// checkProcessBuiltin validates minimal process helpers.
-func (c *Checker) checkProcessBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	return c.checkSimpleCoreBuiltin(name, args, env)
-}
-
-// checkTaskBuiltin validates ownership for task and data-parallel std calls.
-func (c *Checker) checkTaskBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "std.builtin.task_group":
-		return c.checkTaskGroup(args, env)
-	case "std.builtin.task_queue":
-		_, err := checkNoArgOwnershipCall(name, args)
-		if err != nil {
-			return "", true, err
-		}
-		return "Queue", true, nil
-	case "std.builtin.task_partition_mut":
-		return c.checkPartitionMut(args, env)
-	case "std.builtin.task_local_buffer":
-		return c.checkLocalBuffer(args, env)
-
-	default:
-		return "", false, nil
-	}
-}
-
-// checkConcurrencyConstructor rejects untyped concurrency constructors.
-func checkConcurrencyConstructor(name string) (string, bool, error) {
+// checkUntypedContainerConstructor rejects a container constructor written
+// without its element types.
+func checkUntypedContainerConstructor(name string) (string, bool, error) {
 	switch name {
 	case "std.array.Array":
 		return "", true, errorf("move error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
 		return "", true, errorf("move error: use `std::map::Map<K, V>(allocator)`")
-	case "std.atomic.Atomic":
-		return "", true, errorf("move error: use `std::atomic::Atomic<T>(value)`")
-	case "std.atomic.AtomicI64":
-		return "", true, errorf("move error: use `std::atomic::Atomic<i64>(value)`")
-	case "std.sync.Mutex":
-		return "", true, errorf("move error: use `std::sync::Mutex<T>(value)`")
 	default:
 		return "", false, nil
 	}
@@ -2253,31 +2142,15 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 	if isDynType(typeName) {
 		return errorf("array error: Array element cannot be dyn in v0.2")
 	}
-	if err := c.rejectArrayStorageGeneric(typeName, seen); err != nil {
-		return err
+	if base, arg, ok := splitGenericType(typeName); ok && base == "option" {
+		if err := c.rejectArrayStorageType(arg, seen); err != nil {
+			return err
+		}
 	}
 	if err := c.rejectArrayStorageStruct(typeName, seen); err != nil {
 		return err
 	}
 	return c.rejectArrayStorageUnion(typeName, seen)
-}
-
-// rejectArrayStorageGeneric applies Array-specific generic exclusions.
-func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]bool) error {
-	base, arg, ok := splitGenericType(typeName)
-	if !ok {
-		return nil
-	}
-	switch base {
-	case "std::arena::Arena", "std::arena::Handle", "std::array::Array", "std::map::Map":
-		return nil
-	case "Task", "Channel", "Mutex", "Atomic":
-		return errorf("array error: Array element cannot be %s in v0.2", base)
-	case "option":
-		return c.rejectArrayStorageType(arg, seen)
-	default:
-		return nil
-	}
 }
 
 // rejectArrayStorageStruct checks struct fields recursively for Array storage.
@@ -2322,7 +2195,7 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 // checkIoBuiltin validates std::io constructor ownership effects.
 func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	switch name {
-	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
+	case "std.builtin.io_blocking", "std.builtin.io_failing":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
@@ -2368,16 +2241,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinMapTypeApply(name, typeArg, args, env); ok || err != nil {
-		return typ, err
-	}
-	if typ, ok, err := c.checkBuiltinTaskTypeApply(
-		name, typeArg, args, env,
-	); ok || err != nil {
-		return typ, err
-	}
-	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
-		name, typeArg, args, env,
-	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinContainerTypeApply(
@@ -2428,10 +2291,7 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	if typ, ok, err := c.checkBuiltinArrayTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, ok, err
 	}
-	if typ, ok, err := c.checkBuiltinTestingTypeApply(name, typeArg, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	return c.checkBuiltinChannelSyncTypeApply(name, typeArg, args, env)
+	return c.checkBuiltinTestingTypeApply(name, typeArg, args, env)
 }
 
 // checkBuiltinTestingTypeApply validates typed std::testing primitives.
@@ -2446,37 +2306,6 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	}
 	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
 	return typ, true, err
-}
-
-// checkBuiltinChannelSyncTypeApply validates typed concurrency primitives.
-func (c *Checker) checkBuiltinChannelSyncTypeApply(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "std.builtin.channel":
-		_, err := checkNoArgOwnershipCall(name, args)
-		if err != nil {
-			return "", true, err
-		}
-		return fmt.Sprintf("Channel<%s>", typeArg), true, nil
-	case "std.builtin.atomic":
-		typ, _, err := c.checkAtomic(typeArg, args, env)
-		return typ, true, err
-	case "std.builtin.mutex":
-		typ, _, err := c.checkMutex(typeArg, args, env)
-		return typ, true, err
-	case "std.builtin.channel_send", "std.builtin.channel_recv":
-		return c.checkBuiltinChannelMethod(name, typeArg, args, env)
-	case "std.builtin.atomic_load", "std.builtin.atomic_store":
-		return c.checkBuiltinAtomicMethod(name, typeArg, args, env)
-	case "std.builtin.mutex_get":
-		return c.checkBuiltinMutexMethod(name, typeArg, args, env)
-	default:
-		return "", false, nil
-	}
 }
 
 // checkBuiltinTestFailEqual validates ownership for the typed testing failure primitive.
@@ -2600,47 +2429,6 @@ func (c *Checker) checkBuiltinBoxMethod(
 			return "", errorf("box error: Box has no method `%s`", method)
 		}
 	}, args, env)
-}
-
-// checkBuiltinChannelMethod validates std-only channel method primitives.
-func (c *Checker) checkBuiltinChannelMethod(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	return c.checkBuiltinReceiverMethod(name, fmt.Sprintf("Channel<%s>", typeArg),
-		func(rest []ast.Expression) (string, error) {
-			method := strings.TrimPrefix(name, "std.builtin.channel_")
-			return c.checkChannelMethod(typeArg, method, rest, env)
-		}, args, env)
-}
-
-// checkBuiltinAtomicMethod validates std-only atomic method primitives.
-func (c *Checker) checkBuiltinAtomicMethod(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	method := strings.TrimPrefix(name, "std.builtin.atomic_")
-	return c.checkBuiltinReceiverMethod(name, fmt.Sprintf("Atomic<%s>", typeArg),
-		func(rest []ast.Expression) (string, error) {
-			return c.checkAtomicMethod(typeArg, method, rest, env)
-		}, args, env)
-}
-
-// checkBuiltinMutexMethod validates std-only mutex method primitives.
-func (c *Checker) checkBuiltinMutexMethod(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	return c.checkBuiltinReceiverMethod(name, fmt.Sprintf("Mutex<%s>", typeArg),
-		func(rest []ast.Expression) (string, error) {
-			return c.checkMutexMethod(typeArg, "get", rest, env)
-		}, args, env)
 }
 
 // checkBuiltinArrayMethod validates std-only Array method primitives.
@@ -2827,52 +2615,6 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	return nil
 }
 
-// checkBuiltinTaskTypeApply validates the task primitives whose worker arrives
-// as a static argument.
-func (c *Checker) checkBuiltinTaskTypeApply(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "std.builtin.task_parallel_for", "std.builtin.task_parallel_map":
-	}
-	switch name {
-	case "std.builtin.task_parallel_for":
-		return c.checkParallelFor(typeArg, args, env)
-	case "std.builtin.task_parallel_map":
-		return c.checkParallelMap(typeArg, args, env)
-	default:
-		return "", false, nil
-	}
-}
-
-// forwardsWorker reports whether this name is the wrapper's own static value.
-func (c *Checker) forwardsWorker(target string, env *scope) bool {
-	value, ok := env.lookup(target)
-	return ok && value != nil && value.typeName == "Function"
-}
-
-// checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
-func (c *Checker) checkBuiltinThreadScopedTypeApply(
-	name string,
-	typeArg string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if name != "std.builtin.thread_scoped" {
-		return "", false, nil
-	}
-	staticArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(staticArgs) != 2 {
-		return "", true, errorf(
-			"thread error: `std::thread::scoped` expects a type and a function name")
-	}
-	typ, err := c.checkThreadScopedTyped(strings.TrimSpace(staticArgs[0]), args, env)
-	return typ, true, err
-}
-
 // checkedMapArgsAllowTypeParams validates Map arguments inside std generic wrappers.
 func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
@@ -2979,20 +2721,8 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 // checkGenericWrapperTypeArgs validates std wrapper-specific static ownership contracts.
 func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) error {
 	switch name {
-	case "std.channel.Channel":
-		return nil
 	case "std.array.Array":
 		return c.rejectArrayElementType(typeArgs[0])
-	case "std.atomic.Atomic":
-		if !isAtomicSupportedType(typeArgs[0]) {
-			return errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArgs[0])
-		}
-	case "std.sync.Mutex":
-		if !c.isCopyType(typeArgs[0]) {
-			return errorf(
-				"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1",
-				typeArgs[0])
-		}
 	case "std.map.Map":
 		if _, err := c.checkedMapArgs(strings.Join(typeArgs, ", ")); err != nil {
 			return err
@@ -3011,59 +2741,13 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	if name == "std.sync.Mutex" {
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return err
-		}
-	}
-	if handled, err := c.checkGenericUserMoveArg(name, idx, want, arg, env); handled || err != nil {
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-	got, err := c.readContextualExpr(arg, want, env)
-	if err != nil {
-		return err
-	}
-	if got != want {
-		return errorf("move error: arg %d of `%s` expects %s, got %s",
-			idx+1, name, want, got)
-	}
-	return nil
-}
-
-// checkGenericUserMoveArg handles generic wrappers whose argument transfers ownership.
-func (c *Checker) checkGenericUserMoveArg(
-	name string,
-	idx int,
-	want string,
-	arg ast.Expression,
-	env *scope,
-) (bool, error) {
-	// The worker moved to the static list, so the value crossing the boundary
-	// is now the second runtime argument.
-	if name == "std.thread.scoped" && idx == 1 {
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return true, err
-		}
-		return true, c.checkMovedGenericArg(name, idx, want, arg, env)
-	}
+	// `std::mem::Box<T>(allocator, value)` takes ownership of its value; every
+	// other generic wrapper argument is read in place.
+	read := c.readContextualExpr
 	if name == "std.mem.Box" && idx == 1 {
-		return true, c.checkMovedGenericArg(name, idx, want, arg, env)
+		read = c.moveContextualExpr
 	}
-	return false, nil
-}
-
-// checkMovedGenericArg validates one moved argument against an instantiated type.
-func (c *Checker) checkMovedGenericArg(
-	name string,
-	idx int,
-	want string,
-	arg ast.Expression,
-	env *scope,
-) error {
-	got, err := c.moveContextualExpr(arg, want, env)
+	got, err := read(arg, want, env)
 	if err != nil {
 		return err
 	}
@@ -3089,8 +2773,6 @@ func (c *Checker) checkBuiltinCall(
 		return result, true, err
 	case "Io":
 		return "", true, errorf("move error: use `std::io::blocking()`")
-	case "TaskGroup":
-		return "", true, errorf("move error: use `std::task::Group(io)`")
 	default:
 		return "", false, nil
 	}
@@ -3551,16 +3233,6 @@ func (c *Checker) checkNonArenaMethod(
 	if err := checkMapReceiverBorrow(value, name); err != nil {
 		return "", err
 	}
-	if value.typeName == "TaskGroup" {
-		return c.checkTaskGroupMethod(name, args, env)
-	}
-	if elem, ok := taskElement(value.typeName); ok {
-		return c.checkTaskMethod(value, name, elem, args)
-	}
-	typ, ok, err := c.checkConcurrencyMethod(value.typeName, name, args, env)
-	if ok || err != nil {
-		return typ, err
-	}
 	if typ, ok, err := c.checkImplMethodCall(value, name, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -3936,242 +3608,6 @@ func (c *Checker) checkStringByteArg(
 	return "!void", nil
 }
 
-// checkConcurrencyMethod validates std concurrency prototype method moves.
-func (c *Checker) checkConcurrencyMethod(
-	receiver string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	base, arg, generic := splitGenericType(receiver)
-	if generic {
-		switch base {
-		case "Channel":
-			typ, err := c.checkChannelMethod(arg, name, args, env)
-			return typ, true, err
-		case "Mutex":
-			typ, err := c.checkMutexMethod(arg, name, args, env)
-			return typ, true, err
-		case "Atomic":
-			typ, err := c.checkAtomicMethod(arg, name, args, env)
-			return typ, true, err
-		}
-	}
-	switch receiver {
-	case "Queue":
-		typ, err := c.checkQueueMethod(name, args, env)
-		return typ, true, err
-	case "Partition":
-		typ, err := c.checkPartitionMethod(name, args, env)
-		return typ, true, err
-	case "LocalBuffer":
-		typ, err := c.checkLocalBufferMethod(name, args, env)
-		return typ, true, err
-	default:
-		return "", false, nil
-	}
-}
-
-// checkTaskGroupMethod validates spawn ownership effects.
-func (c *Checker) checkTaskGroupMethod(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if name != "spawn" {
-		return "", errorf("task error: TaskGroup has no method `%s`", name)
-	}
-	if len(args) < 1 {
-		return "", errorf("task error: `TaskGroup.spawn` expects function and args")
-	}
-	target, ok := args[0].(*ast.IdentExpr)
-	if !ok {
-		return "", errorf("task error: `TaskGroup.spawn` expects function name")
-	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		if _, ok := env.lookup(target.Name); ok {
-			return "", errorf("task error: `TaskGroup.spawn` expects function name")
-		}
-		return "", errorf("task error: undefined function `%s`", target.Name)
-	}
-	spawnArgs := args[1:]
-	if len(fn.params) == 0 || fn.params[0].typeName != "Io" ||
-		fn.params[0].borrow || fn.params[0].mutBorrow {
-		return "", errorf("task error: spawned function `%s` must accept owned Io as first parameter",
-			target.Name)
-	}
-	if len(spawnArgs) != len(fn.params)-1 {
-		return "", errorf("task error: `%s` expects %d args, got %d",
-			target.Name, len(fn.params)-1, len(spawnArgs))
-	}
-	for idx, arg := range spawnArgs {
-		paramIdx := idx + 1
-		if fn.params[paramIdx].borrow {
-			return "", errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
-		}
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return "", err
-		}
-		if _, err := c.moveExpr(arg, env); err != nil {
-			return "", err
-		}
-	}
-	return fmt.Sprintf("Task<%s>", returnTypeName(fn)), nil
-}
-
-// checkTaskGroup validates a task group bound to one Io implementation.
-func (c *Checker) checkTaskGroup(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, errorf("task error: `std::task::Group` expects io")
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "Io" {
-		return "", true, errorf("task error: `std::task::Group` expects Io, got %s", got)
-	}
-	return "TaskGroup", true, nil
-}
-
-// checkTaskMethod marks task completion for await/cancel.
-func (c *Checker) checkTaskMethod(
-	task *binding,
-	name string,
-	elem string,
-	args []ast.Expression,
-) (string, error) {
-	if len(args) != 0 {
-		return "", errorf("task error: `task.%s` expects 0 args, got %d", name, len(args))
-	}
-	if task.taskDone {
-		return "", errorf("task error: task `%s` was already completed", task.name)
-	}
-	switch name {
-	case "await":
-		task.taskDone = true
-		return elem, nil
-	case "cancel":
-		task.taskDone = true
-		return "void", nil
-	default:
-		return "", errorf("task error: Task has no method `%s`", name)
-	}
-}
-
-// checkQueueMethod applies deterministic deferred queue move rules.
-func (c *Checker) checkQueueMethod(name string, args []ast.Expression, env *scope) (string, error) {
-	switch name {
-	case "enqueue":
-		return c.checkQueueEnqueue(args, env)
-	case "drain":
-		if len(args) != 0 {
-			return "", errorf("task error: `queue.drain` expects 0 args, got %d", len(args))
-		}
-		return "void", nil
-	default:
-		return "", errorf("task error: Queue has no method `%s`", name)
-	}
-}
-
-// checkQueueEnqueue moves queued function arguments into the queue.
-func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope) (string, error) {
-	if len(args) < 2 {
-		return "", errorf("task error: `queue.enqueue` expects io, function, and args")
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	}
-	target, ok := args[1].(*ast.IdentExpr)
-	if !ok {
-		return "", errorf("task error: `queue.enqueue` expects function name")
-	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", errorf("task error: undefined function `%s`", target.Name)
-	}
-	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
-	if len(spawnArgs) != len(fn.params) {
-		return "", errorf("task error: `%s` expects %d args, got %d",
-			target.Name, len(fn.params), len(spawnArgs))
-	}
-	for idx, arg := range spawnArgs {
-		if fn.params[idx].borrow {
-			return "", errorf("task error: queue cannot capture borrow parameter `%s`", target.Name)
-		}
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return "", err
-		}
-		if _, err := c.moveExpr(arg, env); err != nil {
-			return "", err
-		}
-	}
-	return "void", nil
-}
-
-// checkChannelMethod applies owned message passing move rules.
-func (c *Checker) checkChannelMethod(
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "send":
-		if len(args) != 1 {
-			return "", errorf("channel error: `channel.send` expects 1 arg, got %d", len(args))
-		}
-		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
-			return "", err
-		}
-		got, err := c.moveContextualExpr(args[0], elem, env)
-		if err != nil {
-			return "", err
-		}
-		if got != elem {
-			return "", errorf("channel error: `channel.send` expects %s, got %s", elem, got)
-		}
-		return "void", nil
-	case "recv":
-		if len(args) != 0 {
-			return "", errorf("channel error: `channel.recv` expects 0 args, got %d", len(args))
-		}
-		return elem, nil
-	case "close":
-		if len(args) != 0 {
-			return "", errorf("channel error: `channel.close` expects 0 args, got %d", len(args))
-		}
-		return "void", nil
-	default:
-		return "", errorf("channel error: Channel has no method `%s`", name)
-	}
-}
-
-// checkPartitionMethod validates disjoint partition marker reads.
-func (c *Checker) checkPartitionMethod(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if name != "at" {
-		return "", errorf("parallel error: Partition has no method `%s`", name)
-	}
-	return c.checkOneI64Arg("partition.at", args, env)
-}
-
-// checkLocalBufferMethod validates worker-local scratch reads.
-func (c *Checker) checkLocalBufferMethod(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if name != "get" {
-		return "", errorf("parallel error: LocalBuffer has no method `%s`", name)
-	}
-	return c.checkOneI64Arg("LocalBuffer.get", args, env)
-}
-
 // checkArrayMethod validates ownership effects for owned Array<T> methods.
 func (c *Checker) checkArrayMethod(
 	array *binding,
@@ -4484,52 +3920,6 @@ func (c *Checker) checkMapDeinit(mapValue *binding, args []ast.Expression) (stri
 	}
 	mapValue.moved = true
 	return "void", nil
-}
-
-// checkAtomicMethod validates seq_cst-only integer atomic operations.
-func (c *Checker) checkAtomicMethod(
-	elem string,
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	switch name {
-	case "load":
-		if len(args) != 0 {
-			return "", errorf("atomic error: `atomic.load` expects 0 args, got %d", len(args))
-		}
-		return elem, nil
-	case "store":
-		if len(args) != 1 {
-			return "", errorf("atomic error: `atomic.store` expects 1 arg, got %d", len(args))
-		}
-		got, err := c.readContextualExpr(args[0], elem, env)
-		if err != nil {
-			return "", err
-		}
-		if got != elem {
-			return "", errorf("atomic error: `atomic.store` expects %s, got %s", elem, got)
-		}
-		return "void", nil
-	default:
-		return "", errorf("atomic error: Atomic has no method `%s`", name)
-	}
-}
-
-// checkMutexMethod validates the minimal synchronized wrapper API.
-func (c *Checker) checkMutexMethod(
-	elem string,
-	name string,
-	args []ast.Expression,
-	_ *scope,
-) (string, error) {
-	if name != "get" {
-		return "", errorf("sync error: Mutex has no method `%s`", name)
-	}
-	if len(args) != 0 {
-		return "", errorf("sync error: `mutex.get` expects 0 args, got %d", len(args))
-	}
-	return elem, nil
 }
 
 // checkOneI64Arg reads one i64 argument.
@@ -5263,11 +4653,6 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 	return "", mutable, rest, true
 }
 
-// isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
-func isAtomicSupportedType(typeName string) bool {
-	return typeName == "bool" || typeName == "i64"
-}
-
 // isRawPointerType reports whether typeName is a raw pointer spelling.
 func isRawPointerType(typeName string) bool {
 	_, ok := rawPointerElement(typeName)
@@ -5300,260 +4685,6 @@ func checkNoArgOwnershipCall(name string, args []ast.Expression) (string, error)
 	return name, nil
 }
 
-// checkPartitionMut validates ownership for disjoint partition construction.
-func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 2 {
-		return "", true, errorf("parallel error: `std::task::partition_mut` expects 2 args")
-	}
-	init, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if !c.isCopyType(init) {
-		return "", true, errorf("parallel error: partition init must be copy, got %s", init)
-	}
-	if _, err := c.readExpr(args[1], env); err != nil {
-		return "", true, err
-	}
-	return "Partition", true, nil
-}
-
-// checkLocalBuffer validates ownership for worker-local scratch construction.
-func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 2 {
-		return "", true, errorf("parallel error: `std::task::LocalBuffer` expects 2 args")
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", true, err
-	}
-	if _, err := c.readExpr(args[1], env); err != nil {
-		return "", true, err
-	}
-	return "LocalBuffer", true, nil
-}
-
-// checkParallelFor validates ownership for a safe data-parallel call.
-func (c *Checker) checkParallelFor(
-	worker string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if len(args) != 3 {
-		return "", true, errorf("parallel error: `std::task::parallel_for` expects 3 args")
-	}
-	for idx := 0; idx < 3; idx++ {
-		if _, err := c.readExpr(args[idx], env); err != nil {
-			return "", true, err
-		}
-	}
-	target := strings.TrimSpace(worker)
-	if c.forwardsWorker(target, env) {
-		return "!void", true, nil
-	}
-	fn := c.functions[target]
-	if fn == nil {
-		return "", true, errorf("parallel error: undefined function `%s`", target)
-	}
-	return returnTypeName(fn), true, nil
-}
-
-// checkParallelMap validates ownership for disjoint partition output.
-func (c *Checker) checkParallelMap(
-	worker string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if len(args) != 4 {
-		return "", true, errorf("parallel error: `std::task::parallel_map` expects 4 args")
-	}
-	for idx := 0; idx < 4; idx++ {
-		if _, err := c.readExpr(args[idx], env); err != nil {
-			return "", true, err
-		}
-	}
-	target := strings.TrimSpace(worker)
-	forwarded := c.forwardsWorker(target, env)
-	fn := c.functions[target]
-	if fn == nil && !forwarded {
-		return "", true, errorf("parallel error: undefined function `%s`", target)
-	}
-	if forwarded {
-		return "void", true, nil
-	}
-	return returnTypeName(fn), true, nil
-}
-
-// checkThreadScopedTyped validates ownership for the std-only scoped primitive.
-func (c *Checker) checkThreadScopedTyped(
-	argType string,
-	args []ast.Expression,
-	env *scope,
-) (string, error) {
-	if len(args) != 2 {
-		return "", errorf("thread error: `std::thread::scoped` expects io and arg")
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	}
-	got, err := c.moveContextualExpr(args[1], argType, env)
-	if err != nil {
-		return "", err
-	}
-	if got != argType {
-		return "", errorf("thread error: arg 1 of `std::thread::scoped` expects %s, got %s",
-			argType, got)
-	}
-	return argType, nil
-}
-
-// checkAtomic validates ownership for a seq_cst atomic constructor.
-func (c *Checker) checkAtomic(
-	elem string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if elem != "T" && !isAtomicSupportedType(elem) {
-		return "", true, errorf("atomic error: unsupported atomic type `%s` in v0.1", elem)
-	}
-	if len(args) != 1 {
-		return "", true, errorf("atomic error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
-	}
-	got, err := c.readContextualExpr(args[0], elem, env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != elem {
-		return "", true, errorf("atomic error: `std::atomic::Atomic<%s>` expects %s, got %s",
-			elem, elem, got)
-	}
-	return fmt.Sprintf("Atomic<%s>", elem), true, nil
-}
-
-// checkMutex validates ownership for a synchronized wrapper constructor.
-func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, errorf("sync error: `std::sync::Mutex<%s>` expects 1 arg", elem)
-	}
-	if elem != "T" {
-		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
-			return "", true, err
-		}
-	}
-	got, err := c.moveContextualExpr(args[0], elem, env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != elem {
-		return "", true, errorf("sync error: `std::sync::Mutex<%s>` expects %s, got %s",
-			elem, elem, got)
-	}
-	if elem != "T" && !c.isCopyType(elem) {
-		return "", true, errorf(
-			"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
-	}
-	return fmt.Sprintf("Mutex<%s>", elem), true, nil
-}
-
-// rejectConcurrencyBoundaryArg rejects borrows and safe raw pointers at boundaries.
-func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) error {
-	if ident, ok := arg.(*ast.IdentExpr); ok {
-		value, exists := env.lookup(ident.Name)
-		if exists && value.borrowedParam {
-			return errorf("thread error: borrow cannot cross concurrency boundary")
-		}
-	}
-	got, err := c.readExpr(arg, env.clone())
-	if err != nil {
-		return err
-	}
-	return c.rejectConcurrencyBoundaryType(got, map[string]bool{})
-}
-
-// rejectConcurrencyBoundaryType rejects values unsafe to move across concurrency boundaries.
-func (c *Checker) rejectConcurrencyBoundaryType(typeName string, seen map[string]bool) error {
-	if isRawPointerType(typeName) {
-		return errorf("thread error: raw pointer cannot cross concurrency boundary")
-	}
-	if isDynType(typeName) {
-		return errorf("thread error: dyn cannot cross concurrency boundary")
-	}
-	if seen[typeName] {
-		return nil
-	}
-	seen[typeName] = true
-	if err := c.rejectConcurrencyBoundaryGeneric(typeName, seen); err != nil {
-		return err
-	}
-	if err := c.rejectConcurrencyBoundaryStruct(typeName, seen); err != nil {
-		return err
-	}
-	return c.rejectConcurrencyBoundaryUnion(typeName, seen)
-}
-
-// rejectConcurrencyBoundaryGeneric applies boundary rules to generic-like type spellings.
-func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[string]bool) error {
-	base, arg, ok := splitGenericType(typeName)
-	if !ok {
-		return nil
-	}
-	switch base {
-	case "std::arena::Arena":
-		return errorf("thread error: arena cannot cross concurrency boundary")
-	case "std::array::Array":
-		return errorf("thread error: Array cannot cross concurrency boundary in v0.2")
-	case "std::map::Map":
-		return errorf("thread error: Map cannot cross concurrency boundary in v0.2")
-	case "std::arena::Handle":
-		return errorf("thread error: handle cannot cross concurrency boundary")
-	case "Mutex":
-		return errorf("thread error: Mutex cannot cross concurrency boundary in v0.1")
-	case "Task":
-		return errorf("thread error: Task cannot cross concurrency boundary")
-	case "Channel", "option":
-		return c.rejectConcurrencyBoundaryType(arg, seen)
-	case "Atomic":
-		return c.rejectConcurrencyBoundaryAtomic(arg, seen)
-	default:
-		return nil
-	}
-}
-
-// rejectConcurrencyBoundaryAtomic checks Atomic<T> boundary eligibility.
-func (c *Checker) rejectConcurrencyBoundaryAtomic(typeName string, seen map[string]bool) error {
-	if !isAtomicSupportedType(typeName) {
-		return errorf("thread error: Atomic<%s> cannot cross concurrency boundary in v0.1",
-			typeName)
-	}
-	return c.rejectConcurrencyBoundaryType(typeName, seen)
-}
-
-// rejectConcurrencyBoundaryStruct checks all struct fields recursively.
-func (c *Checker) rejectConcurrencyBoundaryStruct(typeName string, seen map[string]bool) error {
-	fields := c.structs[typeName]
-	for fieldName, fieldType := range fields {
-		if err := c.rejectConcurrencyBoundaryType(fieldType, seen); err != nil {
-			return errorf("thread error: struct `%s.%s` cannot cross concurrency boundary: %w",
-				typeName, fieldName, err)
-		}
-	}
-	return nil
-}
-
-// rejectConcurrencyBoundaryUnion checks all union payloads recursively.
-func (c *Checker) rejectConcurrencyBoundaryUnion(typeName string, seen map[string]bool) error {
-	variants := c.unions[typeName]
-	for variant, payload := range variants {
-		if payload == "" {
-			continue
-		}
-		if err := c.rejectConcurrencyBoundaryType(payload, seen); err != nil {
-			return errorf("thread error: union `%s::%s` cannot cross concurrency boundary: %w",
-				typeName, variant, err)
-		}
-	}
-	return nil
-}
-
 // qualifiedName renders a namespace chain as an internal key such as std::task::Group.
 func qualifiedName(expr ast.Expression) (string, bool) {
 	switch e := expr.(type) {
@@ -5571,15 +4702,6 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// taskElement extracts T from Task<T>.
-func taskElement(typeName string) (string, bool) {
-	base, arg, ok := splitGenericType(typeName)
-	if !ok || base != "Task" {
-		return "", false
-	}
-	return arg, true
 }
 
 // checkedMapArgs validates and returns Map key/value static type arguments.
@@ -5649,16 +4771,6 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 		}
 	}
 	return nil, false
-}
-
-// checkPendingTasks rejects tasks that leave scope without await or cancel.
-func (s *scope) checkPendingTasks() error {
-	for name, value := range s.values {
-		if _, ok := taskElement(value.typeName); ok && !value.taskDone {
-			return errorf("task error: task `%s` must be awaited or canceled", name)
-		}
-	}
-	return nil
 }
 
 // releaseLastUseBorrows ends local borrows whose binding is no longer used.

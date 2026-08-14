@@ -60,11 +60,7 @@ go test ./...
 | raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `@unsafe(ptr_deref) { p.*.field }` pointer access |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
-| `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
-| selectable `Io` implementations | `io_runtime.kizu` | uses blocking, threaded, and failing Io constructors |
-| task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
-| task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
 | pure path helpers | `std_path.kizu` | joins and cleans paths with explicit allocator-backed output |
 | path edge cases | `std_path_edges.kizu` | covers root, empty path, repeated slash, parent segment, and extension behavior |
 | explicit-Io fs helpers | `std_fs_path.kizu` | checks existence, metadata, create_dir, and remove_dir |
@@ -96,12 +92,6 @@ go test ./...
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
 | minimal explicit generics | `minimal_generics.kizu` | checks explicit static type arguments and `comptime if T == type<i64>` |
-| owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
-| typed channel payload | `channel_string.kizu` | sends and receives `[]u8` through `Channel<T>` |
-| atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
-| deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
-| safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
-| low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
 
 ## Package-Shaped Examples
 
@@ -182,39 +172,15 @@ single source file. Run them with `kizu check <package-root>`.
 | contract impl requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
 | `dyn Contract` requires explicit contract impl | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
 | owned `dyn Contract` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
-| tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
-| task args move non-copy values | `negative/task_move.kizu` | `moved value` |
-| tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
-| tasks cannot capture safe raw pointers | `negative/task_spawn_pointer.kizu` | `raw pointer` |
-| tasks cannot capture handles | `negative/task_spawn_handle.kizu` | `handle` |
-| tasks cannot capture arenas | `negative/task_spawn_arena.kizu` | `arena` |
-| tasks cannot capture mutex values | `negative/task_spawn_mutex.kizu` | `Mutex` |
-| tasks cannot capture structs containing raw pointers | `negative/task_spawn_struct_pointer.kizu` | `struct` |
-| spawned functions require owned Io | `negative/task_spawn_borrowed_io.kizu` | `owned Io` |
-| spawned functions reject mutable Io borrow | `negative/task_spawn_mut_borrowed_io.kizu` | `owned Io` |
-| task body errors propagate through `await` | `negative/task_await_error.kizu` | `channel is empty` |
-| canceled tasks cannot be awaited | `negative/task_await_after_cancel.kizu` | `already completed` |
-| awaited tasks cannot be canceled | `negative/task_cancel_after_await.kizu` | `already completed` |
 | bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
 | evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
-| task host primitives are reserved | `negative/std_task_builtin_direct_call.kizu` | `reserved; use std::task` |
-| parallel task host primitives are reserved | `negative/std_task_parallel_for_builtin_direct_call.kizu` | `reserved; use std::task` |
-| parallel map host primitives are reserved | `negative/std_task_parallel_map_builtin_direct_call.kizu` | `reserved; use std::task` |
-| channel host primitives are reserved | `negative/std_channel_builtin_direct_call.kizu` | `reserved; use std::channel` |
-| atomic host primitives are reserved | `negative/std_atomic_builtin_direct_call.kizu` | `reserved; use std::atomic` |
-| mutex host primitives are reserved | `negative/std_mutex_builtin_direct_call.kizu` | `reserved; use std::sync` |
 | array host primitives are reserved | `negative/std_array_builtin_direct_call.kizu` | `reserved; use std::array` |
 | map host primitives are reserved | `negative/std_map_builtin_direct_call.kizu` | `reserved; use std::map` |
-| channel method primitives are reserved | `negative/std_channel_send_builtin_direct_call.kizu` | `reserved` |
-| atomic method primitives are reserved | `negative/std_atomic_load_builtin_direct_call.kizu` | `reserved` |
-| mutex method primitives are reserved | `negative/std_mutex_get_builtin_direct_call.kizu` | `reserved` |
 | array method primitives are reserved | `negative/std_array_append_builtin_direct_call.kizu` | `reserved` |
 | map method primitives are reserved | `negative/std_map_insert_builtin_direct_call.kizu` | `reserved` |
 | generic calls require explicit static args | `negative/generic_function_missing_type_args.kizu` | `requires explicit static arguments` |
 | non-type static args are reserved | `negative/generic_function_non_type_static_arg.kizu` | `expected static type argument` |
 | `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
-| task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
-| old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
 | file read requires Io | `negative/fs_read_without_io.kizu` | `expects Io` |
 | missing file returns `!T` error | `negative/fs_read_missing.kizu` | `no such file` |
 | file write bytes must be `[]u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
@@ -240,9 +206,6 @@ single source file. Run them with `kizu check <package-root>`.
 | array get is copy-only in v0.2 | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
 | array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
 | array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |
-| array elements cannot be handles | `negative/std_array_handle_element.kizu` | `handle` |
-| arrays cannot cross channel boundary | `negative/std_array_channel_send.kizu` | `Array cannot cross concurrency boundary` |
-| arrays cannot cross task boundary | `negative/std_array_task_spawn.kizu` | `Array cannot cross concurrency boundary` |
 | borrowed array blocks append | `negative/std_array_append_while_borrowed.kizu` | `cannot run while array is borrowed` |
 | borrowed array blocks deinit | `negative/std_array_deinit_while_borrowed.kizu` | `cannot run while array is borrowed` |
 | borrowed array blocks set | `negative/std_array_set_while_borrowed.kizu` | `cannot run while array is borrowed` |
@@ -251,11 +214,7 @@ single source file. Run them with `kizu check <package-root>`.
 | array element borrows cannot be passed as owned values | `negative/std_array_at_pass_to_owned_param.kizu` | `Array.at` must be bound |
 | array element borrows cannot escape through return | `negative/std_array_at_return_escape.kizu` | `Array.at` must be bound |
 | array borrow access is bounds-checked | `negative/std_array_at_out_of_bounds.kizu` | `index out of bounds` |
-| array elements reject nested arrays through structs | `negative/std_array_struct_nested_array_element.kizu` | `nested array` |
 | array elements reject raw pointers through structs | `negative/std_array_struct_raw_pointer_element.kizu` | `raw pointer` |
-| array elements reject handles through unions | `negative/std_array_union_handle_element.kizu` | `handle` |
-| array elements reject channels through structs | `negative/std_array_struct_channel_element.kizu` | `Channel` |
-| array elements reject atomics | `negative/std_array_atomic_element.kizu` | `Atomic` |
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
 | string storage builtins are removed | `negative/std_string_builtin_direct_call.kizu` | `was removed` |
 | string view builtin is removed | `negative/std_string_builtin_as_bytes_direct_call.kizu` | `was removed` |
@@ -291,9 +250,6 @@ single source file. Run them with `kizu check <package-root>`.
 | shared map borrows cannot insert | `negative/std_map_insert_through_shared_borrow.kizu` | `requires mutable Map receiver` |
 | shared map borrows cannot deinit | `negative/std_map_deinit_through_shared_borrow.kizu` | `requires owned Map receiver` |
 | mutable map borrows cannot deinit | `negative/std_map_deinit_through_mut_borrow.kizu` | `requires owned Map receiver` |
-| maps cannot cross task boundaries | `negative/std_map_task_spawn.kizu` | `Map cannot cross concurrency boundary` |
-| maps cannot cross channel boundaries | `negative/std_map_channel_send.kizu` | `Map cannot cross concurrency boundary` |
-| arrays cannot store maps in v0.2 | `negative/std_array_map_element.kizu` | `std::map::Map` |
 | testing equality failure is readable | `negative/std_testing_failure.kizu` | `expected 4, got 3` |
 | testing expect failure is readable | `negative/std_testing_expect_failure.kizu` | `expected condition to be true` |
 | testing bool condition failure is readable | `negative/std_testing_bool_failure.kizu` | `expected condition to be true` |
@@ -301,42 +257,6 @@ single source file. Run them with `kizu check <package-root>`.
 | testing fail uses caller message | `negative/std_testing_fail.kizu` | `custom failure` |
 | testing helpers enforce argument types | `negative/std_testing_wrong_type.kizu` | `expects bool` |
 | testing equality builtin is std-only | `negative/std_testing_equal_builtin_direct_call.kizu` | `reserved` |
-| channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
-| channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
-| channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
-| empty channel receive is checked | `negative/channel_empty_recv.kizu` | `channel is empty` |
-| channel send payload must match `T` | `negative/channel_send_wrong_type.kizu` | `channel.send` |
-| channel constructor requires `T` | `negative/channel_untyped_constructor.kizu` | `Channel<T>` |
-| queue cannot capture borrow params | `negative/queue_borrow_capture.kizu` | `queue cannot capture borrow` |
-| queue cannot capture safe raw pointers | `negative/queue_enqueue_pointer.kizu` | `raw pointer` |
-| parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
-| parallel map workers must return slot values | `negative/parallel_map_wrong_worker.kizu` | `must return i64` |
-| parallel map workers must accept indexes | `negative/parallel_map_wrong_worker_arg.kizu` | `must accept i64` |
-| parallel map workers must exist | `negative/parallel_map_undefined_worker.kizu` | `undefined function` |
-| parallel map workers must be names | `negative/parallel_map_non_function_name.kizu` | `function name` |
-| partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
-| parallel worker errors propagate | `negative/parallel_for_error.kizu` | `WorkerError::Failed` |
-| partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
-| parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
-| parallel map requires mutable partition owner | `negative/parallel_map_immutable_partition.kizu` | `&var argument` |
-| local buffer access is bounds-checked | `negative/local_buffer_out_of_bounds.kizu` | `out of bounds` |
-| scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
-| scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
-| scoped thread cannot capture mutex values | `negative/thread_scoped_mutex.kizu` | `Mutex` |
-| scoped thread workers must accept `T` | `negative/thread_scoped_wrong_worker_arg.kizu` | `must accept i64` |
-| scoped thread workers must return `T` | `negative/thread_scoped_wrong_worker_return.kizu` | `must return i64` |
-| scoped thread workers must exist | `negative/thread_scoped_undefined_worker.kizu` | `undefined function` |
-| scoped thread workers must be names | `negative/thread_scoped_non_function_name.kizu` | `function name` |
-| scoped thread moves owned args | `negative/thread_scoped_moves_arg.kizu` | `moved value` |
-| scoped thread host primitives are reserved | `negative/std_thread_scoped_builtin_direct_call.kizu` | `reserved; use std::thread` |
-| atomic store must match `T` | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
-| old atomic name is rejected | `negative/atomic_old_name.kizu` | `Atomic<i64>` |
-| atomic constructor requires `T` | `negative/atomic_untyped_constructor.kizu` | `Atomic<T>` |
-| unsupported atomic payloads are rejected | `negative/atomic_unsupported_type.kizu` | `unsupported atomic type` |
-| mutex cannot wrap safe raw pointers | `negative/mutex_pointer.kizu` | `raw pointer` |
-| mutex constructor payload must match `T` | `negative/mutex_wrong_type.kizu` | `Mutex<i64>` |
-| mutex payload must be copy in v0.1 | `negative/mutex_non_copy.kizu` | `requires copy value` |
-| mutex constructor requires `T` | `negative/mutex_untyped_constructor.kizu` | `Mutex<T>` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 | duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |

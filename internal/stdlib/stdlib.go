@@ -285,11 +285,6 @@ var sourceModuleOrder = []string{
 	"io",
 	"process",
 	"map",
-	"task",
-	"channel",
-	"thread",
-	"sync",
-	"atomic",
 }
 
 // parseModuleDecls loads one std wrapper module from Kizu source.

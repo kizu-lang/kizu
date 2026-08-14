@@ -26,7 +26,7 @@ The following are not guaranteed by safe Kizu v0.1:
 - absence of deadlock
 - absence of logic bugs
 - absence of panics or runtime errors
-- real OS-thread parallel execution
+- real OS-thread parallel execution (ADR-0025)
 - raw pointer safety
 - C ABI call safety
 - allocator primitive safety
@@ -143,55 +143,30 @@ policy.
 
 ### Concurrency Boundaries
 
-- v0.1 fixes the async and multi-threading stdlib API shape and checker rules,
-  not a real asynchronous runtime.
-- Task, queue, thread, and data-parallel APIs may execute synchronously.
-- Tasks must be awaited or canceled.
-- `await` propagates task body errors.
-- `cancel` waits for task completion in v0.1 and discards the result or error.
-- Task, queue, channel, and thread boundaries cannot capture or transport local
-  borrows.
-- Raw pointers cannot cross concurrency boundaries in safe Kizu.
-- Sending a non-copy value through a channel moves it.
-- Safe Kizu does not allow implicit shared mutable state across tasks.
-- Data parallel mutation is restricted to trusted structured APIs.
-- `std::channel::Channel<T>` sends and receives owned `T` values.
-- `std::sync::Mutex<T>` is the explicit shared-mutable-state wrapper.
-- `Mutex<T>` accepts copy values only in v0.1; guard mutation and non-copy
-  payloads are future work.
-- `std::atomic::Atomic<T>` is seq_cst-only in v0.1.
-- `Atomic<T>` supports `bool` and `i64` in v0.1.
-- Kizu does not adopt Rust `Send`; boundary-crossing types are explicit checker
-  rules.
-- Copy primitives, enums, and owned structs/unions whose fields are all
-  boundary-safe may cross concurrency boundaries.
-- `Atomic<T>` may cross boundaries only when `T` is supported by v0.1 atomics.
-- `Channel<T>` may cross boundaries only when `T` is boundary-safe.
-- Local borrows, mutable borrows, and raw pointers may not cross safe Kizu
-  concurrency boundaries.
-- Structs and unions containing raw pointer fields or payloads may not cross
-  concurrency boundaries.
-- `std::arena::Arena<T>`, `std::arena::Handle<T>`, `dyn Contract`, `Mutex<T>`, and `Task<T>` may not
-  cross concurrency boundaries in v0.1.
-- Arena / handle thread-safe sharing is not part of v0.1.
-- `std::task::partition_mut(init, count)` creates checked disjoint output slots.
-- `partition.at(i)` bounds-checks slot access.
-- `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
-  as `&var Partition` and writes only into the
-  checked slot range.
-- v0.1 data parallelism is range and `Partition` based; it does not write
-  directly into user collections or mutable slices.
-- `parallel_for` propagates the first worker `!void` error through `try`.
-- `std::fs` APIs require explicit `Io`; I/O errors are returned as `!T` values
-  and can be propagated through `try`.
-- Task-based file I/O uses the same `TaskGroup` ownership and boundary rules as
-  any other spawned function.
+Kizu currently has no concurrency API. `std::task`, `std::channel`,
+`std::thread`, `std::sync`, `std::atomic`, and `std::io::threaded()` were
+withdrawn by ADR-0025: they carried ~1,900 lines of checker rules with no IR
+lowering and no runtime behind them, so no rule here was ever confirmed by
+execution.
 
-These language runtime boundaries are separate from GitHub Actions or CI event
-boundaries. For example, `pull_request_target` is a repository automation
-security concern, while Kizu task, channel, queue, and thread boundaries are
-language-level ownership boundaries. Both must be treated conservatively, but
-they are enforced by different systems.
+Threads return, for parallel work. The order changes: the execution path comes
+first, and safety rules are written against threads that actually run. Two
+constraints are already fixed.
+
+- The shape follows Zig (ADR-0039): no hidden global runtime, `Io` and allocator
+  passed explicitly, no function coloring.
+- Data-race freedom is not negotiable. Zig does not prevent data races in its
+  type system; Kizu must. An API that lets safe Kizu write a data race is not
+  adopted, however convenient.
+
+What a returning thread API must demonstrate is listed as an acceptance table in
+ADR-0025. It is deliberately kept out of the Regression Coverage table below:
+every row there cites an example file that runs today, and a claim with no
+example is what this section used to be.
+
+`std::fs`, `std::io`, and `std::process` keep requiring an explicit `Io`
+capability and return I/O failures as `!T` values that propagate through `try`.
+That boundary is unaffected by the withdrawal.
 
 ### Comptime
 
@@ -205,10 +180,7 @@ known statically.
 
 Current runtime safety checks include:
 
-- partition index bounds
-- `parallel_map` range bounds
-- channel empty receive
-- arena handle access at interpreter runtime
+- arena handle access
 
 Runtime failure is acceptable. Silent undefined behavior is not.
 
@@ -219,7 +191,6 @@ The following components are trusted in v0.1:
 - Go implementation of the parser, type checker, ownership checker, and interpreter
 - built-in functions and std prototype APIs
 - arena / handle runtime representation
-- task, queue, channel, partition, atomic, and mutex prototype runtimes
 - future backend lowering from checked programs to IR, LLVM, or WASM
 
 Each trusted boundary must stay small and must have negative examples or unit tests
@@ -257,15 +228,7 @@ memory-safety invariants to representative examples.
 | `@unsafe` does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
-| task ownership is structured | `examples/task_group.kizu`, `examples/task_cancel.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu`, `examples/negative/task_spawn_handle.kizu`, `examples/negative/task_spawn_arena.kizu`, `examples/negative/task_spawn_mutex.kizu`, `examples/negative/task_spawn_struct_pointer.kizu`, `examples/negative/task_await_error.kizu`, `examples/negative/task_await_after_cancel.kizu`, `examples/negative/task_cancel_after_await.kizu` |
-| file I/O uses explicit Io and `!T` errors | `examples/fs_read.kizu`, `examples/fs_task.kizu` | `examples/negative/fs_read_missing.kizu`, `examples/negative/fs_read_without_io.kizu`, `examples/negative/fs_write_wrong_bytes.kizu`, `examples/negative/fs_failing_io.kizu` |
-| channel sends owned values | `examples/channel.kizu`, `examples/channel_string.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu`, `examples/negative/channel_empty_recv.kizu`, `examples/negative/channel_send_wrong_type.kizu`, `examples/negative/channel_untyped_constructor.kizu` |
-| queued work cannot capture borrows or raw pointers | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu`, `examples/negative/queue_enqueue_pointer.kizu` |
-| structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu`, `examples/negative/parallel_for_error.kizu` |
-| partition and local buffer bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu`, `examples/negative/local_buffer_out_of_bounds.kizu` |
-| scoped thread boundary rejects `@unsafe` boundary values | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu`, `examples/negative/thread_scoped_mutex.kizu` |
-| `Atomic<T>` is bool/i64-only and seq_cst-only | `examples/thread_boundary.kizu`, `examples/atomic_flag.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu`, `examples/negative/atomic_untyped_constructor.kizu`, `examples/negative/atomic_unsupported_type.kizu` |
-| `Mutex<T>` rejects raw pointer and non-copy/non-matching payloads | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu`, `examples/negative/mutex_wrong_type.kizu`, `examples/negative/mutex_non_copy.kizu`, `examples/negative/mutex_untyped_constructor.kizu` |
+| file I/O uses explicit Io and `!T` errors | `examples/fs_read.kizu` | `examples/negative/fs_read_missing.kizu`, `examples/negative/fs_read_without_io.kizu`, `examples/negative/fs_write_wrong_bytes.kizu`, `examples/negative/fs_failing_io.kizu` |
 
 ## Release Gate
 
@@ -286,7 +249,7 @@ These are known areas to keep conservative:
 - Backend code generation is experimental and not yet the source of v0.1 safety.
 - Numeric casts and integer-width runtime semantics are incomplete.
 - Arrays, slices, allocators, and general std containers are not implemented.
-- Real OS threads and async runtime semantics are not implemented.
+- Real OS threads and async runtime semantics are not implemented (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 
 Do not describe these areas as memory-safe until their invariants and regression
