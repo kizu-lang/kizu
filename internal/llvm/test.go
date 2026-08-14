@@ -86,7 +86,8 @@ func (e *emitter) writeTestExpectEqual(instr *ir.Instr) error {
 		fmt.Fprintf(&e.out, "  %s = icmp eq %s %s, %s\n",
 			okName, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
 		report = fmt.Sprintf("  call void @kizu_panic_expect_equal_int(i64 %s, i64 %s, %s)\n",
-			left.operand, right.operand, position)
+			e.runtimeIntegerOperand(instr.Args[0].Type, left.operand),
+			e.runtimeIntegerOperand(instr.Args[1].Type, right.operand), position)
 	}
 	e.writeReportedFailure(okName, report)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}

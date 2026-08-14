@@ -269,26 +269,30 @@ func (l *lowerer) lowerReceiverAddress(expr ast.Expression) (Value, error) {
 	return l.lowerExpr(expr)
 }
 
-// lowerCallArgs lowers the arguments of a call to name. An argument the callee
-// receives as the caller's storage is passed as the local itself.
+// lowerCallArgs lowers the arguments of a call to name.
 func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, error) {
-	sig, known := l.signatures[name]
-	if !known {
-		return l.lowerArgs(args)
-	}
+	return l.lowerCallArgsAs(l.signatures[name].Params, args)
+}
+
+// lowerCallArgsAs lowers call arguments at the types the callee declares for
+// them, which is the one place a call decides what it hands over. An argument
+// the callee receives as the caller's storage is passed as the local itself.
+// Params the lowerer cannot name -- a callee it has no signature for, or a
+// variadic tail -- leave those arguments with the types they carry themselves.
+func (l *lowerer) lowerCallArgsAs(params []Param, args []ast.Expression) ([]Value, error) {
 	values := make([]Value, 0, len(args))
 	for index, arg := range args {
-		if index < len(sig.Params) && sig.Params[index].Passing == PassCallerStorage {
+		want := Param{}
+		if index < len(params) {
+			want = params[index]
+		}
+		if want.Passing == PassCallerStorage {
 			if slot, ok := l.slotPointer(arg); ok {
 				values = append(values, slot)
 				continue
 			}
 		}
-		want := ""
-		if index < len(sig.Params) {
-			want = sig.Params[index].Type
-		}
-		value, err := l.lowerContextualExpr(arg, want)
+		value, err := l.lowerContextualExpr(arg, want.Type)
 		if err != nil {
 			return nil, err
 		}
