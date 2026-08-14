@@ -238,7 +238,10 @@ type loopShape struct {
 // made and closed, so what a name holds around the loop is decided once for
 // every loop form rather than once per form.
 func (l *lowerer) lowerLoop(shape loopShape) error {
-	assigned := assignedNames(shape.body)
+	assigned, err := assignedNames(shape.body)
+	if err != nil {
+		return err
+	}
 	preheader := l.block
 	header := l.newBlock(l.nextBlockName(shape.name + ".header"))
 	body := l.newBlock(l.nextBlockName(shape.name + ".body"))
@@ -507,44 +510,69 @@ func (l *lowerer) addPhi(block *Block, typ string, incoming []Incoming) Value {
 // assignedNames returns names assigned in a block, in the order they are first
 // assigned. The order is the order the header phis are created in, so it comes
 // from the source rather than from a set.
-func assignedNames(block *ast.BlockStmt) []string {
+//
+// An unknown node is an error rather than an empty answer, for the reason the
+// slot walk makes it one too: a name missed here is a name the loop carries
+// without a header phi, so every turn of the loop reads what it held before
+// the loop ran.
+func assignedNames(block *ast.BlockStmt) ([]string, error) {
 	names := []string{}
-	for _, stmt := range block.Statements {
-		collectAssigned(stmt, &names)
+	if err := collectAssigned(block, &names); err != nil {
+		return nil, err
 	}
-	return names
+	return names, nil
 }
 
-// collectAssigned records assigned names in nested statements.
-func collectAssigned(stmt ast.Statement, names *[]string) {
-	switch s := stmt.(type) {
-	case *ast.AssignStmt:
-		if name, ok := assignTargetRoot(s.Target); ok {
+// collectAssigned records the names one statement assigns, walking the
+// statements and the expressions it holds. Walking the expressions is what
+// finds an assignment written inside an `if` or `match` used as a value.
+func collectAssigned(stmt ast.Statement, names *[]string) error {
+	if stmt == nil {
+		return nil
+	}
+	if assign, isAssign := stmt.(*ast.AssignStmt); isAssign {
+		if name, rooted := assignTargetRoot(assign.Target); rooted {
 			addAssigned(names, name)
 		}
-	case *ast.IfStmt:
-		collectBlockAssigned(s.Consequence, names)
-		if s.Alternative != nil {
-			collectBlockAssigned(s.Alternative, names)
-		}
-	case *ast.WhileStmt:
-		collectBlockAssigned(s.Body, names)
-	case *ast.ForStmt:
-		collectBlockAssigned(s.Body, names)
-	case *ast.MatchStmt:
-		for _, arm := range s.Arms {
-			collectAssigned(arm.Body, names)
-		}
-	case *ast.UnsafeStmt:
-		collectBlockAssigned(s.Body, names)
-	case *ast.ComptimeIfStmt:
-		collectBlockAssigned(s.Consequence, names)
-		if s.Alternative != nil {
-			collectBlockAssigned(s.Alternative, names)
-		}
-	case *ast.BlockStmt:
-		collectBlockAssigned(s, names)
 	}
+	exprs, stmts, known := statementChildren(stmt)
+	if !known {
+		return fmt.Errorf("ir error: loop analysis does not know statement `%T`", stmt)
+	}
+	for _, expr := range exprs {
+		if err := collectAssignedExpr(expr, names); err != nil {
+			return err
+		}
+	}
+	for _, inner := range stmts {
+		if err := collectAssigned(inner, names); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// collectAssignedExpr walks one expression for the assignments written inside
+// it. `if` and `match` are both a statement and an expression, so in value
+// position they are still walked as statements.
+func collectAssignedExpr(expr ast.Expression, names *[]string) error {
+	if expr == nil {
+		return nil
+	}
+	switch expr.(type) {
+	case *ast.IfStmt, *ast.MatchStmt:
+		return collectAssigned(expr.(ast.Statement), names)
+	}
+	children, known := expressionChildren(expr)
+	if !known {
+		return fmt.Errorf("ir error: loop analysis does not know expression `%T`", expr)
+	}
+	for _, child := range children {
+		if err := collectAssignedExpr(child, names); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // assignTargetRoot returns the binding an assignment target ultimately rebinds.
@@ -575,13 +603,6 @@ func addAssigned(names *[]string, name string) {
 		}
 	}
 	*names = append(*names, name)
-}
-
-// collectBlockAssigned records assignments inside a block.
-func collectBlockAssigned(block *ast.BlockStmt, names *[]string) {
-	for _, stmt := range block.Statements {
-		collectAssigned(stmt, names)
-	}
 }
 
 // sameValue reports whether two SSA value references are identical.

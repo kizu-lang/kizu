@@ -69,7 +69,10 @@ func (v *verifier) function(fn *Function) error {
 	if err := v.phiIncomingMatchesPredecessors(preds); err != nil {
 		return err
 	}
-	return v.phiIncomingDominates(preds)
+	if err := v.phiIncomingDominates(preds); err != nil {
+		return err
+	}
+	return v.valuesDominateUses(preds)
 }
 
 // instr checks the declared slot an instruction fills, if it fills one.
@@ -290,6 +293,87 @@ func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
 		}
 	}
 	return nil
+}
+
+// valuesDominateUses checks for every operand what phiIncomingDominates checks
+// for a phi edge: a value is read only where its definition is on every path
+// in, and within one block only after it.
+//
+// A phi is the exception this rule leaves alone. Its operands arrive on edges
+// rather than where it stands, so a value defined in the block a back edge
+// leaves from is correct there and would look backwards here.
+func (v *verifier) valuesDominateUses(preds map[string][]string) error {
+	if len(v.fn.Blocks) == 0 {
+		return nil
+	}
+	definedIn := valueDefiningBlocks(v.fn)
+	tree := buildDominatorTree(v.fn, preds)
+	for _, block := range v.fn.Blocks {
+		above := map[string]bool{}
+		for _, instr := range block.Instrs {
+			if instr.Op != "phi" {
+				for _, operand := range instrOperands(instr) {
+					if err := v.dominatesUse(tree, definedIn, above, block, operand); err != nil {
+						return err
+					}
+				}
+			}
+			if instr.Result.Name != "" {
+				above[instr.Result.Name] = true
+			}
+		}
+		for _, operand := range []Value{block.Terminator.Cond, block.Terminator.Value} {
+			if err := v.dominatesUse(tree, definedIn, above, block, operand); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// dominatesUse checks one operand read in block. above holds what the block
+// has defined so far, which is what separates a read of an earlier instruction
+// from a read of a later one.
+func (v *verifier) dominatesUse(
+	tree dominatorTree,
+	definedIn map[string]string,
+	above map[string]bool,
+	block *Block,
+	operand Value,
+) error {
+	definition, defined := definedIn[operand.Name]
+	if !defined {
+		// A param or a literal has no defining block and is read anywhere.
+		return nil
+	}
+	if definition == block.Name {
+		if above[operand.Name] {
+			return nil
+		}
+		return fmt.Errorf("%w: %s: block %s reads %s before it is defined",
+			ErrVerify, v.fn.Name, block.Name, operand.Name)
+	}
+	if tree.dominates(definition, block.Name) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %s: block %s reads %s, which is defined in %s, and %s does not "+
+			"dominate %s",
+		ErrVerify, v.fn.Name, block.Name, operand.Name, definition, definition,
+		block.Name)
+}
+
+// instrOperands returns the values an instruction reads where it stands.
+func instrOperands(instr *Instr) []Value {
+	operands := make([]Value, 0, len(instr.Args)+len(instr.Fields))
+	operands = append(operands, instr.Args...)
+	for _, field := range instr.Fields {
+		operands = append(operands, field.Value)
+	}
+	for _, cleanup := range instr.Cleanups {
+		operands = append(operands, cleanup.Args...)
+	}
+	return operands
 }
 
 // valueDefiningBlocks maps each instruction result to the block defining it.
