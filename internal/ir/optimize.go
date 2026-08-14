@@ -2,11 +2,13 @@ package ir
 
 import "strconv"
 
-// Optimize applies bounded local cleanup passes to a module.
-func Optimize(module *Module) {
+// Optimize applies bounded local cleanup passes to a module. A pass rewrites
+// values in place, so what it produces is verified the same way lowering is.
+func Optimize(module *Module) error {
 	ConstantFold(module)
 	CopyPropagate(module)
 	DeadCodeEliminate(module)
+	return Verify(module)
 }
 
 // ConstantFold folds binary instructions with integer constants.

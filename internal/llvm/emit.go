@@ -1998,12 +1998,7 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value) error {
 // from a function that declares no error set, which is the absorption `try`
 // does written as a return.
 func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
-	wantError, wantSuccess, ok := errorUnionParts(e.currentReturn)
-	if !ok || wantError != "" {
-		return false
-	}
-	gotError, gotSuccess, isUnion := errorUnionParts(value.Type)
-	return isUnion && gotError != "" && gotSuccess == wantSuccess
+	return typ.AbsorbsErrorSet(e.currentReturn, value.Type)
 }
 
 // writeAbsorbedErrorUnionReturn returns one error union as another, naming the

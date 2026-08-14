@@ -56,12 +56,13 @@ type Function struct {
 	Blocks []*Block
 }
 
-// Block is a basic block with instructions and one terminator.
+// Block is a basic block with instructions and one terminator. Its predecessors
+// are not stored: they follow from the terminators naming it, and a stored copy
+// is one more thing that can disagree with the CFG.
 type Block struct {
-	Name         string
-	Instrs       []*Instr
-	Terminator   Terminator
-	Predecessors []string
+	Name       string
+	Instrs     []*Instr
+	Terminator Terminator
 }
 
 // Value names an SSA value and its type.
@@ -120,6 +121,19 @@ type Terminator struct {
 	Cond   Value
 	Target string
 	Else   string
+}
+
+// Successors names the blocks control can reach from this terminator. Deriving
+// the CFG edges here is what keeps a new kind of terminator from having to be
+// remembered everywhere an edge is followed.
+func (t Terminator) Successors() []string {
+	targets := make([]string, 0, 2)
+	for _, target := range []string{t.Target, t.Else} {
+		if target != "" {
+			targets = append(targets, target)
+		}
+	}
+	return targets
 }
 
 // Signature stores a function's callable type.
