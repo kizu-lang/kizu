@@ -10,7 +10,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/stdlib"
-	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // LoadProgram parses every module in graph and returns a qualified package program.
@@ -46,15 +45,6 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 func LoadSource(file string, source string) (*ast.Program, error) {
 	graph := Graph{Modules: []Module{{Path: "", File: file}}}
 	return LoadProgramWithSources(graph, map[string]string{file: source})
-}
-
-// CheckGraph parses and type-checks every module in graph as one package.
-func CheckGraph(graph Graph) error {
-	program, err := LoadProgram(graph)
-	if err != nil {
-		return err
-	}
-	return types.New().Check(program)
 }
 
 type graphChecker struct {
