@@ -197,7 +197,6 @@ go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
-go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
 ```
 
@@ -214,7 +213,6 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
-- `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
 `kizu lint` is not implemented.

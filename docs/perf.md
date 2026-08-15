@@ -34,10 +34,6 @@
 
 キャッシュ総量と項目数を測る。
 
-### why-rebuild
-
-なぜ再ビルドされたかを説明できるかを測る。
-
 ## 初期ベースライン
 
 Go 実装と interpreter を中心に、まず次を測定対象にする。
@@ -53,7 +49,6 @@ go run ./cmd/kizu run examples/user_registry.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target native examples/hello.kizu
-go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu cache status
 pre-commit run --all-files
 ```
@@ -73,7 +68,6 @@ kizu ir <file>
 kizu build <file>
 kizu cache status
 kizu cache prune
-kizu why-rebuild <file>
 ```
 
 ## 記録する値
@@ -85,33 +79,30 @@ kizu why-rebuild <file>
 - cache directory size
 - cache entry count
 - cache hit / miss
-- rebuild reason
 - Kizu commit
 - host OS / architecture
 
 ## build cache に入るもの
 
-| artifact | cache key | 保存条件 | 測定 command |
-| --- | --- | --- | --- |
-| wasm text | source path + source hash + target | `build --target wasm32-wasi` | `kizu why-rebuild <file>` |
-| runtime object | runtime C source + toolchain | native link のたび(初回だけ compile) | `kizu cache status` |
-| run/test 実行ファイル | LLVM IR + runtime object + toolchain | `run` / `test` の link | `time kizu run examples/hello.kizu` |
+| artifact | cache key | 保存条件 |
+| --- | --- | --- |
+| LLVM IR text | source path + source hash + optimization mode | `build --emit-llvm` |
+| wasm text | source path + source hash + optimization mode | `build --target wasm32-wasi` |
+| runtime object | runtime C source + toolchain | native link のたび(初回だけ compile) |
+| run/test 実行ファイル | LLVM IR + runtime object + toolchain | `run` / `test` の link |
 
 prune 条件と status 表示はどれも共通で、`cache prune` が全消し、上限超過分は
-古い順に落ちます。`why-rebuild` が説明できるのは今のところ source path で鍵付く
-wasm text だけで、内容で鍵付く 2 つは説明対象に入っていません。
+古い順に落ちます。測定は `scripts/measure-cache.sh` が cold/warm と single-file
+edit を通しで測ります。
 
 ## キャッシュ設計の制約
 
 - デフォルト上限を持つ
 - `cache status` で状態を見られる
 - `cache prune` で削除できる
-- `why-rebuild` で再ビルド理由を見られる
 - module-aware cache key は、compiler version、manifest hash、module graph
   hash、source hash、public interface hash、target、backend、optimization
   mode、stdlib hash を含む
-- `why-rebuild` は manifest、module graph、source、public interface、stdlib、
-  target/backend/optimization のどれが変化したかを説明する
 - debug artifact は明示 opt-in にする
 - build script と proc macro による隠れた依存は作らない
 - CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない
@@ -129,4 +120,3 @@ module/import 実装後は、少なくとも `tests/fixtures/modules/basic` を�
 - import graph を変えた manifest/module edit check
 
 public interface が変わらない編集では、依存 module の再処理範囲が説明可能でなければならない。
-public interface が変わる編集では、依存 module が再検査対象になる理由を `why-rebuild` で説明する。

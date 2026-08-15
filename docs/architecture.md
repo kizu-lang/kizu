@@ -57,8 +57,8 @@ toolchain、つまり実行ファイルが**何でできているか**だけで�
 書くコマンドなので cache から読まず、毎回 link します。
 
 CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
-`build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `why-rebuild`
-`import-c-header`。基本の実行経路は `kizu run examples/hello.kizu`。
+`build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `import-c-header`。
+基本の実行経路は `kizu run examples/hello.kizu`。
 どのコマンドがどこへ流れるかは `cmd/kizu/main.go` の `dispatch` が全てです。
 
 ## 4. std の二層構造

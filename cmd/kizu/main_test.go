@@ -1882,7 +1882,7 @@ const nativeWhileBreakPhiSource = `fn main() {
     print(found);
 }`
 
-// TestCacheCommands checks cache status, why-rebuild, and prune.
+// TestCacheCommands checks cache status and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()
 	build := kizuCommand("build", "--emit-llvm", "../../examples/hello.kizu")
@@ -1890,18 +1890,9 @@ func TestCacheCommands(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
-	why := kizuCommand("why-rebuild", "../../examples/hello.kizu")
-	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	out, err := why.CombinedOutput()
-	if err != nil {
-		t.Fatalf("why-rebuild failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "cache hit") {
-		t.Fatalf("got %q", out)
-	}
 	status := kizuCommand("cache", "status")
 	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	out, err = status.CombinedOutput()
+	out, err := status.CombinedOutput()
 	if err != nil {
 		t.Fatalf("status failed: %v\n%s", err, out)
 	}
@@ -1972,32 +1963,6 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 	want := "c import error: variadic functions are unsupported"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
-	}
-}
-
-// TestWhyRebuildChangedSource checks CLI rebuild reasons after a single-file edit.
-func TestWhyRebuildChangedSource(t *testing.T) {
-	cacheDir := t.TempDir()
-	source := filepath.Join(t.TempDir(), "main.kizu")
-	if err := os.WriteFile(source, []byte(`fn main() { print("hello"); }`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	build := kizuCommand("build", "--emit-llvm", source)
-	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(source, []byte(`fn main() { print("changed"); }`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	why := kizuCommand("why-rebuild", source)
-	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	out, err := why.CombinedOutput()
-	if err != nil {
-		t.Fatalf("why-rebuild failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "source changed") {
-		t.Fatalf("got %q", out)
 	}
 }
 

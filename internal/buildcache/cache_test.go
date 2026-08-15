@@ -3,7 +3,6 @@ package buildcache
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -29,32 +28,27 @@ func TestGetOrBuildCachesNoOpRebuild(t *testing.T) {
 	}
 }
 
-// TestWhyRebuildExplainsChangedSource checks rebuild reasons for edits.
-func TestWhyRebuildExplainsChangedSource(t *testing.T) {
+// TestGetOrBuildRebuildsChangedSource checks an edit is a miss. A hit is keyed
+// by what the file holds, so the artifact a later read gets back is the one
+// built from the text that is there now.
+func TestGetOrBuildRebuildsChangedSource(t *testing.T) {
 	cache := &Cache{Dir: t.TempDir(), MaxBytes: DefaultMaxBytes}
 	source := writeTempSource(t, `fn main() { print("hello"); }`)
-	_, err := cache.GetOrBuild(source, "emit-llvm", func() (string, error) {
-		return "artifact", nil
-	})
-	if err != nil {
+	build := func(text string) func() (string, error) {
+		return func() (string, error) { return text, nil }
+	}
+	if _, err := cache.GetOrBuild(source, "emit-llvm", build("hello artifact")); err != nil {
 		t.Fatalf("build failed: %v", err)
-	}
-	hit, err := cache.WhyRebuild(source, "emit-llvm")
-	if err != nil {
-		t.Fatalf("why hit failed: %v", err)
-	}
-	if !strings.Contains(hit, "cache hit") {
-		t.Fatalf("got %q", hit)
 	}
 	if err := os.WriteFile(source, []byte(`fn main() { print("changed"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	miss, err := cache.WhyRebuild(source, "emit-llvm")
+	changed, err := cache.GetOrBuild(source, "emit-llvm", build("changed artifact"))
 	if err != nil {
-		t.Fatalf("why miss failed: %v", err)
+		t.Fatalf("rebuild failed: %v", err)
 	}
-	if miss != "cache miss: source changed" {
-		t.Fatalf("got %q", miss)
+	if changed.Hit || changed.Output != "changed artifact" {
+		t.Fatalf("got hit=%v output=%q", changed.Hit, changed.Output)
 	}
 }
 

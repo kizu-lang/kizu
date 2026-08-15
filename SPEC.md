@@ -2133,7 +2133,6 @@ kizu build
 kizu ir
 kizu cache status
 kizu cache prune
-kizu why-rebuild
 kizu import-c-header
 ```
 
@@ -2293,9 +2292,9 @@ typed SSA IR から LLVM IR を生成します。
 LLVM lowering は interpreter より限定された subset だけを扱います。
 これは v0.1 の正ではありません。
 
-### Milestone 10: build cache / why-rebuild
+### Milestone 10: build cache
 
-キャッシュ状態、キャッシュ削除、再ビルド理由を確認できるようにします。
+キャッシュ状態とキャッシュ削除を確認できるようにします。
 build cache は compiler work のための experimental tooling です。
 
 ### Milestone 11: WASM / WASI backend

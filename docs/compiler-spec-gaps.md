@@ -115,7 +115,6 @@ Required user-facing commands:
 
 - `kizu cache status`
 - `kizu cache prune`
-- `kizu why-rebuild`
 
 ### Native Build Policy
 
