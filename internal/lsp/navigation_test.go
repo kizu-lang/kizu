@@ -19,7 +19,7 @@ func TestDefinitionReturnsLocalAndDeclarationLocations(t *testing.T) {
 	requireDefinition(t, server.definition(uri, positionIn(source, "trace.label", "label")),
 		uri, source, "label:")
 	requireDefinition(t, server.definition(uri, positionIn(source, "trace.rename", "rename")),
-		uri, source, "fn rename")
+		uri, source, ") rename(")
 	requireDefinition(t, server.definition(uri, positionIn(source, "trace.label", "trace")),
 		uri, source, "let trace")
 }
@@ -73,7 +73,7 @@ func TestDocumentSymbolsReturnOutline(t *testing.T) {
 	symbols := DocumentSymbols(navigationFixture())
 	requireSymbol(t, symbols, "Trace", symbolKindStruct)
 	requireSymbol(t, symbols, "Color", symbolKindEnum)
-	requireSymbol(t, symbols, "impl Trace", symbolKindClass)
+	requireSymbol(t, symbols, "Trace.rename", symbolKindMethod)
 	requireSymbol(t, symbols, "inspect", symbolKindFunction)
 	requireSymbol(t, symbols, "main", symbolKindFunction)
 
@@ -129,11 +129,9 @@ struct Trace {
     count: i64,
 }
 
-impl Trace {
-    /// Renames the trace.
-    fn rename(self: &var Trace, name: []u8) -> void {
-        return;
-    }
+/// Renames the trace.
+fn (self: &var Trace) rename(name: []u8) -> void {
+    return;
 }
 
 /// Inspects a trace value.

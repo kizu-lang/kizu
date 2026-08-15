@@ -1,10 +1,12 @@
 package project
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // qualifyModule rewrites one parsed module into package-qualified names.
@@ -44,11 +46,52 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 	case *ast.ImplDecl:
 		return c.qualifyImpl(module, d)
 	case *ast.FunctionDecl:
-		return c.qualifyFunction(module, d, module.qualify(d.Name))
+		name, err := c.declaredFunctionName(module, d)
+		if err != nil {
+			return nil, err
+		}
+		return c.qualifyFunction(module, d, name)
 	case *ast.TestDecl:
 		return c.qualifyTestDecl(module, d)
 	default:
 		return decl, nil
+	}
+}
+
+// declaredFunctionName returns what a function is filed under. A method is filed
+// under the type it is a method on, so two types in one module may each declare
+// a `len`; anything else is filed under its module.
+func (c *graphChecker) declaredFunctionName(
+	module *moduleUnit,
+	decl *ast.FunctionDecl,
+) (string, error) {
+	if !decl.Receiver || len(decl.Params) == 0 {
+		return module.qualify(decl.Name), nil
+	}
+	resolved, err := c.resolveTypeNode(module, decl.Params[0].TypeName)
+	if err != nil {
+		return "", err
+	}
+	base, ok := receiverBase(resolved)
+	if !ok {
+		return "", fmt.Errorf("module error: `%s` is not a type a method can be declared on in `%s`",
+			typ.Text(decl.Params[0].TypeName), module.name())
+	}
+	return base + "." + decl.Name, nil
+}
+
+// receiverBase names the type a receiver stands for, with borrows and static
+// arguments dropped: `&std::array::Array<T>` is a method on `std::array::Array`.
+func receiverBase(t typ.Type) (string, bool) {
+	switch node := t.(type) {
+	case *typ.Borrow:
+		return receiverBase(node.Elem)
+	case *typ.Const:
+		return receiverBase(node.Elem)
+	case *typ.Name:
+		return strings.Join(node.Path, "::"), true
+	default:
+		return "", false
 	}
 }
 
@@ -567,7 +610,7 @@ func (c *graphChecker) qualifyCallee(
 func declaresFunction(module *moduleUnit, name string) bool {
 	for _, decl := range module.program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
-		if ok && fn.Name == name {
+		if ok && !fn.Receiver && fn.Name == name {
 			return true
 		}
 	}

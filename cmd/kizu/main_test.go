@@ -1489,11 +1489,9 @@ func TestBuildTargetNativeReturnedArrayFieldCommandSmoke(t *testing.T) {
 	code := []byte(`import std;
 
 struct Bag { values: std::array::Array<i64>, }
-impl Bag {
-    fn deinit(self: Bag) -> void {
-        self.values.deinit();
-        return;
-    }
+fn (self: Bag) deinit() -> void {
+    self.values.deinit();
+    return;
 }
 fn make_bag() -> !Bag {
     var values = std::array::Array<i64>(std::mem::page_allocator());
@@ -1546,11 +1544,9 @@ func TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke(t *testing.T) {
 
 union Stmt { Add(i64), Done(i64), }
 struct Bag { stmts: std::array::Array<Stmt>, }
-impl Bag {
-    fn deinit(self: Bag) -> void {
-        self.stmts.deinit();
-        return;
-    }
+fn (self: Bag) deinit() -> void {
+    self.stmts.deinit();
+    return;
 }
 fn make_bag() -> !Bag {
     var stmts = std::array::Array<Stmt>(std::mem::page_allocator());

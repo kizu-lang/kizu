@@ -390,7 +390,7 @@ attached documentation として結びつきます。
 v0.2 の attachable item は次です。
 
 * function declaration
-* impl method declaration
+* method declaration
 * `struct` / `enum` / `union` declaration
 * struct field
 * enum tag
@@ -403,11 +403,9 @@ pub fn parse_source(source: []u8) -> !Program {
     ...
 }
 
-impl Parser {
-    /// Advances to the next token.
-    fn advance(self: &var Parser) -> void {
-        ...
-    }
+/// Advances to the next token.
+fn (self: &var Parser) advance() -> void {
+    ...
 }
 
 /// Token produced by the lexer.
@@ -1110,14 +1108,12 @@ union MirStmt {
     If(MirIf),
 }
 
-impl MirStmt {
-    fn deinit(self: MirStmt) -> void {
-        match self {
-            LetCall(stmt) => stmt.deinit(),
-            ReturnExpr(stmt) => stmt.deinit(),
-            If(stmt) => stmt.deinit(),
-        };
-    }
+fn (self: MirStmt) deinit() -> void {
+    match self {
+        LetCall(stmt) => stmt.deinit(),
+        ReturnExpr(stmt) => stmt.deinit(),
+        If(stmt) => stmt.deinit(),
+    };
 }
 ```
 
@@ -2151,7 +2147,17 @@ impl Writer for File {
 }
 ```
 
-`impl File { ... }` は inherent method 用として残します。contract method body は
+型固有の method は receiver 欄で宣言します。書き方は 1 つです。
+
+```kizu
+fn (self: &var File) rename(next: []u8) -> void {
+    self.name = next;
+}
+```
+
+receiver 欄を持つ function はその型の method で、module ではなく型の下に置かれます。
+同じ module の 2 つの型が、どちらも `len` を持てます。`impl File { ... }` という
+inherent method の囲いはありません。contract method body は
 `impl Writer for File { ... }` に置きます。旧 `satisfy Writer for File` 構文は
 採用しません。
 

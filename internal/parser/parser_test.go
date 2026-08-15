@@ -167,30 +167,25 @@ pub extern "c" fn host(value: i64)`
 	}
 }
 
-// TestParseImplMethodDocComments checks docs attach to methods inside impl blocks.
-func TestParseImplMethodDocComments(t *testing.T) {
+// TestParseMethodDocComments checks docs attach to a method declaration.
+func TestParseMethodDocComments(t *testing.T) {
 	input := `struct Parser {}
 
-impl Parser {
-    /// Advances to the next token.
-    fn advance(self: Parser) -> void {
-        return;
-    }
+/// Advances to the next token.
+fn (self: Parser) advance() -> void {
+    return;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	implDecl, ok := program.Decls[1].(*ast.ImplDecl)
-	if !ok {
-		t.Fatalf("decl = %#v, want impl", program.Decls[1])
+	method, ok := program.Decls[1].(*ast.FunctionDecl)
+	if !ok || !method.Receiver {
+		t.Fatalf("decl = %#v, want method", program.Decls[1])
 	}
-	if len(implDecl.Methods) != 1 {
-		t.Fatalf("got %d methods, want 1", len(implDecl.Methods))
-	}
-	if implDecl.Methods[0].Doc != "Advances to the next token." {
-		t.Fatalf("method doc = %q", implDecl.Methods[0].Doc)
+	if method.Doc != "Advances to the next token." {
+		t.Fatalf("method doc = %q", method.Doc)
 	}
 }
 
@@ -914,21 +909,19 @@ func TestParseUnsafeCapabilityListRejectsUnknown(t *testing.T) {
 	}
 }
 
-// TestParseRequiresUnsafeImplMethod checks caller-obligation method syntax.
-func TestParseRequiresUnsafeImplMethod(t *testing.T) {
-	input := `impl Register {
-    @requires_unsafe() fn write(self: Register) -> void {
-        return;
-    }
+// TestParseRequiresUnsafeMethod checks caller-obligation method syntax.
+func TestParseRequiresUnsafeMethod(t *testing.T) {
+	input := `@requires_unsafe() fn (self: Register) write() -> void {
+    return;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	impl, ok := program.Decls[0].(*ast.ImplDecl)
-	if !ok || len(impl.Methods) != 1 || !impl.Methods[0].RequiresUnsafe {
-		t.Fatalf("decl = %#v, want impl method requiring unsafe", program.Decls[0])
+	method, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok || !method.Receiver || !method.RequiresUnsafe {
+		t.Fatalf("decl = %#v, want method requiring unsafe", program.Decls[0])
 	}
 }
 

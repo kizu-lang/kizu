@@ -271,7 +271,9 @@ func (c *graphChecker) collectFunctions() error {
 	for _, module := range c.modules {
 		for _, decl := range module.program.Decls {
 			fn, ok := decl.(*ast.FunctionDecl)
-			if !ok {
+			if !ok || fn.Receiver {
+				// A method is filed under its receiver's type, not in this
+				// module, so it is not a name a path can reach.
 				continue
 			}
 			qualified := module.qualify(fn.Name)
@@ -468,7 +470,9 @@ func rejectImportShadowing(module *moduleUnit, imports map[string]string) error 
 func declaredTopLevelName(decl ast.Decl) (string, bool) {
 	switch d := decl.(type) {
 	case *ast.FunctionDecl:
-		return d.Name, true
+		// A method's name lives under its receiver's type, so it is not a name
+		// in this module and shadows nothing.
+		return d.Name, !d.Receiver
 	case *ast.StructDecl:
 		return d.Name, true
 	case *ast.EnumDecl:

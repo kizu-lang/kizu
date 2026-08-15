@@ -413,11 +413,40 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 
 // collectMethodDecl registers one method declaration after contracts are known.
 func (c *Checker) collectMethodDecl(decl ast.Decl) error {
-	impl, ok := decl.(*ast.ImplDecl)
-	if !ok {
+	switch d := decl.(type) {
+	case *ast.ImplDecl:
+		return c.collectImpl(d)
+	case *ast.FunctionDecl:
+		return c.collectReceiverMethod(d)
+	default:
 		return nil
 	}
-	return c.collectImpl(impl)
+}
+
+// collectReceiverMethod files a `fn (self: T) name(...)` declaration under the
+// type it is a method on. Its name already says which that is: the loader files
+// a method under its receiver, so `app::Trace.deinit` is `deinit` on
+// `app::Trace` and needs no second reading of the receiver.
+func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
+	receiver, name, ok := stdmethod.SplitMethodName(decl.Name)
+	if !decl.Receiver || !ok {
+		return nil
+	}
+	methods := c.impls[receiver]
+	if methods == nil {
+		methods = map[string]*functionType{}
+		c.impls[receiver] = methods
+	}
+	if _, exists := methods[name]; exists {
+		return errorf("type error: duplicate method `%s`", decl.Name)
+	}
+	fnType, err := c.newDeclaredFunctionType(decl)
+	if err != nil {
+		return err
+	}
+	fnType.name = decl.Name
+	methods[name] = fnType
+	return nil
 }
 
 // predeclareTypeNames lets recursive fields refer to later declarations through Box.
@@ -5130,7 +5159,7 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 // allowsDirectFieldCleanup reports whether owner.field.deinit is in owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(field *ast.FieldExpr, env *scope) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.sig.Name != "deinit" || fn.returnType != typeVoid {
+	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || fn.returnType != typeVoid {
 		return false
 	}
 	owner, ok := field.Receiver.(*ast.IdentExpr)

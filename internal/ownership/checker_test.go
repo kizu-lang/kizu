@@ -243,12 +243,10 @@ struct Registry { users: std::arena::Arena<User> }
 fn touch(users: &var std::arena::Arena<User>) {
     print(0);
 }
-impl Registry {
-    fn deinit(self: Registry) -> void {
-        self.users.deinit();
-        touch(&var self.users);
-        return;
-    }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+    touch(&var self.users);
+    return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
@@ -1047,10 +1045,8 @@ fn main() {}`
 // TestCheckArrayPopOrPanicMovesNonCopyElement combines pop moves with explicit trapping.
 func TestCheckArrayPopOrPanicMovesNonCopyElement(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.values.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.values.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
@@ -1067,10 +1063,8 @@ fn main() {}`
 // TestCheckArrayPopOrPanicRejectsActiveElementBorrow keeps mutation alias-safe.
 func TestCheckArrayPopOrPanicRejectsActiveElementBorrow(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.values.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.values.deinit();
 }
 fn observe(value: &Parsed) -> void {}
 fn check(values: std::array::Array<Parsed>) -> !void {
@@ -1098,11 +1092,9 @@ struct Parsed {
     users: std::arena::Arena<User>,
     ids: std::array::Array<i64>,
 }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.users.deinit();
-        self.ids.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.users.deinit();
+    self.ids.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
     let item = try values.pop();
@@ -1119,10 +1111,8 @@ fn main() {}`
 // TestCheckImplMethodReturnTypeFeedsGenericCall keeps method result types precise.
 func TestCheckImplMethodReturnTypeFeedsGenericCall(t *testing.T) {
 	source := `struct Counter { value: i64 }
-impl Counter {
-    fn len(self: Counter) -> i64 {
-        return self.value;
-    }
+fn (self: Counter) len() -> i64 {
+    return self.value;
 }
 fn expect_equal<T>(expected: T, actual: T) -> void {
     return;
@@ -1139,10 +1129,8 @@ fn main() {
 // TestCheckRejectsImplMethodReturnTypeMismatch checks generic calls see method returns.
 func TestCheckRejectsImplMethodReturnTypeMismatch(t *testing.T) {
 	source := `struct Counter { value: i64 }
-impl Counter {
-    fn label(self: Counter) -> []u8 {
-        return "one";
-    }
+fn (self: Counter) label() -> []u8 {
+    return "one";
 }
 fn expect_equal<T>(expected: T, actual: T) -> void {
     return;
@@ -1163,10 +1151,8 @@ fn main() {
 // TestCheckRejectsImplMethodArgCount checks method signatures replace unknown fallback.
 func TestCheckRejectsImplMethodArgCount(t *testing.T) {
 	source := `struct Counter { value: i64 }
-impl Counter {
-    fn add(self: Counter, value: i64) -> i64 {
-        return value;
-    }
+fn (self: Counter) add(value: i64) -> i64 {
+    return value;
 }
 fn main() {
     let counter = Counter { value: 1 };
@@ -1185,16 +1171,14 @@ fn main() {
 func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-impl Registry {
-    fn add(self: Registry, user: User) -> void {
-        let handle = self.users.add(user);
-        print(self.users.get(handle).name);
-        return;
-    }
-    fn deinit(self: Registry) -> void {
-        self.users.deinit();
-        return;
-    }
+fn (self: Registry) add(user: User) -> void {
+    let handle = self.users.add(user);
+    print(self.users.get(handle).name);
+    return;
+}
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+    return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
@@ -1229,12 +1213,10 @@ fn main() {
 			name: "use after field cleanup",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-impl Registry {
-    fn deinit(self: Registry) -> void {
-        self.users.deinit();
-        self.users.add(User { name: "alice" });
-        return;
-    }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+    self.users.add(User { name: "alice" });
+    return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();

@@ -63,9 +63,9 @@ var snippetCompletionItems = []completionItem{
 	snippet("enum", "enum declaration", "enum ${1:Name} {\n    ${2:Tag},\n}"),
 	snippet("union", "union declaration", "union ${1:Name} {\n    ${2:Variant}(${3:i64}),\n}"),
 	snippet(
-		"impl",
-		"impl block",
-		"impl ${1:Type} {\n    fn ${2:method}(self: ${1:Type}) -> ${3:void} {\n        $0\n    }\n}",
+		"method",
+		"method declaration",
+		"fn (self: ${1:Type}) ${2:name}() -> ${3:void} {\n    $0\n}",
 	),
 	snippet(
 		"contract",

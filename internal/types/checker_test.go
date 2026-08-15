@@ -557,12 +557,10 @@ func TestCheckAcceptsBorrowProvenanceThroughFieldAliases(t *testing.T) {
 struct Owner {
     text: string::String,
 }
-impl Owner {
-    fn bytes(self: &Owner) -> []u8 borrows self {
-        let storage = &self.text;
-        let view = storage.as_bytes();
-        return view;
-    }
+fn (self: &Owner) bytes() -> []u8 borrows self {
+    let storage = &self.text;
+    let view = storage.as_bytes();
+    return view;
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -576,13 +574,11 @@ func TestCheckAcceptsMethodBorrowProvenance(t *testing.T) {
 	source := `struct Picker {
     bytes: []u8,
 }
-impl Picker {
-    fn from_self(self: &Picker) -> []u8 borrows self {
-        return self.bytes;
-    }
-    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
-        return value;
-    }
+fn (self: &Picker) from_self() -> []u8 borrows self {
+    return self.bytes;
+}
+fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
+    return value;
 }
 fn forward_self(picker: &Picker) -> []u8 borrows picker {
     let view = picker.from_self();
@@ -680,10 +676,8 @@ fn bad(owner: &Owner, text: string::String) -> []u8 borrows owner {
 		{
 			name: "method explicit source mismatch",
 			source: `struct Picker {}
-impl Picker {
-    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
-        return value;
-    }
+fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
+    return value;
 }
 fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
     let view = picker.from_arg(right);
@@ -1358,11 +1352,9 @@ struct Parsed {
     users: std::arena::Arena<User>,
     ids: std::array::Array<i64>,
 }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.users.deinit();
-        self.ids.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.users.deinit();
+    self.ids.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
     let item = try values.pop();
@@ -1379,10 +1371,8 @@ fn main() {}`
 // TestCheckAcceptsArrayPopOrPanicResourceElements keeps the trap variant move-capable.
 func TestCheckAcceptsArrayPopOrPanicResourceElements(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.values.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.values.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
@@ -1492,11 +1482,9 @@ fn main() {
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-impl Registry {
-    fn deinit(self: Registry) -> void {
-        self.users.deinit();
-        return;
-    }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+    return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
@@ -1637,10 +1625,8 @@ union ByteValue {
     Item(u8),
 }
 extern "c" fn raw_byte() -> ptr<u8>
-impl Counter {
-    fn push(self: Counter, value: u8) -> u8 {
-        return value;
-    }
+fn (self: Counter) push(value: u8) -> u8 {
+    return value;
 }
 fn take_u8(x: u8) -> u8 { return x ;}
 fn take_i32(x: i32) -> i32 { return x ;}
@@ -1748,10 +1734,8 @@ fn main() {
 // TestCheckAcceptsRequiresUnsafeMethodCall checks caller-obligation methods.
 func TestCheckAcceptsRequiresUnsafeMethodCall(t *testing.T) {
 	source := `struct Register { value: i64 }
-impl Register {
-    @requires_unsafe() fn read(self: Register) -> i64 {
-        return self.value;
-    }
+@requires_unsafe() fn (self: Register) read() -> i64 {
+    return self.value;
 }
 fn main() {
     let register = Register { value: 1 };
@@ -1974,10 +1958,8 @@ fn main() {
 		{
 			name: "requires unsafe method call outside unsafe",
 			source: `struct Register { value: i64 }
-impl Register {
-    @requires_unsafe() fn read(self: Register) -> i64 {
-        return self.value;
-    }
+@requires_unsafe() fn (self: Register) read() -> i64 {
+    return self.value;
 }
 fn main() {
     let register = Register { value: 1 };

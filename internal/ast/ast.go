@@ -93,7 +93,11 @@ func (p *Program) String() string {
 // this, and only generic and comptime bodies travel with it because
 // instantiation reruns them.
 type FunctionSignature struct {
-	Name string
+	// Receiver reports whether Params[0] is the value this function is a method
+	// on. A method is filed under its receiver's type rather than in its module,
+	// so two types in one module may each have a `len`.
+	Receiver bool
+	Name     string
 	// StaticParams is the `<...>` list. An entry with no declared type is a
 	// type parameter; one with a type is a compile-time value. Both are
 	// compile-time, which is why they live here and not in Params.
@@ -149,8 +153,14 @@ func (*FunctionDecl) declNode() {}
 
 // String returns a compact debug representation of the function.
 func (d *FunctionDecl) String() string {
-	params := make([]string, 0, len(d.Params))
-	for _, p := range d.Params {
+	receiver := ""
+	rest := d.Params
+	if d.Receiver && len(rest) > 0 {
+		receiver = "(" + rest[0].String() + ") "
+		rest = rest[1:]
+	}
+	params := make([]string, 0, len(rest))
+	for _, p := range rest {
 		params = append(params, p.String())
 	}
 	ret := ""
@@ -172,15 +182,15 @@ func (d *FunctionDecl) String() string {
 		prefix += "@requires_unsafe() "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %q fn %s%s(%s)%s",
-			prefix, d.ExternABI, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sextern %q fn %s%s%s(%s)%s",
+			prefix, d.ExternABI, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
 	if d.Body == nil {
-		return fmt.Sprintf("%sfn %s%s(%s)%s;",
-			prefix, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sfn %s%s%s(%s)%s;",
+			prefix, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
-	return fmt.Sprintf("%sfn %s%s(%s)%s %s",
-		prefix, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
+	return fmt.Sprintf("%sfn %s%s%s(%s)%s %s",
+		prefix, receiver, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
 }
 
 // TestDecl represents a top-level test block.

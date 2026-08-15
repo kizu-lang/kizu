@@ -386,8 +386,12 @@ func (idx completionIndex) scan(source string) {
 			}
 			i = next
 		case token.Function:
-			fn, next, ok := readFunction(tokens, i)
-			if ok {
+			fn, receiver, next, ok := readFunction(tokens, i)
+			switch {
+			case !ok:
+			case receiver != "":
+				idx.methods[receiver] = append(idx.methods[receiver], fn)
+			default:
 				idx.functions[fn.name] = fn
 			}
 			i = skipDeclarationBody(tokens, next)
@@ -529,7 +533,7 @@ func (idx completionIndex) scanUnion(tokens []token.Token, start int) int {
 	return brace
 }
 
-// scanImpl collects methods from an inherent or contract impl block.
+// scanImpl collects methods from a contract impl block.
 func (idx completionIndex) scanImpl(tokens []token.Token, start int) int {
 	typeName := ""
 	brace := -1
@@ -557,7 +561,7 @@ func (idx completionIndex) scanImpl(tokens []token.Token, start int) int {
 		if tokens[i].Type != token.Function {
 			continue
 		}
-		fn, next, ok := readFunction(tokens, i)
+		fn, _, next, ok := readFunction(tokens, i)
 		if ok {
 			idx.methods[typeName] = append(idx.methods[typeName], fn)
 		}
@@ -638,19 +642,48 @@ func inferExprType(tokens []token.Token, start int) (string, int) {
 }
 
 // readFunction reads a function name and user-facing call parameters.
-func readFunction(tokens []token.Token, start int) (functionCompletion, int, bool) {
-	if start+1 >= len(tokens) || tokens[start+1].Type != token.Ident {
-		return functionCompletion{}, start, false
+func readFunction(tokens []token.Token, start int) (functionCompletion, string, int, bool) {
+	receiver, nameAt := readReceiver(tokens, start)
+	if nameAt >= len(tokens) || tokens[nameAt].Type != token.Ident {
+		return functionCompletion{}, "", start, false
 	}
-	name := tokens[start+1].Literal
-	params, close := readFunctionParams(tokens, start)
+	name := tokens[nameAt].Literal
+	params, close := readFunctionParams(tokens, nameAt)
 	returnType, next := readFunctionReturnType(tokens, close)
 	return functionCompletion{
-		name:          name,
+		name: name,
+		// A call spells the arguments after the receiver, but the signature a
+		// reader is shown spells the receiver too: it is what the method is on.
 		params:        callableParamNames(params),
-		detail:        functionSignature(name, params, returnType),
+		detail:        functionSignature(name, append(receiver, params...), returnType),
 		documentation: declarationDocumentation(tokens, start),
-	}, next, true
+	}, receiverType(receiver), next, true
+}
+
+// readReceiver reads the `(self: T)` slot a method declares before its name, and
+// returns it together with the index its name is at. A function with no slot has
+// no receiver and its name follows `fn` directly.
+func readReceiver(tokens []token.Token, start int) ([]localBinding, int) {
+	if start+1 >= len(tokens) || tokens[start+1].Type != token.LParen {
+		return nil, start + 1
+	}
+	close := skipBalanced(tokens, start+1, token.LParen, token.RParen)
+	if close <= start+1 {
+		return nil, start + 1
+	}
+	params, _ := readFunctionParams(tokens, start)
+	if len(params) != 1 {
+		return nil, close + 1
+	}
+	return params, close + 1
+}
+
+// receiverType names the type a receiver slot makes its function a method on.
+func receiverType(receiver []localBinding) string {
+	if len(receiver) == 0 {
+		return ""
+	}
+	return normalizeCompletionType(receiver[0].typ)
 }
 
 // readFunctionParams reads a function parameter list.

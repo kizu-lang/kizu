@@ -593,15 +593,13 @@ func tokenSpelling(t token.Token) string {
 // shouldInsertSpace decides whether a space goes between prev and curr.
 func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	prev := b.prev
-	// Generic brackets: tight spacing on both sides of `<` and before `>`.
-	if curr.Type == token.LT && b.index < len(b.generic) && b.generic[b.index] {
+	if b.tightGenericBracket(curr) {
 		return false
 	}
-	if prev.Type == token.LT && b.prevIndex < len(b.generic) && b.generic[b.prevIndex] {
-		return false
-	}
-	if curr.Type == token.GT && b.index < len(b.generic) && b.generic[b.index] {
-		return false
+	// A receiver slot follows `fn` with a space: `fn (self: T) name()`. It is
+	// the one `(` that opens a declaration rather than a call or a group.
+	if curr.Type == token.LParen && prev.Type == token.Function {
+		return true
 	}
 	if noSpaceBefore(curr) {
 		return false
@@ -613,6 +611,18 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 		return false
 	}
 	return true
+}
+
+// tightGenericBracket reports the `<` and `>` of a static argument list, which
+// take no space on either side of `<` and none before `>`.
+func (b *builder) tightGenericBracket(curr token.Token) bool {
+	if curr.Type == token.LT && b.index < len(b.generic) && b.generic[b.index] {
+		return true
+	}
+	if b.prev.Type == token.LT && b.prevIndex < len(b.generic) && b.generic[b.prevIndex] {
+		return true
+	}
+	return curr.Type == token.GT && b.index < len(b.generic) && b.generic[b.index]
 }
 
 // noSpaceBefore reports whether t never takes a preceding space.

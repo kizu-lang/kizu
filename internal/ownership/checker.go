@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -246,6 +247,9 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
 			c.functions[d.Name] = functionInfoFromDecl(d.Name, d)
+			if err := c.collectReceiverMethod(d); err != nil {
+				return err
+			}
 		case *ast.ImplDecl:
 			if err := c.collectImpl(d); err != nil {
 				return err
@@ -254,6 +258,25 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 			continue
 		}
 	}
+	return nil
+}
+
+// collectReceiverMethod files a `fn (self: T) name(...)` declaration under the
+// type it is a method on. Its name already says which that is.
+func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
+	receiver, name, ok := stdmethod.SplitMethodName(decl.Name)
+	if !decl.Receiver || !ok {
+		return nil
+	}
+	methods := c.impls[receiver]
+	if methods == nil {
+		methods = map[string]*functionInfo{}
+		c.impls[receiver] = methods
+	}
+	if _, exists := methods[name]; exists {
+		return errorf("move error: duplicate method `%s`", decl.Name)
+	}
+	methods[name] = functionInfoFromDecl(decl.Name, decl)
 	return nil
 }
 
@@ -4379,7 +4402,7 @@ func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
 // allowsDirectFieldCleanup reports whether field.deinit is inside owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
 	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
@@ -4396,7 +4419,7 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 // active payload owned and cleanable; everywhere else it stays a borrow.
 func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
 	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
