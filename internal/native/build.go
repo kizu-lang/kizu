@@ -32,18 +32,15 @@ type Options struct {
 	Opt       bool
 }
 
-// Build writes transient inputs and links them into a native executable.
+// Build links a lowered program into the executable the caller names, and
+// records next to it what it was built from. It is the artifact command: the
+// output is a file the user asked for by name, so it is written where they
+// asked rather than read out of the cache.
 func Build(options Options) error {
+	if options.Output == "" {
+		return fmt.Errorf("native error: output path is required")
+	}
 	if err := validateOptions(options); err != nil {
-		return err
-	}
-	tmp, err := os.MkdirTemp("", "kizu-native-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	irPath := filepath.Join(tmp, "main.ll")
-	if err := os.WriteFile(irPath, []byte(options.LLVMIR), 0o644); err != nil {
 		return err
 	}
 	runtimePath, err := runtimeObject(options)
@@ -53,18 +50,60 @@ func Build(options Options) error {
 	if err := os.MkdirAll(filepath.Dir(options.Output), 0o755); err != nil {
 		return err
 	}
-	command, err := runClang(irPath, runtimePath, options)
+	command, err := link(runtimePath, options.Output, options)
 	if err != nil {
 		return err
 	}
 	return writeMetadata(options, command)
 }
 
+// Executable returns an executable for one lowered program, linking it only
+// when nothing has it yet. `run` and `test` want a program to execute rather
+// than a file at a name they chose, and the same IR linked against the same
+// runtime by the same toolchain is the same executable however often it is
+// asked for. Keeping it also keeps its identity on disk, which is what lets a
+// system that inspects a binary the first time it runs do that once.
+func Executable(options Options) (string, error) {
+	if err := validateOptions(options); err != nil {
+		return "", err
+	}
+	runtimePath, err := runtimeObject(options)
+	if err != nil {
+		return "", err
+	}
+	cache, err := buildcache.New()
+	if err != nil {
+		return "", err
+	}
+	return cache.GetOrBuildArtifact(
+		"native-exe",
+		executableCacheTarget(options, runtimePath),
+		[]byte(options.LLVMIR),
+		func(output string) error {
+			_, err := link(runtimePath, output, options)
+			return err
+		},
+	)
+}
+
+// link writes the IR where the toolchain can read it and links it with the
+// runtime into output. The IR is transient because the executable is what is
+// worth keeping: it is the thing that is expensive to make and cheap to name.
+func link(runtimePath string, output string, options Options) ([]string, error) {
+	tmp, err := os.MkdirTemp("", "kizu-native-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+	irPath := filepath.Join(tmp, "main.ll")
+	if err := os.WriteFile(irPath, []byte(options.LLVMIR), 0o644); err != nil {
+		return nil, err
+	}
+	return runClang(irPath, runtimePath, output, options)
+}
+
 // validateOptions rejects native build modes that do not have a concrete backend yet.
 func validateOptions(options Options) error {
-	if options.Output == "" {
-		return fmt.Errorf("native error: output path is required")
-	}
 	if options.LibC != "on" {
 		return fmt.Errorf("native error: --libc %s is not implemented yet", options.LibC)
 	}
@@ -112,8 +151,24 @@ func runtimeObject(options Options) (string, error) {
 // the toolchain that builds it, the machine it is built for, and what it is
 // asked to produce.
 func runtimeCacheTarget(options Options) string {
-	key := []string{"native-runtime", options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
-	return strings.Join(append(key, clangFlags(options)...), "/")
+	return strings.Join(append([]string{"native-runtime"}, toolchainKey(options)...), "/")
+}
+
+// executableCacheTarget spells what the executable is made of besides the IR:
+// the same toolchain the runtime is keyed by, and the runtime object itself.
+// That object is stored under a name that is its own key, so naming it here
+// makes a program built against an older runtime a different artifact rather
+// than the same one.
+func executableCacheTarget(options Options, runtimePath string) string {
+	key := append([]string{"native-exe"}, toolchainKey(options)...)
+	return strings.Join(append(key, filepath.Base(runtimePath)), "/")
+}
+
+// toolchainKey spells what builds an artifact rather than what it is built
+// from: the driver, the machine it targets, and the flags it is asked to honour.
+func toolchainKey(options Options) []string {
+	key := []string{options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
+	return append(key, clangFlags(options)...)
 }
 
 // compileRuntime compiles the runtime source into one object file.
@@ -198,8 +253,8 @@ func camelToSnake(name string) string {
 }
 
 // runClang invokes the configured C/LLVM toolchain with explicit inputs.
-func runClang(irPath string, runtimePath string, options Options) ([]string, error) {
-	args := append(clangFlags(options), irPath, runtimePath, "-o", options.Output)
+func runClang(irPath string, runtimePath string, output string, options Options) ([]string, error) {
+	args := append(clangFlags(options), irPath, runtimePath, "-o", output)
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

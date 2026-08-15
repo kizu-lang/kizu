@@ -89,6 +89,18 @@ kizu why-rebuild <file>
 - Kizu commit
 - host OS / architecture
 
+## build cache に入るもの
+
+| artifact | cache key | 保存条件 | 測定 command |
+| --- | --- | --- | --- |
+| wasm text | source path + source hash + target | `build --target wasm32-wasi` | `kizu why-rebuild <file>` |
+| runtime object | runtime C source + toolchain | native link のたび(初回だけ compile) | `kizu cache status` |
+| run/test 実行ファイル | LLVM IR + runtime object + toolchain | `run` / `test` の link | `time kizu run examples/hello.kizu` |
+
+prune 条件と status 表示はどれも共通で、`cache prune` が全消し、上限超過分は
+古い順に落ちます。`why-rebuild` が説明できるのは今のところ source path で鍵付く
+wasm text だけで、内容で鍵付く 2 つは説明対象に入っていません。
+
 ## キャッシュ設計の制約
 
 - デフォルト上限を持つ
