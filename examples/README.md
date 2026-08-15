@@ -58,7 +58,7 @@ go test ./...
 | caller-obligation function | `requires_unsafe.kizu` | check-only `@requires_unsafe() fn` called from `@unsafe(unsafe_call)` |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `@unsafe(ptr_deref) { p.*.field }` pointer access |
-| combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
+| combined application | `user_registry.kizu` | exercises multiple features together |
 | `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | pure path helpers | `std_path.kizu` | joins and cleans paths with explicit allocator-backed output |
@@ -119,7 +119,7 @@ single source file. Run them with `kizu check <package-root>`.
 | loop body use does not end an outer borrow | `negative/borrow_loop_last_use.kizu` | `cannot be moved while borrowed` |
 | field borrow blocks same-field assignment | `negative/field_borrow_same_field_assignment.kizu` | `cannot be assigned while borrowed` |
 | field borrow blocks owner move | `negative/field_borrow_owner_move.kizu` | `cannot be moved while borrowed` |
-| v0.1 rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
+| rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields cannot be stored | `negative/borrow_field.kizu` | `cannot store borrow` |
 | borrow returns need provenance | `negative/borrow_return_missing_source.kizu` | `borrows <source>` |
@@ -171,9 +171,9 @@ single source file. Run them with `kizu check <package-root>`.
 | unsafe does not permit borrow escape | `negative/unsafe_borrow_escape.kizu` | `borrowed value` |
 | contract impl requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
 | `dyn Contract` requires explicit contract impl | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
-| owned `dyn Contract` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
+| owned `dyn Contract` is not | `negative/owned_dyn.kizu` | `must be borrowed` |
 | bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
-| evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
+| evented Io is not implemented | `negative/io_evented_unimplemented.kizu` | `not implemented` |
 | array host primitives are reserved | `negative/std_array_builtin_direct_call.kizu` | `reserved; use std::array` |
 | map host primitives are reserved | `negative/std_map_builtin_direct_call.kizu` | `reserved; use std::map` |
 | array method primitives are reserved | `negative/std_array_append_builtin_direct_call.kizu` | `reserved` |
@@ -203,7 +203,7 @@ single source file. Run them with `kizu check <package-root>`.
 | arrays cannot be used after `deinit` | `negative/std_array_use_after_deinit.kizu` | `moved value` |
 | array append element type must match `T` | `negative/std_array_wrong_type.kizu` | `Array.append` |
 | array append moves non-copy values | `negative/std_array_append_moves.kizu` | `moved value` |
-| array get is copy-only in v0.2 | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
+| array get is copy-only | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
 | array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
 | array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |
 | borrowed array blocks append | `negative/std_array_append_while_borrowed.kizu` | `cannot run while array is borrowed` |
@@ -243,8 +243,8 @@ single source file. Run them with `kizu check <package-root>`.
 | fmt byte literal formatting requires bytes | `negative/std_fmt_wrong_bytes_type.kizu` | `expects []u8` |
 | map missing key is checked | `negative/std_map_get_missing.kizu` | `key not found` |
 | map construction requires explicit allocator | `negative/std_map_no_allocator.kizu` | `expects allocator` |
-| map values are copy-only in v0.2 | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |
-| map keys are `[]u8` in v0.2 | `negative/std_map_wrong_key_type.kizu` | `key type must be []u8` |
+| map values are copy-only | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |
+| map keys are `[]u8` | `negative/std_map_wrong_key_type.kizu` | `key type must be []u8` |
 | map insert value type must match `V` | `negative/std_map_wrong_insert_type.kizu` | `Map.insert` |
 | maps cannot be used after `deinit` | `negative/std_map_use_after_deinit.kizu` | `moved value` |
 | shared map borrows cannot insert | `negative/std_map_insert_through_shared_borrow.kizu` | `requires mutable Map receiver` |

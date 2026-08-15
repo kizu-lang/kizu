@@ -1,4 +1,4 @@
-# Kizu 言語仕様 v0.2 prototype
+# Kizu 言語仕様
 
 Kizu は、明示的で、シンプルで、メモリ安全なプログラミング言語です。
 
@@ -21,110 +21,44 @@ Kizu のメモリ安全性保証は safe Kizu に対して行います。
 safe Kizu の詳細な安全契約と regression coverage は
 [`docs/memory-safety.md`](docs/memory-safety.md) を正とします。
 
-## 0. v0.1 / v0.2 の範囲
+## 0. この仕様の範囲
 
-Kizu v0.1 は、Go 製 interpreter による language core release とします。
+この仕様は、今の Kizu を記述します。ここに書かれていない機能は、言語に無いものです。
+将来入るかもしれない機能を範囲表で予告することはしません。
 
-v0.1 で完成させる対象は、parser、type checker、move checker、borrow checker、
-ownership model、arena / handle、error union / try、限定的な comptime、
-および interpreter で実行できる言語コアです。
+`kizu run` / `kizu check` / `kizu test` は生成した実行ファイルを走らせます。経路は
+1 本で、interpreter はありません(ADR-0083)。実装は Go 一本です(ADR-0082)。
 
-LLVM IR backend、WASM / WASI backend、C header import、build cache は experimental として扱います。
-これらは将来の compiler work の土台ですが、v0.1 の正ではありません。
+### 0.1 メモリ安全 gate
 
-v0.1 の完了条件には、self-hosting compiler、native executable generation、
-full stdlib、Rust 同等以上の runtime performance guarantee は含めません。
-ただし、マルチスレッドと async は Kizu の重要な言語特性として扱い、
-v0.1 では safe structured concurrency の仕様、checker ルール、interpreter 上の
-最小 runtime model を完成対象に含めます。
-
-Kizu v0.2 は、将来の self-host compiler を進めるための最小 stdlib prototype とします。
-v0.2 の正も Go 製 interpreter と `kizu check` です。native executable generation、
-package manager、full stdlib、self-host compiler completion は v0.2 の完了条件に含めません。
-
-### 0.1 v0.1 に含めるもの
-
-v0.1 の正は Go 製 interpreter と `kizu check` です。
-
-v0.1 に含める runtime 言語機能:
+Kizu は safe Kizu のメモリ安全性を release blocker として扱います。
+次は必ず守ります。
 
 ```text
-fn
-explicit return
-statement semicolon
-let / var
-assignment
-i64
-bool
-[]u8
-void
-arithmetic / comparison
-if / else
-while
-struct
-field access
-namespace access with ::
-simple enum
-enum value access
-match over simple enum values
-tagged union
-match payload binding
-function call
-&T / &var T borrow parameter
-move semantics
-std::arena::Arena<T> / std::arena::Handle<T>
-!T / error / try
-limited comptime
-Io capability
-contract
-impl Contract for Type;
-&dyn Contract
+use-after-move を許さない
+double move を許さない
+borrow 中の値の move を許さない
+borrow escape を許さない
+borrow を struct field に保存させない
+borrow を comptime / @unsafe 境界で延命させない
+arena.get(handle) は local borrow だけを返す
+別 arena の handle 使用を許さない
+handle を raw pointer として扱わせない
+@unsafe 内でも type check / move check / borrow check を全面的に無効化しない
 ```
 
-v0.1 に含める static / policy 機能:
+各項目は checker test または `examples/negative/` で検証します。
+safe example は `kizu check` と `kizu run` の対象として維持します。
 
-```text
-@unsafe capability boundary checks
-extern "c" fn declaration checks
-raw pointer type spelling
-nullable pointer type spelling
-explicit cast<T>(value) checker policy
-low-level integer type names in checker
-f32 / f64 type names in checker
-structured task ownership checks
-contract satisfaction checks
-```
+raw pointer operation、C ABI call、unchecked operation は safe Kizu の保証外です。
+これらを使う場合、memory safety obligation はプログラマが負います。
 
-static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 semantics を約束しません。
+allocator primitive と raw pointer runtime operation は完全実装ではありません。
+実装済みの safe guarantee として扱ってはいけません。
 
-### 0.2 v0.2 に含めるもの
+### 0.2 まだ持たないもの
 
-v0.2 に含める stdlib / tooling prototype:
-
-```text
-std::mem read-only byte helpers
-std::array::Array<T>
-std::string::String
-std::fmt
-std::map::Map<[]u8, V>
-std::testing
-std::fs
-std::path
-std::io
-std::process
-kizu test <path>
-self-host compiler skeleton
-module/import syntax and manifest groundwork
-defer explicit cleanup statement
-match wildcard `_` fallback arm
-```
-
-v0.2 の stdlib は self-host compiler を進めるための最小 subset です。
-general-purpose production stdlib ではありません。
-
-### 0.3 v0.1 / v0.2 に含めないもの
-
-次は v0.1 / v0.2 の完了条件に含めません。
+次は言語に無く、いま作る対象でもありません。永続的な非目標は「2. 非目標」にあります。
 
 ```text
 full generics
@@ -133,11 +67,9 @@ complete fixed-width integer runtime semantics
 float literals and float runtime arithmetic
 overflow / truncation behavior for every numeric cast
 raw pointer runtime operations
-actual extern C call execution
 option<T> runtime helper
 full stdlib
 kizu lint
-native executable generation
 self-hosting compiler
 async fn / await syntax
 並行 API (task / channel / thread / mutex / atomic)
@@ -145,33 +77,9 @@ OS thread / event loop / networking runtime
 Rust 同等以上の runtime performance guarantee
 ```
 
-### 0.4 v0.1 / v0.2 メモリ安全 release gate
-
-Kizu v0.1 は、safe Kizu のメモリ安全性を release blocker として扱います。
-
-v0.1 では次を必ず守ります。
-
-```text
-use-after-move を許さない
-double move を許さない
-borrow 中の値の move を許さない
-borrow escape を許さない
-borrow を struct field に保存させない
-borrow を task / comptime / @unsafe 境界で延命させない
-arena.get(handle) は local borrow だけを返す
-別 arena の handle 使用を許さない
-handle を raw pointer として扱わせない
-@unsafe 内でも type check / move check / borrow check を全面的に無効化しない
-```
-
-v0.1 release 前に、上記の各項目は checker test または `examples/negative/` で検証します。
-safe example は `kizu check` と `kizu run` の対象として維持します。
-
-raw pointer operation、C ABI call、unchecked operation は safe Kizu の保証外です。
-これらを使う場合、memory safety obligation はプログラマが負います。
-
-allocator primitive、raw pointer runtime operation は v0.1 では完全実装しません。
-実装済みの safe guarantee として扱ってはいけません。
+self-host は言語が固まってから、Go の構造に沿って作り直します(ADR-0082)。
+thread は入れます。撤回したのは API の形だけで、実行系を先に作り、安全規則は
+動く thread の上でだけ書きます(ADR-0025)。
 
 ## 1. 目標
 
@@ -286,22 +194,15 @@ std::arena::Arena<T>
 std::arena::Handle<T>
 ```
 
-## 5. v0 の実装方針
+## 5. 実装方針
 
-最初の実装は、ネイティブコンパイラではなくインタプリタにします。
+実装は Go 一本です。言語とツールチェインの正は `internal/` と `cmd/kizu` にあり、
+第二実装は持ちません(ADR-0082)。
 
-実装言語:
+`run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
+ありません(ADR-0083)。native code は LLVM IR backend が生成します。
 
-```text
-Go
-```
-
-理由:
-
-* 実装が速い
-* 依存を抑えやすい
-* CLIを作りやすい
-* lexer/parser/interpreter/type checker の実験に向いている
+Go を選んだ理由は、実装が速く、依存を抑えやすく、CLI を作りやすいことです。
 
 ## 6. 基本文法
 
@@ -387,7 +288,7 @@ declaration や member の user-facing documentation は `///` line comment で�
 `///` は通常の `//` comment とは区別され、直後の attachable item に
 attached documentation として結びつきます。
 
-v0.2 の attachable item は次です。
+attachable item は次です。
 
 * function declaration
 * method declaration
@@ -429,7 +330,7 @@ attachment rule:
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します
 * slash 3 つだけの `///` を doc comment とし、`//// text` は通常の line comment です
-* block doc comment は v0.2 では採用しません
+* block doc comment は採用しません
 
 doc comment は型検査、ownership、name resolution、ABI、実行時挙動に
 影響しません。private function にも書けますが、doc comment の有無は
@@ -475,7 +376,7 @@ fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
 }
 ```
 
-v0.2 で許可する形は cleanup method call の expression statement だけです。
+で許可する形は cleanup method call の expression statement だけです。
 
 ```kizu
 defer values.deinit();
@@ -541,12 +442,12 @@ self.related.len();
 `Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
 compile error です。互換構文としては扱いません。
 
-v0.2 の method receiver path は local binding または one-level direct field に限定します。
+method receiver path は local binding または one-level direct field に限定します。
 
 ```kizu
 values.len();          // ok: local receiver
 self.related.len();    // ok: direct field receiver
-self.a.b.len();        // error in v0.2
+self.a.b.len();        // error
 ```
 
 direct field receiver は owner の ownership state に従います。read-only method は
@@ -569,7 +470,7 @@ pub fn main() -> void {
 ```
 
 import は top-level にだけ書けます。
-wildcard import、relative import、re-export、alias import は v0.2/v0.3 では扱いません。
+wildcard import、relative import、re-export、alias import は扱いません。
 cyclic import は compile error です。
 
 import した path は最後の segment 名で束縛され、その名前で参照します。
@@ -667,14 +568,14 @@ fn lex_source(source: []u8) -> !array::Array<Token> {
 * 外部 module から private field を construct / access してはいけない
 * `pub` な enum の tag と `pub` な union の variant は外部から使える
 * package 外から見える API は `internal` の下にない module の `pub` declaration に限る
-* `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
+* `pub(crate)`、`pub(super)`、`protected` は採用しない
 
 ### 6.7 enum
 
 Kizu の `enum` は Zig/C 寄りの tag enum です。
 Rust の payload enum / algebraic data type とは分けます。
 
-v0.1 の enum は、payload を持たない named tag だけを実装します。
+enum は、payload を持たない named tag だけを実装します。
 
 ```kizu
 enum Color {
@@ -724,7 +625,7 @@ match a {
 }
 ```
 
-v0.1 の `union` は次に限定します。
+`union` は次に限定します。
 
 * variant ごとの payload は0個または1個
 * pattern guard はない
@@ -791,7 +692,7 @@ while i < 10 {
 }
 ```
 
-Kizu v0.1 は `loop` keyword を採用しません。
+Kizu は `loop` keyword を採用しません。
 無限 loop は `while true` と書きます。
 
 ```kizu
@@ -813,7 +714,7 @@ outer: while i < 10 {
 
 ### 6.11 for
 
-v0.1 の `for` は、i64 の half-open range に限定します。
+`for` は、i64 の half-open range に限定します。
 終了値は含みません。
 
 ```kizu
@@ -822,7 +723,7 @@ for 0..3 |i| {
 }
 ```
 
-v0.1 では iterator protocol、collection iteration、`inline for` は扱いません。
+iterator protocol、collection iteration、`inline for` は扱いません。
 
 ### 6.12 match
 
@@ -841,11 +742,11 @@ fn main() {
 }
 ```
 
-guard と多段 destructuring は v0.1 では扱いません。
+guard と多段 destructuring は扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
 すべての `match` arm は terminal comma を必須にします。
-v0.2 では wildcard pattern `_` を fallback arm として許可します。
+wildcard pattern `_` を fallback arm として許可します。
 `_` arm は最後に 1 つだけ書けます。payload binding はできません。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
 `_` arm がない場合は、すべての tag を明示しなければなりません。
@@ -864,7 +765,7 @@ let label = match color {
 
 ## 7. 型
 
-v0.1 の基本型:
+基本型:
 
 ```text
 bool
@@ -879,7 +780,7 @@ Kizu は `int` のような幅が曖昧な整数型を導入しません。
 
 文字列 literal には次の 2 形式があります。
 
-* **single-line literal** `"..."`：1 行に収まる literal。escape 解釈は v0.2 では行わず、二重引用符の間のバイト列がそのまま値になります。
+* **single-line literal** `"..."`：1 行に収まる literal。escape 解釈は行わず、二重引用符の間のバイト列がそのまま値になります。
 * **multi-line literal** `\\<content>`：行頭の `\\` (backslash 二つ) で始まる行を 1 つ以上連続させると、`\n` で連結された 1 つの literal になります。delimiter は行末で閉じるため末尾編集で誤って閉じ忘れる事故が起きません。連続性は「次の非空白文字が `\\` で始まる行か」で判定し、空白行や注釈行は許容しません。
 
 ```kizu
@@ -891,14 +792,14 @@ let help =
 ;
 ```
 
-multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\nCommands:\n  build    Build the project`) で、`[]u8` 型として `"..."` と相互に交換可能です。
+multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\nCommands:\n build Build the project`) で、`[]u8` 型として `"..."` と相互に交換可能です。
 
 `void` は値を返さない関数の戻り値です。
-Kizu v0.1 では `Unit` という別名は導入しません。
+Kizu は `Unit` という別名を導入しません。
 
 低レベル型として、次の明示幅整数、浮動小数点、raw pointer 型名を予約します。
-v0.1 では主に checker / `@unsafe` / extern declaration のために扱います。
-interpreter 上の完全な fixed-width arithmetic、float literal、overflow semantics は後続 phase で扱います。
+主に checker / `@unsafe` / extern declaration のために扱います。
+完全な fixed-width arithmetic、float literal、overflow semantics はまだ扱いません。
 
 ```text
 i8
@@ -919,31 +820,31 @@ ptr<const T>
 ?ptr<const T>
 ```
 
-type alias は v0.1 では導入しません。
+type alias は導入しません。
 
-v0.1 では collection runtime API を実装しません。
-将来追加する collection 型は primitive ではなく、標準ライブラリ型として扱います。
+collection は primitive ではなく、標準ライブラリ型として扱います。
+実装済みの collection / ownership 型:
 
 ```text
 std::array::Array<T>
 std::map::Map<K, V>
-std::set::Set<T>
+std::string::String
+std::arena::Arena<T>
+std::arena::Handle<T>
 ```
 
-v0.1 では `std::arena::Arena<T>` / `std::arena::Handle<T>` だけを実装対象にします。
-将来追加する ownership/container 型:
+まだ持たない ownership / container 型:
 
 ```text
-std::mem::Box<T>
+std::set::Set<T>
 shared<T>
-[]T
+[]T (u8 以外の一般 slice)
 ```
 
-v0.1 では full generics を実装しません。
+full generics を実装しません。
 `std::arena::Arena<T>`、`std::arena::Handle<T>` は compiler-known な stdlib 型コンストラクタです。
 `!T` と raw pointer 型は専用の型構文として扱います。
-v0.2 では self-host と Kizu source stdlib のため、ADR-0066 の最小明示 function
-generics だけを採用します。
+ADR-0066 の最小明示 function generics だけを採用します。
 
 ### 7.1 index / slice expression
 
@@ -956,7 +857,7 @@ let tail = bytes[start..];
 let head = bytes[..end];
 ```
 
-v0.2 の最初の対象は `[]u8` です。
+最初の対象は `[]u8` です。
 
 ```text
 []u8 [ i64 ] -> u8
@@ -977,7 +878,7 @@ index / slice syntax は recoverable error を返しません。
 境界外を回復可能な値として扱いたい場合は、`std::mem::byte_at` や
 `std::mem::slice` のような明示 API を使います。
 
-v0.2 では mutable indexed assignment、indexed borrow、multi-dimensional slicing、
+mutable indexed assignment、indexed borrow、multi-dimensional slicing、
 `std::array::Array<T>` への直接 indexing は後続に分離します。
 
 ### 7.2 明示 cast
@@ -1038,14 +939,14 @@ fn write_as_mut(p: ptr<const u8>) {
 pointer cast の memory safety obligation はプログラマが負います。
 ただし、`@unsafe` 内でも type check / move check / borrow check は無効化されません。
 
-type alias は v0.1 では導入しません。
+type alias は導入しません。
 必要になった場合は、別 phase で syntax と ABI 上の扱いを決めます。
 
 ## 8. 所有権
 
 所有される値を代入または関数引数として渡すと move されます。
 
-v0.1 の copy 型:
+copy 型:
 
 ```text
 bool
@@ -1067,15 +968,15 @@ f64
 copy できない型:
 
 ```text
-array
-map
+std::array::Array<T>
+std::map::Map<K, V>
+std::string::String
 std::mem::Box<T>
 arena-owned value
 non-copy field を含む struct
 ```
 
-`array`、`map`、`std::mem::Box<T>` は v0.1 では実装しません。
-将来追加する場合も、copy できない所有値として扱います。
+`std::mem::Box<T>` は型として存在しますが、native lowering はまだありません。
 
 owner field または owner payload を含む struct / union は owner aggregate です。
 owner aggregate は copy できず、値渡しや代入では move されます。
@@ -1140,17 +1041,17 @@ borrow のルール:
 * borrow は一時的
 * local borrow binding は straight-line code では最後に使った場所で終了する
 * borrow argument は呼び出し statement の終了で終了する
-* borrow field は v0.2 では struct / union に保存できない
+* borrow field は struct / union に保存できない
 * borrow return は `borrows <source>` を必須にする
 * borrow 中の値は move できない
 * `&T` と `&var T` は重複できない
 * `&var T` 同士は同じ値に対して重複できない
 * `&var T` argument は mutable local binding に限定する
-* v0.1 は `&user.name` のような one-level direct field borrow を許可する
+* `&user.name` のような one-level direct field borrow を許可する
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
-* v0.1 は `&user.profile.name` のような nested field borrow を拒否する
-* v0.2 の index / slice expression は read-only checked access から始める
+* `&user.profile.name` のような nested field borrow を拒否する
+* index / slice expression は read-only checked access から始める
 * indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
 
@@ -1164,7 +1065,7 @@ fn show(value: &i64) -> &i64 borrows value
 `borrows source` は戻り値が `source` 引数または `self` receiver 由来の view であり、
 その source より長生きできないことを表します。名前付き lifetime parameter、
 lifetime bounds、anonymous lifetime は採用しません。
-`borrows` は v0 では単一 source だけを受け取ります。borrow field、view struct、
+`borrows` は単一 source だけを受け取ります。borrow field、view struct、
 複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
 
 safe borrow binding は通常の field access 構文で field を読めます。
@@ -1251,7 +1152,7 @@ print(users.get(alice).name);
 ```
 
 `std::arena::Arena<T>` は複数の `T` を所有します。
-v0 core arena の構築は明示 allocator capability を要求し、
+core arena の構築は明示 allocator capability を要求し、
 `std::arena::Arena<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
@@ -1269,7 +1170,7 @@ v0 core arena の構築は明示 allocator capability を要求し、
 * handle は対応する arena より長生きしてはいけない
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
-* v0.1 では arena からの削除は実装しない
+* arena からの削除は実装しない
 
 ## 11. エラー処理
 
@@ -1371,7 +1272,7 @@ error 値は set の member そのものであり、**payload を持ちません
 * error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
 * `!void` の成功 return は `return;` と書く
 * exception / stack unwinding は使わない
-* `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
+* `option<T>` は型名として予約するが、runtime helper を実装しない
 
 ## 12. unsafe / C ABI
 
@@ -1465,7 +1366,7 @@ fn update(node: ptr<Node>) -> void {
 | `unsafe_call` | `@requires_unsafe() fn` call |
 | `volatile` | volatile read/write primitive |
 
-`atomic`、`unchecked_index` は v0.1 では capability として採用しません。
+`atomic`、`unchecked_index` は capability として採用しません。
 `volatile` は compiler / CPU に対する通常の最適化抑制・順序制約を表す primitive であり、
 thread synchronization ではありません。atomic operation とは別の capability として扱います。
 
@@ -1497,7 +1398,7 @@ ptr<const T> const T*
 
 Kizu は C header の完全互換 parser は持ちません。
 Phase 14 の header import は、限定された C function prototype を `extern "c" fn` に変換する補助機能です。
-これは v0.1 の正ではなく experimental です。
+これは experimental です。
 
 CLI:
 
@@ -1607,7 +1508,7 @@ Kizu の `comptime` は macro ではありません。
 * comptime の結果は型付きの値または宣言として扱う
 * build script として使える任意の副作用は許さない
 
-v0.1 の最小構文:
+最小構文:
 
 ```kizu
 let size = comptime 4 * 1024;
@@ -1646,12 +1547,12 @@ type-named std constructor spelling は std storage type に結びついた fact
 
 `<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
 format string など、type 以外の comptime value が必要になった場合は、同じ
-`<...>` を static argument list として拡張します。ただし v0.2 では syntax の意味を
+`<...>` を static argument list として拡張します。ただし syntax の意味を
 予約するだけで、整数や文字列の static argument は受理しません。
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
 明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /
-borrow check します。v0.2 の static 引数は type だけなので、`T` は instantiated body
+borrow check します。static 引数は type だけなので、`T` は instantiated body
 内で comptime-only の `type` 値として扱います。`type` 値は runtime local、field、
 collection element、return value として保持できません。
 
@@ -1675,7 +1576,7 @@ package 名は、その package の中では import なしに束縛されてい�
 は path で名指しします。この形が要るのは、型と同じ名前の constructor を持つ std
 module だけです。
 
-This is not a full monomorphization system. v0.2 uses it to move public stdlib
+This is not a full monomorphization system. It moves public stdlib
 constructor and testing spelling into Kizu source while keeping runtime storage,
 test traps, and host interaction as explicit primitive boundaries.
 
@@ -1689,12 +1590,12 @@ comptime if 1 + 1 == 2 {
 }
 ```
 
-v0.2 の `comptime` expression は、整数、真偽値、文字列、compile-time type value、
+`comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算だけを評価します。`type<i64>` のような `type<T>` literal と、
 instantiated generic body 内の static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
 
-Kizu v0.2 の canonical spelling は `type<T>` です。`T == i64` のように bare
+Kizu の canonical spelling は `type<T>` です。`T == i64` のように bare
 type name を expression として解決する規則は採用しません。これは value namespace と
 type namespace の衝突を避け、`type<[]u8>` や `type<std::map::Map<[]u8, i64>>`
 のような複合型でも同じ規則を使うためです。`type` 値は comptime-only であり、
@@ -1723,7 +1624,7 @@ top-level function name.
 
 Kizu は将来的に厚めの標準ライブラリを持ちます。
 
-v0.1 の最小 builtin は `print` です。
+最小 builtin は `print` です。
 
 ```text
 print
@@ -1759,20 +1660,20 @@ std::array
 std::map
 ```
 
-文字列 literal は v0.1 では `[]u8` として扱います。
+文字列 literal は `[]u8` として扱います。
 owned string は primitive ではなく、将来 `std::string::String` で扱います。
 
 C ABI へ `std::string::String` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
-v0.2 で安定化する allocator factory は `std::mem::page_allocator()` です。
+安定 allocator factory は `std::mem::page_allocator()` です。
 
 ```text
 std::mem::page_allocator() -> Allocator
 ```
 
 `Allocator` は visible opaque capability type です。
-v0.2 では user-facing `contract` ではなく、field を持つ struct でもなく、
+user-facing `contract` ではなく、field を持つ struct でもなく、
 user code が実装できる interface でもありません。
 safe Kizu code は `Allocator` 型を名前として使い、local binding に束縛し、
 明示 allocator を要求する API に渡せます。
@@ -1789,7 +1690,7 @@ safe `std::mem` は raw pointer、allocation method、mutable backing slice、
 allocator metadata、deallocation primitive を公開しません。
 user-defined allocator、fixed-buffer allocator、testing allocator は #549 で別途仕様化します。
 
-v0.2 の `std::string::String` は、明示 allocator capability を受け取る
+`std::string::String` は、明示 allocator capability を受け取る
 owned byte buffer です。
 
 ```text
@@ -1824,15 +1725,15 @@ view が生きている間は `append_bytes`、`append_byte`、`truncate`、`cle
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
 例外として、owner 型自身の `deinit(self: Owner) -> void` method 内では
 `self.field.deinit()` の direct field cleanup を許可します。
-v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
+UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
 `std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
-v0.2 では private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
+private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
 raw pointer や mutable backing slice は公開しません。public
 `std::mem::OwnedBytes` または `std::bytes::Buffer` は、mutable slice と raw
 storage provenance の仕様後に検討します。
 
-v0.2 の `std::fmt` は、diagnostic construction 用の最小 formatting API です。
+`std::fmt` は、diagnostic construction 用の最小 formatting API です。
 format string、locale、generic display trait、reflection は持ちません。
 caller が明示 allocator 付きの `std::string::String` を用意し、
 formatting API はその buffer に bytes を append します。
@@ -1864,12 +1765,11 @@ std::array::Array<T>  先に検討する owned contiguous collection
 []T                   contiguous slice value
 &[]T                  shared borrowed slice
 &var []T              mutable borrowed slice
-std::map::Map<K, V>   self-host compiler 向け symbol table
+std::map::Map<K, V>   owned symbol table
 std::set::Set<T>      後続 phase
 ```
 
-v0.2 の `std::mem` は、self-host compiler の lexer が必要とする
-allocation-free な read-only byte helper から始めます。
+`std::mem` は allocation-free な read-only byte helper から始めます。
 
 ```text
 std::mem::page_allocator() -> Allocator
@@ -1885,7 +1785,7 @@ std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8 borrows bytes
 std::mem::trim_ascii(bytes: []u8) -> []u8 borrows bytes
 ```
 
-`std::mem::page_allocator()` は v0.2 の安定 allocator capability factory です。
+`std::mem::page_allocator()` は安定 allocator capability factory です。
 返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
 再利用できます。allocator を受け取る constructor は capability を読み取るだけで、
 allocator binding を move しません。
@@ -1895,7 +1795,7 @@ non-copy / move-only な indirection です。`Box<T>` は struct / union payloa
 `Box<T>` を含む struct / union は non-copy です。
 `borrow` / `borrow_mut` は local borrow source であり、戻り値は local binding に束縛する
 必要があります。borrow return は `borrows self` のように source が結び付く場合だけ
-許可します。borrow field は v0.2 では許可しません。borrow が生きている間は対象
+許可します。borrow field は許可しません。borrow が生きている間は対象
 `Box<T>` の move / deinit を禁止します。
 `deinit` は owned local `Box<T>` receiver 限定です。
 safe API は raw pointer を公開しません。
@@ -1907,7 +1807,7 @@ trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途�
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
-v0.2 の `std::array::Array<T>` は、明示 allocator capability を受け取る
+`std::array::Array<T>` は、明示 allocator capability を受け取る
 owned contiguous collection です。
 
 ```text
@@ -1931,7 +1831,7 @@ array.deinit() -> void
 `array.get` は bounds check し、範囲外なら `!T` の error を返します。
 `array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
-v0.2 の `get` / `get_or_panic` は copy element 限定です。
+`get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
 `pop` は最後の initialized element を array から move して `!T` を返します。
 `pop_or_panic` も最後の initialized element を move して `T` を返し、
@@ -1949,14 +1849,13 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 `deinit` 後の array 使用は safe Kizu では禁止します。
 `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、
 その field は同じ body 内で以後使用できません。
-v0.2 の `Array<T>` element は arena、handle、nested array、`std::map::Map<K, V>` を
+`Array<T>` element は arena、handle、nested array、`std::map::Map<K, V>` を
 含められます。raw pointer と dyn は入れられません。
 この制限は struct field と union payload の中も再帰的に検査します。
 これらは provenance と dynamic dispatch の仕様を collection 向けに
 固めてから扱います。
 
-v0.2 の `std::map::Map<K, V>` は、self-host compiler の symbol table と
-scope lookup に必要な最小 owned map です。
+`std::map::Map<K, V>` は、symbol table と scope lookup に必要な最小 owned map です。
 
 ```text
 std::map::Map<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
@@ -1967,19 +1866,18 @@ map.len() -> i64
 map.deinit() -> void
 ```
 
-v0.2 では key type は `[]u8` 限定です。
+key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `!V` の error として返します。
 `insert` / `get` / `contains` は amortized O(1) です。
 iteration は後続ですが、順序は先に決めてあります。**map は挿入順で反復します。**
 未定義の順序は露出しません。
-v0.2 の value type は copy type 限定です。
+value type は copy type 限定です。
 non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
 `std::map::Map<K, V>()` のような hidden default allocator は使いません。
 `deinit` 後の map 使用は safe Kizu では禁止します。
 
-v0.2 の `std::testing` は、self-host compiler component test 用の
-最小 assertion API です。
+`std::testing` は最小 assertion API です。
 
 ```text
 std::testing::expect(condition: bool) -> void
@@ -1994,7 +1892,7 @@ test source は assertion ごとの `try` を書きません。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
 `expect_equal<T>` は明示 static 引数付きの generic assertion です。
 failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
-v0.2 では static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
+static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
 期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
 導入しません。
 test は top-level declaration として書きます。
@@ -2007,7 +1905,7 @@ test "parser accepts minimal function" {
 }
 ```
 
-`kizu test <path>` は v0.2 では file または package root を受け取り、check 後に
+`kizu test <path>` は file または package root を受け取り、check 後に
 top-level `test` block だけを source order で実行します。`main` は実行しません。
 test block は parameterless `!void` body として扱うため、helper が返す `!T` には
 `try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
@@ -2085,8 +1983,8 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::fs::create_dir(io, path)` は `!void` を返す
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
-* `std::fs::Metadata` は v0.2 では `size: i64` と `is_dir: bool` だけを持つ
-* `std::fs::DirEntry` は v0.2 では `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
+* `std::fs::Metadata` は `size: i64` と `is_dir: bool` だけを持つ
+* `std::fs::DirEntry` は `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
 * `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
@@ -2118,7 +2016,7 @@ runtime selection の方針は ADR-0039 に従います。
 
 ## 16. contract / impl / dyn 方針
 
-Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
+Kizu では、Rust trait clone ではない明示的な抽象化として、
 `contract`、`impl Contract for Type;`、`dyn` を実装対象にします。
 
 ```text
@@ -2178,14 +2076,14 @@ fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
 }
 ```
 
-v0.1 の `dyn` は `&dyn Contract` の動的 dispatch に限定します。
+`dyn` は `&dyn Contract` の動的 dispatch に限定します。
 owned dynamic object、generic bounds、最適化された vtable layout は後続 phase で扱います。
 
 ## 17. ビルドとキャッシュ
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。
 
-v0.1 / v0.2 の正として扱うコマンド:
+/ 正として扱うコマンド:
 
 ```text
 kizu parse
@@ -2201,7 +2099,7 @@ kizu test
 先頭の連続 `import` block は comment を含まない場合に辞書順へ正規化します。
 comment trivia preservation の残りは後続で扱います。
 comment trivia preservation までは、`--write` は full-line ではない line comment を含む file を拒否します。
-`kizu test` は v0.2 では file または package root 内の top-level `test` block runner です。
+`kizu test` は file または package root 内の top-level `test` block runner です。
 `main` 実行、filesystem-wide discovery、filter は行いません。
 
 experimental tooling:
@@ -2241,34 +2139,12 @@ build cache key には、compiler version、manifest hash、resolved module grap
 source hash、public interface hash、target、backend、optimization mode、stdlib hash
 を含めます。
 
-`kizu test` は v0.2 では top-level `test` block runner として実装済みです。
+`kizu test` は top-level `test` block runner として実装済みです。
 `kizu lint` は未実装です。
 
-## 18. v0.1 実装構成
+## 18. 実装構成
 
-推奨リポジトリ構成:
-
-```text
-kizu/
-  README.md
-  SPEC.md
-  AGENTS.md
-  go.mod
-  cmd/
-    kizu/
-      main.go
-  internal/
-    token/
-    lexer/
-    ast/
-    parser/
-    interp/
-    types/
-    ownership/
-  examples/
-    hello.kizu
-  tests/
-```
+リポジトリ構成とデータフローは [`docs/architecture.md`](docs/architecture.md) を正とします。
 
 ## 19. 実装マイルストーン
 
@@ -2362,13 +2238,11 @@ runtime-level で実装します。
 ### Milestone 8: typed SSA IR
 
 checked AST から typed SSA IR に lowering します。
-これは v0.1 の正ではなく experimental tooling です。
+これは experimental tooling です。
 
 ### Milestone 9: LLVM IR backend
 
-typed SSA IR から LLVM IR を生成します。
-LLVM lowering は interpreter より限定された subset だけを扱います。
-これは v0.1 の正ではありません。
+typed SSA IR から LLVM IR を生成します。native code はこの経路が生成します。
 
 ### Milestone 10: build cache
 
@@ -2378,8 +2252,7 @@ build cache は compiler work のための experimental tooling です。
 ### Milestone 11: WASM / WASI backend
 
 typed SSA IR から WASM を生成し、WASI で実行できるようにします。
-WASM target は interpreter より限定された subset だけを扱います。
-これは v0.1 の正ではありません。
+WASM target は LLVM 経路より限定された subset だけを扱います。
 
 ### Milestone 12: unsafe / C ABI
 
@@ -2393,7 +2266,7 @@ macro / proc macro / AST rewrite は実装しません。
 ### Milestone 14: C header import
 
 C header から Kizu の extern 宣言を生成できるようにします。
-これは v0.1 の正ではなく experimental tooling です。
+これは experimental tooling です。
 
 ## 20. 最初に通す examples
 

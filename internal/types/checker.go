@@ -783,7 +783,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 // ownedContainerBases lists the inline-stored std containers that own heap
 // storage and must be released through their explicit `deinit`. A payload
 // built from one of these (directly or nested) is an owner payload of the
-// v0.2 inline tagged-union payload ABI.
+// inline tagged-union payload ABI.
 //
 // std::mem::Box is intentionally excluded: a boxed (heap-indirected) or
 // recursive union payload is deferred to #495, so it is outside this contract
@@ -870,7 +870,7 @@ func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
 	}
 	if len(decl.TypeParams) > 0 {
 		return errorf(
-			"type error: generic owner-payload union `%s` is unsupported in v0.2; "+
+			"type error: generic owner-payload union `%s` is unsupported; "+
 				"use a concrete owner union with explicit `deinit`",
 			decl.Name)
 	}
@@ -957,7 +957,7 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 
 // ownerUnionSelfMatch returns the `match self { ... }` statement only when it is
 // the first executable statement of the deinit body. Requiring it first keeps the
-// v0.2 shape simple and guarantees the active-variant cleanup always runs: a
+// shape simple and guarantees the active-variant cleanup always runs: a
 // statement (such as an early `return`) cannot precede and skip it.
 func ownerUnionSelfMatch(body *ast.BlockStmt, selfName string) *ast.MatchStmt {
 	if body == nil || len(body.Statements) == 0 {
@@ -977,7 +977,7 @@ func ownerUnionSelfMatch(body *ast.BlockStmt, selfName string) *ast.MatchStmt {
 }
 
 // matchArmCleansPayload reports whether an arm body is exactly the direct cleanup
-// call `<binding>.deinit()`. Only the direct form is accepted in v0.2 so the
+// call `<binding>.deinit()`. Only the direct form is accepted so the
 // active payload is always cleaned without path-sensitive analysis of the arm.
 func matchArmCleansPayload(body ast.Statement, binding string) bool {
 	expr, ok := body.(*ast.ExprStmt)
@@ -1457,19 +1457,19 @@ func (c *Checker) parseDynType(name string, contract typ.Type) (Type, error) {
 	return Type(name), nil
 }
 
-// parseMapType validates the v0.2 symbol-table map spelling.
+// parseMapType validates the symbol-table map spelling.
 func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
-		return "", errorf("type error: std::map::Map key type must be []u8 in v0.2")
+		return "", errorf("type error: std::map::Map key type must be []u8")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
 	}
 	if !c.typeParams[args[1]] && !c.isCopyType(Type(args[1])) {
-		return "", errorf("type error: std::map::Map value type must be copy in v0.2")
+		return "", errorf("type error: std::map::Map value type must be copy")
 	}
 	return Type(name), nil
 }
@@ -3490,7 +3490,7 @@ func (c *Checker) checkStdConstructorBuiltin(
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
 	case "std::io::evented", "std::internal::builtin::io_evented":
-		return "", true, errorf("type error: `std::io::evented` is not implemented in v0.1")
+		return "", true, errorf("type error: `std::io::evented` is not implemented")
 	case "std::array::Array":
 		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std::map::Map":
@@ -3761,7 +3761,7 @@ func (c *Checker) checkArrayConstructor(
 // rejectArrayElementType rejects element types that need unresolved lifetime rules.
 func (c *Checker) rejectArrayElementType(elem Type) error {
 	if err := c.rejectArrayStorageType(elem, map[Type]bool{}); err != nil {
-		return errorf("type error: Array element is not safe in v0.2: %w", err)
+		return errorf("type error: Array element is not safe: %w", err)
 	}
 	return nil
 }
@@ -3773,10 +3773,10 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	}
 	seen[typ] = true
 	if isPointerType(typ) {
-		return errorf("type error: Array element cannot be raw pointer in v0.2")
+		return errorf("type error: Array element cannot be raw pointer")
 	}
 	if _, ok := dynContract(typ); ok {
-		return errorf("type error: Array element cannot be dyn in v0.2")
+		return errorf("type error: Array element cannot be dyn")
 	}
 	if base, arg, ok := splitGenericType(string(typ)); ok && base == "option" {
 		argType, err := c.parseType(arg)
@@ -4206,7 +4206,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", err
 		}
 		if !isGenericParamType(elem) && !c.isCopyType(elem) {
-			return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
+			return "", errorf("type error: `Array.%s` requires copy element", name)
 		}
 		if name == "get" {
 			return Type("!" + string(elem)), nil
@@ -4499,7 +4499,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	return nil
 }
 
-// parseGenericWrapperTypeArgs validates v0.2 static type arguments for wrappers.
+// parseGenericWrapperTypeArgs validates static type arguments for wrappers.
 func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
 	out := make([]Type, 0, len(args))
 	for _, arg := range args {
@@ -5096,7 +5096,7 @@ func (c *Checker) checkMethodCallExpr(
 	return c.checkArenaOrImplMethod(field, receiver, args, env, unsafe)
 }
 
-// checkMethodReceiverPath enforces the v0.2 direct field receiver boundary.
+// checkMethodReceiverPath enforces the direct field receiver boundary.
 func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) error {
 	receiver, ok := field.Receiver.(*ast.FieldExpr)
 	if !ok {
@@ -5434,7 +5434,7 @@ func (c *Checker) checkArrayMethod(
 			name, name)
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
-			return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
+			return "", errorf("type error: `Array.%s` requires copy element", name)
 		}
 	}
 	return c.checkStdMethod("std::array::Array", []Type{elem}, "Array", name, args, env, unsafe)
@@ -5697,16 +5697,16 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	return args, nil
 }
 
-// checkMapTypeArgContract enforces v0.2 public Map constructor restrictions.
+// checkMapTypeArgContract enforces public Map constructor restrictions.
 func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	if len(args) != 2 {
 		return errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(args[0], typeByteString) {
-		return errorf("type error: std::map::Map key type must be []u8 in v0.2")
+		return errorf("type error: std::map::Map key type must be []u8")
 	}
 	if !c.isCopyType(args[1]) {
-		return errorf("type error: std::map::Map value type must be copy in v0.2")
+		return errorf("type error: std::map::Map value type must be copy")
 	}
 	return nil
 }
@@ -5862,7 +5862,7 @@ func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 	return prefix, true
 }
 
-// checkBorrowTargetShape restricts v0.1 explicit borrows to direct locals or one field.
+// checkBorrowTargetShape restricts explicit borrows to direct locals or one field.
 func checkBorrowTargetShape(expr ast.Expression) error {
 	switch target := expr.(type) {
 	case *ast.IdentExpr:
@@ -5871,7 +5871,7 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 		if _, ok := target.Receiver.(*ast.IdentExpr); ok {
 			return nil
 		}
-		return errorf("type error: v0.1 field borrow only supports one direct field")
+		return errorf("type error: field borrow only supports one direct field")
 	default:
 		return errorf("type error: borrow target must be a local binding or direct field")
 	}
@@ -6166,7 +6166,7 @@ func isPointerType(typ Type) bool {
 	return ok
 }
 
-// isCopyType reports whether values of typ can be duplicated in v0.1 safe code.
+// isCopyType reports whether values of typ can be duplicated safe code.
 func (c *Checker) isCopyType(typ Type) bool {
 	if typ == typeByteString {
 		return true

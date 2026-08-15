@@ -175,7 +175,7 @@ func TestCheckRejectsGenericOwnerUnion(t *testing.T) {
     None,
 }`
 	assertCheckError(t, source,
-		"generic owner-payload union `Holder` is unsupported in v0.2")
+		"generic owner-payload union `Holder` is unsupported")
 }
 
 // assertCheckError fails unless checking source reports an error containing want.
