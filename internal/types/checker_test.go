@@ -2036,6 +2036,64 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckRejectsUnusedUnsafeCapability checks that a declared capability no
+// operation needed is rejected, so the list states what the block does rather
+// than what it would be allowed to do.
+func TestCheckRejectsUnusedUnsafeCapability(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "capability list is wider than the body",
+			source: `fn read(p: ptr<const u8>) -> u8 {
+    @unsafe(ptr_read, ptr_write) {
+        return ptr_read(p);
+    }
+}`,
+			want: "capability `ptr_write` is declared but never used",
+		},
+		{
+			name: "block declares a capability and uses none",
+			source: `fn main() {
+    @unsafe(volatile) {
+        print(1);
+    }
+}`,
+			want: "capability `volatile` is declared but never used",
+		},
+		{
+			name: "inner block re-declares what the outer one granted",
+			source: `fn write(p: ptr<u8>, value: u8) -> void {
+    @unsafe(ptr_write) {
+        @unsafe(ptr_write) {
+            ptr_write(p, value);
+        }
+    }
+}`,
+			want: "capability `ptr_write` is declared but never used",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsCapabilityUsedByNestedBlock checks that an operation inside a
+// nested block counts as a use of the outer declaration that granted it.
+func TestCheckAcceptsCapabilityUsedByNestedBlock(t *testing.T) {
+	source := `fn write(p: ptr<u8>, value: u8) -> u8 {
+    @unsafe(ptr_write) {
+        @unsafe(ptr_read) {
+            ptr_write(p, value);
+            return ptr_read(p);
+        }
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsRawPointerDerefSyntaxErrors checks explicit pointer deref limits.
 func TestCheckRejectsRawPointerDerefSyntaxErrors(t *testing.T) {
 	cases := []struct {

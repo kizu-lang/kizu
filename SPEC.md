@@ -1319,6 +1319,11 @@ fn caller(p: ptr<u8>) -> void {
 * unsafe operation は対応する `@unsafe` capability 内でのみ使える
 * `@unsafe` capability は compiler-reserved identifier だけを許可する
 * unknown capability は compile error
+* 宣言した capability を block 内の操作が 1 つも使わない場合は compile error。
+  内側の `@unsafe` が同じ capability を再宣言した場合、その使用は内側の宣言に
+  属するので、外側の宣言は未使用になる
+* `comptime if` は選ばれた branch だけを検査するので、選ばれなかった branch でしか
+  使わない capability は未使用として扱う
 * capability list は 1 個以上の identifier を comma-separated で書く
 * nested `@unsafe` は lexical に capability を追加する。revoke はしない
 * `extern "c" fn` の呼び出しは `@unsafe(extern_call)` 内でのみ行える
