@@ -2,10 +2,10 @@
 
 This directory is the user-visible catalog for Kizu language behavior.
 
-Executable and negative examples are listed in
-[`tests/conformance/`](../tests/conformance/). The Go test runner reads the
-versioned manifests so future compiler implementations can reuse them as the
-compatibility corpus.
+Every example ends with the case it declares -- the command to run it with, the
+feature tags it covers, and what that has to produce. The Go test runner walks
+this directory and reads those blocks, so an example is covered by existing. The
+grammar is documented in the `internal/conformance` package doc.
 
 Run the full catalog through the normal project gate:
 
@@ -98,10 +98,10 @@ go test ./...
 These examples document behavior that needs a package/module root rather than a
 single source file. Run them with `kizu check <package-root>`.
 
-| Feature | Example | Backing fixture |
+| Feature | Example | Case declared in |
 | --- | --- | --- |
-| multi-module error phases | `modules/compiler_phases/` | `tests/conformance/v0_2.json` |
-| package test blocks and helper lookup | `modules/same_module_helper_lookup/` | `tests/conformance/v0_2.json` |
+| multi-module error phases | `modules/compiler_phases/` | `src/main.kizu` |
+| package test blocks and helper lookup | `modules/same_module_helper_lookup/` | `src/main.kizu` |
 
 ## Negative Examples
 
