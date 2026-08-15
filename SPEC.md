@@ -2146,129 +2146,7 @@ source hash、public interface hash、target、backend、optimization mode、std
 
 リポジトリ構成とデータフローは [`docs/architecture.md`](docs/architecture.md) を正とします。
 
-## 19. 実装マイルストーン
-
-### Milestone 1: Lexer
-
-対応する token:
-
-```text
-identifier
-integer literal
-[]u8 literal
-keyword
-operator
-punctuation
-```
-
-### Milestone 2: Parser
-
-parse するもの:
-
-```text
-function declaration
-block
-let declaration
-var declaration
-assignment
-return statement
-defer cleanup statement
-errdefer cleanup statement
-if statement
-if expression
-while statement
-function call
-binary expression
-struct declaration
-struct literal
-field access
-namespace access
-enum declaration
-union declaration
-match statement
-match expression
-borrow expression
-arena type and constructor
-error union type
-comptime expression and statement
-contract / impl / dyn type
-```
-
-### Milestone 3: Interpreter
-
-実行できるもの:
-
-```text
-print("hello")
-integer arithmetic
-boolean comparison
-variables
-functions
-if
-while
-struct value
-field access
-enum and union values
-match
-arena / handle
-error union / try
-limited comptime
-std task / channel / thread prototypes
-defer cleanup statement
-errdefer cleanup statement
-```
-
-### Milestone 4: Type checker
-
-未定義変数、型不一致、不正な二項演算、不正な field access を検査します。
-
-### Milestone 5: Move checker
-
-use after move、double move、function argument への move、assignment による move を検査します。
-
-### Milestone 6: Local borrow checker
-
-borrow escape、borrow 中の move、mutable borrow conflict を検査します。
-
-### Milestone 7: arena / handle
-
-`std::arena::Arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)`、`arena.deinit()` を
-runtime-level で実装します。
-
-### Milestone 8: typed SSA IR
-
-checked AST から typed SSA IR に lowering します。
-これは experimental tooling です。
-
-### Milestone 9: LLVM IR backend
-
-typed SSA IR から LLVM IR を生成します。native code はこの経路が生成します。
-
-### Milestone 10: build cache
-
-キャッシュ状態とキャッシュ削除を確認できるようにします。
-build cache は compiler work のための experimental tooling です。
-
-### Milestone 11: WASM / WASI backend
-
-typed SSA IR から WASM を生成し、WASI で実行できるようにします。
-WASM target は LLVM 経路より限定された subset だけを扱います。
-
-### Milestone 12: unsafe / C ABI
-
-`@unsafe` capability block、raw pointer、`extern "c" fn` を扱えるようにします。
-
-### Milestone 13: comptime
-
-限定的な `comptime` を実装します。
-macro / proc macro / AST rewrite は実装しません。
-
-### Milestone 14: C header import
-
-C header から Kizu の extern 宣言を生成できるようにします。
-これは experimental tooling です。
-
-## 20. 最初に通す examples
+## 19. 最初に通す examples
 
 最初に `examples/hello.kizu` を通します。
 
@@ -2278,7 +2156,7 @@ fn main() -> void {
 }
 ```
 
-## 21. エラーメッセージ方針
+## 20. エラーメッセージ方針
 
 エラーは短く、直接的で、読めるものにします。
 詳細な diagnostic message style は
@@ -2291,7 +2169,7 @@ error: moved value `name` was used
   --> examples/move_error.kizu:8:11
 ```
 
-## 22. 言語の性格
+## 21. 言語の性格
 
 Kizu は次のような言語にします。
 
