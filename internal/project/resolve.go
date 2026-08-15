@@ -45,6 +45,7 @@ func (c *graphChecker) resolveNamespaceParts(
 		if len(parts) == 1 {
 			return "", false, nil
 		}
+		module.use(parts[0])
 		if isStdPath(target) {
 			return stdFunctionName(target, parts), true, nil
 		}
@@ -133,6 +134,7 @@ func (c *graphChecker) resolveTypeNamespaceParts(
 		return "", false
 	}
 	if target, ok := module.namespaces[parts[0]]; ok && len(parts) > 1 {
+		module.use(parts[0])
 		if isStdPath(target) {
 			return stdTypeName(target, parts), true
 		}
@@ -204,6 +206,7 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 		return name, nil
 	}
 	if strings.HasPrefix(name, stdlib.Root+"::") {
+		r.module.use(stdlib.Root)
 		return name, rejectUnboundStd(r.module, strings.Split(name, "::"))
 	}
 	if strings.Contains(name, "::") {
@@ -220,6 +223,9 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 	parts := strings.Split(name, "::")
 	targetModule, ok := r.module.namespaces[parts[0]]
+	if ok {
+		r.module.use(parts[0])
+	}
 	if !ok {
 		return "", fmt.Errorf("module error: `%s` is not imported in `%s`", parts[0], r.module.path)
 	}

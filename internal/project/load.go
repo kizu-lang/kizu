@@ -76,6 +76,20 @@ type moduleUnit struct {
 	// namespaces is what name resolution sees: the imports plus the package root
 	// namespace, which is reachable without an import and is not an edge.
 	namespaces map[string]string
+	// stdImports are the names brought in from std. They bind like any import but
+	// are not edges in this package's graph.
+	stdImports map[string]string
+	// used records the namespaces resolution actually went through, so an import
+	// that nothing needed can be told from one that carried a name.
+	used map[string]bool
+}
+
+// use records that a name was reached through one of this module's namespaces.
+func (m *moduleUnit) use(name string) {
+	if m.used == nil {
+		m.used = map[string]bool{}
+	}
+	m.used[name] = true
 }
 
 // name is what a diagnostic calls this module. A program that is not part of a
@@ -248,6 +262,7 @@ func (c *graphChecker) program() (*ast.Program, error) {
 			return nil, err
 		}
 		module.imports = imports
+		module.stdImports = std
 		module.namespaces = c.moduleNamespaces(module, imports, std)
 	}
 	modules, err := c.orderedModules()
@@ -257,6 +272,9 @@ func (c *graphChecker) program() (*ast.Program, error) {
 	for _, module := range modules {
 		qualified, err := c.qualifyModule(module)
 		if err != nil {
+			return nil, err
+		}
+		if err := module.rejectUnusedImports(); err != nil {
 			return nil, err
 		}
 		merged.Decls = append(merged.Decls, qualified.Decls...)
@@ -367,6 +385,35 @@ func (c *graphChecker) bindImport(module *moduleUnit, path string) (importKind, 
 // duplicateImport reports two imports competing for one name.
 func duplicateImport(alias string, module *moduleUnit) error {
 	return fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
+}
+
+// rejectUnusedImports refuses an import nothing was reached through. Once names
+// are abbreviated, the import list is where a reader looks to find out what a
+// name stands for, and a line that stands for nothing sends them somewhere the
+// program never goes. It runs after resolution, so what counts as used is what
+// resolution actually went through rather than a second reading of the source.
+func (m *moduleUnit) rejectUnusedImports() error {
+	for _, alias := range sortedAliases(m.imports, m.stdImports) {
+		if m.used[alias] {
+			continue
+		}
+		return fmt.Errorf("module error: unused import `%s` in `%s`", m.namespaces[alias], m.name())
+	}
+	return nil
+}
+
+// sortedAliases lists the names a module's imports bind, in a stable order so
+// that a file with two unused imports always reports the same one first.
+func sortedAliases(imports map[string]string, std map[string]string) []string {
+	aliases := make([]string, 0, len(imports)+len(std))
+	for alias := range imports {
+		aliases = append(aliases, alias)
+	}
+	for alias := range std {
+		aliases = append(aliases, alias)
+	}
+	sortStrings(aliases)
+	return aliases
 }
 
 // rejectImportShadowing checks local declarations do not shadow import aliases.
