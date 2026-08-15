@@ -5496,11 +5496,11 @@ func (c *Checker) checkStdMethod(
 // `return std::builtin::array_apend<T>(self, value)` -- or anything else -- sat
 // in std reading like the implementation while meaning nothing.
 func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
-	fn := c.functions[method.Decl.Name]
+	fn := c.functions[method.Sig.Name]
 	if fn == nil || fn.body == nil || len(method.TypeParams) != len(typeArgs) {
 		return nil
 	}
-	key := method.Decl.Name + "<" + joinTypes(typeArgs) + ">"
+	key := method.Sig.Name + "<" + joinTypes(typeArgs) + ">"
 	if c.checkedStdBodies[key] {
 		return nil
 	}

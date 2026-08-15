@@ -16,11 +16,14 @@ import (
 //	    return std::builtin::array_append<T>(self, value);
 //	}
 //
-// The declaration carries the method's arity, parameter types, return type and
-// type parameters, so a checker can read the signature here instead of
-// restating it.
+// The signature carries the method's arity, parameter types, return type and
+// type parameters, so a checker can read them here instead of restating them.
+// It is the signature rather than the declaration because this index is what
+// decides what a `value.method(...)` call site sees, and that must not be able
+// to come from a body. The rendered fields below are the same facts spelled as
+// text, kept so a call check does not re-render them.
 type Method struct {
-	Decl       *ast.FunctionDecl
+	Sig        ast.FunctionSignature
 	TypeParams []string
 	Params     []ParamType
 	Return     string
@@ -88,7 +91,7 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 		})
 	}
 	return Method{
-		Decl:       fn,
+		Sig:        fn.FunctionSignature,
 		TypeParams: fn.TypeParamNames(),
 		Params:     params,
 		Return:     typ.Text(fn.ReturnType),

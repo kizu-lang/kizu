@@ -214,7 +214,7 @@ func (p *Parser) parseRequiresUnsafeDecl(public bool, docs string) ast.Decl {
 		p.errorf("expected fn after @requires_unsafe()")
 		return fn
 	}
-	return p.parseFunctionSignature(fn, true)
+	return p.parseFunctionAfterFn(fn, true)
 }
 
 // parseExternDecl parses extern "abi" fn declarations.
@@ -232,7 +232,7 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.Function) {
 		return fn
 	}
-	return p.parseFunctionSignature(fn, false)
+	return p.parseFunctionAfterFn(fn, false)
 }
 
 // parseFunctionDecl parses a top-level function declaration.
@@ -242,7 +242,7 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 
 // parseFunctionDeclWithDoc parses a top-level function declaration with attached docs.
 func (p *Parser) parseFunctionDeclWithDoc(docs string) ast.Decl {
-	return p.parseFunctionSignature(&ast.FunctionDecl{Doc: docs}, true)
+	return p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docs}, true)
 }
 
 // parseTestDecl parses a top-level test block.
@@ -259,8 +259,10 @@ func (p *Parser) parseTestDecl() ast.Decl {
 	return decl
 }
 
-// parseFunctionSignature parses a function declaration after the fn token.
-func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
+// parseFunctionAfterFn parses a function declaration after the fn token. It is
+// not named for ast.FunctionSignature: it parses the body too, which is the one
+// thing that type does not hold.
+func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
 	if !p.expectPeek(token.Ident) {
 		return fn
 	}
@@ -327,7 +329,7 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 			p.errorf("expected contract method, got %s", tokenDescription(p.cur))
 			return methods
 		}
-		method := p.parseFunctionSignature(&ast.FunctionDecl{}, false)
+		method := p.parseFunctionAfterFn(&ast.FunctionDecl{}, false)
 		if fn, ok := method.(*ast.FunctionDecl); ok {
 			methods = append(methods, fn)
 		}
@@ -371,7 +373,7 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 		var method ast.Decl
 		switch p.cur.Type {
 		case token.Function:
-			method = p.parseFunctionSignature(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
+			method = p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
 		case token.At:
 			method = p.parseDirectiveDecl(false, docText(p.cur))
 		case token.Unsafe:

@@ -83,8 +83,8 @@ func (p *Program) String() string {
 	return out.String()
 }
 
-// FunctionSignature is everything a caller is promised: the whole declaration
-// except the body.
+// FunctionSignature is everything a caller is promised: the declaration without
+// its body or its doc comment.
 //
 // It is a type of its own so that the code deciding what a call site sees
 // cannot reach the body. A signature that came from a body is a signature no
