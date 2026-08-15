@@ -153,11 +153,11 @@ unsafe struct Array<T> {
 `ptr<...>` / `?ptr<...>` を field に持つ struct を `unsafe struct` と宣言しないのは
 compile error にする。判定は型注釈の構文検査で足りる。
 
-抜け道は言語に存在しない。
+抜け道は今の言語に存在しない。
 
 | 抜け道 | 状態 |
 | --- | --- |
-| type alias で別名にする | 言語に無い(SPEC §7「type alias は導入しません」) |
+| type alias で別名にする | 言語に無い(SPEC §0.2 / §7)。ただし導入するかどうかは未検討で、永続的な非目標ではない |
 | generic struct の型引数に隠す | 言語に無い(SPEC §7「full generics を実装しません」) |
 | Array 要素に入れる | 既に拒否(`examples/negative/std_array_struct_raw_pointer_element.kizu`) |
 
@@ -362,3 +362,14 @@ branch でしか使わない capability は未使用と判定される。挙動�
 決定 3 の閾値(`ptr<>` を持つ struct)は、raw pointer を持たない struct が
 不変条件を担う場合を捕まえない。Kizu 製の pointer 容器が書かれ、その形が実際に
 現れた時点で再評価する。
+
+type alias を導入する場合も決定 3 を見直す。checker は型を解決してから判定すれば
+よいので強制は保てるが、`grep 'ptr<'` が正確な監査集合を返すという性質は失われる。
+
+```kizu
+type Raw = ptr<u8>;
+struct Buf { data: Raw, len: usize }    // ptr< が綴りに現れない
+```
+
+この grep 性質は、決定 3 で unsafe module の印を不要と結論した根拠そのものである。
+type alias が入るなら、印の要否をもう一度検討する。
