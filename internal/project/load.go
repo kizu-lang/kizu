@@ -39,6 +39,15 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 	return checker.program()
 }
 
+// LoadSource resolves one program that is not part of a package. It is the same
+// work a package module gets -- imports bound, names resolved through them --
+// on a graph of one module with no path to qualify by. A single file and a
+// package module read the same, so they are read by the same code.
+func LoadSource(file string, source string) (*ast.Program, error) {
+	graph := Graph{Modules: []Module{{Path: "", File: file}}}
+	return LoadProgramWithSources(graph, map[string]string{file: source})
+}
+
 // CheckGraph parses and type-checks every module in graph as one package.
 func CheckGraph(graph Graph) error {
 	program, err := LoadProgram(graph)
@@ -66,6 +75,16 @@ type moduleUnit struct {
 	// namespaces is what name resolution sees: the imports plus the package root
 	// namespace, which is reachable without an import and is not an edge.
 	namespaces map[string]string
+}
+
+// qualify returns what a name declared in this module is filed under. A module
+// with no path is a program that is not part of a package: there is nothing to
+// qualify it by, and its declarations keep the names they are written with.
+func (m *moduleUnit) qualify(name string) string {
+	if m.path == "" {
+		return name
+	}
+	return m.path + "::" + name
 }
 
 // moduleNamespaces returns the namespaces module can name. ADR-0049 makes
@@ -164,7 +183,7 @@ func (c *graphChecker) collectTypes() error {
 			if !ok {
 				continue
 			}
-			qualified := module.path + "::" + name
+			qualified := module.qualify(name)
 			if _, exists := c.types[qualified]; exists {
 				return fmt.Errorf("module error: duplicate type `%s`", qualified)
 			}
@@ -182,7 +201,7 @@ func (c *graphChecker) collectFunctions() error {
 			if !ok {
 				continue
 			}
-			qualified := module.path + "::" + fn.Name
+			qualified := module.qualify(fn.Name)
 			if _, exists := c.functions[qualified]; exists {
 				return fmt.Errorf("module error: duplicate function `%s`", qualified)
 			}

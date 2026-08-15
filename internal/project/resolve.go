@@ -50,7 +50,7 @@ func (c *graphChecker) resolveNamespaceParts(
 		}
 		return c.resolveImportedFunction(module, target, parts)
 	}
-	name := module.path + "::" + strings.Join(parts, "::")
+	name := module.qualify(strings.Join(parts, "::"))
 	if _, ok := c.functions[name]; ok {
 		return name, true, nil
 	}
@@ -113,7 +113,7 @@ func (c *graphChecker) resolveTypeNamespaceParts(
 			return name, true
 		}
 	}
-	name := module.path + "::" + strings.Join(parts, "::")
+	name := module.qualify(strings.Join(parts, "::"))
 	if _, ok := c.types[name]; ok {
 		return name, true
 	}
@@ -178,7 +178,7 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 	if strings.Contains(name, "::") {
 		return r.resolveQualifiedBase(name)
 	}
-	local := r.module.path + "::" + name
+	local := r.module.qualify(name)
 	if _, ok := r.checker.types[local]; ok {
 		return local, nil
 	}

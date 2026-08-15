@@ -30,11 +30,11 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 		return c.qualifyStruct(module, d)
 	case *ast.EnumDecl:
 		cp := *d
-		cp.Name = module.path + "::" + d.Name
+		cp.Name = module.qualify(d.Name)
 		return &cp, nil
 	case *ast.ErrorSetDecl:
 		cp := *d
-		cp.Name = module.path + "::" + d.Name
+		cp.Name = module.qualify(d.Name)
 		return &cp, nil
 	case *ast.UnionDecl:
 		return c.qualifyUnion(module, d)
@@ -43,7 +43,7 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 	case *ast.ImplDecl:
 		return c.qualifyImpl(module, d)
 	case *ast.FunctionDecl:
-		return c.qualifyFunction(module, d, module.path+"::"+d.Name)
+		return c.qualifyFunction(module, d, module.qualify(d.Name))
 	case *ast.TestDecl:
 		return c.qualifyTestDecl(module, d)
 	default:
@@ -57,7 +57,7 @@ func (c *graphChecker) qualifyStruct(
 	decl *ast.StructDecl,
 ) (*ast.StructDecl, error) {
 	cp := *decl
-	cp.Name = module.path + "::" + decl.Name
+	cp.Name = module.qualify(decl.Name)
 	cp.Fields = append([]ast.Field(nil), decl.Fields...)
 	for idx := range cp.Fields {
 		resolved, err := c.resolveTypeNode(module, cp.Fields[idx].TypeName)
@@ -75,7 +75,7 @@ func (c *graphChecker) qualifyUnion(
 	decl *ast.UnionDecl,
 ) (*ast.UnionDecl, error) {
 	cp := *decl
-	cp.Name = module.path + "::" + decl.Name
+	cp.Name = module.qualify(decl.Name)
 	cp.Variants = append([]ast.UnionVariant(nil), decl.Variants...)
 	for idx := range cp.Variants {
 		if cp.Variants[idx].Payload == nil {
@@ -96,7 +96,7 @@ func (c *graphChecker) qualifyContract(
 	decl *ast.ContractDecl,
 ) (*ast.ContractDecl, error) {
 	cp := *decl
-	cp.Name = module.path + "::" + decl.Name
+	cp.Name = module.qualify(decl.Name)
 	cp.Methods = append([]*ast.FunctionDecl(nil), decl.Methods...)
 	for idx, method := range cp.Methods {
 		qualified, err := c.qualifyFunction(module, method, method.Name)
@@ -540,7 +540,7 @@ func (c *graphChecker) qualifyCallee(
 	expr ast.Expression,
 ) (ast.Expression, error) {
 	if ident, ok := expr.(*ast.IdentExpr); ok && declaresFunction(module, ident.Name) {
-		return &ast.IdentExpr{Name: module.path + "::" + ident.Name}, nil
+		return &ast.IdentExpr{Name: module.qualify(ident.Name)}, nil
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok && field.Namespace {
 		if _, ok := c.resolveTypeNamespaceReceiver(module, field); ok {
