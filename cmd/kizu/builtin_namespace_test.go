@@ -15,7 +15,7 @@ import (
 var builtinCallPattern = regexp.MustCompile(`std::builtin::([a-z_0-9]+)`)
 
 // goBuiltinPattern finds the primitives the Go sources name.
-var goBuiltinPattern = regexp.MustCompile(`"std\.builtin\.([a-z_0-9]+)"`)
+var goBuiltinPattern = regexp.MustCompile(`"std::builtin::([a-z_0-9]+)"`)
 
 // TestReservedBuiltinsAreClosedToUserCode keeps the `std::builtin::` namespace
 // shut. A primitive reachable from user code hands out what std exists to
@@ -25,7 +25,7 @@ var goBuiltinPattern = regexp.MustCompile(`"std\.builtin\.([a-z_0-9]+)"`)
 func TestReservedBuiltinsAreClosedToUserCode(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range stdprim.BuiltinNames() {
-		call := "std::" + strings.Join(strings.Split(strings.TrimPrefix(name, "std."), "."), "::")
+		call := name
 		source := "fn main() -> void {\n    print(1);\n    " + call + "();\n}\n"
 		path := filepath.Join(dir, "reserved.kizu")
 		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
@@ -57,7 +57,7 @@ func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
-			name := "std.builtin." + match[1]
+			name := "std::builtin::" + match[1]
 			if !known[name] {
 				missing[name] = true
 			}
@@ -88,7 +88,7 @@ func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
-			implemented["std.builtin."+match[1]] = true
+			implemented["std::builtin::"+match[1]] = true
 		}
 	}
 	for _, path := range []string{
@@ -103,7 +103,7 @@ func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range goBuiltinPattern.FindAllStringSubmatch(string(source), -1) {
-			implemented["std.builtin."+match[1]] = true
+			implemented["std::builtin::"+match[1]] = true
 		}
 	}
 	unknown := []string{}

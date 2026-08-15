@@ -1649,8 +1649,8 @@ fn returns_error() -> !u8 { return 8 ;}
 fn main() -> !void {
     var assigned = take_u8(1);
     assigned = 2;
-    let field = Byte { value: 65 };
-    let variant = ByteValue::Item(66);
+    let _ = Byte { value: 65 };
+    let _ = ByteValue::Item(66);
     let counter = Counter {};
     @unsafe(extern_call, ptr_write) {
         let p = raw_byte();

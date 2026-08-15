@@ -48,29 +48,135 @@ func DeclsForSourcePath(path string) ([]ast.Decl, []parser.Diagnostic, error) {
 	return DeclsForSource(string(source))
 }
 
-// ResolveModules returns std modules in dependency-before-dependent order.
-func ResolveModules(source string) ([]string, error) {
-	referenced := referencedModules(source)
-	if len(referenced) == 0 {
-		return nil, nil
+// Root is the namespace the standard library lives under. A user package may
+// not be named this, so a path starting here always means std.
+const Root = "std"
+
+// Importable reports whether path names a std module a program outside std may
+// import, and returns the modules it pulls in with it. A module that is not
+// exported is package-internal: std reaches it, nothing else does.
+func Importable(path string) ([]string, bool, error) {
+	if path != Root && !strings.HasPrefix(path, Root+"::") {
+		return nil, false, nil
 	}
 	exports, err := loadModuleExports()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	resolver := &moduleResolver{
-		visited:  map[string]bool{},
-		visiting: map[string]bool{},
+	wanted, ok := importedNames(path, exports)
+	if !ok {
+		return nil, false, nil
 	}
-	for _, module := range referenced {
-		if !exports[module] {
-			return nil, fmt.Errorf("std module `%s` is not exported", modulePath(module))
-		}
+	modules, err := resolveAll(wanted)
+	if err != nil {
+		return nil, false, err
+	}
+	return modules, true, nil
+}
+
+// importedNames returns the std modules one import path names, and whether the
+// path names anything at all. What it names and what has to be read are not the
+// same: a module the compiler provides itself has no source to load, so it is
+// importable and contributes no declarations. Importing the root names every
+// module under it, because that is what a path through the root can reach.
+func importedNames(path string, exports map[string]bool) ([]string, bool) {
+	if path == Root {
+		return sortedExports(exports), true
+	}
+	module, ok := strings.CutPrefix(path, Root+"::")
+	if !ok || !exports[module] {
+		return nil, false
+	}
+	if !hasSource(module) {
+		return nil, true
+	}
+	return []string{module}, true
+}
+
+// hasSource reports whether a std module is written in Kizu. One that is not is
+// provided by the compiler, and there is nothing to parse for it.
+func hasSource(module string) bool {
+	_, err := FindRepoFile(moduleFile(module))
+	return err == nil
+}
+
+// resolveAll visits modules and everything they are built on, dependency first.
+func resolveAll(modules []string) ([]string, error) {
+	resolver := &moduleResolver{visited: map[string]bool{}, visiting: map[string]bool{}}
+	for _, module := range modules {
 		if err := resolver.visit(module); err != nil {
 			return nil, err
 		}
 	}
 	return resolver.modules, nil
+}
+
+// declaredImports returns the std modules a source declares it imports. It
+// reads declarations rather than uses: what a file depends on is what its
+// import list says.
+func declaredImports(source string, exports map[string]bool) []string {
+	modules := []string{}
+	for _, path := range stdImportPaths(source) {
+		names, ok := importedNames(path, exports)
+		if !ok {
+			continue
+		}
+		modules = append(modules, names...)
+	}
+	return modules
+}
+
+// stdImportPaths returns the std paths a source declares it imports.
+func stdImportPaths(source string) []string {
+	paths := []string{}
+	lex := lexer.New(source)
+	for {
+		tok := lex.NextToken()
+		if tok.Type == token.EOF {
+			return paths
+		}
+		if tok.Type != token.Import {
+			continue
+		}
+		root := lex.NextToken()
+		if root.Type != token.Ident || root.Literal != Root {
+			continue
+		}
+		paths = append(paths, strings.Join(append([]string{Root}, readNamespaceParts(lex)...), "::"))
+	}
+}
+
+// sortedExports lists exported modules in the order their sources are loaded,
+// so a program that imports the root sees them in dependency order.
+func sortedExports(exports map[string]bool) []string {
+	modules := make([]string, 0, len(exports))
+	for _, module := range sourceModuleOrder {
+		if exports[module] {
+			modules = append(modules, module)
+		}
+	}
+	return modules
+}
+
+// ResolveModules returns std modules in dependency-before-dependent order.
+// TODO(import-migration): drop referencedModules once every source declares its
+// std imports. Until then a file is served by whichever of the two it uses.
+func ResolveModules(source string) ([]string, error) {
+	exports, err := loadModuleExports()
+	if err != nil {
+		return nil, err
+	}
+	referenced := referencedModules(source)
+	for _, module := range referenced {
+		if !exports[module] {
+			return nil, fmt.Errorf("std module `%s` is not exported", modulePath(module))
+		}
+	}
+	wanted := append(declaredImports(source, exports), referenced...)
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	return resolveAll(wanted)
 }
 
 // ParseDecls loads selected std wrappers from Kizu source.
@@ -372,7 +478,7 @@ func renameUnion(module string, decl *ast.UnionDecl) {
 
 // renameFunction rewrites a std wrapper function into its qualified form.
 func renameFunction(module string, fn *ast.FunctionDecl) {
-	fn.Name = "std." + strings.ReplaceAll(module, "::", ".") + "." + fn.Name
+	fn.Name = modulePath(module) + "::" + fn.Name
 	renameFunctionTypes(module, fn)
 	renameBlockExprs(module, fn.Body)
 }

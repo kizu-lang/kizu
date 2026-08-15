@@ -110,6 +110,9 @@ func baseTypeName(typeName string) string {
 // methodName takes the last segment of a qualified std function name, which is
 // how a receiver call spells it.
 func methodName(name string) string {
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		return name[idx+len("::"):]
+	}
 	if idx := strings.LastIndex(name, "."); idx >= 0 {
 		return name[idx+1:]
 	}

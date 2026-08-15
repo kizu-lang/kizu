@@ -22,15 +22,25 @@ const diagnosticSource = "kizu"
 
 // Analyze returns diagnostics for one in-memory Kizu source file.
 func Analyze(source string) []Diagnostic {
-	program, parseErrors := parseSource(source)
-	if len(parseErrors) > 0 {
+	if _, parseErrors := parseSource(source); len(parseErrors) > 0 {
 		return parseErrorDiagnostics(parseErrors)
+	}
+	// The editor resolves what the CLI resolves. A name that means one thing on
+	// the command line and another in the editor would make one of them lie.
+	program, err := project.LoadSource(analyzedFile, source)
+	if err != nil {
+		return []Diagnostic{diagnosticFromError(err)}
 	}
 	if diagnostics := appendStdDecls(program, []string{source}); len(diagnostics) > 0 {
 		return diagnostics
 	}
 	return checkProgramDiagnostics(program)
 }
+
+// analyzedFile is the empty path an unsaved buffer has. Diagnostics render a
+// position without a file when there is none, which is what the editor wants:
+// it already knows which buffer it asked about.
+const analyzedFile = ""
 
 // analyzeDocument returns diagnostics using package context when available.
 func (s *Server) analyzeDocument(uri string) []Diagnostic {

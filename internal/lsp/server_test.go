@@ -247,8 +247,10 @@ fn main(value: token::Token) -> void {
 // TestServerPackageDiagnosticsUseStdDecls checks package diagnostics share CLI std wrappers.
 func TestServerPackageDiagnosticsUseStdDecls(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
-	mainSource := `test "package test command" {
-    std::testing::expect(true);
+	mainSource := `import std::testing;
+
+test "package test command" {
+    testing::expect(true);
 }
 `
 	writeLSPPackage(t, root, map[string]string{

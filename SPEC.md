@@ -325,6 +325,21 @@ fn main() {
 
 `let` は immutable です。mutable な変数には `var` を使います。
 
+使わない局所変数は compile error です。関数本体の binding は、その関数の中でしか
+消費されないので、使われないものは確実に死んでいます。値を作ったこと自体が目的
+なら `let _ = expr;` と書いて捨てます。
+
+```kizu
+fn main() {
+    let values = make_values();   // error: 使われていない
+    let _ = make_values();        // ok: 捨てると書いてある
+}
+```
+
+関数の引数は対象外です。引数は署名の一部で、呼び出し側との約束のために受け取る
+ことがあります。top-level 宣言も対象外です。package の外から使われる可能性が
+あります。
+
 ### 6.3 関数
 
 ```kizu
@@ -427,9 +442,12 @@ tooling は hover / completion / generated docs で attached documentation を�
 function body も block として扱います。
 
 ```kizu
+import std::mem;
+import std::array;
+
 fn main() -> !void {
-    let allocator = std::mem::page_allocator();
-    let values = std::array::Array<i64>(allocator);
+    let allocator = mem::page_allocator();
+    let values = array::Array<i64>(allocator);
     defer values.deinit();
 
     try values.append(1);
@@ -446,8 +464,8 @@ cleanup 呼び出しを実行します。通常の block exit や正常な `retu
 正常 exit では `errdefer` entry を skip します。
 
 ```kizu
-fn make_values(allocator: std::mem::Allocator) -> !std::array::Array<i64> {
-    let values = std::array::Array<i64>(allocator);
+fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
+    let values = array::Array<i64>(allocator);
     errdefer values.deinit();
 
     try values.append(1);
@@ -506,8 +524,8 @@ Kizu は型や名前空間に属する item lookup に `::` を使います。
 ```kizu
 let color = Color::Red;
 let shape = Shape::Circle(10);
-let io = std::io::blocking();
-let bytes = try std::fs::read_file(io, "config.toml");
+let handle = io::blocking();
+let bytes = try fs::read_file(handle, "config.toml");
 ```
 
 `.` は runtime value の field / method access だけに使います。
@@ -552,7 +570,7 @@ import は top-level にだけ書けます。
 wildcard import、relative import、re-export、alias import は v0.2/v0.3 では扱いません。
 cyclic import は compile error です。
 
-import した module は最後の segment 名で参照します。
+import した path は最後の segment 名で束縛され、その名前で参照します。
 
 ```kizu
 import app::compiler::lexer;
@@ -560,19 +578,43 @@ import app::compiler::lexer;
 let tokens = try lexer::lex(source);
 ```
 
-`std::...` は標準ライブラリ namespace として import なしで使えます。
+std も同じ規則です。import せずに `std::` で始まる名前は書けません。
+
+```kizu
+import std::fs;
+
+let bytes = try fs::read_file(io, "config.toml");
+```
+
+package 根も import できます。根を import すると根の名前が束縛され、その下の
+module へは完全パスで辿ります。どちらの粒度で import するかは file ごとに
+選びます。module 名と同じ名前の値を置きたい file は、根で import します。
+
+```kizu
+import std;
+
+let io = std::io::blocking();
+```
+
+module の完全パス(`std::fs`)は、その module の同一性を指す名前です。import 宣言と
+文書に現れます。コード中の参照は、束縛された名前から始まります。
+
 user package に `std` という名前は使えません。
+std package 内部の module も同じ規則で import します。`exports` にない
+`std::builtin` のような module は、std package の中からだけ import できます。
 
 name resolution order:
 
 1. local bindings
 2. current module top-level declarations
-3. imported module names by last segment
-4. built-in root namespace `std`
+3. imported names by last segment
+4. builtin(14 章の `print`)
 5. error
 
 同じ last segment を持つ import は compile error です。
-local declaration が import module name を shadow することも compile error です。
+local declaration が import した名前を shadow することも compile error です。
+使わない import も compile error です。import 一覧がその file の依存一覧である
+ことは、これが保証します。
 
 `kizu.toml` の `[modules].exports` は package 外へ公開する module を明示します。
 
@@ -590,6 +632,8 @@ package 内部 module には同じ package から import できますが、packa
 visibility は default private です。
 
 ```kizu
+import std::array;
+
 pub struct Token {
     pub kind: TokenKind,
     pub start: i64,
@@ -602,11 +646,11 @@ enum TokenKind {
     Eof,
 }
 
-pub fn lex(source: []u8) -> !std::array::Array<Token> {
+pub fn lex(source: []u8) -> !array::Array<Token> {
     return lex_source(source);
 }
 
-fn lex_source(source: []u8) -> !std::array::Array<Token> {
+fn lex_source(source: []u8) -> !array::Array<Token> {
     ...
 }
 ```
@@ -1197,8 +1241,11 @@ fn main() -> void {
 Kizu は、長寿命の参照を複雑な lifetime で表さず、`std::arena::Arena<T>` と `std::arena::Handle<T>` で表します。
 
 ```kizu
-let allocator = std::mem::page_allocator();
-let users = std::arena::Arena<User>(allocator);
+import std::mem;
+import std::arena;
+
+let allocator = mem::page_allocator();
+let users = arena::Arena<User>(allocator);
 let alice = users.add(User { name: "alice" });
 print(users.get(alice).name);
 ```
@@ -1612,14 +1659,20 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
-    return std::builtin::array<T>(allocator);
-}
+// std/src/array.kizu
+import std;
+import std::builtin;
 
-pub fn Map<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
-    return std::builtin::map<K, V>(allocator);
+pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
+    return builtin::array<T>(allocator);
 }
 ```
+
+戻り値の型が完全パスなのは、この file が `Array` という名前の function を宣言して
+いるからです。name resolution order で current module の宣言は import した名前より
+上にあるので、この file の `Array` は function を指します。同じ綴りの storage type
+は path で名指しします。この形が要るのは、型と同じ名前の constructor を持つ std
+module だけです。
 
 This is not a full monomorphization system. v0.2 uses it to move public stdlib
 constructor and testing spelling into Kizu source while keeping runtime storage,
@@ -1685,8 +1738,10 @@ print
 失敗を `!void` で返します。
 
 ```kizu
-let io = std::io::blocking();
-try std::io::write_stdout(io, bytes);
+import std::io;
+
+let handle = io::blocking();
+try io::write_stdout(handle, bytes);
 ```
 
 `print` が受け取れない型は診断になります。黙って何も出さないことはありません。
@@ -1944,8 +1999,10 @@ v0.2 では static 引数が type だけなので、caller は `expect_equal<i64
 test は top-level declaration として書きます。
 
 ```kizu
+import std::testing;
+
 test "parser accepts minimal function" {
-    std::testing::expect(true);
+    testing::expect(true);
 }
 ```
 
@@ -1983,8 +2040,10 @@ API の形と個数は未定です。撤回した 8 個の型を一度に戻す�
 `Io` capability は残ります。並行 API とは独立した、外部世界に触る権限の表明です。
 
 ```kizu
+import std::fs;
+
 fn read_config(io: Io, path: []u8) -> ![]u8 {
-    return std::fs::read_file(io, path);
+    return fs::read_file(io, path);
 }
 ```
 

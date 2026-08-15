@@ -849,13 +849,19 @@ func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 	return program, p.Diagnostics(), nil
 }
 
-// parsePathWithStd parses a source file and appends Kizu std wrappers.
+// parsePathWithStd resolves a source file and appends Kizu std wrappers. The
+// resolving is the same pass a package module gets, so a name means the same
+// thing in a loose file as it does inside a package.
 func parsePathWithStd(path string) (*ast.Program, []parser.Diagnostic, error) {
-	program, errs, err := parsePath(path)
-	if err != nil || len(errs) > 0 {
-		return program, errs, err
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
 	}
-	stdDecls, stdErrs, err := stdlib.DeclsForSourcePath(path)
+	program, err := project.LoadSource(path, string(source))
+	if err != nil {
+		return nil, nil, err
+	}
+	stdDecls, stdErrs, err := stdlib.DeclsForSource(string(source))
 	if err != nil || len(stdErrs) > 0 {
 		return program, stdErrs, err
 	}

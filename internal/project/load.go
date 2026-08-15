@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -38,6 +39,15 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 	return checker.program()
 }
 
+// LoadSource resolves one program that is not part of a package. It is the same
+// work a package module gets -- imports bound, names resolved through them --
+// on a graph of one module with no path to qualify by. A single file and a
+// package module read the same, so they are read by the same code.
+func LoadSource(file string, source string) (*ast.Program, error) {
+	graph := Graph{Modules: []Module{{Path: "", File: file}}}
+	return LoadProgramWithSources(graph, map[string]string{file: source})
+}
+
 // CheckGraph parses and type-checks every module in graph as one package.
 func CheckGraph(graph Graph) error {
 	program, err := LoadProgram(graph)
@@ -58,6 +68,7 @@ type graphChecker struct {
 
 type moduleUnit struct {
 	path    string
+	file    string
 	program *ast.Program
 	// imports is the declared import set and defines the dependency edges the
 	// ordering and cycle checks walk.
@@ -65,6 +76,39 @@ type moduleUnit struct {
 	// namespaces is what name resolution sees: the imports plus the package root
 	// namespace, which is reachable without an import and is not an edge.
 	namespaces map[string]string
+	// stdImports are the names brought in from std. They bind like any import but
+	// are not edges in this package's graph.
+	stdImports map[string]string
+	// used records the namespaces resolution actually went through, so an import
+	// that nothing needed can be told from one that carried a name.
+	used map[string]bool
+}
+
+// use records that a name was reached through one of this module's namespaces.
+func (m *moduleUnit) use(name string) {
+	if m.used == nil {
+		m.used = map[string]bool{}
+	}
+	m.used[name] = true
+}
+
+// name is what a diagnostic calls this module. A program that is not part of a
+// package has no module path, so it is named by the file it was read from.
+func (m *moduleUnit) name() string {
+	if m.path == "" {
+		return m.file
+	}
+	return m.path
+}
+
+// qualify returns what a name declared in this module is filed under. A module
+// with no path is a program that is not part of a package: there is nothing to
+// qualify it by, and its declarations keep the names they are written with.
+func (m *moduleUnit) qualify(name string) string {
+	if m.path == "" {
+		return name
+	}
+	return m.path + "::" + name
 }
 
 // moduleNamespaces returns the namespaces module can name. ADR-0049 makes
@@ -75,9 +119,13 @@ type moduleUnit struct {
 func (c *graphChecker) moduleNamespaces(
 	module *moduleUnit,
 	imports map[string]string,
+	std map[string]string,
 ) map[string]string {
-	namespaces := make(map[string]string, len(imports)+1)
+	namespaces := make(map[string]string, len(imports)+len(std)+1)
 	for alias, path := range imports {
+		namespaces[alias] = path
+	}
+	for alias, path := range std {
 		namespaces[alias] = path
 	}
 	if c.packageRoot != "" && c.modulePaths[c.packageRoot] && module.path != c.packageRoot {
@@ -106,7 +154,7 @@ func (c *graphChecker) load(graph Graph) error {
 		if err != nil {
 			return err
 		}
-		c.modules[module.Path] = &moduleUnit{path: module.Path, program: program}
+		c.modules[module.Path] = &moduleUnit{path: module.Path, file: module.File, program: program}
 		c.modulePaths[module.Path] = true
 	}
 	return nil
@@ -159,7 +207,7 @@ func (c *graphChecker) collectTypes() error {
 			if !ok {
 				continue
 			}
-			qualified := module.path + "::" + name
+			qualified := module.qualify(name)
 			if _, exists := c.types[qualified]; exists {
 				return fmt.Errorf("module error: duplicate type `%s`", qualified)
 			}
@@ -177,7 +225,7 @@ func (c *graphChecker) collectFunctions() error {
 			if !ok {
 				continue
 			}
-			qualified := module.path + "::" + fn.Name
+			qualified := module.qualify(fn.Name)
 			if _, exists := c.functions[qualified]; exists {
 				return fmt.Errorf("module error: duplicate function `%s`", qualified)
 			}
@@ -209,12 +257,13 @@ func declaredType(decl ast.Decl) (string, bool, bool) {
 func (c *graphChecker) program() (*ast.Program, error) {
 	merged := &ast.Program{}
 	for _, module := range sortedModuleUnits(c.modules) {
-		imports, err := c.resolveImports(module)
+		imports, std, err := c.resolveImports(module)
 		if err != nil {
 			return nil, err
 		}
 		module.imports = imports
-		module.namespaces = c.moduleNamespaces(module, imports)
+		module.stdImports = std
+		module.namespaces = c.moduleNamespaces(module, imports, std)
 	}
 	modules, err := c.orderedModules()
 	if err != nil {
@@ -223,6 +272,9 @@ func (c *graphChecker) program() (*ast.Program, error) {
 	for _, module := range modules {
 		qualified, err := c.qualifyModule(module)
 		if err != nil {
+			return nil, err
+		}
+		if err := module.rejectUnusedImports(); err != nil {
 			return nil, err
 		}
 		merged.Decls = append(merged.Decls, qualified.Decls...)
@@ -268,28 +320,100 @@ func (c *graphChecker) visitModule(
 	return nil
 }
 
-// resolveImports validates imports and returns last-segment aliases.
-func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, error) {
+// resolveImports validates imports and returns last-segment aliases. An import
+// of std binds a name without becoming an edge in this package's module graph:
+// std is a different package, so it is not part of the ordering this graph
+// decides, and it can never take part in a cycle within it.
+func (c *graphChecker) resolveImports(
+	module *moduleUnit,
+) (map[string]string, map[string]string, error) {
 	imports := map[string]string{}
+	std := map[string]string{}
 	for _, decl := range module.program.Decls {
 		importDecl, ok := decl.(*ast.ImportDecl)
 		if !ok {
 			continue
 		}
 		path := strings.Join(importDecl.Path, "::")
-		if !c.modulePaths[path] {
-			return nil, fmt.Errorf("module error: missing import `%s` in `%s`", path, module.path)
-		}
 		alias := importDecl.Path[len(importDecl.Path)-1]
-		if _, exists := imports[alias]; exists {
-			return nil, fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
+		if _, taken := imports[alias]; taken {
+			return nil, nil, duplicateImport(alias, module)
+		}
+		if _, taken := std[alias]; taken {
+			return nil, nil, duplicateImport(alias, module)
+		}
+		bound, err := c.bindImport(module, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if bound == stdBinding {
+			std[alias] = path
+			continue
 		}
 		imports[alias] = path
 	}
 	if err := rejectImportShadowing(module, imports); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return imports, nil
+	return imports, std, rejectImportShadowing(module, std)
+}
+
+// importKind separates an import that is an edge in this graph from one that
+// only brings a name in from another package.
+type importKind int
+
+const (
+	packageBinding importKind = iota + 1
+	stdBinding
+)
+
+// bindImport reports which package an import names, and rejects one that names
+// nothing. An import that resolves to neither this package nor std has no
+// module behind it, so the name it would bind would stand for nothing.
+func (c *graphChecker) bindImport(module *moduleUnit, path string) (importKind, error) {
+	if c.modulePaths[path] {
+		return packageBinding, nil
+	}
+	if _, ok, err := stdlib.Importable(path); err != nil {
+		return 0, err
+	} else if ok {
+		return stdBinding, nil
+	}
+	return 0, fmt.Errorf("module error: missing import `%s` in `%s`", path, module.path)
+}
+
+// duplicateImport reports two imports competing for one name.
+func duplicateImport(alias string, module *moduleUnit) error {
+	return fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
+}
+
+// rejectUnusedImports refuses an import nothing was reached through. Once names
+// are abbreviated, the import list is where a reader looks to find out what a
+// name stands for, and a line that stands for nothing sends them somewhere the
+// program never goes. It runs after resolution, so what counts as used is what
+// resolution actually went through rather than a second reading of the source.
+func (m *moduleUnit) rejectUnusedImports() error {
+	for _, alias := range sortedAliases(m.imports, m.stdImports) {
+		if m.used[alias] {
+			continue
+		}
+		return fmt.Errorf("module error: unused import `%s` in `%s`", m.namespaces[alias], m.name())
+	}
+	return nil
+}
+
+// sortedAliases lists the names a module's imports bind, in a stable order so
+// that a file with two unused imports always reports the same one first.
+func sortedAliases(imports map[string]string, std map[string]string) []string {
+	aliases := make([]string, 0, len(imports)+len(std))
+	for alias := range imports {
+		aliases = append(aliases, alias)
+	}
+	for alias := range std {
+		aliases = append(aliases, alias)
+	}
+	sortStrings(aliases)
+	return aliases
 }
 
 // rejectImportShadowing checks local declarations do not shadow import aliases.

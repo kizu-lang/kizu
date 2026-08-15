@@ -251,7 +251,7 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 			Instrs: []*ir.Instr{
 				{
 					Result: ir.Value{Name: "%io", Type: "ptr"},
-					Op:     "call.std_builtin_io_blocking",
+					Op:     "call.std::builtin::io_blocking",
 				},
 				{
 					Result:    ir.Value{Name: "%message", Type: "[]u8"},
@@ -260,7 +260,7 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 				},
 				{
 					Result: ir.Value{Name: "%write", Type: "!void"},
-					Op:     "call.std_builtin_io_write_stdout",
+					Op:     "call.std::builtin::io_write_stdout",
 					Args: []ir.Value{
 						{Name: "%io", Type: "ptr"},
 						{Name: "%message", Type: "[]u8"},
@@ -278,11 +278,11 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"declare void @std_builtin_io_write_stdout(ptr, ptr, ptr)",
+		"declare void @std__builtin__io_write_stdout(ptr, ptr, ptr)",
 		"%kizu.write.slot = alloca %kizu.error.void",
 		"%kizu.write.arg.1 = alloca %kizu.slice.u8",
 		"store %kizu.slice.u8 %kizu.message, ptr %kizu.write.arg.1",
-		"call void @std_builtin_io_write_stdout(ptr %kizu.write.slot, " +
+		"call void @std__builtin__io_write_stdout(ptr %kizu.write.slot, " +
 			"ptr %kizu.io, ptr %kizu.write.arg.1)",
 		"%kizu.write = load %kizu.error.void, ptr %kizu.write.slot",
 	} {
