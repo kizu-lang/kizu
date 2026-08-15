@@ -158,7 +158,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 			decl: decl, bindings: instance.bindings, values: instance.values, symbol: symbol,
 		})
 	}
-	return symbol, l.instanceSignature(decl, instance.bindings), nil
+	return symbol, l.instanceSignature(decl.FunctionSignature, instance.bindings), nil
 }
 
 // genericArguments is what one generic declaration's static parameters are bound
@@ -222,18 +222,21 @@ func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param,
 	if err != nil {
 		return nil, err
 	}
-	return l.instanceSignature(decl, instance.bindings).Params, nil
+	return l.instanceSignature(decl.FunctionSignature, instance.bindings).Params, nil
 }
 
 // instanceSignature returns the signature a generic declaration has once its
 // type arguments are bound. The caller sees the instance's types, not the
 // declaration's: `!T` has to come back as `!i64`, and a `u8` parameter has to be
 // handed a u8, or the call carries a parameter that no longer exists.
-func (l *lowerer) instanceSignature(decl *ast.FunctionDecl, bindings map[string]string) Signature {
+func (l *lowerer) instanceSignature(
+	sig ast.FunctionSignature,
+	bindings map[string]string,
+) Signature {
 	previous := l.typeBindings
 	l.typeBindings = bindings
 	defer func() { l.typeBindings = previous }()
-	return l.lowerSignature(decl)
+	return l.lowerSignature(sig)
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -368,9 +371,11 @@ func (l *lowerer) lowerTests() error {
 		}
 		// A test body may `try`, so it lowers as a function returning `!void`.
 		fn := &ast.FunctionDecl{
-			Name:       TestFunctionName(test.Name),
-			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
-			Body:       test.Body,
+			FunctionSignature: ast.FunctionSignature{
+				Name:       TestFunctionName(test.Name),
+				ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
+			},
+			Body: test.Body,
 		}
 		lowered, err := l.lowerFunctionNamed(fn, fn.Name)
 		if err != nil {
@@ -428,7 +433,7 @@ func (l *lowerer) collectDecls() error {
 	for _, decl := range l.program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			l.signatures[d.Name] = l.lowerSignature(d)
+			l.signatures[d.Name] = l.lowerSignature(d.FunctionSignature)
 		case *ast.ImplDecl:
 			l.collectImplSignatures(d)
 		}
@@ -499,7 +504,8 @@ func (l *lowerer) collectImplSignatures(impl *ast.ImplDecl) {
 	l.typeBindings[selfTypeName] = impl.TypeName
 	defer delete(l.typeBindings, selfTypeName)
 	for _, method := range impl.Methods {
-		l.signatures[implMethodName(impl.TypeName, method.Name)] = l.lowerSignature(method)
+		name := implMethodName(impl.TypeName, method.Name)
+		l.signatures[name] = l.lowerSignature(method.FunctionSignature)
 	}
 }
 
@@ -523,12 +529,13 @@ func (l *lowerer) lowerImplMethods(impl *ast.ImplDecl) error {
 }
 
 // lowerSignature extracts the callable type of a function declaration.
-func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
-	params := make([]Param, 0, len(fn.Params))
-	for _, param := range fn.Params {
+func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
+	params := make([]Param, 0, len(sig.Params))
+	for _, param := range sig.Params {
 		params = append(params, l.lowerParam(param))
 	}
-	return Signature{Params: params, Return: l.lowerReturnType(l.resolveType(typ.Text(fn.ReturnType)))}
+	returned := l.lowerReturnType(l.resolveType(typ.Text(sig.ReturnType)))
+	return Signature{Params: params, Return: returned}
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -541,7 +548,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 // second reading of the same declaration: a body and its callers disagreeing
 // about what it takes is the one thing a call site cannot see.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	signature := l.lowerSignature(fn)
+	signature := l.lowerSignature(fn.FunctionSignature)
 	l.current = &Function{Name: name, Params: signature.Params, Return: signature.Return}
 	l.env = newEnv()
 	slots, err := l.mutablyBorrowedLocals(fn)

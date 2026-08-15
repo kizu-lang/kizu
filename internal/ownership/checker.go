@@ -331,9 +331,11 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
-		Name:       "test " + strconv.Quote(decl.Name),
-		ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
-		Body:       decl.Body,
+		FunctionSignature: ast.FunctionSignature{
+			Name:       "test " + strconv.Quote(decl.Name),
+			ReturnType: &typ.ErrorUnion{Ok: &typ.Name{Path: []string{"void"}}},
+		},
+		Body: decl.Body,
 	})
 	return c.checkFunction(fn)
 }

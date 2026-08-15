@@ -447,8 +447,10 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			ret := typ.Text(d.ReturnType)
-			if err := c.checkPublicFunctionSignature(d.Public, d.Name, d.Params, ret); err != nil {
+			if !d.Public {
+				continue
+			}
+			if err := c.checkPublicSignature(d.FunctionSignature); err != nil {
 				return err
 			}
 		case *ast.StructDecl:
@@ -468,26 +470,22 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	return nil
 }
 
-// checkPublicFunctionSignature validates the public boundary of one function.
-func (c *Checker) checkPublicFunctionSignature(
-	public bool,
-	name string,
-	params []ast.Param,
-	returnType string,
-) error {
-	if !public {
-		return nil
-	}
-	for _, param := range params {
-		label := "function `" + name + "` parameter"
+// checkPublicSignature rejects private types named by a signature that is on
+// the public boundary. Whether it is there is the caller's to decide: a
+// function is when it is declared public, and every method of a public contract
+// is whatever the method itself says.
+func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
+	for _, param := range sig.Params {
+		label := "function `" + sig.Name + "` parameter"
 		if err := c.rejectPrivateType(typ.Text(param.TypeName), label); err != nil {
 			return err
 		}
 	}
+	returnType := typ.Text(sig.ReturnType)
 	if returnType == "" {
 		return nil
 	}
-	return c.rejectPrivateType(returnType, "function `"+name+"` return type")
+	return c.rejectPrivateType(returnType, "function `"+sig.Name+"` return type")
 }
 
 // checkPublicStructFields validates public fields on one struct.
@@ -527,8 +525,7 @@ func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
 		return nil
 	}
 	for _, method := range decl.Methods {
-		if err := c.checkPublicFunctionSignature(true, method.Name, method.Params,
-			typ.Text(method.ReturnType)); err != nil {
+		if err := c.checkPublicSignature(method.FunctionSignature); err != nil {
 			return err
 		}
 	}
@@ -545,7 +542,7 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		if _, exists := c.functions[fn.Name]; exists {
 			return errorf("type error: duplicate function `%s`", fn.Name)
 		}
-		fnType, err := c.newFunctionType(fn)
+		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
 			return err
 		}
@@ -564,7 +561,7 @@ func (c *Checker) collectContract(decl *ast.ContractDecl) error {
 		if _, exists := methods[method.Name]; exists {
 			return errorf("type error: duplicate contract method `%s.%s`", decl.Name, method.Name)
 		}
-		fnType, err := c.newFunctionType(method)
+		fnType, err := c.newDeclaredFunctionType(method)
 		if err != nil {
 			return err
 		}
@@ -630,7 +627,7 @@ func (c *Checker) newImplFunctionType(
 	typeName string,
 	method *ast.FunctionDecl,
 ) (*functionType, error) {
-	fnType, err := c.newFunctionType(method)
+	fnType, err := c.newDeclaredFunctionType(method)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,10 +1004,27 @@ type functionParamInfo struct {
 	mutBorrowParams []bool
 }
 
-// newFunctionType converts a parsed function declaration into its static type.
-func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+// newDeclaredFunctionType builds the type for a declaration and attaches the
+// declaration to it. The attaching happens here rather than inside
+// newFunctionType, which never sees a body: the body is what checking and
+// instantiation run over, not what a caller is promised.
+func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+	fnType, err := c.newFunctionType(fn.FunctionSignature)
+	if err != nil {
+		return nil, err
+	}
+	fnType.decl = fn
+	return fnType, nil
+}
+
+// newFunctionType builds the type a call site is promised. It takes the
+// signature rather than the declaration, so what a caller sees cannot be read
+// out of the body: a signature that came from a body is one no other package
+// can be told without being shipped the body too.
+func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, error) {
+	typeParams := fn.TypeParamNames()
 	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(fn.TypeParamNames())
+	c.typeParams = typeParamSet(typeParams)
 	defer func() {
 		c.typeParams = previousTypeParams
 	}()
@@ -1045,15 +1059,15 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	return &functionType{
 		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams,
-		typeParams:      fn.TypeParamNames(),
+		typeParams:      typeParams,
 		returnBorrow:    fn.ReturnBorrow,
-		returnType:      ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
+		returnType:      ret, requiresUnsafe: fn.RequiresUnsafe,
 		externABI: fn.ExternABI,
 	}, nil
 }
 
 // collectFunctionParams validates function parameters and records call-time metadata.
-func (c *Checker) collectFunctionParams(fn *ast.FunctionDecl) (functionParamInfo, error) {
+func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParamInfo, error) {
 	info := functionParamInfo{
 		params:          make([]Type, 0, len(fn.Params)),
 		borrowParams:    make([]bool, 0, len(fn.Params)),
@@ -1105,7 +1119,7 @@ func (c *Checker) checkFunctionParam(
 // is a function-name token a std wrapper forwards to a trusted primitive, not a
 // value a body can call, so declaring one outside std is rejected where it is
 // written rather than where the name fails to resolve.
-func checkStaticParamPolicy(fn *ast.FunctionDecl) error {
+func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	for _, param := range fn.StaticParams {
 		if Type(typ.Text(param.Type)) != typeFunction || fn.Std {
 			continue
@@ -1127,7 +1141,7 @@ func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 }
 
 // checkReturnBorrowPolicy validates source provenance for borrowed returns.
-func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
+func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 	if fn.ReturnType == nil {
 		if fn.ReturnBorrow != "" {
 			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
@@ -1569,9 +1583,9 @@ func checkMainReturnType(fn *functionType) error {
 // into scope, and returns them by declared type. A body reads them like any
 // other name, and a static argument list needs to tell them apart from a
 // runtime local, so both callers set up a generic body through here.
-func defineStaticValueParams(env *scope, decl *ast.FunctionDecl) (map[string]Type, error) {
+func defineStaticValueParams(env *scope, sig ast.FunctionSignature) (map[string]Type, error) {
 	staticParams := map[string]Type{}
-	for _, param := range decl.StaticParams {
+	for _, param := range sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
@@ -1592,7 +1606,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		return err
 	}
 	env := newScope(nil)
-	staticParams, err := defineStaticValueParams(env, fn.decl)
+	staticParams, err := defineStaticValueParams(env, fn.decl.FunctionSignature)
 	if err != nil {
 		return err
 	}
@@ -1633,7 +1647,10 @@ func (c *Checker) checkFunction(fn *functionType) error {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
-	fn := &ast.FunctionDecl{Name: "test " + strconv.Quote(decl.Name), Body: decl.Body}
+	fn := &ast.FunctionDecl{
+		FunctionSignature: ast.FunctionSignature{Name: "test " + strconv.Quote(decl.Name)},
+		Body:              decl.Body,
+	}
 	return c.checkFunction(&functionType{
 		name:           fn.Name,
 		returnType:     "!void",
@@ -4436,7 +4453,7 @@ func isIdentifierText(text string) bool {
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
 	env := newScope(nil)
-	staticParams, err := defineStaticValueParams(env, fn.decl)
+	staticParams, err := defineStaticValueParams(env, fn.decl.FunctionSignature)
 	if err != nil {
 		return err
 	}

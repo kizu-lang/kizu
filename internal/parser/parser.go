@@ -135,7 +135,7 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 		return p.parseDirectiveDecl(false, docs)
 	case token.Unsafe:
 		p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
-		return &ast.FunctionDecl{Doc: docs}
+		return functionStub(false, docs)
 	case token.Extern:
 		return p.parseExternDeclWithDoc(docs)
 	case token.Struct:
@@ -151,10 +151,10 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 			return p.parseErrorSetDeclWithDoc(docs)
 		}
 		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
-		return &ast.FunctionDecl{Public: true, Doc: docs}
+		return functionStub(true, docs)
 	default:
 		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
-		return &ast.FunctionDecl{Public: true, Doc: docs}
+		return functionStub(true, docs)
 	}
 }
 
@@ -179,32 +179,42 @@ func setPublicDecl(decl ast.Decl) {
 // parseDirectiveDecl parses top-level compiler directive declarations.
 func (p *Parser) parseDirectiveDecl(public bool, docs string) ast.Decl {
 	if !p.expectPeek(token.Ident) {
-		return &ast.FunctionDecl{Public: public, Doc: docs}
+		return functionStub(public, docs)
 	}
 	switch p.cur.Literal {
 	case "requires_unsafe":
 		return p.parseRequiresUnsafeDecl(public, docs)
 	default:
 		p.errorf("unknown declaration directive `@%s`", p.cur.Literal)
-		return &ast.FunctionDecl{Public: public, Doc: docs}
+		return functionStub(public, docs)
+	}
+}
+
+// functionStub is the declaration the parser hands back when it has reported an
+// error and has to keep going. It stands in for the function that failed to
+// parse, so the caller is given a declaration rather than nil.
+func functionStub(public bool, docs string) *ast.FunctionDecl {
+	return &ast.FunctionDecl{
+		FunctionSignature: ast.FunctionSignature{Public: public},
+		Doc:               docs,
 	}
 }
 
 // parseRequiresUnsafeDecl parses @requires_unsafe() fn declarations.
 func (p *Parser) parseRequiresUnsafeDecl(public bool, docs string) ast.Decl {
+	fn := functionStub(public, docs)
+	fn.RequiresUnsafe = true
 	if !p.expectPeek(token.LParen) {
-		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+		return fn
 	}
 	if !p.expectPeek(token.RParen) {
-		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+		return fn
 	}
 	if !p.expectPeek(token.Function) {
 		p.errorf("expected fn after @requires_unsafe()")
-		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+		return fn
 	}
-	return p.parseFunctionSignature(&ast.FunctionDecl{
-		Public: public, RequiresUnsafe: true, Doc: docs,
-	}, true)
+	return p.parseFunctionSignature(fn, true)
 }
 
 // parseExternDecl parses extern "abi" fn declarations.

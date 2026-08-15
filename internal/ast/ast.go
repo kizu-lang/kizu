@@ -83,10 +83,17 @@ func (p *Program) String() string {
 	return out.String()
 }
 
-// FunctionDecl represents a function declaration.
-type FunctionDecl struct {
+// FunctionSignature is everything a caller is promised: the whole declaration
+// except the body.
+//
+// It is a type of its own so that the code deciding what a call site sees
+// cannot reach the body. A signature that came from a body is a signature no
+// other package can be told without being shipped the body, and the shape of
+// the compiler follows from that: a package is described to another package by
+// this, and only generic and comptime bodies travel with it because
+// instantiation reruns them.
+type FunctionSignature struct {
 	Name string
-	Doc  string
 	// StaticParams is the `<...>` list. An entry with no declared type is a
 	// type parameter; one with a type is a compile-time value. Both are
 	// compile-time, which is why they live here and not in Params.
@@ -94,11 +101,17 @@ type FunctionDecl struct {
 	Params         []Param
 	ReturnType     typ.Type
 	ReturnBorrow   string
-	Body           *BlockStmt
 	RequiresUnsafe bool
 	ExternABI      string
 	Public         bool
 	Std            bool
+}
+
+// FunctionDecl represents a function declaration.
+type FunctionDecl struct {
+	FunctionSignature
+	Doc  string
+	Body *BlockStmt
 }
 
 // StaticParam is one entry of a `<...>` static argument list.
@@ -121,9 +134,9 @@ func (p StaticParam) String() string {
 }
 
 // TypeParamNames returns the names of the entries that declare types.
-func (d *FunctionDecl) TypeParamNames() []string {
+func (s *FunctionSignature) TypeParamNames() []string {
 	names := []string{}
-	for _, param := range d.StaticParams {
+	for _, param := range s.StaticParams {
 		if param.IsType() {
 			names = append(names, param.Name)
 		}
