@@ -33,12 +33,18 @@ type errDeferEntry struct {
 	name     string
 }
 
+// A functionInfo is the ownership-facing view of a function: what a caller
+// hands over, plus the body this checker walks. The two are separate fields so
+// that reading the signature cannot reach the body by accident.
+//
+// name is not sig.Name: a method is registered under a qualified name, while
+// the signature keeps the name as it was declared.
 type functionInfo struct {
-	name         string
-	params       []paramInfo
-	returnType   string
-	returnBorrow string
-	decl         *ast.FunctionDecl
+	name       string
+	sig        ast.FunctionSignature
+	params     []paramInfo
+	returnType string
+	body       *ast.BlockStmt
 }
 
 type paramInfo struct {
@@ -278,8 +284,8 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 		})
 	}
 	return &functionInfo{
-		name: name, params: params, returnType: typ.Text(fn.ReturnType),
-		returnBorrow: fn.ReturnBorrow, decl: fn,
+		name: name, sig: fn.FunctionSignature, params: params,
+		returnType: typ.Text(fn.ReturnType), body: fn.Body,
 	}
 }
 
@@ -295,19 +301,19 @@ func functionInfoFromImplDecl(name string, typeName string, fn *ast.FunctionDecl
 
 // checkFunction validates one function body.
 func (c *Checker) checkFunction(fn *functionInfo) error {
-	if fn.decl.ExternABI != "" {
+	if fn.sig.ExternABI != "" {
 		return nil
 	}
 	env := newScope(nil)
 	// A `<...>` entry that declares a type is a compile-time value, in scope
 	// for the body like a parameter but never moved or borrowed.
-	for _, param := range fn.decl.StaticParams {
+	for _, param := range fn.sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
 		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
-	for idx, param := range fn.decl.Params {
+	for idx, param := range fn.sig.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
 		value.borrowedParam = fn.params[idx].borrow
 		value.mutBorrow = fn.params[idx].mutBorrow
@@ -319,13 +325,13 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	previousTypeArgValues := c.typeArgValues
 	c.loopDepth = 0
 	c.currentFunction = fn
-	c.currentStd = fn.decl.Std
+	c.currentStd = fn.sig.Std
 	c.typeArgValues = nil
 	defer func() { c.loopDepth = previousLoopDepth }()
 	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
-	return c.checkBlock(fn.decl.Body, env)
+	return c.checkBlock(fn.body, env)
 }
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
@@ -587,7 +593,7 @@ func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if c.currentFunction == nil {
 		return false
 	}
-	if c.currentFunction.returnBorrow != name {
+	if c.currentFunction.sig.ReturnBorrow != name {
 		return false
 	}
 	_, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
@@ -600,7 +606,7 @@ func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if !sameOwnershipType(value.typeName, inner) {
 		return false
 	}
-	for idx, param := range c.currentFunction.decl.Params {
+	for idx, param := range c.currentFunction.sig.Params {
 		if param.Name != name || !c.currentFunction.params[idx].borrow {
 			continue
 		}
@@ -718,8 +724,8 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 
 // borrowReturnParamIndex finds the parameter that owns a returned borrow.
 func borrowReturnParamIndex(fn *functionInfo, mutable bool) int {
-	for idx, param := range fn.decl.Params {
-		if param.Name != fn.returnBorrow || !fn.params[idx].borrow {
+	for idx, param := range fn.sig.Params {
+		if param.Name != fn.sig.ReturnBorrow || !fn.params[idx].borrow {
 			continue
 		}
 		if mutable && !fn.params[idx].mutBorrow {
@@ -1771,7 +1777,7 @@ func (c *Checker) checkUserCall(
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
 	}
-	if len(fn.decl.TypeParamNames()) > 0 {
+	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
@@ -1831,7 +1837,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if len(fn.decl.TypeParamNames()) > 0 {
+	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env)
@@ -2648,7 +2654,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	fn := c.functions[name]
-	if fn == nil || len(fn.decl.StaticParams) == 0 {
+	if fn == nil || len(fn.sig.StaticParams) == 0 {
 		return "", false, nil
 	}
 	if len(args) != len(fn.params) {
@@ -2656,14 +2662,14 @@ func (c *Checker) checkGenericUserTypeApply(
 			name, len(fn.params), len(args))
 	}
 	staticArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(staticArgs) != len(fn.decl.StaticParams) {
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
 		return "", true, errorf("move error: `%s` expects %d static arguments",
-			name, len(fn.decl.StaticParams))
+			name, len(fn.sig.StaticParams))
 	}
 	// Only the entries that declare types take part in substitution; a
 	// compile-time value carries no ownership.
 	typeArgs := []string{}
-	for idx, param := range fn.decl.StaticParams {
+	for idx, param := range fn.sig.StaticParams {
 		if param.IsType() {
 			typeArgs = append(typeArgs, staticArgs[idx])
 		}
@@ -2672,7 +2678,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, err
 	}
 	subst := map[string]string{}
-	for idx, param := range fn.decl.TypeParamNames() {
+	for idx, param := range fn.sig.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
 	for idx, arg := range args {
@@ -2691,13 +2697,13 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	env := newScope(nil)
 	// A `<...>` entry that declares a type is a compile-time value, in scope
 	// for the body like a parameter but never moved or borrowed.
-	for _, param := range fn.decl.StaticParams {
+	for _, param := range fn.sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
 		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
-	for idx, param := range fn.decl.Params {
+	for idx, param := range fn.sig.Params {
 		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
 		value.borrowedParam = fn.params[idx].borrow
 		value.mutBorrow = fn.params[idx].mutBorrow
@@ -2709,7 +2715,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	previousTypeArgValues := c.typeArgValues
 	c.loopDepth = 0
 	c.currentFunction = fn
-	c.currentStd = fn.decl.Std
+	c.currentStd = fn.sig.Std
 	c.typeArgValues = subst
 	defer func() {
 		c.loopDepth = previousLoopDepth
@@ -2717,7 +2723,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 		c.currentStd = previousStd
 		c.typeArgValues = previousTypeArgValues
 	}()
-	return c.checkBlock(fn.decl.Body, env)
+	return c.checkBlock(fn.body, env)
 }
 
 // checkGenericWrapperTypeArgs validates std wrapper-specific static ownership contracts.
@@ -3979,7 +3985,9 @@ func (c *Checker) checkImplMethodArgs(
 	args []ast.Expression,
 	env *scope,
 ) error {
-	call := &functionInfo{name: method.name, params: method.params[1:], decl: method.decl}
+	call := &functionInfo{
+		name: method.name, sig: method.sig, params: method.params[1:], body: method.body,
+	}
 	borrowed, err := c.activateBorrowArgs(call, args, env)
 	if err != nil {
 		return err
@@ -4372,13 +4380,13 @@ func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
 // allowsDirectFieldCleanup reports whether field.deinit is inside owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
-	if len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
 		return false
 	}
-	if fn.decl.Params[0].Name != receiver.owner.name {
+	if fn.sig.Params[0].Name != receiver.owner.name {
 		return false
 	}
 	return sameOwnershipType(fn.params[0].typeName, receiver.owner.typeName)
@@ -4389,10 +4397,10 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 // active payload owned and cleanable; everywhere else it stays a borrow.
 func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
-	if len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
 		return false
 	}
 	if fn.params[0].borrow || fn.params[0].mutBorrow {
@@ -4402,7 +4410,7 @@ func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string
 		return false
 	}
 	ident, ok := value.(*ast.IdentExpr)
-	if !ok || ident.Name != fn.decl.Params[0].Name {
+	if !ok || ident.Name != fn.sig.Params[0].Name {
 		return false
 	}
 	return c.unions[valueType] != nil
