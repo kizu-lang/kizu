@@ -74,9 +74,11 @@ func Importable(path string) ([]string, bool, error) {
 	return modules, true, nil
 }
 
-// importedNames returns the std modules one import path names. Importing the
-// root names every module under it, because that is what a path through the
-// root can reach.
+// importedNames returns the std modules one import path names, and whether the
+// path names anything at all. What it names and what has to be read are not the
+// same: a module the compiler provides itself has no source to load, so it is
+// importable and contributes no declarations. Importing the root names every
+// module under it, because that is what a path through the root can reach.
 func importedNames(path string, exports map[string]bool) ([]string, bool) {
 	if path == Root {
 		return sortedExports(exports), true
@@ -85,7 +87,17 @@ func importedNames(path string, exports map[string]bool) ([]string, bool) {
 	if !ok || !exports[module] {
 		return nil, false
 	}
+	if !hasSource(module) {
+		return nil, true
+	}
 	return []string{module}, true
+}
+
+// hasSource reports whether a std module is written in Kizu. One that is not is
+// provided by the compiler, and there is nothing to parse for it.
+func hasSource(module string) bool {
+	_, err := FindRepoFile(moduleFile(module))
+	return err == nil
 }
 
 // resolveAll visits modules and everything they are built on, dependency first.
