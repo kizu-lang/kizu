@@ -2,7 +2,8 @@
 
 Status: 置換
 
-Replaced by [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md).
+Replaced by [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md)
+(further replaced by [ADR-0089](0089-unsafe-is-an-expression-marker.md)).
 
 ## 背景
 
