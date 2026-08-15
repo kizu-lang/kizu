@@ -49,6 +49,13 @@ source.kizu
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
 
+その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime object・
+toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
+入りません。front end は数 ms なので毎回通り、そこから先の link を飛ばします
+(`kizu run examples/hello.kizu`: 初回 ~250ms → 2 回目以降 ~9ms)。
+`build --target native` は逆に、利用者が名前を指定した成果物とその build 記録を
+書くコマンドなので cache から読まず、毎回 link します。
+
 CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `why-rebuild`
 `import-c-header`。基本の実行経路は `kizu run examples/hello.kizu`。
