@@ -11,9 +11,9 @@ import (
 	"github.com/kizu-lang/kizu/internal/parser"
 )
 
-// TestModuleConformanceFixture resolves and parses the basic multi-file fixture.
-func TestModuleConformanceFixture(t *testing.T) {
-	root := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
+// TestModuleFixture resolves and parses the basic multi-file fixture.
+func TestModuleFixture(t *testing.T) {
+	root := filepath.Join("..", "..", "tests", "fixtures", "modules", "basic")
 	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
 	if err != nil {
 		t.Fatal(err)
