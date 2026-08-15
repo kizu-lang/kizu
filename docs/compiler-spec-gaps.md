@@ -44,8 +44,9 @@ Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and
 - top-level declarations are private by default
 - struct fields are private by default
 - `pub` exposes top-level declarations and fields
-- `[modules].exports` lists package modules visible outside the package
-- non-exported package modules may share `pub` helpers inside the package
+- a module below an `internal` directory is reachable from the subtree that
+  directory hangs off and nowhere else
+- internal package modules may share `pub` helpers inside that subtree
 - public signatures may not expose private types
 - external modules may not construct or access private fields
 - public enum tags and union variants are visible when their type is public

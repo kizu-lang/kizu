@@ -17,15 +17,22 @@ type Module struct {
 
 // Graph is the deterministic module list resolved from a manifest.
 type Graph struct {
-	Root        string
 	PackageName string
 	Modules     []Module
-	Exports     map[string]bool
 }
 
 // ResolveModules maps configured source files to Kizu module paths.
+//
+// A module named after the package itself is not required. `golang.org/x/tools`
+// has no package at its root and std has none either: every std module is
+// `std::mem` or below, and nothing is spelled plain `std`. The package name is
+// still a namespace its own modules reach each other through, whether or not a
+// module answers to it.
 func ResolveModules(baseDir string, manifest manifest.Manifest) (Graph, error) {
-	rootFile := filepath.Clean(filepath.Join(baseDir, manifest.Root))
+	rootFile := ""
+	if manifest.Root != "" {
+		rootFile = filepath.Clean(filepath.Join(baseDir, manifest.Root))
+	}
 	modules := map[string]string{}
 	for _, sourceRoot := range manifest.Paths {
 		root := filepath.Clean(filepath.Join(baseDir, sourceRoot))
@@ -33,20 +40,7 @@ func ResolveModules(baseDir string, manifest manifest.Manifest) (Graph, error) {
 			return Graph{}, err
 		}
 	}
-	rootModule := manifest.PackageName
-	if _, ok := modules[rootModule]; !ok {
-		return Graph{}, fmt.Errorf("module error: root module `%s` was not found", manifest.Root)
-	}
-	exports, err := resolveModuleExports(rootModule, manifest.Exports, modules)
-	if err != nil {
-		return Graph{}, err
-	}
-	return Graph{
-		Root:        rootModule,
-		PackageName: manifest.PackageName,
-		Modules:     sortedModules(modules),
-		Exports:     exports,
-	}, nil
+	return Graph{PackageName: manifest.PackageName, Modules: sortedModules(modules)}, nil
 }
 
 // collectSourceRoot walks one source root and records Kizu source modules.
@@ -114,22 +108,35 @@ func sortedModules(modules map[string]string) []Module {
 	return out
 }
 
-// resolveModuleExports validates and records the package surface modules.
-func resolveModuleExports(
-	rootModule string,
-	manifestExports []string,
-	modules map[string]string,
-) (map[string]bool, error) {
-	exports := map[string]bool{}
-	if len(manifestExports) == 0 {
-		exports[rootModule] = true
-		return exports, nil
+// InternalSegment names the directory a package keeps its own modules in. A
+// module below one is reachable from the subtree the directory sits in and
+// nowhere else, so where the source is decides what can name it and nothing has
+// to be listed anywhere.
+const InternalSegment = "internal"
+
+// ReachableFrom reports whether a module at `from` may name `path`. A path with
+// no `internal` segment is reachable from everywhere; one with an `internal`
+// segment is reachable from the subtree that segment hangs off.
+func ReachableFrom(path string, from string) bool {
+	_, scope, internal := internalModule(path)
+	if !internal {
+		return true
 	}
-	for _, path := range manifestExports {
-		if _, ok := modules[path]; !ok {
-			return nil, fmt.Errorf("module error: exported module `%s` was not found", path)
+	return from == scope || strings.HasPrefix(from, scope+"::")
+}
+
+// internalModule returns the module an `internal` segment hides, the path that
+// module is internal to, and whether path passes through one at all. It reads
+// the module out of a longer path so that a name inside the module is refused
+// under the module's own name rather than its own.
+func internalModule(path string) (string, string, bool) {
+	parts := strings.Split(path, "::")
+	for idx, part := range parts {
+		if idx == 0 || part != InternalSegment {
+			continue
 		}
-		exports[path] = true
+		return strings.Join(parts[:min(idx+2, len(parts))], "::"),
+			strings.Join(parts[:idx], "::"), true
 	}
-	return exports, nil
+	return "", "", false
 }

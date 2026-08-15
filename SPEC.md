@@ -248,6 +248,10 @@ paths = ["src"]
 たとえば `name = "app"` の package では、`src/lexer.kizu` を
 `app::lexer` として import します。
 
+`[modules].root` は package 名そのものになる file を指します。省略できます。
+library package はその module を持つ理由が無いことがあり、std は持ちません
+(std の module はすべて `std::mem` 以下で、裸の `std` はありません)。
+
 module path は file path から決まります。
 
 ```text
@@ -600,8 +604,8 @@ module の完全パス(`std::fs`)は、その module の同一性を指す名前
 文書に現れます。コード中の参照は、束縛された名前から始まります。
 
 user package に `std` という名前は使えません。
-std package 内部の module も同じ規則で import します。`exports` にない
-`std::internal::builtin` のような module は、std package の中からだけ import できます。
+std package 内部の module も同じ規則で import します。`std::internal::builtin` は
+`internal` の下にあるので、std package の中からだけ import できます。
 
 name resolution order:
 
@@ -616,18 +620,18 @@ local declaration が import した名前を shadow することも compile erro
 使わない import も compile error です。import 一覧がその file の依存一覧である
 ことは、これが保証します。
 
-`kizu.toml` の `[modules].exports` は package 外へ公開する module を明示します。
+package の内部 module は `internal` ディレクトリで隠します。manifest に一覧は
+書きません。どこに置いたかが規則そのものです。
 
-```toml
-[modules]
-root = "src/main.kizu"
-paths = ["src"]
-exports = ["app", "app::lexer"]
+```text
+src/lexer.kizu                   -> app::lexer                    公開
+src/internal/table.kizu          -> app::internal::table          app 配下からだけ
+src/parser/internal/state.kizu   -> app::parser::internal::state  app::parser 配下からだけ
 ```
 
-`exports` にない module は package 内部 module です。
-package 内部 module には同じ package から import できますが、package 外からは import /
-参照できません。`exports` を省略した場合は root module だけを export します。
+`internal` は階層のどこにでも置けます。`X::internal::Y` は `X` とその下の module
+からだけ import / 参照できます。部分木の中だけで使う内部 module を、package 全体に
+見せずに置けます。
 
 visibility は default private です。
 
@@ -664,7 +668,7 @@ fn lex_source(source: []u8) -> !array::Array<Token> {
 * public API に private type を出してはいけない
 * 外部 module から private field を construct / access してはいけない
 * `pub` な enum の tag と `pub` な union の variant は外部から使える
-* package 外から見える API は `exports` された module の `pub` declaration に限る
+* package 外から見える API は `internal` の下にない module の `pub` declaration に限る
 * `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
 
 ### 6.7 enum
@@ -1660,13 +1664,14 @@ explicit trusted primitive:
 
 ```kizu
 // lib/kizu/std/src/array.kizu
-import std;
-import std::internal::builtin;
-
 pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
-    return builtin::array<T>(allocator);
+    return std::internal::builtin::array<T>(allocator);
 }
 ```
+
+package 名は、その package の中では import なしに束縛されています。`std::array` は
+`std` package の module なので、この file は `std::` で始まる完全パスをそのまま
+書けます。
 
 戻り値の型が完全パスなのは、この file が `Array` という名前の function を宣言して
 いるからです。name resolution order で current module の宣言は import した名前より

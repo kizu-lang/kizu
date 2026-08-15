@@ -1,13 +1,10 @@
 package ownership
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
-	"github.com/kizu-lang/kizu/internal/lexer"
-	"github.com/kizu-lang/kizu/internal/parser"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 )
 
 // TestCheckAcceptsCopyReuse checks that copy values are reusable after move contexts.
@@ -1302,21 +1299,35 @@ func runErrorCases(t *testing.T, cases []struct {
 
 // checkSource parses and move-checks a source snippet.
 func checkSource(source string) error {
-	p := parser.New(lexer.New(source))
-	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		return errors.New(p.Errors()[0])
-	}
 	// std wrappers are what a program calls now that the `std::internal::builtin::`
 	// namespace is closed to source outside std, so a checkable program is one
-	// with std merged in -- which is what every real invocation does.
-	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	// with std loaded -- which is what every real invocation does.
+	program, err := project.LoadSource("", withStdImport(source))
 	if err != nil {
 		return err
 	}
-	if len(stdErrs) > 0 {
-		return errors.New(stdErrs[0].Error())
-	}
-	program.Decls = append(stdDecls, program.Decls...)
 	return New().Check(program)
+}
+
+// withStdImport gives a snippet the root import a file needs to spell full std
+// paths. The snippets are about what the checker does with std types, not about
+// import lines, and a file that writes `std::mem::page_allocator` has to bring
+// the root into scope the same way any other file does.
+func withStdImport(source string) string {
+	if strings.Contains(source, "import std;") || !writesFullStdPath(source) {
+		return source
+	}
+	return "import std;\n" + source
+}
+
+// writesFullStdPath reports whether a snippet spells a std path in code rather
+// than only naming one in an import declaration.
+func writesFullStdPath(source string) bool {
+	for _, line := range strings.Split(source, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "import ") &&
+			strings.Contains(line, "std::") {
+			return true
+		}
+	}
+	return false
 }

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -467,7 +467,7 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 // failure crossing from one union into another is therefore a copy, never a
 // conversion.
 func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
-	stdSets, err := stdlib.ErrorSets()
+	stdSets, err := project.StdErrorSets()
 	if err != nil {
 		return Enum{}, err
 	}
@@ -475,7 +475,7 @@ func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
 		return Enum{Name: decl.Name, Tags: codes}, nil
 	}
 	if l.nextErrorCode == 0 {
-		base, err := stdlib.ErrorCodeBase()
+		base, err := project.StdErrorCodeBase()
 		if err != nil {
 			return Enum{}, err
 		}

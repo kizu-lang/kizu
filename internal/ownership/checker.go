@@ -1854,7 +1854,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", true, err
 	}
 	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
@@ -1866,21 +1866,14 @@ func (c *Checker) checkQualifiedBuiltin(
 	return checkUntypedContainerConstructor(name)
 }
 
-// rejectReservedBuiltin closes the `std::internal::builtin::` namespace to source outside
-// std. The type checker rejects these first in a full run; this keeps the rule
-// true of this checker on its own, which is how its own tests read it.
-func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std::internal::builtin::") {
+// rejectUnknownBuiltin refuses a primitive the Go implementation does not have.
+// The type checker rejects these first in a full run; this keeps the rule true
+// of this checker on its own, which is how its own tests read it.
+func (c *Checker) rejectUnknownBuiltin(name string) error {
+	if !strings.HasPrefix(name, "std::internal::builtin::") || stdprim.Primitive(name) {
 		return nil
 	}
-	replacement, known := stdprim.ReservedBuiltin(name)
-	if !known {
-		return errorf("move error: `%s` is not a primitive", name)
-	}
-	if c.currentStd {
-		return nil
-	}
-	return errorf("move error: `%s` is reserved; use %s", name, replacement)
+	return errorf("move error: `%s` is not a primitive", name)
 }
 
 // checkQualifiedStdBuiltin validates declarative core and fs ownership effects.
@@ -2219,13 +2212,13 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 }
 
 // typeApplyTarget resolves the callee and static arguments of a `<...>` call,
-// and closes the reserved namespace before any of them is looked at.
+// and refuses an unknown primitive before any of them is looked at.
 func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
 		return "", "", errorf("move error: unsupported type application `%s`", expr.String())
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
 	return name, c.instantiateTypeArgText(expr.TypeArg), nil

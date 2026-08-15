@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 )
 
 // qualifyModule rewrites one parsed module into package-qualified names.
@@ -135,6 +136,10 @@ func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast
 }
 
 // qualifyFunction rewrites a function signature and body type references.
+//
+// A function std declared is marked as such, because being std source is what
+// lets it name the trusted primitives and what makes its `self` parameter a
+// method receiver.
 func (c *graphChecker) qualifyFunction(
 	module *moduleUnit,
 	decl *ast.FunctionDecl,
@@ -142,6 +147,7 @@ func (c *graphChecker) qualifyFunction(
 ) (*ast.FunctionDecl, error) {
 	cp := *decl
 	cp.Name = name
+	cp.Std = module.pkg == stdlib.Root
 	cp.Params = append([]ast.Param(nil), decl.Params...)
 	for idx := range cp.Params {
 		resolved, err := c.resolveTypeNode(module, cp.Params[idx].TypeName)

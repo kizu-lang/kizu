@@ -188,7 +188,7 @@ func buildRunExecutable(path string) (string, error) {
 // runtime refers to every std error set whatever a program uses, so a build
 // that cannot read them cannot say what it failed at.
 func stdErrorSets() (map[string]map[string]int, error) {
-	return stdlib.ErrorSets()
+	return project.StdErrorSets()
 }
 
 // linkModule emits one lowered module and returns an executable for it. The
@@ -238,13 +238,9 @@ func checkFile(path string) error {
 	if isPackageRoot(path) {
 		return checkPackage(path)
 	}
-	program, errs, err := parsePathWithStd(path)
+	program, err := loadFileProgram(path)
 	if err != nil {
 		return err
-	}
-	if len(errs) > 0 {
-		printParserDiagnostics(errs)
-		return fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
 		return err
@@ -304,32 +300,7 @@ func loadPackageProgram(path string) (project.Graph, *ast.Program, error) {
 	if err != nil {
 		return project.Graph{}, nil, err
 	}
-	stdDecls, err := packageStdDecls(graph)
-	if err != nil {
-		return project.Graph{}, nil, err
-	}
-	program.Decls = append(stdDecls, program.Decls...)
 	return graph, program, nil
-}
-
-// packageStdDecls loads std wrapper declarations referenced by package modules.
-func packageStdDecls(graph project.Graph) ([]ast.Decl, error) {
-	sources := make([]string, 0, len(graph.Modules))
-	for _, module := range graph.Modules {
-		data, err := os.ReadFile(module.File)
-		if err != nil {
-			return nil, err
-		}
-		sources = append(sources, string(data))
-	}
-	decls, errs, err := stdlib.DeclsForSources(sources)
-	if err != nil {
-		return nil, err
-	}
-	if len(errs) > 0 {
-		return nil, &errs[0]
-	}
-	return decls, nil
 }
 
 // testFile runs Kizu test blocks and reports a minimal test result.
@@ -754,13 +725,9 @@ func importCHeaderFile(path string) error {
 
 // lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
 func lowerFile(path string, opt bool) (*ir.Module, error) {
-	program, errs, err := parsePathWithStd(path)
+	program, err := loadFileProgram(path)
 	if err != nil {
 		return nil, err
-	}
-	if len(errs) > 0 {
-		printParserDiagnostics(errs)
-		return nil, fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
 		return nil, err
@@ -795,7 +762,7 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 			return nil, err
 		}
 	}
-	if err := addPackageMain(module, graph.Root+"::main"); err != nil {
+	if err := addPackageMain(module, graph.PackageName+"::main"); err != nil {
 		return nil, err
 	}
 	return module, nil
@@ -861,27 +828,13 @@ func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 	return program, p.Diagnostics(), nil
 }
 
-// parsePathWithStd resolves a source file and appends Kizu std wrappers. The
+// loadFileProgram resolves a source file together with the std it imports. The
 // resolving is the same pass a package module gets, so a name means the same
 // thing in a loose file as it does inside a package.
-func parsePathWithStd(path string) (*ast.Program, []parser.Diagnostic, error) {
+func loadFileProgram(path string) (*ast.Program, error) {
 	source, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	program, err := project.LoadSource(path, string(source))
-	if err != nil {
-		return nil, nil, err
-	}
-	stdDecls, stdErrs, err := stdlib.DeclsForSource(string(source))
-	if err != nil || len(stdErrs) > 0 {
-		return program, stdErrs, err
-	}
-	program.Decls = append(stdDecls, program.Decls...)
-	return program, nil, nil
-}
-
-// resolveStdModules returns std modules in dependency-before-dependent order.
-func resolveStdModules(source string) ([]string, error) {
-	return stdlib.ResolveModules(source)
+	return project.LoadSource(path, string(source))
 }

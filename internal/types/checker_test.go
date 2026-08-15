@@ -7,7 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
@@ -555,7 +555,7 @@ fn main() {}`
 func TestCheckAcceptsBorrowProvenanceThroughFieldAliases(t *testing.T) {
 	source := `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
 impl Owner {
     fn bytes(self: &Owner) -> []u8 borrows self {
@@ -653,7 +653,7 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 			name: "field alias source mismatch",
 			source: `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
 fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
     let storage = &right.text;
@@ -666,12 +666,12 @@ fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
 			name: "temporary field owner",
 			source: `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
-fn make(text: std::string::String) -> Owner {
+fn make(text: string::String) -> Owner {
     return Owner { text: text };
 }
-fn bad(owner: &Owner, text: std::string::String) -> []u8 borrows owner {
+fn bad(owner: &Owner, text: string::String) -> []u8 borrows owner {
     let view = make(text).text.as_bytes();
     return view;
 }`,
@@ -704,7 +704,7 @@ func TestCheckAcceptsArrayElementViewTiedToArrayOwner(t *testing.T) {
 	source := `import std::array;
 import std::string;
 struct Store {
-    parts: std::array::Array<std::string::String>,
+    parts: array::Array<string::String>,
 }
 fn view(store: &Store, index: i64) -> ![]u8 borrows store {
     let parts = &store.parts;
@@ -725,7 +725,7 @@ func TestCheckRejectsArrayElementViewFromAnotherOwner(t *testing.T) {
 	source := `import std::array;
 import std::string;
 struct Store {
-    parts: std::array::Array<std::string::String>,
+    parts: array::Array<string::String>,
 }
 fn view(left: &Store, right: &Store, index: i64) -> ![]u8 borrows left {
     let parts = &right.parts;
@@ -2217,22 +2217,13 @@ func TestCheckAllReturnsEmptyForValidProgram(t *testing.T) {
 
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
-	p := parser.New(lexer.New(source))
-	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		return errors.New(p.Errors()[0])
-	}
 	// The checker reads std container method signatures from std's own
-	// declarations, so a program is only checkable with std merged in, which is
+	// declarations, so a program is only checkable with std loaded, which is
 	// what every real invocation does.
-	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	program, err := project.LoadSource("", withStdImport(source))
 	if err != nil {
 		return err
 	}
-	if len(stdErrs) > 0 {
-		return errors.New(stdErrs[0].Error())
-	}
-	program.Decls = append(stdDecls, program.Decls...)
 	return New().Check(program)
 }
 
@@ -2268,4 +2259,27 @@ func TestReferencedTypeNamesSeesThroughEveryWrapper(t *testing.T) {
 			}
 		}
 	}
+}
+
+// withStdImport gives a snippet the root import a file needs to spell full std
+// paths. The snippets are about what the checker does with std types, not about
+// import lines, and a file that writes `std::mem::page_allocator` has to bring
+// the root into scope the same way any other file does.
+func withStdImport(source string) string {
+	if strings.Contains(source, "import std;") || !writesFullStdPath(source) {
+		return source
+	}
+	return "import std;\n" + source
+}
+
+// writesFullStdPath reports whether a snippet spells a std path in code rather
+// than only naming one in an import declaration.
+func writesFullStdPath(source string) bool {
+	for _, line := range strings.Split(source, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "import ") &&
+			strings.Contains(line, "std::") {
+			return true
+		}
+	}
+	return false
 }

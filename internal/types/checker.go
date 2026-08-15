@@ -3433,23 +3433,11 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
-		return "", true, err
-	}
 	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, expressionSpan(field), args, env, unsafe)
 	return typ, true, err
-}
-
-// rejectPrivateStdFunction blocks non-std source from std-private helpers.
-func (c *Checker) rejectPrivateStdFunction(name string, fn *functionType) error {
-	if !fn.sig.Std || fn.sig.Public || c.currentStd {
-		return nil
-	}
-	sourceName := strings.ReplaceAll(name, ".", "::")
-	return errorf("type error: function `%s` is private", sourceName)
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -3463,7 +3451,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", true, err
 	}
 	if typ, ok, err := c.checkStdCoreBuiltin(name, args, env, unsafe); ok || err != nil {
@@ -3472,27 +3460,16 @@ func (c *Checker) checkQualifiedBuiltin(
 	return c.checkStdConstructorBuiltin(name, args)
 }
 
-// rejectReservedBuiltin closes the `std::internal::builtin::` namespace to source outside
-// std. Being a primitive is what reserves it, so a new one is closed the moment
-// it joins the registry rather than when someone remembers to guard its family.
-func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std::internal::builtin::") {
+// rejectUnknownBuiltin refuses a primitive the Go implementation does not have.
+// What keeps the namespace away from a program outside std is where the module
+// sits, so nothing here has to ask who is calling; the registry is what
+// primitives there are, and a name outside it is a misspelling std source needs
+// told about, because one that does not exist would lower to nothing.
+func (c *Checker) rejectUnknownBuiltin(name string) error {
+	if !strings.HasPrefix(name, "std::internal::builtin::") || stdprim.Primitive(name) {
 		return nil
 	}
-	replacement, known := stdprim.ReservedBuiltin(name)
-	if !known {
-		if removed, ok := stdprim.RemovedBuiltinReplacement(name); ok {
-			return errorf("type error: `%s` was removed; use %s", name, removed)
-		}
-		// The registry is what primitives there are, so a name outside it is a
-		// misspelling. Nothing else reports one: std source is trusted, and a
-		// primitive it names that does not exist would lower to nothing.
-		return errorf("type error: `%s` is not a primitive", name)
-	}
-	if c.currentStd {
-		return nil
-	}
-	return errorf("type error: `%s` is reserved; use %s", name, replacement)
+	return errorf("type error: `%s` is not a primitive", name)
 }
 
 // checkStdCoreBuiltin validates pure, filesystem, I/O, and process std calls.
@@ -3875,13 +3852,13 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeCaps, 
 }
 
 // typeApplyTarget resolves the callee and static arguments of a `<...>` call,
-// and closes the reserved namespace before any of them is looked at.
+// and refuses an unknown primitive before any of them is looked at.
 func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
 		return "", "", errorf("type error: unsupported type application `%s`", expr.String())
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
 	return name, c.instantiateTypeArgText(expr.TypeArg), nil
@@ -4377,9 +4354,6 @@ func (c *Checker) checkGenericUserTypeApply(
 	fn := c.functions[name]
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
 		return "", false, nil
-	}
-	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
-		return "", true, err
 	}
 	argsText, ok := splitGenericArgs(typeArg)
 	if !ok || len(argsText) != len(fn.sig.StaticParams) {

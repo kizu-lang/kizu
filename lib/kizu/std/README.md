@@ -1,11 +1,12 @@
 # Kizu Standard Library Sources
 
-This directory is the migration target for Kizu-written `std` modules.
+This is the std package. `kizu.toml` names it and `src/` holds its modules, the
+same shape a program written in Kizu has.
 
-The current implementation still uses Go-backed trusted primitives. Public std
-APIs should move here as Kizu wrappers while host and runtime boundaries remain
-in `internal/stdprim`.
+`src/internal/builtin.kizu` is the trusted primitive namespace. The primitives
+themselves are still provided by the Go implementation; the module exists so
+that std can name them and nothing else can. Public std modules wrap them.
 
-This is a migration layout, not an active package-loader input yet. Keep files
-parseable, but do not assume `kizu check std` works until package loading is
-reintroduced with explicit acceptance tests.
+Where the compiler reads this tree from is decided by `KIZU_LIB_DIR`, the
+`--lib-dir` flag, or the `lib/kizu` directory beside the running binary. The
+current directory is never consulted.

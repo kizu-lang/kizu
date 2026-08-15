@@ -75,44 +75,26 @@ func TestResolveModules(t *testing.T) {
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
-	if !graph.Exports["app"] || len(graph.Exports) != 1 {
-		t.Fatalf("got exports %#v, want root export", graph.Exports)
-	}
 }
 
-// TestResolveModulesRecordsExplicitExports checks package surface metadata.
-func TestResolveModulesRecordsExplicitExports(t *testing.T) {
+// TestResolveModulesWithoutRootModule checks a package needs no module of its
+// own name. std has none: everything it holds is `std::mem` or below.
+func TestResolveModulesWithoutRootModule(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, root, "src/main.kizu")
 	writeFile(t, root, "src/lexer.kizu")
+	writeFile(t, root, "src/internal/table.kizu")
 
 	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
-		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
-		Exports:     []string{"app", "app::lexer"},
 	})
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
-	if !graph.Exports["app"] || !graph.Exports["app::lexer"] || len(graph.Exports) != 2 {
-		t.Fatalf("got exports %#v, want app and app::lexer", graph.Exports)
-	}
-}
-
-// TestResolveModulesRejectsMissingExport checks exported modules must exist.
-func TestResolveModulesRejectsMissingExport(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "src/main.kizu")
-
-	_, err := ResolveModules(root, manifest.Manifest{
-		PackageName: "app",
-		Root:        "src/main.kizu",
-		Paths:       []string{"src"},
-		Exports:     []string{"app::missing"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "exported module `app::missing`") {
-		t.Fatalf("got error %v, want missing export", err)
+	got := modulePaths(graph.Modules)
+	want := []string{"app::internal::table", "app::lexer"}
+	if !sameStrings(got, want) {
+		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
 }
 
@@ -146,6 +128,47 @@ fn main(value: missing::Token) -> void {
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "missing import `app::missing`") {
 		t.Fatalf("got error %v, want missing import", err)
+	}
+}
+
+// TestLoadGraphRejectsInternalImportFromOutside checks a module below an
+// `internal` directory is reachable from the subtree that directory hangs off
+// and nowhere else. Nothing lists it: where the source sits is the whole rule.
+func TestLoadGraphRejectsInternalImportFromOutside(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::parser::internal::table;
+
+fn main(value: table::Entry) -> void {
+    return;
+}
+`,
+		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(),
+		"`app::parser::internal::table` is internal to `app::parser`") {
+		t.Fatalf("got error %v, want internal module", err)
+	}
+}
+
+// TestLoadGraphAcceptsInternalImportInsideSubtree checks the other side of the
+// same rule: the subtree the directory belongs to reaches it.
+func TestLoadGraphAcceptsInternalImportInsideSubtree(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `fn main() -> void {
+    return;
+}
+`,
+		"src/parser/ast.kizu": `import app::parser::internal::table;
+
+pub fn first(entry: table::Entry) -> i64 {
+    return entry.value;
+}
+`,
+		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatalf("check failed: %v", err)
 	}
 }
 

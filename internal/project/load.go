@@ -18,15 +18,23 @@ func LoadProgram(graph Graph) (*ast.Program, error) {
 }
 
 // LoadProgramWithSources parses graph using source overrides keyed by module file path.
+//
+// std is loaded here too, as the package it is. Every frontend that reads a Kizu
+// program comes through this, so a program means the same thing whichever one
+// read it, and std needs no loader of its own.
 func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Program, error) {
 	checker := &graphChecker{
 		modules:         map[string]*moduleUnit{},
 		modulePaths:     map[string]bool{},
+		packages:        map[string]bool{},
 		types:           map[string]typeExport{},
 		functions:       map[string]functionExport{},
 		sourceOverrides: cleanSourceOverrides(sources),
 	}
-	if err := checker.load(graph); err != nil {
+	if err := checker.loadPackage(graph); err != nil {
+		return nil, err
+	}
+	if err := checker.loadStd(); err != nil {
 		return nil, err
 	}
 	if err := checker.collectTypes(); err != nil {
@@ -48,15 +56,23 @@ func LoadSource(file string, source string) (*ast.Program, error) {
 }
 
 type graphChecker struct {
-	packageRoot     string
-	modules         map[string]*moduleUnit
-	modulePaths     map[string]bool
+	modules     map[string]*moduleUnit
+	modulePaths map[string]bool
+	// packages names every package in this program, so an import of a package
+	// root can be told from one that names nothing.
+	packages map[string]bool
+	// order is the order declarations are handed on in. A module comes after
+	// what it is built on, and std comes before the package that imports it.
+	order           []string
 	types           map[string]typeExport
 	functions       map[string]functionExport
 	sourceOverrides map[string]string
 }
 
 type moduleUnit struct {
+	// pkg is the package this module belongs to, and the namespace its siblings
+	// reach it through.
+	pkg     string
 	path    string
 	file    string
 	program *ast.Program
@@ -66,9 +82,6 @@ type moduleUnit struct {
 	// namespaces is what name resolution sees: the imports plus the package root
 	// namespace, which is reachable without an import and is not an edge.
 	namespaces map[string]string
-	// stdImports are the names brought in from std. They bind like any import but
-	// are not edges in this package's graph.
-	stdImports map[string]string
 	// used records the namespaces resolution actually went through, so an import
 	// that nothing needed can be told from one that carried a name.
 	used map[string]bool
@@ -102,25 +115,21 @@ func (m *moduleUnit) qualify(name string) string {
 }
 
 // moduleNamespaces returns the namespaces module can name. ADR-0049 makes
-// [package].name the package root namespace, so every other module reaches the
-// root module's declarations by that name -- a module cannot import the package
-// it is part of, and treating the root as an import edge would make every
-// package with a non-empty root a cycle.
+// [package].name the package root namespace, so a module reaches its siblings
+// by that name whether or not a module answers to it -- a module cannot import
+// the package it is part of, and treating the root as an import edge would make
+// every package a cycle.
 func (c *graphChecker) moduleNamespaces(
 	module *moduleUnit,
 	imports map[string]string,
-	std map[string]string,
 ) map[string]string {
-	namespaces := make(map[string]string, len(imports)+len(std)+1)
+	namespaces := make(map[string]string, len(imports)+1)
 	for alias, path := range imports {
 		namespaces[alias] = path
 	}
-	for alias, path := range std {
-		namespaces[alias] = path
-	}
-	if c.packageRoot != "" && c.modulePaths[c.packageRoot] && module.path != c.packageRoot {
-		if _, taken := namespaces[c.packageRoot]; !taken {
-			namespaces[c.packageRoot] = c.packageRoot
+	if module.pkg != "" && module.path != module.pkg {
+		if _, taken := namespaces[module.pkg]; !taken {
+			namespaces[module.pkg] = module.pkg
 		}
 	}
 	return namespaces
@@ -136,18 +145,68 @@ type functionExport struct {
 	public bool
 }
 
-// load parses every source file and indexes module paths.
-func (c *graphChecker) load(graph Graph) error {
-	c.packageRoot = graph.Root
+// loadPackage parses one package's modules and records what they belong to.
+func (c *graphChecker) loadPackage(graph Graph) error {
+	if graph.PackageName != "" {
+		c.packages[graph.PackageName] = true
+	}
 	for _, module := range graph.Modules {
 		program, err := c.parseModule(module)
 		if err != nil {
 			return err
 		}
-		c.modules[module.Path] = &moduleUnit{path: module.Path, file: module.File, program: program}
+		c.modules[module.Path] = &moduleUnit{
+			pkg:     graph.PackageName,
+			path:    module.Path,
+			file:    module.File,
+			program: program,
+		}
 		c.modulePaths[module.Path] = true
+		c.order = append(c.order, module.Path)
 	}
 	return nil
+}
+
+// loadStd parses the std modules this program imports, and puts them before it.
+// What a program reaches is what its files declare they import, so a file that
+// imports nothing from std reads no std source at all.
+func (c *graphChecker) loadStd() error {
+	graph, err := StdGraph()
+	if err != nil {
+		return err
+	}
+	modules, err := stdModulesFor(graph, c.stdImportPaths())
+	if err != nil {
+		return err
+	}
+	before := append([]string{}, c.order...)
+	c.order = nil
+	if err := c.loadPackage(Graph{PackageName: graph.PackageName, Modules: modules}); err != nil {
+		return err
+	}
+	c.order = append(c.order, before...)
+	return nil
+}
+
+// stdImportPaths returns the std paths this program's modules declare they
+// import, in a stable order.
+func (c *graphChecker) stdImportPaths() []string {
+	seen := map[string]bool{}
+	paths := []string{}
+	for _, module := range sortedModuleUnits(c.modules) {
+		for _, decl := range module.program.Decls {
+			importDecl, ok := decl.(*ast.ImportDecl)
+			if !ok || importDecl.Path[0] != stdlib.Root {
+				continue
+			}
+			path := strings.Join(importDecl.Path, "::")
+			if !seen[path] {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
 }
 
 // parseModule parses one graph module from an override or its source file.
@@ -247,13 +306,12 @@ func declaredType(decl ast.Decl) (string, bool, bool) {
 func (c *graphChecker) program() (*ast.Program, error) {
 	merged := &ast.Program{}
 	for _, module := range sortedModuleUnits(c.modules) {
-		imports, std, err := c.resolveImports(module)
+		imports, err := c.resolveImports(module)
 		if err != nil {
 			return nil, err
 		}
 		module.imports = imports
-		module.stdImports = std
-		module.namespaces = c.moduleNamespaces(module, imports, std)
+		module.namespaces = c.moduleNamespaces(module, imports)
 	}
 	modules, err := c.orderedModules()
 	if err != nil {
@@ -272,12 +330,23 @@ func (c *graphChecker) program() (*ast.Program, error) {
 	return merged, nil
 }
 
+// orderedUnits returns modules in the order they were loaded: std before the
+// package that imports it, and inside each package a module after the ones it
+// is built on.
+func (c *graphChecker) orderedUnits() []*moduleUnit {
+	out := make([]*moduleUnit, 0, len(c.order))
+	for _, path := range c.order {
+		out = append(out, c.modules[path])
+	}
+	return out
+}
+
 // orderedModules returns dependency modules before modules that import them.
 func (c *graphChecker) orderedModules() ([]*moduleUnit, error) {
 	out := []*moduleUnit{}
 	visiting := map[string]bool{}
 	visited := map[string]bool{}
-	for _, module := range sortedModuleUnits(c.modules) {
+	for _, module := range c.orderedUnits() {
 		if err := c.visitModule(module, visiting, visited, &out); err != nil {
 			return nil, err
 		}
@@ -300,7 +369,13 @@ func (c *graphChecker) visitModule(
 	}
 	visiting[module.path] = true
 	for _, path := range sortedImportPaths(module.imports) {
-		if err := c.visitModule(c.modules[path], visiting, visited, out); err != nil {
+		imported, ok := c.modules[path]
+		if !ok {
+			// A package root binds a namespace without naming one module, so
+			// there is no single dependency to order this one after.
+			continue
+		}
+		if err := c.visitModule(imported, visiting, visited, out); err != nil {
 			return err
 		}
 	}
@@ -310,15 +385,9 @@ func (c *graphChecker) visitModule(
 	return nil
 }
 
-// resolveImports validates imports and returns last-segment aliases. An import
-// of std binds a name without becoming an edge in this package's module graph:
-// std is a different package, so it is not part of the ordering this graph
-// decides, and it can never take part in a cycle within it.
-func (c *graphChecker) resolveImports(
-	module *moduleUnit,
-) (map[string]string, map[string]string, error) {
+// resolveImports validates imports and returns last-segment aliases.
+func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, error) {
 	imports := map[string]string{}
-	std := map[string]string{}
 	for _, decl := range module.program.Decls {
 		importDecl, ok := decl.(*ast.ImportDecl)
 		if !ok {
@@ -327,49 +396,27 @@ func (c *graphChecker) resolveImports(
 		path := strings.Join(importDecl.Path, "::")
 		alias := importDecl.Path[len(importDecl.Path)-1]
 		if _, taken := imports[alias]; taken {
-			return nil, nil, duplicateImport(alias, module)
+			return nil, duplicateImport(alias, module)
 		}
-		if _, taken := std[alias]; taken {
-			return nil, nil, duplicateImport(alias, module)
-		}
-		bound, err := c.bindImport(module, path)
-		if err != nil {
-			return nil, nil, err
-		}
-		if bound == stdBinding {
-			std[alias] = path
-			continue
+		if err := c.bindImport(module, path); err != nil {
+			return nil, err
 		}
 		imports[alias] = path
 	}
-	if err := rejectImportShadowing(module, imports); err != nil {
-		return nil, nil, err
-	}
-	return imports, std, rejectImportShadowing(module, std)
+	return imports, rejectImportShadowing(module, imports)
 }
 
-// importKind separates an import that is an edge in this graph from one that
-// only brings a name in from another package.
-type importKind int
-
-const (
-	packageBinding importKind = iota + 1
-	stdBinding
-)
-
-// bindImport reports which package an import names, and rejects one that names
-// nothing. An import that resolves to neither this package nor std has no
-// module behind it, so the name it would bind would stand for nothing.
-func (c *graphChecker) bindImport(module *moduleUnit, path string) (importKind, error) {
-	if c.modulePaths[path] {
-		return packageBinding, nil
+// bindImport rejects an import that names nothing or names something the module
+// may not reach. An import that resolves to no module and no package has
+// nothing behind it, so the name it would bind would stand for nothing.
+func (c *graphChecker) bindImport(module *moduleUnit, path string) error {
+	if !c.modulePaths[path] && !c.packages[path] {
+		return fmt.Errorf("module error: missing import `%s` in `%s`", path, module.name())
 	}
-	if _, ok, err := stdlib.Importable(path); err != nil {
-		return 0, err
-	} else if ok {
-		return stdBinding, nil
+	if !ReachableFrom(path, module.path) {
+		return internalModuleError(path, module)
 	}
-	return 0, fmt.Errorf("module error: missing import `%s` in `%s`", path, module.path)
+	return nil
 }
 
 // duplicateImport reports two imports competing for one name.
@@ -383,7 +430,7 @@ func duplicateImport(alias string, module *moduleUnit) error {
 // program never goes. It runs after resolution, so what counts as used is what
 // resolution actually went through rather than a second reading of the source.
 func (m *moduleUnit) rejectUnusedImports() error {
-	for _, alias := range sortedAliases(m.imports, m.stdImports) {
+	for _, alias := range sortedAliases(m.imports) {
 		if m.used[alias] {
 			continue
 		}
@@ -394,12 +441,9 @@ func (m *moduleUnit) rejectUnusedImports() error {
 
 // sortedAliases lists the names a module's imports bind, in a stable order so
 // that a file with two unused imports always reports the same one first.
-func sortedAliases(imports map[string]string, std map[string]string) []string {
-	aliases := make([]string, 0, len(imports)+len(std))
+func sortedAliases(imports map[string]string) []string {
+	aliases := make([]string, 0, len(imports))
 	for alias := range imports {
-		aliases = append(aliases, alias)
-	}
-	for alias := range std {
 		aliases = append(aliases, alias)
 	}
 	sortStrings(aliases)

@@ -7,10 +7,8 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
-	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
-	"github.com/kizu-lang/kizu/internal/parser"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -970,21 +968,12 @@ func unionNewModule(instr ir.Instr) *ir.Module {
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()
-	p := parser.New(lexer.New(source))
-	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		t.Fatalf("parse failed: %v", p.Errors())
-	}
 	// std container method signatures come from std's declarations, so a
-	// program is only checkable with std merged in, as every real path does.
-	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	// program is only checkable with std loaded, as every real path does.
+	program, err := project.LoadSource("", withStdImport(source))
 	if err != nil {
-		t.Fatalf("load std: %v", err)
+		t.Fatalf("load failed: %v", err)
 	}
-	if len(stdErrs) > 0 {
-		t.Fatalf("load std: %v", stdErrs)
-	}
-	program.Decls = append(stdDecls, program.Decls...)
 	if err := types.New().Check(program); err != nil {
 		t.Fatalf("type check failed: %v", err)
 	}
@@ -1325,3 +1314,26 @@ kizu.main.exit.fail.6:
 kizu.main.exit.ok.5:
   ret i32 0
 }`
+
+// withStdImport gives a snippet the root import a file needs to spell full std
+// paths. The snippets are about what the checker does with std types, not about
+// import lines, and a file that writes `std::mem::page_allocator` has to bring
+// the root into scope the same way any other file does.
+func withStdImport(source string) string {
+	if strings.Contains(source, "import std;") || !writesFullStdPath(source) {
+		return source
+	}
+	return "import std;\n" + source
+}
+
+// writesFullStdPath reports whether a snippet spells a std path in code rather
+// than only naming one in an import declaration.
+func writesFullStdPath(source string) bool {
+	for _, line := range strings.Split(source, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "import ") &&
+			strings.Contains(line, "std::") {
+			return true
+		}
+	}
+	return false
+}

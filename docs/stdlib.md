@@ -160,16 +160,23 @@ for parallel work once a real execution path exists.
 | `std::io` | `blocking`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `lib/kizu/std/src/io.kizu` over `std::internal::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `lib/kizu/std/src/process.kizu`; only arg count, arg, and env use host primitives | keep host process access primitives trusted |
 
-## Source Layout Target
+## Source Layout
 
-The eventual Kizu-written stdlib should live under `std/`:
+std is a package. `internal/project` loads it the same way it loads a program's
+own package, and `internal/stdlib` only says which directory the library tree
+is.
 
 ```text
-std/
+lib/kizu/std/
   README.md
   kizu.toml
   src/
-    builtin.kizu
+    internal/
+      builtin.kizu      std::internal::builtin -- reachable from std only
+    path/
+      internal/
+        bits.kizu       std::path::internal::bits -- reachable from std::path only
+    arena.kizu
     mem.kizu
     array.kizu
     string.kizu
@@ -180,6 +187,10 @@ std/
     io.kizu
     process.kizu
 ```
+
+A module below an `internal` directory is reachable from the subtree that
+directory hangs off and nowhere else. That is the whole visibility rule: the
+manifest lists no exports.
 
 The compiler still reserves the root namespace `std`. User packages cannot be
 named `std`.

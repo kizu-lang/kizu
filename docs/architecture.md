@@ -23,7 +23,7 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   token, lexer, parser, ast     字句・構文・AST
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
-  project, stdlib, manifest     パッケージ/モジュール解決、std 取り込み、kizu.toml
+  project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
   unsafecap                     @unsafe capability の定義
   fmt, diagnostic, buildcache, cimport, lsp
@@ -40,7 +40,7 @@ docs/, docs/adr/     設計ドキュメントと ADR
 ```
 source.kizu
   → internal/lexer → internal/parser → internal/ast
-  → internal/stdlib が lib/kizu/std/src/*.kizu の宣言を合流(demand-load)
+  → internal/project が import した std module を合流(std も 1 つの package)
   → internal/types(型)→ internal/ownership(所有権)
   → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
                            → internal/wasm(wasm32-wasi)
@@ -65,9 +65,11 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 - 実行時の組み込み(print、メモリ、fs、task 等)は Go 実装が提供し、
   `lib/kizu/std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
-- Go 側は `internal/stdlib`(+ `internal/types` の `knownTypes`)経由で std の宣言を
-  取り込みます。std に public 型を足すときは **`knownTypes` の更新が必要**
-  (漏れると checked コードでその型名が `unknown type` になります)。
+- Go 側は `internal/project`(+ `internal/types` の `knownTypes`)経由で std の宣言を
+  取り込みます。std は利用者の package と同じ loader を通り、`internal/stdlib` が
+  持つのは「ツリーがどこにあるか」だけです。std に public 型を足すときは
+  **`knownTypes` の更新が必要**(漏れると checked コードでその型名が
+  `unknown type` になります)。
 - std が宣言する method 署名は `internal/stdmethod` が、その裏の `std::internal::builtin::*`
   primitive の形は `internal/stdprim` が一本化します。checker と backend は署名を
   書き直さずにここを読みます。

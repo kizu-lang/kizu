@@ -1,8 +1,12 @@
-// Package project reads a module graph and hands the rest of the compiler one
-// program.
+// Package project reads packages and hands the rest of the compiler one program.
 //
-// modules.go parses kizu.toml and resolves source files into module paths.
-// Reading those modules is then three jobs, one per file: load.go turns them
-// into declarations and collects what each exports, qualify.go rewrites every
+// modules.go parses kizu.toml and resolves source files into module paths, and
+// answers which of them a package keeps to itself. std.go finds the standard
+// library and reads the part of it a program imports: std is a package with a
+// manifest and a source tree, so it comes through here rather than through a
+// loader of its own.
+//
+// Reading a module is then three jobs, one per file: load.go turns sources into
+// declarations and collects what each module exports, qualify.go rewrites every
 // name to its module path, and resolve.go answers what a written name refers to.
 package project

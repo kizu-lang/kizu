@@ -14,7 +14,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
-	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -30,9 +29,6 @@ func Analyze(source string) []Diagnostic {
 	program, err := project.LoadSource(analyzedFile, source)
 	if err != nil {
 		return []Diagnostic{diagnosticFromError(err)}
-	}
-	if diagnostics := appendStdDecls(program, []string{source}); len(diagnostics) > 0 {
-		return diagnostics
 	}
 	return checkProgramDiagnostics(program)
 }
@@ -69,13 +65,6 @@ func (s *Server) analyzeDocument(uri string) []Diagnostic {
 	program, err := project.LoadProgramWithSources(graph, s.packageSourceOverrides(graph))
 	if err != nil {
 		return []Diagnostic{diagnosticAtStart(err.Error())}
-	}
-	sources, err := s.packageSources(graph)
-	if err != nil {
-		return []Diagnostic{diagnosticAtStart(err.Error())}
-	}
-	if diagnostics := appendStdDecls(program, sources); len(diagnostics) > 0 {
-		return diagnostics
 	}
 	return checkProgramDiagnostics(program)
 }
@@ -156,25 +145,6 @@ func (s *Server) packageSourceOverrides(graph project.Graph) map[string]string {
 	return sources
 }
 
-// packageSources returns graph source text, preferring open buffers over disk.
-func (s *Server) packageSources(graph project.Graph) ([]string, error) {
-	overrides := s.packageSourceOverrides(graph)
-	sources := make([]string, 0, len(graph.Modules))
-	for _, module := range graph.Modules {
-		cleanPath := filepath.Clean(module.File)
-		if source, ok := overrides[cleanPath]; ok {
-			sources = append(sources, source)
-			continue
-		}
-		data, err := os.ReadFile(module.File)
-		if err != nil {
-			return nil, err
-		}
-		sources = append(sources, string(data))
-	}
-	return sources, nil
-}
-
 // findPackageRoot finds the nearest parent directory containing kizu.toml.
 func findPackageRoot(path string) (string, bool, error) {
 	dir := filepath.Dir(filepath.Clean(path))
@@ -230,19 +200,6 @@ func filePathFromURI(rawURI string) (string, bool) {
 func parseSource(source string) (*ast.Program, []parser.Diagnostic) {
 	p := parser.New(lexer.New(source))
 	return p.ParseProgram(), p.Diagnostics()
-}
-
-// appendStdDecls prepends referenced std wrappers to match CLI check/run/test.
-func appendStdDecls(program *ast.Program, sources []string) []Diagnostic {
-	stdDecls, stdErrs, err := stdlib.DeclsForSources(sources)
-	if err != nil {
-		return []Diagnostic{diagnosticAtStart(err.Error())}
-	}
-	if len(stdErrs) > 0 {
-		return []Diagnostic{diagnosticFromParseError(stdErrs[0])}
-	}
-	program.Decls = append(stdDecls, program.Decls...)
-	return nil
 }
 
 // diagnosticFromParseError converts a parser message into an LSP diagnostic.
