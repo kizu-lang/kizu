@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -77,7 +78,7 @@ func (c *graphChecker) declaredFunctionName(
 		return "", fmt.Errorf("module error: `%s` is not a type a method can be declared on in `%s`",
 			typ.Text(decl.Params[0].TypeName), module.name())
 	}
-	return base + "." + decl.Name, nil
+	return stdmethod.MethodName(base, decl.Name), nil
 }
 
 // receiverBase names the type a receiver stands for, with borrows and static
@@ -578,7 +579,7 @@ func (c *graphChecker) qualifyCallee(
 	module *moduleUnit,
 	expr ast.Expression,
 ) (ast.Expression, error) {
-	if ident, ok := expr.(*ast.IdentExpr); ok && declaresFunction(module, ident.Name) {
+	if ident, ok := expr.(*ast.IdentExpr); ok && c.declaresFunction(module, ident.Name) {
 		return &ast.IdentExpr{Name: module.qualify(ident.Name)}, nil
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok && field.Namespace {
@@ -596,15 +597,12 @@ func (c *graphChecker) qualifyCallee(
 	return c.qualifyExpr(module, expr)
 }
 
-// declaresFunction reports whether module has a local top-level function.
-func declaresFunction(module *moduleUnit, name string) bool {
-	for _, decl := range module.program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if ok && !fn.Receiver && fn.Name == name {
-			return true
-		}
-	}
-	return false
+// declaresFunction reports whether module has a local top-level function. It
+// reads the index collectFunctions built, which holds exactly the functions a
+// module names -- methods are filed under their receiver and are not among them.
+func (c *graphChecker) declaresFunction(module *moduleUnit, name string) bool {
+	_, ok := c.functions[module.qualify(name)]
+	return ok
 }
 
 // qualifyFieldExpr rewrites namespace receivers while preserving field names.

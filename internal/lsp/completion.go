@@ -413,8 +413,7 @@ func (idx completionIndex) scan(source string) {
 			}
 			i = skipDeclarationBody(tokens, i+1)
 		case token.Impl:
-			next := idx.scanImpl(tokens, i)
-			i = next
+			// An assertion declares no symbol; the loop steps past it.
 		}
 	}
 }
@@ -533,43 +532,6 @@ func (idx completionIndex) scanUnion(tokens []token.Token, start int) int {
 	return brace
 }
 
-// scanImpl collects methods from a contract impl block.
-func (idx completionIndex) scanImpl(tokens []token.Token, start int) int {
-	typeName := ""
-	brace := -1
-	for i := start + 1; i < len(tokens); i++ {
-		switch tokens[i].Type {
-		case token.For:
-			typeName, brace = readTypeBeforeBrace(tokens, i+1)
-			i = brace
-		case token.LBrace:
-			typeName = tokenText(tokens[start+1 : i])
-			brace = i
-		}
-		if brace >= 0 {
-			break
-		}
-	}
-	if brace < 0 {
-		return start
-	}
-	typeName = normalizeCompletionType(typeName)
-	for i := brace + 1; i < len(tokens) && tokens[i].Type != token.EOF; i++ {
-		if tokens[i].Type == token.RBrace {
-			return i
-		}
-		if tokens[i].Type != token.Function {
-			continue
-		}
-		fn, _, next, ok := readFunction(tokens, i)
-		if ok {
-			idx.methods[typeName] = append(idx.methods[typeName], fn)
-		}
-		i = skipDeclarationBody(tokens, next)
-	}
-	return brace
-}
-
 // inferLocalBindings collects simple locals and params visible before position.
 func inferLocalBindings(source string, position Position) []localBinding {
 	prefix := sourcePrefixAtPosition(source, position)
@@ -667,11 +629,10 @@ func readReceiver(tokens []token.Token, start int) ([]localBinding, int) {
 	if start+1 >= len(tokens) || tokens[start+1].Type != token.LParen {
 		return nil, start + 1
 	}
-	close := skipBalanced(tokens, start+1, token.LParen, token.RParen)
+	params, close := readFunctionParams(tokens, start)
 	if close <= start+1 {
 		return nil, start + 1
 	}
-	params, _ := readFunctionParams(tokens, start)
 	if len(params) != 1 {
 		return nil, close + 1
 	}
@@ -1001,16 +962,6 @@ func readImportPath(tokens []token.Token, start int) ([]string, int) {
 		i++
 	}
 	return parts, start
-}
-
-// readTypeBeforeBrace reads a type spelling before the next block brace.
-func readTypeBeforeBrace(tokens []token.Token, start int) (string, int) {
-	for i := start; i < len(tokens); i++ {
-		if tokens[i].Type == token.LBrace {
-			return tokenText(tokens[start:i]), i
-		}
-	}
-	return "", -1
 }
 
 // readTypeUntil reads a type spelling until one of the stop tokens.

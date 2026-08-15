@@ -130,7 +130,6 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
-
 		}
 	}
 	return nil
@@ -163,7 +162,6 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 			if err := c.checkTestDecl(d); err != nil {
 				errs = append(errs, err)
 			}
-
 		}
 	}
 	return errs
@@ -238,14 +236,13 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 // collectFunctions registers top-level signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
-		switch d := decl.(type) {
-		case *ast.FunctionDecl:
-			c.functions[d.Name] = functionInfoFromDecl(d.Name, d)
-			if err := c.collectReceiverMethod(d); err != nil {
-				return err
-			}
-		default:
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
 			continue
+		}
+		c.functions[fn.Name] = functionInfoFromDecl(fn.Name, fn)
+		if err := c.collectReceiverMethod(fn); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -254,8 +251,11 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 // collectReceiverMethod files a `fn (self: T) name(...)` declaration under the
 // type it is a method on. Its name already says which that is.
 func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
+	if !decl.Receiver {
+		return nil
+	}
 	receiver, name, ok := stdmethod.SplitMethodName(decl.Name)
-	if !decl.Receiver || !ok {
+	if !ok {
 		return nil
 	}
 	methods := c.impls[receiver]
@@ -1939,7 +1939,7 @@ func (c *Checker) checkFsBuiltin(
 	case "std::internal::builtin::fs_create_dir",
 		"std::internal::builtin::fs_remove_dir",
 		"std::internal::builtin::fs_remove_file":
-		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "std::fs::Error!void")
+		return c.checkFsPathOnly(name, args, env, "std::fs::Error!void")
 	case "std::internal::builtin::fs_rename":
 		return c.checkFsRename(args, env)
 	default:

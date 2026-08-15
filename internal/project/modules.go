@@ -130,6 +130,10 @@ func ReachableFrom(path string, from string) bool {
 // the module out of a longer path so that a name inside the module is refused
 // under the module's own name rather than its own.
 func internalModule(path string) (string, string, bool) {
+	// Almost no path has one, and this is asked of every name a module resolves.
+	if !strings.Contains(path, InternalSegment) {
+		return "", "", false
+	}
 	parts := strings.Split(path, "::")
 	for idx, part := range parts {
 		if idx == 0 || part != InternalSegment {

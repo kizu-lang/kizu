@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -140,7 +141,7 @@ func derefType(name string) string {
 
 // implMethodName returns the symbol used for a concrete impl method.
 func implMethodName(typeName string, method string) string {
-	return typeName + "." + method
+	return stdmethod.MethodName(typeName, method)
 }
 
 // runtimeBuiltinReturnType records checked host-runtime builtin result types.

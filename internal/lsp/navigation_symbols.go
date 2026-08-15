@@ -40,8 +40,6 @@ func documentSymbolAt(tokens []token.Token, start int) (documentSymbol, int, boo
 		return variantDocumentSymbol(tokens, start, "union", symbolKindEnum)
 	case token.Contract:
 		return namedDocumentSymbol(tokens, start, "contract", symbolKindInterface)
-	case token.Impl:
-		return implDocumentSymbol(tokens, start)
 	}
 	return documentSymbol{}, start, false
 }
@@ -186,31 +184,4 @@ func declarationChildren(decls map[string]navigationDeclaration) []documentSymbo
 		})
 	}
 	return children
-}
-
-// implDocumentSymbol builds an outline item and method children for an impl block.
-func implDocumentSymbol(tokens []token.Token, start int) (documentSymbol, int, bool) {
-	typeName, brace := implTarget(tokens, start)
-	if brace < 0 {
-		return documentSymbol{}, start, false
-	}
-	end := skipBalanced(tokens, brace, token.LBrace, token.RBrace)
-	symbol := documentSymbol{
-		Name:           "impl " + normalizeCompletionType(typeName),
-		Kind:           symbolKindClass,
-		Range:          rangeFromTokenSpan(tokens, start, end),
-		SelectionRange: rangeFromTokenSpan(tokens, start, brace),
-	}
-	for i := brace + 1; i < end; i++ {
-		if tokens[i].Type != token.Function {
-			continue
-		}
-		child, next, ok := functionDocumentSymbol(tokens, i)
-		if ok {
-			child.Kind = symbolKindMethod
-			symbol.Children = append(symbol.Children, child)
-		}
-		i = next
-	}
-	return symbol, end, true
 }

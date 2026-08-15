@@ -67,15 +67,13 @@ func collectImplementations(
 		return []location{}
 	}
 	locations := []location{}
-	for _, src := range sources {
-		methods := receiverMethodsIn(lexCompletionTokens(src.source))
-		for _, typeName := range sortedTypeNames(methods) {
-			if !coversAll(methods[typeName], want) {
-				continue
-			}
-			locations = append(locations,
-				implementationLocation(index, src, typeName, methods[typeName], methodName)...)
+	for _, typeName := range sortedTypeNames(index.methods) {
+		methods := index.methods[typeName]
+		if !coversAll(methods, want) {
+			continue
 		}
+		locations = append(locations,
+			implementationLocation(index, typeName, methods, methodName)...)
 	}
 	return locations
 }
@@ -84,14 +82,13 @@ func collectImplementations(
 // the cursor asked about.
 func implementationLocation(
 	index navigationIndex,
-	src navigationSource,
 	typeName string,
-	methods map[string]Range,
+	methods map[string]navigationDeclaration,
 	methodName string,
 ) []location {
 	if methodName != "" {
-		if rng, ok := methods[methodName]; ok {
-			return []location{{URI: src.uri, Range: rng}}
+		if decl, ok := methods[methodName]; ok {
+			return []location{{URI: decl.uri, Range: decl.rng}}
 		}
 		return nil
 	}
@@ -105,26 +102,44 @@ func implementationLocation(
 func contractMethodNames(sources []navigationSource, contractName string) []string {
 	for _, src := range sources {
 		tokens := lexCompletionTokens(src.source)
-		for i := 0; i < len(tokens); i++ {
-			if tokens[i].Type != token.Contract {
-				continue
+		for _, body := range contractBodies(tokens) {
+			if body.name == contractName {
+				return methodNamesBetween(tokens, body.brace, body.end)
 			}
-			nameIdx := nextIdentifierIndex(tokens, i+1)
-			brace := -1
-			if nameIdx >= 0 {
-				brace = findNextToken(tokens, nameIdx+1, token.LBrace)
-			}
-			if brace < 0 {
-				continue
-			}
-			end := skipBalanced(tokens, brace, token.LBrace, token.RBrace)
-			if tokens[nameIdx].Literal == contractName {
-				return methodNamesBetween(tokens, brace, end)
-			}
-			i = end
 		}
 	}
 	return nil
+}
+
+// contractBody is one contract declaration and the token bounds of its body.
+type contractBody struct {
+	name  string
+	brace int
+	end   int
+}
+
+// contractBodies returns every contract one source declares. Both readers of a
+// contract body -- what it requires, and which one encloses a position -- ask
+// the token stream the same question, so they ask it in one place.
+func contractBodies(tokens []token.Token) []contractBody {
+	bodies := []contractBody{}
+	for i := 0; i < len(tokens); i++ {
+		if tokens[i].Type != token.Contract {
+			continue
+		}
+		nameIdx := nextIdentifierIndex(tokens, i+1)
+		if nameIdx < 0 {
+			continue
+		}
+		brace := findNextToken(tokens, nameIdx+1, token.LBrace)
+		if brace < 0 {
+			continue
+		}
+		end := skipBalanced(tokens, brace, token.LBrace, token.RBrace)
+		bodies = append(bodies, contractBody{name: tokens[nameIdx].Literal, brace: brace, end: end})
+		i = end
+	}
+	return bodies
 }
 
 // methodNamesBetween lists the `fn name` declarations in a contract body.
@@ -141,29 +156,8 @@ func methodNamesBetween(tokens []token.Token, brace int, end int) []string {
 	return names
 }
 
-// receiverMethodsIn maps each type to the methods one source declares on it.
-func receiverMethodsIn(tokens []token.Token) map[string]map[string]Range {
-	methods := map[string]map[string]Range{}
-	for i := 0; i < len(tokens); i++ {
-		if tokens[i].Type != token.Function {
-			continue
-		}
-		receiver, nameAt := readReceiver(tokens, i)
-		if len(receiver) == 0 || nameAt >= len(tokens) || tokens[nameAt].Type != token.Ident {
-			continue
-		}
-		typeName := receiverType(receiver)
-		if methods[typeName] == nil {
-			methods[typeName] = map[string]Range{}
-		}
-		methods[typeName][tokens[nameAt].Literal] = tokenRange(tokens[nameAt])
-		i = skipDeclarationBody(tokens, declarationHeaderEnd(tokens, i))
-	}
-	return methods
-}
-
 // coversAll reports whether a type declares every method a contract asks for.
-func coversAll(methods map[string]Range, want []string) bool {
+func coversAll(methods map[string]navigationDeclaration, want []string) bool {
 	for _, name := range want {
 		if _, ok := methods[name]; !ok {
 			return false
@@ -173,7 +167,7 @@ func coversAll(methods map[string]Range, want []string) bool {
 }
 
 // sortedTypeNames lists implementing types in a stable order.
-func sortedTypeNames(methods map[string]map[string]Range) []string {
+func sortedTypeNames(methods map[string]map[string]navigationDeclaration) []string {
 	names := make([]string, 0, len(methods))
 	for name := range methods {
 		names = append(names, name)
@@ -184,25 +178,12 @@ func sortedTypeNames(methods map[string]map[string]Range) []string {
 
 // enclosingContractName returns the contract whose body contains position.
 func enclosingContractName(tokens []token.Token, position Position) string {
-	for i := 0; i < len(tokens); i++ {
-		if tokens[i].Type != token.Contract {
-			continue
-		}
-		nameIdx := nextIdentifierIndex(tokens, i+1)
-		if nameIdx < 0 {
-			continue
-		}
-		brace := findNextToken(tokens, nameIdx+1, token.LBrace)
-		if brace < 0 {
-			continue
-		}
-		end := skipBalanced(tokens, brace, token.LBrace, token.RBrace)
-		bodyStart := tokenRange(tokens[brace]).End
-		bodyEnd := tokenRange(tokens[end]).Start
+	for _, body := range contractBodies(tokens) {
+		bodyStart := tokenRange(tokens[body.brace]).End
+		bodyEnd := tokenRange(tokens[body.end]).Start
 		if positionLessEqual(bodyStart, position) && positionBefore(position, bodyEnd) {
-			return tokens[nameIdx].Literal
+			return body.name
 		}
-		i = end
 	}
 	return ""
 }

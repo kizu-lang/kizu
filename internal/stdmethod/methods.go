@@ -98,9 +98,15 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 	}
 }
 
+// MethodName is what a method is filed under: the type it is a method on and the
+// name a call spells. This and SplitMethodName are the one place that pairing is
+// written down.
+func MethodName(receiver string, name string) string {
+	return receiver + "." + name
+}
+
 // SplitMethodName separates a method's name into the type it is a method on and
-// the name a call spells. A method is filed as `<type>.<name>`, which is the one
-// place that pairing is written down.
+// the name a call spells.
 func SplitMethodName(name string) (string, string, bool) {
 	idx := strings.LastIndex(name, ".")
 	if idx < 0 {

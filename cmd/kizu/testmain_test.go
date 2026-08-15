@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdlib/stdlibtest"
 	"testing"
 )
 
@@ -30,7 +31,7 @@ func runTestMain(m *testing.M) (int, error) {
 	// it. Point it at the repository's library tree the way a user points at an
 	// installed one. Setting it here rather than on each command keeps it in
 	// os.Environ(), which the tests that build their own environment copy.
-	if err := os.Setenv(stdlib.LibDirEnv, stdlib.RepoLibDir()); err != nil {
+	if err := os.Setenv(stdlib.LibDirEnv, stdlibtest.RepoLibDir()); err != nil {
 		return 0, err
 	}
 	dir, err := os.MkdirTemp("", "kizu-test-bin-")

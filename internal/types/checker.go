@@ -313,7 +313,6 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
-
 		}
 	}
 	return nil
@@ -347,7 +346,6 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 			if err := c.checkTestDecl(d); err != nil {
 				errs = append(errs, err)
 			}
-
 		}
 	}
 	return errs
@@ -427,8 +425,11 @@ func (c *Checker) collectMethodDecl(decl ast.Decl) error {
 // a method under its receiver, so `app::Trace.deinit` is `deinit` on
 // `app::Trace` and needs no second reading of the receiver.
 func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
+	if !decl.Receiver {
+		return nil
+	}
 	receiver, name, ok := stdmethod.SplitMethodName(decl.Name)
-	if !decl.Receiver || !ok {
+	if !ok {
 		return nil
 	}
 	methods := c.impls[receiver]
@@ -1176,7 +1177,7 @@ func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 	// A contract writes no receiver but every method has one, so `self` names it
 	// there. A method declared with a receiver slot has it among its parameters
 	// already, which is why this only speaks for the ones that do not.
-	if fn.ReturnBorrow == receiverName && len(fn.Params) == 0 {
+	if fn.ReturnBorrow == receiverName && !fn.Receiver {
 		return nil
 	}
 	return errorf("type error: function `%s` borrows unknown source `%s`",
@@ -4636,7 +4637,7 @@ func userCallArityError(name string, fn *functionType, got int) error {
 		paramName := fn.sig.Params[0].Name
 		if paramName != "" {
 			return errorf("type error: `%s` expects %s",
-				diagnosticName(name), paramName)
+				name, paramName)
 		}
 	}
 	return errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), got)
@@ -4651,22 +4652,14 @@ func userCallArgError(name string, fn *functionType, idx int, want Type, got Typ
 		if paramName != "" {
 			if strings.HasPrefix(name, "std::fs::") {
 				return errorf("type error: `%s` expects %s %s, got %s",
-					diagnosticName(name), want, paramName, got)
+					name, want, paramName, got)
 			}
 			return errorf("type error: `%s` %s expects %s, got %s",
-				diagnosticName(name), paramName, want, got)
+				name, paramName, want, got)
 		}
 	}
 	return errorf("type error: arg %d of `%s` expects %s, got %s",
 		idx+1, name, want, got)
-}
-
-// diagnosticName formats internal qualified names as user-facing paths.
-func diagnosticName(name string) string {
-	if strings.HasPrefix(name, "std::") {
-		return strings.ReplaceAll(name, ".", "::")
-	}
-	return name
 }
 
 // checkUnionConstructorCall validates Union.Variant(payload) construction.
@@ -5068,7 +5061,7 @@ func errorSetReceiver(
 	if !ok {
 		return nil, false
 	}
-	set, ok := sets[strings.ReplaceAll(name, ".", "::")]
+	set, ok := sets[name]
 	return set, ok
 }
 
@@ -5731,7 +5724,8 @@ func (c *Checker) checkDynMethodCall(
 	if contract == nil || contract.methods[name] == nil {
 		return "", errorf("type error: `dyn %s` has no method `%s`", contractName, name)
 	}
-	return c.checkContractMethodArgs(contract.methods[name], span, args, env, unsafe)
+	// A contract writes no receiver, so every parameter it declares is an argument.
+	return c.checkCallableArgs(contract.methods[name], 0, span, args, env, unsafe)
 }
 
 // checkMethodArgs validates method-call arguments after the implicit self receiver.
@@ -5751,18 +5745,6 @@ func (c *Checker) checkMethodArgs(
 			method.name, method.params[0], receiver)
 	}
 	return c.checkCallableArgs(method, 1, span, args, env, unsafe)
-}
-
-// checkContractMethodArgs validates a call through `&dyn Contract`. A contract
-// method writes no receiver, so every parameter it declares is an argument.
-func (c *Checker) checkContractMethodArgs(
-	method *functionType,
-	span ast.Span,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeCaps,
-) (Type, error) {
-	return c.checkCallableArgs(method, 0, span, args, env, unsafe)
 }
 
 // checkCallableArgs validates the arguments a call passes, starting at the

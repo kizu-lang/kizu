@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -25,7 +26,6 @@ func LoadProgram(graph Graph) (*ast.Program, error) {
 func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Program, error) {
 	checker := &graphChecker{
 		modules:         map[string]*moduleUnit{},
-		modulePaths:     map[string]bool{},
 		packages:        map[string]bool{},
 		types:           map[string]typeExport{},
 		functions:       map[string]functionExport{},
@@ -56,8 +56,7 @@ func LoadSource(file string, source string) (*ast.Program, error) {
 }
 
 type graphChecker struct {
-	modules     map[string]*moduleUnit
-	modulePaths map[string]bool
+	modules map[string]*moduleUnit
 	// packages names every package in this program, so an import of a package
 	// root can be told from one that names nothing.
 	packages map[string]bool
@@ -161,7 +160,6 @@ func (c *graphChecker) loadPackage(graph Graph) error {
 			file:    module.File,
 			program: program,
 		}
-		c.modulePaths[module.Path] = true
 		c.order = append(c.order, module.Path)
 	}
 	return nil
@@ -175,11 +173,14 @@ func (c *graphChecker) loadStd() error {
 	if err != nil {
 		return err
 	}
-	modules, err := stdModulesFor(graph, c.stdImportPaths())
+	modules, sources, err := stdModulesFor(graph, c.stdImportPaths())
 	if err != nil {
 		return err
 	}
-	before := append([]string{}, c.order...)
+	// The walk that decided which modules to load already read them, so the
+	// parse takes that text rather than opening the same files again.
+	c.addSourceOverrides(sources)
+	before := c.order
 	c.order = nil
 	if err := c.loadPackage(Graph{PackageName: graph.PackageName, Modules: modules}); err != nil {
 		return err
@@ -234,6 +235,17 @@ func parseModuleSource(file string, source string) (*ast.Program, error) {
 		return nil, &diagnostics[0]
 	}
 	return program, nil
+}
+
+// addSourceOverrides records source text a caller already read, keyed the way
+// parseModule looks it up.
+func (c *graphChecker) addSourceOverrides(sources map[string]string) {
+	if c.sourceOverrides == nil {
+		c.sourceOverrides = make(map[string]string, len(sources))
+	}
+	for path, source := range sources {
+		c.sourceOverrides[filepath.Clean(path)] = source
+	}
 }
 
 // cleanSourceOverrides normalizes source override file paths for graph lookups.
@@ -412,7 +424,7 @@ func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, er
 // may not reach. An import that resolves to no module and no package has
 // nothing behind it, so the name it would bind would stand for nothing.
 func (c *graphChecker) bindImport(module *moduleUnit, path string) error {
-	if !c.modulePaths[path] && !c.packages[path] {
+	if _, ok := c.modules[path]; !ok && !c.packages[path] {
 		return fmt.Errorf("module error: missing import `%s` in `%s`", path, module.name())
 	}
 	if !ReachableFrom(path, module.path) {
@@ -448,7 +460,7 @@ func sortedAliases(imports map[string]string) []string {
 	for alias := range imports {
 		aliases = append(aliases, alias)
 	}
-	sortStrings(aliases)
+	sort.Strings(aliases)
 	return aliases
 }
 

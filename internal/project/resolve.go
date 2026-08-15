@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -316,7 +317,7 @@ func sortedModuleUnits(modules map[string]*moduleUnit) []*moduleUnit {
 	for path := range modules {
 		paths = append(paths, path)
 	}
-	sortStrings(paths)
+	sort.Strings(paths)
 	out := make([]*moduleUnit, 0, len(paths))
 	for _, path := range paths {
 		out = append(out, modules[path])
@@ -330,15 +331,6 @@ func sortedImportPaths(imports map[string]string) []string {
 	for _, path := range imports {
 		paths = append(paths, path)
 	}
-	sortStrings(paths)
+	sort.Strings(paths)
 	return paths
-}
-
-// sortStrings sorts values without exposing a helper dependency to callers.
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
 }

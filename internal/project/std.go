@@ -63,11 +63,11 @@ func stdModule(path string) (bool, error) {
 // after the modules it is built on. A program pays for the part of std it
 // imports rather than for all of it: loading every module costs a third of a
 // check and twenty kilobytes of every binary.
-func stdModulesFor(graph Graph, imports []string) ([]Module, error) {
+func stdModulesFor(graph Graph, imports []string) ([]Module, map[string]string, error) {
 	loader := &stdLoader{
-		files:    map[string]string{},
-		visited:  map[string]bool{},
-		visiting: map[string]bool{},
+		files:   map[string]string{},
+		visited: map[string]bool{},
+		sources: map[string]string{},
 	}
 	for _, module := range graph.Modules {
 		loader.files[module.Path] = module.File
@@ -77,20 +77,22 @@ func stdModulesFor(graph Graph, imports []string) ([]Module, error) {
 	for _, path := range imports {
 		for _, wanted := range loader.named(path) {
 			if err := loader.visit(wanted); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
-	return loader.out, nil
+	return loader.out, loader.sources, nil
 }
 
 // stdLoader walks std modules, pulling in what each one names.
 type stdLoader struct {
-	files    map[string]string
-	paths    []string
-	visited  map[string]bool
-	visiting map[string]bool
-	out      []Module
+	files   map[string]string
+	paths   []string
+	visited map[string]bool
+	out     []Module
+	// sources keeps what visit read, so the parse that follows does not open the
+	// same file a second time.
+	sources map[string]string
 }
 
 // named returns the std modules one import path names. Importing the package
@@ -114,21 +116,22 @@ func (l *stdLoader) named(path string) []string {
 
 // visit adds one std module after adding the modules its source names.
 func (l *stdLoader) visit(path string) error {
-	if l.visited[path] || l.visiting[path] {
+	// Marked on the way in: a module already being visited is one this walk
+	// reached through itself, and adding it again would not end.
+	if l.visited[path] {
 		return nil
 	}
-	l.visiting[path] = true
+	l.visited[path] = true
 	source, err := os.ReadFile(l.files[path])
 	if err != nil {
 		return err
 	}
+	l.sources[l.files[path]] = string(source)
 	for _, dependency := range l.references(string(source)) {
 		if err := l.visit(dependency); err != nil {
 			return err
 		}
 	}
-	l.visiting[path] = false
-	l.visited[path] = true
 	l.out = append(l.out, Module{Path: path, File: l.files[path]})
 	return nil
 }

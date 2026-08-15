@@ -190,7 +190,7 @@ func (idx navigationIndex) scan(src navigationSource) {
 		case token.Contract:
 			i = idx.scanContract(src, tokens, i)
 		case token.Impl:
-			i = idx.scanImpl(src, tokens, i)
+			// An assertion declares no symbol; the loop steps past it.
 		}
 	}
 }
@@ -347,33 +347,6 @@ func (idx navigationIndex) scanContract(
 		kind:          symbolKindInterface,
 	}
 	return skipDeclarationBody(tokens, start+1)
-}
-
-// scanImpl records methods inside an impl block.
-func (idx navigationIndex) scanImpl(
-	src navigationSource,
-	tokens []token.Token,
-	start int,
-) int {
-	typeName, brace := implTarget(tokens, start)
-	if brace < 0 {
-		return start
-	}
-	typeName = normalizeCompletionType(typeName)
-	for i := brace + 1; i < len(tokens) && tokens[i].Type != token.EOF; i++ {
-		if tokens[i].Type == token.RBrace {
-			return i
-		}
-		if tokens[i].Type != token.Function {
-			continue
-		}
-		method, next, ok := readMethodDeclaration(src, tokens, i)
-		if ok {
-			addNestedDeclaration(idx.methods, typeName, method)
-		}
-		i = skipDeclarationBody(tokens, next)
-	}
-	return brace
 }
 
 // readMethodDeclaration reads one method header.
@@ -843,21 +816,6 @@ func localDetailSuffix(typ string) string {
 		return ""
 	}
 	return ": " + typ
-}
-
-// implTarget reads the target type and body brace of an impl block.
-func implTarget(tokens []token.Token, start int) (string, int) {
-	for i := start + 1; i < len(tokens); i++ {
-		switch tokens[i].Type {
-		case token.For:
-			return readTypeBeforeBrace(tokens, i+1)
-		case token.LBrace:
-			return tokenText(tokens[start+1 : i]), i
-		case token.EOF:
-			return "", -1
-		}
-	}
-	return "", -1
 }
 
 // declarationHeaderEnd returns where a declaration header stops.

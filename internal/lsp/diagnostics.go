@@ -20,17 +20,21 @@ import (
 const diagnosticSource = "kizu"
 
 // Analyze returns diagnostics for one in-memory Kizu source file.
+//
+// The editor resolves what the CLI resolves. A name that means one thing on the
+// command line and another in the editor would make one of them lie.
 func Analyze(source string) []Diagnostic {
+	program, err := project.LoadSource(analyzedFile, source)
+	if err == nil {
+		return checkProgramDiagnostics(program)
+	}
+	// Loading stops at the first parse error; a buffer being typed into usually
+	// has several, and the editor wants them all. That second read is worth its
+	// cost only once the first one has said the source does not parse.
 	if _, parseErrors := parseSource(source); len(parseErrors) > 0 {
 		return parseErrorDiagnostics(parseErrors)
 	}
-	// The editor resolves what the CLI resolves. A name that means one thing on
-	// the command line and another in the editor would make one of them lie.
-	program, err := project.LoadSource(analyzedFile, source)
-	if err != nil {
-		return []Diagnostic{diagnosticFromError(err)}
-	}
-	return checkProgramDiagnostics(program)
+	return []Diagnostic{diagnosticFromError(err)}
 }
 
 // analyzedFile is the empty path an unsaved buffer has. Diagnostics render a
