@@ -1659,7 +1659,7 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-// std/src/array.kizu
+// lib/kizu/std/src/array.kizu
 import std;
 import std::builtin;
 
@@ -1825,7 +1825,7 @@ view が生きている間は `append_bytes`、`append_byte`、`truncate`、`cle
 `self.field.deinit()` の direct field cleanup を許可します。
 v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
-`std::string::String` の public behavior は `std/src/string.kizu` に実装します。
+`std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
 v0.2 では private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
 raw pointer や mutable backing slice は公開しません。public
 `std::mem::OwnedBytes` または `std::bytes::Buffer` は、mutable slice と raw

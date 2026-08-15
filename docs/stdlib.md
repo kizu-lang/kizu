@@ -52,7 +52,7 @@ behavior whenever possible.
 
 Trusted Go primitives live under `internal/stdprim`. New host or runtime
 boundaries should be added there first, then exposed through Kizu `std` wrappers
-under `std/src`.
+under `lib/kizu/std/src`.
 
 ## Allocator Capability
 
@@ -82,7 +82,7 @@ Every builtin falls into one of three classes:
 
 | Class | Meaning | Action |
 | --- | --- | --- |
-| Kizu-movable | Pure logic or validation that can be written in Kizu with existing language features | Move to `std/src/*.kizu` and delete the Go branch |
+| Kizu-movable | Pure logic or validation that can be written in Kizu with existing language features | Move to `lib/kizu/std/src/*.kizu` and delete the Go branch |
 | Blocked-by-language | Logic that should be Kizu eventually, but needs missing language/runtime features | Keep temporarily and track the blocker |
 | Host primitive | OS, process, file, allocator, thread, atomic, or backend boundary | Keep as a small trusted primitive |
 
@@ -100,31 +100,31 @@ Current builtin thinning candidates:
 
 | Builtin | Class | Next action |
 | --- | --- | --- |
-| `std::builtin::mem_equal_bytes` | Removed | Implemented in `std/src/mem.kizu` |
-| `std::builtin::mem_starts_with` | Removed | Implemented in `std/src/mem.kizu` |
-| `std::builtin::mem_trim_ascii` | Removed | Implemented in `std/src/mem.kizu` |
-| `std::builtin::path_basename` | Removed | Implemented in `std/src/path.kizu` |
-| `std::builtin::path_dirname` | Removed | Implemented in `std/src/path.kizu` |
-| `std::builtin::path_extension` | Removed | Implemented in `std/src/path.kizu` |
+| `std::builtin::mem_equal_bytes` | Removed | Implemented in `lib/kizu/std/src/mem.kizu` |
+| `std::builtin::mem_starts_with` | Removed | Implemented in `lib/kizu/std/src/mem.kizu` |
+| `std::builtin::mem_trim_ascii` | Removed | Implemented in `lib/kizu/std/src/mem.kizu` |
+| `std::builtin::path_basename` | Removed | Implemented in `lib/kizu/std/src/path.kizu` |
+| `std::builtin::path_dirname` | Removed | Implemented in `lib/kizu/std/src/path.kizu` |
+| `std::builtin::path_extension` | Removed | Implemented in `lib/kizu/std/src/path.kizu` |
 | `std::builtin::testing_*` | Removed | Replaced by the single explicit `std::builtin::test_fail` trap primitive |
 | `std::builtin::test_fail` | Host primitive | Keep as the explicit trap boundary behind `std::testing::expect` |
 | `std::builtin::test_fail_equal<T>` | Host primitive | Keep as the typed diagnostic trap behind `std::testing::expect_equal<T>`; direct user calls are rejected |
-| `std::builtin::path_clean` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
-| `std::builtin::path_join` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
-| `std::builtin::fs_*` | Host primitive | Keep as explicit-Io filesystem boundary; public wrappers live in `std/src/fs.kizu` |
+| `std::builtin::path_clean` | Removed | Implemented in `lib/kizu/std/src/path.kizu` with explicit allocator-backed `String` output |
+| `std::builtin::path_join` | Removed | Implemented in `lib/kizu/std/src/path.kizu` with explicit allocator-backed `String` output |
+| `std::builtin::fs_*` | Host primitive | Keep as explicit-Io filesystem boundary; public wrappers live in `lib/kizu/std/src/fs.kizu` |
 | `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
-| `std::builtin::mem_byte_at` | Removed | Implemented in `std/src/mem.kizu` using checked index syntax |
-| `std::builtin::mem_slice` | Removed | Implemented in `std/src/mem.kizu` using checked slice syntax |
+| `std::builtin::mem_byte_at` | Removed | Implemented in `lib/kizu/std/src/mem.kizu` using checked index syntax |
+| `std::builtin::mem_slice` | Removed | Implemented in `lib/kizu/std/src/mem.kizu` using checked slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as the small runtime primitive behind stable `std::mem::page_allocator() -> Allocator`; custom allocators are deferred to #549 |
-| `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `std/src/mem.kizu`; direct user calls are rejected |
-| `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary. |
+| `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/mem.kizu`; direct user calls are rejected |
+| `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `lib/kizu/std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary. |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
-| `std::builtin::process_exit_code` | Removed | Implemented in `std/src/process.kizu` as a pure value helper |
-| `std::builtin::array<T>`, `std::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `std/src/array.kizu`; direct user calls are rejected |
-| `std::builtin::map<K, V>`, `std::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `std/src/map.kizu`; direct user calls are rejected |
+| `std::builtin::process_exit_code` | Removed | Implemented in `lib/kizu/std/src/process.kizu` as a pure value helper |
+| `std::builtin::array<T>`, `std::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/array.kizu`; direct user calls are rejected |
+| `std::builtin::map<K, V>`, `std::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/map.kizu`; direct user calls are rejected |
 
-`std::testing` now keeps the public assertion surface in `std/src/testing.kizu`.
+`std::testing` now keeps the public assertion surface in `lib/kizu/std/src/testing.kizu`.
 `expect(condition)` returns `void` and uses the single explicit
 `std::builtin::test_fail` trap on failure, so normal assertions do not require
 `try`. `expect_equal<T>(expected, actual)` is a minimal explicit generic helper
@@ -149,16 +149,16 @@ for parallel work once a real execution path exists.
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
+| `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `lib/kizu/std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `get_or_panic`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
-| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
+| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `lib/kizu/std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
 | `std::testing` | `expect`, `expect_equal<T>`, `fail` | Kizu source over explicit `std::builtin::test_fail` and `std::builtin::test_fail_equal<T>` traps | keep Go limited to the runner, assertion trap, typed equality diagnostic trap, and error-union reporting boundary |
-| `std::fs` | `read_file`, `write_file`, `rename`, `exists`, `metadata`, `read_dir`, `create_dir`, `remove_dir`, `remove_file`, `Metadata`, `DirEntry` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
-| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
-| `std::io` | `blocking`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
-| `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu`; only arg count, arg, and env use host primitives | keep host process access primitives trusted |
+| `std::fs` | `read_file`, `write_file`, `rename`, `exists`, `metadata`, `read_dir`, `create_dir`, `remove_dir`, `remove_file`, `Metadata`, `DirEntry` | Kizu wrappers in `lib/kizu/std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
+| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `lib/kizu/std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
+| `std::io` | `blocking`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `lib/kizu/std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
+| `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `lib/kizu/std/src/process.kizu`; only arg count, arg, and env use host primitives | keep host process access primitives trusted |
 
 ## Source Layout Target
 

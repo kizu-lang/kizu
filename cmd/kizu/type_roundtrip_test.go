@@ -20,7 +20,7 @@ import (
 // the AST it was asked from -- which is how `std::array::Array<!i64>` once
 // became `std::array::Array<`.
 func TestTypeSpellingRoundTrip(t *testing.T) {
-	roots := []string{"../../examples", "../../std"}
+	roots := []string{"../../examples", "../../lib/kizu/std"}
 	seen := map[string]bool{}
 	checked := 0
 	for _, root := range roots {

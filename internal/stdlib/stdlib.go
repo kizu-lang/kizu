@@ -6,7 +6,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/manifest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -96,7 +95,7 @@ func importedNames(path string, exports map[string]bool) ([]string, bool) {
 // hasSource reports whether a std module is written in Kizu. One that is not is
 // provided by the compiler, and there is nothing to parse for it.
 func hasSource(module string) bool {
-	_, err := FindRepoFile(moduleFile(module))
+	_, err := FindLibFile(moduleFile(module))
 	return err == nil
 }
 
@@ -192,56 +191,72 @@ func ParseDecls(modules []string) ([]ast.Decl, []parser.Diagnostic, error) {
 	return decls, nil, nil
 }
 
-// FindRepoFile searches for a repository-relative file from common dev roots.
-func FindRepoFile(name string) (string, error) {
-	for _, start := range repoSearchRoots() {
-		if start == "" {
-			continue
-		}
-		if path, ok := findRepoFileFrom(start, name); ok {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("open %s: no such file or directory", name)
+// LibDirEnv names the environment variable that overrides where the library
+// tree is. A caller that already knows the path passes it with SetLibDir; this
+// is for the ones that do not run the CLI, and for a development shell.
+const LibDirEnv = "KIZU_LIB_DIR"
+
+// libDir is the library tree this process reads std from, once decided.
+var libDir struct {
+	sync.Once
+	path string
+	err  error
 }
 
-// repoSearchRoots returns roots that work from repo commands, dev binaries, and tests.
-func repoSearchRoots() []string {
-	roots := []string{}
-	if envRoot := os.Getenv("KIZU_REPO_ROOT"); envRoot != "" {
-		roots = append(roots, envRoot)
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		roots = append(roots, cwd)
-	}
-	if executable, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(executable))
-	}
-	if _, sourceFile, _, ok := runtime.Caller(0); ok {
-		roots = append(roots, filepath.Dir(sourceFile))
-	}
-	return roots
+// SetLibDir points this process at a library tree, overriding what it would
+// otherwise find. It has to be called before anything reads std.
+func SetLibDir(path string) {
+	libDir.Do(func() {})
+	libDir.path, libDir.err = path, nil
 }
 
-// findRepoFileFrom searches upward from start for name.
-func findRepoFileFrom(start string, name string) (string, bool) {
-	dir := filepath.Clean(start)
-	for {
-		candidate := filepath.Join(dir, name)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
+// LibDir returns the library tree std is read from. There is one rule: the
+// caller says where it is, or it sits next to the running binary. Nothing is
+// searched for, and the current directory is never consulted -- a program has
+// to mean the same thing whatever directory it is compiled from.
+func LibDir() (string, error) {
+	libDir.Do(func() { libDir.path, libDir.err = resolveLibDir() })
+	return libDir.path, libDir.err
+}
+
+// resolveLibDir decides the library tree from the environment or the binary.
+func resolveLibDir() (string, error) {
+	if fromEnv := os.Getenv(LibDirEnv); fromEnv != "" {
+		return fromEnv, nil
 	}
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		resolved = executable
+	}
+	// <prefix>/bin/kizu -> <prefix>/lib/kizu
+	return filepath.Join(filepath.Dir(filepath.Dir(resolved)), "lib", "kizu"), nil
+}
+
+// FindLibFile returns the path of one file inside the library tree.
+func FindLibFile(name string) (string, error) {
+	dir, err := LibDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf(
+			"open %s: no such file or directory"+
+				"\nhelp: the library tree is `%s`;"+
+				" set %s or pass --lib-dir to point somewhere else",
+			path, dir, LibDirEnv,
+		)
+	}
+	return path, nil
 }
 
 // loadModuleExports reads the std manifest package surface.
 func loadModuleExports() (map[string]bool, error) {
-	path, err := FindRepoFile("std/kizu.toml")
+	path, err := FindLibFile("std/kizu.toml")
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +316,7 @@ func (r *moduleResolver) visit(module string) error {
 
 // readModuleSource reads one std source module by its short module name.
 func readModuleSource(module string) (string, error) {
-	path, err := FindRepoFile(moduleFile(module))
+	path, err := FindLibFile(moduleFile(module))
 	if err != nil {
 		return "", err
 	}
@@ -395,7 +410,7 @@ var sourceModuleOrder = []string{
 
 // parseModuleDecls loads one std wrapper module from Kizu source.
 func parseModuleDecls(module string) ([]ast.Decl, []parser.Diagnostic, error) {
-	path, err := FindRepoFile(moduleFile(module))
+	path, err := FindLibFile(moduleFile(module))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -440,7 +455,7 @@ func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 
 // moduleFile maps a std namespace module name to its source file path.
 func moduleFile(module string) string {
-	return "std/src/" + strings.ReplaceAll(module, "::", "/") + ".kizu"
+	return filepath.Join("std", "src", strings.ReplaceAll(module, "::", "/")+".kizu")
 }
 
 // modulePath renders a resolver module name as its public namespace path.

@@ -51,7 +51,7 @@ func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
 		known[name] = true
 	}
 	missing := map[string]bool{}
-	for _, path := range kizuSourcePaths(t, "../../std") {
+	for _, path := range kizuSourcePaths(t, "../../lib/kizu/std") {
 		source, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -82,7 +82,7 @@ func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
 // a separate primitive.
 func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
 	implemented := map[string]bool{}
-	for _, path := range kizuSourcePaths(t, "../../std") {
+	for _, path := range kizuSourcePaths(t, "../../lib/kizu/std") {
 		source, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)

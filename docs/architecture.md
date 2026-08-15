@@ -27,7 +27,7 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
   unsafecap                     @unsafe capability の定義
   fmt, diagnostic, buildcache, cimport, lsp
-std/src/             Kizu で書かれた標準ライブラリ
+lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
   kizu/              言語の自己記述層(Kizu で書かれた lexer/parser/AST)
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
@@ -40,7 +40,7 @@ docs/, docs/adr/     設計ドキュメントと ADR
 ```
 source.kizu
   → internal/lexer → internal/parser → internal/ast
-  → internal/stdlib が std/src/*.kizu の宣言を合流(demand-load)
+  → internal/stdlib が lib/kizu/std/src/*.kizu の宣言を合流(demand-load)
   → internal/types(型)→ internal/ownership(所有権)
   → internal/ir(typed SSA)→ internal/llvm → clang(internal/native)
                            → internal/wasm(wasm32-wasi)
@@ -64,7 +64,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 ## 4. std の二層構造
 
 - 実行時の組み込み(print、メモリ、fs、task 等)は Go 実装が提供し、
-  `std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
+  `lib/kizu/std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
 - Go 側は `internal/stdlib`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std に public 型を足すときは **`knownTypes` の更新が必要**
   (漏れると checked コードでその型名が `unknown type` になります)。

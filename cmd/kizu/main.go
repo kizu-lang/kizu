@@ -28,11 +28,12 @@ import (
 
 // main dispatches the kizu command line interface.
 func main() {
-	if len(os.Args) < 2 || (len(os.Args) < 3 && !commandAllowsNoTarget(os.Args[1])) {
+	args := takeLibDir(os.Args[1:])
+	if len(args) < 1 || (len(args) < 2 && !commandAllowsNoTarget(args[0])) {
 		usage()
 		os.Exit(2)
 	}
-	if err := dispatch(os.Args[1], os.Args[2:]); err != nil {
+	if err := dispatch(args[0], args[1:]); err != nil {
 		var status exitStatus
 		if errors.As(err, &status) {
 			os.Exit(status.code)
@@ -40,6 +41,17 @@ func main() {
 		printError(err)
 		os.Exit(1)
 	}
+}
+
+// takeLibDir reads the leading `--lib-dir PATH` and returns the rest. It comes
+// before the command because it says where the compiler's own library tree is,
+// which every command reads and no command owns.
+func takeLibDir(args []string) []string {
+	if len(args) < 2 || args[0] != "--lib-dir" {
+		return args
+	}
+	stdlib.SetLibDir(args[1])
+	return args[2:]
 }
 
 // exitStatus exits without printing an extra Go diagnostic.
