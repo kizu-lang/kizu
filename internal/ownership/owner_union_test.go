@@ -10,12 +10,10 @@ const ownerUnionPrelude = `union Node {
     Left(std::string::String),
     Right(std::array::Array<i64>),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        match self {
-            Left(s) => s.deinit(),
-            Right(a) => a.deinit(),
-        }
+fn (self: Node) deinit() -> void {
+    match self {
+        Left(s) => s.deinit(),
+        Right(a) => a.deinit(),
     }
 }
 `
@@ -95,16 +93,14 @@ func TestCheckRejectsOwnerUnionReuseAfterDeinitDispatch(t *testing.T) {
     Left(std::string::String),
     Right(std::array::Array<i64>),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        match self {
-            Left(s) => s.deinit(),
-            Right(a) => a.deinit(),
-        }
-        match self {
-            Left(s) => print(0),
-            Right(a) => print(1),
-        }
+fn (self: Node) deinit() -> void {
+    match self {
+        Left(s) => s.deinit(),
+        Right(a) => a.deinit(),
+    }
+    match self {
+        Left(s) => print(0),
+        Right(a) => print(1),
     }
 }`
 	assertMoveError(t, source, "moved value `self` was used")

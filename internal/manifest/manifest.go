@@ -6,12 +6,15 @@ import (
 )
 
 // Manifest is the minimal kizu.toml shape accepted by the compiler.
+//
+// There is no export list. What a package keeps to itself is decided by where
+// the source sits: a module under an `internal` directory is reachable from the
+// subtree that directory belongs to and nowhere else.
 type Manifest struct {
 	PackageName string
 	Version     string
 	Root        string
 	Paths       []string
-	Exports     []string
 }
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
@@ -150,12 +153,6 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Paths = parsed
-	case "modules.exports":
-		parsed, err := parseStringList(value, lineNo)
-		if err != nil {
-			return err
-		}
-		manifest.Exports = parsed
 	default:
 		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
 	}
@@ -203,33 +200,8 @@ func validateManifest(manifest Manifest, allowReservedName bool) (Manifest, erro
 	if manifest.PackageName == "std" && !allowReservedName {
 		return manifest, fmt.Errorf("manifest error: package name `std` is reserved")
 	}
-	if manifest.Root == "" {
-		return manifest, fmt.Errorf("manifest error: missing [modules].root")
-	}
 	if len(manifest.Paths) == 0 {
 		manifest.Paths = []string{"src"}
 	}
-	if err := validateModuleExports(manifest); err != nil {
-		return manifest, err
-	}
 	return manifest, nil
-}
-
-// validateModuleExports checks package-qualified module export names.
-func validateModuleExports(manifest Manifest) error {
-	seen := map[string]bool{}
-	for _, path := range manifest.Exports {
-		if path == "" {
-			return fmt.Errorf("manifest error: empty module export")
-		}
-		if path != manifest.PackageName && !strings.HasPrefix(path, manifest.PackageName+"::") {
-			return fmt.Errorf("manifest error: export `%s` is outside package `%s`",
-				path, manifest.PackageName)
-		}
-		if seen[path] {
-			return fmt.Errorf("manifest error: duplicate module export `%s`", path)
-		}
-		seen[path] = true
-	}
-	return nil
 }

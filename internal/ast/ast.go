@@ -93,7 +93,11 @@ func (p *Program) String() string {
 // this, and only generic and comptime bodies travel with it because
 // instantiation reruns them.
 type FunctionSignature struct {
-	Name string
+	// Receiver reports whether Params[0] is the value this function is a method
+	// on. A method is filed under its receiver's type rather than in its module,
+	// so two types in one module may each have a `len`.
+	Receiver bool
+	Name     string
 	// StaticParams is the `<...>` list. An entry with no declared type is a
 	// type parameter; one with a type is a compile-time value. Both are
 	// compile-time, which is why they live here and not in Params.
@@ -149,8 +153,14 @@ func (*FunctionDecl) declNode() {}
 
 // String returns a compact debug representation of the function.
 func (d *FunctionDecl) String() string {
-	params := make([]string, 0, len(d.Params))
-	for _, p := range d.Params {
+	receiver := ""
+	rest := d.Params
+	if d.Receiver && len(rest) > 0 {
+		receiver = "(" + rest[0].String() + ") "
+		rest = rest[1:]
+	}
+	params := make([]string, 0, len(rest))
+	for _, p := range rest {
 		params = append(params, p.String())
 	}
 	ret := ""
@@ -172,15 +182,15 @@ func (d *FunctionDecl) String() string {
 		prefix += "@requires_unsafe() "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %q fn %s%s(%s)%s",
-			prefix, d.ExternABI, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sextern %q fn %s%s%s(%s)%s",
+			prefix, d.ExternABI, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
 	if d.Body == nil {
-		return fmt.Sprintf("%sfn %s%s(%s)%s;",
-			prefix, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sfn %s%s%s(%s)%s;",
+			prefix, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
-	return fmt.Sprintf("%sfn %s%s(%s)%s %s",
-		prefix, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
+	return fmt.Sprintf("%sfn %s%s%s(%s)%s %s",
+		prefix, receiver, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
 }
 
 // TestDecl represents a top-level test block.
@@ -346,11 +356,12 @@ func (d *ContractDecl) String() string {
 	return fmt.Sprintf("%scontract %s { %s }", prefix, d.Name, strings.Join(methods, "; "))
 }
 
-// ImplDecl represents inherent or contract methods implemented for one concrete type.
+// ImplDecl asserts that one concrete type satisfies one contract. A type
+// satisfies a contract by having the methods, so this carries no body: it asks
+// for the check to run where it is written.
 type ImplDecl struct {
 	ContractName string
 	TypeName     string
-	Methods      []*FunctionDecl
 }
 
 // declNode marks ImplDecl as a declaration node.
@@ -358,15 +369,7 @@ func (*ImplDecl) declNode() {}
 
 // String returns a compact debug representation of the impl declaration.
 func (d *ImplDecl) String() string {
-	methods := make([]string, 0, len(d.Methods))
-	for _, method := range d.Methods {
-		methods = append(methods, method.String())
-	}
-	if d.ContractName != "" {
-		return fmt.Sprintf("impl %s for %s { %s }",
-			d.ContractName, d.TypeName, strings.Join(methods, "; "))
-	}
-	return fmt.Sprintf("impl %s { %s }", d.TypeName, strings.Join(methods, "; "))
+	return fmt.Sprintf("impl %s for %s;", d.ContractName, d.TypeName)
 }
 
 // Field represents a named struct field.

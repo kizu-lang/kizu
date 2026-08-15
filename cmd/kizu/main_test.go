@@ -218,8 +218,10 @@ func TestInitCommandCanRunWithoutTarget(t *testing.T) {
 	}
 }
 
-// TestCheckPackageCommandRejectsMissingModuleRoot keeps package manifests explicit.
-func TestCheckPackageCommandRejectsMissingModuleRoot(t *testing.T) {
+// TestCheckPackageCommandWithoutModuleRoot keeps a module of the package's own
+// name optional. A library package has no reason to hold one, and std holds
+// none: everything it has is `std::mem` or below.
+func TestCheckPackageCommandWithoutModuleRoot(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte("[package]\nname = \"app\"\n")
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
@@ -230,16 +232,15 @@ func TestCheckPackageCommandRejectsMissingModuleRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(
-		filepath.Join(srcDir, "main.kizu"),
-		[]byte("fn main() {}\n"),
+		filepath.Join(srcDir, "lexer.kizu"),
+		[]byte("pub fn token() -> i64 {\n    return 1;\n}\n"),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	_, runErr := runDispatchCaptureStderr(t, "check", []string{root})
-	if runErr == nil || !strings.Contains(runErr.Error(), "manifest error") {
-		t.Fatalf("got error %v, want a manifest error", runErr)
+	if _, runErr := runDispatchCaptureStderr(t, "check", []string{root}); runErr != nil {
+		t.Fatalf("check failed: %v", runErr)
 	}
 }
 
@@ -1029,76 +1030,6 @@ func TestRunCompilerPhasesStopsAfterParseError(t *testing.T) {
 	}
 }
 
-// TestResolveStdModulesIncludesTransitiveStdSourceDeps checks std source dependencies.
-func TestResolveStdModulesIncludesTransitiveStdSourceDeps(t *testing.T) {
-	got, err := resolveStdModules(`fn main() {
-    let allocator = std::mem::page_allocator();
-    var text = std::string::String(allocator);
-}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"mem", "array", "string"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-// TestResolveStdModulesOrdersTestingDeps checks dependency-before-dependent order.
-func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
-	got, err := resolveStdModules(`fn main() -> !void {
-    std::testing::expect(1 == 1);
-    return void;
-}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"testing"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-// TestResolveStdModulesLoadsPrivateStdDeps keeps internal std modules usable by std.
-func TestResolveStdModulesLoadsPrivateStdDeps(t *testing.T) {
-	got, err := resolveStdModules(`fn main() -> void {
-    print(std::path::basename("src/main.kizu"));
-    return;
-}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"mem", "array", "string", "path_bits", "path"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-// TestResolveStdModulesRejectsPrivateStdModule blocks user access to std internals.
-func TestResolveStdModulesRejectsPrivateStdModule(t *testing.T) {
-	_, err := resolveStdModules(`fn main() -> void {
-    print(std::path_bits::basename("src/main.kizu"));
-    return;
-}`)
-	if err == nil || !strings.Contains(err.Error(), "std module `std::path_bits` is not exported") {
-		t.Fatalf("got error %v, want private std module rejection", err)
-	}
-}
-
-// TestResolveStdModulesIgnoresStringLiterals avoids false std dependency edges.
-func TestResolveStdModulesIgnoresStringLiterals(t *testing.T) {
-	got, err := resolveStdModules(`fn main() -> void {
-    print("std::path_bits::basename");
-    return;
-}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("got modules %v, want none", got)
-	}
-}
-
 // TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
 func TestIROptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
@@ -1558,11 +1489,9 @@ func TestBuildTargetNativeReturnedArrayFieldCommandSmoke(t *testing.T) {
 	code := []byte(`import std;
 
 struct Bag { values: std::array::Array<i64>, }
-impl Bag {
-    fn deinit(self: Bag) -> void {
-        self.values.deinit();
-        return;
-    }
+fn (self: Bag) deinit() -> void {
+    self.values.deinit();
+    return;
 }
 fn make_bag() -> !Bag {
     var values = std::array::Array<i64>(std::mem::page_allocator());
@@ -1615,11 +1544,9 @@ func TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke(t *testing.T) {
 
 union Stmt { Add(i64), Done(i64), }
 struct Bag { stmts: std::array::Array<Stmt>, }
-impl Bag {
-    fn deinit(self: Bag) -> void {
-        self.stmts.deinit();
-        return;
-    }
+fn (self: Bag) deinit() -> void {
+    self.stmts.deinit();
+    return;
 }
 fn make_bag() -> !Bag {
     var stmts = std::array::Array<Stmt>(std::mem::page_allocator());

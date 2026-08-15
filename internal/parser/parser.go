@@ -263,6 +263,9 @@ func (p *Parser) parseTestDecl() ast.Decl {
 // not named for ast.FunctionSignature: it parses the body too, which is the one
 // thing that type does not hold.
 func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
+	if p.peek.Type == token.LParen && !p.parseReceiver(fn) {
+		return fn
+	}
 	if !p.expectPeek(token.Ident) {
 		return fn
 	}
@@ -277,24 +280,12 @@ func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) as
 	if !p.expectPeek(token.LParen) {
 		return fn
 	}
-	fn.Params = p.parseParams()
+	fn.Params = append(fn.Params, p.parseParams()...)
 	if !p.expectCur(token.RParen) {
 		return fn
 	}
-	if p.peek.Type == token.Arrow {
-		p.nextToken()
-		p.nextToken()
-		fn.ReturnType = p.parseTypeName()
-		if fn.ReturnType == nil {
-			return fn
-		}
-		if p.peek.Type == token.Ident && p.peek.Literal == "borrows" {
-			p.nextToken()
-			if !p.expectPeek(token.Ident) {
-				return fn
-			}
-			fn.ReturnBorrow = p.cur.Literal
-		}
+	if !p.parseReturnClause(fn) {
+		return fn
 	}
 	if !requireBody {
 		return fn
@@ -331,6 +322,11 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 		}
 		method := p.parseFunctionAfterFn(&ast.FunctionDecl{}, false)
 		if fn, ok := method.(*ast.FunctionDecl); ok {
+			if fn.Receiver {
+				p.errorf("a contract method takes no receiver;" +
+					" it says what a method looks like, not what it is on")
+				return methods
+			}
 			methods = append(methods, fn)
 		}
 		if p.peek.Type == token.Semicolon {
@@ -341,54 +337,75 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 	return methods
 }
 
-// parseImplDecl parses an impl block with method bodies.
+// parseImplDecl parses the one-line assertion that a type satisfies a contract.
+// A type satisfies one by having the methods, so this carries no body: it asks
+// for the check to run here, where a reader can see the intent written down.
 func (p *Parser) parseImplDecl() ast.Decl {
 	decl := &ast.ImplDecl{}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	firstName := p.cur.Literal
-	if p.peek.Type == token.For {
-		decl.ContractName = firstName
-		p.nextToken()
-		if !p.expectPeek(token.Ident) {
-			return decl
-		}
-		decl.TypeName = p.cur.Literal
-	} else {
-		decl.TypeName = firstName
-	}
-	if !p.expectPeek(token.LBrace) {
+	if p.peek.Type != token.For {
+		p.errorf("expected `impl <contract> for %s;`;"+
+			" a method on a type is `fn (self: %s) name(...)`", firstName, firstName)
 		return decl
 	}
-	decl.Methods = p.parseImplMethods()
+	decl.ContractName = firstName
+	p.nextToken()
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.TypeName = p.cur.Literal
+	if p.peek.Type == token.LBrace {
+		p.errorf("`impl %s for %s` takes no body;"+
+			" write the methods as `fn (self: %s) name(...)` and end this with `;`",
+			decl.ContractName, decl.TypeName, decl.TypeName)
+		return decl
+	}
+	p.expectStatementTerminator("impl declaration")
 	return decl
 }
 
-// parseImplMethods parses method declarations inside an impl block.
-func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
-	methods := []*ast.FunctionDecl{}
-	p.nextToken()
-	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
-		var method ast.Decl
-		switch p.cur.Type {
-		case token.Function:
-			method = p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
-		case token.At:
-			method = p.parseDirectiveDecl(false, docText(p.cur))
-		case token.Unsafe:
-			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
-			return methods
-		default:
-			p.errorf("expected impl method, got %s", tokenDescription(p.cur))
-			return methods
-		}
-		if fn, ok := method.(*ast.FunctionDecl); ok {
-			methods = append(methods, fn)
-		}
-		p.nextToken()
+// parseReturnClause reads `-> T` and the `borrows name` that may follow it.
+func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
+	if p.peek.Type != token.Arrow {
+		return true
 	}
-	return methods
+	p.nextToken()
+	p.nextToken()
+	fn.ReturnType = p.parseTypeName()
+	if fn.ReturnType == nil {
+		return false
+	}
+	if p.peek.Type != token.Ident || p.peek.Literal != "borrows" {
+		return true
+	}
+	p.nextToken()
+	if !p.expectPeek(token.Ident) {
+		return false
+	}
+	fn.ReturnBorrow = p.cur.Literal
+	return true
+}
+
+// parseReceiver reads the `(self: T)` slot a method declares before its name,
+// and records the receiver as the function's first parameter. A method reads as
+// a function that takes its receiver first, which is what it is; the slot is
+// what says the name belongs to the receiver's type rather than to the module.
+func (p *Parser) parseReceiver(fn *ast.FunctionDecl) bool {
+	p.nextToken()
+	params := p.parseParams()
+	if !p.expectCur(token.RParen) {
+		return false
+	}
+	if len(params) != 1 {
+		p.errorf("expected one receiver in `fn (...)`, got %d", len(params))
+		return false
+	}
+	fn.Receiver = true
+	fn.Params = params
+	return true
 }
 
 // parseStructDecl parses a top-level struct declaration.

@@ -9,27 +9,23 @@ import "testing"
 //	2  }
 //	3
 //	4  contract Writer {
-//	5      fn write(self: &Self) -> !i64;
+//	5      fn write() -> !i64;
 //	6  }
 //	7
-//	8  impl Writer for File {
-//	9      fn write(self: &Self) -> !i64 {
-//	10         return 2;
-//	11     }
-//	12 }
+//	8  fn (self: &File) write() -> !i64 {
+//	9      return 2;
+//	10 }
 func implementationFixture() string {
 	return "struct File {\n" +
 		"    name: []u8,\n" +
 		"}\n" +
 		"\n" +
 		"contract Writer {\n" +
-		"    fn write(self: &Self) -> !i64;\n" +
+		"    fn write() -> !i64;\n" +
 		"}\n" +
 		"\n" +
-		"impl Writer for File {\n" +
-		"    fn write(self: &Self) -> !i64 {\n" +
-		"        return 2;\n" +
-		"    }\n" +
+		"fn (self: &File) write() -> !i64 {\n" +
+		"    return 2;\n" +
 		"}\n"
 }
 
@@ -56,7 +52,7 @@ func TestImplementationFromContractMethod(t *testing.T) {
 	server := NewServer(nil, nil)
 	server.documents[uri] = source
 
-	pos := positionIn(source, "fn write(self: &Self) -> !i64;", "write")
+	pos := positionIn(source, "fn write() -> !i64;", "write")
 	locations := server.implementation(uri, pos)
 	if len(locations) != 1 {
 		t.Fatalf("implementation = %#v, want one method location", locations)
@@ -64,9 +60,9 @@ func TestImplementationFromContractMethod(t *testing.T) {
 	if got := textIn(source, locations[0].Range); got != "write" {
 		t.Fatalf("implementation range covers %q, want %q", got, "write")
 	}
-	// The match must be the impl method (line 9), not the contract decl (line 5).
-	if locations[0].Range.Start.Line != 9 {
-		t.Fatalf("implementation method line = %d, want 9", locations[0].Range.Start.Line)
+	// The match must be the method on File (line 8), not the contract decl (line 5).
+	if locations[0].Range.Start.Line != 8 {
+		t.Fatalf("implementation method line = %d, want 8", locations[0].Range.Start.Line)
 	}
 }
 

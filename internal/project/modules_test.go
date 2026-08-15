@@ -2,6 +2,7 @@ package project
 
 import (
 	"github.com/kizu-lang/kizu/internal/manifest"
+	"github.com/kizu-lang/kizu/internal/types"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func TestModuleFixture(t *testing.T) {
 	for _, module := range graph.Modules {
 		parseConformanceModule(t, module)
 	}
-	if err := CheckGraph(graph); err != nil {
+	if err := loadGraph(graph); err != nil {
 		t.Fatalf("check graph failed: %v", err)
 	}
 }
@@ -74,44 +75,26 @@ func TestResolveModules(t *testing.T) {
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
-	if !graph.Exports["app"] || len(graph.Exports) != 1 {
-		t.Fatalf("got exports %#v, want root export", graph.Exports)
-	}
 }
 
-// TestResolveModulesRecordsExplicitExports checks package surface metadata.
-func TestResolveModulesRecordsExplicitExports(t *testing.T) {
+// TestResolveModulesWithoutRootModule checks a package needs no module of its
+// own name. std has none: everything it holds is `std::mem` or below.
+func TestResolveModulesWithoutRootModule(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, root, "src/main.kizu")
 	writeFile(t, root, "src/lexer.kizu")
+	writeFile(t, root, "src/internal/table.kizu")
 
 	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
-		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
-		Exports:     []string{"app", "app::lexer"},
 	})
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
-	if !graph.Exports["app"] || !graph.Exports["app::lexer"] || len(graph.Exports) != 2 {
-		t.Fatalf("got exports %#v, want app and app::lexer", graph.Exports)
-	}
-}
-
-// TestResolveModulesRejectsMissingExport checks exported modules must exist.
-func TestResolveModulesRejectsMissingExport(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "src/main.kizu")
-
-	_, err := ResolveModules(root, manifest.Manifest{
-		PackageName: "app",
-		Root:        "src/main.kizu",
-		Paths:       []string{"src"},
-		Exports:     []string{"app::missing"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "exported module `app::missing`") {
-		t.Fatalf("got error %v, want missing export", err)
+	got := modulePaths(graph.Modules)
+	want := []string{"app::internal::table", "app::lexer"}
+	if !sameStrings(got, want) {
+		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
 }
 
@@ -132,8 +115,8 @@ func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
 	}
 }
 
-// TestCheckGraphRejectsMissingImport checks imported modules must exist.
-func TestCheckGraphRejectsMissingImport(t *testing.T) {
+// TestLoadGraphRejectsMissingImport checks imported modules must exist.
+func TestLoadGraphRejectsMissingImport(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::missing;
 
@@ -148,8 +131,49 @@ fn main(value: missing::Token) -> void {
 	}
 }
 
-// TestCheckGraphRejectsDuplicateImportAlias checks ambiguous last segments.
-func TestCheckGraphRejectsDuplicateImportAlias(t *testing.T) {
+// TestLoadGraphRejectsInternalImportFromOutside checks a module below an
+// `internal` directory is reachable from the subtree that directory hangs off
+// and nowhere else. Nothing lists it: where the source sits is the whole rule.
+func TestLoadGraphRejectsInternalImportFromOutside(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::parser::internal::table;
+
+fn main(value: table::Entry) -> void {
+    return;
+}
+`,
+		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(),
+		"`app::parser::internal::table` is internal to `app::parser`") {
+		t.Fatalf("got error %v, want internal module", err)
+	}
+}
+
+// TestLoadGraphAcceptsInternalImportInsideSubtree checks the other side of the
+// same rule: the subtree the directory belongs to reaches it.
+func TestLoadGraphAcceptsInternalImportInsideSubtree(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `fn main() -> void {
+    return;
+}
+`,
+		"src/parser/ast.kizu": `import app::parser::internal::table;
+
+pub fn first(entry: table::Entry) -> i64 {
+    return entry.value;
+}
+`,
+		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestLoadGraphRejectsDuplicateImportAlias checks ambiguous last segments.
+func TestLoadGraphRejectsDuplicateImportAlias(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::lexer;
 import app::parser::lexer;
@@ -167,8 +191,8 @@ fn main(value: lexer::Token) -> void {
 	}
 }
 
-// TestCheckGraphRejectsDuplicateFunction checks local declaration collisions.
-func TestCheckGraphRejectsDuplicateFunction(t *testing.T) {
+// TestLoadGraphRejectsDuplicateFunction checks local declaration collisions.
+func TestLoadGraphRejectsDuplicateFunction(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `fn parse() -> void {
     return;
@@ -185,8 +209,8 @@ fn parse() -> void {
 	}
 }
 
-// TestCheckGraphRejectsImportCycle checks dependency cycles are rejected early.
-func TestCheckGraphRejectsImportCycle(t *testing.T) {
+// TestLoadGraphRejectsImportCycle checks dependency cycles are rejected early.
+func TestLoadGraphRejectsImportCycle(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::lexer;
 
@@ -207,8 +231,8 @@ pub struct Token {
 	}
 }
 
-// TestCheckGraphRejectsImportShadowing checks local names cannot hide imports.
-func TestCheckGraphRejectsImportShadowing(t *testing.T) {
+// TestLoadGraphRejectsImportShadowing checks local names cannot hide imports.
+func TestLoadGraphRejectsImportShadowing(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::lexer;
 
@@ -228,8 +252,8 @@ fn main() -> void {
 	}
 }
 
-// TestCheckGraphRejectsPrivateImportedType checks module visibility boundaries.
-func TestCheckGraphRejectsPrivateImportedType(t *testing.T) {
+// TestLoadGraphRejectsPrivateImportedType checks module visibility boundaries.
+func TestLoadGraphRejectsPrivateImportedType(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::lexer;
 
@@ -245,8 +269,8 @@ fn main(value: lexer::Token) -> void {
 	}
 }
 
-// TestCheckGraphAllowsCrossModuleTokenReferences covers cross-module token types.
-func TestCheckGraphAllowsCrossModuleTokenReferences(t *testing.T) {
+// TestLoadGraphAllowsCrossModuleTokenReferences covers cross-module token types.
+func TestLoadGraphAllowsCrossModuleTokenReferences(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;
 
@@ -317,8 +341,8 @@ fn main(value: token::Token) -> void {
 	}
 }
 
-// TestCheckGraphRejectsPrivateImportedFunction checks top-level visibility.
-func TestCheckGraphRejectsPrivateImportedFunction(t *testing.T) {
+// TestLoadGraphRejectsPrivateImportedFunction checks top-level visibility.
+func TestLoadGraphRejectsPrivateImportedFunction(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;
 
@@ -343,8 +367,8 @@ fn make(kind: i64) -> Token {
 	}
 }
 
-// TestCheckGraphRejectsUnknownImportedFunction checks missing imported members.
-func TestCheckGraphRejectsUnknownImportedFunction(t *testing.T) {
+// TestLoadGraphRejectsUnknownImportedFunction checks missing imported members.
+func TestLoadGraphRejectsUnknownImportedFunction(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;
 
@@ -365,8 +389,8 @@ fn main() -> void {
 	}
 }
 
-// TestCheckGraphRejectsPrivateImportedFieldConstruction checks struct literals.
-func TestCheckGraphRejectsPrivateImportedFieldConstruction(t *testing.T) {
+// TestLoadGraphRejectsPrivateImportedFieldConstruction checks struct literals.
+func TestLoadGraphRejectsPrivateImportedFieldConstruction(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;
 
@@ -388,8 +412,8 @@ fn main() -> void {
 	}
 }
 
-// TestCheckGraphRejectsPrivateImportedFieldAccess checks external field reads.
-func TestCheckGraphRejectsPrivateImportedFieldAccess(t *testing.T) {
+// TestLoadGraphRejectsPrivateImportedFieldAccess checks external field reads.
+func TestLoadGraphRejectsPrivateImportedFieldAccess(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::token;
 
@@ -473,7 +497,13 @@ func checkTempModuleGraph(t *testing.T, root string) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return CheckGraph(graph)
+	// Visibility across modules is decided by the type checker reading the
+	// resolved program, so a test about it has to get that far.
+	program, err := LoadProgram(graph)
+	if err != nil {
+		return err
+	}
+	return types.New().Check(program)
 }
 
 // modulePaths returns only module path strings.
@@ -496,4 +526,11 @@ func sameStrings(left []string, right []string) bool {
 		}
 	}
 	return true
+}
+
+// loadGraph resolves a graph and drops the program, for tests that are about
+// whether resolution accepts the graph rather than about what it produced.
+func loadGraph(graph Graph) error {
+	_, err := LoadProgram(graph)
+	return err
 }

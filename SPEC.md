@@ -77,7 +77,7 @@ std::arena::Arena<T> / std::arena::Handle<T>
 limited comptime
 Io capability
 contract
-impl Contract for Type
+impl Contract for Type;
 &dyn Contract
 ```
 
@@ -248,6 +248,10 @@ paths = ["src"]
 たとえば `name = "app"` の package では、`src/lexer.kizu` を
 `app::lexer` として import します。
 
+`[modules].root` は package 名そのものになる file を指します。省略できます。
+library package はその module を持つ理由が無いことがあり、std は持ちません
+(std の module はすべて `std::mem` 以下で、裸の `std` はありません)。
+
 module path は file path から決まります。
 
 ```text
@@ -386,7 +390,7 @@ attached documentation として結びつきます。
 v0.2 の attachable item は次です。
 
 * function declaration
-* impl method declaration
+* method declaration
 * `struct` / `enum` / `union` declaration
 * struct field
 * enum tag
@@ -399,11 +403,9 @@ pub fn parse_source(source: []u8) -> !Program {
     ...
 }
 
-impl Parser {
-    /// Advances to the next token.
-    fn advance(self: &var Parser) -> void {
-        ...
-    }
+/// Advances to the next token.
+fn (self: &var Parser) advance() -> void {
+    ...
 }
 
 /// Token produced by the lexer.
@@ -600,8 +602,8 @@ module の完全パス(`std::fs`)は、その module の同一性を指す名前
 文書に現れます。コード中の参照は、束縛された名前から始まります。
 
 user package に `std` という名前は使えません。
-std package 内部の module も同じ規則で import します。`exports` にない
-`std::builtin` のような module は、std package の中からだけ import できます。
+std package 内部の module も同じ規則で import します。`std::internal::builtin` は
+`internal` の下にあるので、std package の中からだけ import できます。
 
 name resolution order:
 
@@ -616,18 +618,18 @@ local declaration が import した名前を shadow することも compile erro
 使わない import も compile error です。import 一覧がその file の依存一覧である
 ことは、これが保証します。
 
-`kizu.toml` の `[modules].exports` は package 外へ公開する module を明示します。
+package の内部 module は `internal` ディレクトリで隠します。manifest に一覧は
+書きません。どこに置いたかが規則そのものです。
 
-```toml
-[modules]
-root = "src/main.kizu"
-paths = ["src"]
-exports = ["app", "app::lexer"]
+```text
+src/lexer.kizu                   -> app::lexer                    公開
+src/internal/table.kizu          -> app::internal::table          app 配下からだけ
+src/parser/internal/state.kizu   -> app::parser::internal::state  app::parser 配下からだけ
 ```
 
-`exports` にない module は package 内部 module です。
-package 内部 module には同じ package から import できますが、package 外からは import /
-参照できません。`exports` を省略した場合は root module だけを export します。
+`internal` は階層のどこにでも置けます。`X::internal::Y` は `X` とその下の module
+からだけ import / 参照できます。部分木の中だけで使う内部 module を、package 全体に
+見せずに置けます。
 
 visibility は default private です。
 
@@ -664,7 +666,7 @@ fn lex_source(source: []u8) -> !array::Array<Token> {
 * public API に private type を出してはいけない
 * 外部 module から private field を construct / access してはいけない
 * `pub` な enum の tag と `pub` な union の variant は外部から使える
-* package 外から見える API は `exports` された module の `pub` declaration に限る
+* package 外から見える API は `internal` の下にない module の `pub` declaration に限る
 * `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
 
 ### 6.7 enum
@@ -1106,14 +1108,12 @@ union MirStmt {
     If(MirIf),
 }
 
-impl MirStmt {
-    fn deinit(self: MirStmt) -> void {
-        match self {
-            LetCall(stmt) => stmt.deinit(),
-            ReturnExpr(stmt) => stmt.deinit(),
-            If(stmt) => stmt.deinit(),
-        };
-    }
+fn (self: MirStmt) deinit() -> void {
+    match self {
+        LetCall(stmt) => stmt.deinit(),
+        ReturnExpr(stmt) => stmt.deinit(),
+        If(stmt) => stmt.deinit(),
+    };
 }
 ```
 
@@ -1659,14 +1659,15 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-// std/src/array.kizu
-import std;
-import std::builtin;
-
+// lib/kizu/std/src/array.kizu
 pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
-    return builtin::array<T>(allocator);
+    return std::internal::builtin::array<T>(allocator);
 }
 ```
+
+package 名は、その package の中では import なしに束縛されています。`std::array` は
+`std` package の module なので、この file は `std::` で始まる完全パスをそのまま
+書けます。
 
 戻り値の型が完全パスなのは、この file が `Array` という名前の function を宣言して
 いるからです。name resolution order で current module の宣言は import した名前より
@@ -1825,7 +1826,7 @@ view が生きている間は `append_bytes`、`append_byte`、`truncate`、`cle
 `self.field.deinit()` の direct field cleanup を許可します。
 v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
-`std::string::String` の public behavior は `std/src/string.kizu` に実装します。
+`std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
 v0.2 では private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
 raw pointer や mutable backing slice は公開しません。public
 `std::mem::OwnedBytes` または `std::bytes::Buffer` は、mutable slice と raw
@@ -1987,7 +1988,7 @@ std::testing::fail(message: []u8) -> !void
 ```
 
 `expect` は test assertion 用の void helper です。
-condition failure は `std::builtin::test_fail` 経由で runtime error として停止し、
+condition failure は `std::internal::builtin::test_fail` 経由で runtime error として停止し、
 test source は assertion ごとの `try` を書きません。
 `fail` は caller-provided `[]u8` を通常の `!void` error として返します。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
@@ -2118,37 +2119,55 @@ runtime selection の方針は ADR-0039 に従います。
 ## 16. contract / impl / dyn 方針
 
 Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
-`contract`、`impl Contract for Type`、`dyn` を実装対象にします。
+`contract`、`impl Contract for Type;`、`dyn` を実装対象にします。
 
 ```text
 contract                型が満たすべき要求
-impl Contract for Type  型が contract を満たすことの明示宣言と method body
+impl Contract for Type; 型が contract を満たすことの表明(任意)
 dyn                     runtime dynamic dispatch を見せる型
 ```
 
-`contract` は required method signatures だけを書きます。
-method body は書けません。
+型は method を持っていれば contract を満たします。宣言は要りません。
+`contract` は required method signatures だけを書き、method body も receiver も
+書きません。receiver は method 側にあり、contract は形だけを言います。
 
 ```kizu
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64
+    fn write(bytes: &Bytes) -> !i64;
 }
 ```
 
-`impl Contract for Type` は明示適合と method body を 1 箇所に置きます。
-Go のような暗黙 interface 適合は採用しません。
+method は receiver 欄で宣言します。書き方は 1 つです。
 
 ```kizu
-impl Writer for File {
-    fn write(self: &Self, bytes: &Bytes) -> !i64 {
-        return os.write(self.fd, bytes);
-    }
+fn (self: &File) write(bytes: &Bytes) -> !i64 {
+    return os::write(self.fd, bytes);
+}
+
+fn (self: &var File) rename(next: []u8) -> void {
+    self.name = next;
 }
 ```
 
-`impl File { ... }` は inherent method 用として残します。contract method body は
-`impl Writer for File { ... }` に置きます。旧 `satisfy Writer for File` 構文は
-採用しません。
+receiver 欄を持つ function はその型の method で、module ではなく型の下に置かれます。
+同じ module の 2 つの型が、どちらも `len` を持てます。`impl File { ... }` という
+inherent method の囲いはありません。
+
+`impl Contract for Type;` は表明で、書けばその場で検査されます。束縛ではないので、
+書かなくても structural に満たせます。書ける場所は型か contract の所有者に
+限りません。旧 `satisfy Writer for File` 構文は採用しません。
+
+```kizu
+impl Writer for File;
+```
+
+structural を採ったので、型の作者が知らない contract を後から満たせます。意図を
+書き残したい側は表明を書けます。Go は structural を取り、その結果
+`var _ io.Writer = (*File)(nil)` という構文のない定型句が生まれました。表明を
+構文として持つのは、その定型句を言語の側に置き直すということです。
+
+`Self` はありません。contract が receiver を書かないので、返り値に自分の型が要る
+場合は generic で表します。
 
 `dyn Contract` は dynamic dispatch を型に見せます。
 

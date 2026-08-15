@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -129,10 +130,6 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -163,10 +160,6 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 			}
 		case *ast.TestDecl:
 			if err := c.checkTestDecl(d); err != nil {
-				errs = append(errs, err)
-			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -243,35 +236,37 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 // collectFunctions registers top-level signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
-		switch d := decl.(type) {
-		case *ast.FunctionDecl:
-			c.functions[d.Name] = functionInfoFromDecl(d.Name, d)
-		case *ast.ImplDecl:
-			if err := c.collectImpl(d); err != nil {
-				return err
-			}
-		default:
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
 			continue
+		}
+		c.functions[fn.Name] = functionInfoFromDecl(fn.Name, fn)
+		if err := c.collectReceiverMethod(fn); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// collectImpl registers concrete impl method signatures before call checks.
-func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
-	methods := c.impls[decl.TypeName]
+// collectReceiverMethod files a `fn (self: T) name(...)` declaration under the
+// type it is a method on. Its name already says which that is.
+func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
+	if !decl.Receiver {
+		return nil
+	}
+	receiver, name, ok := stdmethod.SplitMethodName(decl.Name)
+	if !ok {
+		return nil
+	}
+	methods := c.impls[receiver]
 	if methods == nil {
 		methods = map[string]*functionInfo{}
-		c.impls[decl.TypeName] = methods
+		c.impls[receiver] = methods
 	}
-	for _, method := range decl.Methods {
-		if _, exists := methods[method.Name]; exists {
-			return errorf("move error: duplicate impl method `%s.%s`",
-				decl.TypeName, method.Name)
-		}
-		name := fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
-		methods[method.Name] = functionInfoFromImplDecl(name, decl.TypeName, method)
+	if _, exists := methods[name]; exists {
+		return errorf("move error: duplicate method `%s`", decl.Name)
 	}
+	methods[name] = functionInfoFromDecl(decl.Name, decl)
 	return nil
 }
 
@@ -287,16 +282,6 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 		name: name, sig: fn.FunctionSignature, params: params,
 		returnType: typ.Text(fn.ReturnType), body: fn.Body,
 	}
-}
-
-// functionInfoFromImplDecl binds Self to the concrete receiver type in impl methods.
-func functionInfoFromImplDecl(name string, typeName string, fn *ast.FunctionDecl) *functionInfo {
-	info := functionInfoFromDecl(name, fn)
-	for idx := range info.params {
-		info.params[idx].typeName = substituteSelfTypeName(info.params[idx].typeName, typeName)
-	}
-	info.returnType = substituteSelfTypeName(info.returnType, typeName)
-	return info
 }
 
 // checkFunction validates one function body.
@@ -344,24 +329,6 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 		Body: decl.Body,
 	})
 	return c.checkFunction(fn)
-}
-
-// checkImpl validates concrete impl method bodies after signatures are collected.
-func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
-	for _, method := range decl.Methods {
-		if len(method.TypeParamNames()) > 0 {
-			continue
-		}
-		fn := c.implMethod(decl.TypeName, method.Name)
-		if fn == nil {
-			return errorf("move error: missing impl method `%s.%s`",
-				decl.TypeName, method.Name)
-		}
-		if err := c.checkFunction(fn); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // checkBlock validates statements in a lexical block.
@@ -1854,7 +1821,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", true, err
 	}
 	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
@@ -1866,21 +1833,14 @@ func (c *Checker) checkQualifiedBuiltin(
 	return checkUntypedContainerConstructor(name)
 }
 
-// rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
-// std. The type checker rejects these first in a full run; this keeps the rule
-// true of this checker on its own, which is how its own tests read it.
-func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std::builtin::") {
+// rejectUnknownBuiltin refuses a primitive the Go implementation does not have.
+// The type checker rejects these first in a full run; this keeps the rule true
+// of this checker on its own, which is how its own tests read it.
+func (c *Checker) rejectUnknownBuiltin(name string) error {
+	if !strings.HasPrefix(name, "std::internal::builtin::") || stdprim.Primitive(name) {
 		return nil
 	}
-	replacement, known := stdprim.ReservedBuiltin(name)
-	if !known {
-		return errorf("move error: `%s` is not a primitive", name)
-	}
-	if c.currentStd {
-		return nil
-	}
-	return errorf("move error: `%s` is reserved; use %s", name, replacement)
+	return errorf("move error: `%s` is not a primitive", name)
 }
 
 // checkQualifiedStdBuiltin validates declarative core and fs ownership effects.
@@ -1965,20 +1925,22 @@ func (c *Checker) checkFsBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::fs_read_file":
+	case "std::internal::builtin::fs_read_file":
 		return c.checkFsReadFile(args, env)
-	case "std::builtin::fs_write_file":
+	case "std::internal::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env)
-	case "std::builtin::fs_exists":
+	case "std::internal::builtin::fs_exists":
 		return c.checkFsPathOnly("std::fs::exists", args, env, "std::fs::Error!bool")
-	case "std::builtin::fs_metadata":
+	case "std::internal::builtin::fs_metadata":
 		return c.checkFsPathOnly("std::fs::metadata", args, env, "std::fs::Error!std::fs::Metadata")
-	case "std::builtin::fs_read_dir":
+	case "std::internal::builtin::fs_read_dir":
 		return c.checkFsPathOnly("std::fs::read_dir", args, env,
 			"std::fs::Error!std::array::Array<std::fs::DirEntry>")
-	case "std::builtin::fs_create_dir", "std::builtin::fs_remove_dir", "std::builtin::fs_remove_file":
-		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "std::fs::Error!void")
-	case "std::builtin::fs_rename":
+	case "std::internal::builtin::fs_create_dir",
+		"std::internal::builtin::fs_remove_dir",
+		"std::internal::builtin::fs_remove_file":
+		return c.checkFsPathOnly(name, args, env, "std::fs::Error!void")
+	case "std::internal::builtin::fs_rename":
 		return c.checkFsRename(args, env)
 	default:
 		return "", false, nil
@@ -2203,13 +2165,13 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 // checkIoBuiltin validates std::io constructor ownership effects.
 func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	switch name {
-	case "std::builtin::io_blocking", "std::builtin::io_failing":
+	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Io", true, nil
-	case "std::io::evented", "std::builtin::io_evented":
+	case "std::io::evented", "std::internal::builtin::io_evented":
 		return "", true, errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
@@ -2217,13 +2179,13 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 }
 
 // typeApplyTarget resolves the callee and static arguments of a `<...>` call,
-// and closes the reserved namespace before any of them is looked at.
+// and refuses an unknown primitive before any of them is looked at.
 func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
 		return "", "", errorf("move error: unsupported type application `%s`", expr.String())
 	}
-	if err := c.rejectReservedBuiltin(name); err != nil {
+	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
 	return name, c.instantiateTypeArgText(expr.TypeArg), nil
@@ -2309,7 +2271,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if name != "std::builtin::test_fail_equal" {
+	if name != "std::internal::builtin::test_fail_equal" {
 		return "", false, nil
 	}
 	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
@@ -2351,14 +2313,16 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::array":
+	case "std::internal::builtin::array":
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
-	case "std::builtin::array_append", "std::builtin::array_len", "std::builtin::array_capacity",
-		"std::builtin::array_pop", "std::builtin::array_pop_or_panic",
-		"std::builtin::array_get", "std::builtin::array_get_or_panic",
-		"std::builtin::array_at", "std::builtin::array_at_mut",
-		"std::builtin::array_set", "std::builtin::array_deinit":
+	case "std::internal::builtin::array_append",
+		"std::internal::builtin::array_len",
+		"std::internal::builtin::array_capacity",
+		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
+		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
+		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
+		"std::internal::builtin::array_set", "std::internal::builtin::array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -2373,10 +2337,12 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::box":
+	case "std::internal::builtin::box":
 		typ, err := c.checkBoxConstructor(typeArg, args, env)
 		return typ, true, err
-	case "std::builtin::box_borrow", "std::builtin::box_borrow_mut", "std::builtin::box_deinit":
+	case "std::internal::builtin::box_borrow",
+		"std::internal::builtin::box_borrow_mut",
+		"std::internal::builtin::box_deinit":
 		return c.checkBuiltinBoxMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -2417,7 +2383,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	method := strings.TrimPrefix(name, "std::builtin::box_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::box_")
 	if method == "borrow_mut" {
 		method = "borrow_mut"
 	}
@@ -2446,7 +2412,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	method := strings.TrimPrefix(name, "std::builtin::array_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::array_")
 	return c.checkBuiltinReceiverMethod(name, fmt.Sprintf("std::array::Array<%s>", typeArg),
 		func(rest []ast.Expression) (string, error) {
 			return c.checkArrayPrimitiveMethod(typeArg, method, rest, env)
@@ -2526,10 +2492,10 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if strings.HasPrefix(name, "std::builtin::map_") {
+	if strings.HasPrefix(name, "std::internal::builtin::map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env)
 	}
-	if name != "std::builtin::map" {
+	if name != "std::internal::builtin::map" {
 		return "", false, nil
 	}
 	typ, err := c.checkMapConstructorAllowTypeParams(typeArg, args, env)
@@ -2548,7 +2514,7 @@ func (c *Checker) checkBuiltinMapMethod(
 		return "", true, err
 	}
 	receiver := fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1])
-	method := strings.TrimPrefix(name, "std::builtin::map_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::map_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (string, error) {
 			mapValue := &binding{typeName: receiver}
@@ -4380,7 +4346,7 @@ func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
 // allowsDirectFieldCleanup reports whether field.deinit is inside owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
 	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
@@ -4397,7 +4363,7 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 // active payload owned and cleanable; everywhere else it stays a borrow.
 func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.sig.Name != "deinit" || returnTypeName(fn) != "void" {
+	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false
 	}
 	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
@@ -4556,15 +4522,6 @@ func returnTypeName(fn *functionInfo) string {
 		return "void"
 	}
 	return fn.returnType
-}
-
-// substituteSelfTypeName replaces only standalone Self segments in a type spelling.
-func substituteSelfTypeName(name string, typeName string) string {
-	out, err := typ.SubstituteText(name, map[string]string{"Self": typeName})
-	if err != nil {
-		return name
-	}
-	return out
 }
 
 // implMethod returns the concrete method signature for typeName when known.

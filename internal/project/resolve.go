@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -46,8 +47,12 @@ func (c *graphChecker) resolveNamespaceParts(
 			return "", false, nil
 		}
 		module.use(parts[0])
+		name := target + "::" + strings.Join(parts[1:], "::")
+		if !ReachableFrom(name, module.path) {
+			return "", false, internalModuleError(name, module)
+		}
 		if isStdPath(target) {
-			return stdFunctionName(target, parts), true, nil
+			return c.resolveStdFunction(module, name, parts)
 		}
 		return c.resolveImportedFunction(module, target, parts)
 	}
@@ -62,9 +67,9 @@ func (c *graphChecker) resolveNamespaceParts(
 }
 
 // rejectUnboundStd refuses a std path the file never brought into scope. It
-// speaks only for paths an import would have made reachable: a module that is
-// reserved or kept inside std is refused for a reason of its own, and saying
-// `import it` there would name a fix that does not exist.
+// speaks only for paths that name a std module: a chain that names nothing there
+// is somebody else's error, and saying `import it` would name a fix that does
+// not exist.
 func rejectUnboundStd(module *moduleUnit, parts []string) error {
 	if len(parts) < 2 || parts[0] != stdlib.Root {
 		return nil
@@ -72,12 +77,15 @@ func rejectUnboundStd(module *moduleUnit, parts []string) error {
 	if _, bound := module.namespaces[parts[0]]; bound {
 		return nil
 	}
-	path := stdlib.Root + "::" + parts[1]
-	if _, ok, err := stdlib.Importable(path); err != nil || !ok {
+	path, size, err := stdModulePrefix(parts)
+	if err != nil || size == 0 {
 		return err
 	}
+	if !ReachableFrom(path, module.path) {
+		return internalModuleError(path, module)
+	}
 	used := strings.Join(parts, "::")
-	short := strings.Join(parts[1:], "::")
+	short := strings.Join(parts[size-1:], "::")
 	return fmt.Errorf(
 		"module error: `%s` is used without an import in `%s`"+
 			"\nhelp: `import %s;` reaches it by this path,"+
@@ -86,24 +94,53 @@ func rejectUnboundStd(module *moduleUnit, parts []string) error {
 	)
 }
 
+// stdModulePrefix returns the longest std module path that prefixes parts, and
+// how many segments it spans. A path names the deepest module it can, so
+// `std::path::internal::bits::is_slash` is an item of `std::path::internal::bits`
+// rather than of `std::path`.
+func stdModulePrefix(parts []string) (string, int, error) {
+	for size := len(parts); size >= 2; size-- {
+		path := strings.Join(parts[:size], "::")
+		ok, err := stdModule(path)
+		if err != nil {
+			return "", 0, err
+		}
+		if ok {
+			return path, size, nil
+		}
+	}
+	return "", 0, nil
+}
+
+// internalModuleError refuses a module the reading file may not reach. What
+// keeps it in is where it sits, so the message says where that is rather than
+// naming a list it is missing from.
+func internalModuleError(path string, module *moduleUnit) error {
+	internal, scope, _ := internalModule(path)
+	return fmt.Errorf("module error: `%s` is internal to `%s` and is not reachable from `%s`",
+		internal, scope, module.name())
+}
+
 // isStdPath reports whether a bound name stands for the standard library. A
 // user package may not be named `std`, so the prefix decides it.
 func isStdPath(path string) bool {
 	return path == stdlib.Root || strings.HasPrefix(path, stdlib.Root+"::")
 }
 
-// stdFunctionName spells what a std function is called once loaded. std wrapper
-// functions are filed under a dotted name and std types under a `::` one, so a
-// rewritten path has to arrive in the spelling its own declaration used.
-func stdFunctionName(target string, parts []string) string {
-	return target + "::" + strings.Join(parts[1:], "::")
-}
-
-// stdTypeName spells what a std type is called once loaded. std is another
-// package: its declarations are checked where they are loaded, so resolving a
-// name into it only has to say what that name is, not whether it exists.
-func stdTypeName(target string, parts []string) string {
-	return target + "::" + strings.Join(parts[1:], "::")
+// resolveStdFunction validates visibility for a call into std. A name std does
+// not declare is one the compiler provides itself -- `std::arena::Arena` has no
+// Kizu source -- so it passes through to the checker that knows about it.
+func (c *graphChecker) resolveStdFunction(
+	module *moduleUnit,
+	name string,
+	parts []string,
+) (string, bool, error) {
+	exported, ok := c.functions[name]
+	if ok && exported.module != module.path && !exported.public {
+		return "", false, fmt.Errorf("module error: function `%s` is private",
+			strings.Join(parts, "::"))
+	}
+	return name, true, nil
 }
 
 // resolveImportedFunction validates visibility for a call through an import alias.
@@ -135,10 +172,14 @@ func (c *graphChecker) resolveTypeNamespaceParts(
 	}
 	if target, ok := module.namespaces[parts[0]]; ok && len(parts) > 1 {
 		module.use(parts[0])
-		if isStdPath(target) {
-			return stdTypeName(target, parts), true
-		}
 		name := target + "::" + strings.Join(parts[1:], "::")
+		if !ReachableFrom(name, module.path) {
+			// resolveNamespaceParts says why; this one has no way to report it.
+			return "", false
+		}
+		if isStdPath(target) {
+			return name, true
+		}
 		if _, exists := c.types[name]; exists {
 			return name, true
 		}
@@ -207,6 +248,9 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 	}
 	if strings.HasPrefix(name, stdlib.Root+"::") {
 		r.module.use(stdlib.Root)
+		if !ReachableFrom(name, r.module.path) {
+			return "", internalModuleError(name, r.module)
+		}
 		return name, rejectUnboundStd(r.module, strings.Split(name, "::"))
 	}
 	if strings.Contains(name, "::") {
@@ -229,10 +273,13 @@ func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("module error: `%s` is not imported in `%s`", parts[0], r.module.path)
 	}
-	if isStdPath(targetModule) {
-		return stdTypeName(targetModule, parts), nil
-	}
 	qualified := targetModule + "::" + strings.Join(parts[1:], "::")
+	if !ReachableFrom(qualified, r.module.path) {
+		return "", internalModuleError(qualified, r.module)
+	}
+	if isStdPath(targetModule) {
+		return qualified, nil
+	}
 	exported, ok := r.checker.types[qualified]
 	if !ok {
 		return "", fmt.Errorf("module error: unknown type `%s`", name)
@@ -247,7 +294,7 @@ func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 func isPrimitiveType(name string) bool {
 	switch name {
 	case "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function", "Self",
+		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function",
 		"type":
 		return true
 	default:
@@ -270,7 +317,7 @@ func sortedModuleUnits(modules map[string]*moduleUnit) []*moduleUnit {
 	for path := range modules {
 		paths = append(paths, path)
 	}
-	sortStrings(paths)
+	sort.Strings(paths)
 	out := make([]*moduleUnit, 0, len(paths))
 	for _, path := range paths {
 		out = append(out, modules[path])
@@ -284,15 +331,6 @@ func sortedImportPaths(imports map[string]string) []string {
 	for _, path := range imports {
 		paths = append(paths, path)
 	}
-	sortStrings(paths)
+	sort.Strings(paths)
 	return paths
-}
-
-// sortStrings sorts values without exposing a helper dependency to callers.
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
 }

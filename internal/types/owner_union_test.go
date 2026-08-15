@@ -10,12 +10,10 @@ const ownerUnionDeinit = `union Node {
     Left(std::string::String),
     Right(std::array::Array<i64>),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        match self {
-            Left(s) => s.deinit(),
-            Right(a) => a.deinit(),
-        }
+fn (self: Node) deinit() -> void {
+    match self {
+        Left(s) => s.deinit(),
+        Right(a) => a.deinit(),
     }
 }`
 
@@ -49,13 +47,11 @@ func TestCheckAcceptsOwnerUnionWithCopyVariants(t *testing.T) {
     Empty,
     Text(std::string::String),
 }
-impl Value {
-    fn deinit(self: Value) -> void {
-        match self {
-            Count(n) => print(n),
-            Empty => print(0),
-            Text(s) => s.deinit(),
-        }
+fn (self: Value) deinit() -> void {
+    match self {
+        Count(n) => print(n),
+        Empty => print(0),
+        Text(s) => s.deinit(),
     }
 }`
 	if err := checkSource(source); err != nil {
@@ -67,17 +63,15 @@ impl Value {
 // by delegating to the payload aggregate's own deinit.
 func TestCheckAcceptsOwnerUnionThroughNestedAggregate(t *testing.T) {
 	source := `struct Inner { buf: std::array::Array<i64> }
-impl Inner { fn deinit(self: Inner) -> void { self.buf.deinit(); } }
+fn (self: Inner) deinit() -> void { self.buf.deinit(); }
 union Outer {
     Wrapped(Inner),
     None,
 }
-impl Outer {
-    fn deinit(self: Outer) -> void {
-        match self {
-            Wrapped(inner) => inner.deinit(),
-            None => print(0),
-        }
+fn (self: Outer) deinit() -> void {
+    match self {
+        Wrapped(inner) => inner.deinit(),
+        None => print(0),
     }
 }`
 	if err := checkSource(source); err != nil {
@@ -101,12 +95,10 @@ func TestCheckRejectsOwnerUnionMissingVariantCleanup(t *testing.T) {
     Left(std::string::String),
     Right(i64),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        match self {
-            Left(s) => print(0),
-            Right(n) => print(n),
-        }
+fn (self: Node) deinit() -> void {
+    match self {
+        Left(s) => print(0),
+        Right(n) => print(n),
     }
 }`
 	assertCheckError(t, source,
@@ -119,12 +111,10 @@ func TestCheckRejectsOwnerUnionBorrowedDeinitReceiver(t *testing.T) {
     Left(std::string::String),
     Right(i64),
 }
-impl Node {
-    fn deinit(self: &Node) -> void {
-        match self {
-            Left(s) => print(0),
-            Right(n) => print(n),
-        }
+fn (self: &Node) deinit() -> void {
+    match self {
+        Left(s) => print(0),
+        Right(n) => print(n),
     }
 }`
 	assertCheckError(t, source,
@@ -137,10 +127,8 @@ func TestCheckRejectsOwnerUnionDeinitWithoutMatch(t *testing.T) {
     Left(std::string::String),
     Right(i64),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        return;
-    }
+fn (self: Node) deinit() -> void {
+    return;
 }`
 	assertCheckError(t, source,
 		"owner-payload union `Node` deinit must dispatch on `self` with an exhaustive `match`")
@@ -153,13 +141,11 @@ func TestCheckRejectsOwnerUnionDeinitMatchNotFirst(t *testing.T) {
     Left(std::string::String),
     Right(i64),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        if true { return; }
-        match self {
-            Left(s) => s.deinit(),
-            Right(n) => n,
-        }
+fn (self: Node) deinit() -> void {
+    if true { return; }
+    match self {
+        Left(s) => s.deinit(),
+        Right(n) => n,
     }
 }`
 	assertCheckError(t, source,
@@ -172,12 +158,10 @@ func TestCheckRejectsOwnerUnionWildcardDeinit(t *testing.T) {
     Left(std::string::String),
     Right(i64),
 }
-impl Node {
-    fn deinit(self: Node) -> void {
-        match self {
-            Left(s) => s.deinit(),
-            _ => print(0),
-        }
+fn (self: Node) deinit() -> void {
+    match self {
+        Left(s) => s.deinit(),
+        _ => print(0),
     }
 }`
 	assertCheckError(t, source,

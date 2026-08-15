@@ -97,14 +97,13 @@ func TestFormatPreservesFunctionDocComment(t *testing.T) {
 	}
 }
 
-// TestFormatPreservesImplMethodDocComment keeps method docs inside impl bodies.
-func TestFormatPreservesImplMethodDocComment(t *testing.T) {
-	src := "impl Parser{\n/// Advances.\nfn advance(self: Parser)->void{return;}}\n"
-	want := "impl Parser {\n" +
-		"    /// Advances.\n" +
-		"    fn advance(self: Parser) -> void {\n" +
-		"        return;\n" +
-		"    }\n" +
+// TestFormatPreservesMethodDocComment keeps docs on a method declaration, and
+// keeps the space that tells a receiver slot from a call.
+func TestFormatPreservesMethodDocComment(t *testing.T) {
+	src := "/// Advances.\nfn(self: &var Parser)advance()->void{return;}\n"
+	want := "/// Advances.\n" +
+		"fn (self: &var Parser) advance() -> void {\n" +
+		"    return;\n" +
 		"}\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(doc commented method):\n--- got ---\n%s\n--- want ---\n%s", got, want)

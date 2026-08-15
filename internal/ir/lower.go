@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -35,9 +35,8 @@ type lowerer struct {
 	loops       []*loopContext
 	deferFrames [][]Cleanup
 	// typeBindings binds the type parameters in force: those of the generic
-	// function being instantiated, and Self while an impl block's methods are
-	// lowered. Lowering reads a body once per binding rather than rewriting its
-	// AST, so `T` and `Self` both resolve through here.
+	// function being instantiated. Lowering reads a body once per binding rather
+	// than rewriting its AST, so `T` resolves through here.
 	typeBindings map[string]string
 	// instantiated records the generic instances already requested, keyed by
 	// the symbol they were given.
@@ -122,12 +121,6 @@ func (l *lowerer) resolveType(name string) string {
 	}
 	return resolved
 }
-
-// selfTypeName is what a method inside an `impl` block writes for the type the
-// block is written for. It is a type parameter of the method the way `T` is one
-// of a generic, so lowering resolves it through the same bindings: a body
-// reading `self.field` finds the struct only once Self is bound to it.
-const selfTypeName = "Self"
 
 // resolveTypeArgs binds the type parameters in force across a static argument
 // list. A list is not a type, so each entry is resolved on its own.
@@ -343,15 +336,6 @@ func (l *lowerer) lower() (*Module, error) {
 		}
 		l.module.Functions = append(l.module.Functions, lowered)
 	}
-	for _, decl := range l.program.Decls {
-		impl, ok := decl.(*ast.ImplDecl)
-		if !ok {
-			continue
-		}
-		if err := l.lowerImplMethods(impl); err != nil {
-			return nil, err
-		}
-	}
 	if err := l.lowerTests(); err != nil {
 		return nil, err
 	}
@@ -431,11 +415,8 @@ func (l *lowerer) collectDecls() error {
 		}
 	}
 	for _, decl := range l.program.Decls {
-		switch d := decl.(type) {
-		case *ast.FunctionDecl:
-			l.signatures[d.Name] = l.lowerSignature(d.FunctionSignature)
-		case *ast.ImplDecl:
-			l.collectImplSignatures(d)
+		if fn, ok := decl.(*ast.FunctionDecl); ok {
+			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
 		}
 	}
 	return nil
@@ -467,7 +448,7 @@ func lowerEnum(decl *ast.EnumDecl) Enum {
 // failure crossing from one union into another is therefore a copy, never a
 // conversion.
 func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
-	stdSets, err := stdlib.ErrorSets()
+	stdSets, err := project.StdErrorSets()
 	if err != nil {
 		return Enum{}, err
 	}
@@ -475,7 +456,7 @@ func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
 		return Enum{Name: decl.Name, Tags: codes}, nil
 	}
 	if l.nextErrorCode == 0 {
-		base, err := stdlib.ErrorCodeBase()
+		base, err := project.StdErrorCodeBase()
 		if err != nil {
 			return Enum{}, err
 		}
@@ -496,36 +477,6 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 		fields = append(fields, Field{Name: field.Name, Type: typ.Text(field.TypeName)})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
-}
-
-// collectImplSignatures records the callable type of each method in one impl
-// block, with Self bound to the type the block is written for.
-func (l *lowerer) collectImplSignatures(impl *ast.ImplDecl) {
-	l.typeBindings[selfTypeName] = impl.TypeName
-	defer delete(l.typeBindings, selfTypeName)
-	for _, method := range impl.Methods {
-		name := implMethodName(impl.TypeName, method.Name)
-		l.signatures[name] = l.lowerSignature(method.FunctionSignature)
-	}
-}
-
-// lowerImplMethods lowers one impl block's methods, with Self bound to the type
-// the block is written for.
-func (l *lowerer) lowerImplMethods(impl *ast.ImplDecl) error {
-	l.typeBindings[selfTypeName] = impl.TypeName
-	defer delete(l.typeBindings, selfTypeName)
-	for _, method := range impl.Methods {
-		if method.ExternABI != "" || len(method.StaticParams) > 0 {
-			continue
-		}
-		name := implMethodName(impl.TypeName, method.Name)
-		lowered, err := l.lowerFunctionNamed(method, name)
-		if err != nil {
-			return err
-		}
-		l.module.Functions = append(l.module.Functions, lowered)
-	}
-	return nil
 }
 
 // lowerSignature extracts the callable type of a function declaration.
@@ -1217,13 +1168,13 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	if name == "std::builtin::mem_len" {
+	if name == "std::internal::builtin::mem_len" {
 		if len(args) != 1 {
-			return Value{}, fmt.Errorf("ir error: std::builtin::mem_len expects 1 arg")
+			return Value{}, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
 		}
 		return l.emit("slice.len", "i64", args, ""), nil
 	}
-	if name == "std::builtin::test_fail" {
+	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), nil
 	}
 	ret := "void"
@@ -1481,35 +1432,35 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 	return l.emit("call."+name, sig.Return, args, ""), nil
 }
 
-// arrayPrimitives maps a std::builtin Array primitive to the method it lowers
+// arrayPrimitives maps a std::internal::builtin Array primitive to the method it lowers
 // as. std/src/array.kizu forwards each method to one of these, and lowering the
 // forward is what makes that line the implementation rather than a description
 // of one.
 var arrayPrimitives = map[string]string{
-	"std::builtin::array_append":       "append",
-	"std::builtin::array_as_bytes":     "as_bytes",
-	"std::builtin::array_at":           "at",
-	"std::builtin::array_at_mut":       "at_mut",
-	"std::builtin::array_capacity":     "capacity",
-	"std::builtin::array_clear":        "clear",
-	"std::builtin::array_deinit":       "deinit",
-	"std::builtin::array_get":          "get",
-	"std::builtin::array_get_or_panic": "get_or_panic",
-	"std::builtin::array_len":          "len",
-	"std::builtin::array_pop":          "pop",
-	"std::builtin::array_pop_or_panic": "pop_or_panic",
-	"std::builtin::array_reserve":      "reserve",
-	"std::builtin::array_set":          "set",
-	"std::builtin::array_truncate":     "truncate",
+	"std::internal::builtin::array_append":       "append",
+	"std::internal::builtin::array_as_bytes":     "as_bytes",
+	"std::internal::builtin::array_at":           "at",
+	"std::internal::builtin::array_at_mut":       "at_mut",
+	"std::internal::builtin::array_capacity":     "capacity",
+	"std::internal::builtin::array_clear":        "clear",
+	"std::internal::builtin::array_deinit":       "deinit",
+	"std::internal::builtin::array_get":          "get",
+	"std::internal::builtin::array_get_or_panic": "get_or_panic",
+	"std::internal::builtin::array_len":          "len",
+	"std::internal::builtin::array_pop":          "pop",
+	"std::internal::builtin::array_pop_or_panic": "pop_or_panic",
+	"std::internal::builtin::array_reserve":      "reserve",
+	"std::internal::builtin::array_set":          "set",
+	"std::internal::builtin::array_truncate":     "truncate",
 }
 
-// mapPrimitives maps a std::builtin Map primitive to the method it lowers as.
+// mapPrimitives maps a std::internal::builtin Map primitive to the method it lowers as.
 var mapPrimitives = map[string]string{
-	"std::builtin::map_contains": "contains",
-	"std::builtin::map_deinit":   "deinit",
-	"std::builtin::map_get":      "get",
-	"std::builtin::map_insert":   "insert",
-	"std::builtin::map_len":      "len",
+	"std::internal::builtin::map_contains": "contains",
+	"std::internal::builtin::map_deinit":   "deinit",
+	"std::internal::builtin::map_get":      "get",
+	"std::internal::builtin::map_insert":   "insert",
+	"std::internal::builtin::map_len":      "len",
 }
 
 // mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map

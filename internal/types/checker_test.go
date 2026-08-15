@@ -7,7 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
-	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
@@ -67,15 +67,14 @@ func TestCheckAcceptsContractImpl(t *testing.T) {
 	source := `struct Bytes { text: []u8 }
 struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64;
+    fn write(bytes: &Bytes) -> !i64;
 }
-impl Writer for File {
-    fn write(self: &Self, bytes: &Bytes) -> !i64 {
-        print(self.name);
-        print(bytes.text);
-        return 1;
-    }
+fn (self: &File) write(bytes: &Bytes) -> !i64 {
+    print(self.name);
+    print(bytes.text);
+    return 1;
 }
+impl Writer for File;
 fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
     let n = try writer.write(bytes);
     print(n);
@@ -103,7 +102,7 @@ func TestCheckRejectsOwnedDynParam(t *testing.T) {
 			name: "owned",
 			source: `struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: dyn Writer) -> !void {
     return;
@@ -114,7 +113,7 @@ fn main() {}`,
 		{
 			name: "mutable borrow",
 			source: `contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: &var dyn Writer) -> !void {
     return;
@@ -125,7 +124,7 @@ fn main() {}`,
 		{
 			name: "nullable",
 			source: `contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: ?dyn Writer) -> !void {
     return;
@@ -151,7 +150,7 @@ fn main() {}`,
 func TestCheckRejectsLegacyDynWrapper(t *testing.T) {
 	source := `struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: &Dyn<Writer>) -> !void {
     return;
@@ -260,10 +259,9 @@ func TestCheckRejectsIncompleteContractImpl(t *testing.T) {
 	source := `struct Bytes { text: []u8 }
 struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64;
+    fn write(bytes: &Bytes) -> !i64;
 }
-impl Writer for File {
-}
+impl Writer for File;
 fn main() {}`
 	err := checkSource(source)
 	if err == nil {
@@ -555,14 +553,12 @@ fn main() {}`
 func TestCheckAcceptsBorrowProvenanceThroughFieldAliases(t *testing.T) {
 	source := `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
-impl Owner {
-    fn bytes(self: &Owner) -> []u8 borrows self {
-        let storage = &self.text;
-        let view = storage.as_bytes();
-        return view;
-    }
+fn (self: &Owner) bytes() -> []u8 borrows self {
+    let storage = &self.text;
+    let view = storage.as_bytes();
+    return view;
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -576,13 +572,11 @@ func TestCheckAcceptsMethodBorrowProvenance(t *testing.T) {
 	source := `struct Picker {
     bytes: []u8,
 }
-impl Picker {
-    fn from_self(self: &Picker) -> []u8 borrows self {
-        return self.bytes;
-    }
-    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
-        return value;
-    }
+fn (self: &Picker) from_self() -> []u8 borrows self {
+    return self.bytes;
+}
+fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
+    return value;
 }
 fn forward_self(picker: &Picker) -> []u8 borrows picker {
     let view = picker.from_self();
@@ -653,7 +647,7 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 			name: "field alias source mismatch",
 			source: `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
 fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
     let storage = &right.text;
@@ -666,12 +660,12 @@ fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
 			name: "temporary field owner",
 			source: `import std::string;
 struct Owner {
-    text: std::string::String,
+    text: string::String,
 }
-fn make(text: std::string::String) -> Owner {
+fn make(text: string::String) -> Owner {
     return Owner { text: text };
 }
-fn bad(owner: &Owner, text: std::string::String) -> []u8 borrows owner {
+fn bad(owner: &Owner, text: string::String) -> []u8 borrows owner {
     let view = make(text).text.as_bytes();
     return view;
 }`,
@@ -680,10 +674,8 @@ fn bad(owner: &Owner, text: std::string::String) -> []u8 borrows owner {
 		{
 			name: "method explicit source mismatch",
 			source: `struct Picker {}
-impl Picker {
-    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
-        return value;
-    }
+fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
+    return value;
 }
 fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
     let view = picker.from_arg(right);
@@ -704,7 +696,7 @@ func TestCheckAcceptsArrayElementViewTiedToArrayOwner(t *testing.T) {
 	source := `import std::array;
 import std::string;
 struct Store {
-    parts: std::array::Array<std::string::String>,
+    parts: array::Array<string::String>,
 }
 fn view(store: &Store, index: i64) -> ![]u8 borrows store {
     let parts = &store.parts;
@@ -725,7 +717,7 @@ func TestCheckRejectsArrayElementViewFromAnotherOwner(t *testing.T) {
 	source := `import std::array;
 import std::string;
 struct Store {
-    parts: std::array::Array<std::string::String>,
+    parts: array::Array<string::String>,
 }
 fn view(left: &Store, right: &Store, index: i64) -> ![]u8 borrows left {
     let parts = &right.parts;
@@ -1358,11 +1350,9 @@ struct Parsed {
     users: std::arena::Arena<User>,
     ids: std::array::Array<i64>,
 }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.users.deinit();
-        self.ids.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.users.deinit();
+    self.ids.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
     let item = try values.pop();
@@ -1379,10 +1369,8 @@ fn main() {}`
 // TestCheckAcceptsArrayPopOrPanicResourceElements keeps the trap variant move-capable.
 func TestCheckAcceptsArrayPopOrPanicResourceElements(t *testing.T) {
 	source := `struct Parsed { values: std::array::Array<i64> }
-impl Parsed {
-    fn deinit(self: Parsed) -> void {
-        self.values.deinit();
-    }
+fn (self: Parsed) deinit() -> void {
+    self.values.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
@@ -1492,11 +1480,9 @@ fn main() {
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-impl Registry {
-    fn deinit(self: Registry) -> void {
-        self.users.deinit();
-        return;
-    }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+    return;
 }
 fn main() {
     let allocator = std::mem::page_allocator();
@@ -1637,10 +1623,8 @@ union ByteValue {
     Item(u8),
 }
 extern "c" fn raw_byte() -> ptr<u8>
-impl Counter {
-    fn push(self: Counter, value: u8) -> u8 {
-        return value;
-    }
+fn (self: Counter) push(value: u8) -> u8 {
+    return value;
 }
 fn take_u8(x: u8) -> u8 { return x ;}
 fn take_i32(x: i32) -> i32 { return x ;}
@@ -1748,10 +1732,8 @@ fn main() {
 // TestCheckAcceptsRequiresUnsafeMethodCall checks caller-obligation methods.
 func TestCheckAcceptsRequiresUnsafeMethodCall(t *testing.T) {
 	source := `struct Register { value: i64 }
-impl Register {
-    @requires_unsafe() fn read(self: Register) -> i64 {
-        return self.value;
-    }
+@requires_unsafe() fn (self: Register) read() -> i64 {
+    return self.value;
 }
 fn main() {
     let register = Register { value: 1 };
@@ -1974,10 +1956,8 @@ fn main() {
 		{
 			name: "requires unsafe method call outside unsafe",
 			source: `struct Register { value: i64 }
-impl Register {
-    @requires_unsafe() fn read(self: Register) -> i64 {
-        return self.value;
-    }
+@requires_unsafe() fn (self: Register) read() -> i64 {
+    return self.value;
 }
 fn main() {
     let register = Register { value: 1 };
@@ -2217,22 +2197,13 @@ func TestCheckAllReturnsEmptyForValidProgram(t *testing.T) {
 
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
-	p := parser.New(lexer.New(source))
-	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		return errors.New(p.Errors()[0])
-	}
 	// The checker reads std container method signatures from std's own
-	// declarations, so a program is only checkable with std merged in, which is
+	// declarations, so a program is only checkable with std loaded, which is
 	// what every real invocation does.
-	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)
+	program, err := project.LoadSource("", withStdImport(source))
 	if err != nil {
 		return err
 	}
-	if len(stdErrs) > 0 {
-		return errors.New(stdErrs[0].Error())
-	}
-	program.Decls = append(stdDecls, program.Decls...)
 	return New().Check(program)
 }
 
@@ -2268,4 +2239,27 @@ func TestReferencedTypeNamesSeesThroughEveryWrapper(t *testing.T) {
 			}
 		}
 	}
+}
+
+// withStdImport gives a snippet the root import a file needs to spell full std
+// paths. The snippets are about what the checker does with std types, not about
+// import lines, and a file that writes `std::mem::page_allocator` has to bring
+// the root into scope the same way any other file does.
+func withStdImport(source string) string {
+	if strings.Contains(source, "import std;") || !writesFullStdPath(source) {
+		return source
+	}
+	return "import std;\n" + source
+}
+
+// writesFullStdPath reports whether a snippet spells a std path in code rather
+// than only naming one in an import declaration.
+func writesFullStdPath(source string) bool {
+	for _, line := range strings.Split(source, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "import ") &&
+			strings.Contains(line, "std::") {
+			return true
+		}
+	}
+	return false
 }

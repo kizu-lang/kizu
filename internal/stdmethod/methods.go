@@ -7,13 +7,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
-// Method is one std method: a std function whose first parameter is `self`.
+// Method is one method declared with a receiver slot.
 //
 // std/src/*.kizu writes container methods this way, forwarding to a
-// `std::builtin::*` primitive:
+// `std::internal::builtin::*` primitive:
 //
-//	fn append<T>(self: std::array::Array<T>, value: T) -> !void {
-//	    return std::builtin::array_append<T>(self, value);
+//	fn (self: std::array::Array<T>) append<T>(value: T) -> !void {
+//	    return std::internal::builtin::array_append<T>(self, value);
 //	}
 //
 // The signature carries the method's arity, parameter types, return type and
@@ -63,11 +63,11 @@ func IndexMethods(decls []ast.Decl) MethodIndex {
 	index := MethodIndex{}
 	for _, decl := range decls {
 		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok || !fn.Std || len(fn.Params) == 0 || fn.Params[0].Name != "self" {
+		if !ok || !fn.Receiver || len(fn.Params) == 0 {
 			continue
 		}
-		receiver := baseTypeName(typ.Text(fn.Params[0].TypeName))
-		if receiver == "" {
+		receiver, name, ok := SplitMethodName(fn.Name)
+		if !ok {
 			continue
 		}
 		methods := index[receiver]
@@ -75,7 +75,7 @@ func IndexMethods(decls []ast.Decl) MethodIndex {
 			methods = map[string]Method{}
 			index[receiver] = methods
 		}
-		methods[methodName(fn.Name)] = methodFromDecl(fn)
+		methods[name] = methodFromDecl(fn)
 	}
 	return index
 }
@@ -98,23 +98,28 @@ func methodFromDecl(fn *ast.FunctionDecl) Method {
 	}
 }
 
-// baseTypeName strips static arguments, so `std::array::Array<T>` keys as
-// `std::array::Array`.
-func baseTypeName(typeName string) string {
-	if base, _, ok := typ.SplitApply(typeName); ok {
-		return base
-	}
-	return typeName
+// MethodName is what a method is filed under: the type it is a method on and the
+// name a call spells. This and SplitMethodName are the one place that pairing is
+// written down.
+func MethodName(receiver string, name string) string {
+	return receiver + "." + name
 }
 
-// methodName takes the last segment of a qualified std function name, which is
-// how a receiver call spells it.
-func methodName(name string) string {
-	if idx := strings.LastIndex(name, "::"); idx >= 0 {
-		return name[idx+len("::"):]
+// SplitMethodName separates a method's name into the type it is a method on and
+// the name a call spells.
+func SplitMethodName(name string) (string, string, bool) {
+	idx := strings.LastIndex(name, ".")
+	if idx < 0 {
+		return "", "", false
 	}
-	if idx := strings.LastIndex(name, "."); idx >= 0 {
-		return name[idx+1:]
+	return name[:idx], name[idx+1:], true
+}
+
+// CallName returns the name a call spells for a declared function. A method is
+// filed under its receiver's type, and a call names only the part after it.
+func CallName(name string) string {
+	if _, called, ok := SplitMethodName(name); ok {
+		return called
 	}
 	return name
 }

@@ -1,9 +1,13 @@
 package project
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // qualifyModule rewrites one parsed module into package-qualified names.
@@ -43,11 +47,52 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 	case *ast.ImplDecl:
 		return c.qualifyImpl(module, d)
 	case *ast.FunctionDecl:
-		return c.qualifyFunction(module, d, module.qualify(d.Name))
+		name, err := c.declaredFunctionName(module, d)
+		if err != nil {
+			return nil, err
+		}
+		return c.qualifyFunction(module, d, name)
 	case *ast.TestDecl:
 		return c.qualifyTestDecl(module, d)
 	default:
 		return decl, nil
+	}
+}
+
+// declaredFunctionName returns what a function is filed under. A method is filed
+// under the type it is a method on, so two types in one module may each declare
+// a `len`; anything else is filed under its module.
+func (c *graphChecker) declaredFunctionName(
+	module *moduleUnit,
+	decl *ast.FunctionDecl,
+) (string, error) {
+	if !decl.Receiver || len(decl.Params) == 0 {
+		return module.qualify(decl.Name), nil
+	}
+	resolved, err := c.resolveTypeNode(module, decl.Params[0].TypeName)
+	if err != nil {
+		return "", err
+	}
+	base, ok := receiverBase(resolved)
+	if !ok {
+		return "", fmt.Errorf("module error: `%s` is not a type a method can be declared on in `%s`",
+			typ.Text(decl.Params[0].TypeName), module.name())
+	}
+	return stdmethod.MethodName(base, decl.Name), nil
+}
+
+// receiverBase names the type a receiver stands for, with borrows and static
+// arguments dropped: `&std::array::Array<T>` is a method on `std::array::Array`.
+func receiverBase(t typ.Type) (string, bool) {
+	switch node := t.(type) {
+	case *typ.Borrow:
+		return receiverBase(node.Elem)
+	case *typ.Const:
+		return receiverBase(node.Elem)
+	case *typ.Name:
+		return strings.Join(node.Path, "::"), true
+	default:
+		return "", false
 	}
 }
 
@@ -108,7 +153,7 @@ func (c *graphChecker) qualifyContract(
 	return &cp, nil
 }
 
-// qualifyImpl rewrites an impl receiver, contract name, and method bodies.
+// qualifyImpl rewrites the type and contract an assertion names.
 func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast.ImplDecl, error) {
 	cp := *decl
 	typeName, err := c.resolveType(module, decl.TypeName)
@@ -116,25 +161,19 @@ func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast
 		return nil, err
 	}
 	cp.TypeName = typeName
-	if decl.ContractName != "" {
-		contractName, err := c.resolveType(module, decl.ContractName)
-		if err != nil {
-			return nil, err
-		}
-		cp.ContractName = contractName
+	contractName, err := c.resolveType(module, decl.ContractName)
+	if err != nil {
+		return nil, err
 	}
-	cp.Methods = append([]*ast.FunctionDecl(nil), decl.Methods...)
-	for idx, method := range cp.Methods {
-		qualified, err := c.qualifyFunction(module, method, method.Name)
-		if err != nil {
-			return nil, err
-		}
-		cp.Methods[idx] = qualified
-	}
+	cp.ContractName = contractName
 	return &cp, nil
 }
 
 // qualifyFunction rewrites a function signature and body type references.
+//
+// A function std declared is marked as such, because being std source is what
+// lets it name the trusted primitives and what makes its `self` parameter a
+// method receiver.
 func (c *graphChecker) qualifyFunction(
 	module *moduleUnit,
 	decl *ast.FunctionDecl,
@@ -142,6 +181,7 @@ func (c *graphChecker) qualifyFunction(
 ) (*ast.FunctionDecl, error) {
 	cp := *decl
 	cp.Name = name
+	cp.Std = module.pkg == stdlib.Root
 	cp.Params = append([]ast.Param(nil), decl.Params...)
 	for idx := range cp.Params {
 		resolved, err := c.resolveTypeNode(module, cp.Params[idx].TypeName)
@@ -539,7 +579,7 @@ func (c *graphChecker) qualifyCallee(
 	module *moduleUnit,
 	expr ast.Expression,
 ) (ast.Expression, error) {
-	if ident, ok := expr.(*ast.IdentExpr); ok && declaresFunction(module, ident.Name) {
+	if ident, ok := expr.(*ast.IdentExpr); ok && c.declaresFunction(module, ident.Name) {
 		return &ast.IdentExpr{Name: module.qualify(ident.Name)}, nil
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok && field.Namespace {
@@ -557,15 +597,12 @@ func (c *graphChecker) qualifyCallee(
 	return c.qualifyExpr(module, expr)
 }
 
-// declaresFunction reports whether module has a local top-level function.
-func declaresFunction(module *moduleUnit, name string) bool {
-	for _, decl := range module.program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if ok && fn.Name == name {
-			return true
-		}
-	}
-	return false
+// declaresFunction reports whether module has a local top-level function. It
+// reads the index collectFunctions built, which holds exactly the functions a
+// module names -- methods are filed under their receiver and are not among them.
+func (c *graphChecker) declaresFunction(module *moduleUnit, name string) bool {
+	_, ok := c.functions[module.qualify(name)]
+	return ok
 }
 
 // qualifyFieldExpr rewrites namespace receivers while preserving field names.

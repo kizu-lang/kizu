@@ -40,8 +40,6 @@ func documentSymbolAt(tokens []token.Token, start int) (documentSymbol, int, boo
 		return variantDocumentSymbol(tokens, start, "union", symbolKindEnum)
 	case token.Contract:
 		return namedDocumentSymbol(tokens, start, "contract", symbolKindInterface)
-	case token.Impl:
-		return implDocumentSymbol(tokens, start)
 	}
 	return documentSymbol{}, start, false
 }
@@ -63,18 +61,26 @@ func importDocumentSymbol(tokens []token.Token, start int) (documentSymbol, int,
 
 // functionDocumentSymbol builds an outline item for a function declaration.
 func functionDocumentSymbol(tokens []token.Token, start int) (documentSymbol, int, bool) {
-	if start+1 >= len(tokens) || tokens[start+1].Type != token.Ident {
+	receiver, nameAt := readReceiver(tokens, start)
+	if nameAt >= len(tokens) || tokens[nameAt].Type != token.Ident {
 		return documentSymbol{}, start, false
 	}
 	headerEnd := declarationHeaderEnd(tokens, start)
 	end := skipDeclarationBody(tokens, headerEnd)
-	name := tokens[start+1].Literal
+	name := tokens[nameAt].Literal
+	kind := symbolKindFunction
+	if len(receiver) > 0 {
+		// The outline groups a method under the type it is on, which is where a
+		// reader looks for it.
+		name = receiverType(receiver) + "." + name
+		kind = symbolKindMethod
+	}
 	return documentSymbol{
 		Name:           name,
 		Detail:         tokenText(tokens[start:headerEnd]),
-		Kind:           symbolKindFunction,
+		Kind:           kind,
 		Range:          rangeFromTokenSpan(tokens, start, end),
-		SelectionRange: tokenRange(tokens[start+1]),
+		SelectionRange: tokenRange(tokens[nameAt]),
 	}, end, true
 }
 
@@ -178,31 +184,4 @@ func declarationChildren(decls map[string]navigationDeclaration) []documentSymbo
 		})
 	}
 	return children
-}
-
-// implDocumentSymbol builds an outline item and method children for an impl block.
-func implDocumentSymbol(tokens []token.Token, start int) (documentSymbol, int, bool) {
-	typeName, brace := implTarget(tokens, start)
-	if brace < 0 {
-		return documentSymbol{}, start, false
-	}
-	end := skipBalanced(tokens, brace, token.LBrace, token.RBrace)
-	symbol := documentSymbol{
-		Name:           "impl " + normalizeCompletionType(typeName),
-		Kind:           symbolKindClass,
-		Range:          rangeFromTokenSpan(tokens, start, end),
-		SelectionRange: rangeFromTokenSpan(tokens, start, brace),
-	}
-	for i := brace + 1; i < end; i++ {
-		if tokens[i].Type != token.Function {
-			continue
-		}
-		child, next, ok := functionDocumentSymbol(tokens, i)
-		if ok {
-			child.Kind = symbolKindMethod
-			symbol.Children = append(symbol.Children, child)
-		}
-		i = next
-	}
-	return symbol, end, true
 }

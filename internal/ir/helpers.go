@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -140,27 +141,27 @@ func derefType(name string) string {
 
 // implMethodName returns the symbol used for a concrete impl method.
 func implMethodName(typeName string, method string) string {
-	return typeName + "." + method
+	return stdmethod.MethodName(typeName, method)
 }
 
 // runtimeBuiltinReturnType records checked host-runtime builtin result types.
 func runtimeBuiltinReturnType(name string) (string, bool) {
 	switch name {
-	case "std::builtin::io_blocking", "std::builtin::io_failing":
+	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		return "Io", true
-	case "std::builtin::fs_read_file":
+	case "std::internal::builtin::fs_read_file":
 		return "std::fs::Error![]u8", true
-	case "std::builtin::fs_write_file",
-		"std::builtin::fs_create_dir",
-		"std::builtin::fs_rename",
-		"std::builtin::fs_remove_dir",
-		"std::builtin::fs_remove_file":
+	case "std::internal::builtin::fs_write_file",
+		"std::internal::builtin::fs_create_dir",
+		"std::internal::builtin::fs_rename",
+		"std::internal::builtin::fs_remove_dir",
+		"std::internal::builtin::fs_remove_file":
 		return "std::fs::Error!void", true
-	case "std::builtin::fs_exists":
+	case "std::internal::builtin::fs_exists":
 		return "std::fs::Error!bool", true
-	case "std::builtin::fs_metadata":
+	case "std::internal::builtin::fs_metadata":
 		return "std::fs::Error!std::fs::Metadata", true
-	case "std::builtin::fs_read_dir":
+	case "std::internal::builtin::fs_read_dir":
 		return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true
 	default:
 		return "", false

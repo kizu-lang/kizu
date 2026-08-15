@@ -166,14 +166,12 @@ func TestCompleteReturnsStructFieldsAndImplMethods(t *testing.T) {
     count: i64,
 }
 
-impl Trace {
-    fn deinit(self: Trace) -> void {
-        return;
-    }
-    /// Renames the trace.
-    fn rename(self: &var Trace, name: []u8) -> void {
-        return;
-    }
+fn (self: Trace) deinit() -> void {
+    return;
+}
+/// Renames the trace.
+fn (self: &var Trace) rename(name: []u8) -> void {
+    return;
 }
 
 fn main() {
@@ -181,7 +179,7 @@ fn main() {
     first.
 }
 `
-	items := Complete(source, Position{Line: 18, Character: len("    first.")})
+	items := Complete(source, Position{Line: 16, Character: len("    first.")})
 	label := requireCompletion(t, items, "label")
 	if label.Kind != completionItemKindField || label.Detail != "[]u8" {
 		t.Fatalf("label item = %#v, want []u8 field", label)
