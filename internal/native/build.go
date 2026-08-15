@@ -6,8 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/buildcache"
 )
 
 // Options describes one native link request.
@@ -39,7 +42,11 @@ func Build(options Options) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	irPath, runtimePath, err := writeInputs(tmp, options.LLVMIR, options.ErrorSets)
+	irPath := filepath.Join(tmp, "main.ll")
+	if err := os.WriteFile(irPath, []byte(options.LLVMIR), 0o644); err != nil {
+		return err
+	}
+	runtimePath, err := runtimeObject(options)
 	if err != nil {
 		return err
 	}
@@ -79,25 +86,53 @@ func validateOptions(options Options) error {
 	return nil
 }
 
-// writeInputs writes LLVM IR and the minimal Kizu runtime shim.
-func writeInputs(
-	dir string,
-	llvmIR string,
-	errorSets map[string]map[string]int,
-) (string, string, error) {
-	irPath := filepath.Join(dir, "main.ll")
-	runtimePath := filepath.Join(dir, "runtime.c")
-	if err := os.WriteFile(irPath, []byte(llvmIR), 0o644); err != nil {
-		return "", "", err
+// runtimeObject returns the compiled runtime to link, compiling it only when
+// nothing has it yet. The runtime is part of the compiler, not part of the
+// program: its source is a constant of this binary and the numbers it names
+// failures with are read from std, so compiling it once per program is the same
+// work reaching the same answer every time.
+func runtimeObject(options Options) (string, error) {
+	if err := requireRuntimeErrorSets(options.ErrorSets); err != nil {
+		return "", err
 	}
-	if err := requireRuntimeErrorSets(errorSets); err != nil {
-		return "", "", err
+	source := errorSetConstants(options.ErrorSets) + runtimeSource
+	cache, err := buildcache.New()
+	if err != nil {
+		return "", err
 	}
-	source := errorSetConstants(errorSets) + runtimeSource
-	if err := os.WriteFile(runtimePath, []byte(source), 0o644); err != nil {
-		return "", "", err
+	return cache.GetOrBuildArtifact(
+		"native-runtime.c",
+		runtimeCacheTarget(options),
+		[]byte(source),
+		func(output string) error { return compileRuntime(source, output, options) },
+	)
+}
+
+// runtimeCacheTarget spells what changes the object but is not in its source:
+// the toolchain that builds it, the machine it is built for, and what it is
+// asked to produce.
+func runtimeCacheTarget(options Options) string {
+	key := []string{"native-runtime", options.Linker, runtime.GOOS + "-" + runtime.GOARCH}
+	return strings.Join(append(key, clangFlags(options)...), "/")
+}
+
+// compileRuntime compiles the runtime source into one object file.
+func compileRuntime(source string, output string, options Options) error {
+	dir, err := os.MkdirTemp("", "kizu-runtime-*")
+	if err != nil {
+		return err
 	}
-	return irPath, runtimePath, nil
+	defer os.RemoveAll(dir)
+	sourcePath := filepath.Join(dir, "runtime.c")
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		return err
+	}
+	args := append(clangFlags(options), "-c", sourcePath, "-o", output)
+	out, err := exec.Command(options.Linker, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
+	}
+	return nil
 }
 
 // runtimeErrorSets names the sets the runtime reports its failures with. It
@@ -164,17 +199,23 @@ func camelToSnake(name string) string {
 
 // runClang invokes the configured C/LLVM toolchain with explicit inputs.
 func runClang(irPath string, runtimePath string, options Options) ([]string, error) {
-	args := []string{}
-	if options.Triple != "" {
-		args = append(args, "-target", options.Triple)
-	}
-	args = append(args, clangOptimizationFlag(options.Opt), irPath, runtimePath, "-o", options.Output)
+	args := append(clangFlags(options), irPath, runtimePath, "-o", options.Output)
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
 	}
 	return append([]string{options.Linker}, args...), nil
+}
+
+// clangFlags spells what the toolchain is asked to produce. The runtime object
+// is keyed by these, so the key cannot name one build and the compile another.
+func clangFlags(options Options) []string {
+	flags := []string{}
+	if options.Triple != "" {
+		flags = append(flags, "-target", options.Triple)
+	}
+	return append(flags, clangOptimizationFlag(options.Opt))
 }
 
 // clangOptimizationFlag selects the native toolchain optimization level.
