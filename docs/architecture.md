@@ -63,7 +63,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 ## 4. std の二層構造
 
-- 実行時の組み込み(print、メモリ、fs、task 等)は Go 実装が提供し、
+- 実行時の組み込み(print、メモリ、fs、process 等)は Go 実装が提供し、
   `lib/kizu/std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
 - Go 側は `internal/project`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std は利用者の package と同じ loader を通り、`internal/stdlib` が

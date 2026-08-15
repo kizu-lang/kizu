@@ -189,7 +189,6 @@ borrow は次のことができません。
 
 ```text
 std::mem::Box<T>
-shared<T>
 std::arena::Arena<T>
 std::arena::Handle<T>
 ```
@@ -225,6 +224,8 @@ fn main() {
     let name = "alice";
     var count = 0;
     count = count + 1;
+    print(name);
+    print(count);
 }
 ```
 
@@ -399,8 +400,8 @@ receiver が move 済み、deinit 済み、borrow 中なら拒否します。
 
 ```kizu
 struct User {
-    name: []u8;
-    age: i64;
+    name: []u8,
+    age: i64,
 }
 ```
 
@@ -820,7 +821,7 @@ ptr<const T>
 ?ptr<const T>
 ```
 
-type alias は導入しません。
+type alias は持ちません。導入するかどうかは未検討です。
 
 collection は primitive ではなく、標準ライブラリ型として扱います。
 実装済みの collection / ownership 型:
@@ -829,6 +830,7 @@ collection は primitive ではなく、標準ライブラリ型として扱い�
 std::array::Array<T>
 std::map::Map<K, V>
 std::string::String
+std::mem::Box<T>
 std::arena::Arena<T>
 std::arena::Handle<T>
 ```
@@ -939,9 +941,6 @@ fn write_as_mut(p: ptr<const u8>) {
 pointer cast の memory safety obligation はプログラマが負います。
 ただし、`@unsafe` 内でも type check / move check / borrow check は無効化されません。
 
-type alias は導入しません。
-必要になった場合は、別 phase で syntax と ABI 上の扱いを決めます。
-
 ## 8. 所有権
 
 所有される値を代入または関数引数として渡すと move されます。
@@ -1014,7 +1013,7 @@ fn (self: MirStmt) deinit() -> void {
         LetCall(stmt) => stmt.deinit(),
         ReturnExpr(stmt) => stmt.deinit(),
         If(stmt) => stmt.deinit(),
-    };
+    }
 }
 ```
 
@@ -1108,8 +1107,8 @@ field borrow:
 
 ```kizu
 struct User {
-    name: []u8;
-    age: i64;
+    name: []u8,
+    age: i64,
 }
 
 fn main() -> void {
@@ -1202,7 +1201,7 @@ fn fail() -> !i64 {
 error の場合は、現在の関数からその error value を返します。
 
 ```kizu
-fn main() -> !i64 {
+fn next() -> !i64 {
     let value = try parse();
     return value + 1;
 }
@@ -1983,6 +1982,7 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::fs::create_dir(io, path)` は `!void` を返す
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
+* `std::fs::rename(io, from, to)` は `!void` を返す
 * `std::fs::Metadata` は `size: i64` と `is_dir: bool` だけを持つ
 * `std::fs::DirEntry` は `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
 * `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
@@ -2011,6 +2011,10 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::process::arg_count()` は `i64` を返す
 * `std::process::arg(index)` は `![]u8` を返す
 * `std::process::env(name)` は `![]u8` を返す
+* `std::process::env_or_empty(name)` は `[]u8` を返し、未設定なら空を返す
+* `std::process::monotonic_millis()` は `i64` を返す
+* `std::process::spawn_wait8(argc, arg0, ..., arg7)` は子プロセスを起動して
+  終了を待ち、`!i64` を返す。可変長引数を持たないので引数は 8 個までの固定形
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process` helper は hidden I/O を持たない
 
@@ -2146,17 +2150,7 @@ source hash、public interface hash、target、backend、optimization mode、std
 
 リポジトリ構成とデータフローは [`docs/architecture.md`](docs/architecture.md) を正とします。
 
-## 19. 最初に通す examples
-
-最初に `examples/hello.kizu` を通します。
-
-```kizu
-fn main() -> void {
-    print("hello, kizu");
-}
-```
-
-## 20. エラーメッセージ方針
+## 19. エラーメッセージ方針
 
 エラーは短く、直接的で、読めるものにします。
 詳細な diagnostic message style は
@@ -2169,7 +2163,7 @@ error: moved value `name` was used
   --> examples/move_error.kizu:8:11
 ```
 
-## 21. 言語の性格
+## 20. 言語の性格
 
 Kizu は次のような言語にします。
 
