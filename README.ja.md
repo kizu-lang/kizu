@@ -23,7 +23,7 @@ Kizu は Go 製の初期プロトタイプです。
 作り、それを実行します。2 つのコマンドの違いは「実行するかどうか」だけです。
 lowering は 1 本しかないため、同じプログラムが `run` と `build` で違う挙動を示すことは
 原理的に起きません(ADR-0083)。プログラムが「どう動くべきか」を定義するのは
-conformance manifest であり、特定の実行経路ではありません。
+プログラム自身の末尾に書かれた case であり、特定の実行経路ではありません。
 
 | 機能 | 例の数 | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
@@ -136,9 +136,8 @@ go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 
 機能ごとの実行例と失敗すべき安全性ルールは
 [examples catalog](examples/README.md) にまとめています。
-機械判定用の conformance manifest は
-language core が [tests/conformance/v0_1.json](tests/conformance/v0_1.json)、
-stdlib prototype が [tests/conformance/v0_2.json](tests/conformance/v0_2.json) です。
+すべての例は末尾に自分の case -- どのコマンドで実行し、何を出力すべきか -- を
+書いており、conformance test はそれを読みます。
 safe code のメモリ安全契約は
 [docs/memory-safety.md](docs/memory-safety.md) に明文化しています。
 
@@ -211,7 +210,6 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - [SPEC.md](SPEC.md): 言語仕様
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): examples catalog
-- [tests/conformance](tests/conformance/README.md): reusable conformance manifests
 - [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry と移行計画
 - [docs/adr](docs/adr): Architecture Decision Record
 - [docs/perf.md](docs/perf.md): build/cache performance policy

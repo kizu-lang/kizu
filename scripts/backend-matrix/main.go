@@ -6,13 +6,13 @@
 //	go run ./scripts/backend-matrix
 //
 // The interpreter column is the oracle: every listed example is a passing
-// conformance case, so a failure there means the manifest and the tree
-// disagree. The backend columns are the ones that carry information.
+// conformance case, so a failure there means the example and what it says
+// about itself disagree. The backend columns are the ones that carry
+// information.
 package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,9 +21,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/kizu-lang/kizu/internal/conformance"
 )
 
-// featureGroup names one README row and the manifest tags it collects.
+// featureGroup names one README row and the feature tags it collects.
 type featureGroup struct {
 	name string
 	tags []string
@@ -70,20 +72,11 @@ var groups = []featureGroup{
 }
 
 // routes are the CLI paths each example is put through. `run` builds a native
-// executable and runs it, so it is judged against the manifest stdout rather
-// than against the weaker fact that the command exited zero. `wasm` is judged
+// executable and runs it, so it is judged against the output the example
+// declares rather than against the weaker fact that the command exited zero. `wasm` is judged
 // the same way, by running what it emitted: a module that exits zero while
 // emitting text no runtime can load is not a working backend.
 var routes = []string{"check", "run", "llvm", "wasm"}
-
-// manifestCase is the subset of a conformance entry this command reads.
-type manifestCase struct {
-	Mode     string   `json:"mode"`
-	Path     string   `json:"path"`
-	Args     []string `json:"args"`
-	Stdout   *string  `json:"stdout"`
-	Features []string `json:"features"`
-}
 
 // result records one example and whether each route accepted it.
 type result struct {
@@ -109,28 +102,18 @@ func main() {
 	printFailures(results)
 }
 
-// loadCases returns the runnable single-file examples from every manifest.
-func loadCases() (map[string]manifestCase, error) {
-	files, err := filepath.Glob("tests/conformance/v0_*.json")
-	if err != nil || len(files) == 0 {
-		return nil, fmt.Errorf("no conformance manifest found; run from the repository root")
+// loadCases returns the runnable single-file examples. A package is left out
+// because the table is per example file, and a failing case is left out because
+// the columns report what a backend accepts, not what it rejects on purpose.
+func loadCases() (map[string]conformance.Case, error) {
+	declared, err := conformance.Discover(".")
+	if err != nil {
+		return nil, fmt.Errorf("%w; run from the repository root", err)
 	}
-	cases := map[string]manifestCase{}
-	for _, file := range files {
-		raw, err := os.ReadFile(file)
-		if err != nil {
-			return nil, err
-		}
-		var manifest struct {
-			Cases []manifestCase `json:"cases"`
-		}
-		if err := json.Unmarshal(raw, &manifest); err != nil {
-			return nil, fmt.Errorf("%s: %w", file, err)
-		}
-		for _, entry := range manifest.Cases {
-			if entry.Mode == "run" && strings.HasSuffix(entry.Path, ".kizu") {
-				cases[entry.Path] = entry
-			}
+	cases := map[string]conformance.Case{}
+	for _, entry := range declared {
+		if entry.Command == "run" && !entry.MustFail && strings.HasSuffix(entry.Path, ".kizu") {
+			cases[entry.Path] = entry
 		}
 	}
 	return cases, nil
@@ -153,7 +136,7 @@ func buildKizu() (string, func(), error) {
 }
 
 // routeArgs returns the CLI arguments for one route and example.
-func routeArgs(route string, entry manifestCase) []string {
+func routeArgs(route string, entry conformance.Case) []string {
 	switch route {
 	case "check":
 		return []string{"check", entry.Path}
@@ -167,14 +150,14 @@ func routeArgs(route string, entry manifestCase) []string {
 }
 
 // runAll puts every example through every route, bounded by CPU count.
-func runAll(bin string, cases map[string]manifestCase) map[string]*result {
+func runAll(bin string, cases map[string]conformance.Case) map[string]*result {
 	results := map[string]*result{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, runtime.NumCPU())
 	for path, entry := range cases {
 		wg.Add(1)
-		go func(path string, entry manifestCase) {
+		go func(path string, entry conformance.Case) {
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
@@ -189,7 +172,7 @@ func runAll(bin string, cases map[string]manifestCase) map[string]*result {
 }
 
 // runRoutes runs one example through every route.
-func runRoutes(bin string, entry manifestCase) *result {
+func runRoutes(bin string, entry conformance.Case) *result {
 	res := &result{features: entry.Features, ok: map[string]bool{}, err: map[string]string{}}
 	for _, route := range routes {
 		cmd := exec.Command(bin, routeArgs(route, entry)...)
@@ -378,7 +361,7 @@ func sortedByCount(reasons map[string]int) []string {
 	return keys
 }
 
-// warnUnknownTags reports manifest tags no group collects, so the table
+// warnUnknownTags reports feature tags no group collects, so the table
 // cannot silently drop a feature that examples already cover.
 func warnUnknownTags(results map[string]*result) {
 	known := map[string]bool{}
@@ -403,7 +386,7 @@ func warnUnknownTags(results map[string]*result) {
 		keys = append(keys, tag)
 	}
 	sort.Strings(keys)
-	fmt.Fprintf(os.Stderr, "warning: %d manifest tags have no group: %s\n",
+	fmt.Fprintf(os.Stderr, "warning: %d feature tags have no group: %s\n",
 		len(keys), strings.Join(keys, ", "))
 }
 

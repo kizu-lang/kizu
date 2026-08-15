@@ -8,9 +8,11 @@ Kizu はメモリ安全で隠れた制御フローを嫌い、人間がレビュ
 CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt` / `init` /
 `cache` がその周りにあります。
 
-言語の正しさは 3 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
+言語の正しさは 2 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
 `tests/behavior/` は振る舞いの assert を 1 package にまとめたもので、link も実行も
-1 回で済みます。`tests/conformance/` の manifest がその両方を束ねます。
+1 回で済みます。どちらも自分が何を約束するかを**ファイル末尾のコメントブロック**に
+書き、conformance test が木を歩いてそれを読みます。書式は `internal/conformance` の
+package doc にあります。
 
 リポジトリ全体の構造とデータフローは `docs/architecture.md` を先に読んでください。
 

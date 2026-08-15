@@ -198,7 +198,7 @@ for safe-side misuse.
 
 ## Regression Coverage
 
-Every `.kizu` example is listed in `tests/conformance/v0_1.json`. This table maps
+Every `.kizu` example declares its own case at the end of the file. This table maps
 memory-safety invariants to representative examples.
 
 | Invariant | Positive coverage | Negative coverage |

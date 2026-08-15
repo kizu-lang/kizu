@@ -29,8 +29,9 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   fmt, diagnostic, buildcache, cimport, lsp
 std/src/             Kizu で書かれた標準ライブラリ
   kizu/              言語の自己記述層(Kizu で書かれた lexer/parser/AST)
-examples/            言語機能ごとの実例(conformance の対象)
-tests/conformance/   conformance manifest(examples の登録簿: v0_*.json)
+examples/            言語機能ごとの実例(末尾に自分の case を書く)
+tests/behavior/      振る舞いの assert を 1 package に束ねたもの
+tests/fixtures/      module 解決などが使う固定入力
 docs/, docs/adr/     設計ドキュメントと ADR
 ```
 
@@ -46,7 +47,7 @@ source.kizu
 ```
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
-ありません(ADR-0083)。挙動の正は conformance manifest が持ちます。
+ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
 
 CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 `build`(`--emit-llvm` / `--target native|wasm32-wasi`)`cache` `why-rebuild`
@@ -66,16 +67,19 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 
 ## 5. テスト体系
 
-言語の正しさは **examples + conformance** が持ちます。
+言語の正しさは **examples + tests/behavior** が持ちます。どちらも自分が何を
+約束するかを末尾のコメントブロックに書き、conformance test が木を歩いてそれを
+読みます。登録簿はないので、登録し忘れという状態が存在しません。
 
 | 層 | 実行方法 | 内容 |
 | --- | --- | --- |
-| conformance | `go test ./cmd/kizu` | `examples/` を manifest で全件カバー。未登録の example があれば落ちる |
+| conformance | `go test ./cmd/kizu` | `examples/` と `tests/behavior/` を全件実行。case を書いていない例があれば落ちる |
 | ユニット | `go test ./...`(pre-push hook) | 各 internal パッケージ + CLI smoke + std lexer/parser parity(native 実行)|
 | commit hooks | `pre-commit run --all-files` | gofmt / golangci-lint / コメント検査。数秒 |
 
 CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置きません。
-言語機能を足したら `examples/` に実例を足し、conformance manifest に登録します。
+言語機能を足したら `examples/` に実例を足し、その末尾に case を書きます。
+書式は `internal/conformance` の package doc にあります。
 
 ## 6. 開発フロー
 

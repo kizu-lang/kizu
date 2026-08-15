@@ -651,14 +651,20 @@ func chdirForTest(t *testing.T, dir string) func() {
 }
 
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
+// The example is compared against itself rather than against a copy of its
+// bytes: what `fmt` promises is that formatted source comes back unchanged, and
+// pinning the text here would make editing the example a test failure.
 func TestFmtCommandSmoke(t *testing.T) {
-	cmd := kizuCommand("fmt", "../../examples/hello.kizu")
-	out, err := cmd.CombinedOutput()
+	const path = "../../examples/hello.kizu"
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := kizuCommand("fmt", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
-	if string(out) != want {
+	if string(out) != string(want) {
 		t.Fatalf("got %q, want %q", out, want)
 	}
 }
