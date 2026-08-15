@@ -29,6 +29,5 @@ run "llvm hello" go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 run "wasm hello" go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 run "llvm hello no-op" go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 run "wasm hello no-op" go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-run "why hello" go run ./cmd/kizu why-rebuild examples/hello.kizu
 run "cache status" go run ./cmd/kizu cache status
 run "pre-commit" pre-commit run --all-files

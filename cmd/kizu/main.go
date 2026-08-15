@@ -103,8 +103,6 @@ func dispatch(cmd string, args []string) error {
 		return buildFile(args)
 	case "cache":
 		return cacheCommand(args)
-	case "why-rebuild":
-		return whyRebuildFile(args[0])
 	case "import-c-header":
 		return importCHeaderFile(args[0])
 	default:
@@ -135,7 +133,6 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [native-options] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
 }
 
@@ -726,20 +723,6 @@ func pruneCache(cache *buildcache.Cache) error {
 		return err
 	}
 	_, _ = fmt.Printf("cache pruned: removed %d entries, freed %d bytes\n", entries, bytes)
-	return nil
-}
-
-// whyRebuildFile explains the cache state for a source file.
-func whyRebuildFile(path string) error {
-	cache, err := buildcache.New()
-	if err != nil {
-		return err
-	}
-	reason, err := cache.WhyRebuild(path, "emit-llvm")
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Println(reason)
 	return nil
 }
 

@@ -108,10 +108,6 @@ cache-status:
 cache-prune:
     go run ./cmd/kizu cache prune
 
-# Explain whether a file would rebuild.
-why file="examples/hello.kizu":
-    go run ./cmd/kizu why-rebuild {{file}}
-
 # Report which backends accept each conformance example.
 backend-matrix:
     go run ./scripts/backend-matrix

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,7 +28,6 @@ type Cache struct {
 type Entry struct {
 	Key        string    `json:"key"`
 	Target     string    `json:"target"`
-	SourcePath string    `json:"source_path"`
 	SourceHash string    `json:"source_hash"`
 	Version    string    `json:"version"`
 	Output     string    `json:"output"`
@@ -192,35 +190,9 @@ func (c *Cache) Prune() (int, int64, error) {
 	return len(entries), bytes, nil
 }
 
-// WhyRebuild explains whether target would rebuild for path.
-func (c *Cache) WhyRebuild(path string, target string) (string, error) {
-	input, err := newFileInput(path, target)
-	if err != nil {
-		return "", err
-	}
-	if _, ok := c.readEntry(input.key); ok {
-		return fmt.Sprintf("cache hit: %s", input.key), nil
-	}
-	previous, ok, err := c.latestFor(input.sourcePath, target)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "cache miss: no previous build for file", nil
-	}
-	if previous.Version != Version {
-		return "cache miss: compiler cache version changed", nil
-	}
-	if previous.SourceHash != input.sourceHash {
-		return "cache miss: source changed", nil
-	}
-	return "cache miss: build inputs changed", nil
-}
-
 type cacheInput struct {
 	key        string
 	target     string
-	sourcePath string
 	sourceHash string
 }
 
@@ -244,9 +216,7 @@ func newInput(name string, target string, content []byte) cacheInput {
 	sourceHashBytes := sha256.Sum256(content)
 	sourceHash := hex.EncodeToString(sourceHashBytes[:])
 	keyHash := sha256.Sum256([]byte(Version + "\n" + target + "\n" + name + "\n" + sourceHash))
-	return cacheInput{
-		key: hex.EncodeToString(keyHash[:]), target: target, sourcePath: name, sourceHash: sourceHash,
-	}
+	return cacheInput{key: hex.EncodeToString(keyHash[:]), target: target, sourceHash: sourceHash}
 }
 
 // writeEntry writes metadata and output for one artifact.
@@ -266,8 +236,8 @@ func (c *Cache) writeEntry(input cacheInput, output string) error {
 // that is not there yet.
 func (c *Cache) writeMeta(input cacheInput, outputName string, size int64) error {
 	entry := Entry{
-		Key: input.key, Target: input.target, SourcePath: input.sourcePath,
-		SourceHash: input.sourceHash, Version: Version, Output: outputName,
+		Key: input.key, Target: input.target, SourceHash: input.sourceHash,
+		Version: Version, Output: outputName,
 		SizeBytes: size, CreatedAt: time.Now().UTC(),
 	}
 	data, err := json.MarshalIndent(entry, "", "  ")
@@ -309,26 +279,6 @@ func (c *Cache) entries() ([]Entry, error) {
 		entries = append(entries, entry)
 	}
 	return entries, nil
-}
-
-// latestFor returns the most recent entry for path and target.
-func (c *Cache) latestFor(path string, target string) (Entry, bool, error) {
-	entries, err := c.entries()
-	if err != nil {
-		return Entry{}, false, err
-	}
-	var latest Entry
-	found := false
-	for _, entry := range entries {
-		if entry.SourcePath != path || entry.Target != target {
-			continue
-		}
-		if !found || entry.CreatedAt.After(latest.CreatedAt) {
-			latest = entry
-			found = true
-		}
-	}
-	return latest, found, nil
 }
 
 // enforceLimit removes oldest entries until the cache fits MaxBytes.

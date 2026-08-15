@@ -182,7 +182,6 @@ go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
-go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
 ```
 
@@ -199,7 +198,6 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
-- `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
 
 `kizu lint` は未実装です。
