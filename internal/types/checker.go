@@ -2430,8 +2430,8 @@ func (c *Checker) trustedStdBorrowReturn(expr ast.Expression) bool {
 		return false
 	}
 	switch name {
-	case "std.builtin.box_borrow", "std.builtin.box_borrow_mut",
-		"std.builtin.array_at", "std.builtin.array_at_mut":
+	case "std::builtin::box_borrow", "std::builtin::box_borrow_mut",
+		"std::builtin::array_at", "std::builtin::array_at_mut":
 		return true
 	default:
 		return false
@@ -3453,7 +3453,7 @@ func (c *Checker) checkQualifiedBuiltin(
 // std. Being a primitive is what reserves it, so a new one is closed the moment
 // it joins the registry rather than when someone remembers to guard its family.
 func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std.builtin.") {
+	if !strings.HasPrefix(name, "std::builtin::") {
 		return nil
 	}
 	replacement, known := stdprim.ReservedBuiltin(name)
@@ -3491,14 +3491,14 @@ func (c *Checker) checkStdConstructorBuiltin(
 	args []ast.Expression,
 ) (Type, bool, error) {
 	switch name {
-	case "std.builtin.io_blocking", "std.builtin.io_failing":
+	case "std::builtin::io_blocking", "std::builtin::io_failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
-	case "std.io.evented", "std.builtin.io_evented":
+	case "std::io::evented", "std::builtin::io_evented":
 		return "", true, errorf("type error: `std::io::evented` is not implemented in v0.1")
-	case "std.array.Array":
+	case "std::array::Array":
 		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
-	case "std.map.Map":
+	case "std::map::Map":
 		return "", true, errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	default:
 		return "", false, nil
@@ -3578,19 +3578,19 @@ func (c *Checker) checkFsBuiltin(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
-	case "std.builtin.fs_read_file":
+	case "std::builtin::fs_read_file":
 		return c.checkFsReadFile(args, env, unsafe)
-	case "std.builtin.fs_write_file":
+	case "std::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env, unsafe)
-	case "std.builtin.fs_exists":
+	case "std::builtin::fs_exists":
 		return c.checkFsExists(args, env, unsafe)
-	case "std.builtin.fs_metadata":
+	case "std::builtin::fs_metadata":
 		return c.checkFsMetadata(args, env, unsafe)
-	case "std.builtin.fs_read_dir":
+	case "std::builtin::fs_read_dir":
 		return c.checkFsReadDir(args, env, unsafe)
-	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
+	case "std::builtin::fs_create_dir", "std::builtin::fs_remove_dir", "std::builtin::fs_remove_file":
 		return c.checkFsPathOnly(name, args, env, unsafe, "std::fs::Error!void")
-	case "std.builtin.fs_rename":
+	case "std::builtin::fs_rename":
 		return c.checkFsRename(args, env, unsafe)
 	default:
 		return "", false, nil
@@ -3879,7 +3879,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "int_from_ptr" {
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
-	if name == "std.arena.Arena" {
+	if name == "std::arena::Arena" {
 		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
 	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
@@ -3960,7 +3960,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if name != "std.builtin.test_fail_equal" {
+	if name != "std::builtin::test_fail_equal" {
 		return "", false, nil
 	}
 	arg, err := c.parseType(typeArg)
@@ -4025,13 +4025,13 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 // "" for the constructor. ok is false for a name that is not a Box primitive.
 func boxPrimitiveMethod(name string) (string, bool) {
 	switch name {
-	case "std.builtin.box":
+	case "std::builtin::box":
 		return "", true
-	case "std.builtin.box_borrow":
+	case "std::builtin::box_borrow":
 		return "borrow", true
-	case "std.builtin.box_borrow_mut":
+	case "std::builtin::box_borrow_mut":
 		return "borrow_mut", true
-	case "std.builtin.box_deinit":
+	case "std::builtin::box_deinit":
 		return "deinit", true
 	default:
 		return "", false
@@ -4107,19 +4107,19 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
-	case "std.builtin.array":
+	case "std::builtin::array":
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
 		}
 		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
 		return typ, true, err
-	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
-		"std.builtin.array_get", "std.builtin.array_get_or_panic",
-		"std.builtin.array_at", "std.builtin.array_at_mut",
-		"std.builtin.array_reserve", "std.builtin.array_set", "std.builtin.array_deinit",
-		"std.builtin.array_truncate", "std.builtin.array_clear", "std.builtin.array_as_bytes":
+	case "std::builtin::array_append", "std::builtin::array_len", "std::builtin::array_capacity",
+		"std::builtin::array_pop", "std::builtin::array_pop_or_panic",
+		"std::builtin::array_get", "std::builtin::array_get_or_panic",
+		"std::builtin::array_at", "std::builtin::array_at_mut",
+		"std::builtin::array_reserve", "std::builtin::array_set", "std::builtin::array_deinit",
+		"std::builtin::array_truncate", "std::builtin::array_clear", "std::builtin::array_as_bytes":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
 		return "", false, nil
@@ -4138,7 +4138,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	if err != nil {
 		return "", true, err
 	}
-	method := strings.TrimPrefix(name, "std.builtin.array_")
+	method := strings.TrimPrefix(name, "std::builtin::array_")
 	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("std::array::Array<%s>", elem)),
 		func(rest []ast.Expression) (Type, error) {
 			return c.checkArrayPrimitiveMethod(elem, method, rest, env, unsafe)
@@ -4231,10 +4231,10 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.map_") {
+	if strings.HasPrefix(name, "std::builtin::map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env, unsafe)
 	}
-	if name != "std.builtin.map" {
+	if name != "std::builtin::map" {
 		return "", false, nil
 	}
 	mapArgs, err := c.checkedMapArgs(typeArg)
@@ -4260,7 +4260,7 @@ func (c *Checker) checkBuiltinMapMethod(
 		return "", true, err
 	}
 	receiver := Type(fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1]))
-	method := strings.TrimPrefix(name, "std.builtin.map_")
+	method := strings.TrimPrefix(name, "std::builtin::map_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (Type, error) {
 			return c.checkMapPrimitiveMethod(mapArgs[0], Type(mapArgs[1]), method,
@@ -4515,9 +4515,9 @@ func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
 // checkGenericWrapperTypeArgs validates std wrapper-specific static type contracts.
 func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 	switch name {
-	case "std.array.Array":
+	case "std::array::Array":
 		return c.rejectArrayElementType(args[0])
-	case "std.map.Map":
+	case "std::map::Map":
 		return c.checkMapTypeArgContract(args)
 	}
 	return nil
@@ -4630,7 +4630,7 @@ func (c *Checker) checkUserCallArg(
 
 // userCallArityError reports declared function arity using source signatures when useful.
 func userCallArityError(name string, fn *functionType, got int) error {
-	if name == "std.string.String" {
+	if name == "std::string::String" {
 		return errorf("type error: `std::string::String` expects allocator")
 	}
 	if len(fn.params) == 1 {
@@ -4647,10 +4647,10 @@ func userCallArityError(name string, fn *functionType, got int) error {
 // type this call expects, which for a generic is the parameter with its static
 // arguments filled in: a caller writing `id<i64>` is told i64, not T.
 func userCallArgError(name string, fn *functionType, idx int, want Type, got Type) error {
-	if strings.HasPrefix(name, "std.") && idx < len(fn.sig.Params) {
+	if strings.HasPrefix(name, "std::") && idx < len(fn.sig.Params) {
 		paramName := fn.sig.Params[idx].Name
 		if paramName != "" {
-			if strings.HasPrefix(name, "std.fs.") {
+			if strings.HasPrefix(name, "std::fs::") {
 				return errorf("type error: `%s` expects %s %s, got %s",
 					diagnosticName(name), want, paramName, got)
 			}
@@ -4664,7 +4664,7 @@ func userCallArgError(name string, fn *functionType, idx int, want Type, got Typ
 
 // diagnosticName formats internal qualified names as user-facing paths.
 func diagnosticName(name string) string {
-	if strings.HasPrefix(name, "std.") {
+	if strings.HasPrefix(name, "std::") {
 		return strings.ReplaceAll(name, ".", "::")
 	}
 	return name
@@ -6196,7 +6196,7 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return left + "." + e.Name, true
+		return left + "::" + e.Name, true
 	default:
 		return "", false
 	}

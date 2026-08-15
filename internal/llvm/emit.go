@@ -1066,7 +1066,7 @@ func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (stri
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the
 // explicit out-pointer ABI instead of the platform C aggregate return ABI.
 func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
-	if !strings.HasPrefix(llvmFunctionName(name), "std_builtin_") {
+	if !strings.HasPrefix(llvmFunctionName(name), "std__builtin__") {
 		return false
 	}
 	_, ok := errorUnionSuccessType(instr.Result.Type)

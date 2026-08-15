@@ -372,7 +372,7 @@ func renameUnion(module string, decl *ast.UnionDecl) {
 
 // renameFunction rewrites a std wrapper function into its qualified form.
 func renameFunction(module string, fn *ast.FunctionDecl) {
-	fn.Name = "std." + strings.ReplaceAll(module, "::", ".") + "." + fn.Name
+	fn.Name = modulePath(module) + "::" + fn.Name
 	renameFunctionTypes(module, fn)
 	renameBlockExprs(module, fn.Body)
 }

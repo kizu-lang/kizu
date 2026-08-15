@@ -1192,7 +1192,7 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if !ok || !field.Namespace {
 		return "", false
 	}
-	qualified := strings.ReplaceAll(field.String(), "::", ".")
+	qualified := field.String()
 	if _, ok := l.signatures[qualified]; ok {
 		return qualified, true
 	}
@@ -1217,13 +1217,13 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	if name == "std.builtin.mem_len" {
+	if name == "std::builtin::mem_len" {
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("ir error: std::builtin::mem_len expects 1 arg")
 		}
 		return l.emit("slice.len", "i64", args, ""), nil
 	}
-	if name == "std.builtin.test_fail" {
+	if name == "std::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), nil
 	}
 	ret := "void"
@@ -1262,7 +1262,7 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	// expect_equal lowers to its own instruction, so its std wrapper body is
 	// never called. Its arguments still arrive at the types that wrapper
 	// declares, which is what makes `expect_equal<u8>(65, byte)` compare bytes.
-	if name == "std.testing.expect_equal" {
+	if name == "std::testing::expect_equal" {
 		params, err := l.declaredInstanceParams(name, typeArg)
 		if err != nil {
 			return Value{}, err
@@ -1375,11 +1375,11 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
 	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std.array", field.Name, elem, allArgs,
+		return l.lowerStdContainerMethod("std::array", field.Name, elem, allArgs,
 			func() (Value, error) { return l.lowerArrayMethod(field.Name, elem, allArgs) })
 	}
 	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std.map", field.Name, valueType, allArgs,
+		return l.lowerStdContainerMethod("std::map", field.Name, valueType, allArgs,
 			func() (Value, error) { return l.lowerMapMethod(field.Name, valueType, allArgs) })
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
@@ -1403,10 +1403,10 @@ func (l *lowerer) lowerMethodCallExpr(
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
 	if elem, ok := arrayElementType(receiver); ok {
-		return l.stdContainerParams("std.array", method, elem)
+		return l.stdContainerParams("std::array", method, elem)
 	}
 	if valueType, ok := mapValueType(receiver); ok {
-		return l.stdContainerParams("std.map", method, valueType)
+		return l.stdContainerParams("std::map", method, valueType)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
@@ -1486,30 +1486,30 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 // forward is what makes that line the implementation rather than a description
 // of one.
 var arrayPrimitives = map[string]string{
-	"std.builtin.array_append":       "append",
-	"std.builtin.array_as_bytes":     "as_bytes",
-	"std.builtin.array_at":           "at",
-	"std.builtin.array_at_mut":       "at_mut",
-	"std.builtin.array_capacity":     "capacity",
-	"std.builtin.array_clear":        "clear",
-	"std.builtin.array_deinit":       "deinit",
-	"std.builtin.array_get":          "get",
-	"std.builtin.array_get_or_panic": "get_or_panic",
-	"std.builtin.array_len":          "len",
-	"std.builtin.array_pop":          "pop",
-	"std.builtin.array_pop_or_panic": "pop_or_panic",
-	"std.builtin.array_reserve":      "reserve",
-	"std.builtin.array_set":          "set",
-	"std.builtin.array_truncate":     "truncate",
+	"std::builtin::array_append":       "append",
+	"std::builtin::array_as_bytes":     "as_bytes",
+	"std::builtin::array_at":           "at",
+	"std::builtin::array_at_mut":       "at_mut",
+	"std::builtin::array_capacity":     "capacity",
+	"std::builtin::array_clear":        "clear",
+	"std::builtin::array_deinit":       "deinit",
+	"std::builtin::array_get":          "get",
+	"std::builtin::array_get_or_panic": "get_or_panic",
+	"std::builtin::array_len":          "len",
+	"std::builtin::array_pop":          "pop",
+	"std::builtin::array_pop_or_panic": "pop_or_panic",
+	"std::builtin::array_reserve":      "reserve",
+	"std::builtin::array_set":          "set",
+	"std::builtin::array_truncate":     "truncate",
 }
 
 // mapPrimitives maps a std::builtin Map primitive to the method it lowers as.
 var mapPrimitives = map[string]string{
-	"std.builtin.map_contains": "contains",
-	"std.builtin.map_deinit":   "deinit",
-	"std.builtin.map_get":      "get",
-	"std.builtin.map_insert":   "insert",
-	"std.builtin.map_len":      "len",
+	"std::builtin::map_contains": "contains",
+	"std::builtin::map_deinit":   "deinit",
+	"std::builtin::map_get":      "get",
+	"std::builtin::map_insert":   "insert",
+	"std::builtin::map_len":      "len",
 }
 
 // mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map

@@ -143,7 +143,7 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
 			FunctionSignature: ast.FunctionSignature{
-				Name: "std.mem.len",
+				Name: "std::mem::len",
 				Params: []ast.Param{
 					{Name: "bytes", TypeName: &typ.Slice{Elem: &typ.Name{Path: []string{"u8"}}}},
 				},
@@ -179,7 +179,7 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 		t.Fatalf("lower failed: %v", err)
 	}
 	got := Dump(module)
-	want := "  %2: i64 = call.std.mem.len %1: []u8\n"
+	want := "  %2: i64 = call.std::mem::len %1: []u8\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
 	}
