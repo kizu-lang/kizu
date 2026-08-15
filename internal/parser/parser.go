@@ -1480,7 +1480,7 @@ func (p *Parser) parseTypeBaseName() []string {
 	return parts
 }
 
-// parseTypeArgList parses one or more comma-separated v0.2 static type arguments.
+// parseTypeArgList parses one or more comma-separated static type arguments.
 func (p *Parser) parseTypeArgList(allowConst bool) string {
 	args := []string{}
 	for {

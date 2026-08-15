@@ -12,7 +12,7 @@ to Kizu source.
 
 ## Current Model
 
-Kizu v0.2 implements `std` as trusted compiler builtins.
+Kizu implements `std` as trusted compiler builtins.
 
 The implementation is intentionally split by compiler responsibility:
 
@@ -22,7 +22,7 @@ The implementation is intentionally split by compiler responsibility:
 - `examples`: positive and negative user-facing behavior.
 - `tests/behavior`: one package of behavior assertions, linked and run once.
 
-This is acceptable for v0.2, but new `std` APIs must not be added only as local
+This is acceptable for now, but new `std` APIs must not be added only as local
 Go branches. They need a row in this document, examples, and conformance tests.
 
 ## Migration Policy
@@ -56,7 +56,7 @@ under `lib/kizu/std/src`.
 
 ## Allocator Capability
 
-`std::mem::page_allocator() -> Allocator` is the stable v0.2 allocator factory.
+`std::mem::page_allocator() -> Allocator` is the stable allocator factory.
 `Allocator` is a visible opaque capability type, not a user-facing contract or
 struct. It is copyable: passing it to `Array<T>`, `String`, `Map<K, V>`,
 `Box<T>`, or `std::arena::Arena<T>` reads the capability and does not move the binding.
@@ -93,8 +93,8 @@ Rules:
 - Kizu-movable builtins should not gain new behavior in Go
 - host primitives must stay small, explicit, and capability-shaped
 - deleting a builtin requires examples and conformance to keep behavior stable
-- native/self-host work must treat remaining host primitives as the explicit
-  runtime boundary, not as general stdlib implementation
+- native work must treat remaining host primitives as the explicit runtime
+  boundary, not as general stdlib implementation
 
 Current builtin thinning candidates:
 
@@ -232,7 +232,7 @@ specified.
 
 The Kizu `String` implementation uses std-only Array storage helpers for
 reserve, truncate, clear, and byte-slice exposure. Those helpers are not public
-`std::array` API in v0.2.
+`std::array` API.
 
 The migration path is:
 
@@ -241,6 +241,6 @@ The migration path is:
   borrow and move checks
 - add regression coverage for each storage safety rule before expanding the
   primitive set
-- use `String` for diagnostic and byte-building needs in the self-host frontend
+- use `String` for diagnostic and byte-building needs
 - revisit a public byte storage type only when it can preserve allocator,
   cleanup, and view-borrow safety without raw pointer exposure

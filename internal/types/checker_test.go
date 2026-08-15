@@ -472,7 +472,7 @@ fn main() {}`
 	}
 }
 
-// TestCheckAcceptsMapTypeDecl checks v0.2 two-argument Map type spelling.
+// TestCheckAcceptsMapTypeDecl checks two-argument Map type spelling.
 func TestCheckAcceptsMapTypeDecl(t *testing.T) {
 	source := `fn use_table(table: std::map::Map<[]u8, i64>) -> void {
     return;
@@ -504,7 +504,7 @@ fn main() {}`,
     return;
 }
 fn main() {}`,
-			want: "std::map::Map key type must be []u8 in v0.2",
+			want: "std::map::Map key type must be []u8",
 		},
 	}
 	runErrorCases(t, cases)

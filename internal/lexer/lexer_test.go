@@ -222,7 +222,7 @@ for 0..1 |i| { update(&value); }`
 	}
 }
 
-// TestLoopControlTokens checks v0.1 loop-control syntax.
+// TestLoopControlTokens checks loop-control syntax.
 func TestLoopControlTokens(t *testing.T) {
 	input := `for 0..3 |i| { continue; }
 break :outer;`
@@ -256,7 +256,7 @@ break :outer;`
 	}
 }
 
-// TestLoopIsIdentifier documents that Kizu v0.1 has no loop keyword.
+// TestLoopIsIdentifier documents that Kizu has no loop keyword.
 func TestLoopIsIdentifier(t *testing.T) {
 	l := New("loop")
 	tok := l.NextToken()

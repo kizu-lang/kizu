@@ -1,6 +1,6 @@
 # Kizu Memory Safety Contract
 
-This document is the working memory-safety contract for safe Kizu v0.1.
+This document is the working memory-safety contract for safe Kizu.
 
 ADR files explain why decisions were made. `SPEC.md` defines the language. This
 document lists the safety invariants that the checker and the generated code
@@ -20,7 +20,7 @@ rules.
 
 ## Non-Goals
 
-The following are not guaranteed by safe Kizu v0.1:
+The following are not guaranteed by safe Kizu:
 
 - absence of memory leaks
 - absence of deadlock
@@ -72,19 +72,19 @@ policy.
 - A borrowed parameter cannot be returned as an owned value.
 - A borrowed parameter cannot be stored in a local owned binding.
 - A borrowed parameter cannot be passed to an owning parameter.
-- A borrow cannot be stored in a struct or union field in v0.2.
+- A borrow cannot be stored in a struct or union field.
 - A borrowed return must declare its source with `borrows <source>`.
 - A non-copy value cannot be moved out through `value.*`.
 - Copy values may be copied through `value.*`.
 - `&T` cannot be used for mutation.
 - `&var T` requires a mutable local binding.
 - `&T` and `&var T` cannot overlap in a way that creates mutable aliasing.
-- v0.1 supports one-level direct field borrow such as `&user.name`.
+- One-level direct field borrow such as `&user.name` is supported.
 - A field borrow allows disjoint field assignment, such as assigning `user.age`
   while `user.name` is borrowed.
 - A field borrow blocks owner moves and conflicting access to the same field.
-- v0.1 rejects nested field borrow, such as `&user.profile.name`.
-- v0.1 does not implement indexed borrow syntax. If indexed access is added later,
+- Nested field borrow, such as `&user.profile.name`, is rejected.
+- Indexed borrow syntax is not implemented. If indexed access is added later,
   `&items[0]` must get explicit safety rules and regression coverage first.
 
 ### Arena and Handle
@@ -186,12 +186,12 @@ Runtime failure is acceptable. Silent undefined behavior is not.
 
 ## Trusted Boundaries
 
-The following components are trusted in v0.1:
+The following components are trusted:
 
-- Go implementation of the parser, type checker, ownership checker, and interpreter
+- Go implementation of the parser, type checker, and ownership checker
 - built-in functions and std prototype APIs
 - arena / handle runtime representation
-- future backend lowering from checked programs to IR, LLVM, or WASM
+- backend lowering from checked programs to IR, LLVM, or WASM
 
 Each trusted boundary must stay small and must have negative examples or unit tests
 for safe-side misuse.
@@ -232,11 +232,11 @@ memory-safety invariants to representative examples.
 
 ## Release Gate
 
-Before declaring v0.1 memory-safe for safe Kizu:
+Before declaring safe Kizu memory-safe:
 
 1. `pre-commit run --all-files` must pass.
 2. `go test ./...` must pass.
-3. `go test ./cmd/kizu -run TestV01ConformanceManifest -count=1` must pass.
+3. `go test ./cmd/kizu -run TestConformance -count=1` must pass.
 4. Every invariant in this document must have regression coverage.
 5. New trusted std APIs must document their safe-side preconditions here.
 6. New `@unsafe` capabilities must add negative tests proving safe checks remain
@@ -246,9 +246,8 @@ Before declaring v0.1 memory-safe for safe Kizu:
 
 These are known areas to keep conservative:
 
-- Backend code generation is experimental and not yet the source of v0.1 safety.
 - Numeric casts and integer-width runtime semantics are incomplete.
-- Arrays, slices, allocators, and general std containers are not implemented.
+- General std containers beyond `Array` / `Map` / `String` are not implemented.
 - Real OS threads and async runtime semantics are not implemented (ADR-0025).
 - Raw pointer runtime operations are not implemented as a safe guarantee.
 

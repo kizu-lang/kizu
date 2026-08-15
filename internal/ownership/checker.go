@@ -954,7 +954,7 @@ func (c *Checker) checkBorrowLetStmt(
 	return nil
 }
 
-// borrowTarget resolves a v0.1 explicit borrow target.
+// borrowTarget resolves a explicit borrow target.
 func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, string, error) {
 	switch target := expr.(type) {
 	case *ast.IdentExpr:
@@ -975,7 +975,7 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 		ident, ok := target.Receiver.(*ast.IdentExpr)
 		if !ok {
 			return nil, "", errorAt(target.Span,
-				"borrow error: v0.1 field borrow only supports one direct field")
+				"borrow error: field borrow only supports one direct field")
 		}
 		value, ok := env.lookup(ident.Name)
 		if !ok {
@@ -2095,7 +2095,7 @@ func (c *Checker) checkMapConstructorAllowTypeParams(
 // rejectArrayElementType rejects element types with unresolved ownership hazards.
 func (c *Checker) rejectArrayElementType(elem string) error {
 	if err := c.rejectArrayStorageType(elem, map[string]bool{}); err != nil {
-		return errorf("array error: Array element is not safe in v0.2: %w", err)
+		return errorf("array error: Array element is not safe: %w", err)
 	}
 	return nil
 }
@@ -2107,10 +2107,10 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 	}
 	seen[typeName] = true
 	if isRawPointerType(typeName) {
-		return errorf("array error: Array element cannot be raw pointer in v0.2")
+		return errorf("array error: Array element cannot be raw pointer")
 	}
 	if isDynType(typeName) {
-		return errorf("array error: Array element cannot be dyn in v0.2")
+		return errorf("array error: Array element cannot be dyn")
 	}
 	if base, arg, ok := splitGenericType(typeName); ok && base == "option" {
 		if err := c.rejectArrayStorageType(arg, seen); err != nil {
@@ -2172,7 +2172,7 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 		}
 		return "Io", true, nil
 	case "std::io::evented", "std::internal::builtin::io_evented":
-		return "", true, errorf("move error: `std::io::evented` is not implemented in v0.1")
+		return "", true, errorf("move error: `std::io::evented` is not implemented")
 	default:
 		return "", false, nil
 	}
@@ -2473,7 +2473,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 		}
 		if !isGenericParamName(elem) && !c.isCopyType(elem) {
-			return "", errorf("array error: `Array.%s` requires copy element in v0.2", name)
+			return "", errorf("array error: `Array.%s` requires copy element", name)
 		}
 		if name == "get" {
 			return "!" + elem, nil
@@ -3772,7 +3772,7 @@ func (c *Checker) checkArraySet(
 	return "!void", nil
 }
 
-// checkArrayGet validates copy-only Array<T> reads in the v0.2 prototype.
+// checkArrayGet validates copy-only Array<T> reads in the prototype.
 func (c *Checker) checkArrayGet(
 	elem string,
 	name string,
@@ -3790,7 +3790,7 @@ func (c *Checker) checkArrayGet(
 		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 	}
 	if !c.isCopyType(elem) {
-		return "", errorf("array error: `Array.%s` requires copy element in v0.2", name)
+		return "", errorf("array error: `Array.%s` requires copy element", name)
 	}
 	if name == "get" {
 		return "!" + elem, nil
@@ -4678,13 +4678,13 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 		return nil, errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if !sameOwnershipType(args[0], "[]u8") {
-		return nil, errorf("map error: std::map::Map key type must be []u8 in v0.2")
+		return nil, errorf("map error: std::map::Map key type must be []u8")
 	}
 	if isGenericParamName(args[1]) {
 		return args, nil
 	}
 	if !c.isCopyType(args[1]) {
-		return nil, errorf("map error: std::map::Map value type must be copy in v0.2")
+		return nil, errorf("map error: std::map::Map value type must be copy")
 	}
 	return args, nil
 }
