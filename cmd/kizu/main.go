@@ -155,23 +155,22 @@ func parseFile(path string) error {
 
 // runFile builds a source file or package into a native executable and runs it.
 //
-// `run` and `build` are one path: run links the executable `build --target
-// native` writes and then executes it. A program cannot behave one way under
-// run and another way under build, because there is only one lowering.
+// `run` and `build` are one path: both lower the program the same way and hand
+// the same IR to the same linker, and differ only in where the executable goes.
+// A program cannot behave one way under run and another way under build.
 func runFile(path string, args []string) error {
-	exe, cleanup, err := buildRunExecutable(path)
+	exe, err := buildRunExecutable(path)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
 	return executeBuilt(exe, args)
 }
 
-// buildRunExecutable lowers a run target and links it into a temporary binary.
-func buildRunExecutable(path string) (string, func(), error) {
+// buildRunExecutable lowers a run target and links it into an executable.
+func buildRunExecutable(path string) (string, error) {
 	module, err := lowerRunTarget(path)
 	if err != nil {
-		return "", func() {}, err
+		return "", err
 	}
 	return linkModule(module)
 }
@@ -183,31 +182,22 @@ func stdErrorSets() (map[string]map[string]int, error) {
 	return stdlib.ErrorSets()
 }
 
-// linkModule emits and links one lowered module into a temporary executable.
-func linkModule(module *ir.Module) (string, func(), error) {
-	noCleanup := func() {}
+// linkModule emits one lowered module and returns an executable for it. The
+// executable is kept rather than thrown away, so a program that has not changed
+// since it was last run is not linked a second time.
+func linkModule(module *ir.Module) (string, error) {
 	llvmIR, err := llvm.Emit(module)
 	if err != nil {
-		return "", noCleanup, err
+		return "", err
 	}
-	dir, err := os.MkdirTemp("", "kizu-run-*")
-	if err != nil {
-		return "", noCleanup, err
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	exe := filepath.Join(dir, "main")
 	errorSets, err := stdErrorSets()
 	if err != nil {
-		return "", noCleanup, err
+		return "", err
 	}
-	if err := native.Build(native.Options{
-		LLVMIR: llvmIR, Output: exe, ErrorSets: errorSets,
+	return native.Executable(native.Options{
+		LLVMIR: llvmIR, ErrorSets: errorSets,
 		LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang",
-	}); err != nil {
-		cleanup()
-		return "", noCleanup, err
-	}
-	return exe, cleanup, nil
+	})
 }
 
 // lowerRunTarget lowers either a package root or a single source file.
@@ -342,11 +332,10 @@ func testFile(path string, args []string) error {
 	if err := addTestMain(module); err != nil {
 		return err
 	}
-	exe, cleanup, err := linkModule(module)
+	exe, err := linkModule(module)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
 	if err := executeBuilt(exe, args); err != nil {
 		return err
 	}
