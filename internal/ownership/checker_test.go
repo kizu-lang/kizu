@@ -1307,7 +1307,7 @@ func checkSource(source string) error {
 	if len(p.Errors()) > 0 {
 		return errors.New(p.Errors()[0])
 	}
-	// std wrappers are what a program calls now that the `std::builtin::`
+	// std wrappers are what a program calls now that the `std::internal::builtin::`
 	// namespace is closed to source outside std, so a checkable program is one
 	// with std merged in -- which is what every real invocation does.
 	stdDecls, stdErrs, err := stdlib.DeclsForSource(source)

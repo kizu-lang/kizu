@@ -10,10 +10,10 @@ import (
 // Method is one std method: a std function whose first parameter is `self`.
 //
 // std/src/*.kizu writes container methods this way, forwarding to a
-// `std::builtin::*` primitive:
+// `std::internal::builtin::*` primitive:
 //
 //	fn append<T>(self: std::array::Array<T>, value: T) -> !void {
-//	    return std::builtin::array_append<T>(self, value);
+//	    return std::internal::builtin::array_append<T>(self, value);
 //	}
 //
 // The signature carries the method's arity, parameter types, return type and

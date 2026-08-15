@@ -1217,13 +1217,13 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	if name == "std::builtin::mem_len" {
+	if name == "std::internal::builtin::mem_len" {
 		if len(args) != 1 {
-			return Value{}, fmt.Errorf("ir error: std::builtin::mem_len expects 1 arg")
+			return Value{}, fmt.Errorf("ir error: std::internal::builtin::mem_len expects 1 arg")
 		}
 		return l.emit("slice.len", "i64", args, ""), nil
 	}
-	if name == "std::builtin::test_fail" {
+	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), nil
 	}
 	ret := "void"
@@ -1481,35 +1481,35 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 	return l.emit("call."+name, sig.Return, args, ""), nil
 }
 
-// arrayPrimitives maps a std::builtin Array primitive to the method it lowers
+// arrayPrimitives maps a std::internal::builtin Array primitive to the method it lowers
 // as. std/src/array.kizu forwards each method to one of these, and lowering the
 // forward is what makes that line the implementation rather than a description
 // of one.
 var arrayPrimitives = map[string]string{
-	"std::builtin::array_append":       "append",
-	"std::builtin::array_as_bytes":     "as_bytes",
-	"std::builtin::array_at":           "at",
-	"std::builtin::array_at_mut":       "at_mut",
-	"std::builtin::array_capacity":     "capacity",
-	"std::builtin::array_clear":        "clear",
-	"std::builtin::array_deinit":       "deinit",
-	"std::builtin::array_get":          "get",
-	"std::builtin::array_get_or_panic": "get_or_panic",
-	"std::builtin::array_len":          "len",
-	"std::builtin::array_pop":          "pop",
-	"std::builtin::array_pop_or_panic": "pop_or_panic",
-	"std::builtin::array_reserve":      "reserve",
-	"std::builtin::array_set":          "set",
-	"std::builtin::array_truncate":     "truncate",
+	"std::internal::builtin::array_append":       "append",
+	"std::internal::builtin::array_as_bytes":     "as_bytes",
+	"std::internal::builtin::array_at":           "at",
+	"std::internal::builtin::array_at_mut":       "at_mut",
+	"std::internal::builtin::array_capacity":     "capacity",
+	"std::internal::builtin::array_clear":        "clear",
+	"std::internal::builtin::array_deinit":       "deinit",
+	"std::internal::builtin::array_get":          "get",
+	"std::internal::builtin::array_get_or_panic": "get_or_panic",
+	"std::internal::builtin::array_len":          "len",
+	"std::internal::builtin::array_pop":          "pop",
+	"std::internal::builtin::array_pop_or_panic": "pop_or_panic",
+	"std::internal::builtin::array_reserve":      "reserve",
+	"std::internal::builtin::array_set":          "set",
+	"std::internal::builtin::array_truncate":     "truncate",
 }
 
-// mapPrimitives maps a std::builtin Map primitive to the method it lowers as.
+// mapPrimitives maps a std::internal::builtin Map primitive to the method it lowers as.
 var mapPrimitives = map[string]string{
-	"std::builtin::map_contains": "contains",
-	"std::builtin::map_deinit":   "deinit",
-	"std::builtin::map_get":      "get",
-	"std::builtin::map_insert":   "insert",
-	"std::builtin::map_len":      "len",
+	"std::internal::builtin::map_contains": "contains",
+	"std::internal::builtin::map_deinit":   "deinit",
+	"std::internal::builtin::map_get":      "get",
+	"std::internal::builtin::map_insert":   "insert",
+	"std::internal::builtin::map_len":      "len",
 }
 
 // mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map

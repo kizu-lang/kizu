@@ -727,7 +727,7 @@ void kizu_print_bool(_Bool v) {
     fputs(v ? "true\n" : "false\n", stdout);
 }
 
-void *std__builtin__mem_page_allocator(void) {
+void *std__internal__builtin__mem_page_allocator(void) {
     return NULL;
 }
 
@@ -737,11 +737,11 @@ void *std__builtin__mem_page_allocator(void) {
 #define KIZU_IO_WORKING ((void *)1)
 #define KIZU_IO_FAILING ((void *)2)
 
-void *std__builtin__io_blocking(void) {
+void *std__internal__builtin__io_blocking(void) {
     return KIZU_IO_WORKING;
 }
 
-void *std__builtin__io_failing(void) {
+void *std__internal__builtin__io_failing(void) {
     return KIZU_IO_FAILING;
 }
 
@@ -759,7 +759,8 @@ static KizuErrorVoid kizu_std_builtin_io_write_stdout_result(void *io, KizuSlice
     return kizu_ok_void();
 }
 
-void std__builtin__io_write_stdout(KizuErrorVoid *out, void *io, const KizuSliceU8 *bytes) {
+void std__internal__builtin__io_write_stdout(
+    KizuErrorVoid *out, void *io, const KizuSliceU8 *bytes) {
     *out = kizu_std_builtin_io_write_stdout_result(io, *bytes);
 }
 
@@ -773,7 +774,8 @@ static KizuErrorVoid kizu_std_builtin_io_write_stderr_result(void *io, KizuSlice
     return kizu_ok_void();
 }
 
-void std__builtin__io_write_stderr(KizuErrorVoid *out, void *io, const KizuSliceU8 *bytes) {
+void std__internal__builtin__io_write_stderr(
+    KizuErrorVoid *out, void *io, const KizuSliceU8 *bytes) {
     *out = kizu_std_builtin_io_write_stderr_result(io, *bytes);
 }
 
@@ -813,11 +815,11 @@ static KizuErrorSliceU8 kizu_std_builtin_io_read_stdin_result(void *io) {
     return kizu_ok_slice(out);
 }
 
-void std__builtin__io_read_stdin(KizuErrorSliceU8 *out, void *io) {
+void std__internal__builtin__io_read_stdin(KizuErrorSliceU8 *out, void *io) {
     *out = kizu_std_builtin_io_read_stdin_result(io);
 }
 
-int64_t std__builtin__process_arg_count(void) {
+int64_t std__internal__builtin__process_arg_count(void) {
     if (kizu_runtime_argc <= 0) {
         return 0;
     }
@@ -825,13 +827,13 @@ int64_t std__builtin__process_arg_count(void) {
 }
 
 static KizuErrorSliceU8 kizu_std_builtin_process_arg_result(int64_t index) {
-    if (index < 0 || index >= std__builtin__process_arg_count()) {
+    if (index < 0 || index >= std__internal__builtin__process_arg_count()) {
         return kizu_err_slice(KIZU_ERR_STD_PROCESS_ERROR_ARG_INDEX_OUT_OF_BOUNDS);
     }
     return kizu_ok_slice(kizu_slice_from_cstr(kizu_runtime_argv[index + 1]));
 }
 
-void std__builtin__process_arg(KizuErrorSliceU8 *out, int64_t index) {
+void std__internal__builtin__process_arg(KizuErrorSliceU8 *out, int64_t index) {
     *out = kizu_std_builtin_process_arg_result(index);
 }
 
@@ -848,11 +850,11 @@ static KizuErrorSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
     return kizu_ok_slice(kizu_slice_from_cstr(value));
 }
 
-void std__builtin__process_env(KizuErrorSliceU8 *out, const KizuSliceU8 *name) {
+void std__internal__builtin__process_env(KizuErrorSliceU8 *out, const KizuSliceU8 *name) {
     *out = kizu_std_builtin_process_env_result(*name);
 }
 
-KizuSliceU8 std__builtin__process_env_or_empty(KizuSliceU8 name) {
+KizuSliceU8 std__internal__builtin__process_env_or_empty(KizuSliceU8 name) {
     char *key = kizu_slice_to_cstr(name);
     if (!key) {
         return kizu_slice_from_cstr("");
@@ -865,7 +867,7 @@ KizuSliceU8 std__builtin__process_env_or_empty(KizuSliceU8 name) {
     return kizu_slice_from_cstr(value);
 }
 
-int64_t std__builtin__process_monotonic_millis(void) {
+int64_t std__internal__builtin__process_monotonic_millis(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
@@ -897,7 +899,7 @@ static int kizu_run_child_process(char *const argv[]) {
     return 127;
 }
 
-void std__builtin__process_spawn_wait8(
+void std__internal__builtin__process_spawn_wait8(
     KizuErrorI64 *out,
     int64_t argc,
     const KizuSliceU8 *arg0,
@@ -981,7 +983,8 @@ static KizuErrorSliceU8 kizu_std_builtin_fs_read_file_result(void *io, KizuSlice
     return kizu_ok_slice(out);
 }
 
-void std__builtin__fs_read_file(KizuErrorSliceU8 *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_read_file(
+    KizuErrorSliceU8 *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_read_file_result(io, *path);
 }
 
@@ -1011,7 +1014,7 @@ static KizuErrorVoid kizu_std_builtin_fs_write_file_result(
     return kizu_ok_void();
 }
 
-void std__builtin__fs_write_file(
+void std__internal__builtin__fs_write_file(
     KizuErrorVoid *out,
     void *io,
     const KizuSliceU8 *path,
@@ -1045,7 +1048,7 @@ static KizuErrorVoid kizu_std_builtin_fs_rename_result(
     return kizu_ok_void();
 }
 
-void std__builtin__fs_rename(
+void std__internal__builtin__fs_rename(
     KizuErrorVoid *out,
     void *io,
     const KizuSliceU8 *from,
@@ -1067,7 +1070,7 @@ static KizuErrorBool kizu_std_builtin_fs_exists_result(void *io, KizuSliceU8 pat
     return kizu_ok_bool(found);
 }
 
-void std__builtin__fs_exists(KizuErrorBool *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_exists(KizuErrorBool *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_exists_result(io, *path);
 }
 
@@ -1092,7 +1095,8 @@ static KizuErrorFsMetadata kizu_std_builtin_fs_metadata_result(void *io, KizuSli
     return kizu_ok_metadata(out);
 }
 
-void std__builtin__fs_metadata(KizuErrorFsMetadata *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_metadata(
+    KizuErrorFsMetadata *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_metadata_result(io, *path);
 }
 
@@ -1142,7 +1146,7 @@ static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 pa
     return kizu_ok_ptr(array);
 }
 
-void std__builtin__fs_read_dir(KizuErrorPtr *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_read_dir(KizuErrorPtr *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_read_dir_result(io, *path);
 }
 
@@ -1163,7 +1167,7 @@ static KizuErrorVoid kizu_std_builtin_fs_create_dir_result(void *io, KizuSliceU8
     return kizu_ok_void();
 }
 
-void std__builtin__fs_create_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_create_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_create_dir_result(io, *path);
 }
 
@@ -1184,7 +1188,7 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_dir_result(void *io, KizuSliceU8
     return kizu_ok_void();
 }
 
-void std__builtin__fs_remove_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_remove_dir(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_remove_dir_result(io, *path);
 }
 
@@ -1205,7 +1209,7 @@ static KizuErrorVoid kizu_std_builtin_fs_remove_file_result(void *io, KizuSliceU
     return kizu_ok_void();
 }
 
-void std__builtin__fs_remove_file(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
+void std__internal__builtin__fs_remove_file(KizuErrorVoid *out, void *io, const KizuSliceU8 *path) {
     *out = kizu_std_builtin_fs_remove_file_result(io, *path);
 }
 

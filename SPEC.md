@@ -601,7 +601,7 @@ module の完全パス(`std::fs`)は、その module の同一性を指す名前
 
 user package に `std` という名前は使えません。
 std package 内部の module も同じ規則で import します。`exports` にない
-`std::builtin` のような module は、std package の中からだけ import できます。
+`std::internal::builtin` のような module は、std package の中からだけ import できます。
 
 name resolution order:
 
@@ -1661,7 +1661,7 @@ explicit trusted primitive:
 ```kizu
 // lib/kizu/std/src/array.kizu
 import std;
-import std::builtin;
+import std::internal::builtin;
 
 pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
     return builtin::array<T>(allocator);
@@ -1987,7 +1987,7 @@ std::testing::fail(message: []u8) -> !void
 ```
 
 `expect` は test assertion 用の void helper です。
-condition failure は `std::builtin::test_fail` 経由で runtime error として停止し、
+condition failure は `std::internal::builtin::test_fail` 経由で runtime error として停止し、
 test source は assertion ごとの `try` を書きません。
 `fail` は caller-provided `[]u8` を通常の `!void` error として返します。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。

@@ -1866,11 +1866,11 @@ func (c *Checker) checkQualifiedBuiltin(
 	return checkUntypedContainerConstructor(name)
 }
 
-// rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
+// rejectReservedBuiltin closes the `std::internal::builtin::` namespace to source outside
 // std. The type checker rejects these first in a full run; this keeps the rule
 // true of this checker on its own, which is how its own tests read it.
 func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std::builtin::") {
+	if !strings.HasPrefix(name, "std::internal::builtin::") {
 		return nil
 	}
 	replacement, known := stdprim.ReservedBuiltin(name)
@@ -1965,20 +1965,22 @@ func (c *Checker) checkFsBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::fs_read_file":
+	case "std::internal::builtin::fs_read_file":
 		return c.checkFsReadFile(args, env)
-	case "std::builtin::fs_write_file":
+	case "std::internal::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env)
-	case "std::builtin::fs_exists":
+	case "std::internal::builtin::fs_exists":
 		return c.checkFsPathOnly("std::fs::exists", args, env, "std::fs::Error!bool")
-	case "std::builtin::fs_metadata":
+	case "std::internal::builtin::fs_metadata":
 		return c.checkFsPathOnly("std::fs::metadata", args, env, "std::fs::Error!std::fs::Metadata")
-	case "std::builtin::fs_read_dir":
+	case "std::internal::builtin::fs_read_dir":
 		return c.checkFsPathOnly("std::fs::read_dir", args, env,
 			"std::fs::Error!std::array::Array<std::fs::DirEntry>")
-	case "std::builtin::fs_create_dir", "std::builtin::fs_remove_dir", "std::builtin::fs_remove_file":
+	case "std::internal::builtin::fs_create_dir",
+		"std::internal::builtin::fs_remove_dir",
+		"std::internal::builtin::fs_remove_file":
 		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "std::fs::Error!void")
-	case "std::builtin::fs_rename":
+	case "std::internal::builtin::fs_rename":
 		return c.checkFsRename(args, env)
 	default:
 		return "", false, nil
@@ -2203,13 +2205,13 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 // checkIoBuiltin validates std::io constructor ownership effects.
 func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	switch name {
-	case "std::builtin::io_blocking", "std::builtin::io_failing":
+	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Io", true, nil
-	case "std::io::evented", "std::builtin::io_evented":
+	case "std::io::evented", "std::internal::builtin::io_evented":
 		return "", true, errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
@@ -2309,7 +2311,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if name != "std::builtin::test_fail_equal" {
+	if name != "std::internal::builtin::test_fail_equal" {
 		return "", false, nil
 	}
 	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
@@ -2351,14 +2353,16 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::array":
+	case "std::internal::builtin::array":
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
-	case "std::builtin::array_append", "std::builtin::array_len", "std::builtin::array_capacity",
-		"std::builtin::array_pop", "std::builtin::array_pop_or_panic",
-		"std::builtin::array_get", "std::builtin::array_get_or_panic",
-		"std::builtin::array_at", "std::builtin::array_at_mut",
-		"std::builtin::array_set", "std::builtin::array_deinit":
+	case "std::internal::builtin::array_append",
+		"std::internal::builtin::array_len",
+		"std::internal::builtin::array_capacity",
+		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
+		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
+		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
+		"std::internal::builtin::array_set", "std::internal::builtin::array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -2373,10 +2377,12 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::builtin::box":
+	case "std::internal::builtin::box":
 		typ, err := c.checkBoxConstructor(typeArg, args, env)
 		return typ, true, err
-	case "std::builtin::box_borrow", "std::builtin::box_borrow_mut", "std::builtin::box_deinit":
+	case "std::internal::builtin::box_borrow",
+		"std::internal::builtin::box_borrow_mut",
+		"std::internal::builtin::box_deinit":
 		return c.checkBuiltinBoxMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -2417,7 +2423,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	method := strings.TrimPrefix(name, "std::builtin::box_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::box_")
 	if method == "borrow_mut" {
 		method = "borrow_mut"
 	}
@@ -2446,7 +2452,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	method := strings.TrimPrefix(name, "std::builtin::array_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::array_")
 	return c.checkBuiltinReceiverMethod(name, fmt.Sprintf("std::array::Array<%s>", typeArg),
 		func(rest []ast.Expression) (string, error) {
 			return c.checkArrayPrimitiveMethod(typeArg, method, rest, env)
@@ -2526,10 +2532,10 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if strings.HasPrefix(name, "std::builtin::map_") {
+	if strings.HasPrefix(name, "std::internal::builtin::map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env)
 	}
-	if name != "std::builtin::map" {
+	if name != "std::internal::builtin::map" {
 		return "", false, nil
 	}
 	typ, err := c.checkMapConstructorAllowTypeParams(typeArg, args, env)
@@ -2548,7 +2554,7 @@ func (c *Checker) checkBuiltinMapMethod(
 		return "", true, err
 	}
 	receiver := fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1])
-	method := strings.TrimPrefix(name, "std::builtin::map_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::map_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (string, error) {
 			mapValue := &binding{typeName: receiver}

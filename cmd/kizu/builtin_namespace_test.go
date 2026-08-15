@@ -11,15 +11,15 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
-// builtinCallPattern finds the `std::builtin::` calls std source makes.
-var builtinCallPattern = regexp.MustCompile(`std::builtin::([a-z_0-9]+)`)
+// builtinCallPattern finds the `std::internal::builtin::` calls std source makes.
+var builtinCallPattern = regexp.MustCompile(`std::internal::builtin::([a-z_0-9]+)`)
 
 // goBuiltinPattern finds the primitives the Go sources name.
-var goBuiltinPattern = regexp.MustCompile(`"std::builtin::([a-z_0-9]+)"`)
+var goBuiltinPattern = regexp.MustCompile(`"std::internal::builtin::([a-z_0-9]+)"`)
 
-// TestReservedBuiltinsAreClosedToUserCode keeps the `std::builtin::` namespace
+// TestReservedBuiltinsAreClosedToUserCode keeps the `std::internal::builtin::` namespace
 // shut. A primitive reachable from user code hands out what std exists to
-// control: `std::builtin::io_blocking()` once returned an Io capability to any
+// control: `std::internal::builtin::io_blocking()` once returned an Io capability to any
 // program that asked for one, because the guard was written per family and that
 // family never got one.
 func TestReservedBuiltinsAreClosedToUserCode(t *testing.T) {
@@ -57,7 +57,7 @@ func TestReservedBuiltinRegistryCoversStd(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
-			name := "std::builtin::" + match[1]
+			name := "std::internal::builtin::" + match[1]
 			if !known[name] {
 				missing[name] = true
 			}
@@ -88,7 +88,7 @@ func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range builtinCallPattern.FindAllStringSubmatch(string(source), -1) {
-			implemented["std::builtin::"+match[1]] = true
+			implemented["std::internal::builtin::"+match[1]] = true
 		}
 	}
 	for _, path := range []string{
@@ -103,7 +103,7 @@ func TestReservedBuiltinRegistryNamesRealPrimitives(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, match := range goBuiltinPattern.FindAllStringSubmatch(string(source), -1) {
-			implemented["std::builtin::"+match[1]] = true
+			implemented["std::internal::builtin::"+match[1]] = true
 		}
 	}
 	unknown := []string{}

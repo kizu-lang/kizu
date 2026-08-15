@@ -2453,8 +2453,8 @@ func (c *Checker) trustedStdBorrowReturn(expr ast.Expression) bool {
 		return false
 	}
 	switch name {
-	case "std::builtin::box_borrow", "std::builtin::box_borrow_mut",
-		"std::builtin::array_at", "std::builtin::array_at_mut":
+	case "std::internal::builtin::box_borrow", "std::internal::builtin::box_borrow_mut",
+		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut":
 		return true
 	default:
 		return false
@@ -3472,11 +3472,11 @@ func (c *Checker) checkQualifiedBuiltin(
 	return c.checkStdConstructorBuiltin(name, args)
 }
 
-// rejectReservedBuiltin closes the `std::builtin::` namespace to source outside
+// rejectReservedBuiltin closes the `std::internal::builtin::` namespace to source outside
 // std. Being a primitive is what reserves it, so a new one is closed the moment
 // it joins the registry rather than when someone remembers to guard its family.
 func (c *Checker) rejectReservedBuiltin(name string) error {
-	if !strings.HasPrefix(name, "std::builtin::") {
+	if !strings.HasPrefix(name, "std::internal::builtin::") {
 		return nil
 	}
 	replacement, known := stdprim.ReservedBuiltin(name)
@@ -3514,10 +3514,10 @@ func (c *Checker) checkStdConstructorBuiltin(
 	args []ast.Expression,
 ) (Type, bool, error) {
 	switch name {
-	case "std::builtin::io_blocking", "std::builtin::io_failing":
+	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
-	case "std::io::evented", "std::builtin::io_evented":
+	case "std::io::evented", "std::internal::builtin::io_evented":
 		return "", true, errorf("type error: `std::io::evented` is not implemented in v0.1")
 	case "std::array::Array":
 		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
@@ -3601,19 +3601,21 @@ func (c *Checker) checkFsBuiltin(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
-	case "std::builtin::fs_read_file":
+	case "std::internal::builtin::fs_read_file":
 		return c.checkFsReadFile(args, env, unsafe)
-	case "std::builtin::fs_write_file":
+	case "std::internal::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env, unsafe)
-	case "std::builtin::fs_exists":
+	case "std::internal::builtin::fs_exists":
 		return c.checkFsExists(args, env, unsafe)
-	case "std::builtin::fs_metadata":
+	case "std::internal::builtin::fs_metadata":
 		return c.checkFsMetadata(args, env, unsafe)
-	case "std::builtin::fs_read_dir":
+	case "std::internal::builtin::fs_read_dir":
 		return c.checkFsReadDir(args, env, unsafe)
-	case "std::builtin::fs_create_dir", "std::builtin::fs_remove_dir", "std::builtin::fs_remove_file":
+	case "std::internal::builtin::fs_create_dir",
+		"std::internal::builtin::fs_remove_dir",
+		"std::internal::builtin::fs_remove_file":
 		return c.checkFsPathOnly(name, args, env, unsafe, "std::fs::Error!void")
-	case "std::builtin::fs_rename":
+	case "std::internal::builtin::fs_rename":
 		return c.checkFsRename(args, env, unsafe)
 	default:
 		return "", false, nil
@@ -3983,7 +3985,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if name != "std::builtin::test_fail_equal" {
+	if name != "std::internal::builtin::test_fail_equal" {
 		return "", false, nil
 	}
 	arg, err := c.parseType(typeArg)
@@ -4048,13 +4050,13 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 // "" for the constructor. ok is false for a name that is not a Box primitive.
 func boxPrimitiveMethod(name string) (string, bool) {
 	switch name {
-	case "std::builtin::box":
+	case "std::internal::builtin::box":
 		return "", true
-	case "std::builtin::box_borrow":
+	case "std::internal::builtin::box_borrow":
 		return "borrow", true
-	case "std::builtin::box_borrow_mut":
+	case "std::internal::builtin::box_borrow_mut":
 		return "borrow_mut", true
-	case "std::builtin::box_deinit":
+	case "std::internal::builtin::box_deinit":
 		return "deinit", true
 	default:
 		return "", false
@@ -4130,19 +4132,25 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
-	case "std::builtin::array":
+	case "std::internal::builtin::array":
 		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", true, err
 		}
 		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
 		return typ, true, err
-	case "std::builtin::array_append", "std::builtin::array_len", "std::builtin::array_capacity",
-		"std::builtin::array_pop", "std::builtin::array_pop_or_panic",
-		"std::builtin::array_get", "std::builtin::array_get_or_panic",
-		"std::builtin::array_at", "std::builtin::array_at_mut",
-		"std::builtin::array_reserve", "std::builtin::array_set", "std::builtin::array_deinit",
-		"std::builtin::array_truncate", "std::builtin::array_clear", "std::builtin::array_as_bytes":
+	case "std::internal::builtin::array_append",
+		"std::internal::builtin::array_len",
+		"std::internal::builtin::array_capacity",
+		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
+		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
+		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
+		"std::internal::builtin::array_reserve",
+		"std::internal::builtin::array_set",
+		"std::internal::builtin::array_deinit",
+		"std::internal::builtin::array_truncate",
+		"std::internal::builtin::array_clear",
+		"std::internal::builtin::array_as_bytes":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
 		return "", false, nil
@@ -4161,7 +4169,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	if err != nil {
 		return "", true, err
 	}
-	method := strings.TrimPrefix(name, "std::builtin::array_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::array_")
 	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("std::array::Array<%s>", elem)),
 		func(rest []ast.Expression) (Type, error) {
 			return c.checkArrayPrimitiveMethod(elem, method, rest, env, unsafe)
@@ -4254,10 +4262,10 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
-	if strings.HasPrefix(name, "std::builtin::map_") {
+	if strings.HasPrefix(name, "std::internal::builtin::map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env, unsafe)
 	}
-	if name != "std::builtin::map" {
+	if name != "std::internal::builtin::map" {
 		return "", false, nil
 	}
 	mapArgs, err := c.checkedMapArgs(typeArg)
@@ -4283,7 +4291,7 @@ func (c *Checker) checkBuiltinMapMethod(
 		return "", true, err
 	}
 	receiver := Type(fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1]))
-	method := strings.TrimPrefix(name, "std::builtin::map_")
+	method := strings.TrimPrefix(name, "std::internal::builtin::map_")
 	return c.checkBuiltinReceiverMethod(name, receiver,
 		func(rest []ast.Expression) (Type, error) {
 			return c.checkMapPrimitiveMethod(mapArgs[0], Type(mapArgs[1]), method,
@@ -5516,7 +5524,7 @@ func (c *Checker) checkStdMethod(
 // A generic body is checked when a call instantiates it (ADR-0066), and no call
 // instantiates these: a container method is matched against the signature std
 // declares and lowered from the method name. That left the body unchecked, so
-// `return std::builtin::array_apend<T>(self, value)` -- or anything else -- sat
+// `return std::internal::builtin::array_apend<T>(self, value)` -- or anything else -- sat
 // in std reading like the implementation while meaning nothing.
 func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
 	fn := c.functions[method.Sig.Name]

@@ -68,7 +68,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 - Go 側は `internal/stdlib`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std に public 型を足すときは **`knownTypes` の更新が必要**
   (漏れると checked コードでその型名が `unknown type` になります)。
-- std が宣言する method 署名は `internal/stdmethod` が、その裏の `std::builtin::*`
+- std が宣言する method 署名は `internal/stdmethod` が、その裏の `std::internal::builtin::*`
   primitive の形は `internal/stdprim` が一本化します。checker と backend は署名を
   書き直さずにここを読みます。
 
