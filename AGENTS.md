@@ -1,19 +1,23 @@
 # AGENTS.md
 
-Kizu はメモリ安全な systems programming language です。
+Kizu はメモリ安全で隠れた制御フローを嫌い、人間がレビュー、記述しやすい高速な開発サイクルが可能な systems programming language です。
 
 ## 最優先
 
-基本の実行経路は `kizu run examples/hello.kizu`、必須 CLI は `run` / `parse` / `check` です。
-言語の正しさは `examples/` と `cmd/kizu/conformance_test.go` が持ちます。
+基本の実行経路は `kizu run examples/hello.kizu` です。
+CLI は `run` / `check` / `test` / `parse` が中核で、`build` / `ir` / `fmt` / `init` /
+`cache` がその周りにあります。
+
+言語の正しさは 3 つが持ちます。`examples/` は読んで分かるプログラムと、その出力。
+`tests/behavior/` は振る舞いの assert を 1 package にまとめたもので、link も実行も
+1 回で済みます。`tests/conformance/` の manifest がその両方を束ねます。
+
 リポジトリ全体の構造とデータフローは `docs/architecture.md` を先に読んでください。
 
 ## 実装ルール
 
-- 賢いコードより単純なコードを優先する。
-- 大きな依存を追加しない。
+- シンプルな設計でコンパイラのビルド時間をgoレベルに高速化することを心がける
 - `SPEC.md` と矛盾する構文や機能を勝手に追加しない。
-- parser / AST / checker / backend は読みやすく保つ。
 - ファイルが 1000 行を超える場合、分割を検討し、関心が分離できていない可能性を疑う。
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
 - 実装は Go 一本(ADR-0082)。selfhost は削除済みで、言語が固まるまで作り直さない。
@@ -27,20 +31,20 @@ Kizu はメモリ安全な systems programming language です。
 - hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
 - 関数の内部形状や生成テキスト断片を grep で固定する**構造 pin を新規に追加しない**
   (ADR-0080)。検証は probe 差分・parity manifest・実行 golden で行う。
-- `main` へ直接 commit / push しない。red な gate を含む変更を merge しない。
-  WIP checkpoint は branch に置く。
+- `main` へ直接 commit / push しない。
 
 ## テストと性能
 
 テスト実行時間は 120s 以内に収めることを目標にしてください。
 遅くなったら profile、重複削除、アルゴリズム改善、不要な gate 分離で改善します。
-並列化でごまかす改善は NG です。
+雑な並列化でごまかす改善は NG です。
 commit 前は原則 `pre-commit run --all-files` を通してください。
 `go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
 
 
 ## PR Workflow
 
+リファクタは同一PRに含めて問題ない。commitが分かれていればいい
 作業は topic branch / Pull Request ベースで進めます。
 **commit の前に必ず停止し、ユーザーのコードチェックを受けてください。**
 自動での commit / push / merge は、ユーザーがその変更のチェックを終えてから行います。

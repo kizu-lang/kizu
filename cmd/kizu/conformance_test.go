@@ -257,7 +257,10 @@ func manifestPaths(manifests []conformanceManifest) []string {
 	paths := []string{}
 	for _, manifest := range manifests {
 		for _, tt := range manifest.Cases {
-			if isPackageExamplePath(tt.Path) {
+			// A case outside examples/ is not an example and has nothing to
+			// be missing from: the behavior suite is one package of test
+			// blocks, not a program worth reading.
+			if !strings.HasPrefix(tt.Path, "examples/") || isPackageExamplePath(tt.Path) {
 				continue
 			}
 			paths = append(paths, tt.Path)
