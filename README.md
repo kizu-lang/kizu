@@ -24,8 +24,8 @@ Kizu is an early prototype implemented in Go.
 writes, and then runs it. The only difference between the two commands is
 whether the result is executed, so a program cannot behave one way under `run`
 and another way under `build` -- there is one lowering, not two (ADR-0083).
-What a program is *supposed* to do is defined by the conformance manifests, not
-by any one execution path.
+What a program is *supposed* to do is written at the end of the program itself,
+not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
@@ -148,10 +148,9 @@ go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 ```
 
 See the [examples catalog](examples/README.md) for runnable feature
-examples and negative safety-rule examples. The machine-readable conformance
-manifests are [tests/conformance/v0_1.json](tests/conformance/v0_1.json) for the
-language core and [tests/conformance/v0_2.json](tests/conformance/v0_2.json) for
-the stdlib prototypes.
+examples and negative safety-rule examples. Every example ends with the case it
+declares -- the command to run it with and what that has to produce -- which is
+what the conformance test reads.
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
 Open compiler specification gaps are tracked in
@@ -226,7 +225,6 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - [SPEC.md](SPEC.md): language specification
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): examples catalog
-- [tests/conformance](tests/conformance/README.md): reusable conformance manifests
 - [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry and migration plan
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy

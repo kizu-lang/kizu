@@ -60,7 +60,6 @@ Source: [ADR-0079](adr/0079-struct-literal-field-initializers.md).
 - a repeated field name is an error; last-wins is not the rule
 - written order is free; fields match the declaration by name
 - `examples/negative/duplicate_struct_field.kizu` carries the repeated-name case
-  in the reusable conformance manifest
 
 ### Diagnostics
 
@@ -175,7 +174,7 @@ diagnostics, memory-safety cases, and oracle tests are explicit.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
-- Multi-file module conformance fixture at `tests/conformance/modules/basic`.
+- Multi-file module fixture at `tests/fixtures/modules/basic`.
 - Go project tests resolve the module fixture graph and parse every fixture
   source file.
 

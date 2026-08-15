@@ -1,317 +1,120 @@
 package main
 
 import (
-	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/conformance"
 )
 
-const conformanceManifestGlob = "../../tests/conformance/v0_*.json"
+// repoRoot is where cases are read from and where the CLI is run.
+const repoRoot = "../.."
 
 var conformanceProcessMu sync.Mutex
 
-type conformanceManifest struct {
-	Version string            `json:"version"`
-	Cases   []conformanceCase `json:"cases"`
-}
-
-type conformanceCase struct {
-	Name           string   `json:"name"`
-	Mode           string   `json:"mode"`
-	Command        string   `json:"command"`
-	Path           string   `json:"path"`
-	Args           []string `json:"args"`
-	Stdout         *string  `json:"stdout"`
-	StderrContains string   `json:"stderr_contains"`
-	Pending        string   `json:"pending"`
-	Features       []string `json:"features"`
-}
-
-// TestConformanceManifests runs reusable conformance manifests.
-func TestConformanceManifests(t *testing.T) {
-	for _, manifest := range loadConformanceManifests(t) {
-		for _, tt := range manifest.Cases {
-			name := manifest.Version + "/" + tt.Name
-			t.Run(name, func(t *testing.T) {
-				runConformanceCase(t, tt)
-			})
-		}
+// TestConformance runs every case the tree declares. Discovery walks the tree
+// rather than a registry, so an example is a case by existing: there is no
+// list it can be left out of.
+func TestConformance(t *testing.T) {
+	cases, err := conformance.Discover(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range cases {
+		t.Run(tt.Path, func(t *testing.T) {
+			runConformanceCase(t, tt)
+		})
 	}
 }
 
-// TestConformanceManifestsCoverExamples keeps examples in the reusable corpus.
-func TestConformanceManifestsCoverExamples(t *testing.T) {
-	got := manifestPaths(loadConformanceManifests(t))
-	want := examplePaths(t)
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("manifest paths do not match examples\nmissing:\n%s\nextra:\n%s",
-			strings.Join(diffStrings(want, got), "\n"),
-			strings.Join(diffStrings(got, want), "\n"))
-	}
-}
-
-// TestConformanceManifestShape validates reusable conformance manifest fields.
-func TestConformanceManifestShape(t *testing.T) {
-	seen := map[string]bool{}
-	for _, manifest := range loadConformanceManifests(t) {
-		for _, tt := range manifest.Cases {
-			validateConformanceCase(t, tt, seen)
-			seen[tt.Name] = true
-		}
-	}
-}
-
-// runConformanceCase dispatches one manifest entry.
-func runConformanceCase(t *testing.T, tt conformanceCase) {
+// runConformanceCase runs one case and checks what it promised.
+func runConformanceCase(t *testing.T, tt conformance.Case) {
 	t.Helper()
 	if tt.Pending != "" {
 		runPendingCase(t, tt)
 		return
 	}
-	switch tt.Mode {
-	case "run":
+	if tt.MustFail {
+		runFailingCase(t, tt)
+		return
+	}
+	if tt.Command == "run" || tt.Command == "check" {
+		// A run case goes through the reference checker first, so a program the
+		// backend accepts but the checker would reject fails here rather than
+		// standing as a passing example of an unchecked program.
 		runReferenceCheckOK(t, tt.Path)
-		out := runKizuOK(t, runArgs(tt)...)
-		want := conformanceExpectedStdout(t, tt)
-		if out != want {
-			t.Fatalf("got %q, want %q", out, want)
-		}
-	case "check":
-		runReferenceCheckOK(t, tt.Path)
-	case "test":
-		out := runKizuOK(t, "test", tt.Path)
-		want := conformanceExpectedStdout(t, tt)
-		if out != want {
-			t.Fatalf("got %q, want %q", out, want)
-		}
-	case "error":
-		runConformanceErrorCase(t, tt)
-	default:
-		t.Fatalf("unknown conformance mode %q", tt.Mode)
+	}
+	if tt.Command == "check" {
+		return
+	}
+	out := runKizuOK(t, caseArgs(tt)...)
+	if out != *tt.Stdout {
+		t.Fatalf("got %q, want %q", out, *tt.Stdout)
 	}
 }
 
-// conformanceExpectedStdout returns declared stdout, allowing explicit empty output.
-func conformanceExpectedStdout(t *testing.T, tt conformanceCase) string {
+// runFailingCase checks one case whose promise is that it fails.
+func runFailingCase(t *testing.T, tt conformance.Case) {
 	t.Helper()
-	if tt.Stdout == nil {
-		t.Fatalf("%s: stdout must be declared", tt.Name)
-	}
-	return *tt.Stdout
-}
-
-// runPendingCase asserts a declared gap is still a gap. A case that starts
-// passing has to lose its `pending` entry in the change that fixes it, so the
-// list cannot outlive the gaps it names.
-func runPendingCase(t *testing.T, tt conformanceCase) {
-	t.Helper()
-	if conformanceCasePasses(tt) {
-		t.Fatalf("%s passes now; remove its `pending` entry (%s)", tt.Name, tt.Pending)
-	}
-}
-
-// conformanceCasePasses reports whether a case already meets its manifest
-// expectation, without failing the test when it does not.
-func conformanceCasePasses(tt conformanceCase) bool {
-	switch tt.Mode {
-	case "run", "test":
-		if tt.Stdout == nil {
-			return false
-		}
-		if _, err := runReferenceCheck(tt.Path); err != nil {
-			return false
-		}
-		args := runArgs(tt)
-		if tt.Mode == "test" {
-			args = []string{"test", tt.Path}
-		}
-		out, err := runKizu(args...)
-		return err == nil && out == *tt.Stdout
-	case "error":
-		out, err := runErrorCaseCommand(tt)
-		return err != nil && strings.Contains(out, "error:") &&
-			strings.Contains(out, tt.StderrContains)
-	default:
-		return false
-	}
-}
-
-// runErrorCaseCommand runs the command an expected-failure entry names.
-func runErrorCaseCommand(tt conformanceCase) (string, error) {
-	command := tt.Command
-	if command == "" {
-		command = "check"
-	}
-	switch command {
-	case "check":
-		return runReferenceCheck(tt.Path)
-	case "parse":
-		return runReferenceParse(tt.Path)
-	default:
-		args := []string{command, tt.Path}
-		if command == "run" || command == "test" {
-			args = append(args, tt.Args...)
-		}
-		return runKizu(args...)
-	}
-}
-
-// runConformanceErrorCase checks one expected failure entry.
-func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
-	t.Helper()
-	out, err := runErrorCaseCommand(tt)
+	out, err := runCaseCommand(tt)
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
 	if !strings.Contains(out, "error:") {
 		t.Fatalf("got %q, want readable error prefix", out)
 	}
-	if !strings.Contains(out, tt.StderrContains) {
-		t.Fatalf("got %q, want substring %q", out, tt.StderrContains)
+	if !strings.Contains(out, tt.ErrorText) {
+		t.Fatalf("got %q, want substring %q", out, tt.ErrorText)
 	}
 }
 
-// runArgs returns CLI args for a positive run case.
-func runArgs(tt conformanceCase) []string {
-	args := []string{"run", tt.Path}
-	return append(args, tt.Args...)
-}
-
-// validateConformanceCase rejects ambiguous or incomplete manifest entries.
-func validateConformanceCase(t *testing.T, tt conformanceCase, seen map[string]bool) {
+// runPendingCase asserts a declared gap is still a gap. A case that starts
+// passing has to lose its `pending:` line in the change that fixes it, so the
+// list cannot outlive the gaps it names.
+func runPendingCase(t *testing.T, tt conformance.Case) {
 	t.Helper()
-	if tt.Name == "" || seen[tt.Name] {
-		t.Fatalf("case names must be non-empty and unique: %q", tt.Name)
+	if casePasses(tt) {
+		t.Fatalf("passes now; remove its `pending:` line (%s)", tt.Pending)
 	}
-	if tt.Path == "" || filepath.IsAbs(tt.Path) {
-		t.Fatalf("%s: path must be relative to repo root", tt.Name)
+}
+
+// casePasses reports whether a case already keeps its promise, without failing
+// the test when it does not.
+func casePasses(tt conformance.Case) bool {
+	if tt.MustFail {
+		out, err := runCaseCommand(tt)
+		return err != nil && strings.Contains(out, "error:") && strings.Contains(out, tt.ErrorText)
 	}
-	if len(tt.Features) == 0 {
-		t.Fatalf("%s: features must not be empty", tt.Name)
-	}
-	if tt.Pending != "" && tt.Mode == "check" {
-		t.Fatalf("%s: a check case cannot be pending", tt.Name)
-	}
-	switch tt.Mode {
-	case "run":
-		if tt.Stdout == nil {
-			t.Fatalf("%s: run case must declare stdout", tt.Name)
+	if tt.Command == "run" || tt.Command == "check" {
+		if _, err := runReferenceCheck(tt.Path); err != nil {
+			return false
 		}
+	}
+	if tt.Command == "check" {
+		return true
+	}
+	out, err := runCaseCommand(tt)
+	return err == nil && out == *tt.Stdout
+}
+
+// runCaseCommand runs the CLI verb a case names.
+func runCaseCommand(tt conformance.Case) (string, error) {
+	switch tt.Command {
 	case "check":
-	case "test":
-		if tt.Stdout == nil {
-			t.Fatalf("%s: test case must declare stdout", tt.Name)
-		}
-	case "error":
-		if tt.StderrContains == "" {
-			t.Fatalf("%s: error case must declare stderr_contains", tt.Name)
-		}
+		return runReferenceCheck(tt.Path)
+	case "parse":
+		return runReferenceParse(tt.Path)
 	default:
-		t.Fatalf("%s: unknown mode %q", tt.Name, tt.Mode)
+		return runKizu(caseArgs(tt)...)
 	}
 }
 
-// loadConformanceManifests reads machine-usable versioned test manifests.
-func loadConformanceManifests(t *testing.T) []conformanceManifest {
-	t.Helper()
-	paths, err := filepath.Glob(conformanceManifestGlob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(paths) == 0 {
-		t.Fatal("no conformance manifests found")
-	}
-	manifests := make([]conformanceManifest, 0, len(paths))
-	for _, path := range paths {
-		manifests = append(manifests, loadConformanceManifest(t, path))
-	}
-	return manifests
-}
-
-// loadConformanceManifest reads one conformance manifest from disk.
-func loadConformanceManifest(t *testing.T, path string) conformanceManifest {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var manifest conformanceManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	want := strings.TrimSuffix(filepath.Base(path), ".json")
-	want = strings.ReplaceAll(want, "_", ".")
-	if manifest.Version != want {
-		t.Fatalf("%s: unexpected conformance version %q", path, manifest.Version)
-	}
-	return manifest
-}
-
-// manifestPaths returns sorted Kizu file paths declared by the manifests.
-func manifestPaths(manifests []conformanceManifest) []string {
-	paths := []string{}
-	for _, manifest := range manifests {
-		for _, tt := range manifest.Cases {
-			// A case outside examples/ is not an example and has nothing to
-			// be missing from: the behavior suite is one package of test
-			// blocks, not a program worth reading.
-			if !strings.HasPrefix(tt.Path, "examples/") || isPackageExamplePath(tt.Path) {
-				continue
-			}
-			paths = append(paths, tt.Path)
-		}
-	}
-	sort.Strings(paths)
-	return paths
-}
-
-// examplePaths returns all Kizu source examples that must stay in the manifest.
-func examplePaths(t *testing.T) []string {
-	t.Helper()
-	paths, err := filepath.Glob("../../examples/**/*.kizu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	top, err := filepath.Glob("../../examples/*.kizu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths = append(paths, top...)
-	filtered := paths[:0]
-	for _, path := range paths {
-		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
-		if isPackageExamplePath(rel) {
-			continue
-		}
-		filtered = append(filtered, rel)
-	}
-	sort.Strings(filtered)
-	return filtered
-}
-
-// isPackageExamplePath reports package roots that are manifest cases, not files.
-func isPackageExamplePath(path string) bool {
-	return strings.HasPrefix(path, "examples/modules/")
-}
-
-// diffStrings returns entries in left that do not appear in right.
-func diffStrings(left []string, right []string) []string {
-	rightSet := map[string]bool{}
-	for _, item := range right {
-		rightSet[item] = true
-	}
-	missing := []string{}
-	for _, item := range left {
-		if !rightSet[item] {
-			missing = append(missing, item)
-		}
-	}
-	return missing
+// caseArgs returns the CLI arguments one case is run with.
+func caseArgs(tt conformance.Case) []string {
+	return append([]string{tt.Command, tt.Path}, tt.Args...)
 }
 
 // runKizuOK runs the Kizu CLI and fails the test on errors.
@@ -334,7 +137,7 @@ func runReferenceCheckOK(t *testing.T, path string) string {
 	return out
 }
 
-// runReferenceCheck keeps conformance manifests tied to the full reference checker.
+// runReferenceCheck keeps conformance cases tied to the full reference checker.
 func runReferenceCheck(path string) (string, error) {
 	conformanceProcessMu.Lock()
 	defer conformanceProcessMu.Unlock()
@@ -397,7 +200,7 @@ func runWithCapture(run func() error) (string, error) {
 	os.Stdout = writer
 	os.Stderr = writer
 	_ = os.Setenv("KIZU_TEST_ENV", "env-ok")
-	chdirErr := os.Chdir("../..")
+	chdirErr := os.Chdir(repoRoot)
 
 	var err error
 	if chdirErr != nil {

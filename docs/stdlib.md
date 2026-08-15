@@ -20,7 +20,7 @@ The implementation is intentionally split by compiler responsibility:
 - `internal/ownership`: move, borrow, arena, concurrency, and std safety rules.
 - `internal/ir` and the backends: runtime behavior.
 - `examples`: positive and negative user-facing behavior.
-- `tests/conformance`: reusable behavior corpus for future compiler implementations.
+- `tests/behavior`: one package of behavior assertions, linked and run once.
 
 This is acceptable for v0.2, but new `std` APIs must not be added only as local
 Go branches. They need a row in this document, examples, and conformance tests.
@@ -195,8 +195,7 @@ New std APIs require all of the following in the same change:
 - This registry updated with the current implementation boundary.
 - Positive example under `examples/`.
 - Negative example when the API has safety or error boundaries.
-- `tests/conformance/v0_1.json` entry while that manifest remains the active
-  reusable corpus.
+- A case block at the end of that example saying what running it produces.
 - No hidden global allocator, hidden global runtime, implicit blocking I/O, or
   silent fallback behavior.
 
@@ -206,7 +205,7 @@ Before replacing a Go builtin with Kizu source, the following must be true:
 
 - module resolver can load `std` sources deterministically
 - diagnostics can report spans in both user source and std source
-- conformance tests pass through the Go implementation and any future compiler path
+- conformance cases pass through the Go implementation
 - cache keys include std source hashes and public interface hashes
 - host primitives remain explicit and small
 - safe wrappers preserve the memory-safety contract in `docs/memory-safety.md`

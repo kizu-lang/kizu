@@ -109,7 +109,7 @@ kizu why-rebuild <file>
 
 ## module graph 測定
 
-module/import 実装後は、少なくとも `tests/conformance/modules/basic` を使って次を測る。
+module/import 実装後は、少なくとも `tests/fixtures/modules/basic` を使って次を測る。
 
 - manifest と source が変わらない no-op check
 - private 実装だけを変えた single-file edit check
