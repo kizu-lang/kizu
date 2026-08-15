@@ -268,6 +268,11 @@ type scope struct {
 	borrowed     map[string]bool
 	mutBorrow    map[string]bool
 	borrowSource map[string]string
+	// unread holds the locals this scope declared that nothing has read yet. A
+	// read removes one; whatever is left when the scope closes was never needed.
+	// Parameters are not in here: they are part of a signature, and a caller can
+	// require one the body has no use for.
+	unread map[string]ast.Span
 }
 
 // New creates an empty type checker.
@@ -1684,11 +1689,16 @@ func (c *Checker) checkBlock(
 ) (bool, error) {
 	for _, stmt := range block.Statements {
 		returns, err := c.checkStmt(stmt, env, wantReturn, unsafe)
-		if err != nil || returns {
+		if err != nil {
 			return returns, err
 		}
+		if returns {
+			// A block that returns still has to account for what it bound: an
+			// early return does not make the bindings before it needed.
+			return true, env.checkAllRead()
+		}
 	}
-	return false, nil
+	return false, env.checkAllRead()
 }
 
 // checkStmt validates a statement and reports explicit return flow.
@@ -1802,7 +1812,20 @@ func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
 }
 
 // checkLetStmt validates a let or var declaration.
+// checkLetStmt validates one local binding and records it as one this scope
+// will be asked about, so a binding nothing reads can be told apart from one
+// that carried a value somewhere.
 func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps) (bool, error) {
+	returns, err := c.checkLetBinding(stmt, env, unsafe)
+	if err != nil {
+		return returns, err
+	}
+	env.declareLocal(stmt.Name, expressionSpan(stmt.Value))
+	return returns, nil
+}
+
+// checkLetBinding types one local binding and binds its name.
+func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps) (bool, error) {
 	handled, err := c.defineSpecialLetInitializer(stmt, env, unsafe)
 	if handled || err != nil {
 		return false, err
@@ -6348,7 +6371,7 @@ func newScope(parent *scope) *scope {
 	return &scope{
 		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
 		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
-		borrowSource: map[string]string{},
+		borrowSource: map[string]string{}, unread: map[string]ast.Span{},
 	}
 }
 
@@ -6357,8 +6380,40 @@ func (s *scope) child() *scope {
 	return newScope(s)
 }
 
+// declareLocal records a binding this scope will be asked about. `_` is the
+// name for a value that is deliberately dropped, so it is never asked about.
+func (s *scope) declareLocal(name string, span ast.Span) {
+	if name == discardName {
+		return
+	}
+	s.unread[name] = span
+}
+
+// discardName is written where a value is produced on purpose and not kept.
+const discardName = "_"
+
+// checkAllRead reports a local this scope declared and nothing read.
+func (s *scope) checkAllRead() error {
+	names := make([]string, 0, len(s.unread))
+	for name := range s.unread {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		return errorAtCode(s.unread[name], "type.unused_local",
+			"type error: local `%s` is never read"+
+				"\nhelp: remove it, or write `let _ = ...` to drop the value on purpose", name)
+	}
+	return nil
+}
+
 // define binds a local name to a type in the current scope.
 func (s *scope) define(name string, typ Type, mutable bool) error {
+	if name == discardName {
+		// `_` is where a value is dropped, not a name anything can read. Binding
+		// it twice in one scope is two drops, not a redeclaration.
+		return nil
+	}
 	if _, exists := s.values[name]; exists {
 		return errorf("type error: duplicate variable `%s`", name)
 	}
@@ -6410,6 +6465,7 @@ func (s *scope) defineParamWithSource(
 func (s *scope) lookup(name string) (Type, bool) {
 	for cur := s; cur != nil; cur = cur.parent {
 		if typ, ok := cur.values[name]; ok {
+			delete(cur.unread, name)
 			return typ, true
 		}
 	}

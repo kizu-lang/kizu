@@ -23,9 +23,9 @@ impl Node {
 func TestCheckAcceptsCopyUnionWithoutDeinit(t *testing.T) {
 	cases := []string{
 		`union Tag { A, B, C }
-fn main() { let t = Tag::A; }`,
+fn main() { let _ = Tag::A; }`,
 		`union Scalar { Count(i64), Byte(u8), Bytes([]u8), Empty }
-fn main() { let s = Scalar::Empty; }`,
+fn main() { let _ = Scalar::Empty; }`,
 	}
 	for _, source := range cases {
 		if err := checkSource(source); err != nil {
