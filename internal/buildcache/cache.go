@@ -71,11 +71,11 @@ func (c *Cache) GetOrBuild(
 	target string,
 	builder func() (string, error),
 ) (Result, error) {
-	input, err := newInput(path, target)
+	input, err := newFileInput(path, target)
 	if err != nil {
 		return Result{}, err
 	}
-	if entry, ok := c.readEntry(input.key); ok {
+	if entry, ok := c.hasArtifact(input.key); ok {
 		out, err := os.ReadFile(c.outputPath(entry.Output))
 		if err != nil {
 			return Result{}, err
@@ -90,6 +90,74 @@ func (c *Cache) GetOrBuild(
 		return Result{}, err
 	}
 	return Result{Output: output, Hit: false, Key: input.key}, c.enforceLimit()
+}
+
+// GetOrBuildArtifact returns the path of a cached file, building it with
+// builder when it is missing. GetOrBuild caches text lowered from a source file
+// on disk; this caches a file built from content the compiler carries itself,
+// which is what the native runtime object is. Nothing about the program being
+// built belongs in that key, so `name` and `content` stand in for the path and
+// the file bytes a source artifact is keyed by.
+func (c *Cache) GetOrBuildArtifact(
+	name string,
+	target string,
+	content []byte,
+	builder func(output string) error,
+) (string, error) {
+	input := newInput(name, target, content)
+	stored := outputName(input.key)
+	output := c.outputPath(stored)
+	if _, ok := c.hasArtifact(input.key); ok {
+		return output, nil
+	}
+	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
+		return "", err
+	}
+	size, err := c.buildArtifact(output, builder)
+	if err != nil {
+		return "", err
+	}
+	if err := c.writeMeta(input, stored, size); err != nil {
+		return "", err
+	}
+	return output, c.enforceLimit()
+}
+
+// hasArtifact reports whether a key has both the entry that accounts for it and
+// the file that entry names. An entry whose artifact is gone is a miss: the
+// cache is a record of work already done, and work that is gone has to be done
+// again rather than read from where it is not.
+func (c *Cache) hasArtifact(key string) (Entry, bool) {
+	entry, ok := c.readEntry(key)
+	if !ok {
+		return Entry{}, false
+	}
+	if _, err := os.Stat(c.outputPath(entry.Output)); err != nil {
+		return Entry{}, false
+	}
+	return entry, true
+}
+
+// buildArtifact builds into a scratch file and moves it into place, so a reader
+// never sees a half-written artifact under a key that claims to be complete.
+func (c *Cache) buildArtifact(output string, builder func(output string) error) (int64, error) {
+	scratch, err := os.CreateTemp(c.Dir, "artifact-*")
+	if err != nil {
+		return 0, err
+	}
+	path := scratch.Name()
+	if err := scratch.Close(); err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.Remove(path) }()
+	if err := builder(path); err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), os.Rename(path, output)
 }
 
 // Status returns current cache size and entry count.
@@ -126,7 +194,7 @@ func (c *Cache) Prune() (int, int64, error) {
 
 // WhyRebuild explains whether target would rebuild for path.
 func (c *Cache) WhyRebuild(path string, target string) (string, error) {
-	input, err := newInput(path, target)
+	input, err := newFileInput(path, target)
 	if err != nil {
 		return "", err
 	}
@@ -156,8 +224,8 @@ type cacheInput struct {
 	sourceHash string
 }
 
-// newInput hashes source content and cache-shaping inputs.
-func newInput(path string, target string) (cacheInput, error) {
+// newFileInput reads a source file and keys it by where it is and what is in it.
+func newFileInput(path string, target string) (cacheInput, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cacheInput{}, err
@@ -166,12 +234,19 @@ func newInput(path string, target string) (cacheInput, error) {
 	if err != nil {
 		return cacheInput{}, err
 	}
-	sourceHashBytes := sha256.Sum256(data)
+	return newInput(abs, target, data), nil
+}
+
+// newInput keys an artifact by everything it is made of: the cache format, the
+// target it is built for, the name it is filed under, and the bytes it is built
+// from.
+func newInput(name string, target string, content []byte) cacheInput {
+	sourceHashBytes := sha256.Sum256(content)
 	sourceHash := hex.EncodeToString(sourceHashBytes[:])
-	keyHash := sha256.Sum256([]byte(Version + "\n" + target + "\n" + abs + "\n" + sourceHash))
+	keyHash := sha256.Sum256([]byte(Version + "\n" + target + "\n" + name + "\n" + sourceHash))
 	return cacheInput{
-		key: hex.EncodeToString(keyHash[:]), target: target, sourcePath: abs, sourceHash: sourceHash,
-	}, nil
+		key: hex.EncodeToString(keyHash[:]), target: target, sourcePath: name, sourceHash: sourceHash,
+	}
 }
 
 // writeEntry writes metadata and output for one artifact.
@@ -179,14 +254,21 @@ func (c *Cache) writeEntry(input cacheInput, output string) error {
 	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
 		return err
 	}
-	outputName := input.key + ".out"
-	if err := os.WriteFile(c.outputPath(outputName), []byte(output), 0o644); err != nil {
+	name := outputName(input.key)
+	if err := os.WriteFile(c.outputPath(name), []byte(output), 0o644); err != nil {
 		return err
 	}
+	return c.writeMeta(input, name, int64(len(output)))
+}
+
+// writeMeta records what one stored artifact is and how much room it takes. It
+// is written after the artifact it describes, so an entry never promises a file
+// that is not there yet.
+func (c *Cache) writeMeta(input cacheInput, outputName string, size int64) error {
 	entry := Entry{
 		Key: input.key, Target: input.target, SourcePath: input.sourcePath,
 		SourceHash: input.sourceHash, Version: Version, Output: outputName,
-		SizeBytes: int64(len(output)), CreatedAt: time.Now().UTC(),
+		SizeBytes: size, CreatedAt: time.Now().UTC(),
 	}
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
@@ -280,6 +362,11 @@ func (c *Cache) enforceLimit() error {
 // metaPath returns the metadata path for key.
 func (c *Cache) metaPath(key string) string {
 	return filepath.Join(c.Dir, key+".json")
+}
+
+// outputName returns the file name the artifact for key is stored under.
+func outputName(key string) string {
+	return key + ".out"
 }
 
 // outputPath returns the artifact path for name.
