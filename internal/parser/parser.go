@@ -322,6 +322,11 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 		}
 		method := p.parseFunctionAfterFn(&ast.FunctionDecl{}, false)
 		if fn, ok := method.(*ast.FunctionDecl); ok {
+			if fn.Receiver {
+				p.errorf("a contract method takes no receiver;" +
+					" it says what a method looks like, not what it is on")
+				return methods
+			}
 			methods = append(methods, fn)
 		}
 		if p.peek.Type == token.Semicolon {
@@ -332,7 +337,9 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 	return methods
 }
 
-// parseImplDecl parses an impl block with method bodies.
+// parseImplDecl parses the one-line assertion that a type satisfies a contract.
+// A type satisfies one by having the methods, so this carries no body: it asks
+// for the check to run here, where a reader can see the intent written down.
 func (p *Parser) parseImplDecl() ast.Decl {
 	decl := &ast.ImplDecl{}
 	if !p.expectPeek(token.Ident) {
@@ -340,7 +347,7 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	}
 	firstName := p.cur.Literal
 	if p.peek.Type != token.For {
-		p.errorf("expected `impl <contract> for %s`;"+
+		p.errorf("expected `impl <contract> for %s;`;"+
 			" a method on a type is `fn (self: %s) name(...)`", firstName, firstName)
 		return decl
 	}
@@ -350,37 +357,14 @@ func (p *Parser) parseImplDecl() ast.Decl {
 		return decl
 	}
 	decl.TypeName = p.cur.Literal
-	if !p.expectPeek(token.LBrace) {
+	if p.peek.Type == token.LBrace {
+		p.errorf("`impl %s for %s` takes no body;"+
+			" write the methods as `fn (self: %s) name(...)` and end this with `;`",
+			decl.ContractName, decl.TypeName, decl.TypeName)
 		return decl
 	}
-	decl.Methods = p.parseImplMethods()
+	p.expectStatementTerminator("impl declaration")
 	return decl
-}
-
-// parseImplMethods parses method declarations inside an impl block.
-func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
-	methods := []*ast.FunctionDecl{}
-	p.nextToken()
-	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
-		var method ast.Decl
-		switch p.cur.Type {
-		case token.Function:
-			method = p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
-		case token.At:
-			method = p.parseDirectiveDecl(false, docText(p.cur))
-		case token.Unsafe:
-			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
-			return methods
-		default:
-			p.errorf("expected impl method, got %s", tokenDescription(p.cur))
-			return methods
-		}
-		if fn, ok := method.(*ast.FunctionDecl); ok {
-			methods = append(methods, fn)
-		}
-		p.nextToken()
-	}
-	return methods
 }
 
 // parseReturnClause reads `-> T` and the `borrows name` that may follow it.

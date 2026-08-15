@@ -356,11 +356,12 @@ func (d *ContractDecl) String() string {
 	return fmt.Sprintf("%scontract %s { %s }", prefix, d.Name, strings.Join(methods, "; "))
 }
 
-// ImplDecl represents inherent or contract methods implemented for one concrete type.
+// ImplDecl asserts that one concrete type satisfies one contract. A type
+// satisfies a contract by having the methods, so this carries no body: it asks
+// for the check to run where it is written.
 type ImplDecl struct {
 	ContractName string
 	TypeName     string
-	Methods      []*FunctionDecl
 }
 
 // declNode marks ImplDecl as a declaration node.
@@ -368,15 +369,7 @@ func (*ImplDecl) declNode() {}
 
 // String returns a compact debug representation of the impl declaration.
 func (d *ImplDecl) String() string {
-	methods := make([]string, 0, len(d.Methods))
-	for _, method := range d.Methods {
-		methods = append(methods, method.String())
-	}
-	if d.ContractName != "" {
-		return fmt.Sprintf("impl %s for %s { %s }",
-			d.ContractName, d.TypeName, strings.Join(methods, "; "))
-	}
-	return fmt.Sprintf("impl %s { %s }", d.TypeName, strings.Join(methods, "; "))
+	return fmt.Sprintf("impl %s for %s;", d.ContractName, d.TypeName)
 }
 
 // Field represents a named struct field.

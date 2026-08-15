@@ -435,20 +435,20 @@ union Event {
 // TestParseContractImplDecl checks explicit contract implementation syntax.
 func TestParseContractImplDecl(t *testing.T) {
 	input := `contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
-impl Writer for File {
-    fn write(self: &Self) -> !i64 {
-        return 1;
-    }
-}`
+fn (self: &File) write() -> !i64 {
+    return 1;
+}
+impl Writer for File;`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `contract Writer { fn write(self: &Self) -> !i64; }
-impl Writer for File { fn write(self: &Self) -> !i64 { return 1; } }`
+	want := `contract Writer { fn write() -> !i64; }
+fn (self: &File) write() -> !i64 { return 1; }
+impl Writer for File;`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

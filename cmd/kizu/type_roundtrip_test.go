@@ -101,10 +101,6 @@ func declaredTypes(t *testing.T, path string) []typ.Type {
 			for _, method := range d.Methods {
 				types = append(types, functionTypes(method)...)
 			}
-		case *kizuast.ImplDecl:
-			for _, method := range d.Methods {
-				types = append(types, functionTypes(method)...)
-			}
 		}
 	}
 	return types

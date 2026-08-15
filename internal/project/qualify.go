@@ -152,7 +152,7 @@ func (c *graphChecker) qualifyContract(
 	return &cp, nil
 }
 
-// qualifyImpl rewrites an impl receiver, contract name, and method bodies.
+// qualifyImpl rewrites the type and contract an assertion names.
 func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast.ImplDecl, error) {
 	cp := *decl
 	typeName, err := c.resolveType(module, decl.TypeName)
@@ -160,21 +160,11 @@ func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast
 		return nil, err
 	}
 	cp.TypeName = typeName
-	if decl.ContractName != "" {
-		contractName, err := c.resolveType(module, decl.ContractName)
-		if err != nil {
-			return nil, err
-		}
-		cp.ContractName = contractName
+	contractName, err := c.resolveType(module, decl.ContractName)
+	if err != nil {
+		return nil, err
 	}
-	cp.Methods = append([]*ast.FunctionDecl(nil), decl.Methods...)
-	for idx, method := range cp.Methods {
-		qualified, err := c.qualifyFunction(module, method, method.Name)
-		if err != nil {
-			return nil, err
-		}
-		cp.Methods[idx] = qualified
-	}
+	cp.ContractName = contractName
 	return &cp, nil
 }
 

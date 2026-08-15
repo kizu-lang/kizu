@@ -77,7 +77,7 @@ std::arena::Arena<T> / std::arena::Handle<T>
 limited comptime
 Io capability
 contract
-impl Contract for Type
+impl Contract for Type;
 &dyn Contract
 ```
 
@@ -2119,37 +2119,31 @@ runtime selection の方針は ADR-0039 に従います。
 ## 16. contract / impl / dyn 方針
 
 Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
-`contract`、`impl Contract for Type`、`dyn` を実装対象にします。
+`contract`、`impl Contract for Type;`、`dyn` を実装対象にします。
 
 ```text
 contract                型が満たすべき要求
-impl Contract for Type  型が contract を満たすことの明示宣言と method body
+impl Contract for Type; 型が contract を満たすことの表明(任意)
 dyn                     runtime dynamic dispatch を見せる型
 ```
 
-`contract` は required method signatures だけを書きます。
-method body は書けません。
+型は method を持っていれば contract を満たします。宣言は要りません。
+`contract` は required method signatures だけを書き、method body も receiver も
+書きません。receiver は method 側にあり、contract は形だけを言います。
 
 ```kizu
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64
+    fn write(bytes: &Bytes) -> !i64;
 }
 ```
 
-`impl Contract for Type` は明示適合と method body を 1 箇所に置きます。
-Go のような暗黙 interface 適合は採用しません。
+method は receiver 欄で宣言します。書き方は 1 つです。
 
 ```kizu
-impl Writer for File {
-    fn write(self: &Self, bytes: &Bytes) -> !i64 {
-        return os.write(self.fd, bytes);
-    }
+fn (self: &File) write(bytes: &Bytes) -> !i64 {
+    return os::write(self.fd, bytes);
 }
-```
 
-型固有の method は receiver 欄で宣言します。書き方は 1 つです。
-
-```kizu
 fn (self: &var File) rename(next: []u8) -> void {
     self.name = next;
 }
@@ -2157,9 +2151,23 @@ fn (self: &var File) rename(next: []u8) -> void {
 
 receiver 欄を持つ function はその型の method で、module ではなく型の下に置かれます。
 同じ module の 2 つの型が、どちらも `len` を持てます。`impl File { ... }` という
-inherent method の囲いはありません。contract method body は
-`impl Writer for File { ... }` に置きます。旧 `satisfy Writer for File` 構文は
-採用しません。
+inherent method の囲いはありません。
+
+`impl Contract for Type;` は表明で、書けばその場で検査されます。束縛ではないので、
+書かなくても structural に満たせます。書ける場所は型か contract の所有者に
+限りません。旧 `satisfy Writer for File` 構文は採用しません。
+
+```kizu
+impl Writer for File;
+```
+
+structural を採ったので、型の作者が知らない contract を後から満たせます。意図を
+書き残したい側は表明を書けます。Go は structural を取り、その結果
+`var _ io.Writer = (*File)(nil)` という構文のない定型句が生まれました。表明を
+構文として持つのは、その定型句を言語の側に置き直すということです。
+
+`Self` はありません。contract が receiver を書かないので、返り値に自分の型が要る
+場合は generic で表します。
 
 `dyn Contract` は dynamic dispatch を型に見せます。
 

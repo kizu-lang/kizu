@@ -130,10 +130,7 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
-				return err
-			}
+
 		}
 	}
 	return nil
@@ -166,10 +163,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 			if err := c.checkTestDecl(d); err != nil {
 				errs = append(errs, err)
 			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
-				errs = append(errs, err)
-			}
+
 		}
 	}
 	return errs
@@ -250,10 +244,6 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 			if err := c.collectReceiverMethod(d); err != nil {
 				return err
 			}
-		case *ast.ImplDecl:
-			if err := c.collectImpl(d); err != nil {
-				return err
-			}
 		default:
 			continue
 		}
@@ -280,24 +270,6 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 	return nil
 }
 
-// collectImpl registers concrete impl method signatures before call checks.
-func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
-	methods := c.impls[decl.TypeName]
-	if methods == nil {
-		methods = map[string]*functionInfo{}
-		c.impls[decl.TypeName] = methods
-	}
-	for _, method := range decl.Methods {
-		if _, exists := methods[method.Name]; exists {
-			return errorf("move error: duplicate impl method `%s.%s`",
-				decl.TypeName, method.Name)
-		}
-		name := fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
-		methods[method.Name] = functionInfoFromImplDecl(name, decl.TypeName, method)
-	}
-	return nil
-}
-
 // functionInfoFromDecl extracts the ownership-facing signature for a function.
 func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
@@ -310,16 +282,6 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 		name: name, sig: fn.FunctionSignature, params: params,
 		returnType: typ.Text(fn.ReturnType), body: fn.Body,
 	}
-}
-
-// functionInfoFromImplDecl binds Self to the concrete receiver type in impl methods.
-func functionInfoFromImplDecl(name string, typeName string, fn *ast.FunctionDecl) *functionInfo {
-	info := functionInfoFromDecl(name, fn)
-	for idx := range info.params {
-		info.params[idx].typeName = substituteSelfTypeName(info.params[idx].typeName, typeName)
-	}
-	info.returnType = substituteSelfTypeName(info.returnType, typeName)
-	return info
 }
 
 // checkFunction validates one function body.
@@ -367,24 +329,6 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 		Body: decl.Body,
 	})
 	return c.checkFunction(fn)
-}
-
-// checkImpl validates concrete impl method bodies after signatures are collected.
-func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
-	for _, method := range decl.Methods {
-		if len(method.TypeParamNames()) > 0 {
-			continue
-		}
-		fn := c.implMethod(decl.TypeName, method.Name)
-		if fn == nil {
-			return errorf("move error: missing impl method `%s.%s`",
-				decl.TypeName, method.Name)
-		}
-		if err := c.checkFunction(fn); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // checkBlock validates statements in a lexical block.
@@ -4578,15 +4522,6 @@ func returnTypeName(fn *functionInfo) string {
 		return "void"
 	}
 	return fn.returnType
-}
-
-// substituteSelfTypeName replaces only standalone Self segments in a type spelling.
-func substituteSelfTypeName(name string, typeName string) string {
-	out, err := typ.SubstituteText(name, map[string]string{"Self": typeName})
-	if err != nil {
-		return name
-	}
-	return out
 }
 
 // implMethod returns the concrete method signature for typeName when known.

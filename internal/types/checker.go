@@ -22,7 +22,6 @@ const (
 	typeI64        Type = "i64"
 	typeU8         Type = "u8"
 	typeByteString Type = "[]u8"
-	typeSelf       Type = "Self"
 	typeType       Type = "type"
 	typeVoid       Type = "void"
 )
@@ -192,7 +191,6 @@ type Checker struct {
 	unions          map[string]*unionType
 	contracts       map[string]*contractType
 	impls           map[string]map[string]*functionType
-	satisfactions   map[string]map[string]bool
 	declaredTypes   map[string]bool
 	currentReturn   Type
 	currentFunction *functionType
@@ -285,7 +283,6 @@ func New() *Checker {
 		unions:           map[string]*unionType{},
 		contracts:        map[string]*contractType{},
 		impls:            map[string]map[string]*functionType{},
-		satisfactions:    map[string]map[string]bool{},
 		declaredTypes:    map[string]bool{},
 		checkedStdBodies: map[string]bool{},
 	}
@@ -316,10 +313,7 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
-				return err
-			}
+
 		}
 	}
 	return nil
@@ -353,10 +347,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 			if err := c.checkTestDecl(d); err != nil {
 				errs = append(errs, err)
 			}
-		case *ast.ImplDecl:
-			if err := c.checkImpl(d); err != nil {
-				errs = append(errs, err)
-			}
+
 		}
 	}
 	return errs
@@ -388,6 +379,18 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 			return err
 		}
 	}
+	// Assertions run last: `impl Writer for File;` says what File already is, so
+	// every method has to be registered before one can be answered, wherever in
+	// the file the assertion happens to sit.
+	for _, decl := range program.Decls {
+		impl, ok := decl.(*ast.ImplDecl)
+		if !ok {
+			continue
+		}
+		if err := c.collectImpl(impl); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -411,16 +414,12 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 	}
 }
 
-// collectMethodDecl registers one method declaration after contracts are known.
+// collectMethodDecl registers one method declaration.
 func (c *Checker) collectMethodDecl(decl ast.Decl) error {
-	switch d := decl.(type) {
-	case *ast.ImplDecl:
-		return c.collectImpl(d)
-	case *ast.FunctionDecl:
-		return c.collectReceiverMethod(d)
-	default:
-		return nil
+	if fn, ok := decl.(*ast.FunctionDecl); ok {
+		return c.collectReceiverMethod(fn)
 	}
+	return nil
 }
 
 // collectReceiverMethod files a `fn (self: T) name(...)` declaration under the
@@ -613,66 +612,40 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 	if _, err := c.parseType(decl.TypeName); err != nil {
 		return err
 	}
-	if decl.ContractName != "" && c.contracts[decl.ContractName] == nil {
-		return errorf("type error: unknown contract `%s`", decl.ContractName)
-	}
-	methods := c.impls[decl.TypeName]
-	if methods == nil {
-		methods = map[string]*functionType{}
-		c.impls[decl.TypeName] = methods
-	}
-	for _, method := range decl.Methods {
-		if _, exists := methods[method.Name]; exists {
-			return errorf("type error: duplicate impl method `%s.%s`", decl.TypeName, method.Name)
-		}
-		fnType, err := c.newImplFunctionType(decl.TypeName, method)
-		if err != nil {
-			return err
-		}
-		fnType.name = fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
-		methods[method.Name] = fnType
-	}
-	if decl.ContractName == "" {
-		return nil
-	}
-	return c.recordContractImpl(decl)
+	return c.checkSatisfies(decl.ContractName, Type(decl.TypeName))
 }
 
-// recordContractImpl validates and records explicit contract implementation.
-func (c *Checker) recordContractImpl(decl *ast.ImplDecl) error {
-	contract := c.contracts[decl.ContractName]
-	for name, want := range contract.methods {
-		got := c.implMethod(decl.TypeName, name)
+// checkSatisfies reports why a type does not satisfy a contract, or nil when it
+// does. A type satisfies one by having the methods; this is where that is said
+// out loud, so the answer arrives at the type rather than at a call far away.
+func (c *Checker) checkSatisfies(contractName string, typeName Type) error {
+	contract := c.contracts[contractName]
+	if contract == nil {
+		return errorf("type error: unknown contract `%s`", contractName)
+	}
+	for _, name := range sortedMethodNames(contract.methods) {
+		got := c.implMethod(string(typeName), name)
 		if got == nil {
 			return errorf("type error: `%s` does not satisfy `%s`: missing method `%s`",
-				decl.TypeName, decl.ContractName, name)
+				typeName, contractName, name)
 		}
-		if !methodMatches(decl.TypeName, want, got) {
+		if !methodMatches(contract.methods[name], got) {
 			return errorf("type error: `%s.%s` does not match contract `%s`",
-				decl.TypeName, name, decl.ContractName)
+				typeName, name, contractName)
 		}
 	}
-	if c.satisfactions[decl.ContractName] == nil {
-		c.satisfactions[decl.ContractName] = map[string]bool{}
-	}
-	c.satisfactions[decl.ContractName][decl.TypeName] = true
 	return nil
 }
 
-// newImplFunctionType converts a method declaration and binds Self to its receiver.
-func (c *Checker) newImplFunctionType(
-	typeName string,
-	method *ast.FunctionDecl,
-) (*functionType, error) {
-	fnType, err := c.newDeclaredFunctionType(method)
-	if err != nil {
-		return nil, err
+// sortedMethodNames lists a contract's methods in a stable order, so a type that
+// misses two of them is always told about the same one first.
+func sortedMethodNames(methods map[string]*functionType) []string {
+	names := make([]string, 0, len(methods))
+	for name := range methods {
+		names = append(names, name)
 	}
-	for idx, param := range fnType.params {
-		fnType.params[idx] = substituteSelfType(param, typeName)
-	}
-	fnType.returnType = substituteSelfType(fnType.returnType, typeName)
-	return fnType, nil
+	sort.Strings(names)
+	return names
 }
 
 // collectEnum registers and validates a tag enum declaration.
@@ -1200,9 +1173,18 @@ func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 			return nil
 		}
 	}
+	// A contract writes no receiver but every method has one, so `self` names it
+	// there. A method declared with a receiver slot has it among its parameters
+	// already, which is why this only speaks for the ones that do not.
+	if fn.ReturnBorrow == receiverName && len(fn.Params) == 0 {
+		return nil
+	}
 	return errorf("type error: function `%s` borrows unknown source `%s`",
 		fn.Name, fn.ReturnBorrow)
 }
+
+// receiverName is what a method calls the value it is called on.
+const receiverName = "self"
 
 // checkStructFieldBorrowPolicy rejects borrow fields until a non-lifetime model exists.
 func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
@@ -1378,9 +1360,6 @@ func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
 // parseNamedType validates primitive, declared, and type-parameter names.
 func (c *Checker) parseNamedType(name string) (Type, error) {
 	typ := Type(name)
-	if typ == typeSelf {
-		return typ, nil
-	}
 	if c.typeParams[name] {
 		return typ, nil
 	}
@@ -1693,20 +1672,6 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 		body:           fn.Body,
 		implicitReturn: true,
 	})
-}
-
-// checkImpl validates method bodies in an impl block.
-func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
-	for _, method := range decl.Methods {
-		fnType := c.implMethod(decl.TypeName, method.Name)
-		if fnType == nil {
-			return errorf("type error: missing impl method `%s.%s`", decl.TypeName, method.Name)
-		}
-		if err := c.checkFunction(fnType); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // checkBlock validates statements and reports whether the block always returns.
@@ -5766,7 +5731,7 @@ func (c *Checker) checkDynMethodCall(
 	if contract == nil || contract.methods[name] == nil {
 		return "", errorf("type error: `dyn %s` has no method `%s`", contractName, name)
 	}
-	return c.checkMethodArgs(contract.methods[name], typeSelf, span, args, env, unsafe)
+	return c.checkContractMethodArgs(contract.methods[name], span, args, env, unsafe)
 }
 
 // checkMethodArgs validates method-call arguments after the implicit self receiver.
@@ -5781,13 +5746,38 @@ func (c *Checker) checkMethodArgs(
 	if len(method.params) == 0 {
 		return "", errorf("type error: method `%s` must have self parameter", method.name)
 	}
-	if len(args) != len(method.params)-1 {
-		return "", errorf("type error: `%s` expects %d args, got %d",
-			method.name, len(method.params)-1, len(args))
-	}
-	if method.params[0] != receiver && method.params[0] != typeSelf {
+	if method.params[0] != receiver {
 		return "", errorf("type error: method `%s` self expects %s, got %s",
 			method.name, method.params[0], receiver)
+	}
+	return c.checkCallableArgs(method, 1, span, args, env, unsafe)
+}
+
+// checkContractMethodArgs validates a call through `&dyn Contract`. A contract
+// method writes no receiver, so every parameter it declares is an argument.
+func (c *Checker) checkContractMethodArgs(
+	method *functionType,
+	span ast.Span,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	return c.checkCallableArgs(method, 0, span, args, env, unsafe)
+}
+
+// checkCallableArgs validates the arguments a call passes, starting at the
+// parameter after the ones the call does not write.
+func (c *Checker) checkCallableArgs(
+	method *functionType,
+	offset int,
+	span ast.Span,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	if len(args) != len(method.params)-offset {
+		return "", errorf("type error: `%s` expects %d args, got %d",
+			method.name, len(method.params)-offset, len(args))
 	}
 	if method.sig.RequiresUnsafe {
 		if err := requireUnsafeCapabilityAt(
@@ -5800,17 +5790,17 @@ func (c *Checker) checkMethodArgs(
 		}
 	}
 	for idx, arg := range args {
-		want := method.params[idx+1]
+		want := method.params[idx+offset]
 		checkedArg, err := prepareBorrowArgument(
 			arg,
-			method.borrowParams[idx+1],
-			method.mutBorrowParams[idx+1],
+			method.borrowParams[idx+offset],
+			method.mutBorrowParams[idx+offset],
 			env,
 		)
 		if err != nil {
 			return "", err
 		}
-		if method.mutBorrowParams[idx+1] {
+		if method.mutBorrowParams[idx+offset] {
 			if err := requireMutableBorrowArg(checkedArg, env); err != nil {
 				return "", err
 			}
@@ -6315,40 +6305,31 @@ func (c *Checker) implMethod(typeName string, method string) *functionType {
 	return methods[method]
 }
 
-// satisfies reports whether a type explicitly satisfies a contract.
+// satisfies reports whether a type has the methods a contract asks for. Nothing
+// has to be declared: a contract names a shape, and a type either has it or does
+// not, which is what lets one be satisfied by a type its author never saw.
 func (c *Checker) satisfies(contractName string, typ Type) bool {
-	return c.satisfactions[contractName] != nil && c.satisfactions[contractName][string(typ)]
+	return c.checkSatisfies(contractName, typ) == nil
 }
 
-// methodMatches checks an impl method against a contract method.
-func methodMatches(typeName string, want *functionType, got *functionType) bool {
-	wantReturn := substituteSelfType(want.returnType, typeName)
-	if len(want.params) != len(got.params) || !sameType(wantReturn, got.returnType) {
+// methodMatches checks a method against the contract method it stands for. The
+// contract writes no receiver, so the comparison starts after the method's own.
+func methodMatches(want *functionType, got *functionType) bool {
+	if len(got.params) == 0 {
+		return false
+	}
+	gotParams := got.params[1:]
+	if len(want.params) != len(gotParams) || !sameType(want.returnType, got.returnType) {
 		return false
 	}
 	for idx, wantParam := range want.params {
-		expected := substituteSelfType(wantParam, typeName)
-		if !sameType(expected, got.params[idx]) ||
-			want.borrowParams[idx] != got.borrowParams[idx] ||
-			want.mutBorrowParams[idx] != got.mutBorrowParams[idx] {
+		if !sameType(wantParam, gotParams[idx]) ||
+			want.borrowParams[idx] != got.borrowParams[idx+1] ||
+			want.mutBorrowParams[idx] != got.mutBorrowParams[idx+1] {
 			return false
 		}
 	}
 	return true
-}
-
-// substituteSelfType replaces the Self type segment inside one impl signature type.
-func substituteSelfType(typ Type, typeName string) Type {
-	return Type(substituteSelfTypeName(string(typ), typeName))
-}
-
-// substituteSelfTypeName replaces only standalone Self segments in a type spelling.
-func substituteSelfTypeName(name string, typeName string) string {
-	out, err := typ.SubstituteText(name, map[string]string{"Self": typeName})
-	if err != nil {
-		return name
-	}
-	return out
 }
 
 // errorUnionElement extracts T from legacy !T.

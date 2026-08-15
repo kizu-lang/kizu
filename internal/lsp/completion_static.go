@@ -70,7 +70,7 @@ var snippetCompletionItems = []completionItem{
 	snippet(
 		"contract",
 		"contract declaration",
-		"contract ${1:Name} {\n    fn ${2:method}(self: &Self) -> ${3:void};\n}",
+		"contract ${1:Name} {\n    fn ${2:method}() -> ${3:void};\n}",
 	),
 	snippet("if", "if block", "if ${1:condition} {\n    $0\n}"),
 	snippet("if else", "if/else block", "if ${1:condition} {\n    ${2}\n} else {\n    $0\n}"),

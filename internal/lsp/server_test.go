@@ -428,14 +428,14 @@ func TestServerStructuralRequests(t *testing.T) {
 		"}\n" +
 		"\n" +
 		"contract Writer {\n" +
-		"    fn write(self: &Self) -> !i64;\n" +
+		"    fn write() -> !i64;\n" +
 		"}\n" +
 		"\n" +
-		"impl Writer for File {\n" +
-		"    fn write(self: &Self) -> !i64 {\n" +
-		"        return 2;\n" +
-		"    }\n" +
+		"fn (self: &File) write() -> !i64 {\n" +
+		"    return 2;\n" +
 		"}\n" +
+		"\n" +
+		"impl Writer for File;\n" +
 		"\n" +
 		"fn main() -> !void {\n" +
 		"    let file = File { name: \"out\" };\n" +
@@ -502,8 +502,10 @@ func assertStructuralResponses(t *testing.T, messages []map[string]any, uri stri
 	if len(impls) != 1 {
 		t.Fatalf("implementation result = %#v, want one location", impls)
 	}
-	if line := typeDefRangeLine(t, impls[0]); line != 11 {
-		t.Fatalf("implementation line = %d, want impl on line 11", line)
+	// A type implements a contract by having its methods, so the answer is the
+	// type itself rather than a block naming the contract.
+	if line := typeDefRangeLine(t, impls[0]); line != 3 {
+		t.Fatalf("implementation line = %d, want struct File on line 3", line)
 	}
 
 	renameResult := messages[5]["result"].(map[string]any)

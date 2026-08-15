@@ -35,9 +35,8 @@ type lowerer struct {
 	loops       []*loopContext
 	deferFrames [][]Cleanup
 	// typeBindings binds the type parameters in force: those of the generic
-	// function being instantiated, and Self while an impl block's methods are
-	// lowered. Lowering reads a body once per binding rather than rewriting its
-	// AST, so `T` and `Self` both resolve through here.
+	// function being instantiated. Lowering reads a body once per binding rather
+	// than rewriting its AST, so `T` resolves through here.
 	typeBindings map[string]string
 	// instantiated records the generic instances already requested, keyed by
 	// the symbol they were given.
@@ -122,12 +121,6 @@ func (l *lowerer) resolveType(name string) string {
 	}
 	return resolved
 }
-
-// selfTypeName is what a method inside an `impl` block writes for the type the
-// block is written for. It is a type parameter of the method the way `T` is one
-// of a generic, so lowering resolves it through the same bindings: a body
-// reading `self.field` finds the struct only once Self is bound to it.
-const selfTypeName = "Self"
 
 // resolveTypeArgs binds the type parameters in force across a static argument
 // list. A list is not a type, so each entry is resolved on its own.
@@ -343,15 +336,6 @@ func (l *lowerer) lower() (*Module, error) {
 		}
 		l.module.Functions = append(l.module.Functions, lowered)
 	}
-	for _, decl := range l.program.Decls {
-		impl, ok := decl.(*ast.ImplDecl)
-		if !ok {
-			continue
-		}
-		if err := l.lowerImplMethods(impl); err != nil {
-			return nil, err
-		}
-	}
 	if err := l.lowerTests(); err != nil {
 		return nil, err
 	}
@@ -431,11 +415,8 @@ func (l *lowerer) collectDecls() error {
 		}
 	}
 	for _, decl := range l.program.Decls {
-		switch d := decl.(type) {
-		case *ast.FunctionDecl:
-			l.signatures[d.Name] = l.lowerSignature(d.FunctionSignature)
-		case *ast.ImplDecl:
-			l.collectImplSignatures(d)
+		if fn, ok := decl.(*ast.FunctionDecl); ok {
+			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
 		}
 	}
 	return nil
@@ -496,36 +477,6 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 		fields = append(fields, Field{Name: field.Name, Type: typ.Text(field.TypeName)})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
-}
-
-// collectImplSignatures records the callable type of each method in one impl
-// block, with Self bound to the type the block is written for.
-func (l *lowerer) collectImplSignatures(impl *ast.ImplDecl) {
-	l.typeBindings[selfTypeName] = impl.TypeName
-	defer delete(l.typeBindings, selfTypeName)
-	for _, method := range impl.Methods {
-		name := implMethodName(impl.TypeName, method.Name)
-		l.signatures[name] = l.lowerSignature(method.FunctionSignature)
-	}
-}
-
-// lowerImplMethods lowers one impl block's methods, with Self bound to the type
-// the block is written for.
-func (l *lowerer) lowerImplMethods(impl *ast.ImplDecl) error {
-	l.typeBindings[selfTypeName] = impl.TypeName
-	defer delete(l.typeBindings, selfTypeName)
-	for _, method := range impl.Methods {
-		if method.ExternABI != "" || len(method.StaticParams) > 0 {
-			continue
-		}
-		name := implMethodName(impl.TypeName, method.Name)
-		lowered, err := l.lowerFunctionNamed(method, name)
-		if err != nil {
-			return err
-		}
-		l.module.Functions = append(l.module.Functions, lowered)
-	}
-	return nil
 }
 
 // lowerSignature extracts the callable type of a function declaration.

@@ -67,15 +67,14 @@ func TestCheckAcceptsContractImpl(t *testing.T) {
 	source := `struct Bytes { text: []u8 }
 struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64;
+    fn write(bytes: &Bytes) -> !i64;
 }
-impl Writer for File {
-    fn write(self: &Self, bytes: &Bytes) -> !i64 {
-        print(self.name);
-        print(bytes.text);
-        return 1;
-    }
+fn (self: &File) write(bytes: &Bytes) -> !i64 {
+    print(self.name);
+    print(bytes.text);
+    return 1;
 }
+impl Writer for File;
 fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
     let n = try writer.write(bytes);
     print(n);
@@ -103,7 +102,7 @@ func TestCheckRejectsOwnedDynParam(t *testing.T) {
 			name: "owned",
 			source: `struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: dyn Writer) -> !void {
     return;
@@ -114,7 +113,7 @@ fn main() {}`,
 		{
 			name: "mutable borrow",
 			source: `contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: &var dyn Writer) -> !void {
     return;
@@ -125,7 +124,7 @@ fn main() {}`,
 		{
 			name: "nullable",
 			source: `contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: ?dyn Writer) -> !void {
     return;
@@ -151,7 +150,7 @@ fn main() {}`,
 func TestCheckRejectsLegacyDynWrapper(t *testing.T) {
 	source := `struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self) -> !i64;
+    fn write() -> !i64;
 }
 fn save(writer: &Dyn<Writer>) -> !void {
     return;
@@ -260,10 +259,9 @@ func TestCheckRejectsIncompleteContractImpl(t *testing.T) {
 	source := `struct Bytes { text: []u8 }
 struct File { name: []u8 }
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64;
+    fn write(bytes: &Bytes) -> !i64;
 }
-impl Writer for File {
-}
+impl Writer for File;
 fn main() {}`
 	err := checkSource(source)
 	if err == nil {
