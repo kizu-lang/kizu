@@ -68,6 +68,7 @@ type graphChecker struct {
 
 type moduleUnit struct {
 	path    string
+	file    string
 	program *ast.Program
 	// imports is the declared import set and defines the dependency edges the
 	// ordering and cycle checks walk.
@@ -75,6 +76,15 @@ type moduleUnit struct {
 	// namespaces is what name resolution sees: the imports plus the package root
 	// namespace, which is reachable without an import and is not an edge.
 	namespaces map[string]string
+}
+
+// name is what a diagnostic calls this module. A program that is not part of a
+// package has no module path, so it is named by the file it was read from.
+func (m *moduleUnit) name() string {
+	if m.path == "" {
+		return m.file
+	}
+	return m.path
 }
 
 // qualify returns what a name declared in this module is filed under. A module
@@ -130,7 +140,7 @@ func (c *graphChecker) load(graph Graph) error {
 		if err != nil {
 			return err
 		}
-		c.modules[module.Path] = &moduleUnit{path: module.Path, program: program}
+		c.modules[module.Path] = &moduleUnit{path: module.Path, file: module.File, program: program}
 		c.modulePaths[module.Path] = true
 	}
 	return nil

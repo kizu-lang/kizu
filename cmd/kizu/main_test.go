@@ -958,7 +958,9 @@ func TestTestPackageCommandSmoke(t *testing.T) {
 // TestTestFileCommandSmoke checks a file test block reports success.
 func TestTestFileCommandSmoke(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample_test.kizu")
-	source := `test "sample" {
+	source := `import std;
+
+test "sample" {
     std::testing::expect(true);
 }
 `
@@ -1470,7 +1472,9 @@ func TestBuildTargetNativeProcessSpawnCommandSmoke(t *testing.T) {
 		t.Skipf("%s is required for native process spawn smoke", truePath)
 	}
 	source := filepath.Join(t.TempDir(), "spawn.kizu")
-	code := []byte(`fn main() -> !void {
+	code := []byte(`import std;
+
+fn main() -> !void {
     let code = try std::process::spawn_wait8(1, "/usr/bin/true", "", "", "", "", "", "", "");
     print(code);
     return;
@@ -1504,7 +1508,9 @@ func TestBuildTargetNativeProcessProfileHelpersSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	source := filepath.Join(t.TempDir(), "process_profile_helpers.kizu")
-	code := []byte(`fn main() -> void {
+	code := []byte(`import std;
+
+fn main() -> void {
     let missing = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_MISSING");
     print(std::mem::len(missing));
     let present = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_PRESENT");
@@ -1549,7 +1555,9 @@ func TestBuildTargetNativeReturnedArrayFieldCommandSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	source := filepath.Join(t.TempDir(), "returned_array_field.kizu")
-	code := []byte(`struct Bag { values: std::array::Array<i64>, }
+	code := []byte(`import std;
+
+struct Bag { values: std::array::Array<i64>, }
 impl Bag {
     fn deinit(self: Bag) -> void {
         self.values.deinit();
@@ -1603,7 +1611,9 @@ func TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	source := filepath.Join(t.TempDir(), "returned_union_array_borrow.kizu")
-	code := []byte(`union Stmt { Add(i64), Done(i64), }
+	code := []byte(`import std;
+
+union Stmt { Add(i64), Done(i64), }
 struct Bag { stmts: std::array::Array<Stmt>, }
 impl Bag {
     fn deinit(self: Bag) -> void {
@@ -1763,7 +1773,9 @@ func TestBuildTargetNativeArenaCommandSmoke(t *testing.T) {
 		t.Skip("clang is required for native build smoke")
 	}
 	source := filepath.Join(t.TempDir(), "arena.kizu")
-	code := []byte(`struct User { age: i64, }
+	code := []byte(`import std;
+
+struct User { age: i64, }
 fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);

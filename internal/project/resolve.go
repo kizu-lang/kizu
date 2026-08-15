@@ -50,11 +50,39 @@ func (c *graphChecker) resolveNamespaceParts(
 		}
 		return c.resolveImportedFunction(module, target, parts)
 	}
+	if err := rejectUnboundStd(module, parts); err != nil {
+		return "", false, err
+	}
 	name := module.qualify(strings.Join(parts, "::"))
 	if _, ok := c.functions[name]; ok {
 		return name, true, nil
 	}
 	return "", false, nil
+}
+
+// rejectUnboundStd refuses a std path the file never brought into scope. It
+// speaks only for paths an import would have made reachable: a module that is
+// reserved or kept inside std is refused for a reason of its own, and saying
+// `import it` there would name a fix that does not exist.
+func rejectUnboundStd(module *moduleUnit, parts []string) error {
+	if len(parts) < 2 || parts[0] != stdlib.Root {
+		return nil
+	}
+	if _, bound := module.namespaces[parts[0]]; bound {
+		return nil
+	}
+	path := stdlib.Root + "::" + parts[1]
+	if _, ok, err := stdlib.Importable(path); err != nil || !ok {
+		return err
+	}
+	used := strings.Join(parts, "::")
+	short := strings.Join(parts[1:], "::")
+	return fmt.Errorf(
+		"module error: `%s` is used without an import in `%s`"+
+			"\nhelp: `import %s;` reaches it by this path,"+
+			" or `import %s;` and write `%s`",
+		used, module.name(), stdlib.Root, path, short,
+	)
 }
 
 // isStdPath reports whether a bound name stands for the standard library. A
@@ -172,8 +200,11 @@ type typeResolver struct {
 
 // resolveBase resolves one non-generic type base.
 func (r typeResolver) resolveBase(name string) (string, error) {
-	if isPrimitiveType(name) || strings.HasPrefix(name, "std::") {
+	if isPrimitiveType(name) {
 		return name, nil
+	}
+	if strings.HasPrefix(name, stdlib.Root+"::") {
+		return name, rejectUnboundStd(r.module, strings.Split(name, "::"))
 	}
 	if strings.Contains(name, "::") {
 		return r.resolveQualifiedBase(name)

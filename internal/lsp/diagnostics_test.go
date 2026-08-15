@@ -167,9 +167,11 @@ func TestAnalyzeAcceptsValidSource(t *testing.T) {
 
 // TestAnalyzeAcceptsStdTestingSource checks LSP diagnostics share CLI std wrappers.
 func TestAnalyzeAcceptsStdTestingSource(t *testing.T) {
-	source := `test "vscode test command" {
-    std::testing::expect(true);
-    std::testing::expect_equal<i64>(3, 1 + 2);
+	source := `import std::testing;
+
+test "vscode test command" {
+    testing::expect(true);
+    testing::expect_equal<i64>(3, 1 + 2);
 }
 `
 	diagnostics := Analyze(source)
