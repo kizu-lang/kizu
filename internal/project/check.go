@@ -826,12 +826,17 @@ func (c *graphChecker) qualifyCallExpr(
 }
 
 // qualifyTypeApplyExpr rewrites explicit static type arguments in constructor calls.
+//
+// The callee goes through qualifyCallee, not qualifyExpr: `f<T>(x)` names a
+// function of this module exactly as `f(x)` does, and reading it as a plain
+// expression left the name unqualified while the declaration was registered
+// under the module path, so the call found nothing that takes static arguments.
 func (c *graphChecker) qualifyTypeApplyExpr(
 	module *moduleUnit,
 	expr *ast.TypeApplyExpr,
 ) (*ast.TypeApplyExpr, error) {
 	cp := *expr
-	callee, err := c.qualifyExpr(module, expr.Callee)
+	callee, err := c.qualifyCallee(module, expr.Callee)
 	if err != nil {
 		return nil, err
 	}
