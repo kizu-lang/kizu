@@ -325,6 +325,21 @@ fn main() {
 
 `let` は immutable です。mutable な変数には `var` を使います。
 
+使わない局所変数は compile error です。関数本体の binding は、その関数の中でしか
+消費されないので、使われないものは確実に死んでいます。値を作ったこと自体が目的
+なら `let _ = expr;` と書いて捨てます。
+
+```kizu
+fn main() {
+    let values = make_values();   // error: 使われていない
+    let _ = make_values();        // ok: 捨てると書いてある
+}
+```
+
+関数の引数は対象外です。引数は署名の一部で、呼び出し側との約束のために受け取る
+ことがあります。top-level 宣言も対象外です。package の外から使われる可能性が
+あります。
+
 ### 6.3 関数
 
 ```kizu
