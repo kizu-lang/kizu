@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -75,9 +76,13 @@ type moduleUnit struct {
 func (c *graphChecker) moduleNamespaces(
 	module *moduleUnit,
 	imports map[string]string,
+	std map[string]string,
 ) map[string]string {
-	namespaces := make(map[string]string, len(imports)+1)
+	namespaces := make(map[string]string, len(imports)+len(std)+1)
 	for alias, path := range imports {
+		namespaces[alias] = path
+	}
+	for alias, path := range std {
 		namespaces[alias] = path
 	}
 	if c.packageRoot != "" && c.modulePaths[c.packageRoot] && module.path != c.packageRoot {
@@ -209,12 +214,12 @@ func declaredType(decl ast.Decl) (string, bool, bool) {
 func (c *graphChecker) program() (*ast.Program, error) {
 	merged := &ast.Program{}
 	for _, module := range sortedModuleUnits(c.modules) {
-		imports, err := c.resolveImports(module)
+		imports, std, err := c.resolveImports(module)
 		if err != nil {
 			return nil, err
 		}
 		module.imports = imports
-		module.namespaces = c.moduleNamespaces(module, imports)
+		module.namespaces = c.moduleNamespaces(module, imports, std)
 	}
 	modules, err := c.orderedModules()
 	if err != nil {
@@ -268,28 +273,71 @@ func (c *graphChecker) visitModule(
 	return nil
 }
 
-// resolveImports validates imports and returns last-segment aliases.
-func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, error) {
+// resolveImports validates imports and returns last-segment aliases. An import
+// of std binds a name without becoming an edge in this package's module graph:
+// std is a different package, so it is not part of the ordering this graph
+// decides, and it can never take part in a cycle within it.
+func (c *graphChecker) resolveImports(
+	module *moduleUnit,
+) (map[string]string, map[string]string, error) {
 	imports := map[string]string{}
+	std := map[string]string{}
 	for _, decl := range module.program.Decls {
 		importDecl, ok := decl.(*ast.ImportDecl)
 		if !ok {
 			continue
 		}
 		path := strings.Join(importDecl.Path, "::")
-		if !c.modulePaths[path] {
-			return nil, fmt.Errorf("module error: missing import `%s` in `%s`", path, module.path)
-		}
 		alias := importDecl.Path[len(importDecl.Path)-1]
-		if _, exists := imports[alias]; exists {
-			return nil, fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
+		if _, taken := imports[alias]; taken {
+			return nil, nil, duplicateImport(alias, module)
+		}
+		if _, taken := std[alias]; taken {
+			return nil, nil, duplicateImport(alias, module)
+		}
+		bound, err := c.bindImport(module, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if bound == stdBinding {
+			std[alias] = path
+			continue
 		}
 		imports[alias] = path
 	}
 	if err := rejectImportShadowing(module, imports); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return imports, nil
+	return imports, std, rejectImportShadowing(module, std)
+}
+
+// importKind separates an import that is an edge in this graph from one that
+// only brings a name in from another package.
+type importKind int
+
+const (
+	packageBinding importKind = iota + 1
+	stdBinding
+)
+
+// bindImport reports which package an import names, and rejects one that names
+// nothing. An import that resolves to neither this package nor std has no
+// module behind it, so the name it would bind would stand for nothing.
+func (c *graphChecker) bindImport(module *moduleUnit, path string) (importKind, error) {
+	if c.modulePaths[path] {
+		return packageBinding, nil
+	}
+	if _, ok, err := stdlib.Importable(path); err != nil {
+		return 0, err
+	} else if ok {
+		return stdBinding, nil
+	}
+	return 0, fmt.Errorf("module error: missing import `%s` in `%s`", path, module.path)
+}
+
+// duplicateImport reports two imports competing for one name.
+func duplicateImport(alias string, module *moduleUnit) error {
+	return fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
 }
 
 // rejectImportShadowing checks local declarations do not shadow import aliases.

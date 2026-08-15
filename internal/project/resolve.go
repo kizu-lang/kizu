@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -44,6 +45,9 @@ func (c *graphChecker) resolveNamespaceParts(
 		if len(parts) == 1 {
 			return "", false, nil
 		}
+		if isStdPath(target) {
+			return stdFunctionName(target, parts), true, nil
+		}
 		return c.resolveImportedFunction(module, target, parts)
 	}
 	name := module.path + "::" + strings.Join(parts, "::")
@@ -51,6 +55,26 @@ func (c *graphChecker) resolveNamespaceParts(
 		return name, true, nil
 	}
 	return "", false, nil
+}
+
+// isStdPath reports whether a bound name stands for the standard library. A
+// user package may not be named `std`, so the prefix decides it.
+func isStdPath(path string) bool {
+	return path == stdlib.Root || strings.HasPrefix(path, stdlib.Root+"::")
+}
+
+// stdFunctionName spells what a std function is called once loaded. std wrapper
+// functions are filed under a dotted name and std types under a `::` one, so a
+// rewritten path has to arrive in the spelling its own declaration used.
+func stdFunctionName(target string, parts []string) string {
+	return target + "::" + strings.Join(parts[1:], "::")
+}
+
+// stdTypeName spells what a std type is called once loaded. std is another
+// package: its declarations are checked where they are loaded, so resolving a
+// name into it only has to say what that name is, not whether it exists.
+func stdTypeName(target string, parts []string) string {
+	return target + "::" + strings.Join(parts[1:], "::")
 }
 
 // resolveImportedFunction validates visibility for a call through an import alias.
@@ -81,6 +105,9 @@ func (c *graphChecker) resolveTypeNamespaceParts(
 		return "", false
 	}
 	if target, ok := module.namespaces[parts[0]]; ok && len(parts) > 1 {
+		if isStdPath(target) {
+			return stdTypeName(target, parts), true
+		}
 		name := target + "::" + strings.Join(parts[1:], "::")
 		if _, exists := c.types[name]; exists {
 			return name, true
@@ -164,6 +191,9 @@ func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 	targetModule, ok := r.module.namespaces[parts[0]]
 	if !ok {
 		return "", fmt.Errorf("module error: `%s` is not imported in `%s`", parts[0], r.module.path)
+	}
+	if isStdPath(targetModule) {
+		return stdTypeName(targetModule, parts), nil
 	}
 	qualified := targetModule + "::" + strings.Join(parts[1:], "::")
 	exported, ok := r.checker.types[qualified]
