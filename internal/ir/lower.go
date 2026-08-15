@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -1272,12 +1273,12 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("array.new", "std::array::Array<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
 // lowerMapConstructor lowers std::map::Map<[]u8, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
-	mapType, valueType, ok := mapTypeName(typeArg)
+	mapType, valueType, ok := mapInstanceType(typeArg)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: std::map::Map only supports []u8 keys")
 	}
@@ -1326,11 +1327,11 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
 	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std::array", field.Name, elem, allArgs,
+		return l.lowerStdContainerMethod(arrayTypeName, field.Name, elem, allArgs,
 			func() (Value, error) { return l.lowerArrayMethod(field.Name, elem, allArgs) })
 	}
 	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std::map", field.Name, valueType, allArgs,
+		return l.lowerStdContainerMethod(mapTypeName, field.Name, valueType, allArgs,
 			func() (Value, error) { return l.lowerMapMethod(field.Name, valueType, allArgs) })
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
@@ -1354,10 +1355,10 @@ func (l *lowerer) lowerMethodCallExpr(
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
 	if elem, ok := arrayElementType(receiver); ok {
-		return l.stdContainerParams("std::array", method, elem)
+		return l.stdContainerParams(arrayTypeName, method, elem)
 	}
 	if valueType, ok := mapValueType(receiver); ok {
-		return l.stdContainerParams("std::map", method, valueType)
+		return l.stdContainerParams(mapTypeName, method, valueType)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
@@ -1369,11 +1370,11 @@ func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, e
 // method at this element type. A method std has no declaration for lowers
 // straight to its instruction, which names no parameter types.
 func (l *lowerer) stdContainerParams(
-	module string,
+	receiver string,
 	method string,
 	typeArg string,
 ) ([]Param, error) {
-	name := module + "." + method
+	name := stdmethod.MethodName(receiver, method)
 	if l.genericDecl(name) == nil {
 		return nil, nil
 	}
@@ -1394,16 +1395,15 @@ func paramsAfterSelf(params []Param) []Param {
 
 // lowerStdContainerMethod runs the wrapper std declares for a container method,
 // so the body in std/src/*.kizu is what the call does rather than a description
-// of it. Array.truncate, Array.clear and Array.as_bytes have no declaration to
-// run, so those still lower straight to their instruction.
+// of it. A method std has no declaration for lowers straight to its instruction.
 func (l *lowerer) lowerStdContainerMethod(
-	module string,
+	receiver string,
 	method string,
 	typeArg string,
 	args []Value,
 	undeclared func() (Value, error),
 ) (Value, error) {
-	name := module + "." + method
+	name := stdmethod.MethodName(receiver, method)
 	if l.genericDecl(name) == nil {
 		return undeclared()
 	}
