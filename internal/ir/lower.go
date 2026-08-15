@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -1272,12 +1273,12 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("array.new", "std::array::Array<"+typeArg+">", []Value{allocator}, typeArg), nil
+	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
 // lowerMapConstructor lowers std::map::Map<[]u8, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
-	mapType, valueType, ok := mapTypeName(typeArg)
+	mapType, valueType, ok := mapInstanceType(typeArg)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: std::map::Map only supports []u8 keys")
 	}
@@ -1326,12 +1327,10 @@ func (l *lowerer) lowerMethodCallExpr(
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
 	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std::array", field.Name, elem, allArgs,
-			func() (Value, error) { return l.lowerArrayMethod(field.Name, elem, allArgs) })
+		return l.lowerStdContainerMethod(arrayTypeName, field.Name, elem, allArgs)
 	}
 	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerStdContainerMethod("std::map", field.Name, valueType, allArgs,
-			func() (Value, error) { return l.lowerMapMethod(field.Name, valueType, allArgs) })
+		return l.lowerStdContainerMethod(mapTypeName, field.Name, valueType, allArgs)
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
@@ -1354,10 +1353,10 @@ func (l *lowerer) lowerMethodCallExpr(
 // arguments keep the types they carry themselves.
 func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, error) {
 	if elem, ok := arrayElementType(receiver); ok {
-		return l.stdContainerParams("std::array", method, elem)
+		return l.stdContainerParams(arrayTypeName, method, elem)
 	}
 	if valueType, ok := mapValueType(receiver); ok {
-		return l.stdContainerParams("std::map", method, valueType)
+		return l.stdContainerParams(mapTypeName, method, valueType)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
@@ -1366,18 +1365,13 @@ func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, e
 }
 
 // stdContainerParams returns the parameters std declares for one container
-// method at this element type. A method std has no declaration for lowers
-// straight to its instruction, which names no parameter types.
+// method at this element type.
 func (l *lowerer) stdContainerParams(
-	module string,
+	receiver string,
 	method string,
 	typeArg string,
 ) ([]Param, error) {
-	name := module + "." + method
-	if l.genericDecl(name) == nil {
-		return nil, nil
-	}
-	_, sig, err := l.requestGenericInstance(name, typeArg)
+	_, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
 	if err != nil {
 		return nil, err
 	}
@@ -1394,20 +1388,16 @@ func paramsAfterSelf(params []Param) []Param {
 
 // lowerStdContainerMethod runs the wrapper std declares for a container method,
 // so the body in std/src/*.kizu is what the call does rather than a description
-// of it. Array.truncate, Array.clear and Array.as_bytes have no declaration to
-// run, so those still lower straight to their instruction.
+// of it. There is no second answer to fall back on: a lookup that stops finding
+// the declaration fails here, instead of quietly lowering to an instruction the
+// lowerer picked out of a list of its own.
 func (l *lowerer) lowerStdContainerMethod(
-	module string,
+	receiver string,
 	method string,
 	typeArg string,
 	args []Value,
-	undeclared func() (Value, error),
 ) (Value, error) {
-	name := module + "." + method
-	if l.genericDecl(name) == nil {
-		return undeclared()
-	}
-	symbol, sig, err := l.requestGenericInstance(name, typeArg)
+	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
 	if err != nil {
 		return Value{}, err
 	}
@@ -1416,7 +1406,7 @@ func (l *lowerer) lowerStdContainerMethod(
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
 func (l *lowerer) implMethodCalleeName(receiver string, method string) (string, bool) {
-	name := implMethodName(derefType(receiver), method)
+	name := stdmethod.MethodName(derefType(receiver), method)
 	if _, ok := l.signatures[name]; ok {
 		return name, true
 	}
@@ -1473,7 +1463,9 @@ func mapPrimitiveValueType(typeArg string) string {
 	return args[1]
 }
 
-// lowerMapMethod lowers runtime-backed std::map::Map<[]u8, V> methods.
+// lowerMapMethod lowers the runtime primitive one std::map::Map<[]u8, V> method
+// forwards to. Only a wrapper body in std/src/map.kizu reaches it: a `m.get(k)`
+// call lowers as a call to that wrapper, and this is what the wrapper does.
 func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (Value, error) {
 	switch name {
 	case "insert":
@@ -1491,9 +1483,10 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 	}
 }
 
-// lowerArrayMethod lowers runtime-backed std::array::Array<T> methods. Only the
-// methods whose result mentions the element type need to be spelled out here;
-// the rest carry a fixed result type and go through arrayMethodResultType.
+// lowerArrayMethod lowers the runtime primitive one std::array::Array<T> method
+// forwards to, reached the same way lowerMapMethod is. Only the methods whose
+// result mentions the element type need to be spelled out here; the rest carry a
+// fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
 	if result, ok := arrayMethodResultType(name); ok {
 		return l.emit("array."+name, result, args, elem), nil

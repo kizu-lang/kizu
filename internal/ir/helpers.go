@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -74,9 +73,20 @@ func (l *lowerer) fieldType(structName string, fieldName string) string {
 	return "unknown"
 }
 
+// arrayTypeName and mapTypeName are the containers std declares methods on.
+//
+// A method is filed under the type it is a method on, so the name that reads a
+// receiver's element type and the name that looks the method up have to be one
+// string. They were two, spelled `std::array::Array<T>` here and `std::array`
+// at the lookup, and every container method call missed its declaration.
+const (
+	arrayTypeName = "std::array::Array"
+	mapTypeName   = "std::map::Map"
+)
+
 // arrayElementType returns T for std::array::Array<T>.
 func arrayElementType(name string) (string, bool) {
-	const prefix = "std::array::Array<"
+	const prefix = arrayTypeName + "<"
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
 		return "", false
 	}
@@ -85,7 +95,7 @@ func arrayElementType(name string) (string, bool) {
 
 // mapValueType returns V for the supported std::map::Map<[]u8, V> shape.
 func mapValueType(name string) (string, bool) {
-	const prefix = "std::map::Map<"
+	const prefix = mapTypeName + "<"
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
 		return "", false
 	}
@@ -107,14 +117,15 @@ func splitStaticArgs(args string) []string {
 	return parts
 }
 
-// mapTypeName returns std::map::Map<[]u8, V>.
-func mapTypeName(typeArg string) (string, string, bool) {
+// mapInstanceType returns std::map::Map<[]u8, V> and V for the argument list a
+// map constructor was written with.
+func mapInstanceType(typeArg string) (string, string, bool) {
 	args := splitStaticArgs(typeArg)
 	if len(args) != 2 || args[0] != "[]u8" {
 		return "", "", false
 	}
 	valueType := args[1]
-	return "std::map::Map<[]u8, " + valueType + ">", valueType, true
+	return mapTypeName + "<[]u8, " + valueType + ">", valueType, true
 }
 
 // isReferenceType reports whether a type is a local borrow.
@@ -137,11 +148,6 @@ func derefType(name string) string {
 		return strings.TrimPrefix(name, "&")
 	}
 	return name
-}
-
-// implMethodName returns the symbol used for a concrete impl method.
-func implMethodName(typeName string, method string) string {
-	return stdmethod.MethodName(typeName, method)
 }
 
 // runtimeBuiltinReturnType records checked host-runtime builtin result types.
