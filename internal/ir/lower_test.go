@@ -142,18 +142,22 @@ fn main() {}`)
 func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name: "std.mem.len",
-			Params: []ast.Param{
-				{Name: "bytes", TypeName: &typ.Slice{Elem: &typ.Name{Path: []string{"u8"}}}},
+			FunctionSignature: ast.FunctionSignature{
+				Name: "std.mem.len",
+				Params: []ast.Param{
+					{Name: "bytes", TypeName: &typ.Slice{Elem: &typ.Name{Path: []string{"u8"}}}},
+				},
+				ReturnType: &typ.Name{Path: []string{"i64"}},
 			},
-			ReturnType: &typ.Name{Path: []string{"i64"}},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IntExpr{Value: "1"}},
 			}},
 		},
 		&ast.FunctionDecl{
-			Name:       "main",
-			ReturnType: &typ.Name{Path: []string{"i64"}},
+			FunctionSignature: ast.FunctionSignature{
+				Name:       "main",
+				ReturnType: &typ.Name{Path: []string{"i64"}},
+			},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.CallExpr{
 					Callee: &ast.FieldExpr{
@@ -357,16 +361,20 @@ func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
 	program := &ast.Program{Decls: []ast.Decl{
 		&ast.FunctionDecl{
-			Name:         "unused",
-			StaticParams: []ast.StaticParam{{Name: "T"}},
-			Params:       []ast.Param{{Name: "value", TypeName: &typ.Name{Path: []string{"T"}}}},
-			ReturnType:   &typ.Name{Path: []string{"T"}},
+			FunctionSignature: ast.FunctionSignature{
+				Name:         "unused",
+				StaticParams: []ast.StaticParam{{Name: "T"}},
+				Params: []ast.Param{
+					{Name: "value", TypeName: &typ.Name{Path: []string{"T"}}},
+				},
+				ReturnType: &typ.Name{Path: []string{"T"}},
+			},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
 			}},
 		},
 		&ast.FunctionDecl{
-			Name: "main",
+			FunctionSignature: ast.FunctionSignature{Name: "main"},
 			Body: &ast.BlockStmt{Statements: []ast.Statement{
 				&ast.ReturnStmt{},
 			}},

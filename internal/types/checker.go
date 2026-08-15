@@ -238,17 +238,20 @@ type unionType struct {
 	public     bool
 }
 
+// A functionType is what a call site sees, plus the body the passes that check
+// or instantiate it run over. The two are separate fields rather than one
+// declaration so that reading the signature cannot reach the body by accident.
+//
+// name is not sig.Name: an impl method is registered under the qualified
+// `Type.method`, while the signature keeps the name as it was declared.
 type functionType struct {
 	name            string
+	sig             ast.FunctionSignature
 	params          []Type
 	borrowParams    []bool
 	mutBorrowParams []bool
-	typeParams      []string
-	returnBorrow    string
 	returnType      Type
-	decl            *ast.FunctionDecl
-	requiresUnsafe  bool
-	externABI       string
+	body            *ast.BlockStmt
 	implicitReturn  bool
 }
 
@@ -447,8 +450,10 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			ret := typ.Text(d.ReturnType)
-			if err := c.checkPublicFunctionSignature(d.Public, d.Name, d.Params, ret); err != nil {
+			if !d.Public {
+				continue
+			}
+			if err := c.checkPublicSignature(d.FunctionSignature); err != nil {
 				return err
 			}
 		case *ast.StructDecl:
@@ -468,26 +473,22 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	return nil
 }
 
-// checkPublicFunctionSignature validates the public boundary of one function.
-func (c *Checker) checkPublicFunctionSignature(
-	public bool,
-	name string,
-	params []ast.Param,
-	returnType string,
-) error {
-	if !public {
-		return nil
-	}
-	for _, param := range params {
-		label := "function `" + name + "` parameter"
+// checkPublicSignature rejects private types named by a signature that is on
+// the public boundary. Whether it is there is the caller's to decide: a
+// function is when it is declared public, and every method of a public contract
+// is whatever the method itself says.
+func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
+	for _, param := range sig.Params {
+		label := "function `" + sig.Name + "` parameter"
 		if err := c.rejectPrivateType(typ.Text(param.TypeName), label); err != nil {
 			return err
 		}
 	}
+	returnType := typ.Text(sig.ReturnType)
 	if returnType == "" {
 		return nil
 	}
-	return c.rejectPrivateType(returnType, "function `"+name+"` return type")
+	return c.rejectPrivateType(returnType, "function `"+sig.Name+"` return type")
 }
 
 // checkPublicStructFields validates public fields on one struct.
@@ -527,8 +528,7 @@ func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
 		return nil
 	}
 	for _, method := range decl.Methods {
-		if err := c.checkPublicFunctionSignature(true, method.Name, method.Params,
-			typ.Text(method.ReturnType)); err != nil {
+		if err := c.checkPublicSignature(method.FunctionSignature); err != nil {
 			return err
 		}
 	}
@@ -545,7 +545,7 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		if _, exists := c.functions[fn.Name]; exists {
 			return errorf("type error: duplicate function `%s`", fn.Name)
 		}
-		fnType, err := c.newFunctionType(fn)
+		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
 			return err
 		}
@@ -564,7 +564,7 @@ func (c *Checker) collectContract(decl *ast.ContractDecl) error {
 		if _, exists := methods[method.Name]; exists {
 			return errorf("type error: duplicate contract method `%s.%s`", decl.Name, method.Name)
 		}
-		fnType, err := c.newFunctionType(method)
+		fnType, err := c.newDeclaredFunctionType(method)
 		if err != nil {
 			return err
 		}
@@ -630,7 +630,7 @@ func (c *Checker) newImplFunctionType(
 	typeName string,
 	method *ast.FunctionDecl,
 ) (*functionType, error) {
-	fnType, err := c.newFunctionType(method)
+	fnType, err := c.newDeclaredFunctionType(method)
 	if err != nil {
 		return nil, err
 	}
@@ -875,7 +875,7 @@ func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
 	if err := c.checkOwnerUnionDeinitSignature(decl, method); err != nil {
 		return err
 	}
-	return c.checkOwnerUnionDeinitBody(decl, method.decl)
+	return c.checkOwnerUnionDeinitBody(decl, method)
 }
 
 // checkOwnerUnionDeinitSignature enforces the consuming `deinit(self: T) -> void`
@@ -902,12 +902,12 @@ func (c *Checker) checkOwnerUnionDeinitSignature(decl *ast.UnionDecl, method *fu
 // an exhaustive `match self` whose every owner-payload variant binds and cleans
 // its payload. Inactive variants are never cleaned because only the active arm
 // runs, so copy and payload-free variants need no cleanup.
-func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *ast.FunctionDecl) error {
-	if fn == nil || len(fn.Params) == 0 {
+func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionType) error {
+	if fn == nil || len(fn.sig.Params) == 0 {
 		return errorf("type error: owner-payload union `%s` deinit must take `self`", decl.Name)
 	}
-	selfName := fn.Params[0].Name
-	match := ownerUnionSelfMatch(fn.Body, selfName)
+	selfName := fn.sig.Params[0].Name
+	match := ownerUnionSelfMatch(fn.body, selfName)
 	if match == nil {
 		return errorf(
 			"type error: owner-payload union `%s` deinit must dispatch on `%s` with an exhaustive `match`",
@@ -1007,10 +1007,27 @@ type functionParamInfo struct {
 	mutBorrowParams []bool
 }
 
-// newFunctionType converts a parsed function declaration into its static type.
-func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+// newDeclaredFunctionType builds the type for a declaration and attaches the
+// declaration to it. The attaching happens here rather than inside
+// newFunctionType, which never sees a body: the body is what checking and
+// instantiation run over, not what a caller is promised.
+func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+	fnType, err := c.newFunctionType(fn.FunctionSignature)
+	if err != nil {
+		return nil, err
+	}
+	fnType.body = fn.Body
+	return fnType, nil
+}
+
+// newFunctionType builds the type a call site is promised. It takes the
+// signature rather than the declaration, so what a caller sees cannot be read
+// out of the body: a signature that came from a body is one no other package
+// can be told without being shipped the body too.
+func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, error) {
+	typeParams := fn.TypeParamNames()
 	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(fn.TypeParamNames())
+	c.typeParams = typeParamSet(typeParams)
 	defer func() {
 		c.typeParams = previousTypeParams
 	}()
@@ -1043,17 +1060,15 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		return nil, err
 	}
 	return &functionType{
-		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
+		name: fn.Name, sig: fn, params: paramInfo.params,
+		borrowParams:    paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams,
-		typeParams:      fn.TypeParamNames(),
-		returnBorrow:    fn.ReturnBorrow,
-		returnType:      ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
-		externABI: fn.ExternABI,
+		returnType:      ret,
 	}, nil
 }
 
 // collectFunctionParams validates function parameters and records call-time metadata.
-func (c *Checker) collectFunctionParams(fn *ast.FunctionDecl) (functionParamInfo, error) {
+func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParamInfo, error) {
 	info := functionParamInfo{
 		params:          make([]Type, 0, len(fn.Params)),
 		borrowParams:    make([]bool, 0, len(fn.Params)),
@@ -1105,7 +1120,7 @@ func (c *Checker) checkFunctionParam(
 // is a function-name token a std wrapper forwards to a trusted primitive, not a
 // value a body can call, so declaring one outside std is rejected where it is
 // written rather than where the name fails to resolve.
-func checkStaticParamPolicy(fn *ast.FunctionDecl) error {
+func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	for _, param := range fn.StaticParams {
 		if Type(typ.Text(param.Type)) != typeFunction || fn.Std {
 			continue
@@ -1127,7 +1142,7 @@ func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 }
 
 // checkReturnBorrowPolicy validates source provenance for borrowed returns.
-func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
+func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 	if fn.ReturnType == nil {
 		if fn.ReturnBorrow != "" {
 			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
@@ -1555,10 +1570,10 @@ func (c *Checker) isPublicType(name string) bool {
 // status is platform-shaped, and a value returned from `main` cannot express it
 // portably.
 func checkMainReturnType(fn *functionType) error {
-	if fn.name != "main" || fn.decl == nil {
+	if fn.name != "main" {
 		return nil
 	}
-	returned := strings.TrimSpace(typ.Text(fn.decl.ReturnType))
+	returned := strings.TrimSpace(typ.Text(fn.sig.ReturnType))
 	if returned == "" || returned == "void" || strings.HasSuffix(returned, "!void") {
 		return nil
 	}
@@ -1569,9 +1584,9 @@ func checkMainReturnType(fn *functionType) error {
 // into scope, and returns them by declared type. A body reads them like any
 // other name, and a static argument list needs to tell them apart from a
 // runtime local, so both callers set up a generic body through here.
-func defineStaticValueParams(env *scope, decl *ast.FunctionDecl) (map[string]Type, error) {
+func defineStaticValueParams(env *scope, sig ast.FunctionSignature) (map[string]Type, error) {
 	staticParams := map[string]Type{}
-	for _, param := range decl.StaticParams {
+	for _, param := range sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
@@ -1585,18 +1600,18 @@ func defineStaticValueParams(env *scope, decl *ast.FunctionDecl) (map[string]Typ
 
 // checkFunction validates one function body against its signature.
 func (c *Checker) checkFunction(fn *functionType) error {
-	if fn.externABI != "" {
+	if fn.sig.ExternABI != "" {
 		return nil
 	}
 	if err := checkMainReturnType(fn); err != nil {
 		return err
 	}
 	env := newScope(nil)
-	staticParams, err := defineStaticValueParams(env, fn.decl)
+	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
 		return err
 	}
-	for idx, param := range fn.decl.Params {
+	for idx, param := range fn.sig.Params {
 		if err := env.defineParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow); err != nil {
 			return err
 		}
@@ -1609,8 +1624,8 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentFunction = fn
-	c.currentStd = fn.decl.Std
-	c.typeParams = typeParamSet(fn.typeParams)
+	c.currentStd = fn.sig.Std
+	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.staticParams = staticParams
 	c.loopLabels = nil
 	defer func() {
@@ -1621,7 +1636,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
-	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, nil)
+	returns, err := c.checkBlock(fn.body, env, fn.returnType, nil)
 	if err != nil {
 		return err
 	}
@@ -1633,11 +1648,15 @@ func (c *Checker) checkFunction(fn *functionType) error {
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
 func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
-	fn := &ast.FunctionDecl{Name: "test " + strconv.Quote(decl.Name), Body: decl.Body}
+	fn := &ast.FunctionDecl{
+		FunctionSignature: ast.FunctionSignature{Name: "test " + strconv.Quote(decl.Name)},
+		Body:              decl.Body,
+	}
 	return c.checkFunction(&functionType{
 		name:           fn.Name,
+		sig:            fn.FunctionSignature,
 		returnType:     "!void",
-		decl:           fn,
+		body:           fn.Body,
 		implicitReturn: true,
 	})
 }
@@ -2161,7 +2180,7 @@ func (c *Checker) returnValueMatchesBorrowParam(
 	if !sameType(got, inner) {
 		return false
 	}
-	return c.currentFunction != nil && c.currentFunction.returnBorrow == ident.Name
+	return c.currentFunction != nil && c.currentFunction.sig.ReturnBorrow == ident.Name
 }
 
 // checkReturnBorrowSources rejects returned views not tied to the declared source.
@@ -2171,7 +2190,7 @@ func (c *Checker) checkReturnBorrowSources(
 	_ Type,
 	unsafe unsafeCaps,
 ) error {
-	if c.currentFunction == nil || c.currentFunction.returnBorrow == "" {
+	if c.currentFunction == nil || c.currentFunction.sig.ReturnBorrow == "" {
 		return nil
 	}
 	if c.trustedStdBorrowReturn(expr) {
@@ -2184,7 +2203,7 @@ func (c *Checker) checkReturnBorrowSources(
 	if sources["$static"] {
 		return nil
 	}
-	source := c.currentFunction.returnBorrow
+	source := c.currentFunction.sig.ReturnBorrow
 	if sources[source] {
 		return nil
 	}
@@ -2249,24 +2268,24 @@ func (c *Checker) callBorrowSources(
 	if fn == nil {
 		return map[string]bool{}, nil
 	}
-	if fn.returnBorrow == "" {
+	if fn.sig.ReturnBorrow == "" {
 		return map[string]bool{}, nil
 	}
 	idx := borrowReturnParamIndex(fn)
 	if idx < 0 || idx >= len(expr.Args) {
 		return map[string]bool{}, errorf("type error: `%s` borrows unknown source `%s`",
-			fn.name, fn.returnBorrow)
+			fn.name, fn.sig.ReturnBorrow)
 	}
 	return c.exprBorrowSources(expr.Args[idx], env, unsafe)
 }
 
 // borrowReturnParamIndex finds the parameter named by a return-borrow annotation.
 func borrowReturnParamIndex(fn *functionType) int {
-	if fn == nil || fn.decl == nil || fn.returnBorrow == "" {
+	if fn == nil || fn.sig.ReturnBorrow == "" {
 		return -1
 	}
-	for idx, param := range fn.decl.Params {
-		if param.Name == fn.returnBorrow {
+	for idx, param := range fn.sig.Params {
+		if param.Name == fn.sig.ReturnBorrow {
 			return idx
 		}
 	}
@@ -2288,14 +2307,14 @@ func (c *Checker) methodBorrowSources(
 		return nil, true, err
 	}
 	if method := c.implMethod(string(receiver), field.Name); method != nil {
-		if method.returnBorrow == "" {
+		if method.sig.ReturnBorrow == "" {
 			return map[string]bool{}, true, nil
 		}
 		idx := borrowReturnParamIndex(method)
 		if idx < 0 {
 			return map[string]bool{}, true, errorf(
 				"type error: `%s` borrows unknown source `%s`",
-				method.name, method.returnBorrow)
+				method.name, method.sig.ReturnBorrow)
 		}
 		if idx == 0 {
 			sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
@@ -3394,7 +3413,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
 		return "", true, err
 	}
-	if len(fn.typeParams) > 0 {
+	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, expressionSpan(field), args, env, unsafe)
@@ -3403,7 +3422,7 @@ func (c *Checker) checkQualifiedUserCall(
 
 // rejectPrivateStdFunction blocks non-std source from std-private helpers.
 func (c *Checker) rejectPrivateStdFunction(name string, fn *functionType) error {
-	if !fn.decl.Std || fn.decl.Public || c.currentStd {
+	if !fn.sig.Std || fn.sig.Public || c.currentStd {
 		return nil
 	}
 	sourceName := strings.ReplaceAll(name, ".", "::")
@@ -4325,16 +4344,16 @@ func (c *Checker) checkGenericUserTypeApply(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	fn := c.functions[name]
-	if fn == nil || len(fn.decl.StaticParams) == 0 {
+	if fn == nil || len(fn.sig.StaticParams) == 0 {
 		return "", false, nil
 	}
 	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
 		return "", true, err
 	}
 	argsText, ok := splitGenericArgs(typeArg)
-	if !ok || len(argsText) != len(fn.decl.StaticParams) {
+	if !ok || len(argsText) != len(fn.sig.StaticParams) {
 		return "", true, errorf("type error: `%s` expects %d static arguments",
-			name, len(fn.decl.StaticParams))
+			name, len(fn.sig.StaticParams))
 	}
 	typeArgsText, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
@@ -4351,7 +4370,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, userCallArityError(name, fn, len(args))
 	}
 	subst := map[string]Type{}
-	for idx, param := range fn.typeParams {
+	for idx, param := range fn.sig.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
 	for idx, expr := range args {
@@ -4373,7 +4392,7 @@ func (c *Checker) checkStaticArgs(
 	argsText []string,
 ) ([]string, error) {
 	typeArgs := []string{}
-	for idx, param := range fn.decl.StaticParams {
+	for idx, param := range fn.sig.StaticParams {
 		arg := strings.TrimSpace(argsText[idx])
 		if param.IsType() {
 			typeArgs = append(typeArgs, arg)
@@ -4436,11 +4455,11 @@ func isIdentifierText(text string) bool {
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
 	env := newScope(nil)
-	staticParams, err := defineStaticValueParams(env, fn.decl)
+	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
 		return err
 	}
-	for idx, param := range fn.decl.Params {
+	for idx, param := range fn.sig.Params {
 		typ := substituteTypeParams(fn.params[idx], subst)
 		if err := env.defineParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
 			return err
@@ -4456,8 +4475,8 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	previousLoops := c.loopLabels
 	c.currentReturn = returnType
 	c.currentFunction = fn
-	c.currentStd = fn.decl.Std
-	c.typeParams = typeParamSet(fn.typeParams)
+	c.currentStd = fn.sig.Std
+	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.typeArgValues = subst
 	c.staticParams = staticParams
 	c.loopLabels = nil
@@ -4470,7 +4489,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
-	returns, err := c.checkBlock(fn.decl.Body, env, returnType, nil)
+	returns, err := c.checkBlock(fn.body, env, returnType, nil)
 	if err != nil {
 		return err
 	}
@@ -4547,17 +4566,17 @@ func (c *Checker) checkUserCall(
 		return "", errorf("type error: undefined function `%s`", name)
 	}
 	operation := fmt.Sprintf("call to `%s`", name)
-	if fn.externABI != "" {
+	if fn.sig.ExternABI != "" {
 		if err := requireUnsafeCapabilityAt(unsafe, unsafeExternCall, operation, span); err != nil {
 			return "", err
 		}
 	}
-	if fn.requiresUnsafe {
+	if fn.sig.RequiresUnsafe {
 		if err := requireUnsafeCapabilityAt(unsafe, unsafeUnsafeCall, operation, span); err != nil {
 			return "", err
 		}
 	}
-	if len(fn.typeParams) > 0 {
+	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", errorf("type error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
@@ -4614,8 +4633,8 @@ func userCallArityError(name string, fn *functionType, got int) error {
 	if name == "std.string.String" {
 		return errorf("type error: `std::string::String` expects allocator")
 	}
-	if len(fn.params) == 1 && fn.decl != nil {
-		paramName := fn.decl.Params[0].Name
+	if len(fn.params) == 1 {
+		paramName := fn.sig.Params[0].Name
 		if paramName != "" {
 			return errorf("type error: `%s` expects %s",
 				diagnosticName(name), paramName)
@@ -4628,8 +4647,8 @@ func userCallArityError(name string, fn *functionType, got int) error {
 // type this call expects, which for a generic is the parameter with its static
 // arguments filled in: a caller writing `id<i64>` is told i64, not T.
 func userCallArgError(name string, fn *functionType, idx int, want Type, got Type) error {
-	if strings.HasPrefix(name, "std.") && fn.decl != nil && idx < len(fn.decl.Params) {
-		paramName := fn.decl.Params[idx].Name
+	if strings.HasPrefix(name, "std.") && idx < len(fn.sig.Params) {
+		paramName := fn.sig.Params[idx].Name
 		if paramName != "" {
 			if strings.HasPrefix(name, "std.fs.") {
 				return errorf("type error: `%s` expects %s %s, got %s",
@@ -5106,15 +5125,15 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 // allowsDirectFieldCleanup reports whether owner.field.deinit is in owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(field *ast.FieldExpr, env *scope) bool {
 	fn := c.currentFunction
-	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || fn.returnType != typeVoid {
+	if fn == nil || fn.sig.Name != "deinit" || fn.returnType != typeVoid {
 		return false
 	}
 	owner, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok || len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+	if !ok || len(fn.params) == 0 || len(fn.sig.Params) == 0 {
 		return false
 	}
 	ownerType, ok := env.lookup(owner.Name)
-	if !ok || fn.decl.Params[0].Name != owner.Name {
+	if !ok || fn.sig.Params[0].Name != owner.Name {
 		return false
 	}
 	return sameType(fn.params[0], ownerType)
@@ -5477,11 +5496,11 @@ func (c *Checker) checkStdMethod(
 // `return std::builtin::array_apend<T>(self, value)` -- or anything else -- sat
 // in std reading like the implementation while meaning nothing.
 func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
-	fn := c.functions[method.Decl.Name]
-	if fn == nil || fn.decl.Body == nil || len(method.TypeParams) != len(typeArgs) {
+	fn := c.functions[method.Sig.Name]
+	if fn == nil || fn.body == nil || len(method.TypeParams) != len(typeArgs) {
 		return nil
 	}
-	key := method.Decl.Name + "<" + joinTypes(typeArgs) + ">"
+	key := method.Sig.Name + "<" + joinTypes(typeArgs) + ">"
 	if c.checkedStdBodies[key] {
 		return nil
 	}
@@ -5736,7 +5755,7 @@ func (c *Checker) checkMethodArgs(
 		return "", errorf("type error: method `%s` self expects %s, got %s",
 			method.name, method.params[0], receiver)
 	}
-	if method.requiresUnsafe {
+	if method.sig.RequiresUnsafe {
 		if err := requireUnsafeCapabilityAt(
 			unsafe,
 			unsafeUnsafeCall,
