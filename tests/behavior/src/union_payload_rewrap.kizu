@@ -1,0 +1,116 @@
+import std::testing;
+
+// ADR-0090: a match on an owned union copies scalar payloads and moves
+// aggregate payloads out, so both can be rewrapped into another union.
+
+enum FailKind {
+    Bad,
+}
+
+error FsError {
+    NotFound,
+    Denied,
+}
+
+union Value {
+    Flag(bool),
+    Count(i64),
+    Fail(FailKind),
+    Lost(FsError),
+}
+
+union Selection {
+    Selected(bool),
+    Counted(i64),
+    Error(FailKind),
+    Missing(FsError),
+}
+
+fn select_value(value: Value) -> Selection {
+    return match value {
+        Flag(flag) => Selection::Selected(flag),
+        Count(count) => Selection::Counted(count),
+        Fail(kind) => Selection::Error(kind),
+        Lost(failure) => Selection::Missing(failure),
+    };
+}
+
+union Inner {
+    Word([]u8),
+    Number(i64),
+}
+
+union Wrapped {
+    Kept(Inner),
+    Empty,
+}
+
+union Rewrapped {
+    Held(Inner),
+    Vacant,
+}
+
+fn rewrap(wrapped: Wrapped) -> Rewrapped {
+    return match wrapped {
+        Kept(inner) => Rewrapped::Held(inner),
+        Empty => Rewrapped::Vacant,
+    };
+}
+
+test "scalar payloads rewrap on return" {
+    let selected = match select_value(Value::Flag(true)) {
+        Selected(flag) => flag,
+        Counted(_) => false,
+        Error(_) => false,
+        Missing(_) => false,
+    };
+    testing::expect(selected);
+
+    let counted = match select_value(Value::Count(41)) {
+        Selected(_) => 0,
+        Counted(count) => count,
+        Error(_) => 0,
+        Missing(_) => 0,
+    };
+    testing::expect_equal<i64>(41, counted);
+}
+
+test "scalar match leaves the union alive" {
+    let value = Value::Count(7);
+    let first = match value {
+        Flag(_) => 0,
+        Count(count) => count,
+        Fail(_) => 0,
+        Lost(_) => 0,
+    };
+    let second = match value {
+        Flag(_) => 0,
+        Count(count) => count,
+        Fail(_) => 0,
+        Lost(_) => 0,
+    };
+    testing::expect_equal<i64>(first, second);
+}
+
+test "union payloads rewrap on return" {
+    let held = rewrap(Wrapped::Kept(Inner::Word("hello")));
+    match held {
+        Held(inner) => match inner {
+            Word(word) => testing::expect_equal<[]u8>("hello", word),
+            Number(_) => testing::expect(false),
+        },
+        Vacant => testing::expect(false),
+    }
+}
+
+test "number payloads rewrap through nested unions" {
+    let held = rewrap(Wrapped::Kept(Inner::Number(12)));
+    let number = match held {
+        Held(inner) => match inner {
+            Word(_) => 0,
+            Number(value) => value,
+        },
+        Vacant => 0,
+    };
+    testing::expect_equal<i64>(12, number);
+}
