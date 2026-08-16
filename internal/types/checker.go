@@ -622,7 +622,11 @@ func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
 	return nil
 }
 
-// collectTopLevelFunctions registers top-level function signatures.
+// collectTopLevelFunctions registers top-level function signatures. A name a
+// type already took is rejected here: `Point(3)` reads as constructing a Point,
+// so letting a function claim that spelling makes the call site unreadable.
+// Every type name is predeclared before this pass, so the answer does not
+// depend on which declaration was written first.
 func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
@@ -631,6 +635,10 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		}
 		if _, exists := c.functions[fn.Name]; exists {
 			return errorf("type error: duplicate function `%s`", fn.Name)
+		}
+		if c.isTypeName(fn.Name) {
+			return errorf("type error: `%s` is a type and cannot name a function",
+				fn.Name)
 		}
 		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
@@ -1440,11 +1448,23 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 	if c.typeParams[name] {
 		return typ, nil
 	}
-	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
-		c.enums[name] == nil && c.unions[name] == nil && c.errorSets[name] == nil {
+	if !c.isTypeName(name) {
 		return "", errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
+}
+
+// isTypeName reports whether a name is a type in this program: one the compiler
+// provides or one the program declared. Type parameters are not asked about
+// here, since they are scoped to a single declaration rather than to the
+// program. Every caller asks the same question, so a name that is a type for
+// one of them is a type for all of them.
+func (c *Checker) isTypeName(name string) bool {
+	if knownTypes[Type(name)] || c.declaredTypes[name] || isKnownGenericBase(name) {
+		return true
+	}
+	return c.structs[name] != nil || c.enums[name] != nil ||
+		c.unions[name] != nil || c.errorSets[name] != nil
 }
 
 // parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
@@ -1492,7 +1512,7 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 		return c.parseUserGenericType(name, base, args, union.typeParams)
 	}
 
-	if !isKnownSingleArgGeneric(base) {
+	if !isKnownGenericBase(base) {
 		return "", errorf("type error: unknown generic type `%s`", base)
 	}
 	arg, err := singleGenericArg(base, args)
@@ -1550,10 +1570,14 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	return Type(name), nil
 }
 
-// isKnownSingleArgGeneric reports whether base currently takes exactly one static argument.
-func isKnownSingleArgGeneric(base string) bool {
+// isKnownGenericBase reports whether base names a generic type the compiler
+// provides. parseGenericType gives each one its own argument rules; this answers
+// the prior question of whether the spelling is a type at all, which is also
+// what stops a function from taking it.
+func isKnownGenericBase(base string) bool {
 	switch base {
-	case "std::arena::Arena", "std::arena::Handle", "option", "std::array::Array":
+	case "std::mem::Box", "std::map::Map", "ptr",
+		"std::arena::Arena", "std::arena::Handle", "option", "std::array::Array":
 		return true
 	default:
 		return false

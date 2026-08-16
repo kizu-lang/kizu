@@ -283,6 +283,24 @@ fn log(message: []u8) -> void {
 }
 ```
 
+同じ scope で、型が取った名前を関数は取れません。逆も同じです。
+
+```kizu
+struct Point { x: i64, y: i64 }
+
+fn Point(x: i64) -> i64 {   // error: `Point` is a type in this scope
+    return x + 100;
+}
+```
+
+`Point(3)` を読んだ人は Point が構築されると読みます。名前が 2 つの無関係な
+意味を同時に持つと、call site から意味を復元できません。戻り値をその型に
+限る緩和も採りません。構築は `Point { x: 1, y: 2 }` で綴れるので、同じことを
+する 2 つ目の綴りは要りません。
+
+検査は宣言の順序に依存しません。struct と function のどちらが先に書かれていても
+同じ error になります。std もこの規則の中にいて、例外を持ちません(§14)。
+
 #### doc comment
 
 declaration や member の user-facing documentation は `///` line comment で書きます。
