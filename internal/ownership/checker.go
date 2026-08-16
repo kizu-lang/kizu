@@ -21,6 +21,8 @@ type Checker struct {
 	unions          map[string]map[string]string
 	nextID          int
 	consumeNeeds    map[string]bool
+	deinitOwners    map[string]bool
+	structOrder     map[string][]string
 	loopDepth       int
 	currentFunction *functionInfo
 	currentStd      bool
@@ -108,11 +110,13 @@ func New() *Checker {
 		errorSets:    map[string]map[string]bool{},
 		unions:       map[string]map[string]string{},
 		consumeNeeds: map[string]bool{},
+		structOrder:  map[string][]string{},
 	}
 }
 
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
+	c.deinitOwners = ast.DeinitOwners(program)
 	if err := c.checkStructs(program); err != nil {
 		return err
 	}
@@ -120,6 +124,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
+		return err
+	}
+	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
 		return err
 	}
 	for _, decl := range program.Decls {
@@ -144,6 +151,7 @@ func (c *Checker) Check(program *ast.Program) error {
 // top-level declaration instead of stopping at the first, so editors can show
 // every independent move error at once. Setup phases still fail fast.
 func (c *Checker) CheckAll(program *ast.Program) []error {
+	c.deinitOwners = ast.DeinitOwners(program)
 	if err := c.checkStructs(program); err != nil {
 		return []error{err}
 	}
@@ -154,6 +162,9 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 		return []error{err}
 	}
 	var errs []error
+	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
+		errs = append(errs, err)
+	}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -226,14 +237,17 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 			continue
 		}
 		fields := map[string]string{}
+		order := make([]string, 0, len(st.Fields))
 		for _, field := range st.Fields {
 			if field.Borrow {
 				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
 			fields[field.Name] = fieldOwnershipType(field)
+			order = append(order, field.Name)
 		}
 		c.structs[st.Name] = fields
+		c.structOrder[st.Name] = order
 	}
 	return nil
 }
@@ -308,7 +322,72 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
-	return c.checkBlock(fn.body, env)
+	if err := c.checkBlock(fn.body, env); err != nil {
+		return err
+	}
+	return c.checkDeinitCompleteness(fn, env)
+}
+
+// checkOwnerAggregatesDeclareDeinit enforces ADR-0091: a struct or union that
+// holds owner fields or payloads is itself an owner and must declare deinit,
+// so its cleanup contract is visible in source. Generic declarations wait for
+// instantiation, where their spellings become concrete.
+func (c *Checker) checkOwnerAggregatesDeclareDeinit(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
+				continue
+			}
+			for _, field := range d.Fields {
+				if !c.valueTypeNeedsConsume(typ.Text(field.TypeName)) {
+					continue
+				}
+				return errorf(
+					"move error: struct `%s` holds owner field `%s` and must declare deinit",
+					d.Name, field.Name)
+			}
+		case *ast.UnionDecl:
+			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
+				continue
+			}
+			for _, variant := range d.Variants {
+				if variant.Payload == nil || !c.valueTypeNeedsConsume(typ.Text(variant.Payload)) {
+					continue
+				}
+				return errorf(
+					"move error: union `%s` holds owner payload `%s` and must declare deinit",
+					d.Name, variant.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// checkDeinitCompleteness enforces ADR-0091: a struct deinit must consume every
+// owner field of its receiver. A union deinit is covered by the match dispatch
+// rules, and a body that moves self on has handed the obligation elsewhere.
+func (c *Checker) checkDeinitCompleteness(fn *functionInfo, env *scope) error {
+	receiver, method, ok := stdmethod.SplitMethodName(fn.name)
+	if !ok || method != "deinit" || !fn.sig.Receiver || len(fn.sig.Params) == 0 {
+		return nil
+	}
+	fields := c.structs[receiver]
+	if fields == nil {
+		return nil
+	}
+	self, exists := env.lookup(fn.sig.Params[0].Name)
+	if !exists || self.moved {
+		return nil
+	}
+	for _, name := range c.structOrder[receiver] {
+		if !c.valueTypeNeedsConsume(fields[name]) || self.fieldDeinit[name] {
+			continue
+		}
+		return errorf("move error: deinit of `%s` must consume owner field `%s`",
+			receiver, name)
+	}
+	return nil
 }
 
 // defineParams binds a function's params into env, substituting generic type
@@ -514,9 +593,8 @@ func (c *Checker) validateErrDeferReceivers(env *scope) error {
 }
 
 // valueTypeNeedsConsume reports whether typeName carries a deinit contract, the
-// class of values ADR-0091 requires every exit path to consume. Owner-ness is
-// read from the collected deinit declarations; only Arena is named, because its
-// deinit is builtin-only and has no kizu-source declaration to look up.
+// class of values ADR-0091 requires every exit path to consume. Owner-ness has
+// one definition, ast.DeinitOwners, seeded per program in Check / CheckAll.
 func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
 	if needs, ok := c.consumeNeeds[typeName]; ok {
 		return needs
@@ -525,7 +603,7 @@ func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
 	if generic, _, ok := splitGenericType(typeName); ok {
 		base = generic
 	}
-	needs := base == "std::arena::Arena" || c.implMethod(base, "deinit") != nil
+	needs := c.deinitOwners[base]
 	c.consumeNeeds[typeName] = needs
 	return needs
 }

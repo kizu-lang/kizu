@@ -1,0 +1,50 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// ADR-0091: `= fields;` generates the forwarding deinit body. The calls to it
+// stay written in source; only the body is generated.
+
+struct Pair {
+    pub first: string::String,
+    pub second: string::String,
+    pub count: i64,
+}
+
+fn (self: Pair) deinit() -> void = fields;
+
+union Slot {
+    Kept(string::String),
+    Vacant,
+}
+
+fn (self: Slot) deinit() -> void = fields;
+
+fn make_pair(allocator: Allocator) -> !Pair {
+    var first = string::new(allocator);
+    errdefer first.deinit();
+    try first.append_bytes("left");
+    var second = string::new(allocator);
+    errdefer second.deinit();
+    try second.append_bytes("right");
+    return Pair { first: first, second: second, count: 2 };
+}
+
+test "fields deinit consumes struct owners" {
+    let allocator = mem::page_allocator();
+    var pair = try make_pair(allocator);
+    defer pair.deinit();
+    testing::expect_equal<i64>(2, pair.count);
+}
+
+test "fields deinit dispatches union payloads" {
+    let allocator = mem::page_allocator();
+    var kept = string::new(allocator);
+    errdefer kept.deinit();
+    try kept.append_bytes("held");
+    let slot = Slot::Kept(kept);
+    slot.deinit();
+
+    let vacant = Slot::Vacant;
+    vacant.deinit();
+}

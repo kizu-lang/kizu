@@ -375,6 +375,17 @@ func SplitApply(name string) (string, string, bool) {
 	return name[:open], args, true
 }
 
+// SplitMethodName separates a receiver-qualified method name -- the
+// `Receiver.method` pairing stdmethod.MethodName writes -- into its halves.
+// Receiver spellings never contain `.`, so the last dot is the seam.
+func SplitMethodName(name string) (string, string, bool) {
+	idx := strings.LastIndex(name, ".")
+	if idx < 0 {
+		return "", "", false
+	}
+	return name[:idx], name[idx+1:], true
+}
+
 // Substitute replaces every type parameter named in subst, wherever it appears
 // in the structure. A name is replaced only when the whole name matches, so a
 // parameter `T` leaves `Timer` alone.

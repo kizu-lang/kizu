@@ -356,6 +356,7 @@ func (c *Checker) Check(program *ast.Program) error {
 // every independent type error at once. Setup phases that the body checks
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
+	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
