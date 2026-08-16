@@ -20,6 +20,7 @@ type Checker struct {
 	errorSets       map[string]map[string]bool
 	unions          map[string]map[string]string
 	nextID          int
+	consumeNeeds    map[string]bool
 	loopDepth       int
 	currentFunction *functionInfo
 	currentStd      bool
@@ -74,6 +75,9 @@ type binding struct {
 	arenaID          int
 	handleArenaID    int
 	deinitialized    bool
+	consumeExempt    bool
+	deferCleanup     bool
+	declSpan         ast.Span
 }
 
 type scope struct {
@@ -97,12 +101,13 @@ type temporaryBorrow struct {
 // New creates an empty ownership checker.
 func New() *Checker {
 	return &Checker{
-		functions: map[string]*functionInfo{},
-		impls:     map[string]map[string]*functionInfo{},
-		structs:   map[string]map[string]string{},
-		enums:     map[string]map[string]bool{},
-		errorSets: map[string]map[string]bool{},
-		unions:    map[string]map[string]string{},
+		functions:    map[string]*functionInfo{},
+		impls:        map[string]map[string]*functionInfo{},
+		structs:      map[string]map[string]string{},
+		enums:        map[string]map[string]bool{},
+		errorSets:    map[string]map[string]bool{},
+		unions:       map[string]map[string]string{},
+		consumeNeeds: map[string]bool{},
 	}
 }
 
@@ -290,20 +295,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return nil
 	}
 	env := newScope(nil)
-	// A `<...>` entry that declares a type is a compile-time value, in scope
-	// for the body like a parameter but never moved or borrowed.
-	for _, param := range fn.sig.StaticParams {
-		if param.IsType() {
-			continue
-		}
-		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
-	}
-	for idx, param := range fn.sig.Params {
-		value := c.newBinding(param.Name, fn.params[idx].typeName)
-		value.borrowedParam = fn.params[idx].borrow
-		value.mutBorrow = fn.params[idx].mutBorrow
-		env.define(value)
-	}
+	c.defineParams(fn, env, nil)
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -317,6 +309,40 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
 	return c.checkBlock(fn.body, env)
+}
+
+// defineParams binds a function's params into env, substituting generic type
+// spellings when subst is non-nil.
+func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]string) {
+	// A `<...>` entry that declares a type is a compile-time value, in scope
+	// for the body like a parameter but never moved or borrowed.
+	for _, param := range fn.sig.StaticParams {
+		if param.IsType() {
+			continue
+		}
+		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
+	}
+	for idx, param := range fn.sig.Params {
+		typeName := fn.params[idx].typeName
+		if subst != nil {
+			typeName = substituteOwnershipType(typeName, subst)
+		}
+		value := c.newBinding(param.Name, typeName)
+		value.borrowedParam = fn.params[idx].borrow
+		value.mutBorrow = fn.params[idx].mutBorrow
+		// A method receiver is written as a by-value param but is not a
+		// consuming transfer (SPEC §14: mutators are callable from owned
+		// locals), and a consume primitive keeps its value by design
+		// (ADR-0091): neither carries a consume obligation.
+		value.consumeExempt = (fn.sig.Receiver && idx == 0) || isConsumePrimitive(fn.name)
+		env.define(value)
+	}
+}
+
+// isConsumePrimitive names the std functions whose whole job is consuming an
+// owner: their param carries no obligation and their argument is moved.
+func isConsumePrimitive(name string) bool {
+	return name == "std::mem::leak"
 }
 
 // checkTestDecl validates a top-level test block as an errorable, parameterless body.
@@ -337,6 +363,9 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	defers := []ast.Expression{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
+	// Bindings declared inside this block carry IDs above the watermark; the
+	// fall-through leak check below is scoped to exactly those.
+	bindingMark := c.nextID
 	for idx, stmt := range block.Statements {
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
@@ -358,7 +387,13 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 		}
 		env.releaseLastUseBorrows(idx, lastUses)
 	}
-	return c.checkDeferredCleanups(defers, env)
+	if err := c.checkDeferredCleanups(defers, env); err != nil {
+		return err
+	}
+	if blockTerminates(block) {
+		return nil
+	}
+	return c.checkOwnersConsumed(env, bindingMark, false)
 }
 
 // checkStmt validates one statement.
@@ -405,8 +440,17 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 	if !ok || field.Name != "deinit" {
 		return errorf("move error: defer expects cleanup method call")
 	}
-	_, err := c.readExpr(field.Receiver, env)
-	return err
+	if _, err := c.readExpr(field.Receiver, env); err != nil {
+		return err
+	}
+	// A registered defer runs on every later exit of this block, so from here
+	// on the receiver's consume obligation (ADR-0091) is discharged.
+	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
+		if value, exists := env.lookup(ident.Name); exists {
+			value.deferCleanup = true
+		}
+	}
+	return nil
 }
 
 // checkErrDeferStmt validates an error-path cleanup registration. The receiver
@@ -469,6 +513,118 @@ func (c *Checker) validateErrDeferReceivers(env *scope) error {
 	return nil
 }
 
+// valueTypeNeedsConsume reports whether typeName carries a deinit contract, the
+// class of values ADR-0091 requires every exit path to consume. Owner-ness is
+// read from the collected deinit declarations; only Arena is named, because its
+// deinit is builtin-only and has no kizu-source declaration to look up.
+func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
+	if needs, ok := c.consumeNeeds[typeName]; ok {
+		return needs
+	}
+	base := typeName
+	if generic, _, ok := splitGenericType(typeName); ok {
+		base = generic
+	}
+	needs := base == "std::arena::Arena" || c.implMethod(base, "deinit") != nil
+	c.consumeNeeds[typeName] = needs
+	return needs
+}
+
+// bindingNeedsConsume reports whether a binding still owes its cleanup: an
+// owned deinit-carrying value that no move, deinit, or registered defer has
+// discharged yet.
+func (c *Checker) bindingNeedsConsume(value *binding) bool {
+	if value.moved || value.deinitialized || value.deferCleanup {
+		return false
+	}
+	if value.borrowedParam || value.localBorrow || value.consumeExempt {
+		return false
+	}
+	if value.handleArenaID != 0 {
+		return false
+	}
+	return c.valueTypeNeedsConsume(value.typeName)
+}
+
+// checkOwnersConsumed rejects an exit that would leak a live owner. sinceID
+// limits the check to bindings declared after that watermark: a function exit
+// passes 0 and checks everything live, a block fall-through passes the ID the
+// block started at and checks only its own declarations. On an error path a
+// registered errdefer cleanup counts as the consume.
+func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, errorPath bool) error {
+	var leaked *binding
+	env.walkBindings(func(value *binding) {
+		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
+			return
+		}
+		if errorPath && c.errDeferCovers(value.name) {
+			return
+		}
+		if leaked == nil || value.id > leaked.id {
+			leaked = value
+		}
+	})
+	if leaked == nil {
+		return nil
+	}
+	return leakError(leaked)
+}
+
+// leakError reports one unconsumed owner at its declaration site.
+func leakError(value *binding) error {
+	return errorAt(value.declSpan, "move error: owned value `%s` is never deinitialized",
+		value.name)
+}
+
+// errDeferCovers reports whether an active errdefer cleans up the named owner.
+func (c *Checker) errDeferCovers(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, entry := range c.liveErrDefers {
+		if entry.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// blockTerminates reports whether a block always exits through a return, in
+// which case its fall-through path is unreachable and branch effects cannot
+// leak past it.
+func blockTerminates(block *ast.BlockStmt) bool {
+	if block == nil || len(block.Statements) == 0 {
+		return false
+	}
+	return stmtTerminates(block.Statements[len(block.Statements)-1])
+}
+
+// stmtTerminates reports whether a statement always returns. Exhaustiveness of
+// a match is the type checker's promise, so all arms returning is enough here.
+func stmtTerminates(stmt ast.Statement) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.BlockStmt:
+		return blockTerminates(s)
+	case *ast.IfStmt:
+		return s.Alternative != nil && blockTerminates(s.Consequence) &&
+			blockTerminates(s.Alternative)
+	case *ast.MatchStmt:
+		if len(s.Arms) == 0 {
+			return false
+		}
+		for _, arm := range s.Arms {
+			if !stmtTerminates(arm.Body) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 // checkDeferredCleanups applies deferred cleanup effects in reverse order.
 func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) error {
 	for idx := len(defers) - 1; idx >= 0; idx-- {
@@ -483,7 +639,7 @@ func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) err
 // checkReturnStmt rejects borrowed values before applying normal move rules.
 func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if stmt.Value == nil {
-		return nil
+		return c.checkOwnersConsumed(env, 0, false)
 	}
 	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
 		value, exists := env.lookup(ident.Name)
@@ -505,13 +661,16 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	// An error return runs active errdefer cleanups before the function exits,
 	// so their receivers must still be valid here. A success return transfers
 	// the owner instead and must not be blocked by the cleanup it skips.
-	if c.returnTakesErrorPath(stmt.Value, env) {
+	errorPath := c.returnTakesErrorPath(stmt.Value, env)
+	if errorPath {
 		if err := c.validateErrDeferReceivers(env); err != nil {
 			return err
 		}
 	}
-	_, err := c.moveExpr(stmt.Value, env)
-	return err
+	if _, err := c.moveExpr(stmt.Value, env); err != nil {
+		return err
+	}
+	return c.checkOwnersConsumed(env, 0, errorPath)
 }
 
 // returnTakesErrorPath reports whether returning expr exits through the error
@@ -611,6 +770,7 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	}
 	value := c.newBinding(stmt.Name, typeName)
 	value.mutable = stmt.Mutable
+	value.declSpan = expressionSpan(stmt.Value)
 	c.setArenaProvenance(value, stmt.Value, env)
 	env.define(value)
 	return nil
@@ -1032,6 +1192,11 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 			return errorf("borrow error: value `%s` cannot be assigned while borrowed",
 				target.name)
 		}
+		// Overwriting a live owner silently drops it (ADR-0091).
+		if c.bindingNeedsConsume(target) {
+			return errorAt(expressionSpan(stmt.Value),
+				"move error: owned value `%s` is overwritten before cleanup", target.name)
+		}
 		target.typeName = typeName
 		target.moved = false
 		target.deinitialized = false
@@ -1077,8 +1242,13 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 			return err
 		}
 	}
-	env.mergeMovedFrom(left)
-	env.mergeMovedFrom(right)
+	// A branch that always returns cannot affect the code after the if.
+	if !blockTerminates(stmt.Consequence) {
+		env.mergeMovedFrom(left)
+	}
+	if stmt.Alternative == nil || !blockTerminates(stmt.Alternative) {
+		env.mergeMovedFrom(right)
+	}
 	return nil
 }
 
@@ -1155,13 +1325,32 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
-		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, ownedMatch, child)
+		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, ownedMatch, child,
+			expressionSpan(stmt.Value))
 		if err := c.checkStmt(arm.Body, child); err != nil {
 			return err
 		}
-		env.mergeMovedFrom(armEnv)
+		if err := c.checkArmPayloadConsumed(arm, child); err != nil {
+			return err
+		}
+		if !stmtTerminates(arm.Body) {
+			env.mergeMovedFrom(armEnv)
+		}
 	}
 	return nil
+}
+
+// checkArmPayloadConsumed rejects a match arm that drops an owned payload it
+// moved out of the scrutinee (ADR-0091).
+func (c *Checker) checkArmPayloadConsumed(arm ast.MatchArm, child *scope) error {
+	if arm.Binding == "" {
+		return nil
+	}
+	value, ok := child.values[arm.Binding]
+	if !ok || !c.bindingNeedsConsume(value) {
+		return nil
+	}
+	return leakError(value)
 }
 
 // matchScrutineeOwner returns the binding of a matched value that is an owned
@@ -1268,12 +1457,14 @@ func (c *Checker) defineMatchArmPayload(
 	ownerDeinitDispatch bool,
 	ownedMatch bool,
 	child *scope,
+	span ast.Span,
 ) {
 	payload := unionPayloads[arm.Tag]
 	if arm.IsWildcard() || payload == "" || arm.Binding == "" {
 		return
 	}
 	value := c.newBinding(arm.Binding, payload)
+	value.declSpan = span
 	class := c.classifyMatchPayload(payload)
 	owned := class == payloadCopies ||
 		(class == payloadMoves && ownedMatch) ||
@@ -1691,7 +1882,8 @@ func (c *Checker) checkMatchExprValue(
 	}
 	var result string
 	for idx, arm := range stmt.Arms {
-		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, ownedMatch, env, moveTail)
+		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, ownedMatch,
+			expressionSpan(stmt.Value), env, moveTail)
 		if err != nil {
 			return "", err
 		}
@@ -1710,6 +1902,7 @@ func (c *Checker) checkMatchExprArmValue(
 	tags map[string]bool,
 	unionPayloads map[string]string,
 	ownedMatch bool,
+	span ast.Span,
 	env *scope,
 	moveTail bool,
 ) (string, error) {
@@ -1722,9 +1915,12 @@ func (c *Checker) checkMatchExprArmValue(
 	}
 	armEnv := env.clone()
 	child := armEnv.child()
-	c.defineMatchArmPayload(arm, unionPayloads, false, ownedMatch, child)
+	c.defineMatchArmPayload(arm, unionPayloads, false, ownedMatch, child, span)
 	got, err := c.checkStmtValue(arm.Body, child, moveTail)
 	if err != nil {
+		return "", err
+	}
+	if err := c.checkArmPayloadConsumed(arm, child); err != nil {
 		return "", err
 	}
 	env.mergeMovedFrom(armEnv)
@@ -1740,6 +1936,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	defers := []ast.Expression{}
 	errDeferMark := len(c.liveErrDefers)
 	defer c.restoreErrDefers(errDeferMark)
+	bindingMark := c.nextID
 	lastIdx := len(block.Statements) - 1
 	for idx, stmt := range block.Statements[:lastIdx] {
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
@@ -1768,6 +1965,9 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	}
 	env.releaseLastUseBorrows(lastIdx, lastUses)
 	if err := c.checkDeferredCleanups(defers, env); err != nil {
+		return "", err
+	}
+	if err := c.checkOwnersConsumed(env, bindingMark, false); err != nil {
 		return "", err
 	}
 	return valueType, nil
@@ -2770,20 +2970,7 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
 	env := newScope(nil)
-	// A `<...>` entry that declares a type is a compile-time value, in scope
-	// for the body like a parameter but never moved or borrowed.
-	for _, param := range fn.sig.StaticParams {
-		if param.IsType() {
-			continue
-		}
-		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
-	}
-	for idx, param := range fn.sig.Params {
-		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
-		value.borrowedParam = fn.params[idx].borrow
-		value.mutBorrow = fn.params[idx].mutBorrow
-		env.define(value)
-	}
+	c.defineParams(fn, env, subst)
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -2824,10 +3011,11 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	// `std::mem::box<T>(allocator, value)` takes ownership of its value; every
-	// other generic wrapper argument is read in place.
+	// `std::mem::box<T>(allocator, value)` takes ownership of its value, and a
+	// consume primitive moves its argument (ADR-0091); every other generic
+	// wrapper argument is read in place.
 	read := c.readContextualExpr
-	if name == "std::mem::box" && idx == 1 {
+	if (name == "std::mem::box" && idx == 1) || (isConsumePrimitive(name) && idx == 0) {
 		read = c.moveContextualExpr
 	}
 	got, err := read(arg, want, env)
@@ -2874,6 +3062,11 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	// A try can return early through the error path, which runs any active
 	// errdefer cleanups. Their receivers must still be valid at this point.
 	if err := c.validateErrDeferReceivers(env); err != nil {
+		return "", err
+	}
+	// The same early exit must not leak a live owner: every owner must be
+	// consumed or covered by a defer / errdefer cleanup before the try.
+	if err := c.checkOwnersConsumed(env, 0, true); err != nil {
 		return "", err
 	}
 	return arg, nil

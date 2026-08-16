@@ -20,13 +20,27 @@ union Slot {
     UserHandle(arena::Handle<User>),
 }
 
+// make_holder builds its element behind one cleanup boundary: error paths
+// release the partial array, the success return moves it out.
+fn make_holder(allocator: Allocator) -> !Holder {
+    let inner = array::new<i64>(allocator);
+    errdefer inner.deinit();
+    try inner.append(7);
+    return Holder { values: inner };
+}
+
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let users = arena::new<User>(allocator);
+    defer users.deinit();
     let handles = array::new<arena::Handle<User>>(allocator);
+    defer handles.deinit();
     let maps = array::new<map::Map<[]u8, i64>>(allocator);
+    defer maps.deinit();
     let holders = array::new<Holder>(allocator);
+    defer holders.deinit();
     let slots = array::new<Slot>(allocator);
+    defer slots.deinit();
 
     let alice = users.add(User { name: "alice" });
     try handles.append(alice);
@@ -37,9 +51,7 @@ fn main() -> !void {
     let moved_table = try maps.pop();
     moved_table.deinit();
 
-    let inner = array::new<i64>(allocator);
-    try inner.append(7);
-    try holders.append(Holder { values: inner });
+    try holders.append(try make_holder(allocator));
     let holder = try holders.pop();
     print(holder.values.get_or_panic(0));
     holder.deinit();
@@ -47,11 +59,6 @@ fn main() -> !void {
     let bob = users.add(User { name: "bob" });
     try slots.append(Slot::UserHandle(bob));
     print(slots.len());
-    slots.deinit();
-    holders.deinit();
-    maps.deinit();
-    handles.deinit();
-    users.deinit();
     return;
 }
 
