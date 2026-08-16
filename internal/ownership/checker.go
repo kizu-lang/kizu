@@ -1139,6 +1139,12 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	if ownerDeinitDispatch {
 		c.consumeOwnerUnionReceiver(stmt.Value, env)
 	}
+	ownedMatch := c.matchScrutineeOwned(stmt.Value, env)
+	if !ownerDeinitDispatch {
+		if err := c.consumeMovedFromScrutinee(stmt, unionPayloads, env); err != nil {
+			return err
+		}
+	}
 	for _, arm := range stmt.Arms {
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
@@ -1149,13 +1155,90 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
-		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, child)
+		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, ownedMatch, child)
 		if err := c.checkStmt(arm.Body, child); err != nil {
 			return err
 		}
 		env.mergeMovedFrom(armEnv)
 	}
 	return nil
+}
+
+// matchScrutineeOwner returns the binding of a matched value that is an owned
+// named local, the one thing a moving match must mark consumed.
+func (c *Checker) matchScrutineeOwner(value ast.Expression, env *scope) *binding {
+	ident, ok := value.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	owner, exists := env.lookup(ident.Name)
+	if !exists {
+		return nil
+	}
+	if owner.borrowedParam || owner.localBorrow || owner.handleArenaID != 0 {
+		return nil
+	}
+	return owner
+}
+
+// matchScrutineeOwned reports whether the matched value owns its payloads: an
+// owned named local, or a call temporary the match consumes for free. Borrows,
+// projections, and calls that may return borrows (arena.get, methods, `borrows`
+// returns) match in borrow mode and their aggregate payloads cannot move out.
+func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
+	if c.matchScrutineeOwner(value, env) != nil {
+		return true
+	}
+	call, ok := value.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if c.isArenaGetExpr(value, env) {
+		return false
+	}
+	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
+		return false
+	}
+	if _, fn := c.calledFunction(call.Callee); fn != nil {
+		return fn.sig.ReturnBorrow == ""
+	}
+	// An unresolved namespace call is a variant constructor: a fresh temporary.
+	return true
+}
+
+// consumeMovedFromScrutinee marks an owned matched value moved when any arm
+// binds a payload that moves out. One arm moving is enough: which arm runs is
+// not known statically, so the value is unavailable in the arm bodies and
+// after the match either way.
+func (c *Checker) consumeMovedFromScrutinee(
+	stmt *ast.MatchStmt,
+	unionPayloads map[string]string,
+	env *scope,
+) error {
+	owner := c.matchScrutineeOwner(stmt.Value, env)
+	if owner == nil || !c.matchMovesPayload(stmt.Arms, unionPayloads) {
+		return nil
+	}
+	if owner.hasAnyBorrow() {
+		return errorAt(expressionSpan(stmt.Value),
+			"borrow error: value `%s` cannot be moved while borrowed", owner.name)
+	}
+	owner.moved = true
+	return nil
+}
+
+// matchMovesPayload reports whether any arm binds a payload an owned match
+// moves out rather than copies.
+func (c *Checker) matchMovesPayload(arms []ast.MatchArm, unionPayloads map[string]string) bool {
+	for _, arm := range arms {
+		if arm.IsWildcard() || arm.Binding == "" {
+			continue
+		}
+		if c.classifyMatchPayload(unionPayloads[arm.Tag]) == payloadMoves {
+			return true
+		}
+	}
+	return false
 }
 
 // consumeOwnerUnionReceiver marks an owner union's deinit receiver moved. The
@@ -1172,15 +1255,18 @@ func (c *Checker) consumeOwnerUnionReceiver(value ast.Expression, env *scope) {
 	}
 }
 
-// defineMatchArmPayload binds one union variant payload for a match arm. Inside
-// an owner union's own `deinit` the active owner payload is bound as an owned
-// local so it can be cleaned through its explicit `deinit`; every other match
-// keeps it borrowed so safe code cannot move out of a live union, and inactive
-// variants are never bound.
+// defineMatchArmPayload binds one union variant payload for a match arm.
+// Scalar payloads bind as copies from any match; declared aggregates move out
+// of an owned scrutinee (ADR-0090); view payloads and aggregate payloads of a
+// borrowed scrutinee stay borrowed so they cannot escape. Inside an owner
+// union's own `deinit` the active owner payload is bound as an owned local so
+// it can be cleaned through its explicit `deinit`. Inactive variants are never
+// bound.
 func (c *Checker) defineMatchArmPayload(
 	arm ast.MatchArm,
 	unionPayloads map[string]string,
 	ownerDeinitDispatch bool,
+	ownedMatch bool,
 	child *scope,
 ) {
 	payload := unionPayloads[arm.Tag]
@@ -1188,10 +1274,51 @@ func (c *Checker) defineMatchArmPayload(
 		return
 	}
 	value := c.newBinding(arm.Binding, payload)
-	if !(ownerDeinitDispatch && !c.isCopyType(payload)) {
+	class := c.classifyMatchPayload(payload)
+	owned := class == payloadCopies ||
+		(class == payloadMoves && ownedMatch) ||
+		(ownerDeinitDispatch && !c.isCopyType(payload))
+	if !owned {
 		value.borrowedParam = true
 	}
 	child.define(value)
+}
+
+// matchPayloadClass says what a match on an owned value may do with one bound
+// payload: copy it out, move it out, or keep it borrowed.
+type matchPayloadClass int
+
+const (
+	payloadBorrows matchPayloadClass = iota
+	payloadCopies
+	payloadMoves
+)
+
+// classifyMatchPayload sorts a payload type for a match on an owned value.
+// Only types positively known to be provenance-free copies or declared
+// aggregates escape the arm; views and anything unclassified stay borrowed, so
+// an unhandled type errs toward rejection, never toward escape (ADR-0090).
+func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
+	parsed, err := typ.Parse(typeName)
+	if err != nil {
+		return payloadBorrows
+	}
+	name, ok := parsed.(*typ.Name)
+	if !ok {
+		// []T, &T, ?T, dyn T, E!T: views and wrappers keep borrow handling.
+		return payloadBorrows
+	}
+	if isRawPointerType(typeName) {
+		return payloadBorrows
+	}
+	if c.isCopyType(typeName) {
+		return payloadCopies
+	}
+	base := strings.Join(name.Path, "::")
+	if c.structs[base] != nil || c.unions[base] != nil {
+		return payloadMoves
+	}
+	return payloadBorrows
 }
 
 // matchTags returns known tags for enum and union match ownership checks.
@@ -1558,9 +1685,13 @@ func (c *Checker) checkMatchExprValue(
 	if !ok {
 		return "", errorf("move error: match expects enum or union, got %s", valueType)
 	}
+	ownedMatch := c.matchScrutineeOwned(stmt.Value, env)
+	if err := c.consumeMovedFromScrutinee(stmt, unionPayloads, env); err != nil {
+		return "", err
+	}
 	var result string
 	for idx, arm := range stmt.Arms {
-		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, env, moveTail)
+		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, ownedMatch, env, moveTail)
 		if err != nil {
 			return "", err
 		}
@@ -1578,6 +1709,7 @@ func (c *Checker) checkMatchExprArmValue(
 	arm ast.MatchArm,
 	tags map[string]bool,
 	unionPayloads map[string]string,
+	ownedMatch bool,
 	env *scope,
 	moveTail bool,
 ) (string, error) {
@@ -1590,11 +1722,7 @@ func (c *Checker) checkMatchExprArmValue(
 	}
 	armEnv := env.clone()
 	child := armEnv.child()
-	if payload := unionPayloads[arm.Tag]; !arm.IsWildcard() && payload != "" && arm.Binding != "" {
-		value := c.newBinding(arm.Binding, payload)
-		value.borrowedParam = true
-		child.define(value)
-	}
+	c.defineMatchArmPayload(arm, unionPayloads, false, ownedMatch, child)
 	got, err := c.checkStmtValue(arm.Body, child, moveTail)
 	if err != nil {
 		return "", err

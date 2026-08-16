@@ -72,17 +72,33 @@ fn consume(s: std::string::String) -> void {
 	assertMoveError(t, source, "moved value `n` was borrowed")
 }
 
-// TestCheckRejectsActivePayloadCleanupOutsideDeinit proves the active payload is
-// borrowed in an ordinary match, so inactive payload storage is never owned or
-// cleaned outside the union's own deinit.
-func TestCheckRejectsActivePayloadCleanupOutsideDeinit(t *testing.T) {
+// TestCheckAcceptsActivePayloadCleanupOutsideDeinit accepts cleaning the active
+// payload through an ordinary match on an owned union: the payload moves out and
+// carries its cleanup with it (ADR-0090).
+func TestCheckAcceptsActivePayloadCleanupOutsideDeinit(t *testing.T) {
 	source := ownerUnionPrelude + `fn drop_node(n: Node) -> void {
     match n {
         Left(s) => s.deinit(),
         Right(a) => a.deinit(),
     }
 }`
-	assertMoveError(t, source, "`String.deinit` requires owned String receiver")
+	if err := checkSource(source); err != nil {
+		t.Fatalf("owned match payload cleanup should check: %v", err)
+	}
+}
+
+// TestCheckRejectsUnionReuseAfterMovingMatch proves a match that moves any
+// payload out consumes the union, so touching it afterwards is use-after-move.
+func TestCheckRejectsUnionReuseAfterMovingMatch(t *testing.T) {
+	source := ownerUnionPrelude + `fn show(n: &Node) -> void { return; }
+fn drop_node(n: Node) -> void {
+    match n {
+        Left(s) => s.deinit(),
+        Right(a) => a.deinit(),
+    }
+    show(n);
+}`
+	assertMoveError(t, source, "moved value `n` was borrowed")
 }
 
 // TestCheckRejectsOwnerUnionReuseAfterDeinitDispatch proves the deinit dispatch

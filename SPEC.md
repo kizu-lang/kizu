@@ -681,6 +681,19 @@ match a {
 * destructuring は payload binding 1つだけ
 * `match` は exhaustive でなければならない
 
+payload binding の所有は、payload の型と match される値の所有で決まります
+(ADR-0090)。
+
+* scalar(bool / 整数 / float / enum / error set)の payload は copy として
+  束縛され、どの match からでもそのまま使えます。
+* 宣言された struct / union 型の payload は、owned なローカル値または
+  呼び出し結果の temporary への match で move out として束縛されます。
+  move する arm が 1 つでもあれば、match 以降そのローカル値全体は moved に
+  なります。borrow への match では move out できず、payload は borrow として
+  束縛されます。
+* `[]T` や raw pointer などの view 型 payload は常に borrow として束縛され、
+  arm の外へ escape できません。
+
 ### 6.9 if
 
 Kizu の `if` は statement と expression の両方で使えます。
