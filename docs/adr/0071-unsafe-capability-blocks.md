@@ -1,6 +1,8 @@
 # ADR-0071: unsafe capability blocks
 
-Status: 採用
+Status: 置換
+
+Replaced by [ADR-0089: `unsafe` は式のマーカーにし、不変条件は型に印を付ける](0089-unsafe-is-an-expression-marker.md).
 
 ## 背景
 

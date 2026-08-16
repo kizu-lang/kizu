@@ -88,7 +88,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0068: safe borrow field access](0068-safe-borrow-field-access.md)
 - [ADR-0069: raw pointer dereference syntax](0069-raw-pointer-dereference-syntax.md)
 - [ADR-0070: package export surface](0070-package-export-surface.md)
-- [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md)
+- [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md) (置換)
 - [ADR-0072: diagnostic message style](0072-diagnostic-message-style.md)
 - [ADR-0073: selfhost run artifact and host runtime boundary](0073-selfhost-run-artifact-and-host-runtime-boundary.md)
 - [ADR-0074: control expressions and statement semicolons](0074-control-expressions-and-statement-semicolons.md)
@@ -102,3 +102,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0086: errors are names, not messages](0086-errors-are-names-not-messages.md) (決定 3 は置換)
 - [ADR-0087: `!T` declares no error set](0087-error-union-declares-no-set.md)
 - [ADR-0088: map iterates in insertion order](0088-map-iterates-in-insertion-order.md)
+- [ADR-0089: `unsafe` は式のマーカーにし、不変条件は型に印を付ける](0089-unsafe-is-an-expression-marker.md)
