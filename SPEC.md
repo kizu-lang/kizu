@@ -283,6 +283,24 @@ fn log(message: []u8) -> void {
 }
 ```
 
+同じ scope で、型が取った名前を関数は取れません。逆も同じです。
+
+```kizu
+struct Point { x: i64, y: i64 }
+
+fn Point(x: i64) -> i64 {   // error: `Point` is a type in this scope
+    return x + 100;
+}
+```
+
+`Point(3)` を読んだ人は Point が構築されると読みます。名前が 2 つの無関係な
+意味を同時に持つと、call site から意味を復元できません。戻り値をその型に
+限る緩和も採りません。構築は `Point { x: 1, y: 2 }` で綴れるので、同じことを
+する 2 つ目の綴りは要りません。
+
+検査は宣言の順序に依存しません。struct と function のどちらが先に書かれていても
+同じ error になります。std もこの規則の中にいて、例外を持ちません(§14)。
+
 #### doc comment
 
 declaration や member の user-facing documentation は `///` line comment で書きます。
@@ -378,7 +396,7 @@ import std::array;
 
 fn main() -> !void {
     let allocator = mem::page_allocator();
-    let values = array::Array<i64>(allocator);
+    let values = array::new<i64>(allocator);
     defer values.deinit();
 
     try values.append(1);
@@ -396,7 +414,7 @@ cleanup 呼び出しを実行します。通常の block exit や正常な `retu
 
 ```kizu
 fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
-    let values = array::Array<i64>(allocator);
+    let values = array::new<i64>(allocator);
     errdefer values.deinit();
 
     try values.append(1);
@@ -1173,20 +1191,20 @@ import std::mem;
 import std::arena;
 
 let allocator = mem::page_allocator();
-let users = arena::Arena<User>(allocator);
+let users = arena::new<User>(allocator);
 let alice = users.add(User { name: "alice" });
 print(users.get(alice).name);
 ```
 
 `std::arena::Arena<T>` は複数の `T` を所有します。
 core arena の構築は明示 allocator capability を要求し、
-`std::arena::Arena<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
+`std::arena::new<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 
 ルール:
 
-* `std::arena::Arena<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
+* `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
 * `std::arena::Arena<T>.add(value)` は value を arena に move する
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
 * `std::arena::Arena<T>.get(handle)` はローカル borrow を返す
@@ -1637,9 +1655,23 @@ associated types、higher-kinded types、specialization、reflection は実装�
 通常の function / method 名は、generic かどうかに関係なく snake_case にします。
 `<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
 保ちます。例えば `Identity<T>` / `IsI64<T>` ではなく、`identity<T>` /
-`is_i64<T>` と書きます。既存の `std::array::Array<T>(allocator)` のような
-type-named std constructor spelling は std storage type に結びついた factory
-構文であり、通常の generic function naming の前例とはみなしません。
+`is_i64<T>` と書きます。
+
+型と同じ名前の関数は宣言できません(§6.3)。だから storage type の constructor も
+型名では綴れません。module 名が型名の snake_case であれば `new`、そうでなければ
+関数名で型を名指します。
+
+```kizu
+array::new<i64>(allocator)      // std::array の型は Array 1 つ
+string::new(allocator)
+map::new<[]u8, i64>(allocator)
+arena::new<User>(allocator)
+mem::box<Item>(allocator, value)  // std::mem は Allocator も持つので型を名指す
+```
+
+型名で名付けた module は構築できる型を 1 つだけ持ちます。2 つ目の storage type は
+module を分けます。variant は `array::with_capacity<T>(allocator, 64)` のように
+横に並べ、`new_` を接頭辞にしません。
 
 `<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
 format string など、type 以外の comptime value が必要になった場合は、同じ
@@ -1657,7 +1689,7 @@ explicit trusted primitive:
 
 ```kizu
 // lib/kizu/std/src/array.kizu
-pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
+pub fn new<T>(allocator: Allocator) -> std::array::Array<T> {
     return std::internal::builtin::array<T>(allocator);
 }
 ```
@@ -1666,11 +1698,11 @@ package 名は、その package の中では import なしに束縛されてい�
 `std` package の module なので、この file は `std::` で始まる完全パスをそのまま
 書けます。
 
-戻り値の型が完全パスなのは、この file が `Array` という名前の function を宣言して
-いるからです。name resolution order で current module の宣言は import した名前より
-上にあるので、この file の `Array` は function を指します。同じ綴りの storage type
-は path で名指しします。この形が要るのは、型と同じ名前の constructor を持つ std
-module だけです。
+戻り値の型が完全パスなのは、`std::array::Array` が Go 実装の持つ型で、この file が
+宣言したものではないからです。compiler が提供する storage type は完全パスでだけ
+名前を持ちます。自分の file が宣言した型は短い名前で書けます —— `std::string::String`
+は `string.kizu` の `pub struct String` なので、同じ file の中では `String { ... }`
+と書きます。
 
 This is not a full monomorphization system. It moves public stdlib
 constructor and testing spelling into Kizu source while keeping runtime storage,
@@ -1790,7 +1822,7 @@ user-defined allocator、fixed-buffer allocator、testing allocator は #549 で
 owned byte buffer です。
 
 ```text
-std::string::String(allocator: Allocator) -> std::string::String
+std::string::new(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.reserve(additional: i64) -> !void
@@ -1803,7 +1835,7 @@ string.deinit() -> void
 ```
 
 `string` primitive は追加しません。
-`std::string::String()` のような hidden default allocator は使いません。
+`std::string::new()` のような hidden default allocator は使いません。
 `std::string::String` は non-copy / move-only です。
 `append_bytes` は source の `[]u8` を move せず、owned buffer に copy します。
 `append_byte` は 1 byte を追加します。
@@ -1869,7 +1901,7 @@ std::set::Set<T>      後続 phase
 
 ```text
 std::mem::page_allocator() -> Allocator
-std::mem::Box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
+std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
 box.borrow() -> &T borrows self
 box.borrow_mut() -> &var T borrows self
 box.deinit() -> void
@@ -1908,7 +1940,7 @@ owned contiguous collection です。
 
 ```text
 std::mem::page_allocator() -> Allocator
-std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
+std::array::new<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
@@ -1923,7 +1955,7 @@ array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```
 
-`std::array::Array<T>()` のような hidden default allocator は使いません。
+`std::array::new<T>()` のような hidden default allocator は使いません。
 `array.get` は bounds check し、範囲外なら `!T` の error を返します。
 `array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
@@ -1954,7 +1986,7 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 `std::map::Map<K, V>` は、symbol table と scope lookup に必要な最小 owned map です。
 
 ```text
-std::map::Map<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
+std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
 map.insert(key: []u8, value: V) -> !void
 map.get(key: []u8) -> !V
 map.contains(key: []u8) -> bool
@@ -1970,7 +2002,7 @@ iteration は後続ですが、順序は先に決めてあります。**map は�
 未定義の順序は露出しません。
 value type は copy type 限定です。
 non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
-`std::map::Map<K, V>()` のような hidden default allocator は使いません。
+`std::map::new<K, V>()` のような hidden default allocator は使いません。
 `deinit` 後の map 使用は safe Kizu では禁止します。
 
 `std::testing` は最小 assertion API です。

@@ -622,7 +622,11 @@ func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
 	return nil
 }
 
-// collectTopLevelFunctions registers top-level function signatures.
+// collectTopLevelFunctions registers top-level function signatures. A name a
+// type already took is rejected here: `Point(3)` reads as constructing a Point,
+// so letting a function claim that spelling makes the call site unreadable.
+// Every type name is predeclared before this pass, so the answer does not
+// depend on which declaration was written first.
 func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
@@ -631,6 +635,10 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		}
 		if _, exists := c.functions[fn.Name]; exists {
 			return errorf("type error: duplicate function `%s`", fn.Name)
+		}
+		if c.isTypeName(fn.Name) {
+			return errorf("type error: `%s` is a type and cannot name a function",
+				fn.Name)
 		}
 		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
@@ -1440,11 +1448,23 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 	if c.typeParams[name] {
 		return typ, nil
 	}
-	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
-		c.enums[name] == nil && c.unions[name] == nil && c.errorSets[name] == nil {
+	if !c.isTypeName(name) {
 		return "", errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
+}
+
+// isTypeName reports whether a name is a type in this program: one the compiler
+// provides or one the program declared. Type parameters are not asked about
+// here, since they are scoped to a single declaration rather than to the
+// program. Every caller asks the same question, so a name that is a type for
+// one of them is a type for all of them.
+func (c *Checker) isTypeName(name string) bool {
+	if knownTypes[Type(name)] || c.declaredTypes[name] || isKnownGenericBase(name) {
+		return true
+	}
+	return c.structs[name] != nil || c.enums[name] != nil ||
+		c.unions[name] != nil || c.errorSets[name] != nil
 }
 
 // parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
@@ -1492,7 +1512,7 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 		return c.parseUserGenericType(name, base, args, union.typeParams)
 	}
 
-	if !isKnownSingleArgGeneric(base) {
+	if !isKnownGenericBase(base) {
 		return "", errorf("type error: unknown generic type `%s`", base)
 	}
 	arg, err := singleGenericArg(base, args)
@@ -1550,10 +1570,14 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	return Type(name), nil
 }
 
-// isKnownSingleArgGeneric reports whether base currently takes exactly one static argument.
-func isKnownSingleArgGeneric(base string) bool {
+// isKnownGenericBase reports whether base names a generic type the compiler
+// provides. parseGenericType gives each one its own argument rules; this answers
+// the prior question of whether the spelling is a type at all, which is also
+// what stops a function from taking it.
+func isKnownGenericBase(base string) bool {
 	switch base {
-	case "std::arena::Arena", "std::arena::Handle", "option", "std::array::Array":
+	case "std::mem::Box", "std::map::Map", "ptr",
+		"std::arena::Arena", "std::arena::Handle", "option", "std::array::Array":
 		return true
 	default:
 		return false
@@ -2879,8 +2903,6 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 		return c.checkUnsafeExpr(e, env, unsafe)
 	case *ast.IndexExpr:
 		return c.checkIndexExpr(e, env, unsafe)
-	case *ast.ArenaNewExpr:
-		return c.checkArenaNewExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.FieldExpr:
@@ -3580,10 +3602,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return typ, true, err
 	case "std::io::evented", "std::internal::builtin::io_evented":
 		return "", true, errorf("type error: `std::io::evented` is not implemented")
-	case "std::array::Array":
-		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
-	case "std::map::Map":
-		return "", true, errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	default:
 		return "", false, nil
 	}
@@ -3821,7 +3839,7 @@ func (c *Checker) checkFsPathArgs(
 	return "Io", path, nil
 }
 
-// checkArrayConstructor validates std::array::Array<T>(allocator).
+// checkArrayConstructor validates std::array::new<T>(allocator).
 func (c *Checker) checkArrayConstructor(
 	elem Type,
 	args []ast.Expression,
@@ -3965,9 +3983,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "int_from_ptr" {
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
-	if name == "std::arena::Arena" {
-		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
-	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -3986,7 +4001,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	return "", errorf("type error: `%s` does not take static arguments", name)
 }
 
-// checkArenaTypeApply validates std::arena::Arena<T>(allocator).
+// checkArenaTypeApply validates std::arena::new<T>(allocator).
 func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
@@ -3995,7 +4010,7 @@ func (c *Checker) checkArenaTypeApply(
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", errorf("type error: std::arena::Arena expects 1 type argument")
+		return "", errorf("type error: std::arena::new expects 1 type argument")
 	}
 	elem, err := c.parseType(parts[0])
 	if err != nil {
@@ -4003,7 +4018,7 @@ func (c *Checker) checkArenaTypeApply(
 	}
 	if len(args) != 1 {
 		return "", errorf(
-			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			"type error: `std::arena::new<%s>` expects exactly one allocator argument",
 			elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -4011,7 +4026,7 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("type error: `std::arena::new<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return Type(fmt.Sprintf("std::arena::Arena<%s>", elem)), nil
@@ -4025,6 +4040,10 @@ func (c *Checker) checkBuiltinTypeApply(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
+	if name == "std::internal::builtin::arena" {
+		typ, err := c.checkArenaTypeApply(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -4124,7 +4143,7 @@ func boxPrimitiveMethod(name string) (string, bool) {
 	}
 }
 
-// checkBoxConstructor validates std::mem::Box<T>(allocator, value).
+// checkBoxConstructor validates std::mem::box<T>(allocator, value).
 func (c *Checker) checkBoxConstructor(
 	elem Type,
 	args []ast.Expression,
@@ -4719,9 +4738,6 @@ func (c *Checker) checkUserCallArg(
 
 // userCallArityError reports declared function arity using source signatures when useful.
 func userCallArityError(name string, fn *functionType, got int) error {
-	if name == "std::string::String" {
-		return errorf("type error: `std::string::String` expects allocator")
-	}
 	if len(fn.params) == 1 {
 		paramName := fn.sig.Params[0].Name
 		if paramName != "" {
@@ -4800,31 +4816,6 @@ func (c *Checker) checkUnionConstructorCall(
 			unionType.name, field.Name, payload, got)
 	}
 	return Type(unionType.name), true, nil
-}
-
-// checkArenaNewExpr validates std::arena::Arena<T>(allocator) and returns the arena type.
-func (c *Checker) checkArenaNewExpr(
-	expr *ast.ArenaNewExpr,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if _, err := c.parseType(expr.TypeName); err != nil {
-		return "", err
-	}
-	if expr.Allocator == nil {
-		return "", errorf(
-			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
-			expr.TypeName)
-	}
-	got, err := c.checkExpr(expr.Allocator, env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if got != "Allocator" {
-		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
-			expr.TypeName, got)
-	}
-	return Type(fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName)), nil
 }
 
 // checkStructLiteralExpr validates field names and initializer types.

@@ -236,9 +236,9 @@ func TestFormatTrailingCommaDroppedBeforeClose(t *testing.T) {
 
 // TestFormatGenericBracketsTight checks generic `<T>` keeps no surrounding spaces.
 func TestFormatGenericBracketsTight(t *testing.T) {
-	src := `fn main() { let a = std::array::Array<i64>(x); }`
+	src := `fn main() { let a = std::array::new<i64>(x); }`
 	want := "fn main() {\n" +
-		"    let a = std::array::Array<i64>(x);\n" +
+		"    let a = std::array::new<i64>(x);\n" +
 		"}\n"
 	if got := Format(src); got != want {
 		t.Fatalf("generic brackets:\n--- got ---\n%s\n--- want ---\n%s", got, want)

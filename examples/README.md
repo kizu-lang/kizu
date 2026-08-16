@@ -273,3 +273,5 @@ single source file. Run them with `kizu check <package-root>`.
 | wildcard match arm cannot bind payload | `negative/match_wildcard_binding.kizu` | `wildcard match arm cannot bind payload` |
 | enum variants use `::`, not `.` | `negative/enum_dot_variant.kizu` | `use ::` |
 | union variants use `::`, not `.` | `negative/union_dot_variant.kizu` | `use ::` |
+| a function cannot take a type's name | `negative/function_named_after_type.kizu` | `is a type and cannot name a function` |
+| declaration order does not change the answer | `negative/function_named_after_enum.kizu` | `is a type and cannot name a function` |

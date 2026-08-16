@@ -250,7 +250,7 @@ fn (self: Registry) deinit() -> void {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    let registry = Registry { users: std::arena::new<User>(allocator) };
     registry.deinit();
 }`,
 			want: "field `self.users` was deinitialized",
@@ -474,7 +474,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();
@@ -491,7 +491,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
@@ -508,8 +508,8 @@ func TestCheckArenaAllocatorReadOnly(t *testing.T) {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let left = std::arena::Arena<User>(allocator);
-    let right = std::arena::Arena<User>(allocator);
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
     print(left);
     print(right);
 }`
@@ -530,8 +530,8 @@ func TestCheckRejectsArenaHandleProvenanceErrors(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let left = std::arena::Arena<User>(allocator);
-    let right = std::arena::Arena<User>(allocator);
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
     let alice = left.add(User { name: "alice" });
     print(right.get(alice).name);
 }`,
@@ -542,8 +542,8 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let left = std::arena::Arena<User>(allocator);
-    let right = std::arena::Arena<User>(allocator);
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
     print(right.get(left.add(User { name: "alice" })).name);
 }`,
 			want: "handle from `left` does not belong to arena `right`",
@@ -561,7 +561,7 @@ fn show(users: std::arena::Arena<User>, user: std::arena::Handle<User>) {
 			source: `struct User { name: []u8 }
 fn make() -> std::arena::Handle<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     return alice;
 }`,
@@ -583,7 +583,7 @@ func TestCheckRejectsArenaHandleMoveErrors(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let user = User { name: "alice" };
     let alice = users.add(user);
     print(user.name);
@@ -598,7 +598,7 @@ struct Box { user: User }
 fn take(user: User) { print(user.name); }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let boxes = std::arena::Arena<Box>(allocator);
+    let boxes = std::arena::new<Box>(allocator);
     let h = boxes.add(Box { user: User { name: "alice" } });
     take(boxes.get(h).user);
 }`,
@@ -620,7 +620,7 @@ func TestCheckRejectsArenaUseAfterDeinit(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     users.deinit();
     users.deinit();
 }`,
@@ -631,7 +631,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     users.deinit();
     users.add(User { name: "alice" });
 }`,
@@ -642,7 +642,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     users.deinit();
     print(users.get(alice).name);
@@ -665,7 +665,7 @@ func TestCheckRejectsArenaDeinitWithLiveReferences(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let borrowed = &users;
     users.deinit();
     print(borrowed);
@@ -677,7 +677,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     users.deinit();
     print(alice);
@@ -689,7 +689,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     users.deinit();
     let borrowed = &users;
     print(borrowed);
@@ -726,7 +726,7 @@ func TestCheckRejectsDeferredCleanupExitErrors(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     users.deinit();
     defer users.deinit();
 }`,
@@ -737,7 +737,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     defer users.deinit();
     let moved = users;
     print(moved);
@@ -749,7 +749,7 @@ fn main() {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let borrowed = &users;
     defer users.deinit();
     while false { print(borrowed); }
@@ -767,7 +767,7 @@ func TestCheckAcceptsErrDeferReturnedOwner(t *testing.T) {
 struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     return users;
 }`
@@ -804,7 +804,7 @@ func TestCheckRejectsErrDeferReceiverInvalidOnErrorPath(t *testing.T) {
 fn step() -> !void { return; }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     let moved = users;
     try step();
@@ -818,7 +818,7 @@ fn build() -> !std::arena::Arena<User> {
 fn step() -> !void { return; }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     users.deinit();
     try step();
@@ -832,7 +832,7 @@ fn build() -> !std::arena::Arena<User> {
 fn step() -> !void { return; }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     let borrowed = &users;
     try step();
@@ -847,7 +847,7 @@ fn build() -> !std::arena::Arena<User> {
 struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     users.deinit();
     return BuildError::Boom;
@@ -1169,7 +1169,7 @@ fn (self: Registry) deinit() -> void {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    let registry = Registry { users: std::arena::new<User>(allocator) };
     registry.add(User { name: "alice" });
     registry.deinit();
 }`
@@ -1191,7 +1191,7 @@ func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
 struct Registry { users: std::arena::Arena<User> }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    let registry = Registry { users: std::arena::new<User>(allocator) };
     registry.users.deinit();
 }`,
 			want: "field cleanup `registry.users.deinit` is only allowed inside owner deinit",
@@ -1207,7 +1207,7 @@ fn (self: Registry) deinit() -> void {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    let registry = Registry { users: std::arena::new<User>(allocator) };
     registry.deinit();
 }`,
 			want: "field `self.users` was deinitialized",
@@ -1219,7 +1219,7 @@ struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: registry };
     wrapper.registry.users.add(User { name: "alice" });
 }`,

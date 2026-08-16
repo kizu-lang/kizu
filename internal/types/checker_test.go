@@ -1322,7 +1322,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();
@@ -1339,7 +1339,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
@@ -1411,7 +1411,7 @@ func TestCheckAcceptsErrDeferredCleanup(t *testing.T) {
 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     return users;
 }
@@ -1461,7 +1461,7 @@ func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     users.deinit(1);
 }`,
 			want: "`arena.deinit` expects 0 args",
@@ -1472,7 +1472,7 @@ fn main() {
 struct Registry { users: std::arena::Arena<User> }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let registry = Registry { users: users };
     registry.users.deinit();
 }`,
@@ -1492,7 +1492,7 @@ fn (self: Registry) deinit() -> void {
 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let registry = Registry { users: users };
     registry.deinit();
 }`
@@ -1778,7 +1778,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
@@ -1789,10 +1789,10 @@ fn main() {
 			name: "arena non allocator",
 			source: `struct User { name: []u8 }
 fn main() {
-    let users = std::arena::Arena<User>(1);
+    let users = std::arena::new<User>(1);
     print(users);
 }`,
-			want: "`std::arena::Arena<User>` expects Allocator, got i64",
+			want: "`std::arena::new` allocator expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)

@@ -1240,8 +1240,6 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readTryExpr(e, env)
 	case *ast.IndexExpr:
 		return c.readIndexExpr(e, env)
-	case *ast.ArenaNewExpr:
-		return c.readArenaNewExpr(e, env)
 	case *ast.StructLiteralExpr:
 		return c.readStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
@@ -1273,24 +1271,6 @@ func (c *Checker) readScalarExpr(expr ast.Expression) (string, error) {
 		return "type", nil
 	}
 	return readLiteralType(expr)
-}
-
-// readArenaNewExpr validates allocator use without consuming its capability.
-func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, error) {
-	if expr.Allocator == nil {
-		return "", errorf(
-			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
-			expr.TypeName)
-	}
-	got, err := c.readExpr(expr.Allocator, env)
-	if err != nil {
-		return "", err
-	}
-	if got != "Allocator" {
-		return "", errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
-			expr.TypeName, got)
-	}
-	return fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName), nil
 }
 
 // readControlExpr checks control flow expressions without consuming owned values.
@@ -1843,7 +1823,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
 		return typ, ok, err
 	}
-	return checkUntypedContainerConstructor(name)
+	return "", false, nil
 }
 
 // rejectUnknownBuiltin refuses a primitive the Go implementation does not have.
@@ -1960,19 +1940,6 @@ func (c *Checker) checkFsBuiltin(
 	}
 }
 
-// checkUntypedContainerConstructor rejects a container constructor written
-// without its element types.
-func checkUntypedContainerConstructor(name string) (string, bool, error) {
-	switch name {
-	case "std::array::Array":
-		return "", true, errorf("move error: use `std::array::Array<T>(allocator)`")
-	case "std::map::Map":
-		return "", true, errorf("move error: use `std::map::Map<K, V>(allocator)`")
-	default:
-		return "", false, nil
-	}
-}
-
 // checkFsReadFile validates ownership effects for std::fs::read_file.
 func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
@@ -2057,7 +2024,7 @@ func (c *Checker) checkFsPathOnly(
 	return result, true, nil
 }
 
-// checkArrayConstructor validates std::array::Array<T>(allocator) ownership.
+// checkArrayConstructor validates std::array::new<T>(allocator) ownership.
 func (c *Checker) checkArrayConstructor(
 	elem string,
 	args []ast.Expression,
@@ -2217,9 +2184,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
-	if name == "std::arena::Arena" {
-		return c.checkArenaTypeApply(typeArg, args, env)
-	}
 	if typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -2234,7 +2198,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	return "", errorf("move error: `%s` does not take static arguments", name)
 }
 
-// checkArenaTypeApply validates std::arena::Arena<T>(allocator) ownership.
+// checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
 func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
@@ -2242,12 +2206,12 @@ func (c *Checker) checkArenaTypeApply(
 ) (string, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", errorf("arena error: std::arena::Arena expects 1 type argument")
+		return "", errorf("arena error: std::arena::new expects 1 type argument")
 	}
 	elem := parts[0]
 	if len(args) != 1 {
 		return "", errorf(
-			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			"arena error: `std::arena::new<%s>` expects exactly one allocator argument",
 			elem)
 	}
 	got, err := c.readExpr(args[0], env)
@@ -2255,7 +2219,7 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("arena error: `std::arena::new<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return fmt.Sprintf("std::arena::Arena<%s>", elem), nil
@@ -2268,6 +2232,10 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if name == "std::internal::builtin::arena" {
+		typ, err := c.checkArenaTypeApply(typeArg, args, env)
+		return typ, true, err
+	}
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, ok, err
 	}
@@ -2362,7 +2330,7 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	}
 }
 
-// checkBoxConstructor validates std::mem::Box<T>(allocator, value) ownership.
+// checkBoxConstructor validates std::mem::box<T>(allocator, value) ownership.
 func (c *Checker) checkBoxConstructor(
 	elem string,
 	args []ast.Expression,
@@ -2728,10 +2696,10 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 ) error {
 	want := substituteOwnershipType(fn.params[idx].typeName, subst)
-	// `std::mem::Box<T>(allocator, value)` takes ownership of its value; every
+	// `std::mem::box<T>(allocator, value)` takes ownership of its value; every
 	// other generic wrapper argument is read in place.
 	read := c.readContextualExpr
-	if name == "std::mem::Box" && idx == 1 {
+	if name == "std::mem::box" && idx == 1 {
 		read = c.moveContextualExpr
 	}
 	got, err := read(arg, want, env)
@@ -4316,10 +4284,6 @@ func (c *Checker) newBinding(name string, typeName string) *binding {
 
 // setArenaProvenance records arena and handle origins for local bindings.
 func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *scope) {
-	if _, ok := expr.(*ast.ArenaNewExpr); ok {
-		value.arenaID = value.id
-		return
-	}
 	if isArenaConstructorExpr(expr) {
 		value.arenaID = value.id
 		return
@@ -4329,7 +4293,7 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 	}
 }
 
-// isArenaConstructorExpr reports the public std::arena::Arena<T>(allocator) constructor.
+// isArenaConstructorExpr reports the public std::arena::new<T>(allocator) constructor.
 func isArenaConstructorExpr(expr ast.Expression) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -4340,7 +4304,7 @@ func isArenaConstructorExpr(expr ast.Expression) bool {
 		return false
 	}
 	name, ok := qualifiedName(typeApply.Callee)
-	return ok && name == "std::arena::Arena"
+	return ok && name == "std::arena::new"
 }
 
 // directFieldArenaID returns a stable arena identity for one owner field.

@@ -728,7 +728,7 @@ struct User {
 }
 fn main() {
     let user = User { name: "alice", };
-    let values = std::array::Array<i64,>(allocator,);
+    let values = std::array::new<i64,>(allocator,);
     print(id(1,));
     print(values.len());
     print(user.name);
@@ -740,7 +740,7 @@ fn main() {
 	}
 	want := `fn id<T>(value: T) -> T { return value; }
 struct User { name: []u8 }
-fn main() { let user = User { name: "alice" }; let values = std::array::Array<i64>(allocator); ` +
+fn main() { let user = User { name: "alice" }; let values = std::array::new<i64>(allocator); ` +
 		`print(id(1)); print(values.len()); print(user.name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -753,7 +753,7 @@ func TestParseArenaAndStructLiteral(t *testing.T) {
     name: []u8,
 }
 fn main() {
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -763,7 +763,7 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `struct User { name: []u8 }
-fn main() { let users = std::arena::Arena<User>(allocator); ` +
+fn main() { let users = std::arena::new<User>(allocator); ` +
 		`let alice = users.add(User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
 	if got := program.String(); got != want {
@@ -795,7 +795,7 @@ func TestParseMultiArgGenericTypes(t *testing.T) {
     return table.get("main");
 }
 fn main() {
-    let table = std::map::Map<[]u8, i64>(allocator);
+    let table = std::map::new<[]u8, i64>(allocator);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -804,7 +804,7 @@ fn main() {
 	}
 	want := `fn lookup(table: std::map::Map<[]u8, i64>) -> i64 { ` +
 		`return table.get("main"); }
-fn main() { let table = std::map::Map<[]u8, i64>(allocator); }`
+fn main() { let table = std::map::new<[]u8, i64>(allocator); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -92,7 +92,7 @@ func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeArrayNew lowers std::array::Array<T>(allocator) to an opaque runtime handle.
+// writeArrayNew lowers std::array::new<T>(allocator) to an opaque runtime handle.
 func (e *emitter) writeArrayNew(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || !isArrayLLVMType(instr.Result.Type) {
 		return fmt.Errorf("llvm error: array.new expects allocator -> Array<T>")

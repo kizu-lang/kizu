@@ -185,8 +185,6 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 		return []ast.Expression{e.Receiver}, true
 	case *ast.FieldExpr:
 		return []ast.Expression{e.Receiver}, true
-	case *ast.ArenaNewExpr:
-		return []ast.Expression{e.Allocator}, true
 	case *ast.IndexExpr:
 		return []ast.Expression{e.Target, e.Index, e.Start, e.End}, true
 	case *ast.StructLiteralExpr:

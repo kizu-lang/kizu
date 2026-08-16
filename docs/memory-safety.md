@@ -89,7 +89,7 @@ policy.
 
 ### Arena and Handle
 
-- `std::arena::Arena<T>(allocator)` requires an explicit `Allocator` capability.
+- `std::arena::new<T>(allocator)` requires an explicit `Allocator` capability.
 - Arena construction reads the allocator capability; it does not move it.
 - `std::arena::Arena<T>.add(value)` moves `value` into the arena.
 - `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.

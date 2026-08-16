@@ -136,8 +136,8 @@ Stateful runtime APIs such as `std::array::Array` and `std::map::Map` still keep
 Go runtime primitives where they own runtime storage and borrow-safety rules.
 Treat those primitives as explicit runtime boundaries, not ordinary stdlib logic.
 The first wrapper split was tracked by #360 and must not leave dual public paths
-behind. `std::mem::Box<T>(allocator, value)`, `std::array::Array<T>(allocator)`,
-and `std::map::Map<K, V>(allocator)` use source-level type-argument forwarding
+behind. `std::mem::box<T>(allocator, value)`, `std::array::new<T>(allocator)`,
+and `std::map::new<K, V>(allocator)` use source-level type-argument forwarding
 through Kizu std source.
 
 The concurrency modules (`std::task`, `std::channel`, `std::thread`,
