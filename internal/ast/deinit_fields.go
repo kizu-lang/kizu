@@ -65,7 +65,7 @@ func hasFieldsDeinit(program *Program) bool {
 // DeinitOwners returns the base type names whose values carry a deinit
 // contract: every receiver a declared deinit names, plus Arena, whose deinit is
 // builtin-only and never declared in kizu source. This is the one definition of
-// owner-ness; the ownership checker seeds its own lookup from it.
+// owner-ness; the checkers seed their lookups from it.
 func DeinitOwners(program *Program) map[string]bool {
 	owners := map[string]bool{"std::arena::Arena": true}
 	for _, decl := range program.Decls {
@@ -78,6 +78,14 @@ func DeinitOwners(program *Program) map[string]bool {
 		}
 	}
 	return owners
+}
+
+// OwnerType reports whether values of typeName carry a deinit contract under a
+// DeinitOwners map. A generic application is an owner when its base declares
+// deinit, which is how `Array<String>` — a container that must consume its
+// elements — reads as owner.
+func OwnerType(owners map[string]bool, typeName string) bool {
+	return owners[baseTypeName(typeName)]
 }
 
 // baseTypeName strips a generic application down to the applied name.
@@ -105,24 +113,41 @@ func fieldsDeinitReceiver(fn *FunctionDecl) (string, error) {
 	return receiver, nil
 }
 
-// deinitCallStmt builds the one statement both generators emit: a deinit call
+// deinitCallStmt builds the one statement both generators emit: a cleanup call
 // on the given receiver expression.
-func deinitCallStmt(receiver Expression) Statement {
+func deinitCallStmt(receiver Expression, method string) Statement {
 	return &ExprStmt{
-		Expr:      &CallExpr{Callee: &FieldExpr{Receiver: receiver, Name: "deinit"}},
+		Expr:      &CallExpr{Callee: &FieldExpr{Receiver: receiver, Name: method}},
 		Semicolon: true,
 	}
+}
+
+// CleanupMethodName picks the one cleanup call a type accepts (ADR-0091):
+// `deinit_all` for an owner-element container, `deinit` for every other owner.
+// The generator and the type checker both read this, so the method `= fields;`
+// emits is the method the checker then requires.
+func CleanupMethodName(typeText string, owners map[string]bool) string {
+	base, arg, ok := typ.SplitApply(typeText)
+	if !ok || (base != "std::array::Array" && base != "std::mem::Box") {
+		return "deinit"
+	}
+	if owners[baseTypeName(arg)] {
+		return "deinit_all"
+	}
+	return "deinit"
 }
 
 // fieldsDeinitStructBody deinitializes owner fields in declaration order.
 func fieldsDeinitStructBody(self string, decl *StructDecl, owners map[string]bool) *BlockStmt {
 	stmts := []Statement{}
 	for _, field := range decl.Fields {
-		if !owners[baseTypeName(typ.Text(field.TypeName))] {
+		fieldType := typ.Text(field.TypeName)
+		if !owners[baseTypeName(fieldType)] {
 			continue
 		}
 		stmts = append(stmts, deinitCallStmt(
-			&FieldExpr{Receiver: &IdentExpr{Name: self}, Name: field.Name}))
+			&FieldExpr{Receiver: &IdentExpr{Name: self}, Name: field.Name},
+			CleanupMethodName(fieldType, owners)))
 	}
 	stmts = append(stmts, &ReturnStmt{})
 	return &BlockStmt{Statements: stmts}
@@ -141,7 +166,8 @@ func fieldsDeinitUnionBody(self string, decl *UnionDecl, owners map[string]bool)
 		case owners[baseTypeName(typ.Text(variant.Payload))]:
 			hasOwner = true
 			arm.Binding = "payload"
-			arm.Body = deinitCallStmt(&IdentExpr{Name: "payload"})
+			arm.Body = deinitCallStmt(&IdentExpr{Name: "payload"},
+				CleanupMethodName(typ.Text(variant.Payload), owners))
 		default:
 			arm.Binding = "_"
 		}

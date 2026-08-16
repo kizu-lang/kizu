@@ -1,0 +1,71 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+// ADR-0091: an owner-element container is closed at compile time. Its one
+// cleanup is `deinit_all()`, which consumes every remaining element before
+// releasing the buffer; shallow `deinit()` is a type error there.
+
+struct Bag {
+    pub names: array::Array<string::String>,
+    pub count: i64,
+}
+
+fn (self: Bag) deinit() -> void = fields;
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return name;
+}
+
+fn make_bag(allocator: Allocator) -> !Bag {
+    let names = array::new<string::String>(allocator);
+    errdefer names.deinit_all();
+    try names.append(try make_name(allocator, "alice"));
+    return Bag { names: names, count: 1 };
+}
+
+test "deinit_all consumes remaining owner elements" {
+    let allocator = mem::page_allocator();
+    let names = array::new<string::String>(allocator);
+    defer names.deinit_all();
+    try names.append(try make_name(allocator, "alice"));
+    try names.append(try make_name(allocator, "bob"));
+    testing::expect_equal<i64>(2, names.len());
+}
+
+test "pop before deinit_all consumes elements one by one" {
+    let allocator = mem::page_allocator();
+    let names = array::new<string::String>(allocator);
+    defer names.deinit_all();
+    try names.append(try make_name(allocator, "carol"));
+    let taken = try names.pop();
+    taken.deinit();
+    testing::expect_equal<i64>(0, names.len());
+}
+
+fn make_table(allocator: Allocator) -> !map::Map<[]u8, i64> {
+    let table = map::new<[]u8, i64>(allocator);
+    errdefer table.deinit();
+    try table.insert("seen", 1);
+    return table;
+}
+
+test "deinit_all cleans owner containers as elements" {
+    let allocator = mem::page_allocator();
+    let maps = array::new<map::Map<[]u8, i64>>(allocator);
+    defer maps.deinit_all();
+    try maps.append(try make_table(allocator));
+    testing::expect_equal<i64>(1, maps.len());
+}
+
+test "fields deinit forwards owner-element arrays to deinit_all" {
+    let allocator = mem::page_allocator();
+    let bag = try make_bag(allocator);
+    defer bag.deinit();
+    testing::expect_equal<i64>(1, bag.count);
+}

@@ -1398,11 +1398,26 @@ func (l *lowerer) lowerStdContainerMethod(
 	typeArg string,
 	args []Value,
 ) (Value, error) {
-	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	op, sig, err := l.stdContainerCallOp(receiver, method, typeArg)
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("call."+symbol, sig.Return, args, ""), nil
+	return l.emit(op, sig.Return, args, ""), nil
+}
+
+// stdContainerCallOp resolves one std container method to the call op of its
+// generic instance — the one resolution direct calls and deferred cleanups
+// share.
+func (l *lowerer) stdContainerCallOp(
+	receiver string,
+	method string,
+	typeArg string,
+) (string, Signature, error) {
+	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	if err != nil {
+		return "", Signature{}, err
+	}
+	return "call." + symbol, sig, nil
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.

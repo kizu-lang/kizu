@@ -516,7 +516,7 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 		return errorf("move error: defer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "deinit" {
+	if !ok || !typ.CleanupMethod(field.Name) {
 		return errorf("move error: defer expects cleanup method call")
 	}
 	if _, err := c.readExpr(field.Receiver, env); err != nil {
@@ -542,7 +542,7 @@ func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
 		return errorf("move error: errdefer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "deinit" {
+	if !ok || !typ.CleanupMethod(field.Name) {
 		return errorf("move error: errdefer expects cleanup method call")
 	}
 	if _, err := c.readExpr(field.Receiver, env); err != nil {
@@ -599,11 +599,7 @@ func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
 	if needs, ok := c.consumeNeeds[typeName]; ok {
 		return needs
 	}
-	base := typeName
-	if generic, _, ok := splitGenericType(typeName); ok {
-		base = generic
-	}
-	needs := c.deinitOwners[base]
+	needs := ast.OwnerType(c.deinitOwners, typeName)
 	c.consumeNeeds[typeName] = needs
 	return needs
 }
@@ -2729,7 +2725,8 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 		return typ, true, err
 	case "std::internal::builtin::box_borrow",
 		"std::internal::builtin::box_borrow_mut",
-		"std::internal::builtin::box_deinit":
+		"std::internal::builtin::box_deinit",
+		"std::internal::builtin::box_take":
 		return c.checkBuiltinBoxMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -2786,6 +2783,8 @@ func (c *Checker) checkBuiltinBoxMethod(
 			return "&var " + typeArg, nil
 		case "deinit":
 			return "void", nil
+		case "take":
+			return typeArg, nil
 		default:
 			return "", errorf("box error: Box has no method `%s`", method)
 		}
@@ -3607,21 +3606,21 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	if err != nil {
 		return "", true, err
 	}
-	if field.Name == "deinit" && !c.allowsDirectFieldCleanup(receiver) {
+	if typ.CleanupMethod(field.Name) && !c.allowsDirectFieldCleanup(receiver) {
 		return "", true, errorf(
-			"move error: field cleanup `%s.deinit` is only allowed inside owner deinit",
-			receiver.path,
+			"move error: field cleanup `%s.%s` is only allowed inside owner deinit",
+			receiver.path, field.Name,
 		)
 	}
 	value := c.bindingForDirectFieldReceiver(receiver)
-	typ, err := c.checkDirectFieldReceiverByType(value, field.Name, args, env)
+	result, err := c.checkDirectFieldReceiverByType(value, field.Name, args, env)
 	if err != nil {
 		return "", true, err
 	}
-	if field.Name == "deinit" {
+	if typ.CleanupMethod(field.Name) {
 		receiver.owner.markFieldDeinit(receiver.field)
 	}
-	return typ, true, nil
+	return result, true, nil
 }
 
 // directFieldReceiver resolves the one-level field path used as a method receiver.
@@ -3757,8 +3756,8 @@ func (c *Checker) checkBoxReceiverExpr(
 	if err != nil {
 		return "", true, err
 	}
-	if field.Name == "deinit" && borrowedField != "" {
-		return "", true, errorf("box error: `Box.deinit` requires local Box receiver")
+	if typ.CleanupMethod(field.Name) && borrowedField != "" {
+		return "", true, errorf("box error: `Box.%s` requires local Box receiver", field.Name)
 	}
 	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
 	return typ, true, err
@@ -3775,12 +3774,12 @@ func (c *Checker) checkBoxMethodForTarget(
 	case "borrow", "borrow_mut":
 		return "", errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
 			name, name)
-	case "deinit":
+	case "deinit", "deinit_all":
 		if target.hasAnyBorrow() {
-			return "", errorf("box error: `Box.deinit` cannot run while box is borrowed")
+			return "", errorf("box error: `Box.%s` cannot run while box is borrowed", name)
 		}
 		if len(args) != 0 {
-			return "", errorf("box error: `Box.deinit` expects 0 args, got %d", len(args))
+			return "", errorf("box error: `Box.%s` expects 0 args, got %d", name, len(args))
 		}
 		if field == "" {
 			target.moved = true
@@ -3994,16 +3993,14 @@ func (c *Checker) checkArrayMethod(
 			name, name)
 	case "set":
 		return c.checkArraySet(array, elem, args, env)
-	case "deinit":
+	case "deinit", "deinit_all":
 		if array.hasAnyBorrow() {
 			return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
 		}
 		if len(args) != 0 {
 			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
-		if name == "deinit" {
-			array.moved = true
-		}
+		array.moved = true
 		return "void", nil
 	default:
 		return "", errorf("array error: Array has no method `%s`", name)
