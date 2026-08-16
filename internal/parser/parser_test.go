@@ -900,6 +900,74 @@ func TestParseRejectsUnsafeCapabilityBlock(t *testing.T) {
 	}
 }
 
+// TestParseAttachesSafetyCommentToMarkers checks the parser hands each `unsafe`
+// marker the justification written above its statement, and stops at the next
+// statement rather than leaking into it.
+func TestParseAttachesSafetyCommentToMarkers(t *testing.T) {
+	input := "fn main() {\n" +
+		"    // SAFETY: the caller checked the bound\n" +
+		"    unsafe ptr_write(dst, unsafe ptr_read(src));\n" +
+		"    unsafe ptr_write(dst, 0);\n" +
+		"}"
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	fn, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok || len(fn.Body.Statements) != 2 {
+		t.Fatalf("decl = %#v, want a function with two statements", program.Decls[0])
+	}
+	want := []string{"the caller checked the bound", ""}
+	for i, stmt := range fn.Body.Statements {
+		expr, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			t.Fatalf("statement %d = %#v, want an expression statement", i, stmt)
+		}
+		marker, ok := expr.Expr.(*ast.UnsafeExpr)
+		if !ok {
+			t.Fatalf("statement %d = %#v, want an unsafe marker", i, expr.Expr)
+		}
+		if marker.Safety != want[i] {
+			t.Fatalf("statement %d safety = %q, want %q", i, marker.Safety, want[i])
+		}
+	}
+}
+
+// TestParseUnsafeStruct checks invariant-bearing struct syntax.
+func TestParseUnsafeStruct(t *testing.T) {
+	input := `pub unsafe struct Buf {
+    data: ptr<u8>,
+    len: usize,
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `pub unsafe struct Buf { data: ptr<u8>, len: usize }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	decl, ok := program.Decls[0].(*ast.StructDecl)
+	if !ok || !decl.RequiresUnsafe || !decl.Public {
+		t.Fatalf("decl = %#v, want public unsafe struct", program.Decls[0])
+	}
+}
+
+// TestParseRejectsUnsafeOnOtherDeclarations keeps `unsafe` to the two
+// declarations it means something for.
+func TestParseRejectsUnsafeOnOtherDeclarations(t *testing.T) {
+	p := New(lexer.New("unsafe enum Color { Red }"))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	if got := p.Errors()[0]; !strings.Contains(got, "expected fn or struct after unsafe") {
+		t.Fatalf("first error = %q", got)
+	}
+}
+
 // TestParseUnsafeMethod checks caller-obligation method syntax.
 func TestParseUnsafeMethod(t *testing.T) {
 	input := `unsafe fn (self: Register) write() -> void {

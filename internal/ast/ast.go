@@ -217,6 +217,11 @@ type StructDecl struct {
 	TypeParams []string
 	Fields     []Field
 	Public     bool
+	// RequiresUnsafe marks a struct whose fields carry an invariant the
+	// compiler cannot check, spelled `unsafe struct`. Establishing or changing
+	// that invariant is what needs `unsafe`, so writes are marked and reads are
+	// not.
+	RequiresUnsafe bool
 }
 
 // declNode marks StructDecl as a declaration node.
@@ -231,6 +236,9 @@ func (d *StructDecl) String() string {
 	prefix := ""
 	if d.Public {
 		prefix = "pub "
+	}
+	if d.RequiresUnsafe {
+		prefix += "unsafe "
 	}
 	typeParams := typeParamText(d.TypeParams)
 	if typeParams != "" {
@@ -956,6 +964,10 @@ func (e *TryExpr) String() string {
 // obligation for every unproven operation inside Value.
 type UnsafeExpr struct {
 	Value Expression
+	// Safety is the text of the `// SAFETY:` comment written above the
+	// statement this marker sits in. The comment justifies the statement, so
+	// every marker in one statement carries the same text.
+	Safety string
 	// Span points at the `unsafe` keyword, so a marker covering no such
 	// operation can be reported where it was written.
 	Span Span
@@ -1020,6 +1032,9 @@ func (e *ArenaNewExpr) String() string {
 type StructLiteralExpr struct {
 	TypeName string
 	Fields   []FieldValue
+	// Span points at the type name, so a diagnostic about the construction as
+	// a whole can be reported where the struct is named.
+	Span Span
 }
 
 // expressionNode marks StructLiteralExpr as an expression node.

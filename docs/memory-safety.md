@@ -132,11 +132,25 @@ policy.
   extension.
 - An `unsafe` marker that covers no unproven operation is rejected, so the word
   states what happens rather than what would be allowed.
+- A struct with a raw pointer field must be declared `unsafe struct`. It cannot
+  expose a `pub` field, so the code that can break its invariant is confined to
+  the file that declares it.
+- Establishing the invariant of an `unsafe struct` — constructing it, or writing
+  one of its fields — requires `unsafe`. Reading a field does not: a raw pointer
+  taken out of a struct does nothing until it is used, and every use is marked.
+- `unsafe fn` and `unsafe struct` must carry a `///` comment. What the
+  obligation says cannot be written in code, so the comment is the only place it
+  can live; the compiler checks that one was written, not what it says.
+- A statement containing `unsafe` must carry a `// SAFETY:` comment. The unit is
+  the statement, so one comment answers for every marker inside it, and a
+  comment on an enclosing statement does not reach a nested one.
 
 | Operation | Safe Kizu | under `unsafe` |
 | --- | --- | --- |
 | call `extern "c" fn` | rejected | allowed, caller owns ABI and memory obligation |
 | call `unsafe fn` | rejected | allowed, caller owns API-specific obligation |
+| construct or write a field of an `unsafe struct` | rejected | allowed, writer owns the declared invariant |
+| read a field of an `unsafe struct` | allowed | allowed |
 | raw pointer read/write/dereference | rejected | allowed |
 | nullable raw pointer read as non-null | rejected | rejected until an explicit conversion policy exists |
 | use moved safe value | rejected | rejected |
@@ -229,6 +243,9 @@ memory-safety invariants to representative examples.
 | `unsafe` is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
 | `unsafe` does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | `unsafe` states what happens | | `examples/negative/unsafe_marker_covers_nothing.kizu`, `examples/negative/redundant_nested_unsafe_marker.kizu` |
+| raw pointer fields carry a declared invariant | `examples/unsafe_struct.kizu` | `examples/negative/unsafe_struct_required.kizu`, `examples/negative/unsafe_struct_pub_field.kizu`, `examples/negative/unsafe_struct_field_write.kizu`, `examples/negative/unsafe_struct_construction.kizu` |
+| obligations are stated where they are created | `examples/requires_unsafe.kizu`, `examples/unsafe_struct.kizu` | `examples/negative/unsafe_fn_without_doc.kizu`, `examples/negative/unsafe_struct_without_doc.kizu` |
+| obligations are justified where they are met | `examples/pointer_policy.kizu` | `examples/negative/unsafe_without_safety_comment.kizu`, `examples/negative/unsafe_safety_comment_is_empty.kizu`, `examples/negative/unsafe_safety_comment_does_not_reach_nested.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
 | file I/O uses explicit Io and `!T` errors | `examples/fs_read.kizu` | `examples/negative/fs_read_missing.kizu`, `examples/negative/fs_read_without_io.kizu`, `examples/negative/fs_write_wrong_bytes.kizu`, `examples/negative/fs_failing_io.kizu` |

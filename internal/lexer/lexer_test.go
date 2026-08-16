@@ -1,6 +1,7 @@
 package lexer
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/token"
@@ -85,7 +86,7 @@ fn parse() {}
 	if tok.Type != token.Function {
 		t.Fatalf("got %s, want fn", tok.Type)
 	}
-	requireDocComments(t, tok, []string{"Parses a source file.", "Returns an AST."})
+	requireComments(t, "doc", tok.DocComments, []string{"Parses a source file.", "Returns an AST."})
 }
 
 // TestDocCommentsRequireExactThreeSlashesAndAdjacency checks non-doc comments break attachment.
@@ -100,20 +101,57 @@ func TestDocCommentsRequireExactThreeSlashesAndAdjacency(t *testing.T) {
 		if tok.Type != token.Function {
 			t.Fatalf("got %s, want fn for %q", tok.Type, input)
 		}
-		requireDocComments(t, tok, nil)
+		requireComments(t, "doc", tok.DocComments, nil)
 	}
 }
 
-// requireDocComments checks token doc metadata exactly.
-func requireDocComments(t *testing.T, tok token.Token, want []string) {
-	t.Helper()
-	if len(tok.DocComments) != len(want) {
-		t.Fatalf("doc comments = %#v, want %#v", tok.DocComments, want)
+// TestSafetyCommentsAttachToNextToken checks `// SAFETY:` lines survive as
+// token metadata. Every other `//` line is still read and dropped.
+func TestSafetyCommentsAttachToNextToken(t *testing.T) {
+	l := New("// SAFETY: the caller checked the bound\n" +
+		"//\tSAFETY: tabs and extra spacing still count\n" +
+		"unsafe ptr_write(p, 1);\n")
+	tok := l.NextToken()
+	if tok.Type != token.Unsafe {
+		t.Fatalf("got %s, want unsafe", tok.Type)
 	}
-	for i := range want {
-		if tok.DocComments[i] != want[i] {
-			t.Fatalf("doc comments = %#v, want %#v", tok.DocComments, want)
+	requireComments(t, "safety", tok.Safety, []string{
+		"the caller checked the bound",
+		"tabs and extra spacing still count",
+	})
+}
+
+// TestSafetyCommentsRequireExactPrefixAndAdjacency checks what does not count
+// as a justification: a different spelling, and one held off by a blank line.
+func TestSafetyCommentsRequireExactPrefixAndAdjacency(t *testing.T) {
+	for _, input := range []string{
+		"// safety: lowercase\nunsafe ptr_write(p, 1);\n",
+		"// SAFETY the colon is part of the prefix\nunsafe ptr_write(p, 1);\n",
+		"// SAFETY: held off\n\nunsafe ptr_write(p, 1);\n",
+		"// SAFETY: dropped\n// ordinary\nunsafe ptr_write(p, 1);\n",
+	} {
+		l := New(input)
+		tok := l.NextToken()
+		if tok.Type != token.Unsafe {
+			t.Fatalf("got %s, want unsafe for %q", tok.Type, input)
 		}
+		requireComments(t, "safety", tok.Safety, nil)
+	}
+}
+
+// TestSafetyAndDocCommentsStaySeparate checks the two comment kinds do not mix.
+func TestSafetyAndDocCommentsStaySeparate(t *testing.T) {
+	l := New("/// what it promises\n// SAFETY: why it holds\nunsafe fn poke() {}\n")
+	tok := l.NextToken()
+	requireComments(t, "doc", tok.DocComments, []string{"what it promises"})
+	requireComments(t, "safety", tok.Safety, []string{"why it holds"})
+}
+
+// requireComments checks one kind of token comment metadata exactly.
+func requireComments(t *testing.T, kind string, got []string, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s comments = %#v, want %#v", kind, got, want)
 	}
 }
 

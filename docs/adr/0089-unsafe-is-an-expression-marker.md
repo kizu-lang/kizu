@@ -160,6 +160,7 @@ compile error にする。判定は型注釈の構文検査で足りる。
 | type alias で別名にする | 言語に無い(SPEC §0.2 / §7)。ただし導入するかどうかは未検討で、永続的な非目標ではない |
 | generic struct の型引数に隠す | 言語に無い(SPEC §7「full generics を実装しません」) |
 | Array 要素に入れる | 既に拒否(`examples/negative/std_array_struct_raw_pointer_element.kizu`) |
+| union variant の payload や std container の要素に裸の pointer を入れる | 印は付かない。ただしそこには pointer 1 つしか無く、ずれる相手の field が無い。決定 3 が閉じたいのは `data` と `len` が独立に動ける形で、多 field の payload は struct にするほか無く、その struct は規則に掛かる |
 
 C layout struct(SPEC §12.2 が `extern struct` / `@repr("c")` として将来定める形)
 は対象外にする。C ABI struct は field を `pub` にできないと構築できず、
@@ -171,7 +172,21 @@ safe Kizu の保証外です」。例外ではなく、元から線の外であ�
 
 - `unsafe struct` の field に `pub` を付けるのは compile error
 - field への**書き込み**には `unsafe` が要る
+- **構築**にも `unsafe` が要る
 - field の**読み**には要らない
+
+構築を書き込みと同じ扱いにするのは、そうしないと規則に穴が開くからである。
+読みが自由なので、safe code が他の値から raw pointer を取り出して、不変条件を
+満たさない値を組み立てられてしまう。
+
+```kizu
+fn forge(b: &Buf) -> Buf {
+    return Buf { data: b.data, len: 4096 };   // 印が無ければ safe code で通る
+}
+```
+
+これは RFC 3458 が copy を `unsafe` にした理由と同じ場面である。Kizu は
+読みではなく構築の側に印を置くことで、同じ穴を閉じつつ読みを解放する。
 
 読みを解放できるのは Kizu 固有の性質による。**Kizu では raw pointer を手に
 入れても、使うのに `unsafe` が要る。** 次は前者が通り後者が落ちる。
@@ -279,7 +294,7 @@ Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 �
 | `unsafe fn` の**呼び出し**に `unsafe` | 完全 |
 | `ptr<>` field を持つ struct に `unsafe struct` | 完全 |
 | `unsafe struct` の `pub` field 禁止 | 完全 |
-| `unsafe struct` の field 書き込みに `unsafe` | 完全 |
+| `unsafe struct` の構築と field 書き込みに `unsafe` | 完全 |
 | `unsafe fn` / `unsafe struct` の `///` の存在 | 完全(存在のみ) |
 | `unsafe` を含む文の `// SAFETY:` の存在 | 完全(存在のみ) |
 | 関数を `unsafe fn` と**宣言**させる | **不可** |
