@@ -95,6 +95,11 @@ Kizu は次を目指します。
 - CIを速くする
 - ビルドキャッシュを肥大化させない
 - 依存グラフを抑える
+- 隠れた制御フローを持たない
+
+隠れた制御フローとは、呼び出しが source に見えないまま実行される制御の移動です。
+呼び出しが source に明示されている限り、宣言の裏で body が生成されることは
+hidden ではありません(ADR-0091)。
 
 ## 2. 非目標
 
@@ -1038,22 +1043,35 @@ non-copy field を含む struct
 
 owner field または owner payload を含む struct / union は owner aggregate です。
 owner aggregate は copy できず、値渡しや代入では move されます。
-block を出る時点で owner aggregate は次のいずれかで処理済みでなければなりません。
+block を出る時点で、owner 値は次のいずれかで consume 済みでなければ
+compile error です(ADR-0091)。
 
-* `value.deinit()` による明示 cleanup
+* `value.deinit()` または `defer value.deinit();` による明示 cleanup
 * 別の owner aggregate / container への move
 * owned return value として caller への move
+* `std::mem::leak(value)` による明示 leak
 
-owner aggregate を値引数として受け取る関数は、その値を consume します。
+owner aggregate を値引数として受け取る関数は、その値を consume する義務を負います。
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
 
-named owner aggregate を standalone owner として構築、返却、値渡しする場合は、
-`deinit(self: T) -> void` を source 上に定義して cleanup contract を見えるようにします。
-`deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可します。
+owner field または owner payload を含む型は `deinit(self: T) -> void` を必須とし、
+cleanup contract を source 上に見えるようにします。
+`deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可し、
+body は self の owner field をすべての path で consume しなければなりません。
 `deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
-container 内部の structural element cleanup は、`array.deinit()` のような明示 cleanup 呼び出しの
-実装 detail としてだけ許可します。これは callable な implicit destructor を合成しません。
+転送だけの `deinit` は宣言 1 行で body を生成できます。
+
+```kizu
+fn (self: BinaryExpr) deinit() -> void = fields;
+```
+
+`= fields;` は owner field を宣言順に deinit する body を生成します。
+呼び出しは常に source 上の `deinit()` / `defer` なので、hidden control flow では
+ありません(§1)。
+要素が owner 型の container は shallow な `deinit()` を型 error とし、要素ごと
+consume する `deinit_all()` だけを cleanup として認めます。空の container への
+`deinit_all()` は合法です。
 
 owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
 payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の
@@ -1915,6 +1933,7 @@ std::set::Set<T>      後続 phase
 ```text
 std::mem::page_allocator() -> Allocator
 std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
+std::mem::leak<T>(value: T) -> void
 box.borrow() -> &T borrows self
 box.borrow_mut() -> &var T borrows self
 box.deinit() -> void
@@ -1930,6 +1949,13 @@ std::mem::trim_ascii(bytes: []u8) -> []u8 borrows bytes
 返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
 再利用できます。allocator を受け取る constructor は capability を読み取るだけで、
 allocator binding を move しません。
+
+`std::mem::leak<T>(value)` は owner 値を consume しますが解放しません。
+leak-on-exit(短命 process が解放を OS に任せる)を source 上に明示する
+唯一の手段です。
+
+`std::mem::Limit` は確保上限を明示する union で、`Bytes(i64)` と `Unlimited` を
+持ちます。上限を設けない選択も `Unlimited` と綴って source に残します。
 
 `std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
 non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
@@ -2116,7 +2142,10 @@ runtime selection の方針は ADR-0039 に従います。
 
 `std::fs`:
 
-* `std::fs::read_file(io, path)` は `![]u8` を返す
+* `std::fs::read_file(io, allocator, path, limit)` は `!std::string::String` を返す。
+  `limit: std::mem::Limit` で確保上限を明示する
+* `std::fs::read_file_into(io, path, out: &var std::string::String)` は `!void` を
+  返し、fs 側では確保しない
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
@@ -2148,7 +2177,8 @@ runtime selection の方針は ADR-0039 に従います。
 
 * `std::io::write_stdout(io, bytes)` は `!void` を返す
 * `std::io::write_stderr(io, bytes)` は `!void` を返す
-* `std::io::read_stdin(io)` は `![]u8` を返す
+* `std::io::read_stdin(io, allocator, limit)` は `!std::string::String` を返す
+* `std::io::read_stdin_into(io, out: &var std::string::String)` は `!void` を返す
 * stdio helper は `Io` capability を必ず要求する
 * `std::process::arg_count()` は `i64` を返す
 * `std::process::arg(index)` は `![]u8` を返す
