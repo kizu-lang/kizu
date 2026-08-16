@@ -36,9 +36,10 @@ func expressionSpan(expr ast.Expression) ast.Span {
 
 // nestedExpressionSpan unwraps compound expressions until it finds a stored span.
 func nestedExpressionSpan(expr ast.Expression) ast.Span {
+	if inner, ok := transparentExprValue(expr); ok {
+		return expressionSpan(inner)
+	}
 	switch e := expr.(type) {
-	case *ast.PrefixExpr:
-		return expressionSpan(e.Right)
 	case *ast.CallExpr:
 		return expressionSpan(e.Callee)
 	case *ast.TypeApplyExpr:

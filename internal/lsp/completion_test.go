@@ -234,55 +234,6 @@ fn main() {
 	}
 }
 
-// TestCompleteReturnsDirectiveItemsAfterAt checks compiler directive completions.
-func TestCompleteReturnsDirectiveItemsAfterAt(t *testing.T) {
-	source := `@req`
-	items := Complete(source, Position{Line: 0, Character: len("@req")})
-	item := requireCompletion(t, items, "requires_unsafe")
-	if item.Kind != completionItemKindSnippet {
-		t.Fatalf("kind = %d, want snippet", item.Kind)
-	}
-	if item.TextEdit == nil || !strings.HasPrefix(item.TextEdit.NewText, "requires_unsafe() fn") {
-		t.Fatalf("textEdit = %#v, want requires_unsafe snippet", item.TextEdit)
-	}
-	if item.TextEdit.Range.Start != (Position{Line: 0, Character: 1}) {
-		t.Fatalf("range start = %#v, want after @", item.TextEdit.Range.Start)
-	}
-}
-
-// TestCompleteReturnsUnsafeCapabilities checks @unsafe capability completions.
-func TestCompleteReturnsUnsafeCapabilities(t *testing.T) {
-	source := `fn main() {
-    @unsafe(ptr_)
-}`
-	items := Complete(source, Position{Line: 1, Character: len("    @unsafe(ptr_")})
-	item := requireCompletion(t, items, "ptr_read")
-	if item.Kind != completionItemKindKeyword {
-		t.Fatalf("kind = %d, want keyword", item.Kind)
-	}
-	if item.TextEdit == nil || item.TextEdit.NewText != "ptr_read" {
-		t.Fatalf("textEdit = %#v, want ptr_read replacement", item.TextEdit)
-	}
-	if item.TextEdit.Range.Start != (Position{Line: 1, Character: len("    @unsafe(")}) {
-		t.Fatalf("range start = %#v, want capability start", item.TextEdit.Range.Start)
-	}
-	if item.Documentation == nil || !strings.Contains(item.Documentation.Value, "ptr_read(p)") {
-		t.Fatalf("documentation = %#v, want ptr_read operation", item.Documentation)
-	}
-}
-
-// TestCompleteReturnsUnsafeCapabilitiesAfterComma checks additional capability slots.
-func TestCompleteReturnsUnsafeCapabilitiesAfterComma(t *testing.T) {
-	source := `fn main() {
-    @unsafe(ptr_read, )
-}`
-	items := Complete(source, Position{Line: 1, Character: len("    @unsafe(ptr_read, ")})
-	item := requireCompletion(t, items, "volatile")
-	if item.TextEdit == nil || item.TextEdit.NewText != "volatile" {
-		t.Fatalf("item = %#v, want volatile insertion", item)
-	}
-}
-
 // TestServerCompletionReturnsPackageModuleImportPaths checks package-aware import completions.
 func TestServerCompletionReturnsPackageModuleImportPaths(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")

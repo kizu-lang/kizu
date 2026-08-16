@@ -106,8 +106,6 @@ func nestingStatementChildren(stmt ast.Statement) ([]ast.Expression, []ast.State
 		return []ast.Expression{s.Start, s.End}, blocks(s.Body), true
 	case *ast.MatchStmt:
 		return []ast.Expression{s.Value}, matchArmBodies(s), true
-	case *ast.UnsafeStmt:
-		return nil, blocks(s.Body), true
 	default:
 		return nil, nil, false
 	}
@@ -178,6 +176,8 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	case *ast.CastExpr:
 		return []ast.Expression{e.Value}, true
 	case *ast.TryExpr:
+		return []ast.Expression{e.Value}, true
+	case *ast.UnsafeExpr:
 		return []ast.Expression{e.Value}, true
 	case *ast.ComptimeExpr:
 		return []ast.Expression{e.Expr}, true

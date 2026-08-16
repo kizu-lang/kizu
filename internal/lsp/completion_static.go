@@ -1,7 +1,5 @@
 package lsp
 
-import "github.com/kizu-lang/kizu/internal/unsafecap"
-
 var keywordCompletionItems = []completionItem{
 	{Label: "fn", Kind: completionItemKindKeyword},
 	{Label: "test", Kind: completionItemKindKeyword},
@@ -82,11 +80,11 @@ var snippetCompletionItems = []completionItem{
 	snippet("return", "return statement", "return ${1:value};"),
 	snippet("defer", "defer cleanup", "defer ${1:value}.deinit();"),
 	snippet("errdefer", "errdefer cleanup", "errdefer ${1:value}.deinit();"),
-	snippet("unsafe", "unsafe capability block", "@unsafe(${1:ptr_read}) {\n    $0\n}"),
+	snippet("unsafe", "unsafe marker", "unsafe ${1:expression}"),
 	snippet(
-		"requires unsafe",
+		"unsafe fn",
 		"caller-obligation function declaration",
-		"@requires_unsafe() fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
+		"unsafe fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
 	),
 	snippet("comptime if", "comptime if block", "comptime if ${1:condition} {\n    $0\n}"),
 	snippet("print", "print builtin", "print(${1:value})"),
@@ -94,17 +92,6 @@ var snippetCompletionItems = []completionItem{
 	snippet("cast", "cast expression", "cast<${1:T}>(${2:value})"),
 	snippet("type", "type expression", "type<${1:T}>"),
 }
-
-var directiveCompletionItems = []completionItem{
-	snippet("unsafe", "unsafe capability block", "unsafe(${1:ptr_read}) {\n    $0\n}"),
-	snippet(
-		"requires_unsafe",
-		"caller-obligation function",
-		"requires_unsafe() fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
-	),
-}
-
-var unsafeCapabilityCompletionItems = buildUnsafeCapabilityCompletionItems()
 
 // snippet builds one static snippet completion item.
 func snippet(label string, detail string, insertText string) completionItem {
@@ -114,25 +101,5 @@ func snippet(label string, detail string, insertText string) completionItem {
 		Detail:           detail,
 		InsertText:       insertText,
 		InsertTextFormat: insertTextFormatSnippet,
-	}
-}
-
-// buildUnsafeCapabilityCompletionItems builds @unsafe capability completion items.
-func buildUnsafeCapabilityCompletionItems() []completionItem {
-	docs := unsafecap.All()
-	items := make([]completionItem, 0, len(docs))
-	for _, info := range docs {
-		items = append(items, unsafeCapability(info))
-	}
-	return items
-}
-
-// unsafeCapability builds one @unsafe capability completion item.
-func unsafeCapability(info unsafecap.Info) completionItem {
-	return completionItem{
-		Label:         info.Name,
-		Kind:          completionItemKindKeyword,
-		Detail:        info.Detail,
-		Documentation: markdownDocumentation(unsafecap.Markdown(info)),
 	}
 }

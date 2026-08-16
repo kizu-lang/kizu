@@ -179,7 +179,7 @@ func (d *FunctionDecl) String() string {
 		prefix += "pub "
 	}
 	if d.RequiresUnsafe {
-		prefix += "@requires_unsafe() "
+		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
 		return fmt.Sprintf("%sextern %q fn %s%s%s(%s)%s",
@@ -671,24 +671,6 @@ func (a MatchArm) String() string {
 	return fmt.Sprintf("%s => %s", a.Tag, body)
 }
 
-// UnsafeStmt represents an explicit unsafe capability block.
-type UnsafeStmt struct {
-	Capabilities []string
-	// CapabilitySpans points at each declared capability name so an unused
-	// declaration can be reported where it was written. It runs parallel to
-	// Capabilities.
-	CapabilitySpans []Span
-	Body            *BlockStmt
-}
-
-// statementNode marks UnsafeStmt as a statement node.
-func (*UnsafeStmt) statementNode() {}
-
-// String returns a compact debug representation of the unsafe capability block.
-func (s *UnsafeStmt) String() string {
-	return "@unsafe(" + strings.Join(s.Capabilities, ", ") + ") " + s.Body.String()
-}
-
 // ComptimeIfStmt represents a branch selected during compilation.
 type ComptimeIfStmt struct {
 	Condition   Expression
@@ -967,6 +949,24 @@ func (*TryExpr) expressionNode() {}
 // String returns a compact debug representation of the try expression.
 func (e *TryExpr) String() string {
 	return "try " + e.Value.String()
+}
+
+// UnsafeExpr marks an expression whose memory safety the compiler does not
+// prove. It carries no value of its own: the marker says the author owns the
+// obligation for every unproven operation inside Value.
+type UnsafeExpr struct {
+	Value Expression
+	// Span points at the `unsafe` keyword, so a marker covering no such
+	// operation can be reported where it was written.
+	Span Span
+}
+
+// expressionNode marks UnsafeExpr as an expression node.
+func (*UnsafeExpr) expressionNode() {}
+
+// String returns a compact debug representation of the unsafe expression.
+func (e *UnsafeExpr) String() string {
+	return "unsafe " + e.Value.String()
 }
 
 // IndexExpr represents checked byte indexing or one-dimensional slicing.

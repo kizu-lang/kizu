@@ -1,74 +1,46 @@
-// Package unsafecap defines reserved @unsafe capabilities and user-facing help.
+// Package unsafecap names the operation kinds the compiler cannot prove, and
+// the help text for each. Source no longer spells these names; they exist so a
+// diagnostic can say which kind of unproven operation needed the `unsafe`.
 package unsafecap
 
-import "strings"
-
-// Info describes one reserved @unsafe capability.
+// Info describes one kind of operation the compiler cannot prove.
 type Info struct {
 	Name        string
-	Detail      string
-	Permits     []string
 	ShortPermit string
 }
 
 var capabilities = []Info{
 	{
 		Name:        "extern_call",
-		Detail:      "extern function call",
-		Permits:     []string{"Calling `extern \"c\" fn` declarations."},
-		ShortPermit: "permits calls to `extern \"c\" fn` declarations",
+		ShortPermit: "covers calls to `extern \"c\" fn` declarations",
 	},
 	{
 		Name:        "ptr_cast",
-		Detail:      "raw pointer cast",
-		Permits:     []string{"Raw pointer to raw pointer casts with `cast<ptr<...>>(value)`."},
-		ShortPermit: "permits raw pointer casts with `cast<ptr<...>>(value)`",
+		ShortPermit: "covers raw pointer casts with `cast<ptr<...>>(value)`",
 	},
 	{
-		Name:   "ptr_deref",
-		Detail: "raw pointer dereference",
-		Permits: []string{
-			"Reading through `p.*`.",
-			"Writing through `p.* = value` when the pointer is mutable.",
-			"Reading or assigning struct fields through `p.*.field`.",
-		},
-		ShortPermit: "permits raw pointer dereference such as `p.*` and `p.*.field`",
+		Name:        "ptr_deref",
+		ShortPermit: "covers raw pointer dereference such as `p.*` and `p.*.field`",
 	},
 	{
-		Name:   "ptr_int_cast",
-		Detail: "integer and pointer conversion",
-		Permits: []string{
-			"Creating raw pointers with `ptr_from_int<ptr<...>>(value)`.",
-			"Converting raw pointers to integers with `int_from_ptr<usize>(value)`.",
-		},
-		ShortPermit: "permits `ptr_from_int<ptr<...>>(value)` and `int_from_ptr<usize>(value)`",
+		Name:        "ptr_int_cast",
+		ShortPermit: "covers `ptr_from_int<ptr<...>>(value)` and `int_from_ptr<usize>(value)`",
 	},
 	{
 		Name:        "ptr_read",
-		Detail:      "raw pointer read",
-		Permits:     []string{"Reading a raw pointer with `ptr_read(p)`."},
-		ShortPermit: "permits raw pointer reads with `ptr_read(p)`",
+		ShortPermit: "covers raw pointer reads with `ptr_read(p)`",
 	},
 	{
 		Name:        "ptr_write",
-		Detail:      "raw pointer write",
-		Permits:     []string{"Writing a mutable raw pointer with `ptr_write(p, value)`."},
-		ShortPermit: "permits mutable raw pointer writes with `ptr_write(p, value)`",
+		ShortPermit: "covers mutable raw pointer writes with `ptr_write(p, value)`",
 	},
 	{
 		Name:        "unsafe_call",
-		Detail:      "caller-obligation function call",
-		Permits:     []string{"Calling functions or methods declared with `@requires_unsafe()`."},
-		ShortPermit: "permits calls to functions or methods declared with `@requires_unsafe()`",
+		ShortPermit: "covers calls to functions or methods declared `unsafe fn`",
 	},
 	{
-		Name:   "volatile",
-		Detail: "volatile read or write",
-		Permits: []string{
-			"Volatile raw pointer reads with `volatile_read(p)`.",
-			"Volatile raw pointer writes with `volatile_write(p, value)`.",
-		},
-		ShortPermit: "permits volatile reads and writes with `volatile_read` / `volatile_write`",
+		Name:        "volatile",
+		ShortPermit: "covers volatile reads and writes with `volatile_read` / `volatile_write`",
 	},
 }
 
@@ -89,23 +61,7 @@ func Lookup(name string) (Info, bool) {
 	return Info{}, false
 }
 
-// Markdown renders a compact markdown explanation for completion and hover.
-func Markdown(info Info) string {
-	var builder strings.Builder
-	builder.WriteString(info.Detail)
-	builder.WriteString("\n\nPermits:\n")
-	for _, permit := range info.Permits {
-		builder.WriteString("- ")
-		builder.WriteString(permit)
-		builder.WriteByte('\n')
-	}
-	builder.WriteString("\n`@unsafe(")
-	builder.WriteString(info.Name)
-	builder.WriteString(")` does not disable type, move, or borrow checks.")
-	return strings.TrimSpace(builder.String())
-}
-
-// Hint renders a one-line help note for missing-capability diagnostics.
+// Hint renders a one-line help note naming what the `unsafe` would cover.
 func Hint(info Info) string {
-	return "`@unsafe(" + info.Name + ")` " + info.ShortPermit + "."
+	return "`unsafe` here " + info.ShortPermit + "."
 }

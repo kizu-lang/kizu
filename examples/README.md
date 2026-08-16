@@ -55,9 +55,9 @@ go test ./...
 | wildcard `match` fallback | `match_wildcard.kizu` | groups remaining enum/union tags with `_` |
 | tagged `union` with payloads | `union.kizu` | binds payload values in `match` arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper; caller owns the unsafe obligation |
-| caller-obligation function | `requires_unsafe.kizu` | check-only `@requires_unsafe() fn` called from `@unsafe(unsafe_call)` |
+| caller-obligation function | `requires_unsafe.kizu` | `unsafe fn` called through an `unsafe` marker |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
-| raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `@unsafe(ptr_deref) { p.*.field }` pointer access |
+| raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `unsafe p.*.field` pointer access |
 | combined application | `user_registry.kizu` | exercises multiple features together |
 | `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
@@ -158,11 +158,12 @@ single source file. Run them with `kizu check <package-root>`.
 | typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
 | `error(message)` was removed | `negative/typed_error_untyped_constructor.kizu` | `` `error(message)` was removed `` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
-| extern calls require `@unsafe(extern_call)` | `negative/unsafe_call.kizu` | `requires @unsafe(extern_call)` |
-| caller-obligation calls require `@unsafe(unsafe_call)` | `negative/requires_unsafe_call.kizu` | `requires @unsafe(unsafe_call)` |
-| pointer reads require `@unsafe(ptr_read)` | `negative/ptr_read_without_unsafe.kizu` | `requires @unsafe(ptr_read)` |
+| extern calls require `unsafe` | `negative/unsafe_call.kizu` | ``requires `unsafe` `` |
+| caller-obligation calls require `unsafe` | `negative/requires_unsafe_call.kizu` | ``requires `unsafe` `` |
+| pointer reads require `unsafe` | `negative/ptr_read_without_unsafe.kizu` | ``requires `unsafe` `` |
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
-| raw pointer dereference requires `@unsafe(ptr_deref)` | `negative/raw_pointer_deref_without_unsafe.kizu` | `requires @unsafe(ptr_deref)` |
+| raw pointer dereference requires `unsafe` | `negative/raw_pointer_deref_without_unsafe.kizu` | ``requires `unsafe` `` |
+| an `unsafe` marker must cover something | `negative/unsafe_marker_covers_nothing.kizu`, `negative/redundant_nested_unsafe_marker.kizu` | ``covers no operation that needs it`` |
 | const raw pointer dereference cannot be written | `negative/raw_pointer_const_write.kizu` | `const raw pointer` |
 | nullable raw pointer dereference is rejected | `negative/raw_pointer_nullable_deref.kizu` | `nullable raw pointer` |
 | raw pointer field access needs explicit dereference | `negative/raw_pointer_direct_field.kizu` | `has no fields` |

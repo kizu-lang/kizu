@@ -388,8 +388,6 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkLoopBranch(s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env)
-	case *ast.UnsafeStmt:
-		return c.checkBlock(s.Body, env.child())
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env)
 	default:
@@ -1219,6 +1217,9 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 
 // readExpr checks an expression without consuming owned values.
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
+	if inner, ok := transparentExprValue(expr); ok {
+		return c.readExpr(inner, env)
+	}
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
 		return c.readScalarExpr(e)
@@ -1229,8 +1230,6 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 			return "type", nil
 		}
 		return readIdent(e, env)
-	case *ast.PrefixExpr:
-		return c.readExpr(e.Right, env)
 	case *ast.BinaryExpr:
 		return c.readBinaryExpr(e, env)
 	case *ast.CallExpr:
@@ -1251,6 +1250,20 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readDerefExpr(e, env)
 	default:
 		return c.readControlExpr(expr, env)
+	}
+}
+
+// transparentExprValue returns the operand of a wrapper that reads as its inner
+// expression. `unsafe` says who owns an obligation and carries no value of its
+// own, and `&` / `!` / `-` read their operand, so ownership sees through both.
+func transparentExprValue(expr ast.Expression) (ast.Expression, bool) {
+	switch e := expr.(type) {
+	case *ast.UnsafeExpr:
+		return e.Value, true
+	case *ast.PrefixExpr:
+		return e.Right, true
+	default:
+		return nil, false
 	}
 }
 
@@ -4432,6 +4445,9 @@ func (c *Checker) isArenaGetExpr(expr ast.Expression, env *scope) bool {
 
 // containsArenaGet reports whether an expression reads through arena.get.
 func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
+	if inner, ok := transparentExprValue(expr); ok {
+		return c.containsArenaGet(inner, env)
+	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		if c.isArenaGetExpr(e, env) {
@@ -4444,8 +4460,6 @@ func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
 		}
 	case *ast.FieldExpr:
 		return c.containsArenaGet(e.Receiver, env)
-	case *ast.PrefixExpr:
-		return c.containsArenaGet(e.Right, env)
 	case *ast.BinaryExpr:
 		return c.containsArenaGet(e.Left, env) || c.containsArenaGet(e.Right, env)
 	case *ast.CastExpr:
@@ -4858,8 +4872,6 @@ func stmtIdentUses(stmt ast.Statement) []string {
 			uses = append(uses, stmtIdentUses(arm.Body)...)
 		}
 		return uses
-	case *ast.UnsafeStmt:
-		return blockIdentUses(s.Body)
 	case *ast.ComptimeIfStmt:
 		uses := exprIdentUses(s.Condition)
 		uses = append(uses, blockIdentUses(s.Consequence)...)
@@ -4884,13 +4896,14 @@ func blockIdentUses(block *ast.BlockStmt) []string {
 
 // exprIdentUses collects identifier reads from an expression.
 func exprIdentUses(expr ast.Expression) []string {
+	if inner, ok := transparentExprValue(expr); ok {
+		return exprIdentUses(inner)
+	}
 	switch e := expr.(type) {
 	case nil:
 		return nil
 	case *ast.IdentExpr:
 		return []string{e.Name}
-	case *ast.PrefixExpr:
-		return exprIdentUses(e.Right)
 	case *ast.BinaryExpr:
 		return append(exprIdentUses(e.Left), exprIdentUses(e.Right)...)
 	case *ast.CallExpr:
