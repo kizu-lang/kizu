@@ -1086,7 +1086,11 @@ fn (self: BinaryExpr) deinit() -> void = fields;
 ありません(§1)。
 要素が owner 型の container は shallow な `deinit()` を型 error とし、要素ごと
 consume する `deinit_all()` だけを cleanup として認めます。空の container への
-`deinit_all()` は合法です。
+`deinit_all()` は合法です。`deinit_all` は要素を要素自身の `deinit()` で consume
+するため、owner 要素の container を直接要素にする入れ子は構築時に型 error です。
+deinit を宣言した struct で包んで名前を与えます。owner 要素の `set` も、置き換え
+前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
+owner 型を要素にできません。
 
 owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
 payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の

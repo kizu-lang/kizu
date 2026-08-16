@@ -64,8 +64,19 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 // cleanupFromMethod resolves one receiver.method() cleanup into an IR instruction.
 func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, error) {
 	receiverType := derefType(receiver.Type)
-	if _, ok := arrayElementType(receiverType); ok && method == "deinit" {
-		return Cleanup{Op: "array.deinit", Args: []Value{receiver}}, nil
+	if elem, ok := arrayElementType(receiverType); ok {
+		if method == "deinit" {
+			return Cleanup{Op: "array.deinit", Args: []Value{receiver}}, nil
+		}
+		if method == "deinit_all" {
+			// deinit_all is the std wrapper's body, not a runtime op: the
+			// cleanup calls its instance exactly like a direct call would.
+			op, _, err := l.stdContainerCallOp(arrayTypeName, method, elem)
+			if err != nil {
+				return Cleanup{}, err
+			}
+			return Cleanup{Op: op, Args: []Value{receiver}}, nil
+		}
 	}
 	if _, ok := mapValueType(receiverType); ok && method == "deinit" {
 		return Cleanup{Op: "map.deinit", Args: []Value{receiver}}, nil

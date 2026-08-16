@@ -102,6 +102,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::box_borrow":               true,
 	"std::internal::builtin::box_borrow_mut":           true,
 	"std::internal::builtin::box_deinit":               true,
+	"std::internal::builtin::box_take":                 true,
 	"std::internal::builtin::fs_create_dir":            true,
 	"std::internal::builtin::fs_exists":                true,
 	"std::internal::builtin::fs_metadata":              true,

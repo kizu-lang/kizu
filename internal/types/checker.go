@@ -242,6 +242,9 @@ type Checker struct {
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
+	// deinitOwners marks the base type names whose values carry a deinit
+	// contract, seeded from ast.DeinitOwners — the one definition of owner-ness.
+	deinitOwners map[string]bool
 }
 
 type enumType struct {
@@ -324,6 +327,7 @@ func New() *Checker {
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.stdMethods = stdmethod.IndexMethods(program.Decls)
+	c.deinitOwners = ast.DeinitOwners(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -357,6 +361,7 @@ func (c *Checker) Check(program *ast.Program) error {
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.stdMethods = stdmethod.IndexMethods(program.Decls)
+	c.deinitOwners = ast.DeinitOwners(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
@@ -1017,8 +1022,9 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		}
 		if !matchArmCleansPayload(arm.Body, arm.Binding) {
 			return errorf(
-				"type error: owner-payload union variant `%s::%s` must clean its payload via `%s.deinit()`",
-				decl.Name, variant.Name, arm.Binding)
+				"type error: owner-payload union variant `%s::%s` must clean its payload "+
+					"via `%s.deinit()` or `%s.deinit_all()`",
+				decl.Name, variant.Name, arm.Binding, arm.Binding)
 		}
 	}
 	return nil
@@ -1056,14 +1062,16 @@ func matchArmCleansPayload(body ast.Statement, binding string) bool {
 	return ownerUnionDeinitCall(expr.Expr, binding)
 }
 
-// ownerUnionDeinitCall reports whether expr is the cleanup call `binding.deinit()`.
+// ownerUnionDeinitCall reports whether expr is the cleanup call
+// `binding.deinit()` or `binding.deinit_all()`. Which of the two the payload
+// type accepts is enforced where the arm body is checked.
 func ownerUnionDeinitCall(expr ast.Expression, binding string) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Namespace || field.Name != "deinit" {
+	if !ok || field.Namespace || !typ.CleanupMethod(field.Name) {
 		return false
 	}
 	return ownerUnionIdentName(field.Receiver) == binding
@@ -1885,7 +1893,7 @@ func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
 		return errorf("type error: %s expects cleanup method call", keyword)
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "deinit" {
+	if !ok || !typ.CleanupMethod(field.Name) {
 		return errorf("type error: %s expects cleanup method call", keyword)
 	}
 	return nil
@@ -3871,6 +3879,11 @@ func (c *Checker) checkArrayConstructor(
 
 // rejectArrayElementType rejects element types that need unresolved lifetime rules.
 func (c *Checker) rejectArrayElementType(elem Type) error {
+	if c.ownerElemContainer(elem) {
+		return errorf(
+			"type error: Array element `%s` is an owner-element container; wrap it in a struct with deinit",
+			elem)
+	}
 	if err := c.rejectArrayStorageType(elem, map[Type]bool{}); err != nil {
 		return errorf("type error: Array element is not safe: %w", err)
 	}
@@ -4020,6 +4033,11 @@ func (c *Checker) checkArenaTypeApply(
 	if err != nil {
 		return "", err
 	}
+	if c.ownerType(elem) {
+		return "", errorf(
+			"type error: Arena cannot hold owner values; `%s` needs a deinit Arena never runs",
+			elem)
+	}
 	if len(args) != 1 {
 		return "", errorf(
 			"type error: `std::arena::new<%s>` expects exactly one allocator argument",
@@ -4142,6 +4160,8 @@ func boxPrimitiveMethod(name string) (string, bool) {
 		return "borrow_mut", true
 	case "std::internal::builtin::box_deinit":
 		return "deinit", true
+	case "std::internal::builtin::box_take":
+		return "take", true
 	default:
 		return "", false
 	}
@@ -4154,6 +4174,11 @@ func (c *Checker) checkBoxConstructor(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
+	if c.ownerElemContainer(elem) {
+		return "", true, errorf(
+			"type error: Box payload `%s` is an owner-element container; wrap it in a struct with deinit",
+			elem)
+	}
 	if len(args) != 2 {
 		return "", true, errorf("type error: `std::mem::Box<%s>` expects allocator and value",
 			elem)
@@ -4201,6 +4226,8 @@ func (c *Checker) checkBuiltinBoxMethod(
 			return Type("&" + string(elem)), nil
 		case "borrow_mut":
 			return Type("&var " + string(elem)), nil
+		case "take":
+			return elem, nil
 		default:
 			return typeVoid, nil
 		}
@@ -4314,19 +4341,39 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		}
 		return Type("!&var " + string(elem)), nil
 	case "get", "get_or_panic":
-		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
-			return "", err
+		return c.checkArrayPrimitiveGet(elem, name, args, env, unsafe)
+	case "deinit":
+		// The raw primitive frees only the buffer, with no owner-element rule:
+		// it is the one escape `Array.deinit_all` uses after consuming the
+		// elements, and only std source can name it.
+		if len(args) != 0 {
+			return "", errorf("type error: `Array.deinit` expects 0 args, got %d", len(args))
 		}
-		if !isGenericParamType(elem) && !c.isCopyType(elem) {
-			return "", errorf("type error: `Array.%s` requires copy element", name)
-		}
-		if name == "get" {
-			return Type("!" + string(elem)), nil
-		}
-		return elem, nil
+		return typeVoid, nil
 	default:
 		return c.checkArrayMethod(elem, name, args, env, unsafe)
 	}
+}
+
+// checkArrayPrimitiveGet validates the copy-only element reads behind the get
+// wrappers.
+func (c *Checker) checkArrayPrimitiveGet(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+		return "", err
+	}
+	if !isGenericParamType(elem) && !c.isCopyType(elem) {
+		return "", errorf("type error: `Array.%s` requires copy element", name)
+	}
+	if name == "get" {
+		return Type("!" + string(elem)), nil
+	}
+	return elem, nil
 }
 
 // isGenericParamType reports whether a type is a std generic wrapper parameter.
@@ -5217,12 +5264,12 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 	if _, ok := receiver.Receiver.(*ast.IdentExpr); !ok {
 		return errorf("type error: field method receiver only supports one direct field")
 	}
-	if field.Name != "deinit" || c.allowsDirectFieldCleanup(receiver, env) {
+	if !typ.CleanupMethod(field.Name) || c.allowsDirectFieldCleanup(receiver, env) {
 		return nil
 	}
 	return errorf(
-		"type error: field cleanup `%s.deinit` is only allowed inside owner deinit",
-		receiver.String(),
+		"type error: field cleanup `%s.%s` is only allowed inside owner deinit",
+		receiver.String(), field.Name,
 	)
 }
 
@@ -5297,15 +5344,16 @@ func (c *Checker) checkBoxReceiverMethod(
 	case "borrow_mut":
 		return "", errorf(
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
-	case "deinit":
+	case "deinit", "deinit_all":
 		if _, ok := field.Receiver.(*ast.IdentExpr); !ok &&
 			!c.directFieldCleanupReceiver(field.Receiver, env) {
-			return "", errorf("type error: `Box.deinit` requires local Box receiver")
+			return "", errorf("type error: `Box.%s` requires local Box receiver", field.Name)
 		}
-		if len(args) != 0 {
-			return "", errorf("type error: `Box.deinit` expects 0 args, got %d", len(args))
+		if err := c.cleanupChoiceError("Box", "payload", field.Name, elem); err != nil {
+			return "", err
 		}
-		return typeVoid, nil
+		return c.checkStdMethod("std::mem::Box", []Type{elem}, "Box", field.Name,
+			args, env, unsafe)
 	default:
 		receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 		method := c.implMethod(string(receiver), field.Name)
@@ -5538,8 +5586,9 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
 	}
-	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow, and
-	// `get` copies out of the array.
+	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow,
+	// `get` copies out of the array, and owner elements make shallow cleanup a
+	// leak (ADR-0091), so the element type picks between deinit and deinit_all.
 	switch name {
 	case "at", "at_mut":
 		return "", errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
@@ -5547,6 +5596,15 @@ func (c *Checker) checkArrayMethod(
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
+		}
+	case "deinit", "deinit_all":
+		if err := c.cleanupChoiceError("Array", "elements", name, elem); err != nil {
+			return "", err
+		}
+	case "set":
+		if c.ownerType(elem) {
+			return "", errorf(
+				"type error: `Array.set` would leak the replaced `%s` element", elem)
 		}
 	}
 	return c.checkStdMethod("std::array::Array", []Type{elem}, "Array", name, args, env, unsafe)
@@ -6276,6 +6334,47 @@ func assignableRawPointerDerefType(typ Type) (Type, error) {
 func isPointerType(typ Type) bool {
 	_, ok := pointerElement(typ)
 	return ok
+}
+
+// ownerType reports whether values of typ carry a deinit contract (ADR-0091).
+func (c *Checker) ownerType(typ Type) bool {
+	return ast.OwnerType(c.deinitOwners, string(typ))
+}
+
+// ownerElemContainer reports whether typ is a container of owner elements,
+// the class whose only cleanup is `deinit_all()`. Such a container cannot
+// itself be a container element: `deinit_all` consumes each element through the
+// element's own `deinit()`, which owner-element containers reject. The class
+// has one definition, ast.CleanupMethodName, shared with the `= fields;`
+// generator.
+func (c *Checker) ownerElemContainer(typ Type) bool {
+	return ast.CleanupMethodName(string(typ), c.deinitOwners) == "deinit_all"
+}
+
+// cleanupChoiceError rejects the cleanup name an element type does not accept
+// (ADR-0091): shallow `deinit` leaks owner contents, `deinit_all` requires
+// them. contents names what the container holds ("elements" or "payload").
+func (c *Checker) cleanupChoiceError(
+	container string,
+	contents string,
+	name string,
+	elem Type,
+) error {
+	switch name {
+	case "deinit":
+		if c.ownerType(elem) {
+			return errorf(
+				"type error: `%s.deinit` would leak the owner %s `%s`; use `%s.deinit_all`",
+				container, contents, elem, container)
+		}
+	case "deinit_all":
+		if !c.ownerType(elem) {
+			return errorf(
+				"type error: `%s.deinit_all` is for owner %s; `%s` needs no cleanup, use `%s.deinit`",
+				container, contents, elem, container)
+		}
+	}
+	return nil
 }
 
 // isCopyType reports whether values of typ can be duplicated safe code.
