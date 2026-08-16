@@ -421,6 +421,9 @@ let user = User { name: "alice", age: 30 };
 let user = User { name: "alice", age: 30, age: 31 }; // error: duplicate field `User.age`
 ```
 
+コンパイラが検査できない不変条件を field に持つ struct は `unsafe struct` で
+宣言します。規則は §12 にあります。
+
 ### 6.5 namespace access
 
 Kizu は型や名前空間に属する item lookup に `::` を使います。
@@ -1303,6 +1306,39 @@ fn caller(p: ptr<u8>) -> void {
 }
 ```
 
+コンパイラが検査できない不変条件を持つ struct は `unsafe struct` で宣言します。
+raw pointer を field に持つ struct は `unsafe struct` でなければ compile error です。
+
+```kizu
+/// data は少なくとも len バイトの読み出し可能なメモリを指す。
+unsafe struct Bytes {
+    data: ptr<const u8>,
+    len: usize,
+}
+```
+
+`unsafe struct` は field を `pub` にできません。Kizu の module は 1 file で
+`pub(crate)` / `pub(super)` を持たないため(§6.6)、不変条件を壊しうるコードは
+宣言と同じ file の中だけに閉じます。
+
+不変条件を作る操作 —— 構築と field への書き込み —— には `unsafe` が要ります。
+field の読みには要りません。読み出した raw pointer は、それを使う操作の側が
+`unsafe` を要求します。
+
+```kizu
+fn size(b: &Bytes) -> usize {
+    return b.len;
+}
+
+fn shrink(b: &var Bytes, n: usize) -> void {
+    unsafe b.len = n;
+}
+
+fn wrap(p: ptr<const u8>, n: usize) -> Bytes {
+    return unsafe Bytes { data: p, len: n };
+}
+```
+
 C ABI declaration は `extern "c" fn` で書きます。
 
 ```kizu
@@ -1334,6 +1370,10 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
 * raw pointer を field から読み出すのに `unsafe` は要らない。取り出した
   pointer を使う操作の側が要求する
+* `ptr<T>` / `?ptr<T>` を field に持つ struct を `unsafe struct` と宣言しないのは
+  compile error
+* `unsafe struct` の field に `pub` は付けられない
+* `unsafe struct` の構築と field への書き込みには `unsafe` が要る
 
 ```kizu
 struct Node {
@@ -1356,12 +1396,13 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
 | `extern_call` | `extern "c" fn` call |
 | `unsafe_call` | `unsafe fn` call |
+| `unsafe_field` | `unsafe struct` の構築 / field write |
 | `volatile` | volatile read/write primitive |
 
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は
 式の綴りが名乗ります(`ptr_read(p)`、`p.*`、`cast<ptr<u8>>(p)`)。綴りから
-読めない `extern_call` と `unsafe_call` は、呼び先の宣言(`extern "c" fn` /
-`unsafe fn`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
+読めない `extern_call` / `unsafe_call` / `unsafe_field` は、呼び先や書き込み先の
+宣言(`extern "c" fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
 マーカーが無いときにどの種類の操作だったかを伝えます。
 
 `atomic`、`unchecked_index` は採用しません。
@@ -1455,8 +1496,8 @@ C ABI と共有する layout は、将来 `extern struct` または `repr(c)` �
 
 ```kizu
 extern struct Point {
-    x: i32
-    y: i32
+    x: i32,
+    y: i32,
 }
 ```
 
@@ -1465,10 +1506,14 @@ extern struct Point {
 ```kizu
 @repr("c")
 struct Point {
-    x: i32
-    y: i32
+    x: i32,
+    y: i32,
 }
 ```
+
+C layout struct は `unsafe struct` の要求から外します。C ABI struct は field を
+`pub` にできないと構築できず、名前も C の側が決めるためです。raw pointer field を
+持つ C layout struct が safe Kizu の保証外である根拠は §0.1 が既に持っています。
 
 link name / library 指定も暗黙にしません。
 将来必要になった場合は attribute として扱います。

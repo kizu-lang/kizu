@@ -64,7 +64,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
 		case token.Unsafe:
-			program.Decls = append(program.Decls, p.parseUnsafeFnDecl(false, docText(p.cur)))
+			program.Decls = append(program.Decls, p.parseUnsafeDecl(docText(p.cur)))
 			p.nextToken()
 		case token.Extern:
 			program.Decls = append(program.Decls, p.parseExternDecl())
@@ -125,7 +125,7 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	case token.Function:
 		return p.parseFunctionDeclWithDoc(docs)
 	case token.Unsafe:
-		return p.parseUnsafeFnDecl(false, docs)
+		return p.parseUnsafeDecl(docs)
 	case token.Extern:
 		return p.parseExternDeclWithDoc(docs)
 	case token.Struct:
@@ -176,18 +176,28 @@ func functionStub(public bool, docs string) *ast.FunctionDecl {
 	}
 }
 
-// parseUnsafeFnDecl parses `unsafe fn` declarations. The marker says the caller
-// owns a memory safety obligation the compiler cannot check. The body is an
-// ordinary function body, so an unproven operation inside it still needs its
-// own `unsafe`.
-func (p *Parser) parseUnsafeFnDecl(public bool, docs string) ast.Decl {
-	fn := functionStub(public, docs)
-	fn.RequiresUnsafe = true
-	if !p.expectPeek(token.Function) {
-		p.errorf("expected fn after unsafe")
-		return fn
+// parseUnsafeDecl parses the declarations `unsafe` can introduce. In both the
+// marker says a memory safety obligation the compiler cannot check is owned by
+// someone else: by the caller for a function, by the writer of a field for a
+// struct.
+func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
+	switch p.peek.Type {
+	case token.Struct:
+		p.nextToken()
+		decl := p.parseStructDeclWithDoc(docs)
+		if structDecl, ok := decl.(*ast.StructDecl); ok {
+			structDecl.RequiresUnsafe = true
+		}
+		return decl
+	case token.Function:
+		fn := functionStub(false, docs)
+		fn.RequiresUnsafe = true
+		p.nextToken()
+		return p.parseFunctionAfterFn(fn, true)
+	default:
+		p.errorf("expected fn or struct after unsafe, got %s", tokenDescription(p.peek))
+		return functionStub(false, docs)
 	}
-	return p.parseFunctionAfterFn(fn, true)
 }
 
 // parseExternDecl parses extern "abi" fn declarations.
@@ -1601,7 +1611,7 @@ func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
 
 // parseStructLiteralExpr parses Type { field: value }.
 func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
-	expr := &ast.StructLiteralExpr{TypeName: typeName}
+	expr := &ast.StructLiteralExpr{TypeName: typeName, Span: tokenSpan(p.cur)}
 	p.nextToken()
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {

@@ -900,6 +900,40 @@ func TestParseRejectsUnsafeCapabilityBlock(t *testing.T) {
 	}
 }
 
+// TestParseUnsafeStruct checks invariant-bearing struct syntax.
+func TestParseUnsafeStruct(t *testing.T) {
+	input := `pub unsafe struct Buf {
+    data: ptr<u8>,
+    len: usize,
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `pub unsafe struct Buf { data: ptr<u8>, len: usize }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	decl, ok := program.Decls[0].(*ast.StructDecl)
+	if !ok || !decl.RequiresUnsafe || !decl.Public {
+		t.Fatalf("decl = %#v, want public unsafe struct", program.Decls[0])
+	}
+}
+
+// TestParseRejectsUnsafeOnOtherDeclarations keeps `unsafe` to the two
+// declarations it means something for.
+func TestParseRejectsUnsafeOnOtherDeclarations(t *testing.T) {
+	p := New(lexer.New("unsafe enum Color { Red }"))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	if got := p.Errors()[0]; !strings.Contains(got, "expected fn or struct after unsafe") {
+		t.Fatalf("first error = %q", got)
+	}
+}
+
 // TestParseUnsafeMethod checks caller-obligation method syntax.
 func TestParseUnsafeMethod(t *testing.T) {
 	input := `unsafe fn (self: Register) write() -> void {

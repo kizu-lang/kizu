@@ -86,6 +86,11 @@ var snippetCompletionItems = []completionItem{
 		"caller-obligation function declaration",
 		"unsafe fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
 	),
+	snippet(
+		"unsafe struct",
+		"invariant-bearing struct declaration",
+		"unsafe struct ${1:Name} {\n    $0\n}",
+	),
 	snippet("comptime if", "comptime if block", "comptime if ${1:condition} {\n    $0\n}"),
 	snippet("print", "print builtin", "print(${1:value})"),
 	snippet("error", "error builtin", "error(${1:message})"),

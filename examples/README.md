@@ -58,6 +58,7 @@ go test ./...
 | caller-obligation function | `requires_unsafe.kizu` | `unsafe fn` called through an `unsafe` marker |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `unsafe p.*.field` pointer access |
+| raw pointer field invariant | `unsafe_struct.kizu` | `unsafe struct` documents its invariant; reads are free, writes and construction are marked |
 | combined application | `user_registry.kizu` | exercises multiple features together |
 | `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
@@ -164,6 +165,10 @@ single source file. Run them with `kizu check <package-root>`.
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
 | raw pointer dereference requires `unsafe` | `negative/raw_pointer_deref_without_unsafe.kizu` | ``requires `unsafe` `` |
 | an `unsafe` marker must cover something | `negative/unsafe_marker_covers_nothing.kizu`, `negative/redundant_nested_unsafe_marker.kizu` | ``covers no operation that needs it`` |
+| raw pointer fields require `unsafe struct` | `negative/unsafe_struct_required.kizu` | ``must be declared `unsafe struct` `` |
+| `unsafe struct` cannot expose fields | `negative/unsafe_struct_pub_field.kizu` | ``cannot have `pub` field`` |
+| `unsafe struct` field writes require `unsafe` | `negative/unsafe_struct_field_write.kizu` | ``requires `unsafe` `` |
+| `unsafe struct` construction requires `unsafe` | `negative/unsafe_struct_construction.kizu` | ``requires `unsafe` `` |
 | const raw pointer dereference cannot be written | `negative/raw_pointer_const_write.kizu` | `const raw pointer` |
 | nullable raw pointer dereference is rejected | `negative/raw_pointer_nullable_deref.kizu` | `nullable raw pointer` |
 | raw pointer field access needs explicit dereference | `negative/raw_pointer_direct_field.kizu` | `has no fields` |

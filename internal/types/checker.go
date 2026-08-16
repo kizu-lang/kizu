@@ -121,6 +121,7 @@ const (
 	unsafePtrIntCast unsafeCapability = "ptr_int_cast"
 	unsafeExternCall unsafeCapability = "extern_call"
 	unsafeUnsafeCall unsafeCapability = "unsafe_call"
+	unsafeField      unsafeCapability = "unsafe_field"
 	unsafeVolatile   unsafeCapability = "volatile"
 )
 
@@ -767,6 +768,9 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
 			return err
 		}
+		if err := checkUnsafeStructFieldPolicy(decl, field, typ); err != nil {
+			return err
+		}
 		if typ == typeFunction {
 			return errorf("type error: struct field `%s.%s` cannot store Function",
 				decl.Name, field.Name)
@@ -1197,6 +1201,30 @@ func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 	}
 	return errorf("type error: borrow field `%s.%s` cannot store borrow",
 		decl.Name, field.Name)
+}
+
+// checkUnsafeStructFieldPolicy enforces what `unsafe struct` is for. A raw
+// pointer field means the struct carries an invariant the compiler cannot
+// check, so the declaration has to say so; and a struct that says so keeps
+// every field private, which is what pins the code that can break the
+// invariant to this one file (Kizu modules are one file and do not nest their
+// privacy, SPEC §6.6).
+func checkUnsafeStructFieldPolicy(decl *ast.StructDecl, field ast.Field, fieldType Type) error {
+	if decl.RequiresUnsafe {
+		if !field.Public {
+			return nil
+		}
+		return errorf("unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
+			"\nhelp: drop `pub` so only this file can break the invariant",
+			decl.Name, field.Name)
+	}
+	if !containsRawPointer(fieldType) {
+		return nil
+	}
+	return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
+		"so it must be declared `unsafe struct`"+
+		"\nhelp: write `unsafe struct %s` and document the invariant its fields carry",
+		decl.Name, field.Name, decl.Name)
 }
 
 // checkBorrowFieldPolicy rejects borrowed payloads.
@@ -4767,6 +4795,13 @@ func (c *Checker) checkStructLiteralExpr(
 	if decl == nil {
 		return "", errorf("type error: unknown struct `%s`", expr.TypeName)
 	}
+	if decl.RequiresUnsafe {
+		if err := requireUnsafeCapabilityAt(unsafe, unsafeField,
+			fmt.Sprintf("construction of `unsafe struct %s`", expr.TypeName),
+			expr.Span); err != nil {
+			return "", err
+		}
+	}
 	values := map[string]Type{}
 	exprs := map[string]ast.Expression{}
 	for _, field := range expr.Fields {
@@ -4806,8 +4841,21 @@ func (c *Checker) checkStructLiteralExpr(
 	return Type(expr.TypeName), nil
 }
 
-// checkFieldExpr returns the declared type of a struct field access.
+// checkFieldExpr returns the declared type of a struct field read.
 func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeMark) (Type, error) {
+	return c.checkFieldAccess(expr, env, unsafe, false)
+}
+
+// checkFieldAccess resolves a field access and, when it writes, requires the
+// `unsafe` that an `unsafe struct` puts on changing its invariant. Reads are
+// left unmarked: a raw pointer taken out of a struct does nothing until it is
+// used, and every use of one is marked already.
+func (c *Checker) checkFieldAccess(
+	expr *ast.FieldExpr,
+	env *scope,
+	unsafe unsafeMark,
+	write bool,
+) (Type, error) {
 	if expr.Namespace {
 		return c.checkNamespaceExpr(expr)
 	}
@@ -4840,6 +4888,13 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeM
 		if field.Name == expr.Name {
 			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
 				return "", err
+			}
+			if write && decl.RequiresUnsafe {
+				if err := requireUnsafeCapabilityAt(unsafe, unsafeField,
+					fmt.Sprintf("write to field `%s.%s`", receiver, field.Name),
+					expr.Span); err != nil {
+					return "", err
+				}
 			}
 			return Type(typ.Text(field.TypeName)), nil
 		}
@@ -5026,7 +5081,7 @@ func (c *Checker) checkAssignableField(
 			return "", err
 		}
 	}
-	return c.checkFieldExpr(expr, env, unsafe)
+	return c.checkFieldAccess(expr, env, unsafe, true)
 }
 
 // checkAssignableDeref validates mutation through an &var borrow or raw pointer.
@@ -6235,6 +6290,14 @@ func dynContract(typ Type) (string, bool) {
 // containsDynType reports whether a type spelling contains a dynamic object.
 func containsDynType(typ Type) bool {
 	return containsWrappedType(typ, dynTypeMatch)
+}
+
+// containsRawPointer reports whether a type spelling mentions ptr<T> anywhere,
+// including behind `?`, `[]`, and static type arguments.
+func containsRawPointer(typ Type) bool {
+	return containsWrappedType(typ, func(typ Type) bool {
+		return typ == "ptr"
+	})
 }
 
 // containsTypeValue reports whether a type spelling contains comptime-only type.

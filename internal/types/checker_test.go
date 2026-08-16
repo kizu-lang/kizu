@@ -443,7 +443,8 @@ func runErrorCases(t *testing.T, cases []struct {
 func TestUnsafeCapabilityMetadataMatchesChecker(t *testing.T) {
 	checkerCapabilities := []unsafeCapability{
 		unsafePtrRead, unsafePtrWrite, unsafePtrDeref, unsafePtrCast,
-		unsafePtrIntCast, unsafeExternCall, unsafeUnsafeCall, unsafeVolatile,
+		unsafePtrIntCast, unsafeExternCall, unsafeUnsafeCall, unsafeField,
+		unsafeVolatile,
 	}
 	for _, capability := range checkerCapabilities {
 		if _, ok := unsafecap.Lookup(string(capability)); !ok {
@@ -1945,6 +1946,95 @@ fn main() {
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsUnsafeStructErrors checks the rules a raw pointer field puts
+// on the struct that holds it.
+func TestCheckRejectsUnsafeStructErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "raw pointer field without unsafe struct",
+			source: `struct Buf { data: ptr<u8>, len: usize }
+fn main() {}`,
+			want: "must be declared `unsafe struct`",
+		},
+		{
+			name: "raw pointer behind a slice",
+			source: `struct Buf { data: []ptr<u8> }
+fn main() {}`,
+			want: "must be declared `unsafe struct`",
+		},
+		{
+			name: "nullable raw pointer field",
+			source: `struct Buf { data: ?ptr<u8> }
+fn main() {}`,
+			want: "must be declared `unsafe struct`",
+		},
+		{
+			name: "public field on unsafe struct",
+			source: `unsafe struct Buf { pub data: ptr<u8> }
+fn main() {}`,
+			want: "cannot have `pub` field `data`",
+		},
+		{
+			name: "field write without a marker",
+			source: `unsafe struct Buf { data: ptr<u8>, len: usize }
+fn shrink(b: &var Buf, n: usize) -> void {
+    b.len = n;
+}`,
+			want: "write to field `Buf.len` requires `unsafe`",
+		},
+		{
+			name: "construction without a marker",
+			source: `unsafe struct Buf { data: ptr<u8>, len: usize }
+fn wrap(p: ptr<u8>) -> Buf {
+    return Buf { data: p, len: 0 };
+}`,
+			want: "construction of `unsafe struct Buf` requires `unsafe`",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsUnsafeStruct checks that reading a field of an `unsafe struct`
+// stays unmarked while writing and constructing one carry the marker.
+func TestCheckAcceptsUnsafeStruct(t *testing.T) {
+	source := `unsafe struct Buf { data: ptr<u8>, len: usize }
+fn steal(b: &Buf) -> ptr<u8> {
+    return b.data;
+}
+fn size(b: &Buf) -> usize {
+    return b.len;
+}
+fn shrink(b: &var Buf, n: usize) -> void {
+    unsafe b.len = n;
+}
+fn wrap(p: ptr<u8>) -> Buf {
+    return unsafe Buf { data: p, len: 0 };
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsUnsafeStructWithoutRawPointer keeps `unsafe struct` available
+// to a struct whose invariant does not run through a raw pointer. The rule that
+// a raw pointer field forces the declaration does not mean it is the only thing
+// that may carry one.
+func TestCheckAcceptsUnsafeStructWithoutRawPointer(t *testing.T) {
+	source := `unsafe struct Slot { index: usize }
+fn take(s: &Slot) -> usize {
+    return s.index;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
 }
 
 // TestCheckUnsafeBoundaryErrorNamesTheOperationKind keeps unsafe diagnostics

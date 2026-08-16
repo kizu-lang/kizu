@@ -39,6 +39,11 @@ var capabilities = []Info{
 		ShortPermit: "covers calls to functions or methods declared `unsafe fn`",
 	},
 	{
+		Name: "unsafe_field",
+		ShortPermit: "covers establishing or changing the invariant of an " +
+			"`unsafe struct`, which is its construction and its field writes",
+	},
+	{
 		Name:        "volatile",
 		ShortPermit: "covers volatile reads and writes with `volatile_read` / `volatile_write`",
 	},
