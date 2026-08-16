@@ -1240,8 +1240,6 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readTryExpr(e, env)
 	case *ast.IndexExpr:
 		return c.readIndexExpr(e, env)
-	case *ast.ArenaNewExpr:
-		return c.readArenaNewExpr(e, env)
 	case *ast.StructLiteralExpr:
 		return c.readStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
@@ -1273,24 +1271,6 @@ func (c *Checker) readScalarExpr(expr ast.Expression) (string, error) {
 		return "type", nil
 	}
 	return readLiteralType(expr)
-}
-
-// readArenaNewExpr validates allocator use without consuming its capability.
-func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, error) {
-	if expr.Allocator == nil {
-		return "", errorf(
-			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
-			expr.TypeName)
-	}
-	got, err := c.readExpr(expr.Allocator, env)
-	if err != nil {
-		return "", err
-	}
-	if got != "Allocator" {
-		return "", errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
-			expr.TypeName, got)
-	}
-	return fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName), nil
 }
 
 // readControlExpr checks control flow expressions without consuming owned values.
@@ -4304,10 +4284,6 @@ func (c *Checker) newBinding(name string, typeName string) *binding {
 
 // setArenaProvenance records arena and handle origins for local bindings.
 func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *scope) {
-	if _, ok := expr.(*ast.ArenaNewExpr); ok {
-		value.arenaID = value.id
-		return
-	}
 	if isArenaConstructorExpr(expr) {
 		value.arenaID = value.id
 		return

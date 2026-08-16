@@ -431,15 +431,6 @@ func (c *graphChecker) qualifyTypeOrControlExpr(
 		}
 		cp.TypeName = typ
 		return &cp, nil
-	case *ast.ArenaNewExpr:
-		cp := *e
-		typ, err := c.resolveType(module, e.TypeName)
-		if err != nil {
-			return &cp, err
-		}
-		cp.TypeName = typ
-		cp.Allocator, err = c.qualifyExpr(module, e.Allocator)
-		return &cp, err
 	case *ast.StructLiteralExpr:
 		return c.qualifyStructLiteral(module, e)
 	case *ast.FieldExpr:

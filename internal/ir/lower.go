@@ -932,8 +932,6 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr, *ast.IndexExpr, *ast.DerefExpr:
 		return l.lowerAccessExpr(e)
-	case *ast.ArenaNewExpr:
-		return l.lowerArenaNewExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
@@ -950,16 +948,6 @@ func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
-}
-
-// lowerArenaNewExpr lowers an arena constructor.
-func (l *lowerer) lowerArenaNewExpr(expr *ast.ArenaNewExpr) (Value, error) {
-	allocator, err := l.lowerExpr(expr.Allocator)
-	if err != nil {
-		return Value{}, err
-	}
-	return l.emit("arena.new", "std::arena::Arena<"+expr.TypeName+">",
-		[]Value{allocator}, expr.TypeName), nil
 }
 
 // lowerDerefExpr reads what a borrow points at. The write side already stored

@@ -48,10 +48,6 @@ func nestedExpressionSpan(expr ast.Expression) ast.Span {
 		return expressionSpan(e.Value)
 	case *ast.IndexExpr:
 		return firstNonZeroSpan(e.Target, e.Index, e.Start, e.End)
-	case *ast.ArenaNewExpr:
-		if e.Allocator != nil {
-			return expressionSpan(e.Allocator)
-		}
 	case *ast.StructLiteralExpr:
 		if len(e.Fields) > 0 {
 			return expressionSpan(e.Fields[0].Value)

@@ -2903,8 +2903,6 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 		return c.checkUnsafeExpr(e, env, unsafe)
 	case *ast.IndexExpr:
 		return c.checkIndexExpr(e, env, unsafe)
-	case *ast.ArenaNewExpr:
-		return c.checkArenaNewExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.FieldExpr:
@@ -4818,31 +4816,6 @@ func (c *Checker) checkUnionConstructorCall(
 			unionType.name, field.Name, payload, got)
 	}
 	return Type(unionType.name), true, nil
-}
-
-// checkArenaNewExpr validates std::arena::Arena<T>(allocator) and returns the arena type.
-func (c *Checker) checkArenaNewExpr(
-	expr *ast.ArenaNewExpr,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if _, err := c.parseType(expr.TypeName); err != nil {
-		return "", err
-	}
-	if expr.Allocator == nil {
-		return "", errorf(
-			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
-			expr.TypeName)
-	}
-	got, err := c.checkExpr(expr.Allocator, env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if got != "Allocator" {
-		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
-			expr.TypeName, got)
-	}
-	return Type(fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName)), nil
 }
 
 // checkStructLiteralExpr validates field names and initializer types.
