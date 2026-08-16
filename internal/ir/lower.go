@@ -1292,8 +1292,15 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	// The attached cleanups run at this same program point, so a slot-backed
+	// receiver is loaded here: Cleanup args are always values, never `&var`
+	// slots, and no backend has to re-derive that rule.
+	cleanups := l.errorCleanups()
+	for index := range cleanups {
+		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
+	}
 	result := l.emit("error.try", errorUnionElementType(value.Type), []Value{value}, "")
-	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = l.errorCleanups()
+	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = cleanups
 	return result, nil
 }
 
