@@ -900,6 +900,40 @@ func TestParseRejectsUnsafeCapabilityBlock(t *testing.T) {
 	}
 }
 
+// TestParseAttachesSafetyCommentToMarkers checks the parser hands each `unsafe`
+// marker the justification written above its statement, and stops at the next
+// statement rather than leaking into it.
+func TestParseAttachesSafetyCommentToMarkers(t *testing.T) {
+	input := "fn main() {\n" +
+		"    // SAFETY: the caller checked the bound\n" +
+		"    unsafe ptr_write(dst, unsafe ptr_read(src));\n" +
+		"    unsafe ptr_write(dst, 0);\n" +
+		"}"
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	fn, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok || len(fn.Body.Statements) != 2 {
+		t.Fatalf("decl = %#v, want a function with two statements", program.Decls[0])
+	}
+	want := []string{"the caller checked the bound", ""}
+	for i, stmt := range fn.Body.Statements {
+		expr, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			t.Fatalf("statement %d = %#v, want an expression statement", i, stmt)
+		}
+		marker, ok := expr.Expr.(*ast.UnsafeExpr)
+		if !ok {
+			t.Fatalf("statement %d = %#v, want an unsafe marker", i, expr.Expr)
+		}
+		if marker.Safety != want[i] {
+			t.Fatalf("statement %d safety = %q, want %q", i, marker.Safety, want[i])
+		}
+	}
+}
+
 // TestParseUnsafeStruct checks invariant-bearing struct syntax.
 func TestParseUnsafeStruct(t *testing.T) {
 	input := `pub unsafe struct Buf {

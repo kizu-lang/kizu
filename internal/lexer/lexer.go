@@ -1,21 +1,37 @@
 package lexer
 
-import "github.com/kizu-lang/kizu/internal/token"
+import (
+	"strings"
+
+	"github.com/kizu-lang/kizu/internal/token"
+)
 
 // Lexer scans Kizu source text into tokens.
 type Lexer struct {
-	input              []rune
-	position           int
-	readPosition       int
-	ch                 rune
-	line               int
-	column             int
-	pendingDocComments []string
-	file               string
+	input        []rune
+	position     int
+	readPosition int
+	ch           rune
+	line         int
+	column       int
+	pending      comments
+	file         string
+}
+
+// comments are the comment lines the lexer keeps for the next real token: the
+// `///` lines that describe what a declaration promises, and the `// SAFETY:`
+// lines that say why a statement may break the compiler's proof. Every other
+// comment is read and dropped.
+type comments struct {
+	doc    []string
+	safety []string
 }
 
 var singleCharTokens = map[rune]token.Type{
 	'+': token.Plus,
+	// skipIgnored has already consumed every `//`, so a `/` left for the
+	// scanner is always division.
+	'/': token.Slash,
 	'&': token.Amp,
 	'*': token.Asterisk,
 	'%': token.Percent,
@@ -63,25 +79,30 @@ func NewFile(file string, input string) *Lexer {
 }
 
 // NextToken returns the next token from the input stream.
+//
+// skipIgnored has already read every comment before the token, so the comments
+// it kept are stamped on here rather than threaded through each scan helper.
 func (l *Lexer) NextToken() token.Token {
 	l.skipIgnored()
+	kept := l.pending
+	l.pending = comments{}
+	tok := l.scanToken()
+	tok.DocComments = kept.doc
+	tok.Safety = kept.safety
+	return tok
+}
 
-	tok := token.Token{File: l.file, Line: l.line, Column: l.column, DocComments: l.takeDocComments()}
+// scanToken reads the token at the current position.
+func (l *Lexer) scanToken() token.Token {
+	tok := token.Token{File: l.file, Line: l.line, Column: l.column}
 
 	switch l.ch {
-	case '/':
-		if l.peekChar() == '/' {
-			l.clearDocComments()
-			l.skipLineComment()
-			return l.NextToken()
-		}
-		tok = l.oneCharToken(token.Slash, tok.DocComments)
 	case '=':
 		if l.peekChar() == '>' {
-			tok = l.twoCharToken(token.FatArrow, tok.DocComments)
+			tok = l.twoCharToken(token.FatArrow)
 			break
 		}
-		tok = l.readCompoundToken(compoundTokens[l.ch], tok.DocComments)
+		tok = l.readCompoundToken(compoundTokens[l.ch])
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()
@@ -92,17 +113,17 @@ func (l *Lexer) NextToken() token.Token {
 			tok.Literal = l.readMultilineString()
 			return tok
 		}
-		tok = l.oneCharToken(token.Illegal, tok.DocComments)
+		tok = l.oneCharToken(token.Illegal)
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
 	default:
 		if spec, ok := compoundTokens[l.ch]; ok {
-			tok = l.readCompoundToken(spec, tok.DocComments)
+			tok = l.readCompoundToken(spec)
 			break
 		}
 		if tokType, ok := singleCharTokens[l.ch]; ok {
-			tok = l.oneCharToken(tokType, tok.DocComments)
+			tok = l.oneCharToken(tokType)
 			break
 		}
 		if isLetter(l.ch) {
@@ -115,7 +136,7 @@ func (l *Lexer) NextToken() token.Token {
 			tok.Literal = l.readNumber()
 			return tok
 		}
-		tok = l.oneCharToken(token.Illegal, tok.DocComments)
+		tok = l.oneCharToken(token.Illegal)
 	}
 
 	l.readChar()
@@ -123,38 +144,36 @@ func (l *Lexer) NextToken() token.Token {
 }
 
 // readCompoundToken reads an operator that may have a two-character spelling.
-func (l *Lexer) readCompoundToken(spec compoundToken, docs []string) token.Token {
+func (l *Lexer) readCompoundToken(spec compoundToken) token.Token {
 	if l.peekChar() == spec.next {
-		return l.twoCharToken(spec.compound, docs)
+		return l.twoCharToken(spec.compound)
 	}
-	return l.oneCharToken(spec.single, docs)
+	return l.oneCharToken(spec.single)
 }
 
 // oneCharToken returns a token for the current rune.
-func (l *Lexer) oneCharToken(t token.Type, docs []string) token.Token {
+func (l *Lexer) oneCharToken(t token.Type) token.Token {
 	return token.Token{
-		Type:        t,
-		Literal:     string(l.ch),
-		File:        l.file,
-		Line:        l.line,
-		Column:      l.column,
-		DocComments: docs,
+		Type:    t,
+		Literal: string(l.ch),
+		File:    l.file,
+		Line:    l.line,
+		Column:  l.column,
 	}
 }
 
 // twoCharToken returns a token spanning the current rune and the next rune.
-func (l *Lexer) twoCharToken(t token.Type, docs []string) token.Token {
+func (l *Lexer) twoCharToken(t token.Type) token.Token {
 	ch := l.ch
 	line := l.line
 	column := l.column
 	l.readChar()
 	return token.Token{
-		Type:        t,
-		Literal:     string([]rune{ch, l.ch}),
-		File:        l.file,
-		Line:        line,
-		Column:      column,
-		DocComments: docs,
+		Type:    t,
+		Literal: string([]rune{ch, l.ch}),
+		File:    l.file,
+		Line:    line,
+		Column:  column,
 	}
 }
 
@@ -192,20 +211,29 @@ func (l *Lexer) peekRune(offset int) rune {
 	return l.input[position]
 }
 
-// skipIgnored advances past insignificant whitespace and comments.
+// skipIgnored advances past insignificant whitespace and comments, keeping the
+// comment lines that belong to the token that follows. A blank line separates a
+// comment from what comes after it, so it drops what has been kept so far.
 func (l *Lexer) skipIgnored() {
 	for {
 		if l.skipWhitespace() {
-			l.clearDocComments()
+			l.pending = comments{}
 		}
 		if l.ch != '/' || l.peekChar() != '/' {
 			return
 		}
+		// Neither kept kind clears the other: a declaration may be described
+		// and its statement justified without one comment cancelling the
+		// other. Only a blank line or an ordinary comment clears both.
 		if l.isDocCommentStart() {
-			l.pendingDocComments = append(l.pendingDocComments, l.readDocComment())
+			l.pending.doc = append(l.pending.doc, l.readDocComment())
 			continue
 		}
-		l.clearDocComments()
+		if text, ok := l.readSafetyComment(); ok {
+			l.pending.safety = append(l.pending.safety, text)
+			continue
+		}
+		l.pending = comments{}
 		l.skipLineComment()
 	}
 }
@@ -234,6 +262,32 @@ func (l *Lexer) isDocCommentStart() bool {
 	return l.peekRune(2) == '/' && l.peekRune(3) != '/'
 }
 
+// safetyPrefix is the fixed marker a justification comment starts with. It is
+// ASCII and case sensitive so that what the compiler requires is one spelling,
+// not a family of near misses. What follows it is free text.
+const safetyPrefix = "SAFETY:"
+
+// readSafetyComment reads a `// SAFETY:` line and returns the text after the
+// prefix. It reports false without consuming anything when the line is an
+// ordinary comment.
+func (l *Lexer) readSafetyComment() (string, bool) {
+	offset := 2
+	for l.peekRune(offset) == ' ' || l.peekRune(offset) == '\t' {
+		offset++
+	}
+	for i, want := range safetyPrefix {
+		if l.peekRune(offset+i) != want {
+			return "", false
+		}
+	}
+	for i := 0; i < offset+len(safetyPrefix); i++ {
+		l.readChar()
+	}
+	start := l.position
+	l.skipLineComment()
+	return strings.TrimSpace(string(l.input[start:l.position])), true
+}
+
 // readDocComment advances past one doc comment and returns its normalized text.
 func (l *Lexer) readDocComment() string {
 	l.readChar()
@@ -251,21 +305,6 @@ func (l *Lexer) readDocComment() string {
 		end--
 	}
 	return string(l.input[start:end])
-}
-
-// clearDocComments discards doc comments no longer adjacent to a declaration.
-func (l *Lexer) clearDocComments() {
-	l.pendingDocComments = nil
-}
-
-// takeDocComments returns and clears comments for the next real token.
-func (l *Lexer) takeDocComments() []string {
-	if len(l.pendingDocComments) == 0 {
-		return nil
-	}
-	out := append([]string(nil), l.pendingDocComments...)
-	l.pendingDocComments = nil
-	return out
 }
 
 // readIdentifier reads an identifier or keyword literal.

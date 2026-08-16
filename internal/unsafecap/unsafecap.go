@@ -35,13 +35,13 @@ var capabilities = []Info{
 		ShortPermit: "covers mutable raw pointer writes with `ptr_write(p, value)`",
 	},
 	{
-		Name:        "unsafe_call",
-		ShortPermit: "covers calls to functions or methods declared `unsafe fn`",
-	},
-	{
-		Name: "unsafe_field",
+		Name: "struct_invariant",
 		ShortPermit: "covers establishing or changing the invariant of an " +
 			"`unsafe struct`, which is its construction and its field writes",
+	},
+	{
+		Name:        "unsafe_call",
+		ShortPermit: "covers calls to functions or methods declared `unsafe fn`",
 	},
 	{
 		Name:        "volatile",

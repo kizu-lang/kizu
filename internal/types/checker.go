@@ -114,15 +114,15 @@ var integerTypes = map[Type]bool{
 type unsafeCapability string
 
 const (
-	unsafePtrRead    unsafeCapability = "ptr_read"
-	unsafePtrWrite   unsafeCapability = "ptr_write"
-	unsafePtrDeref   unsafeCapability = "ptr_deref"
-	unsafePtrCast    unsafeCapability = "ptr_cast"
-	unsafePtrIntCast unsafeCapability = "ptr_int_cast"
-	unsafeExternCall unsafeCapability = "extern_call"
-	unsafeUnsafeCall unsafeCapability = "unsafe_call"
-	unsafeField      unsafeCapability = "unsafe_field"
-	unsafeVolatile   unsafeCapability = "volatile"
+	unsafePtrRead         unsafeCapability = "ptr_read"
+	unsafePtrWrite        unsafeCapability = "ptr_write"
+	unsafePtrDeref        unsafeCapability = "ptr_deref"
+	unsafePtrCast         unsafeCapability = "ptr_cast"
+	unsafePtrIntCast      unsafeCapability = "ptr_int_cast"
+	unsafeExternCall      unsafeCapability = "extern_call"
+	unsafeUnsafeCall      unsafeCapability = "unsafe_call"
+	unsafeStructInvariant unsafeCapability = "struct_invariant"
+	unsafeVolatile        unsafeCapability = "volatile"
 )
 
 // unsafeScope is one `unsafe` marker. A use is recorded on the innermost marker
@@ -155,12 +155,20 @@ func (c *Checker) underMark(
 ) (Type, error) {
 	inner := &unsafeScope{}
 	valueType, err := check(inner)
-	if err != nil || inner.used {
+	if err != nil {
 		return valueType, err
 	}
-	return valueType, errorAtCode(expr.Span, "unsafe.unused_marker", "%s",
-		"unsafe error: `unsafe` covers no operation that needs it"+
-			"\nhelp: remove `unsafe`")
+	if !inner.used {
+		return valueType, errorAtCode(expr.Span, "unsafe.unused_marker", "%s",
+			"unsafe error: `unsafe` covers no operation that needs it"+
+				"\nhelp: remove `unsafe`")
+	}
+	if expr.Safety == "" {
+		return valueType, errorAtCode(expr.Span, "unsafe.missing_safety_comment", "%s",
+			"unsafe error: `unsafe` needs a `// SAFETY:` comment on its statement"+
+				"\nhelp: write `// SAFETY: <why this holds>` on the line above")
+	}
+	return valueType, nil
 }
 
 // requireUnsafeCapabilityAt rejects an operation the compiler cannot prove when
@@ -184,6 +192,27 @@ func requireUnsafeCapabilityAt(
 		return errorAtCode(span, "unsafe.missing_marker", "%s", message)
 	}
 	return errorf("%s", message)
+}
+
+// requireUnsafeStructInvariant rejects an operation that establishes or changes
+// the invariant of an `unsafe struct` when no `unsafe` marker covers it.
+// Construction and field writes are the same rule: both put the struct into a
+// state only the author can vouch for.
+func requireUnsafeStructInvariant(
+	mark unsafeMark,
+	decl *ast.StructDecl,
+	action string,
+	fieldName string,
+	span ast.Span,
+) error {
+	if decl == nil || !decl.RequiresUnsafe {
+		return nil
+	}
+	target := "`unsafe struct " + decl.Name + "`"
+	if fieldName != "" {
+		target = "`" + decl.Name + "." + fieldName + "`"
+	}
+	return requireUnsafeCapabilityAt(mark, unsafeStructInvariant, action+" "+target, span)
 }
 
 // Checker validates type rules for a parsed program.
@@ -529,11 +558,31 @@ func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
 	return c.rejectPrivateType(returnType, "function `"+sig.Name+"` return type")
 }
 
+// requireObligationDoc requires a `///` comment where an obligation is created.
+// What the obligation says cannot be written in code, so a comment is the only
+// place it can live; the compiler cannot judge what is written there, but it
+// can tell that nothing was.
+func requireObligationDoc(requiresUnsafe bool, doc string, subject string, want string) error {
+	if !requiresUnsafe || doc != "" {
+		return nil
+	}
+	return errorf("unsafe error: `%s` needs a `///` comment stating %s"+
+		"\nhelp: write `/// <%s>` above the declaration", subject, want, want)
+}
+
 // checkPublicStructFields validates public fields on one struct.
 func (c *Checker) checkPublicStructFields(decl *ast.StructDecl) error {
 	for _, field := range decl.Fields {
 		if !field.Public {
 			continue
+		}
+		// An `unsafe struct` keeps every field private. That is what pins the
+		// code able to break its invariant to this one file: Kizu modules are
+		// one file and do not nest their privacy (SPEC §6.6).
+		if decl.RequiresUnsafe {
+			return errorf("unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
+				"\nhelp: drop `pub` so only this file can break the invariant",
+				decl.Name, field.Name)
 		}
 		context := "field `" + decl.Name + "." + field.Name + "`"
 		if err := c.rejectPrivateType(typ.Text(field.TypeName), context); err != nil {
@@ -754,6 +803,10 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
 		return err
 	}
+	if err := requireObligationDoc(decl.RequiresUnsafe, decl.Doc,
+		"unsafe struct "+decl.Name, "the invariant its fields carry"); err != nil {
+		return err
+	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
@@ -768,7 +821,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
 			return err
 		}
-		if err := checkUnsafeStructFieldPolicy(decl, field, typ); err != nil {
+		if err := checkRawPointerFieldPolicy(decl, field, typ); err != nil {
 			return err
 		}
 		if typ == typeFunction {
@@ -1027,6 +1080,10 @@ type functionParamInfo struct {
 // newFunctionType, which never sees a body: the body is what checking and
 // instantiation run over, not what a caller is promised.
 func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+	if err := requireObligationDoc(fn.RequiresUnsafe, fn.Doc,
+		"unsafe fn "+fn.Name, "what the caller must uphold"); err != nil {
+		return nil, err
+	}
 	fnType, err := c.newFunctionType(fn.FunctionSignature)
 	if err != nil {
 		return nil, err
@@ -1203,22 +1260,10 @@ func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 		decl.Name, field.Name)
 }
 
-// checkUnsafeStructFieldPolicy enforces what `unsafe struct` is for. A raw
-// pointer field means the struct carries an invariant the compiler cannot
-// check, so the declaration has to say so; and a struct that says so keeps
-// every field private, which is what pins the code that can break the
-// invariant to this one file (Kizu modules are one file and do not nest their
-// privacy, SPEC §6.6).
-func checkUnsafeStructFieldPolicy(decl *ast.StructDecl, field ast.Field, fieldType Type) error {
-	if decl.RequiresUnsafe {
-		if !field.Public {
-			return nil
-		}
-		return errorf("unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
-			"\nhelp: drop `pub` so only this file can break the invariant",
-			decl.Name, field.Name)
-	}
-	if !containsRawPointer(fieldType) {
+// checkRawPointerFieldPolicy rejects a raw pointer field on a struct that has
+// not said it carries an invariant the compiler cannot check.
+func checkRawPointerFieldPolicy(decl *ast.StructDecl, field ast.Field, fieldType Type) error {
+	if decl.RequiresUnsafe || !containsRawPointer(fieldType) {
 		return nil
 	}
 	return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
@@ -3327,6 +3372,8 @@ func expressionSpan(expr ast.Expression) ast.Span {
 		return e.Span
 	case *ast.DerefExpr:
 		return e.OperatorSpan
+	case *ast.StructLiteralExpr:
+		return e.Span
 	default:
 		return ast.Span{}
 	}
@@ -4795,12 +4842,9 @@ func (c *Checker) checkStructLiteralExpr(
 	if decl == nil {
 		return "", errorf("type error: unknown struct `%s`", expr.TypeName)
 	}
-	if decl.RequiresUnsafe {
-		if err := requireUnsafeCapabilityAt(unsafe, unsafeField,
-			fmt.Sprintf("construction of `unsafe struct %s`", expr.TypeName),
-			expr.Span); err != nil {
-			return "", err
-		}
+	if err := requireUnsafeStructInvariant(unsafe, decl,
+		"construction of", "", expr.Span); err != nil {
+		return "", err
 	}
 	values := map[string]Type{}
 	exprs := map[string]ast.Expression{}
@@ -4843,63 +4887,59 @@ func (c *Checker) checkStructLiteralExpr(
 
 // checkFieldExpr returns the declared type of a struct field read.
 func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeMark) (Type, error) {
-	return c.checkFieldAccess(expr, env, unsafe, false)
+	fieldType, _, err := c.resolveFieldExpr(expr, env, unsafe)
+	return fieldType, err
 }
 
-// checkFieldAccess resolves a field access and, when it writes, requires the
-// `unsafe` that an `unsafe struct` puts on changing its invariant. Reads are
-// left unmarked: a raw pointer taken out of a struct does nothing until it is
-// used, and every use of one is marked already.
-func (c *Checker) checkFieldAccess(
+// resolveFieldExpr resolves a field access to the field's declared type and the
+// struct that declares it, or nil for a receiver that is not a user struct.
+// Reading is all this does. Writing takes on whatever invariant the struct
+// carries, and that rule lives with the other assignment rules.
+func (c *Checker) resolveFieldExpr(
 	expr *ast.FieldExpr,
 	env *scope,
 	unsafe unsafeMark,
-	write bool,
-) (Type, error) {
+) (Type, *ast.StructDecl, error) {
 	if expr.Namespace {
-		return c.checkNamespaceExpr(expr)
+		fieldType, err := c.checkNamespaceExpr(expr)
+		return fieldType, nil, err
 	}
 	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
-		return "", errorf("type error: enum tag `%s.%s` must use `::`",
+		return "", nil, errorf("type error: enum tag `%s.%s` must use `::`",
 			enumType.name, expr.Name)
 	}
 	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
-		return "", errorf("type error: error `%s.%s` must use `::`", set.name, expr.Name)
+		return "", nil, errorf("type error: error `%s.%s` must use `::`", set.name, expr.Name)
 	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
-		return "", errorf("type error: union variant `%s.%s` must use `::`",
+		return "", nil, errorf("type error: union variant `%s.%s` must use `::`",
 			unionType.name, expr.Name)
 	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if receiver == "std::fs::Metadata" {
-		return checkFsMetadataField(expr.Name)
+		fieldType, err := checkFsMetadataField(expr.Name)
+		return fieldType, nil, err
 	}
 	if receiver == "std::fs::DirEntry" {
-		return checkFsDirEntryField(expr.Name)
+		fieldType, err := checkFsDirEntryField(expr.Name)
+		return fieldType, nil, err
 	}
 	decl := c.structs[string(receiver)]
 	if decl == nil {
-		return "", errorf("type error: `%s` has no fields", receiver)
+		return "", nil, errorf("type error: `%s` has no fields", receiver)
 	}
 	for _, field := range decl.Fields {
 		if field.Name == expr.Name {
 			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
-				return "", err
+				return "", nil, err
 			}
-			if write && decl.RequiresUnsafe {
-				if err := requireUnsafeCapabilityAt(unsafe, unsafeField,
-					fmt.Sprintf("write to field `%s.%s`", receiver, field.Name),
-					expr.Span); err != nil {
-					return "", err
-				}
-			}
-			return Type(typ.Text(field.TypeName)), nil
+			return Type(typ.Text(field.TypeName)), decl, nil
 		}
 	}
-	return "", errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+	return "", nil, errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
 }
 
 // checkPrivateFieldAccess enforces std and user module field visibility.
@@ -5081,7 +5121,15 @@ func (c *Checker) checkAssignableField(
 			return "", err
 		}
 	}
-	return c.checkFieldAccess(expr, env, unsafe, true)
+	fieldType, decl, err := c.resolveFieldExpr(expr, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if err := requireUnsafeStructInvariant(unsafe, decl,
+		"write to field", expr.Name, expr.Span); err != nil {
+		return "", err
+	}
+	return fieldType, nil
 }
 
 // checkAssignableDeref validates mutation through an &var borrow or raw pointer.
@@ -6295,9 +6343,7 @@ func containsDynType(typ Type) bool {
 // containsRawPointer reports whether a type spelling mentions ptr<T> anywhere,
 // including behind `?`, `[]`, and static type arguments.
 func containsRawPointer(typ Type) bool {
-	return containsWrappedType(typ, func(typ Type) bool {
-		return typ == "ptr"
-	})
+	return containsWrappedType(typ, isPointerType)
 }
 
 // containsTypeValue reports whether a type spelling contains comptime-only type.

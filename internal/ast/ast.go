@@ -964,6 +964,10 @@ func (e *TryExpr) String() string {
 // obligation for every unproven operation inside Value.
 type UnsafeExpr struct {
 	Value Expression
+	// Safety is the text of the `// SAFETY:` comment written above the
+	// statement this marker sits in. The comment justifies the statement, so
+	// every marker in one statement carries the same text.
+	Safety string
 	// Span points at the `unsafe` keyword, so a marker covering no such
 	// operation can be reported where it was written.
 	Span Span

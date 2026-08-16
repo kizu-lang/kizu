@@ -17,6 +17,9 @@ type Parser struct {
 	cur    token.Token
 	peek   token.Token
 	errors []Diagnostic
+	// safety is the `// SAFETY:` text of the statement being parsed. It is the
+	// justification every `unsafe` marker in that statement is stamped with.
+	safety string
 }
 
 // New creates a parser over l.
@@ -41,9 +44,11 @@ func (p *Parser) Diagnostics() []Diagnostic {
 	return p.errors
 }
 
-// docText normalizes doc comment lines attached by the lexer.
-func docText(tok token.Token) string {
-	return strings.Join(tok.DocComments, "\n")
+// commentText normalizes the comment lines the lexer attached to a token. Both
+// kinds go through here, so "the comment is empty" means one thing whether it
+// was written as `///` or as `// SAFETY:`.
+func commentText(lines []string) string {
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // ParseProgram parses a complete source file.
@@ -64,7 +69,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
 		case token.Unsafe:
-			program.Decls = append(program.Decls, p.parseUnsafeDecl(docText(p.cur)))
+			program.Decls = append(program.Decls, p.parseUnsafeDecl(commentText(p.cur.DocComments)))
 			p.nextToken()
 		case token.Extern:
 			program.Decls = append(program.Decls, p.parseExternDecl())
@@ -112,7 +117,7 @@ func (p *Parser) parseImportDecl() ast.Decl {
 
 // parsePublicDecl parses public top-level declarations.
 func (p *Parser) parsePublicDecl() ast.Decl {
-	docs := docText(p.cur)
+	docs := commentText(p.cur.DocComments)
 	p.nextToken()
 	decl := p.parseTopLevelDeclWithDoc(docs)
 	setPublicDecl(decl)
@@ -185,9 +190,7 @@ func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
 	case token.Struct:
 		p.nextToken()
 		decl := p.parseStructDeclWithDoc(docs)
-		if structDecl, ok := decl.(*ast.StructDecl); ok {
-			structDecl.RequiresUnsafe = true
-		}
+		decl.RequiresUnsafe = true
 		return decl
 	case token.Function:
 		fn := functionStub(false, docs)
@@ -202,7 +205,7 @@ func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
 
 // parseExternDecl parses extern "abi" fn declarations.
 func (p *Parser) parseExternDecl() ast.Decl {
-	return p.parseExternDeclWithDoc(docText(p.cur))
+	return p.parseExternDeclWithDoc(commentText(p.cur.DocComments))
 }
 
 // parseExternDeclWithDoc parses extern "abi" fn declarations with attached docs.
@@ -220,7 +223,7 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 
 // parseFunctionDecl parses a top-level function declaration.
 func (p *Parser) parseFunctionDecl() ast.Decl {
-	return p.parseFunctionDeclWithDoc(docText(p.cur))
+	return p.parseFunctionDeclWithDoc(commentText(p.cur.DocComments))
 }
 
 // parseFunctionDeclWithDoc parses a top-level function declaration with attached docs.
@@ -393,11 +396,13 @@ func (p *Parser) parseReceiver(fn *ast.FunctionDecl) bool {
 
 // parseStructDecl parses a top-level struct declaration.
 func (p *Parser) parseStructDecl() ast.Decl {
-	return p.parseStructDeclWithDoc(docText(p.cur))
+	return p.parseStructDeclWithDoc(commentText(p.cur.DocComments))
 }
 
-// parseStructDeclWithDoc parses a top-level struct declaration with attached docs.
-func (p *Parser) parseStructDeclWithDoc(docs string) ast.Decl {
+// parseStructDeclWithDoc parses a top-level struct declaration with attached
+// docs. It returns the concrete declaration so a caller that has more to say
+// about it — `unsafe struct` — can say it without a type assertion.
+func (p *Parser) parseStructDeclWithDoc(docs string) *ast.StructDecl {
 	decl := &ast.StructDecl{Doc: docs}
 	if !p.expectPeek(token.Ident) {
 		return decl
@@ -437,7 +442,7 @@ func (p *Parser) parseStructFields() []ast.Field {
 
 // parseStructField parses one struct field declaration.
 func (p *Parser) parseStructField() (ast.Field, bool) {
-	field := ast.Field{Doc: docText(p.cur)}
+	field := ast.Field{Doc: commentText(p.cur.DocComments)}
 	if p.cur.Type == token.Public {
 		field.Public = true
 		p.nextToken()
@@ -468,7 +473,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 
 // parseEnumDecl parses a top-level Zig/C-style tag enum declaration.
 func (p *Parser) parseEnumDecl() ast.Decl {
-	return p.parseEnumDeclWithDoc(docText(p.cur))
+	return p.parseEnumDeclWithDoc(commentText(p.cur.DocComments))
 }
 
 // parseEnumDeclWithDoc parses a top-level enum declaration with attached docs.
@@ -508,7 +513,7 @@ func (p *Parser) startsErrorSetDecl() bool {
 
 // parseErrorSetDecl parses `error Name { A, B }`.
 func (p *Parser) parseErrorSetDecl() ast.Decl {
-	return p.parseErrorSetDeclWithDoc(docText(p.cur))
+	return p.parseErrorSetDeclWithDoc(commentText(p.cur.DocComments))
 }
 
 // parseErrorSetDeclWithDoc parses an error set declaration with attached docs.
@@ -538,7 +543,7 @@ func (p *Parser) parseNameList(label string) ([]string, map[string]string) {
 			return names, tagDocsOrNil(docs)
 		}
 		names = append(names, p.cur.Literal)
-		if text := docText(p.cur); text != "" {
+		if text := commentText(p.cur.DocComments); text != "" {
 			docs[p.cur.Literal] = text
 		}
 		if !p.consumeListDelimiter(label) {
@@ -559,7 +564,7 @@ func tagDocsOrNil(tagDocs map[string]string) map[string]string {
 
 // parseUnionDecl parses a top-level tagged union declaration.
 func (p *Parser) parseUnionDecl() ast.Decl {
-	return p.parseUnionDeclWithDoc(docText(p.cur))
+	return p.parseUnionDeclWithDoc(commentText(p.cur.DocComments))
 }
 
 // parseUnionDeclWithDoc parses a top-level union declaration with attached docs.
@@ -603,7 +608,7 @@ func (p *Parser) parseUnionVariants() []ast.UnionVariant {
 
 // parseUnionVariant parses one tagged union variant declaration.
 func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
-	variant := ast.UnionVariant{Doc: docText(p.cur)}
+	variant := ast.UnionVariant{Doc: commentText(p.cur.DocComments)}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected union variant, got %s", tokenDescription(p.cur))
 		return variant, false
@@ -688,6 +693,19 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 
 // parseStatement parses a single statement.
 func (p *Parser) parseStatement() ast.Statement {
+	// A `// SAFETY:` comment justifies the statement it sits above, so it is in
+	// scope until that statement ends. Restoring the enclosing one afterwards is
+	// what makes a nested statement need its own comment rather than inherit.
+	enclosing := p.safety
+	p.safety = commentText(p.cur.Safety)
+	stmt := p.parseStatementForm()
+	p.safety = enclosing
+	return stmt
+}
+
+// parseStatementForm parses the statement itself, once its `// SAFETY:` comment
+// is in scope.
+func (p *Parser) parseStatementForm() ast.Statement {
 	if stmt, ok := p.parseKeywordStatement(); ok {
 		return stmt
 	}
@@ -1210,7 +1228,11 @@ func (p *Parser) parseMarkerExpression() ast.Expression {
 	case token.Try:
 		return &ast.TryExpr{Value: p.parseExpression(prefix)}
 	default:
-		return &ast.UnsafeExpr{Value: p.parseExpression(prefix), Span: tokenSpan(marker)}
+		return &ast.UnsafeExpr{
+			Value:  p.parseExpression(prefix),
+			Safety: p.safety,
+			Span:   tokenSpan(marker),
+		}
 	}
 }
 

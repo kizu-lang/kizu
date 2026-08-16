@@ -169,6 +169,8 @@ single source file. Run them with `kizu check <package-root>`.
 | `unsafe struct` cannot expose fields | `negative/unsafe_struct_pub_field.kizu` | ``cannot have `pub` field`` |
 | `unsafe struct` field writes require `unsafe` | `negative/unsafe_struct_field_write.kizu` | ``requires `unsafe` `` |
 | `unsafe struct` construction requires `unsafe` | `negative/unsafe_struct_construction.kizu` | ``requires `unsafe` `` |
+| `unsafe fn` / `unsafe struct` need a `///` comment | `negative/unsafe_fn_without_doc.kizu`, `negative/unsafe_struct_without_doc.kizu` | ``needs a `///` comment`` |
+| `unsafe` needs a `// SAFETY:` comment | `negative/unsafe_without_safety_comment.kizu`, `negative/unsafe_safety_comment_is_empty.kizu`, `negative/unsafe_safety_comment_does_not_reach_nested.kizu` | ``needs a `// SAFETY:` comment`` |
 | const raw pointer dereference cannot be written | `negative/raw_pointer_const_write.kizu` | `const raw pointer` |
 | nullable raw pointer dereference is rejected | `negative/raw_pointer_nullable_deref.kizu` | `nullable raw pointer` |
 | raw pointer field access needs explicit dereference | `negative/raw_pointer_direct_field.kizu` | `has no fields` |

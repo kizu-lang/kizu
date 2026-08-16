@@ -331,14 +331,41 @@ attachment rule:
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します
 * slash 3 つだけの `///` を doc comment とし、`//// text` は通常の line comment です
+* `// SAFETY:` は「通常の `//` comment」ではないので、間に挟まっても attach を切りません
 * block doc comment は採用しません
 
-doc comment は型検査、ownership、name resolution、ABI、実行時挙動に
-影響しません。private function にも書けますが、doc comment の有無は
-visibility rule を変えません。
+doc comment は ownership、name resolution、ABI、実行時挙動に影響しません。
+型検査に対しても、書いてある内容は影響しません。ただし `unsafe fn` と
+`unsafe struct` は doc comment の**存在**を要求します(§12)。private function にも
+書けますが、doc comment の有無は visibility rule を変えません。
 tooling は hover / completion / generated docs で attached documentation を表示できます。
 最初の段落は summary として扱えますが、compiler diagnostic の意味づけには
 使いません。
+
+#### safety comment
+
+`unsafe` を含む文の理由は `// SAFETY:` line comment で書きます。`///` が
+「この宣言は何を約束するか」を書くのに対し、`// SAFETY:` は「なぜここで
+コンパイラの証明を外してよいか」を書きます。
+
+```kizu
+// SAFETY: 直前に cap を確認済みなので len <= cap は保たれる
+unsafe self.len = self.len + 1;
+```
+
+attachment rule:
+
+* 接頭辞は ASCII 固定の `// SAFETY:` です。`//` と `SAFETY:` の間の空白は
+  任意個で、後続の本文は自由記述です
+* 文の直前にある連続した `// SAFETY:` 行だけを対象にします。空行、通常の
+  `//` comment、他の token が間にあると attach しません。`///` は「通常の `//`
+  comment」ではないので、間に挟まっても attach を切りません
+* attach 先は式ではなく文です。1 つの文の中の `unsafe` はすべて同じ comment に
+  結びつきます
+* 外側の文に付けた comment は、その中の文には届きません
+
+`unsafe` を含む文が `// SAFETY:` を持たないのは compile error です(§12)。
+comment の内容は検査しません。
 
 ### 6.3.1 defer / errdefer cleanup statement
 
@@ -1339,6 +1366,28 @@ fn wrap(p: ptr<const u8>, n: usize) -> Bytes {
 }
 ```
 
+義務を作る宣言 —— `unsafe fn` と `unsafe struct` —— には `///` が要ります。義務の
+中身はコードに書けず、書ける場所は comment だけです。何が書いてあるかは検査しませんが、
+何も書いていないことは検査します。
+
+義務を果たす場所 —— `unsafe` を含む文 —— には直前の `// SAFETY:` が要ります。
+
+```kizu
+/// p は少なくとも 1 バイトの書き込み可能なメモリを指していなければならない。
+unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
+    // SAFETY: p の有効性は呼び出し側が保証する(unsafe fn の契約)
+    unsafe ptr_write(p, value);
+}
+```
+
+接頭辞は ASCII 固定の `// SAFETY:` です。後続の本文は自由記述で、日本語で構いません。
+単位は式ではなく文なので、1 つの文に `unsafe` が複数あっても comment は 1 つで足ります。
+
+```kizu
+// SAFETY: dst と src はどちらも 1 バイト分有効であると呼び出し側が保証する
+unsafe ptr_write(dst, unsafe ptr_read(src));
+```
+
 C ABI declaration は `extern "c" fn` で書きます。
 
 ```kizu
@@ -1374,6 +1423,10 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
   compile error
 * `unsafe struct` の field に `pub` は付けられない
 * `unsafe struct` の構築と field への書き込みには `unsafe` が要る
+* `unsafe fn` / `unsafe struct` に `///` が無い、または本文が空なのは compile error
+* `unsafe` を含む文の直前に `// SAFETY:` が無い、または本文が空なのは compile error
+* `// SAFETY:` は文に付く。外側の文の comment は内側の文には届かない
+* `// SAFETY:` と文の間に空行や他の comment を挟むと、その comment は届かない
 
 ```kizu
 struct Node {
@@ -1396,12 +1449,12 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
 | `extern_call` | `extern "c" fn` call |
 | `unsafe_call` | `unsafe fn` call |
-| `unsafe_field` | `unsafe struct` の構築 / field write |
+| `struct_invariant` | `unsafe struct` の構築 / field write |
 | `volatile` | volatile read/write primitive |
 
 この表の名前はソースには書きません。マーカーは `unsafe` の 1 語で、種類は
 式の綴りが名乗ります(`ptr_read(p)`、`p.*`、`cast<ptr<u8>>(p)`)。綴りから
-読めない `extern_call` / `unsafe_call` / `unsafe_field` は、呼び先や書き込み先の
+読めない `extern_call` / `unsafe_call` / `struct_invariant` は、呼び先や書き込み先の
 宣言(`extern "c" fn` / `unsafe fn` / `unsafe struct`)と module path が名乗ります。名前が残るのは診断メッセージの中だけで、
 マーカーが無いときにどの種類の操作だったかを伝えます。
 

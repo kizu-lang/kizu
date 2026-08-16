@@ -84,6 +84,11 @@ type Token struct {
 	Line        int
 	Column      int
 	DocComments []string
+	// Safety holds the `// SAFETY:` lines written directly above this token.
+	// A `///` line describes what a declaration promises; a `// SAFETY:` line
+	// says why a statement is allowed to break the compiler's proof, so the two
+	// are kept apart rather than merged into one comment list.
+	Safety []string
 	// File is the source path the token was read from, carried so spans built
 	// from it can name the file a diagnostic points into.
 	File string

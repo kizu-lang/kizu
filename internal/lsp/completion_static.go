@@ -80,16 +80,24 @@ var snippetCompletionItems = []completionItem{
 	snippet("return", "return statement", "return ${1:value};"),
 	snippet("defer", "defer cleanup", "defer ${1:value}.deinit();"),
 	snippet("errdefer", "errdefer cleanup", "errdefer ${1:value}.deinit();"),
-	snippet("unsafe", "unsafe marker", "unsafe ${1:expression}"),
+	// The marker and the two declarations each require a comment, so each
+	// snippet expands with the comment it needs rather than into an error.
+	snippet(
+		"unsafe",
+		"unsafe marker",
+		"// SAFETY: ${1:why this holds}\nunsafe ${2:expression}",
+	),
 	snippet(
 		"unsafe fn",
 		"caller-obligation function declaration",
-		"unsafe fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
+		"/// ${1:what the caller must uphold}\n"+
+			"unsafe fn ${2:name}(${3}) -> ${4:void} {\n    $0\n}",
 	),
 	snippet(
 		"unsafe struct",
 		"invariant-bearing struct declaration",
-		"unsafe struct ${1:Name} {\n    $0\n}",
+		"/// ${1:the invariant its fields carry}\n"+
+			"unsafe struct ${2:Name} {\n    $0\n}",
 	),
 	snippet("comptime if", "comptime if block", "comptime if ${1:condition} {\n    $0\n}"),
 	snippet("print", "print builtin", "print(${1:value})"),
