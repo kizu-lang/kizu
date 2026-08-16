@@ -81,6 +81,7 @@ var TypedCoreBuiltins = map[string]string{
 // source needs told -- a primitive it names that does not exist would lower to
 // nothing.
 var primitives = map[string]bool{
+	"std::internal::builtin::arena":                    true,
 	"std::internal::builtin::array":                    true,
 	"std::internal::builtin::array_append":             true,
 	"std::internal::builtin::array_at":                 true,

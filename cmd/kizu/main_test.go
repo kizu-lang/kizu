@@ -1494,7 +1494,7 @@ fn (self: Bag) deinit() -> void {
     return;
 }
 fn make_bag() -> !Bag {
-    var values = std::array::Array<i64>(std::mem::page_allocator());
+    var values = std::array::new<i64>(std::mem::page_allocator());
     try values.append(10);
     try values.append(20);
     return Bag { values: values };
@@ -1549,7 +1549,7 @@ fn (self: Bag) deinit() -> void {
     return;
 }
 fn make_bag() -> !Bag {
-    var stmts = std::array::Array<Stmt>(std::mem::page_allocator());
+    var stmts = std::array::new<Stmt>(std::mem::page_allocator());
     try stmts.append(Stmt::Add(10));
     try stmts.append(Stmt::Done(20));
     return Bag { stmts: stmts };
@@ -1705,7 +1705,7 @@ func TestBuildTargetNativeArenaCommandSmoke(t *testing.T) {
 struct User { age: i64, }
 fn main() {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     let alice = users.add(User { age: 41 });
     print(users.get(alice).age);
     users.deinit();

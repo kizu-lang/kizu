@@ -190,7 +190,7 @@ func TestLowerErrDeferRunsOnlyOnErrorReturn(t *testing.T) {
 struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     return BuildError::Boom;
 }
@@ -204,7 +204,7 @@ fn main() {}`)
 struct User { name: []u8 }
 fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
-    let users = std::arena::Arena<User>(allocator);
+    let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
     return users;
 }
@@ -489,7 +489,7 @@ struct User {
     name: []u8,
 }
 fn main(allocator: Allocator) {
-    let users = arena::Arena<User>(allocator);
+    let users = arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();

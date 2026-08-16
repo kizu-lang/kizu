@@ -1117,13 +1117,14 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		}
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
-		if typeApply.Callee.String() == "std::arena::Arena" {
+		// The std storage constructors lower to one instruction each, so their
+		// std bodies are never walked. Every other generic call falls through.
+		switch typeApply.Callee.String() {
+		case "std::arena::new":
 			return l.lowerArenaConstructor(typeApply.TypeArg, expr.Args)
-		}
-		if typeApply.Callee.String() == "std::array::Array" {
+		case "std::array::new":
 			return l.lowerArrayConstructor(typeApply.TypeArg, expr.Args)
-		}
-		if typeApply.Callee.String() == "std::map::Map" {
+		case "std::map::new":
 			return l.lowerMapConstructor(typeApply.TypeArg, expr.Args)
 		}
 		if name, ok := l.functionCalleeName(typeApply.Callee); ok {
@@ -1251,11 +1252,11 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
 }
 
-// lowerArenaConstructor lowers std::arena::Arena<T>(allocator).
+// lowerArenaConstructor lowers std::arena::new<T>(allocator).
 func (l *lowerer) lowerArenaConstructor(typeArg string, args []ast.Expression) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf(
-			"ir error: std::arena::Arena<%s> expects exactly one allocator argument",
+			"ir error: std::arena::new<%s> expects exactly one allocator argument",
 			typeArg,
 		)
 	}
@@ -1266,7 +1267,7 @@ func (l *lowerer) lowerArenaConstructor(typeArg string, args []ast.Expression) (
 	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
-// lowerArrayConstructor lowers std::array::Array<T>(allocator).
+// lowerArrayConstructor lowers std::array::new<T>(allocator).
 func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf(
@@ -1281,7 +1282,7 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
-// lowerMapConstructor lowers std::map::Map<[]u8, V>(allocator).
+// lowerMapConstructor lowers std::map::new<[]u8, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
 	mapType, valueType, ok := mapInstanceType(typeArg)
 	if !ok {

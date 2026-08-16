@@ -48,7 +48,7 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeArenaNew lowers std::arena::Arena<T>(allocator).
+// writeArenaNew lowers std::arena::new<T>(allocator).
 func (e *emitter) writeArenaNew(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || !isArenaLLVMType(instr.Result.Type) {
 		return fmt.Errorf("llvm error: arena.new expects allocator -> Arena<T>")

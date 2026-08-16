@@ -54,7 +54,7 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeMapNew lowers std::map::Map<[]u8, V>(allocator).
+// writeMapNew lowers std::map::new<[]u8, V>(allocator).
 func (e *emitter) writeMapNew(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || !isMapLLVMType(instr.Result.Type) {
 		return fmt.Errorf("llvm error: map.new expects allocator -> Map<[]u8, V>")

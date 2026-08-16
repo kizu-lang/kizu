@@ -3580,10 +3580,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return typ, true, err
 	case "std::io::evented", "std::internal::builtin::io_evented":
 		return "", true, errorf("type error: `std::io::evented` is not implemented")
-	case "std::array::Array":
-		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
-	case "std::map::Map":
-		return "", true, errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	default:
 		return "", false, nil
 	}
@@ -3821,7 +3817,7 @@ func (c *Checker) checkFsPathArgs(
 	return "Io", path, nil
 }
 
-// checkArrayConstructor validates std::array::Array<T>(allocator).
+// checkArrayConstructor validates std::array::new<T>(allocator).
 func (c *Checker) checkArrayConstructor(
 	elem Type,
 	args []ast.Expression,
@@ -3965,9 +3961,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if name == "int_from_ptr" {
 		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
-	if name == "std::arena::Arena" {
-		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
-	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -3986,7 +3979,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	return "", errorf("type error: `%s` does not take static arguments", name)
 }
 
-// checkArenaTypeApply validates std::arena::Arena<T>(allocator).
+// checkArenaTypeApply validates std::arena::new<T>(allocator).
 func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
@@ -3995,7 +3988,7 @@ func (c *Checker) checkArenaTypeApply(
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", errorf("type error: std::arena::Arena expects 1 type argument")
+		return "", errorf("type error: std::arena::new expects 1 type argument")
 	}
 	elem, err := c.parseType(parts[0])
 	if err != nil {
@@ -4003,7 +3996,7 @@ func (c *Checker) checkArenaTypeApply(
 	}
 	if len(args) != 1 {
 		return "", errorf(
-			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			"type error: `std::arena::new<%s>` expects exactly one allocator argument",
 			elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -4011,7 +4004,7 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("type error: `std::arena::new<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return Type(fmt.Sprintf("std::arena::Arena<%s>", elem)), nil
@@ -4025,6 +4018,10 @@ func (c *Checker) checkBuiltinTypeApply(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
+	if name == "std::internal::builtin::arena" {
+		typ, err := c.checkArenaTypeApply(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -4124,7 +4121,7 @@ func boxPrimitiveMethod(name string) (string, bool) {
 	}
 }
 
-// checkBoxConstructor validates std::mem::Box<T>(allocator, value).
+// checkBoxConstructor validates std::mem::box<T>(allocator, value).
 func (c *Checker) checkBoxConstructor(
 	elem Type,
 	args []ast.Expression,
@@ -4719,9 +4716,6 @@ func (c *Checker) checkUserCallArg(
 
 // userCallArityError reports declared function arity using source signatures when useful.
 func userCallArityError(name string, fn *functionType, got int) error {
-	if name == "std::string::String" {
-		return errorf("type error: `std::string::String` expects allocator")
-	}
 	if len(fn.params) == 1 {
 		paramName := fn.sig.Params[0].Name
 		if paramName != "" {
