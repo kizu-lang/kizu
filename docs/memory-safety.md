@@ -14,7 +14,7 @@ Safe Kizu means code that does not use operations whose safety cannot be proven 
 the compiler, such as raw pointer dereference, unchecked access, or actual C ABI
 calls.
 
-`@unsafe` marks a trusted boundary. It does not disable type checking, move
+`unsafe` marks a trusted boundary. It does not disable type checking, move
 checking, borrow checking, arena provenance checking, or structured concurrency
 rules.
 
@@ -123,19 +123,21 @@ policy.
 ### Unsafe and Raw Pointers
 
 - Raw pointer types are distinct from safe borrows.
-- Raw pointer operations require an explicit `@unsafe` capability.
+- Raw pointer operations require an explicit `unsafe` marker on the expression.
 - Nullable raw pointers cannot be read as non-null pointers without an explicit
   check or conversion policy.
-- `@unsafe` code carries the memory-safety obligation for raw pointer operations,
+- `unsafe` code carries the memory-safety obligation for raw pointer operations,
   C ABI calls, and unchecked operations.
-- `@unsafe` does not permit moved values, borrow escape, or safe-borrow lifetime
+- `unsafe` does not permit moved values, borrow escape, or safe-borrow lifetime
   extension.
+- An `unsafe` marker that covers no unproven operation is rejected, so the word
+  states what happens rather than what would be allowed.
 
-| Operation | Safe Kizu | `@unsafe` Kizu |
+| Operation | Safe Kizu | under `unsafe` |
 | --- | --- | --- |
-| call `extern "c" fn` | rejected | allowed by `extern_call`, caller owns ABI and memory obligation |
-| call `@requires_unsafe() fn` | rejected | allowed by `unsafe_call`, caller owns API-specific obligation |
-| raw pointer read/write | rejected | allowed by `ptr_read` / `ptr_write` / `ptr_deref` |
+| call `extern "c" fn` | rejected | allowed, caller owns ABI and memory obligation |
+| call `unsafe fn` | rejected | allowed, caller owns API-specific obligation |
+| raw pointer read/write/dereference | rejected | allowed |
 | nullable raw pointer read as non-null | rejected | rejected until an explicit conversion policy exists |
 | use moved safe value | rejected | rejected |
 | return or store safe borrow | rejected | rejected |
@@ -224,8 +226,9 @@ memory-safety invariants to representative examples.
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
 | deferred cleanup is explicit and ownership-checked | `examples/defer_cleanup.kizu`, `examples/defer_order.kizu` | `examples/negative/defer_non_cleanup_expr.kizu`, `examples/negative/defer_invalid_statement.kizu`, `examples/negative/defer_after_move.kizu`, `examples/negative/defer_after_explicit_deinit.kizu`, `examples/negative/defer_cleanup_while_borrowed.kizu` |
-| `@unsafe` is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
-| `@unsafe` does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
+| `unsafe` is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
+| `unsafe` does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
+| `unsafe` states what happens | | `examples/negative/unsafe_marker_covers_nothing.kizu`, `examples/negative/redundant_nested_unsafe_marker.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
 | file I/O uses explicit Io and `!T` errors | `examples/fs_read.kizu` | `examples/negative/fs_read_missing.kizu`, `examples/negative/fs_read_without_io.kizu`, `examples/negative/fs_write_wrong_bytes.kizu`, `examples/negative/fs_failing_io.kizu` |
@@ -239,8 +242,8 @@ Before declaring safe Kizu memory-safe:
 3. `go test ./cmd/kizu -run TestConformance -count=1` must pass.
 4. Every invariant in this document must have regression coverage.
 5. New trusted std APIs must document their safe-side preconditions here.
-6. New `@unsafe` capabilities must add negative tests proving safe checks remain
-   active around the `@unsafe` boundary.
+6. New kinds of unproven operation must add negative tests proving safe checks
+   remain active around the `unsafe` marker.
 
 ## Open Risks
 

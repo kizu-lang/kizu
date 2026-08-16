@@ -747,8 +747,6 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerLoopBranch("continue", s.Label)
 	case *ast.MatchStmt:
 		return l.lowerMatchStmt(s)
-	case *ast.UnsafeStmt:
-		return l.lowerBlock(s.Body)
 	case *ast.ComptimeIfStmt:
 		return l.lowerComptimeIfStmt(s)
 	default:
@@ -800,6 +798,9 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 // silently compile the assignment away.
 func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 	switch t := target.(type) {
+	case *ast.UnsafeExpr:
+		// The marker says who owns the obligation, not where the store goes.
+		return l.lowerAssignTarget(t.Value, value)
 	case *ast.IdentExpr:
 		if slot, ok := l.slotPointer(t); ok {
 			l.emit("ref.store", "void", []Value{slot, value}, "")
@@ -921,6 +922,10 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
+	case *ast.UnsafeExpr:
+		// The marker is a claim about who owns the obligation, not an
+		// operation, so it lowers to whatever it covers.
+		return l.lowerExpr(e.Value)
 	case *ast.IfStmt, *ast.MatchStmt:
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:

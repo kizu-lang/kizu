@@ -17,7 +17,7 @@ type comptimeValue struct {
 func (c *Checker) checkComptimeExpr(
 	expr *ast.ComptimeExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	typ, err := c.checkExpr(expr.Expr, env, unsafe)
 	if err != nil {
@@ -38,7 +38,7 @@ func (c *Checker) checkComptimeIfStmt(
 	stmt *ast.ComptimeIfStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	cond, err := c.evalComptime(stmt.Condition)
 	if err != nil {

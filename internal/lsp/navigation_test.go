@@ -47,27 +47,6 @@ func TestHoverReturnsSymbolDetails(t *testing.T) {
 	requireHoverContains(t, function, "Inspects a trace value.")
 }
 
-// TestHoverReturnsUnsafeCapabilityDetails checks @unsafe capability documentation.
-func TestHoverReturnsUnsafeCapabilityDetails(t *testing.T) {
-	source := `fn main(p: ptr<u8>) -> void {
-    @unsafe(ptr_write, volatile) {
-        ptr_write(p, 1);
-    }
-}`
-	uri := "file:///main.kizu"
-	server := NewServer(nil, nil)
-	server.documents[uri] = source
-
-	ptrWrite := server.hover(uri, positionIn(source, "ptr_write, volatile", "ptr_write"))
-	requireHoverContains(t, ptrWrite, "@unsafe(ptr_write)")
-	requireHoverContains(t, ptrWrite, "ptr_write(p, value)")
-	requireHoverContains(t, ptrWrite, "does not disable type, move, or borrow checks")
-
-	volatile := server.hover(uri, positionIn(source, "ptr_write, volatile", "volatile"))
-	requireHoverContains(t, volatile, "@unsafe(volatile)")
-	requireHoverContains(t, volatile, "volatile_write(p, value)")
-}
-
 // TestDocumentSymbolsReturnOutline checks VSCode Outline gets useful structure.
 func TestDocumentSymbolsReturnOutline(t *testing.T) {
 	symbols := DocumentSymbols(navigationFixture())

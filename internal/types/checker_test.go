@@ -436,17 +436,22 @@ func runErrorCases(t *testing.T, cases []struct {
 	}
 }
 
-// TestUnsafeCapabilityMetadataMatchesChecker keeps semantic and LSP docs in sync.
+// TestUnsafeCapabilityMetadataMatchesChecker keeps every operation kind the
+// checker can name backed by help text. The name never appears in source, so a
+// missing entry would silently drop the only line that tells the reader which
+// kind of operation the marker would cover.
 func TestUnsafeCapabilityMetadataMatchesChecker(t *testing.T) {
-	for name := range knownUnsafeCapabilities {
-		if _, ok := unsafecap.Lookup(name); !ok {
-			t.Fatalf("checker capability %q is missing metadata", name)
+	checkerCapabilities := []unsafeCapability{
+		unsafePtrRead, unsafePtrWrite, unsafePtrDeref, unsafePtrCast,
+		unsafePtrIntCast, unsafeExternCall, unsafeUnsafeCall, unsafeVolatile,
+	}
+	for _, capability := range checkerCapabilities {
+		if _, ok := unsafecap.Lookup(string(capability)); !ok {
+			t.Fatalf("checker capability %q is missing metadata", capability)
 		}
 	}
-	for _, info := range unsafecap.All() {
-		if _, ok := knownUnsafeCapabilities[info.Name]; !ok {
-			t.Fatalf("metadata capability %q is missing checker support", info.Name)
-		}
+	if got, want := len(unsafecap.All()), len(checkerCapabilities); got != want {
+		t.Fatalf("metadata has %d capabilities, checker names %d", got, want)
 	}
 }
 
@@ -1499,12 +1504,9 @@ fn main() {
 func TestCheckAcceptsUnsafePointerOperations(t *testing.T) {
 	source := `extern "c" fn source() -> ptr<i64>
 fn main() {
-    @unsafe(extern_call, ptr_read, ptr_write) {
-        let p = source();
-        ptr_write(p, 1);
-        print(ptr_read(p));
-    }
-}`
+    let p = unsafe source();
+    unsafe ptr_write(p, 1);
+    unsafe print(ptr_read(p));}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1514,22 +1516,13 @@ fn main() {
 func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
 	source := `struct Node { tag: i64, name: []u8 }
 fn read_tag(node: ptr<const Node>) -> i64 {
-    @unsafe(ptr_deref) {
-        return node.*.tag;
-    }
-}
+    return unsafe node.*.tag;}
 fn write_tag(node: ptr<Node>, tag: i64) -> void {
-    @unsafe(ptr_deref) {
-        node.*.tag = tag;
-        return;
-    }
-}
+    unsafe node.*.tag = tag;
+    return;}
 fn replace(node: ptr<Node>, value: Node) -> void {
-    @unsafe(ptr_deref) {
-        node.* = value;
-        return;
-    }
-}`
+    unsafe node.* = value;
+    return;}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1636,11 +1629,8 @@ fn main() -> !void {
     let _ = Byte { value: 65 };
     let _ = ByteValue::Item(66);
     let counter = Counter {};
-    @unsafe(extern_call, ptr_write) {
-        let p = raw_byte();
-        ptr_write(p, 67);
-    }
-    print(counter.push(68));
+    let p = unsafe raw_byte();
+    unsafe ptr_write(p, 67);    print(counter.push(68));
     print(take_i32(-1));
     print(returns_u8());
     print(try returns_error());
@@ -1690,12 +1680,9 @@ fn main() {
 func TestCheckAcceptsUnsafePointerCast(t *testing.T) {
 	source := `extern "c" fn raw() -> ptr<const u8>
 fn main() {
-    @unsafe(extern_call, ptr_cast, ptr_write) {
-        let p = raw();
-        let writable = cast<ptr<u8>>(p);
-        ptr_write(writable, 1);
-    }
-}`
+    let p = unsafe raw();
+    let writable = unsafe cast<ptr<u8>>(p);
+    unsafe ptr_write(writable, 1);}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1704,13 +1691,10 @@ fn main() {
 // TestCheckAcceptsPointerIntCastAndVolatile checks low-level unsafe primitives.
 func TestCheckAcceptsPointerIntCastAndVolatile(t *testing.T) {
 	source := `fn main() {
-    @unsafe(ptr_int_cast, volatile) {
-        let p = ptr_from_int<ptr<u32>>(0);
-        volatile_write(p, 1);
-        let value = volatile_read(p);
-        print(value);
-    }
-}`
+    let p = unsafe ptr_from_int<ptr<u32>>(0);
+    unsafe volatile_write(p, 1);
+    let value = unsafe volatile_read(p);
+    print(value);}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1718,12 +1702,9 @@ func TestCheckAcceptsPointerIntCastAndVolatile(t *testing.T) {
 
 // TestCheckAcceptsRequiresUnsafeCall checks caller-obligation functions.
 func TestCheckAcceptsRequiresUnsafeCall(t *testing.T) {
-	source := `@requires_unsafe() fn source() -> i64 { return 1; }
+	source := `unsafe fn source() -> i64 { return 1; }
 fn main() {
-    @unsafe(unsafe_call) {
-        print(source());
-    }
-}`
+    unsafe print(source());}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1732,15 +1713,12 @@ fn main() {
 // TestCheckAcceptsRequiresUnsafeMethodCall checks caller-obligation methods.
 func TestCheckAcceptsRequiresUnsafeMethodCall(t *testing.T) {
 	source := `struct Register { value: i64 }
-@requires_unsafe() fn (self: Register) read() -> i64 {
+unsafe fn (self: Register) read() -> i64 {
     return self.value;
 }
 fn main() {
     let register = Register { value: 1 };
-    @unsafe(unsafe_call) {
-        print(register.read());
-    }
-}`
+    print(unsafe register.read());}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
@@ -1758,7 +1736,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 			source: `fn bad(p: ptr<const u8>) -> ptr<u8> {
     return cast<ptr<u8>>(p);
 }`,
-			want: "pointer cast requires @unsafe(ptr_cast)",
+			want: "pointer cast requires `unsafe`",
 		},
 		{
 			name: "invalid value cast",
@@ -1928,14 +1906,14 @@ fn main() {
     let p = source();
     print(ptr_read(p));
 }`,
-			want: "call to `source` requires @unsafe(extern_call)",
+			want: "call to `source` requires `unsafe`",
 		},
 		{
 			name: "ptr read outside unsafe with pointer param",
 			source: `fn read(p: ptr<u8>) -> u8 {
     return ptr_read(p);
 }`,
-			want: "`ptr_read` requires @unsafe(ptr_read)",
+			want: "`ptr_read` requires `unsafe`",
 		},
 		{
 			name: "extern call outside unsafe",
@@ -1943,34 +1921,36 @@ fn main() {
 fn main() {
     print(source());
 }`,
-			want: "call to `source` requires @unsafe(extern_call)",
+			want: "call to `source` requires `unsafe`",
 		},
 		{
 			name: "requires unsafe call outside unsafe",
-			source: `@requires_unsafe() fn source() -> i64 { return 1 ;}
+			source: `unsafe fn source() -> i64 { return 1 ;}
 fn main() {
     print(source());
 }`,
-			want: "call to `source` requires @unsafe(unsafe_call)",
+			want: "call to `source` requires `unsafe`",
 		},
 		{
 			name: "requires unsafe method call outside unsafe",
 			source: `struct Register { value: i64 }
-@requires_unsafe() fn (self: Register) read() -> i64 {
+unsafe fn (self: Register) read() -> i64 {
     return self.value;
 }
 fn main() {
     let register = Register { value: 1 };
     print(register.read());
 }`,
-			want: "call to `Register.read` requires @unsafe(unsafe_call)",
+			want: "call to `Register.read` requires `unsafe`",
 		},
 	}
 	runErrorCases(t, cases)
 }
 
-// TestCheckUnsafeBoundaryErrorReportsCapabilityHelp keeps unsafe diagnostics actionable.
-func TestCheckUnsafeBoundaryErrorReportsCapabilityHelp(t *testing.T) {
+// TestCheckUnsafeBoundaryErrorNamesTheOperationKind keeps unsafe diagnostics
+// actionable. Source no longer spells capability names, so the diagnostic is
+// the only place a reader learns which kind of operation needed the marker.
+func TestCheckUnsafeBoundaryErrorNamesTheOperationKind(t *testing.T) {
 	err := checkSource(`fn read(p: ptr<u8>) -> u8 {
     return ptr_read(p);
 }`)
@@ -1981,14 +1961,14 @@ func TestCheckUnsafeBoundaryErrorReportsCapabilityHelp(t *testing.T) {
 	if !errors.As(err, &diagnostic) {
 		t.Fatalf("got %T, want DiagnosticError", err)
 	}
-	if diagnostic.Code != "unsafe.missing_capability" {
-		t.Fatalf("code = %q, want unsafe.missing_capability",
+	if diagnostic.Code != "unsafe.missing_marker" {
+		t.Fatalf("code = %q, want unsafe.missing_marker",
 			diagnostic.Code)
 	}
 	for _, want := range []string{
-		"`ptr_read` requires @unsafe(ptr_read)",
+		"`ptr_read` requires `unsafe`",
 		"at 2:12",
-		"help: `@unsafe(ptr_read)` permits raw pointer reads with `ptr_read(p)`",
+		"help: `unsafe` here covers raw pointer reads with `ptr_read(p)`",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
@@ -1996,98 +1976,84 @@ func TestCheckUnsafeBoundaryErrorReportsCapabilityHelp(t *testing.T) {
 	}
 }
 
-// TestCheckRejectsUnsafeCapabilityErrors checks capability-specific unsafe operations.
-func TestCheckRejectsUnsafeCapabilityErrors(t *testing.T) {
+// TestCheckRejectsUnmarkedUnsafeOperations checks that each kind of unproven
+// operation needs a marker. A marker covers the expression it wraps, so a
+// second statement needs its own.
+func TestCheckRejectsUnmarkedUnsafeOperations(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
 		want   string
 	}{
 		{
-			name: "ptr_from_int outside ptr_int capability",
+			name: "ptr_from_int without a marker",
 			source: `fn main() {
     let p = ptr_from_int<ptr<u32>>(0);
     volatile_write(p, 1);
 }`,
-			want: "`ptr_from_int` requires @unsafe(ptr_int_cast)",
+			want: "`ptr_from_int` requires `unsafe`",
 		},
 		{
-			name: "volatile write outside volatile capability",
+			name: "marker on one statement does not reach the next",
 			source: `fn main() {
-    @unsafe(ptr_int_cast) {
-        let p = ptr_from_int<ptr<u32>>(0);
-        volatile_write(p, 1);
-    }
+    let p = unsafe ptr_from_int<ptr<u32>>(0);
+    volatile_write(p, 1);
 }`,
-			want: "`volatile_write` requires @unsafe(volatile)",
+			want: "`volatile_write` requires `unsafe`",
 		},
 		{
 			name: "write through const pointer",
 			source: `extern "c" fn source() -> ptr<const i64>
 fn main() {
-    @unsafe(extern_call, ptr_write) {
-        let p = source();
-        ptr_write(p, 1);
-    }
-}`,
+    let p = unsafe source();
+    unsafe ptr_write(p, 1);}`,
 			want: "ptr_write` expects mutable non-null raw pointer",
 		},
 	}
 	runErrorCases(t, cases)
 }
 
-// TestCheckRejectsUnusedUnsafeCapability checks that a declared capability no
-// operation needed is rejected, so the list states what the block does rather
-// than what it would be allowed to do.
-func TestCheckRejectsUnusedUnsafeCapability(t *testing.T) {
+// TestCheckRejectsUnusedUnsafeMarker checks that an `unsafe` covering no
+// unproven operation is rejected, so the marker means "this happens here"
+// rather than "this would be allowed".
+func TestCheckRejectsUnusedUnsafeMarker(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
 		want   string
 	}{
 		{
-			name: "capability list is wider than the body",
-			source: `fn read(p: ptr<const u8>) -> u8 {
-    @unsafe(ptr_read, ptr_write) {
-        return ptr_read(p);
-    }
-}`,
-			want: "capability `ptr_write` is declared but never used",
-		},
-		{
-			name: "block declares a capability and uses none",
+			name: "marker covers an ordinary call",
 			source: `fn main() {
-    @unsafe(volatile) {
-        print(1);
-    }
+    unsafe print(1);
 }`,
-			want: "capability `volatile` is declared but never used",
+			want: "`unsafe` covers no operation that needs it",
 		},
 		{
-			name: "inner block re-declares what the outer one granted",
+			name: "inner marker already covers the only operation",
 			source: `fn write(p: ptr<u8>, value: u8) -> void {
-    @unsafe(ptr_write) {
-        @unsafe(ptr_write) {
-            ptr_write(p, value);
-        }
-    }
+    unsafe (unsafe ptr_write(p, value));
 }`,
-			want: "capability `ptr_write` is declared but never used",
+			want: "`unsafe` covers no operation that needs it",
+		},
+		{
+			name: "marker on an assignment target that needs none",
+			source: `fn main() {
+    var count = 0;
+    unsafe count = 1;
+    print(count);
+}`,
+			want: "`unsafe` covers no operation that needs it",
 		},
 	}
 	runErrorCases(t, cases)
 }
 
-// TestCheckAcceptsCapabilityUsedByNestedBlock checks that an operation inside a
-// nested block counts as a use of the outer declaration that granted it.
-func TestCheckAcceptsCapabilityUsedByNestedBlock(t *testing.T) {
-	source := `fn write(p: ptr<u8>, value: u8) -> u8 {
-    @unsafe(ptr_write) {
-        @unsafe(ptr_read) {
-            ptr_write(p, value);
-            return ptr_read(p);
-        }
-    }
+// TestCheckAcceptsOneMarkerForSeveralOperations checks that a marker covers
+// every unproven operation in the expression it wraps, not just the outermost.
+func TestCheckAcceptsOneMarkerForSeveralOperations(t *testing.T) {
+	source := `fn copy(dst: ptr<u8>, src: ptr<const u8>) -> void {
+    unsafe ptr_write(dst, ptr_read(src));
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -2106,7 +2072,7 @@ func TestCheckRejectsRawPointerDerefSyntaxErrors(t *testing.T) {
 			source: `fn read(p: ptr<u8>) -> u8 {
     return p.*;
 }`,
-			want: "raw pointer dereference requires @unsafe(ptr_deref)",
+			want: "raw pointer dereference requires `unsafe`",
 		},
 		{
 			name: "raw pointer field outside unsafe",
@@ -2114,46 +2080,34 @@ func TestCheckRejectsRawPointerDerefSyntaxErrors(t *testing.T) {
 fn read(p: ptr<Node>) -> i64 {
     return p.*.tag;
 }`,
-			want: "raw pointer dereference requires @unsafe(ptr_deref)",
+			want: "raw pointer dereference requires `unsafe`",
 		},
 		{
 			name: "nullable raw pointer deref",
 			source: `fn read(p: ?ptr<u8>) -> u8 {
-    @unsafe(ptr_deref) {
-        return p.*;
-    }
-}`,
+    return unsafe p.*;}`,
 			want: "nullable raw pointer `?ptr<u8>` cannot be dereferenced",
 		},
 		{
 			name: "assign through const raw pointer",
 			source: `fn write(p: ptr<const u8>) -> void {
-    @unsafe(ptr_deref) {
-        p.* = 1;
-        return;
-    }
-}`,
+    unsafe p.* = 1;
+    return;}`,
 			want: "cannot assign through const raw pointer `ptr<const u8>`",
 		},
 		{
 			name: "assign field through const raw pointer",
 			source: `struct Node { tag: i64 }
 fn write(p: ptr<const Node>) -> void {
-    @unsafe(ptr_deref) {
-        p.*.tag = 1;
-        return;
-    }
-}`,
+    unsafe p.*.tag = 1;
+    return;}`,
 			want: "cannot assign through const raw pointer `ptr<const Node>`",
 		},
 		{
 			name: "direct raw pointer field access",
 			source: `struct Node { tag: i64 }
 fn read(p: ptr<Node>) -> i64 {
-    @unsafe(ptr_deref) {
-        return p.tag;
-    }
-}`,
+    return p.tag;}`,
 			want: "`ptr<Node>` has no fields",
 		},
 	}

@@ -40,7 +40,6 @@ func TestParseTopLevelErrorNamesAllowedDeclarations(t *testing.T) {
 	for _, want := range []string{
 		"expected declaration",
 		"fn, test, import",
-		"@requires_unsafe()",
 		`identifier "foo"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -833,41 +832,44 @@ fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&var T { ` +
 	}
 }
 
-// TestParseUnsafeAndExtern checks Phase 12 @unsafe and C ABI declarations.
+// TestParseUnsafeAndExtern checks the unsafe marker and C ABI declarations.
 func TestParseUnsafeAndExtern(t *testing.T) {
 	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
 fn main() {
-    @unsafe(extern_call, ptr_read) {
-        print(get_byte(ptr_read_ptr()));
-    }
-}`
+    unsafe print(get_byte(ptr_read_ptr()));}`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
-fn main() { @unsafe(extern_call, ptr_read) { print(get_byte(ptr_read_ptr())); } }`
+fn main() { unsafe print(get_byte(ptr_read_ptr())); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-// TestParseUnsafeFnIsRejected keeps the removed caller-obligation syntax out.
-func TestParseUnsafeFnIsRejected(t *testing.T) {
-	p := New(lexer.New(`unsafe fn poke() { return; }`))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		t.Fatal("expected parser error")
+// TestParseUnsafeExprBindsLikeTry checks the marker takes one expression, so an
+// assignment keeps its target inside the marker and its value outside.
+func TestParseUnsafeExprBindsLikeTry(t *testing.T) {
+	input := `fn main() {
+    unsafe p.* = read();
+    return unsafe ptr_read(p);
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	if got := p.Errors()[0]; !strings.Contains(got, "unsafe fn is not supported") {
-		t.Fatalf("first error = %q", got)
+	want := `fn main() { unsafe p.* = read(); return unsafe ptr_read(p); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-// TestParseRequiresUnsafeFunction checks caller-obligation function syntax.
-func TestParseRequiresUnsafeFunction(t *testing.T) {
-	input := `pub @requires_unsafe() fn poke() -> i64 {
+// TestParseUnsafeFunction checks caller-obligation function syntax.
+func TestParseUnsafeFunction(t *testing.T) {
+	input := `pub unsafe fn poke() -> i64 {
     return 1;
 }`
 	p := New(lexer.New(input))
@@ -875,7 +877,7 @@ func TestParseRequiresUnsafeFunction(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `pub @requires_unsafe() fn poke() -> i64 { return 1; }`
+	want := `pub unsafe fn poke() -> i64 { return 1; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -885,33 +887,22 @@ func TestParseRequiresUnsafeFunction(t *testing.T) {
 	}
 }
 
-// TestParseUnsafeCapabilityListRejectsEmpty checks capability lists are explicit.
-func TestParseUnsafeCapabilityListRejectsEmpty(t *testing.T) {
-	p := New(lexer.New(`fn main() { @unsafe() { return; } }`))
+// TestParseRejectsUnsafeCapabilityBlock keeps the removed capability block out.
+// `@` no longer starts a statement, so the old spelling fails at the sigil.
+func TestParseRejectsUnsafeCapabilityBlock(t *testing.T) {
+	p := New(lexer.New("fn main() { @unsafe(ptr_read) { return; } }"))
 	p.ParseProgram()
 	if len(p.Errors()) == 0 {
 		t.Fatal("expected parser error")
 	}
-	if got := p.Errors()[0]; !strings.Contains(got, "expected unsafe capability") {
+	if got := p.Errors()[0]; !strings.Contains(got, "expected expression, got `@`") {
 		t.Fatalf("first error = %q", got)
 	}
 }
 
-// TestParseUnsafeCapabilityListRejectsUnknown checks capability names are reserved.
-func TestParseUnsafeCapabilityListRejectsUnknown(t *testing.T) {
-	p := New(lexer.New(`fn main() { @unsafe(anything) { return; } }`))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		t.Fatal("expected parser error")
-	}
-	if got := p.Errors()[0]; !strings.Contains(got, "unknown unsafe capability") {
-		t.Fatalf("first error = %q", got)
-	}
-}
-
-// TestParseRequiresUnsafeMethod checks caller-obligation method syntax.
-func TestParseRequiresUnsafeMethod(t *testing.T) {
-	input := `@requires_unsafe() fn (self: Register) write() -> void {
+// TestParseUnsafeMethod checks caller-obligation method syntax.
+func TestParseUnsafeMethod(t *testing.T) {
+	input := `unsafe fn (self: Register) write() -> void {
     return;
 }`
 	p := New(lexer.New(input))
@@ -1002,16 +993,13 @@ fn main() {
 func TestParseCast(t *testing.T) {
 	input := `fn main() {
     let x = cast<i32>(1);
-    @unsafe(ptr_cast) {
-        let p = cast<ptr<u8>>(raw());
-    }
-}`
+    let p = unsafe cast<ptr<u8>>(raw());}`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() { let x = cast<i32>(1); @unsafe(ptr_cast) { let p = cast<ptr<u8>>(raw()); } }`
+	want := `fn main() { let x = cast<i32>(1); let p = unsafe cast<ptr<u8>>(raw()); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

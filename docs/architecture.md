@@ -25,7 +25,7 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   ir, llvm, wasm, native        typed SSA IR と各 backend
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
-  unsafecap                     @unsafe capability の定義
+  unsafecap                     unsafe が覆う操作の種類と診断文言
   fmt, diagnostic, buildcache, cimport, lsp
 lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
   kizu/              言語の自己記述層(Kizu で書かれた lexer/parser/AST)

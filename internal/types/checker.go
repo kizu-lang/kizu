@@ -124,103 +124,63 @@ const (
 	unsafeVolatile   unsafeCapability = "volatile"
 )
 
-var knownUnsafeCapabilities = map[string]unsafeCapability{
-	string(unsafePtrRead):    unsafePtrRead,
-	string(unsafePtrWrite):   unsafePtrWrite,
-	string(unsafePtrDeref):   unsafePtrDeref,
-	string(unsafePtrCast):    unsafePtrCast,
-	string(unsafePtrIntCast): unsafePtrIntCast,
-	string(unsafeExternCall): unsafeExternCall,
-	string(unsafeUnsafeCall): unsafeUnsafeCall,
-	string(unsafeVolatile):   unsafeVolatile,
-}
-
-// unsafeScope is one lexical `@unsafe` block. Scopes chain to their parent so
-// a use can be attributed to the innermost block that granted the capability,
-// which is what lets an unused declaration be named.
+// unsafeScope is one `unsafe` marker. A use is recorded on the innermost marker
+// in scope, which is what lets a marker that covers nothing be reported.
 type unsafeScope struct {
-	parent  *unsafeScope
-	granted map[unsafeCapability]bool
-	used    map[unsafeCapability]bool
+	used bool
 }
 
-// unsafeCaps is the capability scope threaded through checking. A nil scope
-// grants nothing, so a function body starts outside every `@unsafe` block.
-type unsafeCaps = *unsafeScope
+// unsafeMark is the marker state threaded through checking. A nil mark means
+// the expression is covered by no `unsafe`, so a function body starts unmarked
+// whether or not the function itself is declared `unsafe fn`.
+type unsafeMark = *unsafeScope
 
-// use reports whether an unsafe capability is available, and records the use
-// against the innermost scope that granted it.
-func (caps unsafeCaps) use(cap unsafeCapability) bool {
-	for scope := caps; scope != nil; scope = scope.parent {
-		if scope.granted[cap] {
-			scope.used[cap] = true
-			return true
-		}
+// use reports whether an unproven operation is covered here, and records the
+// use against the innermost marker.
+func (mark unsafeMark) use() bool {
+	if mark == nil {
+		return false
 	}
-	return false
+	mark.used = true
+	return true
 }
 
-// with returns a child scope granting the parsed capability names.
-func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
-	next := &unsafeScope{
-		parent:  caps,
-		granted: map[unsafeCapability]bool{},
-		used:    map[unsafeCapability]bool{},
+// underMark checks value under a fresh marker and rejects a marker that covers
+// no unproven operation. Both the expression and the assignment-target paths go
+// through here, so the rule for what a marker must cover lives in one place.
+func (c *Checker) underMark(
+	expr *ast.UnsafeExpr,
+	check func(unsafeMark) (Type, error),
+) (Type, error) {
+	inner := &unsafeScope{}
+	valueType, err := check(inner)
+	if err != nil || inner.used {
+		return valueType, err
 	}
-	for _, name := range names {
-		if _, ok := unsafecap.Lookup(name); !ok {
-			return nil, errorf("unsafe error: unknown capability `%s`", name)
-		}
-		cap, ok := knownUnsafeCapabilities[name]
-		if !ok {
-			return nil, errorf("unsafe error: unknown capability `%s`", name)
-		}
-		next.granted[cap] = true
-	}
-	return next, nil
+	return valueType, errorAtCode(expr.Span, "unsafe.unused_marker", "%s",
+		"unsafe error: `unsafe` covers no operation that needs it"+
+			"\nhelp: remove `unsafe`")
 }
 
-// reportUnused rejects a capability the block declared but no operation needed.
-// An `@unsafe` block states what happens inside it, so a declaration nothing
-// used is either left over from an edit or wrong about what the body does.
-// A capability an inner block re-declares is attributed to that inner block, so
-// the redundant outer declaration is reported here too.
-func (caps unsafeCaps) reportUnused(names []string, spans []ast.Span) error {
-	for index, name := range names {
-		cap, known := knownUnsafeCapabilities[name]
-		if !known || caps.used[cap] {
-			continue
-		}
-		message := fmt.Sprintf("unsafe error: capability `%s` is declared but never used", cap)
-		if info, ok := unsafecap.Lookup(string(cap)); ok {
-			message += "\nhelp: " + unsafecap.Hint(info)
-		}
-		message += "\nhelp: remove `" + string(cap) + "` from the @unsafe capability list"
-		if index < len(spans) && !spans[index].IsZero() {
-			return errorAtCode(spans[index], "unsafe.unused_capability", "%s", message)
-		}
-		return errorf("%s", message)
-	}
-	return nil
-}
-
-// requireUnsafeCapability rejects an unsafe operation outside its capability scope.
-// requireUnsafeCapabilityAt reports a missing unsafe capability at a source span.
+// requireUnsafeCapabilityAt rejects an operation the compiler cannot prove when
+// no `unsafe` marker covers it. Source no longer spells capability names, but
+// the diagnostic still names the kind of operation so the reader learns what
+// obligation the marker would take on.
 func requireUnsafeCapabilityAt(
-	caps unsafeCaps,
+	mark unsafeMark,
 	cap unsafeCapability,
 	operation string,
 	span ast.Span,
 ) error {
-	if caps.use(cap) {
+	if mark.use() {
 		return nil
 	}
-	message := fmt.Sprintf("unsafe error: %s requires @unsafe(%s)", operation, cap)
+	message := fmt.Sprintf("unsafe error: %s requires `unsafe`", operation)
 	if info, ok := unsafecap.Lookup(string(cap)); ok {
 		message += "\nhelp: " + unsafecap.Hint(info)
 	}
 	if !span.IsZero() {
-		return errorAtCode(span, "unsafe.missing_capability", "%s", message)
+		return errorAtCode(span, "unsafe.missing_marker", "%s", message)
 	}
 	return errorf("%s", message)
 }
@@ -1723,7 +1683,7 @@ func (c *Checker) checkBlock(
 	block *ast.BlockStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	for _, stmt := range block.Statements {
 		returns, err := c.checkStmt(stmt, env, wantReturn, unsafe)
@@ -1744,7 +1704,7 @@ func (c *Checker) checkStmt(
 	stmt ast.Statement,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
@@ -1772,8 +1732,6 @@ func (c *Checker) checkStmt(
 		return false, c.checkLoopBranch("continue", s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env, wantReturn, unsafe)
-	case *ast.UnsafeStmt:
-		return c.checkUnsafeStmt(s, env, wantReturn, unsafe)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
@@ -1782,7 +1740,7 @@ func (c *Checker) checkStmt(
 }
 
 // checkDeferStmt validates the first supported block cleanup registration form.
-func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeCaps) (bool, error) {
+func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeMark) (bool, error) {
 	if err := validateDeferCleanupExpr(stmt.Expr); err != nil {
 		return false, err
 	}
@@ -1801,34 +1759,13 @@ func validateDeferCleanupExpr(expr ast.Expression) error {
 	return validateCleanupCallExpr("defer", expr)
 }
 
-// checkUnsafeStmt validates an unsafe capability block body.
-func (c *Checker) checkUnsafeStmt(
-	stmt *ast.UnsafeStmt,
-	env *scope,
-	wantReturn Type,
-	unsafe unsafeCaps,
-) (bool, error) {
-	caps, err := unsafe.with(stmt.Capabilities)
-	if err != nil {
-		return false, err
-	}
-	returns, err := c.checkBlock(stmt.Body, env.child(), wantReturn, caps)
-	if err != nil {
-		return returns, err
-	}
-	if err := caps.reportUnused(stmt.Capabilities, stmt.CapabilitySpans); err != nil {
-		return returns, err
-	}
-	return returns, nil
-}
-
 // checkErrDeferStmt validates an error-path cleanup registration. It shares the
 // cleanup-call shape with defer; the path-sensitive timing difference is handled
 // by lowering and the runtime, not by the type surface.
 func (c *Checker) checkErrDeferStmt(
 	stmt *ast.ErrDeferStmt,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if err := validateCleanupCallExpr("errdefer", stmt.Expr); err != nil {
 		return false, err
@@ -1860,7 +1797,7 @@ func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
 // checkLetStmt validates one local binding and records it as one this scope
 // will be asked about, so a binding nothing reads can be told apart from one
 // that carried a value somewhere.
-func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps) (bool, error) {
+func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeMark) (bool, error) {
 	returns, err := c.checkLetBinding(stmt, env, unsafe)
 	if err != nil {
 		return returns, err
@@ -1870,7 +1807,7 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps)
 }
 
 // checkLetBinding types one local binding and binds its name.
-func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps) (bool, error) {
+func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMark) (bool, error) {
 	handled, err := c.defineSpecialLetInitializer(stmt, env, unsafe)
 	if handled || err != nil {
 		return false, err
@@ -1899,7 +1836,7 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeCa
 func (c *Checker) defineSpecialLetInitializer(
 	stmt *ast.LetStmt,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		typ, mutable, err := c.checkBorrowPrefix(borrow, env, unsafe)
@@ -1945,7 +1882,7 @@ func (c *Checker) defineSpecialLetInitializer(
 func (c *Checker) checkBoxBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -1991,7 +1928,7 @@ func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
 func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (string, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -2020,7 +1957,7 @@ func (c *Checker) checkStringViewInitializer(
 func (c *Checker) checkArrayBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, bool, error) {
 	tryExpr, ok := expr.(*ast.TryExpr)
 	if !ok {
@@ -2057,7 +1994,7 @@ func (c *Checker) checkArrayBorrowInitializer(
 func (c *Checker) checkAssignStmt(
 	stmt *ast.AssignStmt,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	want, err := c.checkAssignableTarget(stmt.Target, env, unsafe)
 	if err != nil {
@@ -2079,7 +2016,7 @@ func (c *Checker) checkAssignStmt(
 func (c *Checker) checkAssignableTarget(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch target := expr.(type) {
 	case *ast.IdentExpr:
@@ -2088,6 +2025,13 @@ func (c *Checker) checkAssignableTarget(
 		return c.checkAssignableField(target, env, unsafe)
 	case *ast.DerefExpr:
 		return c.checkAssignableDeref(target, env, unsafe)
+	case *ast.UnsafeExpr:
+		// `unsafe p.* = value` marks the store, so the marker sits on the
+		// target. It covers the target only: the assigned value is a separate
+		// expression and needs its own marker if it is unproven too.
+		return c.underMark(target, func(inner unsafeMark) (Type, error) {
+			return c.checkAssignableTarget(target.Value, env, inner)
+		})
 	default:
 		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
@@ -2110,7 +2054,7 @@ func (c *Checker) checkReturnStmt(
 	stmt *ast.ReturnStmt,
 	env *scope,
 	want Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if stmt.Value == nil {
 		if acceptsBareReturn(want) {
@@ -2134,7 +2078,7 @@ func (c *Checker) checkReturnValue(
 	env *scope,
 	want Type,
 	got Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if ok, err := c.checkErrorUnionReturn(expr, env, want, got, unsafe); ok || err != nil {
 		return ok, err
@@ -2172,7 +2116,7 @@ func (c *Checker) checkErrorUnionReturn(
 	env *scope,
 	want Type,
 	got Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if elem, ok := errorUnionElement(want); ok {
 		success := Type(elem)
@@ -2256,7 +2200,7 @@ func (c *Checker) checkReturnBorrowSources(
 	expr ast.Expression,
 	env *scope,
 	_ Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if c.currentFunction == nil || c.currentFunction.sig.ReturnBorrow == "" {
 		return nil
@@ -2283,7 +2227,7 @@ func (c *Checker) checkReturnBorrowSources(
 func (c *Checker) exprBorrowSources(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (map[string]bool, error) {
 	switch e := expr.(type) {
 	case *ast.StringExpr:
@@ -2296,6 +2240,8 @@ func (c *Checker) exprBorrowSources(
 		}
 		return c.exprBorrowSources(e.Target, env, unsafe)
 	case *ast.TryExpr:
+		return c.exprBorrowSources(e.Value, env, unsafe)
+	case *ast.UnsafeExpr:
 		return c.exprBorrowSources(e.Value, env, unsafe)
 	case *ast.CallExpr:
 		return c.callBorrowSources(e, env, unsafe)
@@ -2327,7 +2273,7 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 func (c *Checker) callBorrowSources(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (map[string]bool, error) {
 	if sources, ok, err := c.methodBorrowSources(expr, env, unsafe); ok || err != nil {
 		return sources, err
@@ -2364,7 +2310,7 @@ func borrowReturnParamIndex(fn *functionType) int {
 func (c *Checker) methodBorrowSources(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (map[string]bool, bool, error) {
 	field, ok := expr.Callee.(*ast.FieldExpr)
 	if !ok || field.Namespace {
@@ -2407,7 +2353,7 @@ func (c *Checker) methodBorrowSources(
 }
 
 // singleBorrowSource extracts a deterministic source name when one source is known.
-func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe unsafeCaps) string {
+func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe unsafeMark) string {
 	sources, err := c.exprBorrowSources(expr, env, unsafe)
 	if err != nil {
 		return ""
@@ -2429,7 +2375,7 @@ func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe uns
 func (c *Checker) fieldBorrowSources(
 	expr *ast.FieldExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (map[string]bool, error) {
 	if expr.Namespace {
 		return map[string]bool{}, nil
@@ -2441,7 +2387,7 @@ func (c *Checker) fieldBorrowSources(
 func (c *Checker) structLiteralBorrowSources(
 	expr *ast.StructLiteralExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (map[string]bool, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
@@ -2556,7 +2502,7 @@ func (c *Checker) checkIfStmt(
 	stmt *ast.IfStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
@@ -2584,7 +2530,7 @@ func (c *Checker) checkWhileStmt(
 	stmt *ast.WhileStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
@@ -2607,7 +2553,7 @@ func (c *Checker) checkForStmt(
 	stmt *ast.ForStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	if err := c.checkForBounds(stmt, env, unsafe); err != nil {
 		return false, err
@@ -2626,7 +2572,7 @@ func (c *Checker) checkForStmt(
 }
 
 // checkForBounds validates the start and end expressions for a range loop.
-func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe unsafeCaps) error {
+func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe unsafeMark) error {
 	start, err := c.checkExpr(stmt.Start, env, unsafe)
 	if err != nil {
 		return err
@@ -2690,7 +2636,7 @@ func (c *Checker) checkMatchStmt(
 	stmt *ast.MatchStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
@@ -2713,7 +2659,7 @@ func (c *Checker) checkMatchArms(
 	unionType *unionType,
 	env *scope,
 	wantReturn Type,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (bool, error) {
 	seen := map[string]bool{}
 	wildcard := false
@@ -2838,7 +2784,7 @@ func missingMatchVariants(
 }
 
 // checkExpr computes the static type of an expression.
-func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
 		return c.checkScalarExpr(e)
@@ -2856,6 +2802,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeCaps) 
 		return c.checkCastExpr(e, env, unsafe)
 	case *ast.TryExpr:
 		return c.checkTryExpr(e, env, unsafe)
+	case *ast.UnsafeExpr:
+		return c.checkUnsafeExpr(e, env, unsafe)
 	case *ast.IndexExpr:
 		return c.checkIndexExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
@@ -2886,7 +2834,7 @@ func (c *Checker) checkScalarExpr(expr ast.Expression) (Type, error) {
 func (c *Checker) checkControlExpr(
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IfStmt:
@@ -2899,7 +2847,7 @@ func (c *Checker) checkControlExpr(
 }
 
 // checkIfExpr validates an if expression and returns the common branch type.
-func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeMark) (Type, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2929,7 +2877,7 @@ func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeCaps) (
 func (c *Checker) checkBlockValue(
 	block *ast.BlockStmt,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if block == nil || len(block.Statements) == 0 {
 		return "", errorf("type error: expression block must end with a value")
@@ -2947,7 +2895,7 @@ func (c *Checker) checkBlockValue(
 }
 
 // checkStmtValue computes the value type of a statement in expression-tail position.
-func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeMark) (Type, error) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {
@@ -2964,7 +2912,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeCa
 }
 
 // checkMatchExpr validates an exhaustive match expression and its arm result type.
-func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeMark) (Type, error) {
 	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2983,7 +2931,7 @@ func (c *Checker) checkMatchExprArms(
 	enumType *enumType,
 	unionType *unionType,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	seen := map[string]bool{}
 	wildcard := false
@@ -3035,7 +2983,7 @@ func (c *Checker) checkMatchExprArm(
 	enumType *enumType,
 	unionType *unionType,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if arm.IsWildcard() {
 		return c.checkStmtValue(arm.Body, env.child(), unsafe)
@@ -3054,7 +3002,7 @@ func (c *Checker) checkMatchExprArm(
 }
 
 // checkIndexExpr validates checked one-dimensional byte indexing and slicing.
-func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	target, err := c.checkExpr(expr.Target, env, unsafe)
 	if err != nil {
 		return "", err
@@ -3086,7 +3034,7 @@ func (c *Checker) checkIndexBound(
 	name string,
 	expr ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if expr == nil {
 		return errorf("type error: %s is missing", name)
@@ -3120,7 +3068,7 @@ func (c *Checker) checkContextualExpr(
 	expr ast.Expression,
 	want Type,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	got, err := c.checkExpr(expr, env, unsafe)
 	if err != nil {
@@ -3212,7 +3160,7 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 func (c *Checker) checkPrefixExpr(
 	expr *ast.PrefixExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if expr.Operator == "&" || expr.Operator == "&var" {
 		typ, _, err := c.checkBorrowPrefix(expr, env, unsafe)
@@ -3242,7 +3190,7 @@ func (c *Checker) checkPrefixExpr(
 func (c *Checker) checkBorrowPrefix(
 	expr *ast.PrefixExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	mutable := expr.Operator == "&var"
 	if mutable {
@@ -3264,7 +3212,7 @@ func (c *Checker) checkBorrowPrefix(
 func (c *Checker) checkBinaryExpr(
 	expr *ast.BinaryExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
@@ -3362,7 +3310,7 @@ func isComparison(op string) bool {
 }
 
 // checkCastExpr validates explicit low-level casts.
-func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	target, err := c.parseTypeNode(expr.TargetType)
 	if err != nil {
 		return "", err
@@ -3388,8 +3336,24 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCap
 	return "", errorf("type error: cannot cast %s to %s", source, target)
 }
 
+// checkUnsafeExpr checks the expression an `unsafe` marker covers. The marker
+// carries no type of its own; it says the author owns the obligation for every
+// unproven operation inside.
+//
+// The enclosing marker is deliberately dropped: a use inside this marker belongs
+// to this one, which is what makes a redundant outer marker reportable.
+func (c *Checker) checkUnsafeExpr(
+	expr *ast.UnsafeExpr,
+	env *scope,
+	_ unsafeMark,
+) (Type, error) {
+	return c.underMark(expr, func(inner unsafeMark) (Type, error) {
+		return c.checkExpr(expr.Value, env, inner)
+	})
+}
+
 // checkTryExpr validates error-union propagation and returns the success type.
-func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if _, _, ok := errorUnionParts(c.currentReturn); !ok {
 		return "", errorf("type error: try requires function to return !T")
 	}
@@ -3412,7 +3376,7 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps)
 }
 
 // checkCallExpr validates builtin and user function calls.
-func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
 	}
@@ -3449,7 +3413,7 @@ func (c *Checker) checkFieldCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if typ, ok, err := c.checkUnionConstructorCall(field, args, env, unsafe); ok || err != nil {
 		return typ, err
@@ -3468,7 +3432,7 @@ func (c *Checker) checkQualifiedUserCall(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	name, ok := qualifiedName(field)
 	if !ok {
@@ -3490,7 +3454,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	name, ok := qualifiedName(field)
 	if !ok {
@@ -3522,7 +3486,7 @@ func (c *Checker) checkStdCoreBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if typ, ok, err := c.checkFsBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
@@ -3555,7 +3519,7 @@ func (c *Checker) checkSimpleCoreBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	signature, ok := stdprim.SimpleCoreSignatures[name]
 	if !ok {
@@ -3580,7 +3544,7 @@ func (c *Checker) checkCoreArg(
 	want stdprim.ArgKind,
 	arg ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, unsafe, name)
@@ -3620,7 +3584,7 @@ func (c *Checker) checkFsBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	switch name {
 	case "std::internal::builtin::fs_read_file":
@@ -3648,7 +3612,7 @@ func (c *Checker) checkFsBuiltin(
 func (c *Checker) checkFsReadFile(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) != 2 {
 		return "", true, errorf("type error: `std::fs::read_file` expects io and path")
@@ -3671,7 +3635,7 @@ func (c *Checker) checkFsReadFile(
 func (c *Checker) checkFsWriteFile(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) != 3 {
 		return "", true, errorf("type error: `std::fs::write_file` expects io, path, and bytes")
@@ -3696,7 +3660,7 @@ func (c *Checker) checkFsWriteFile(
 func (c *Checker) checkFsRename(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) != 3 {
 		return "", true, errorf("type error: `std::fs::rename` expects io, from, and to")
@@ -3721,7 +3685,7 @@ func (c *Checker) checkFsRename(
 func (c *Checker) checkFsExists(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::exists", args, env, unsafe)
 	return "std::fs::Error!bool", true, err
@@ -3731,7 +3695,7 @@ func (c *Checker) checkFsExists(
 func (c *Checker) checkFsMetadata(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
 	return "std::fs::Error!std::fs::Metadata", true, err
@@ -3741,7 +3705,7 @@ func (c *Checker) checkFsMetadata(
 func (c *Checker) checkFsReadDir(
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
 	return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true, err
@@ -3752,7 +3716,7 @@ func (c *Checker) checkFsPathOnly(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 	result Type,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs(name, args, env, unsafe)
@@ -3764,7 +3728,7 @@ func (c *Checker) checkFsPathArgs(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, Type, error) {
 	if len(args) != 2 {
 		return "", "", errorf("type error: `%s` expects io and path", name)
@@ -3787,7 +3751,7 @@ func (c *Checker) checkArrayConstructor(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if !c.typeParams[string(elem)] {
 		if err := c.rejectArrayElementType(elem); err != nil {
@@ -3885,7 +3849,7 @@ func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
 }
 
 // checkIoArg validates an explicit Io argument for a std call.
-func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeCaps, name string) error {
+func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeMark, name string) error {
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
 		return err
@@ -3914,7 +3878,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	name, typeArg, err := c.typeApplyTarget(expr)
 	if err != nil {
@@ -3952,7 +3916,7 @@ func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
@@ -3984,7 +3948,7 @@ func (c *Checker) checkBuiltinTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(
 		name, typeArg, args, env, unsafe,
@@ -4005,7 +3969,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if name != "std::internal::builtin::test_fail_equal" {
 		return "", false, nil
@@ -4023,7 +3987,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 	typ Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
@@ -4052,7 +4016,7 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	method, ok := boxPrimitiveMethod(name)
 	if !ok {
@@ -4090,7 +4054,7 @@ func (c *Checker) checkBoxConstructor(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) != 2 {
 		return "", true, errorf("type error: `std::mem::Box<%s>` expects allocator and value",
@@ -4126,7 +4090,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	method string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (Type, error) {
@@ -4151,7 +4115,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	switch name {
 	case "std::internal::builtin::array":
@@ -4185,7 +4149,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -4205,7 +4169,7 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	checkRest func([]ast.Expression) (Type, error),
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) == 0 {
 		return "", true, errorf("type error: `%s` expects receiver", name)
@@ -4228,7 +4192,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch name {
 	case "pop":
@@ -4282,7 +4246,7 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if strings.HasPrefix(name, "std::internal::builtin::map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env, unsafe)
@@ -4306,7 +4270,7 @@ func (c *Checker) checkBuiltinMapMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	mapArgs, err := c.checkedMapArgs(typeArg)
 	if err != nil {
@@ -4328,7 +4292,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
 		return c.checkMapMethod(valueType, name, args, env, unsafe)
@@ -4373,7 +4337,7 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	keyType string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
@@ -4394,7 +4358,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	fn := c.functions[name]
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
@@ -4581,7 +4545,7 @@ func (c *Checker) checkGenericUserArg(
 	idx int,
 	arg ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	want := substituteTypeParams(fn.params[idx], subst)
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
@@ -4609,7 +4573,7 @@ func (c *Checker) checkUserCall(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	fn, ok := c.functions[name]
 	if !ok {
@@ -4647,7 +4611,7 @@ func (c *Checker) checkUserCallArg(
 	idx int,
 	arg ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
 	if err != nil {
@@ -4717,7 +4681,7 @@ func (c *Checker) checkUnionConstructorCall(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if !field.Namespace {
 		if enumType, ok := enumReceiver(field.Receiver, c.enums); ok {
@@ -4767,7 +4731,7 @@ func (c *Checker) checkUnionConstructorCall(
 func (c *Checker) checkArenaNewExpr(
 	expr *ast.ArenaNewExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if _, err := c.parseType(expr.TypeName); err != nil {
 		return "", err
@@ -4797,7 +4761,7 @@ func (c *Checker) checkArenaNewExpr(
 func (c *Checker) checkStructLiteralExpr(
 	expr *ast.StructLiteralExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
@@ -4843,7 +4807,7 @@ func (c *Checker) checkStructLiteralExpr(
 }
 
 // checkFieldExpr returns the declared type of a struct field access.
-func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if expr.Namespace {
 		return c.checkNamespaceExpr(expr)
 	}
@@ -5006,7 +4970,7 @@ func (c *Checker) knownNamespaceSummary() string {
 }
 
 // checkDerefExpr returns the value type behind a local borrow or raw pointer.
-func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
 		typ, _ := env.lookup(ident.Name)
 		return typ, nil
@@ -5040,7 +5004,7 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeC
 func (c *Checker) checkAssignableField(
 	expr *ast.FieldExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		if env.isBorrowed(ident.Name) {
@@ -5069,7 +5033,7 @@ func (c *Checker) checkAssignableField(
 func (c *Checker) checkAssignableDeref(
 	expr *ast.DerefExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 		return c.checkDerefExpr(expr, env, unsafe)
@@ -5130,7 +5094,7 @@ func (c *Checker) checkMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := c.checkMethodReceiverPath(field, env); err != nil {
 		return "", err
@@ -5187,7 +5151,7 @@ func (c *Checker) checkKnownReceiverMethod(
 	receiver Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if contractName, ok := dynContract(receiver); ok {
 		typ, err := c.checkDynMethodCall(
@@ -5226,7 +5190,7 @@ func (c *Checker) checkBoxReceiverMethod(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch field.Name {
 	case "borrow":
@@ -5260,7 +5224,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	receiver Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "std::arena::Arena" {
@@ -5287,7 +5251,7 @@ func (c *Checker) checkStringReceiverMethod(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if field.Name == "deinit" && ok && env.isBorrowed(ident.Name) {
@@ -5305,7 +5269,7 @@ func (c *Checker) checkStringMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch name {
 	case "append_bytes":
@@ -5361,7 +5325,7 @@ func (c *Checker) checkStringBytesArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -5381,7 +5345,7 @@ func (c *Checker) checkStringReserveArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -5401,7 +5365,7 @@ func (c *Checker) checkStringByteArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -5422,7 +5386,7 @@ func (c *Checker) checkArrayReceiverMethod(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
@@ -5438,7 +5402,7 @@ func (c *Checker) checkMapReceiverMethod(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := checkMapReceiverBorrow(field, env); err != nil {
 		return "", err
@@ -5471,7 +5435,7 @@ func (c *Checker) checkArrayMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
@@ -5499,7 +5463,7 @@ func (c *Checker) checkStdMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	method, ok := c.stdMethods[receiver][name]
 	if !ok {
@@ -5571,7 +5535,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if !c.currentStd {
 		return "", errorf("type error: Array has no method `%s`", name)
@@ -5618,7 +5582,7 @@ func (c *Checker) checkArrayIndexArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `Array.%s` expects 1 arg, got %d", name, len(args))
@@ -5639,7 +5603,7 @@ func (c *Checker) checkMapConstructorForArgs(
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, bool, error) {
 	if len(args) != 1 {
 		return "", true, errorf("type error: `std::map::Map` expects allocator")
@@ -5660,7 +5624,7 @@ func (c *Checker) checkMapMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	switch name {
 	case "insert":
@@ -5695,7 +5659,7 @@ func (c *Checker) checkMapInsert(
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
@@ -5720,7 +5684,7 @@ func (c *Checker) checkMapKeyArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) error {
 	if len(args) != 1 {
 		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
@@ -5768,7 +5732,7 @@ func (c *Checker) checkDynMethodCall(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	contract := c.contracts[contractName]
 	if contract == nil || contract.methods[name] == nil {
@@ -5785,7 +5749,7 @@ func (c *Checker) checkMethodArgs(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(method.params) == 0 {
 		return "", errorf("type error: method `%s` must have self parameter", method.name)
@@ -5805,7 +5769,7 @@ func (c *Checker) checkCallableArgs(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != len(method.params)-offset {
 		return "", errorf("type error: `%s` expects %d args, got %d",
@@ -5932,7 +5896,7 @@ func (c *Checker) checkArenaAdd(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != 1 {
 		return "", errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
@@ -5952,7 +5916,7 @@ func (c *Checker) checkArenaGet(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if len(args) != 1 {
 		return "", errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
@@ -5994,7 +5958,7 @@ func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bo
 }
 
 // checkPtrRead validates unsafe raw pointer reads.
-func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if err := requireUnsafeCapabilityAt(
 		unsafe,
 		unsafePtrRead,
@@ -6018,7 +5982,7 @@ func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps
 }
 
 // checkPtrWrite validates unsafe raw pointer writes.
-func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if err := requireUnsafeCapabilityAt(
 		unsafe,
 		unsafePtrWrite,
@@ -6054,7 +6018,7 @@ func (c *Checker) checkPtrFromInt(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := requireUnsafeCapabilityAt(unsafe, unsafePtrIntCast, "`ptr_from_int`", span); err != nil {
 		return "", err
@@ -6085,7 +6049,7 @@ func (c *Checker) checkIntFromPtr(
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := requireUnsafeCapabilityAt(unsafe, unsafePtrIntCast, "`int_from_ptr`", span); err != nil {
 		return "", err
@@ -6114,7 +6078,7 @@ func (c *Checker) checkIntFromPtr(
 func (c *Checker) checkVolatileRead(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := requireUnsafeCapabilityAt(
 		unsafe,
@@ -6142,7 +6106,7 @@ func (c *Checker) checkVolatileRead(
 func (c *Checker) checkVolatileWrite(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe unsafeCaps,
+	unsafe unsafeMark,
 ) (Type, error) {
 	if err := requireUnsafeCapabilityAt(
 		unsafe,
@@ -6376,7 +6340,7 @@ func errorUnionParts(union Type) (string, string, bool) {
 }
 
 // checkPrintCall validates the print builtin.
-func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
 	if len(expr.Args) != 1 {
 		return "", errorf("type error: `print` expects 1 arg, got %d", len(expr.Args))
 	}

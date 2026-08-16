@@ -274,11 +274,6 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		return c.qualifyForStmt(module, s)
 	case *ast.MatchStmt:
 		return c.qualifyMatchStmt(module, s)
-	case *ast.UnsafeStmt:
-		cp := *s
-		body, err := c.qualifyBlock(module, s.Body)
-		cp.Body = body
-		return &cp, err
 	case *ast.ComptimeIfStmt:
 		return c.qualifyComptimeIfStmt(module, s)
 	default:
@@ -413,6 +408,8 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyCastExpr(module, e)
 	case *ast.TryExpr:
 		return c.qualifyTryExpr(module, e)
+	case *ast.UnsafeExpr:
+		return c.qualifyUnsafeExpr(module, e)
 	default:
 		return c.qualifyTypeOrControlExpr(module, expr)
 	}
@@ -517,6 +514,17 @@ func (c *graphChecker) qualifyTryExpr(
 	module *moduleUnit,
 	expr *ast.TryExpr,
 ) (*ast.TryExpr, error) {
+	cp := *expr
+	value, err := c.qualifyExpr(module, expr.Value)
+	cp.Value = value
+	return &cp, err
+}
+
+// qualifyUnsafeExpr rewrites the expression an unsafe marker covers.
+func (c *graphChecker) qualifyUnsafeExpr(
+	module *moduleUnit,
+	expr *ast.UnsafeExpr,
+) (*ast.UnsafeExpr, error) {
 	cp := *expr
 	value, err := c.qualifyExpr(module, expr.Value)
 	cp.Value = value

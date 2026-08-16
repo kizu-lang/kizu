@@ -100,8 +100,9 @@ fn main() {
 	}
 }
 
-// TestAnalyzeReportsUnsafeCapabilityHelp checks missing unsafe caps explain the permission.
-func TestAnalyzeReportsUnsafeCapabilityHelp(t *testing.T) {
+// TestAnalyzeReportsUnsafeMarkerHelp checks a missing unsafe marker explains
+// which kind of operation needed it.
+func TestAnalyzeReportsUnsafeMarkerHelp(t *testing.T) {
 	source := `fn read(p: ptr<u8>) -> u8 {
     return ptr_read(p);
 }
@@ -111,9 +112,9 @@ func TestAnalyzeReportsUnsafeCapabilityHelp(t *testing.T) {
 		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
 	}
 	for _, want := range []string{
-		"`ptr_read` requires @unsafe(ptr_read)",
+		"`ptr_read` requires `unsafe`",
 		"at 2:12",
-		"permits raw pointer reads with `ptr_read(p)`",
+		"covers raw pointer reads with `ptr_read(p)`",
 	} {
 		if !strings.Contains(diagnostics[0].Message, want) {
 			t.Fatalf("message = %q, want substring %q", diagnostics[0].Message, want)
@@ -123,8 +124,8 @@ func TestAnalyzeReportsUnsafeCapabilityHelp(t *testing.T) {
 	if got.Start.Line != 1 || got.Start.Character != 11 {
 		t.Fatalf("got start %d:%d, want 1:11", got.Start.Line, got.Start.Character)
 	}
-	if diagnostics[0].Code != "unsafe.missing_capability" {
-		t.Fatalf("code = %q, want unsafe.missing_capability", diagnostics[0].Code)
+	if diagnostics[0].Code != "unsafe.missing_marker" {
+		t.Fatalf("code = %q, want unsafe.missing_marker", diagnostics[0].Code)
 	}
 }
 

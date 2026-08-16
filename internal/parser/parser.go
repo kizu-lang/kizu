@@ -9,7 +9,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/typ"
-	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
 // Parser consumes tokens and builds a Kizu AST.
@@ -58,9 +57,6 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Public:
 			program.Decls = append(program.Decls, p.parsePublicDecl())
 			p.nextToken()
-		case token.At:
-			program.Decls = append(program.Decls, p.parseDirectiveDecl(false, docText(p.cur)))
-			p.nextToken()
 		case token.Ident:
 			program.Decls = append(program.Decls, p.parseIdentLedDecl()...)
 			p.nextToken()
@@ -68,7 +64,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
 		case token.Unsafe:
-			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
+			program.Decls = append(program.Decls, p.parseUnsafeFnDecl(false, docText(p.cur)))
 			p.nextToken()
 		case token.Extern:
 			program.Decls = append(program.Decls, p.parseExternDecl())
@@ -118,9 +114,6 @@ func (p *Parser) parseImportDecl() ast.Decl {
 func (p *Parser) parsePublicDecl() ast.Decl {
 	docs := docText(p.cur)
 	p.nextToken()
-	if p.cur.Type == token.At {
-		return p.parseDirectiveDecl(true, docs)
-	}
 	decl := p.parseTopLevelDeclWithDoc(docs)
 	setPublicDecl(decl)
 	return decl
@@ -131,11 +124,8 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	switch p.cur.Type {
 	case token.Function:
 		return p.parseFunctionDeclWithDoc(docs)
-	case token.At:
-		return p.parseDirectiveDecl(false, docs)
 	case token.Unsafe:
-		p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
-		return functionStub(false, docs)
+		return p.parseUnsafeFnDecl(false, docs)
 	case token.Extern:
 		return p.parseExternDeclWithDoc(docs)
 	case token.Struct:
@@ -176,20 +166,6 @@ func setPublicDecl(decl ast.Decl) {
 	}
 }
 
-// parseDirectiveDecl parses top-level compiler directive declarations.
-func (p *Parser) parseDirectiveDecl(public bool, docs string) ast.Decl {
-	if !p.expectPeek(token.Ident) {
-		return functionStub(public, docs)
-	}
-	switch p.cur.Literal {
-	case "requires_unsafe":
-		return p.parseRequiresUnsafeDecl(public, docs)
-	default:
-		p.errorf("unknown declaration directive `@%s`", p.cur.Literal)
-		return functionStub(public, docs)
-	}
-}
-
 // functionStub is the declaration the parser hands back when it has reported an
 // error and has to keep going. It stands in for the function that failed to
 // parse, so the caller is given a declaration rather than nil.
@@ -200,18 +176,15 @@ func functionStub(public bool, docs string) *ast.FunctionDecl {
 	}
 }
 
-// parseRequiresUnsafeDecl parses @requires_unsafe() fn declarations.
-func (p *Parser) parseRequiresUnsafeDecl(public bool, docs string) ast.Decl {
+// parseUnsafeFnDecl parses `unsafe fn` declarations. The marker says the caller
+// owns a memory safety obligation the compiler cannot check. The body is an
+// ordinary function body, so an unproven operation inside it still needs its
+// own `unsafe`.
+func (p *Parser) parseUnsafeFnDecl(public bool, docs string) ast.Decl {
 	fn := functionStub(public, docs)
 	fn.RequiresUnsafe = true
-	if !p.expectPeek(token.LParen) {
-		return fn
-	}
-	if !p.expectPeek(token.RParen) {
-		return fn
-	}
 	if !p.expectPeek(token.Function) {
-		p.errorf("expected fn after @requires_unsafe()")
+		p.errorf("expected fn after unsafe")
 		return fn
 	}
 	return p.parseFunctionAfterFn(fn, true)
@@ -705,9 +678,6 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 
 // parseStatement parses a single statement.
 func (p *Parser) parseStatement() ast.Statement {
-	if p.cur.Type == token.At {
-		return p.parseUnsafeStmt()
-	}
 	if stmt, ok := p.parseKeywordStatement(); ok {
 		return stmt
 	}
@@ -761,8 +731,6 @@ func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
 		return p.parseContinueStmt(), true
 	case token.Match:
 		return p.parseMatchStmt(), true
-	case token.Unsafe:
-		return p.parseLegacyUnsafeStmt(), true
 	case token.Comptime:
 		if p.peek.Type == token.If {
 			return p.parseComptimeIfStmt(), true
@@ -807,75 +775,6 @@ func (p *Parser) parseComptimeIfStmt() ast.Statement {
 		stmt.Alternative = p.parseBlockStmt()
 	}
 	return stmt
-}
-
-// parseUnsafeStmt parses an @unsafe capability statement block.
-func (p *Parser) parseUnsafeStmt() ast.Statement {
-	stmt := &ast.UnsafeStmt{}
-	if !p.expectPeek(token.Unsafe) {
-		p.errorf("expected unsafe after @")
-		return stmt
-	}
-	if !p.expectPeek(token.LParen) {
-		return stmt
-	}
-	stmt.Capabilities, stmt.CapabilitySpans = p.parseUnsafeCapabilities()
-	if !p.expectCur(token.RParen) {
-		return stmt
-	}
-	if !p.expectPeek(token.LBrace) {
-		return stmt
-	}
-	stmt.Body = p.parseBlockStmt()
-	return stmt
-}
-
-// parseLegacyUnsafeStmt rejects the removed `unsafe {}` block while recovering its body.
-func (p *Parser) parseLegacyUnsafeStmt() ast.Statement {
-	stmt := &ast.UnsafeStmt{}
-	p.errorf("unsafe block syntax is not supported; use @unsafe(...)")
-	if p.peek.Type != token.LBrace {
-		return stmt
-	}
-	p.nextToken()
-	stmt.Body = p.parseBlockStmt()
-	return stmt
-}
-
-// parseUnsafeCapabilities parses one or more comma-separated capability names
-// and the span of each name.
-func (p *Parser) parseUnsafeCapabilities() ([]string, []ast.Span) {
-	capabilities := []string{}
-	spans := []ast.Span{}
-	p.nextToken()
-	if p.cur.Type == token.RParen {
-		p.errorf("expected unsafe capability")
-		return capabilities, spans
-	}
-	for {
-		if p.cur.Type != token.Ident {
-			p.errorf("expected unsafe capability, got %s", tokenDescription(p.cur))
-			return capabilities, spans
-		}
-		if _, ok := unsafecap.Lookup(p.cur.Literal); !ok {
-			p.errorf("unknown unsafe capability `%s`", p.cur.Literal)
-		}
-		capabilities = append(capabilities, p.cur.Literal)
-		spans = append(spans, tokenSpan(p.cur))
-		if p.peek.Type != token.Comma {
-			break
-		}
-		p.nextToken()
-		if p.peek.Type == token.RParen {
-			p.errorf("expected unsafe capability after comma")
-			return capabilities, spans
-		}
-		p.nextToken()
-	}
-	if !p.expectPeek(token.RParen) {
-		return capabilities, spans
-	}
-	return capabilities, spans
 }
 
 // parseLetStmt parses a let or var declaration.
@@ -1264,12 +1163,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return p.parseIfStmt()
 	case token.Match:
 		return p.parseMatchStmt()
-	case token.Comptime:
-		p.nextToken()
-		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
-	case token.Try:
-		p.nextToken()
-		return &ast.TryExpr{Value: p.parseExpression(prefix)}
+	case token.Comptime, token.Try, token.Unsafe:
+		return p.parseMarkerExpression()
 	case token.Amp:
 		p.nextToken()
 		op := "&"
@@ -1290,6 +1185,22 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	default:
 		p.errorf("expected expression, got %s", tokenDescription(p.cur))
 		return &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}
+	}
+}
+
+// parseMarkerExpression parses the keywords that sit in front of an expression
+// and say something about it without changing its value: `comptime`, `try` and
+// `unsafe`.
+func (p *Parser) parseMarkerExpression() ast.Expression {
+	marker := p.cur
+	p.nextToken()
+	switch marker.Type {
+	case token.Comptime:
+		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
+	case token.Try:
+		return &ast.TryExpr{Value: p.parseExpression(prefix)}
+	default:
+		return &ast.UnsafeExpr{Value: p.parseExpression(prefix), Span: tokenSpan(marker)}
 	}
 }
 
@@ -1819,7 +1730,7 @@ func (p *Parser) errorf(format string, args ...any) {
 // errorExpectedDeclaration reports the accepted top-level declaration starts.
 func (p *Parser) errorExpectedDeclaration() {
 	p.errorf("expected declaration (%s), got %s",
-		"fn, test, import, struct, enum, union, contract, impl, extern, pub, or @requires_unsafe()",
+		"fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe",
 		tokenDescription(p.cur),
 	)
 }

@@ -60,16 +60,25 @@ func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 	}
 }
 
-// TestFormatUnsafeDirectives keeps @ directives attached to their names.
-func TestFormatUnsafeDirectives(t *testing.T) {
-	src := `@requires_unsafe() fn raw(){@unsafe(ptr_read,unsafe_call){return;}}`
-	want := "@requires_unsafe() fn raw() {\n" +
-		"    @unsafe(ptr_read, unsafe_call) {\n" +
-		"        return;\n" +
-		"    }\n" +
+// TestFormatUnsafeFnDeclaration keeps the unsafe marker on the declaration.
+func TestFormatUnsafeFnDeclaration(t *testing.T) {
+	src := `unsafe fn raw(){return;}`
+	want := "unsafe fn raw() {\n" +
+		"    return;\n" +
 		"}\n"
 	if got := Format(src); got != want {
-		t.Fatalf("Format(@unsafe):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		t.Fatalf("Format(unsafe fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatUnsafeExpression keeps the unsafe marker on the expression it covers.
+func TestFormatUnsafeExpression(t *testing.T) {
+	src := `fn read(p:ptr<u8>)->u8{return unsafe ptr_read(p);}`
+	want := "fn read(p: ptr<u8>) -> u8 {\n" +
+		"    return unsafe ptr_read(p);\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(unsafe expr):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
