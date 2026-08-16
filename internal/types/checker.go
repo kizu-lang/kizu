@@ -135,18 +135,37 @@ var knownUnsafeCapabilities = map[string]unsafeCapability{
 	string(unsafeVolatile):   unsafeVolatile,
 }
 
-type unsafeCaps map[unsafeCapability]bool
-
-// has reports whether an unsafe capability is available in the current scope.
-func (caps unsafeCaps) has(cap unsafeCapability) bool {
-	return caps != nil && caps[cap]
+// unsafeScope is one lexical `@unsafe` block. Scopes chain to their parent so
+// a use can be attributed to the innermost block that granted the capability,
+// which is what lets an unused declaration be named.
+type unsafeScope struct {
+	parent  *unsafeScope
+	granted map[unsafeCapability]bool
+	used    map[unsafeCapability]bool
 }
 
-// with returns a scope containing the receiver capabilities plus the parsed names.
+// unsafeCaps is the capability scope threaded through checking. A nil scope
+// grants nothing, so a function body starts outside every `@unsafe` block.
+type unsafeCaps = *unsafeScope
+
+// use reports whether an unsafe capability is available, and records the use
+// against the innermost scope that granted it.
+func (caps unsafeCaps) use(cap unsafeCapability) bool {
+	for scope := caps; scope != nil; scope = scope.parent {
+		if scope.granted[cap] {
+			scope.used[cap] = true
+			return true
+		}
+	}
+	return false
+}
+
+// with returns a child scope granting the parsed capability names.
 func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
-	next := unsafeCaps{}
-	for cap := range caps {
-		next[cap] = true
+	next := &unsafeScope{
+		parent:  caps,
+		granted: map[unsafeCapability]bool{},
+		used:    map[unsafeCapability]bool{},
 	}
 	for _, name := range names {
 		if _, ok := unsafecap.Lookup(name); !ok {
@@ -156,9 +175,33 @@ func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
 		if !ok {
 			return nil, errorf("unsafe error: unknown capability `%s`", name)
 		}
-		next[cap] = true
+		next.granted[cap] = true
 	}
 	return next, nil
+}
+
+// reportUnused rejects a capability the block declared but no operation needed.
+// An `@unsafe` block states what happens inside it, so a declaration nothing
+// used is either left over from an edit or wrong about what the body does.
+// A capability an inner block re-declares is attributed to that inner block, so
+// the redundant outer declaration is reported here too.
+func (caps unsafeCaps) reportUnused(names []string, spans []ast.Span) error {
+	for index, name := range names {
+		cap, known := knownUnsafeCapabilities[name]
+		if !known || caps.used[cap] {
+			continue
+		}
+		message := fmt.Sprintf("unsafe error: capability `%s` is declared but never used", cap)
+		if info, ok := unsafecap.Lookup(string(cap)); ok {
+			message += "\nhelp: " + unsafecap.Hint(info)
+		}
+		message += "\nhelp: remove `" + string(cap) + "` from the @unsafe capability list"
+		if index < len(spans) && !spans[index].IsZero() {
+			return errorAtCode(spans[index], "unsafe.unused_capability", "%s", message)
+		}
+		return errorf("%s", message)
+	}
+	return nil
 }
 
 // requireUnsafeCapability rejects an unsafe operation outside its capability scope.
@@ -169,7 +212,7 @@ func requireUnsafeCapabilityAt(
 	operation string,
 	span ast.Span,
 ) error {
-	if caps.has(cap) {
+	if caps.use(cap) {
 		return nil
 	}
 	message := fmt.Sprintf("unsafe error: %s requires @unsafe(%s)", operation, cap)
@@ -1769,7 +1812,14 @@ func (c *Checker) checkUnsafeStmt(
 	if err != nil {
 		return false, err
 	}
-	return c.checkBlock(stmt.Body, env.child(), wantReturn, caps)
+	returns, err := c.checkBlock(stmt.Body, env.child(), wantReturn, caps)
+	if err != nil {
+		return returns, err
+	}
+	if err := caps.reportUnused(stmt.Capabilities, stmt.CapabilitySpans); err != nil {
+		return returns, err
+	}
+	return returns, nil
 }
 
 // checkErrDeferStmt validates an error-path cleanup registration. It shares the

@@ -819,7 +819,7 @@ func (p *Parser) parseUnsafeStmt() ast.Statement {
 	if !p.expectPeek(token.LParen) {
 		return stmt
 	}
-	stmt.Capabilities = p.parseUnsafeCapabilities()
+	stmt.Capabilities, stmt.CapabilitySpans = p.parseUnsafeCapabilities()
 	if !p.expectCur(token.RParen) {
 		return stmt
 	}
@@ -842,37 +842,40 @@ func (p *Parser) parseLegacyUnsafeStmt() ast.Statement {
 	return stmt
 }
 
-// parseUnsafeCapabilities parses one or more comma-separated capability names.
-func (p *Parser) parseUnsafeCapabilities() []string {
+// parseUnsafeCapabilities parses one or more comma-separated capability names
+// and the span of each name.
+func (p *Parser) parseUnsafeCapabilities() ([]string, []ast.Span) {
 	capabilities := []string{}
+	spans := []ast.Span{}
 	p.nextToken()
 	if p.cur.Type == token.RParen {
 		p.errorf("expected unsafe capability")
-		return capabilities
+		return capabilities, spans
 	}
 	for {
 		if p.cur.Type != token.Ident {
 			p.errorf("expected unsafe capability, got %s", tokenDescription(p.cur))
-			return capabilities
+			return capabilities, spans
 		}
 		if _, ok := unsafecap.Lookup(p.cur.Literal); !ok {
 			p.errorf("unknown unsafe capability `%s`", p.cur.Literal)
 		}
 		capabilities = append(capabilities, p.cur.Literal)
+		spans = append(spans, tokenSpan(p.cur))
 		if p.peek.Type != token.Comma {
 			break
 		}
 		p.nextToken()
 		if p.peek.Type == token.RParen {
 			p.errorf("expected unsafe capability after comma")
-			return capabilities
+			return capabilities, spans
 		}
 		p.nextToken()
 	}
 	if !p.expectPeek(token.RParen) {
-		return capabilities
+		return capabilities, spans
 	}
-	return capabilities
+	return capabilities, spans
 }
 
 // parseLetStmt parses a let or var declaration.

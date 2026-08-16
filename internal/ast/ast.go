@@ -674,7 +674,11 @@ func (a MatchArm) String() string {
 // UnsafeStmt represents an explicit unsafe capability block.
 type UnsafeStmt struct {
 	Capabilities []string
-	Body         *BlockStmt
+	// CapabilitySpans points at each declared capability name so an unused
+	// declaration can be reported where it was written. It runs parallel to
+	// Capabilities.
+	CapabilitySpans []Span
+	Body            *BlockStmt
 }
 
 // statementNode marks UnsafeStmt as a statement node.
