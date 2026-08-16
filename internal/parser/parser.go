@@ -868,6 +868,18 @@ func (p *Parser) parseReturnStmt() ast.Statement {
 	return stmt
 }
 
+// parseMatchArmReturn parses `return` or `return <expr>` as a match arm body.
+// The arm's own comma is the terminator, so no semicolon is consumed here.
+func (p *Parser) parseMatchArmReturn() ast.Statement {
+	stmt := &ast.ReturnStmt{}
+	if p.peek.Type == token.Comma || p.peek.Type == token.RBrace {
+		return stmt
+	}
+	p.nextToken()
+	stmt.Value = p.parseExpression(lowest)
+	return stmt
+}
+
 // parseDeferStmt parses one block-exit cleanup expression statement.
 func (p *Parser) parseDeferStmt() ast.Statement {
 	stmt := &ast.DeferStmt{}
@@ -1066,6 +1078,12 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 		return arm, false
 	}
 	p.nextToken()
+	// A statement-position arm body is an expression or a `return` statement
+	// (SPEC §6.12); the arm's comma terminates it in place of `;`.
+	if p.cur.Type == token.Return {
+		arm.Body = p.parseMatchArmReturn()
+		return arm, true
+	}
 	arm.Body = p.parseStatement()
 	return arm, true
 }

@@ -819,6 +819,21 @@ wildcard pattern `_` を fallback arm として許可します。
 `_` arm がない場合は、すべての tag を明示しなければなりません。
 expression として使う場合は、すべての arm の value type が一致しなければなりません。
 arm value は expression なので `;` を付けません。
+
+statement として使う `match` の arm body は、expression または `return` 文です
+(ADR-0093)。`Tag => return,` は関数からの早期 return で、payload なし variant の
+「何もしない」を明示する書き方でもあります。expression として使う `match` の
+arm に `return` は書けません。
+
+```kizu
+fn (self: Slot) deinit() -> void {
+    match self {
+        Kept(payload) => payload.deinit(),
+        Vacant => return,
+    }
+    return;
+}
+```
 `let` / `var` initializer、assignment、または expression statement として `match` expression を使う場合は、
 外側の statement を `;` で終端します。
 

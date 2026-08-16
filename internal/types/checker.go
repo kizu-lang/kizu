@@ -3002,6 +3002,9 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeMa
 		return c.checkIfExpr(s, env, unsafe)
 	case *ast.MatchStmt:
 		return c.checkMatchExpr(s, env, unsafe)
+	case *ast.ReturnStmt:
+		// ADR-0093 allows `return` arms only in statement matches.
+		return "", errorf("type error: expression match arm cannot `return`")
 	default:
 		return "", errorf("type error: expression block must end with a value")
 	}
