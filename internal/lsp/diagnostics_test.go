@@ -47,6 +47,35 @@ func TestAnalyzeReportsCheckDiagnostic(t *testing.T) {
 	}
 }
 
+// TestAnalyzeAcceptsFieldsDeinit pins that `= fields;` bodies are expanded
+// before the editor path checks them: an unexpanded nil body used to panic the
+// type checker here (ADR-0091).
+func TestAnalyzeAcceptsFieldsDeinit(t *testing.T) {
+	source := `import std::mem;
+import std::string;
+
+struct Pair {
+    first: string::String,
+    second: string::String,
+}
+
+fn (self: Pair) deinit() -> void = fields;
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let pair = Pair {
+        first: string::new(allocator),
+        second: string::new(allocator),
+    };
+    pair.deinit();
+    return;
+}
+`
+	if diagnostics := Analyze(source); len(diagnostics) != 0 {
+		t.Fatalf("got %d diagnostics, want 0: %v", len(diagnostics), diagnostics)
+	}
+}
+
 // TestAnalyzeReportsMultipleTypeErrors checks each function's error is reported,
 // ordered by position, rather than only the first.
 func TestAnalyzeReportsMultipleTypeErrors(t *testing.T) {

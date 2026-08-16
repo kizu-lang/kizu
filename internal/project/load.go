@@ -43,7 +43,16 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 	if err := checker.collectFunctions(); err != nil {
 		return nil, err
 	}
-	return checker.program()
+	program, err := checker.program()
+	if err != nil {
+		return nil, err
+	}
+	// Generated deinit bodies are expanded here, once, so every frontend and
+	// checker reads the same bodies (ADR-0091).
+	if err := ast.ExpandFieldsDeinit(program); err != nil {
+		return nil, err
+	}
+	return program, nil
 }
 
 // LoadSource resolves one program that is not part of a package. It is the same

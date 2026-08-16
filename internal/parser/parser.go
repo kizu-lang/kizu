@@ -276,11 +276,35 @@ func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) as
 	if !requireBody {
 		return fn
 	}
+	if p.parseFieldsBody(fn) {
+		return fn
+	}
 	if !p.expectPeek(token.LBrace) {
 		return fn
 	}
 	fn.Body = p.parseBlockStmt()
 	return fn
+}
+
+// parseFieldsBody parses the `= fields;` generated-deinit marker in place of a
+// block body (ADR-0091, SPEC §8), reporting whether the declaration ends there.
+func (p *Parser) parseFieldsBody(fn *ast.FunctionDecl) bool {
+	if p.peek.Type != token.Assign {
+		return false
+	}
+	p.nextToken()
+	if !p.expectPeek(token.Ident) {
+		return true
+	}
+	if p.cur.Literal != "fields" {
+		p.errorf("expected `fields` after `=`, got `%s`", p.cur.Literal)
+		return true
+	}
+	if !p.expectPeek(token.Semicolon) {
+		return true
+	}
+	fn.FieldsBody = true
+	return true
 }
 
 // parseContractDecl parses a contract with method requirements.

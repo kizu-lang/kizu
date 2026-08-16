@@ -1,8 +1,6 @@
 package stdmethod
 
 import (
-	"strings"
-
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -108,11 +106,7 @@ func MethodName(receiver string, name string) string {
 // SplitMethodName separates a method's name into the type it is a method on and
 // the name a call spells.
 func SplitMethodName(name string) (string, string, bool) {
-	idx := strings.LastIndex(name, ".")
-	if idx < 0 {
-		return "", "", false
-	}
-	return name[:idx], name[idx+1:], true
+	return typ.SplitMethodName(name)
 }
 
 // CallName returns the name a call spells for a declared function. A method is
