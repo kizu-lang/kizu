@@ -138,9 +138,34 @@ func (l *lowerer) emitCleanupFrame(frame int) {
 	l.emitCleanups(cleanups)
 }
 
-// emitCleanups appends cleanup instructions to the current block.
+// emitCleanups appends cleanup instructions to the current block. A cleanup
+// receiver that lives in a slot arrives as `&var T` storage; every cleanup
+// consumes the value, so the slot is loaded at the exit that runs it.
 func (l *lowerer) emitCleanups(cleanups []Cleanup) {
 	for _, cleanup := range cleanups {
-		l.emit(cleanup.Op, "void", cleanup.Args, "")
+		l.emit(cleanup.Op, "void", l.loadCleanupArgs(cleanup.Args), "")
 	}
+}
+
+// loadCleanupArgs loads slot-backed cleanup receivers into values. Args without
+// a slot are returned as they are, unallocated.
+func (l *lowerer) loadCleanupArgs(args []Value) []Value {
+	needsLoad := false
+	for _, arg := range args {
+		if isMutableReferenceType(arg.Type) {
+			needsLoad = true
+			break
+		}
+	}
+	if !needsLoad {
+		return args
+	}
+	out := make([]Value, len(args))
+	for index, arg := range args {
+		if isMutableReferenceType(arg.Type) {
+			arg = l.emit("ref.load", derefType(arg.Type), []Value{arg}, "")
+		}
+		out[index] = arg
+	}
+	return out
 }

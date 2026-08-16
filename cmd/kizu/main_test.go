@@ -1495,6 +1495,7 @@ fn (self: Bag) deinit() -> void {
 }
 fn make_bag() -> !Bag {
     var values = std::array::new<i64>(std::mem::page_allocator());
+    errdefer values.deinit();
     try values.append(10);
     try values.append(20);
     return Bag { values: values };
@@ -1550,6 +1551,7 @@ fn (self: Bag) deinit() -> void {
 }
 fn make_bag() -> !Bag {
     var stmts = std::array::new<Stmt>(std::mem::page_allocator());
+    errdefer stmts.deinit();
     try stmts.append(Stmt::Add(10));
     try stmts.append(Stmt::Done(20));
     return Bag { stmts: stmts };
@@ -1573,8 +1575,8 @@ fn render_bag(bag: &Bag) -> !void {
 }
 fn main() -> !void {
     let bag = try make_bag();
+    defer bag.deinit();
     try render_bag(&bag);
-    bag.deinit();
     return;
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {

@@ -285,6 +285,7 @@ func TestCheckAcceptsErrorReturnAfterLocalView(t *testing.T) {
 fn fail(text: std::string::String) -> !void {
     let bytes = text.as_bytes();
     print(bytes);
+    text.deinit();
     return ViewError::Bad;
 }`
 	if err := checkSource(source); err != nil {
@@ -512,6 +513,8 @@ fn main() {
     let right = std::arena::new<User>(allocator);
     print(left);
     print(right);
+    left.deinit();
+    right.deinit();
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1018,9 +1021,9 @@ fn main(values: std::array::Array<Name>) {
 func TestCheckArrayPopMovesNonCopyElement(t *testing.T) {
 	source := `struct Name { value: []u8 }
 fn check(values: std::array::Array<Name>) -> !void {
+    defer values.deinit();
     let value = try values.pop();
     print(value.value);
-    values.deinit();
     return;
 }
 fn main() {}`
@@ -1084,9 +1087,9 @@ fn (self: Parsed) deinit() -> void {
     self.ids.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
+    defer values.deinit();
     let item = try values.pop();
     item.deinit();
-    values.deinit();
     return;
 }
 fn main() {}`

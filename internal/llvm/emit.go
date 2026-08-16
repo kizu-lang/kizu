@@ -1680,6 +1680,8 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 }
 
 // writeCleanup emits one deferred void cleanup inside an already-open block.
+// Cleanup args arrive as values, never `&var` slots: the lowerer loads
+// slot-backed receivers before attaching cleanups to an instruction.
 func (e *emitter) writeCleanup(cleanup ir.Cleanup) error {
 	instr := &ir.Instr{
 		Result: ir.Value{Name: "%" + e.nextSyntheticValue("cleanup"), Type: "void"},

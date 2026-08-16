@@ -1,0 +1,42 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// ADR-0091: every owner is consumed on every exit path. errdefer covers the
+// error paths of a builder that moves its owner out on success, and mem::leak
+// is the explicit way to not release one.
+
+fn build_greeting(allocator: Allocator) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("hello");
+    return text;
+}
+
+test "errdefer builder returns the owner" {
+    let allocator = mem::page_allocator();
+    var text = try build_greeting(allocator);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    testing::expect_equal<[]u8>("hello", bytes);
+}
+
+test "mem leak consumes an owner explicitly" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("kept alive");
+    let bytes = text.as_bytes();
+    testing::expect_equal<[]u8>("kept alive", bytes);
+    mem::leak<string::String>(text);
+}
+
+test "each branch consumes the owner its own way" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    if 1 < 2 {
+        text.deinit();
+    } else {
+        mem::leak<string::String>(text);
+    }
+}
