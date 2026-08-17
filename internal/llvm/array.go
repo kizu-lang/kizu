@@ -171,12 +171,12 @@ func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
 // writeArrayPop lowers Array.pop().
 func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
-		return fmt.Errorf("llvm error: array.pop expects Array<T> -> !T")
+		return fmt.Errorf("llvm error: array.pop expects Array<T> -> ?T")
 	}
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
-	return e.writeArrayOptionalLoadResult(instr, ptrName, "array_pop")
+	return e.writeArrayOptionalLoadResult(instr, ptrName)
 }
 
 // writeArrayPopOrPanic moves the last element out or traps on an empty Array.
@@ -198,14 +198,14 @@ func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
 // writeArrayGet lowers Array.get(index).
 func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
-		return fmt.Errorf("llvm error: array.get expects Array<T>, i64 -> !T")
+		return fmt.Errorf("llvm error: array.get expects Array<T>, i64 -> ?T")
 	}
 	array := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	return e.writeArrayOptionalLoadResult(instr, ptrName, "array_bounds")
+	return e.writeArrayOptionalLoadResult(instr, ptrName)
 }
 
 // writeArrayGetOrPanic lowers Array.get_or_panic(index).
@@ -306,38 +306,35 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArrayOptionalLoadResult converts a nullable element pointer to !T.
-func (e *emitter) writeArrayOptionalLoadResult(
-	instr *ir.Instr,
-	ptrName string,
-	failureKey string,
-) error {
-	success, _ := errorUnionSuccessType(instr.Result.Type)
+// writeArrayOptionalLoadResult converts a nullable element pointer to ?T:
+// null becomes the all-zero optional and a live pointer loads the payload.
+func (e *emitter) writeArrayOptionalLoadResult(instr *ir.Instr, ptrName string) error {
+	elem, ok := optionalElemLLVM(instr.Result.Type)
+	if !ok {
+		return fmt.Errorf(
+			"llvm error: %s expects a `?T` result, got %s", instr.Op, instr.Result.Type)
+	}
 	resultName := localName(instr.Result.Name)
-	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array")
+	nullLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array")
 	e.markCurrentBlockExit(joinLabel)
 	nullName := resultName + ".is_null"
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
-	if err := e.writeArrayFailureBlock(
-		failLabel,
-		resultName+".fail",
-		instr.Result.Type,
-		failureKey,
-		joinLabel,
-	); err != nil {
-		return err
-	}
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, nullLabel, okLabel)
+	optType := e.llvmType(instr.Result.Type)
+	fmt.Fprintf(&e.out, "%s:\n", nullLabel)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", valueName, e.llvmType(success), ptrName)
-	e.values[valueName] = valueInfo{typ: success, operand: valueName}
-	okName := resultName + ".success"
-	e.writeErrorSuccessValue(okName, instr.Result.Type, ir.Value{Name: valueName, Type: success})
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", valueName, e.llvmType(elem), ptrName)
+	someName := resultName + ".some"
+	okName := resultName + ".ok"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n", someName, optType)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
+		okName, optType, someName, e.llvmType(elem), valueName)
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
-	fmt.Fprintf(&e.out, "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]\n",
-		resultName, e.llvmType(instr.Result.Type), resultName+".fail", failLabel, okName, okLabel)
+	fmt.Fprintf(&e.out, "  %s = phi %s [ zeroinitializer, %%%s ], [ %s, %%%s ]\n",
+		resultName, optType, nullLabel, okName, okLabel)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

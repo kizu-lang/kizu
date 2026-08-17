@@ -759,6 +759,15 @@ and
 左辺は `?T`、右辺と結果は `T` です。右辺は左辺が null のときだけ評価
 されます。
 
+右辺には default の代わりに `return [expr]` / `break [:label]` /
+`continue [:label]` を書けます。null なら enclosing 関数・loop を離れる
+ので、式自体は常に payload を生みます。miss の早期 return を capture の
+入れ子なしで書く guard 形です。
+
+```kizu
+let at = find(text, b) orelse return -1;
+```
+
 例:
 
 ```kizu
@@ -965,10 +974,18 @@ fn (self: &var Stream) next() -> ReadError!?u8 {
 }
 ```
 
+element の規則は error union の成功型と同じです: parse できる型なら
+書けます(view `?[]u8`、owner `?String`、generic `?T`、struct、enum)。
+payload の階級は型が運びます: owner payload は capture / `orelse` の
+結果に消費義務が付き、view payload は view の借用規則にそのまま従い
+ます。owner / view を包んだ optional は「生まれた場所で消費」限定で、
+let / var への保存と引数渡しは copy element の optional だけができます。
+
 現在の制限:
 
-* element は scalar(明示幅整数 / bool / f32 / f64)と enum に限定
-* `??T` / `?!T` は書けない(optional を包めるのは error union だけ)
+* `??T` / `?!T` は書けない(optional を包めるのは error union だけ)。
+  generic 実体化が作る綴り(`Array<!i64>` の `pop()` が返す `?!i64`)も
+  同じ規則で拒否される
 * struct field・union payload・static argument(`Array<?u8>` など)・
   borrow(`&?T`)の対象にはできない
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
@@ -2118,10 +2135,10 @@ box.borrow() -> &T
 box.borrow_mut() -> &var T
 box.deinit() -> void
 std::mem::len(bytes: []u8) -> i64
-std::mem::byte_at(bytes: []u8, index: i64) -> !u8
+std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
 std::mem::equal_bytes(left: []u8, right: []u8) -> bool
 std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
-std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8
+std::mem::slice(bytes: []u8, start: i64, end: i64) -> ?[]u8
 std::mem::trim_ascii(bytes: []u8) -> []u8
 ```
 
@@ -2148,7 +2165,8 @@ non-copy / move-only な indirection です。`Box<T>` は struct / union payloa
 safe API は raw pointer を公開しません。
 
 `std::mem` の safe API は raw pointer を返しません。
-`std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。
+`std::mem::slice` と `std::mem::byte_at` は境界外を `null` として返します
+(lookup の不在は失敗ではなく答えであるため。基準は `docs/style.md`)。
 checked index / slice syntax の実装後は、Kizu std source では
 trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途で使い分けます。
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
@@ -2164,9 +2182,9 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.reserve(additional: i64) -> !void
-array.pop() -> !T
+array.pop() -> ?T
 array.pop_or_panic() -> T
-array.get(index: i64) -> !T
+array.get(index: i64) -> ?T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T
 array.at_mut(index: i64) -> !&var T
@@ -2175,12 +2193,13 @@ array.deinit() -> void
 ```
 
 `std::array::new<T>()` のような hidden default allocator は使いません。
-`array.get` は bounds check し、範囲外なら `!T` の error を返します。
+`array.get` は bounds check し、範囲外なら `null` を返します。
 `array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
 `get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
-`pop` は最後の initialized element を array から move して `!T` を返します。
+`pop` は最後の initialized element を array から move して `?T` を返し、
+empty array なら `null` を返します。
 `pop_or_panic` も最後の initialized element を move して `T` を返し、
 empty array なら runtime error で停止します。copy / non-copy のどちらにも使え、
 recoverable な empty case を扱う場合は `pop` を使います。
@@ -2207,7 +2226,7 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 ```text
 std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
 map.insert(key: []u8, value: V) -> !void
-map.get(key: []u8) -> !V
+map.get(key: []u8) -> ?V
 map.contains(key: []u8) -> bool
 map.len() -> i64
 map.deinit() -> void
@@ -2215,7 +2234,7 @@ map.deinit() -> void
 
 key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
-`get` は missing key を `!V` の error として返します。
+`get` は missing key を `null` として返します(docs/style.md)。
 `insert` / `get` / `contains` は amortized O(1) です。
 iteration は後続ですが、順序は先に決めてあります。**map は挿入順で反復します。**
 未定義の順序は露出しません。
@@ -2366,8 +2385,8 @@ runtime selection の方針は ADR-0039 に従います。
 * stdio helper は `Io` capability を必ず要求する
 * `std::process::arg_count()` は `i64` を返す
 * `std::process::arg(index)` は `![]u8` を返す
-* `std::process::env(name)` は `![]u8` を返す
-* `std::process::env_or_empty(name)` は `[]u8` を返し、未設定なら空を返す
+* `std::process::env(name)` は `?[]u8` を返し、未設定なら `null` を返す
+  (空にしたければ `orelse ""`)
 * `std::process::monotonic_millis()` は `i64` を返す
 * `std::process::spawn_wait8(argc, arg0, ..., arg7)` は子プロセスを起動して
   終了を待ち、`!i64` を返す。可変長引数を持たないので引数は 8 個までの固定形

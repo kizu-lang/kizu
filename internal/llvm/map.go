@@ -81,7 +81,7 @@ func (e *emitter) writeMapInsert(instr *ir.Instr) error {
 // writeMapGet lowers Map.get(key).
 func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" {
-		return fmt.Errorf("llvm error: map.get expects Map, []u8 -> !V")
+		return fmt.Errorf("llvm error: map.get expects Map, []u8 -> ?V")
 	}
 	mapValue := e.value(instr.Args[0])
 	key, err := e.sliceValue(instr.Args[1])
@@ -92,7 +92,7 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
-	return e.writeArrayOptionalLoadResult(instr, ptrName, "map_missing")
+	return e.writeArrayOptionalLoadResult(instr, ptrName)
 }
 
 // writeMapContains lowers Map.contains(key).

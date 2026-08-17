@@ -130,7 +130,7 @@ fn save(writer: ?dyn Writer) -> !void {
     return;
 }
 fn main() {}`,
-			want: "optional element must be a scalar or enum, got `dyn Writer`",
+			want: "dyn parameter `writer` must use &dyn Contract",
 		},
 	}
 	for _, tc := range cases {
@@ -1288,8 +1288,9 @@ fn (self: Parsed) deinit() -> void {
     self.ids.deinit();
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
-    let item = try values.pop();
-    item.deinit();
+    if values.pop() |item| {
+        item.deinit();
+    }
     values.deinit_all();
     return;
 }

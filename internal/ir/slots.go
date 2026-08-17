@@ -194,8 +194,22 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	case *ast.CallExpr:
 		return append([]ast.Expression{e.Callee}, e.Args...), true
 	default:
+		return guardExpressionChildren(expr)
+	}
+}
+
+// guardExpressionChildren returns the walkable children of an orelse guard:
+// the condition, and the value a return exit carries.
+func guardExpressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
+	guard, ok := expr.(*ast.OrelseGuardExpr)
+	if !ok {
 		return nil, false
 	}
+	children := []ast.Expression{guard.Cond}
+	if ret, ok := guard.Exit.(*ast.ReturnStmt); ok && ret.Value != nil {
+		children = append(children, ret.Value)
+	}
+	return children, true
 }
 
 // structLiteralValues returns the initializer of each field in a literal.

@@ -1616,13 +1616,19 @@ func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
 		}
 		return Type(name), nil
 	}
-	elemType, err := c.parseTypeNode(elem)
-	if err != nil {
-		return "", err
-	}
-	if !c.optionalElementAllowed(elemType) {
+	// The element follows the same rule as an error union's success type:
+	// anything parseable. The one wrapping optionals allow is being wrapped
+	// by an error union (`E!?T`), so an optional or error-union element is
+	// rejected here rather than by an allow-list.
+	switch elem.(type) {
+	case *typ.Optional:
+		return "", errorf("type error: optional cannot wrap an optional `%s`", elem)
+	case *typ.ErrorUnion:
 		return "", errorf(
-			"type error: optional element must be a scalar or enum, got `%s`", elemType)
+			"type error: optional cannot wrap an error union `%s`; spell it `E!?T`", elem)
+	}
+	if _, err := c.parseTypeNode(elem); err != nil {
+		return "", err
 	}
 	return Type(name), nil
 }
@@ -1632,15 +1638,6 @@ func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
 func optionalElem(t Type) (Type, bool) {
 	elem, ok := typ.OptionalElem(string(t))
 	return Type(elem), ok
-}
-
-// optionalElementAllowed lists the payload types `?T` accepts today: scalar
-// copies and enums, whose absence carries no ownership story (ADR-0101).
-func (c *Checker) optionalElementAllowed(elem Type) bool {
-	if integerTypes[elem] || elem == typeBool || elem == "f32" || elem == "f64" {
-		return true
-	}
-	return c.enums[string(elem)] != nil
 }
 
 // parsePointerType validates raw pointer element types.
@@ -3066,9 +3063,46 @@ func (c *Checker) checkControlExpr(
 		return c.checkIfExpr(e, env, unsafe)
 	case *ast.MatchStmt:
 		return c.checkMatchExpr(e, env, unsafe)
+	case *ast.OrelseGuardExpr:
+		return c.checkOrelseGuardExpr(e, env, unsafe)
 	default:
 		return "", errorf("type error: unsupported expression %T", expr)
 	}
+}
+
+// checkOrelseGuardExpr types `cond orelse return/break/continue`: on null the
+// guard leaves the enclosing function or loop, so the guard itself always
+// yields the payload.
+func (c *Checker) checkOrelseGuardExpr(
+	expr *ast.OrelseGuardExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	cond, err := c.checkExpr(expr.Cond, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := optionalElem(cond)
+	if !ok {
+		return "", errorf("type error: `orelse` expects an optional left operand, got %s", cond)
+	}
+	switch exit := expr.Exit.(type) {
+	case *ast.ReturnStmt:
+		if _, err := c.checkReturnStmt(exit, env, c.currentReturn, unsafe); err != nil {
+			return "", err
+		}
+	case *ast.BreakStmt:
+		if err := c.checkLoopBranch("break", exit.Label); err != nil {
+			return "", err
+		}
+	case *ast.ContinueStmt:
+		if err := c.checkLoopBranch("continue", exit.Label); err != nil {
+			return "", err
+		}
+	default:
+		return "", errorf("type error: `orelse` guard must exit with return, break, or continue")
+	}
+	return elem, nil
 }
 
 // checkIfExpr validates an if expression and returns the common branch type.
@@ -4544,7 +4578,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
 		}
-		return Type("!" + string(elem)), nil
+		return Type("?" + string(elem)), nil
 	case "pop_or_panic":
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.pop_or_panic` expects 0 args, got %d", len(args))
@@ -4591,7 +4625,7 @@ func (c *Checker) checkArrayPrimitiveGet(
 		return "", errorf("type error: `Array.%s` requires copy element", name)
 	}
 	if name == "get" {
-		return Type("!" + string(elem)), nil
+		return Type("?" + string(elem)), nil
 	}
 	return elem, nil
 }
@@ -4685,7 +4719,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("!" + string(valueType)), nil
+		return Type("?" + string(valueType)), nil
 	case "contains":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
 			return "", err
@@ -4845,6 +4879,14 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		}
 	}
 	returnType := substituteTypeParams(fn.returnType, subst)
+	for idx := range fn.params {
+		if err := c.revalidateSubstituted(substituteTypeParams(fn.params[idx], subst)); err != nil {
+			return err
+		}
+	}
+	if err := c.revalidateSubstituted(returnType); err != nil {
+		return err
+	}
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -5872,7 +5914,24 @@ func (c *Checker) checkStdMethod(
 			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
 		}
 	}
-	return Type(method.Substitute(method.Return, subst)), nil
+	result := Type(method.Substitute(method.Return, subst))
+	if err := c.revalidateSubstituted(result); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+// revalidateSubstituted re-parses a type text after generic substitution when
+// it carries an optional. Declaration-time checking sees only `?T`, so a
+// substitution can mint spellings the source could never write -- `pop<!i64>`
+// would return `?!i64` -- and those must fail the same way the literal
+// spelling does.
+func (c *Checker) revalidateSubstituted(t Type) error {
+	if !strings.Contains(string(t), "?") {
+		return nil
+	}
+	_, err := c.parseType(string(t))
+	return err
 }
 
 // checkStdMethodBody checks the std wrapper a receiver call resolved to, with
@@ -6021,7 +6080,7 @@ func (c *Checker) checkMapMethod(
 		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("!" + string(valueType)), nil
+		return Type("?" + string(valueType)), nil
 	case "contains":
 		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
 			return "", err

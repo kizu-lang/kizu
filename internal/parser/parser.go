@@ -1140,10 +1140,12 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			(p.peek.Type == token.LT && p.shouldParseTypeApply(left))) {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
-			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE,
-			token.Orelse:
+			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
 			p.nextToken()
 			left = p.parseBinaryExpr(left)
+		case token.Orelse:
+			p.nextToken()
+			left = p.parseOrelseExpr(left)
 		case token.LParen:
 			p.nextToken()
 			left = p.parseCallExpr(left)
@@ -1633,6 +1635,43 @@ func (p *Parser) parseTypeArg(allowConst bool) typ.Type {
 		return &typ.Const{Elem: inner}
 	}
 	return p.parseTypeName()
+}
+
+// parseOrelseExpr parses the right side of `orelse`: either a default
+// expression or a return/break/continue guard that leaves the enclosing
+// function or loop on null.
+func (p *Parser) parseOrelseExpr(left ast.Expression) ast.Expression {
+	guard := &ast.OrelseGuardExpr{Cond: left, Span: tokenSpan(p.cur)}
+	switch p.peek.Type {
+	case token.Return:
+		p.nextToken()
+		ret := &ast.ReturnStmt{}
+		if !p.peekIsExpressionEnd() {
+			p.nextToken()
+			ret.Value = p.parseExpression(lowest)
+		}
+		guard.Exit = ret
+		return guard
+	case token.Break:
+		p.nextToken()
+		guard.Exit = &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
+		return guard
+	case token.Continue:
+		p.nextToken()
+		guard.Exit = &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
+		return guard
+	}
+	return p.parseBinaryExpr(left)
+}
+
+// peekIsExpressionEnd reports whether the next token closes the expression a
+// bare `orelse return` sits in, so no return value follows.
+func (p *Parser) peekIsExpressionEnd() bool {
+	switch p.peek.Type {
+	case token.Semicolon, token.Comma, token.RBrace, token.RParen, token.RBracket:
+		return true
+	}
+	return false
 }
 
 // parseBinaryExpr parses an infix binary expression.

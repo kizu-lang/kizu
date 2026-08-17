@@ -124,6 +124,47 @@ func (l *lowerer) lowerOrelseExpr(expr *ast.BinaryExpr) (Value, error) {
 	}), nil
 }
 
+// lowerOrelseGuardExpr lowers `cond orelse return/break/continue`. The null
+// arm lowers the exit statement and never rejoins, so only the some arm
+// reaches the code after the guard and no merge phi is needed.
+func (l *lowerer) lowerOrelseGuardExpr(expr *ast.OrelseGuardExpr) (Value, error) {
+	opt, err := l.lowerExpr(expr.Cond)
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := optionalElemType(opt.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: orelse needs a `?T` left operand, got %s", opt.Type)
+	}
+	has := l.emit("opt.has", "bool", []Value{opt}, "")
+	someBlock := l.newBlock(l.nextBlockName("guard.some"))
+	exitBlock := l.newBlock(l.nextBlockName("guard.exit"))
+	l.block.Terminator = Terminator{
+		Op: "branch", Cond: has, Target: someBlock.Name, Else: exitBlock.Name,
+	}
+	l.block = exitBlock
+	if err := l.lowerGuardExit(expr.Exit); err != nil {
+		return Value{}, err
+	}
+	l.block = someBlock
+	return l.emit("opt.value", elem, []Value{opt}, ""), nil
+}
+
+// lowerGuardExit lowers the exit arm of an orelse guard through the same
+// paths the statement forms take, defers included.
+func (l *lowerer) lowerGuardExit(exit ast.Statement) error {
+	switch s := exit.(type) {
+	case *ast.ReturnStmt:
+		return l.lowerReturnStmt(s)
+	case *ast.BreakStmt:
+		return l.lowerLoopBranch("break", s.Label)
+	case *ast.ContinueStmt:
+		return l.lowerLoopBranch("continue", s.Label)
+	default:
+		return fmt.Errorf("ir error: unsupported orelse guard exit %T", exit)
+	}
+}
+
 // lowerLogicalExpr lowers short-circuit boolean operators into control flow.
 func (l *lowerer) lowerLogicalExpr(expr *ast.BinaryExpr) (Value, error) {
 	left, err := l.lowerExpr(expr.Left)

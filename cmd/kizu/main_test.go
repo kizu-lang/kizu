@@ -1442,9 +1442,9 @@ func TestBuildTargetNativeProcessProfileHelpersSmoke(t *testing.T) {
 	code := []byte(`import std;
 
 fn main() -> void {
-    let missing = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_MISSING");
+    let missing = std::process::env("KIZU_TEST_PROCESS_PROFILE_MISSING") orelse "";
     print(std::mem::len(missing));
-    let present = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_PRESENT");
+    let present = std::process::env("KIZU_TEST_PROCESS_PROFILE_PRESENT") orelse "";
     print(present);
     let before = std::process::monotonic_millis();
     let after = std::process::monotonic_millis();

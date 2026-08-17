@@ -175,11 +175,9 @@ func panicPosition(span ast.Span) []string {
 var failureErrors = map[string]struct{ set, member string }{
 	"array_append":   {"std::array::Error", "OutOfMemory"},
 	"array_bounds":   {"std::array::Error", "OutOfBounds"},
-	"array_pop":      {"std::array::Error", "Empty"},
 	"array_reserve":  {"std::array::Error", "OutOfMemory"},
 	"array_truncate": {"std::array::Error", "OutOfBounds"},
 	"map_insert":     {"std::map::Error", "OutOfMemory"},
-	"map_missing":    {"std::map::Error", "Missing"},
 }
 
 // failureErrorCode returns the global code one container failure lowers to.
@@ -594,9 +592,12 @@ func instrHasSliceType(instr *ir.Instr) bool {
 	return false
 }
 
-// isSliceType reports whether a lowered IR type is the byte-slice value type.
+// isSliceType reports whether a lowered IR type mentions the byte-slice value
+// type, itself or inside a wrapper: `?[]u8` and `![]u8` aggregates embed
+// %kizu.slice.u8, so a module whose only slice sits inside one still needs
+// the declaration.
 func isSliceType(typ string) bool {
-	return typ == "[]u8"
+	return strings.Contains(typ, "[]u8")
 }
 
 // sortedErrorUnionNames returns all error-union types referenced by this module.
@@ -1237,11 +1238,16 @@ func (e *emitter) internalCallArg(arg ir.Value, param ir.Param, index int) (stri
 
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the
 // explicit out-pointer ABI instead of the platform C aggregate return ABI.
+// Error unions and optionals are both C-side aggregates, so both go out
+// through the pointer.
 func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 	if !strings.HasPrefix(llvmFunctionName(name), "std__internal__builtin__") {
 		return false
 	}
-	_, ok := errorUnionSuccessType(instr.Result.Type)
+	if _, ok := errorUnionSuccessType(instr.Result.Type); ok {
+		return true
+	}
+	_, ok := optionalElemLLVM(instr.Result.Type)
 	return ok
 }
 
