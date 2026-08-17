@@ -41,6 +41,8 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 		return e.writeArenaAdd(instr)
 	case "arena.get":
 		return e.writeArenaGet(instr)
+	case "arena.at_mut":
+		return e.writeArenaAtMut(instr)
 	case "arena.deinit":
 		return e.writeArenaDeinit(instr)
 	default:
@@ -87,6 +89,22 @@ func (e *emitter) writeArenaGet(instr *ir.Instr) error {
 		resultName, e.llvmType(instr.Result.Type), ptrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeArenaAtMut lowers Arena.at_mut(handle) to a borrow optional: the
+// runtime's nullable element pointer becomes the payload and its presence,
+// branch-free. It calls the same kizu_arena_get as Arena.get and skips both
+// the trap and the load.
+func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
+		return fmt.Errorf("llvm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T")
+	}
+	arena := e.value(instr.Args[0])
+	handle := e.value(instr.Args[1])
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
+		ptrName, arena.operand, handle.operand)
+	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
 // writeArenaDeinit lowers Arena.deinit().

@@ -107,10 +107,6 @@ func (e *emitter) writeMapAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" {
 		return fmt.Errorf("llvm error: %s expects Map, []u8 -> ?&V", instr.Op)
 	}
-	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
-		return fmt.Errorf(
-			"llvm error: %s expects a `?&V` result, got %s", instr.Op, instr.Result.Type)
-	}
 	mapValue := e.value(instr.Args[0])
 	key, err := e.sliceValue(instr.Args[1])
 	if err != nil {
@@ -121,18 +117,7 @@ func (e *emitter) writeMapAt(instr *ir.Instr) error {
 	ptrName := resultName + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
-	optType := e.llvmType(instr.Result.Type)
-	liveName := resultName + ".live"
-	tagName := resultName + ".tag"
-	someName := resultName + ".some"
-	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
-	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
-		someName, optType, tagName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
-		resultName, optType, someName, ptrName)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
 // writeMapKeyAt lowers Map.key_at(index). The runtime fills a `?[]u8` slot

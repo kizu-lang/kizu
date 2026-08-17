@@ -45,6 +45,7 @@ go test ./...
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&var` updates through checked field access |
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
+| `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
@@ -133,6 +134,10 @@ single source file. Run them with `kizu check <package-root>`.
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
+| `arena.at_mut` must be consumed by a capture | `negative/arena_at_mut_requires_capture.kizu` | `must be consumed by a capture` |
+| `arena.at_mut` requires a mutable binding | `negative/arena_at_mut_immutable.kizu` | `requires mutable arena binding` |
+| `arena.add` waits for element borrows | `negative/arena_add_while_borrowed.kizu` | `cannot run while arena is borrowed` |
+| `arena.get` waits for mutable borrows | `negative/arena_get_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
 | arena construction requires an allocator | `negative/arena_missing_allocator.kizu` | `allocator argument` |
 | arena construction accepts one allocator | `negative/arena_extra_allocator_arg.kizu` | `allocator argument` |
 | arena allocator argument must be `Allocator` | `negative/arena_non_allocator_arg.kizu` | `expects Allocator` |
@@ -152,6 +157,9 @@ single source file. Run them with `kizu check <package-root>`.
 | unknown loop labels are rejected | `negative/unknown_loop_label.kizu` | `unknown loop label` |
 | labels only attach to loops | `negative/label_on_non_loop.kizu` | `must be attached` |
 | fields on `let` bindings are immutable | `negative/immutable_field_assignment.kizu` | `cannot assign field` |
+| nested fields inherit base immutability | `negative/immutable_nested_field_assignment.kizu` | `cannot assign field` |
+| call results are not assignment targets | `negative/call_result_field_assignment.kizu` | `invalid assignment target` |
+| capture context covers one call only | `negative/std_array_at_in_argument.kizu` | `must be consumed by a capture` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |

@@ -233,29 +233,13 @@ func executeBuilt(exe string, args []string) error {
 	return nil
 }
 
-// checkFile parses a source file and runs static checks.
+// checkFile runs every static gate `run` and `build` would pass the target
+// through, by lowering it exactly as they do and discarding the module.
+// `check: ok` is a promise the backend accepts the program, not just the
+// checkers, so a lowering gap surfaces here instead of waiting for the first
+// `run`, and the promise cannot drift from what `run` actually does.
 func checkFile(path string) error {
-	if isPackageRoot(path) {
-		return checkPackage(path)
-	}
-	program, err := loadFileProgram(path)
-	if err != nil {
-		return err
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	_, _ = fmt.Println("check: ok")
-	return nil
-}
-
-// checkPackage resolves a package root and runs package-level static checks.
-func checkPackage(path string) error {
-	_, program, err := loadPackageProgram(path)
-	if err != nil {
-		return err
-	}
-	if err := checkProgram(program); err != nil {
+	if _, err := lowerRunTarget(path); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")

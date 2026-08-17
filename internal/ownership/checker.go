@@ -33,6 +33,10 @@ type Checker struct {
 	// binding; a statement ending with entries left over used the result some
 	// other way, which would lose the tie, so checkBlock rejects it.
 	pendingAllocTaints []allocTaint
+	// captureCondition is set while an if/while capture condition is checked.
+	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
+	// `?&var T` only in this context and refuse everywhere else.
+	captureCondition bool
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -1393,7 +1397,7 @@ func isBufferTypeName(typeName string) bool {
 		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
-// containerBorrowCondition describes a recognized array/map at/at_mut capture
+// containerBorrowCondition describes a recognized container at/at_mut capture
 // condition: which container binding it borrows and how.
 type containerBorrowCondition struct {
 	containerName string
@@ -1401,10 +1405,11 @@ type containerBorrowCondition struct {
 	mutable       bool
 }
 
-// matchContainerBorrowCondition recognizes array/map at/at_mut capture
-// conditions and validates the pieces the generic condition path would have:
-// the receiver is a live Array or Map binding, and the argument reads as an
-// i64 index (Array) or a []u8 key (Map).
+// matchContainerBorrowCondition recognizes capture conditions built from a
+// container's capture accessor — the accessCapture entries of the shared
+// table. The call is checked through the normal method dispatch with the
+// capture context set, so each accessor's own checker validates receiver and
+// arguments once, and this recognizer only reads the payload type it returns.
 func (c *Checker) matchContainerBorrowCondition(
 	cond ast.Expression,
 	env *scope,
@@ -1414,7 +1419,7 @@ func (c *Checker) matchContainerBorrowCondition(
 		return containerBorrowCondition{}, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "at" && field.Name != "at_mut") {
+	if !ok {
 		return containerBorrowCondition{}, false, nil
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
@@ -1425,74 +1430,26 @@ func (c *Checker) matchContainerBorrowCondition(
 	if !exists || container.moved {
 		return containerBorrowCondition{}, false, nil
 	}
-	base, arg, ok := splitGenericType(container.typeName)
-	if !ok {
+	base, _, ok := splitGenericType(container.typeName)
+	if !ok || containerAccessTables[base].methods[field.Name] != accessCapture {
 		return containerBorrowCondition{}, false, nil
 	}
-	var elem string
-	var err error
-	switch base {
-	case "std::array::Array":
-		elem, err = c.checkArrayBorrowConditionArgs(field, call, container, arg, env)
-	case "std::map::Map":
-		elem, err = c.checkMapBorrowConditionArgs(field, call, container, arg, env)
-	default:
-		return containerBorrowCondition{}, false, nil
-	}
+	saved := c.captureCondition
+	c.captureCondition = true
+	result, err := c.checkLocalReceiverMethod(field, call.Args, env)
+	c.captureCondition = saved
 	if err != nil {
 		return containerBorrowCondition{}, false, err
 	}
+	elem, mutable, ok := typ.BorrowOptionalElem(result)
+	if !ok {
+		return containerBorrowCondition{}, false, errorf(
+			"move error: capture accessor `%s` returned %s, not a borrow optional",
+			field.Name, result)
+	}
 	return containerBorrowCondition{
-		containerName: ident.Name, elem: elem, mutable: field.Name == "at_mut",
+		containerName: ident.Name, elem: elem, mutable: mutable,
 	}, true, nil
-}
-
-// checkArrayBorrowConditionArgs validates a recognized Array at/at_mut capture
-// condition: a mutable binding for at_mut and one i64 index.
-func (c *Checker) checkArrayBorrowConditionArgs(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	array *binding,
-	elem string,
-	env *scope,
-) (string, error) {
-	if field.Name == "at_mut" && !array.mutable {
-		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
-	}
-	if len(call.Args) != 1 {
-		return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
-			field.Name, len(call.Args))
-	}
-	got, err := c.readExpr(call.Args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "i64" {
-		return "", errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
-	}
-	return elem, nil
-}
-
-// checkMapBorrowConditionArgs validates a recognized Map at/at_mut capture
-// condition: a mutable binding for at_mut and one []u8 key.
-func (c *Checker) checkMapBorrowConditionArgs(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	mapValue *binding,
-	arg string,
-	env *scope,
-) (string, error) {
-	mapArgs, err := c.checkedMapArgs(arg)
-	if err != nil {
-		return "", err
-	}
-	if field.Name == "at_mut" && !mapValue.mutable {
-		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
-	}
-	if err := c.checkMapKeyArg(field.Name, call.Args, env); err != nil {
-		return "", err
-	}
-	return mapArgs[1], nil
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
@@ -4581,16 +4538,60 @@ func (c *Checker) checkLocalReceiverMethod(
 	if !ok || base != "std::arena::Arena" {
 		return c.checkNonArenaMethod(arena, field.Name, args, env)
 	}
-	switch field.Name {
+	return c.checkArenaMethod(arena, field.Name, args, env)
+}
+
+// checkArenaMethod dispatches methods on a local arena binding.
+func (c *Checker) checkArenaMethod(
+	arena *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if err := checkContainerMethodAccess("std::arena::Arena", arena, name); err != nil {
+		return "", err
+	}
+	switch name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)
 	case "get":
 		return c.checkArenaGet(arena, args, env)
+	case "at_mut":
+		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", errorf("arena error: unknown arena method `%s`", field.Name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("arena error: method `%s` is classified but unhandled", name)
 	}
+}
+
+// checkArenaAtCondition checks at_mut inside a capture condition — a mutable
+// binding and one handle whose provenance matches the arena — and refuses it
+// everywhere else. Provenance is the guarantee here: a handle that passes it
+// can only go absent if the checker itself is wrong, so the capture's else
+// branch is a residue, not a normal path.
+func (c *Checker) checkArenaAtCondition(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+	}
+	// The flag covers exactly this call: clear it before the argument is
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
+	if !arena.mutable {
+		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
+	}
+	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at_mut")
+	if err != nil {
+		return "", err
+	}
+	return "?&var " + elem, nil
 }
 
 // checkNonArenaMethod validates methods on non-arena owned values.
@@ -4730,15 +4731,25 @@ func (c *Checker) checkFieldArenaMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if err := checkContainerMethodAccess("std::arena::Arena", arena, name); err != nil {
+		return "", err
+	}
 	switch name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)
 	case "get":
 		return c.checkFieldArenaGet(arena, args, env)
+	case "at_mut":
+		// Field-owned arenas cannot back an at_mut capture: the recognizer
+		// wants a local mutable binding, the same limit Array and Map have,
+		// so this always lands on the capture-only refusal.
+		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", errorf("arena error: unknown arena method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("arena error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -4825,6 +4836,96 @@ func (c *Checker) checkBoxMethod(
 	return c.checkBoxMethodForTarget(box, "", name, args)
 }
 
+// containerAccess classifies what one container method does to the storage a
+// live borrow may alias: reads wait for mutable borrows, mutations and
+// cleanup wait for any borrow, capture accessors are consumed by the capture
+// recognizer, and view producers are guarded where their binding forms.
+type containerAccess int
+
+const (
+	accessRead containerAccess = iota
+	accessMutate
+	accessCleanup
+	accessCapture
+	accessView
+)
+
+// containerAccessTable names one container's methods and how each touches
+// storage. kind is the error prefix, label the method spelling.
+type containerAccessTable struct {
+	kind    string
+	label   string
+	methods map[string]containerAccess
+}
+
+// containerAccessTables is the one classification the container dispatchers
+// share. A method missing here is refused at dispatch, so a new method has to
+// name what it does to storage before any per-method checker sees it. Box is
+// not here: its borrows are per-field and its conflicts are checked where the
+// field borrow forms.
+var containerAccessTables = map[string]containerAccessTable{
+	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
+		"append": accessMutate, "reserve": accessMutate, "set": accessMutate,
+		"pop": accessMutate, "pop_or_panic": accessMutate,
+		"truncate": accessMutate, "clear": accessMutate,
+		"len": accessRead, "capacity": accessRead,
+		"get": accessRead, "get_or_panic": accessRead,
+		// Unlike String's, Array's as_bytes/as_mut_bytes are std-internal
+		// calls guarded here as reads; String's form view bindings and are
+		// guarded where the binding forms.
+		"as_bytes": accessRead, "as_mut_bytes": accessRead,
+		"at": accessCapture, "at_mut": accessCapture,
+		"deinit": accessCleanup, "deinit_all": accessCleanup,
+	}},
+	"std::map::Map": {kind: "map", label: "Map", methods: map[string]containerAccess{
+		"insert": accessMutate,
+		"get":    accessRead, "key_at": accessRead, "contains": accessRead,
+		"len": accessRead,
+		"at":  accessCapture, "at_mut": accessCapture,
+		"deinit": accessCleanup,
+	}},
+	"std::string::String": {kind: "string", label: "String", methods: map[string]containerAccess{
+		"append_bytes": accessMutate, "append_byte": accessMutate,
+		"reserve": accessMutate, "truncate": accessMutate, "clear": accessMutate,
+		"len": accessRead, "capacity": accessRead,
+		"as_bytes": accessView, "as_mut_bytes": accessView,
+		"deinit": accessCleanup,
+	}},
+	"std::arena::Arena": {kind: "arena", label: "Arena", methods: map[string]containerAccess{
+		"add":    accessMutate,
+		"get":    accessRead,
+		"at_mut": accessCapture,
+		"deinit": accessCleanup,
+	}},
+}
+
+// checkContainerMethodAccess looks a container method up in the shared table
+// and refuses it when a live borrow conflicts with what it does to storage.
+// An unknown method is refused here: default deny, not fall-through.
+func checkContainerMethodAccess(base string, value *binding, name string) error {
+	table, ok := containerAccessTables[base]
+	if !ok {
+		return errorf("move error: `%s` has no container access table", base)
+	}
+	access, known := table.methods[name]
+	if !known {
+		return errorf("%s error: %s has no method `%s`", table.kind, table.label, name)
+	}
+	switch access {
+	case accessRead:
+		if value.activeMutBorrows > 0 {
+			return errorf("%s error: `%s.%s` cannot read while mutably borrowed",
+				table.kind, table.label, name)
+		}
+	case accessMutate, accessCleanup:
+		if value.hasAnyBorrow() {
+			return errorf("%s error: `%s.%s` cannot run while %s is borrowed",
+				table.kind, table.label, name, table.kind)
+		}
+	}
+	return nil
+}
+
 // checkStringReceiverBorrow rejects String methods whose receiver cannot be tracked safely.
 func checkStringReceiverBorrow(value *binding, name string) error {
 	if name == "deinit" && value.borrowedParam {
@@ -4858,18 +4959,13 @@ func (c *Checker) checkStringMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if err := checkContainerMethodAccess("std::string::String", str, name); err != nil {
+		return "", err
+	}
 	switch name {
 	case "append_bytes", "append_byte", "reserve", "truncate":
-		if err := checkStringMutationAllowed(str, name); err != nil {
-			return "", err
-		}
 		return c.checkStringAppendOrReserve(name, args, env)
 	case "len", "capacity":
-		// A live writable view is exclusive (ADR-0096): even reads wait.
-		if str.activeMutBorrows > 0 {
-			return "", errorf(
-				"string error: `String.%s` cannot run while string is mutably borrowed", name)
-		}
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
 		}
@@ -4878,9 +4974,6 @@ func (c *Checker) checkStringMethod(
 		return "", errorf(
 			"string error: `String.%s` must be bound with `let name = string.%s()`", name, name)
 	case "clear", "deinit":
-		if err := checkStringMutationAllowed(str, name); err != nil {
-			return "", err
-		}
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
 		}
@@ -4889,7 +4982,9 @@ func (c *Checker) checkStringMethod(
 		}
 		return "void", nil
 	default:
-		return "", errorf("string error: String has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("string error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -4907,14 +5002,6 @@ func (c *Checker) checkStringAppendOrReserve(
 	default:
 		return c.checkStringReserveArg(name, args, env)
 	}
-}
-
-// checkStringMutationAllowed rejects mutation while a byte view is alive.
-func checkStringMutationAllowed(str *binding, name string) error {
-	if str.hasAnyBorrow() {
-		return errorf("string error: `String.%s` cannot run while string is borrowed", name)
-	}
-	return nil
 }
 
 // checkStringNoArgs validates no-argument String methods.
@@ -5000,63 +5087,56 @@ func (c *Checker) checkArrayMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if isStdArrayStorageMethod(name) && !c.currentStd {
+		return "", errorf("array error: Array has no method `%s`", name)
+	}
+	if err := checkContainerMethodAccess("std::array::Array", array, name); err != nil {
+		return "", err
+	}
 	if isStdArrayStorageMethod(name) {
-		return c.checkStdArrayStorageMethod(array, elem, name, args, env)
+		return c.checkStdArrayStorageMethod(elem, name, args, env)
 	}
 	switch name {
 	case "append":
-		return c.checkArrayAppend(array, elem, args, env)
+		return c.checkArrayAppend(elem, args, env)
 	case "reserve":
-		return c.checkArrayCountMutation(array, name, args, env)
+		return c.checkArrayCountMutation(name, args, env)
 	case "pop":
-		return c.checkArrayPop(array, elem, name, args, true)
+		return c.checkArrayPop(elem, name, args, true)
 	case "pop_or_panic":
-		return c.checkArrayPop(array, elem, name, args, false)
+		return c.checkArrayPop(elem, name, args, false)
 	case "len", "capacity":
-		return c.checkArrayReadNoArgs(array, name, args)
+		return c.checkArrayReadNoArgs(name, args)
 	case "get", "get_or_panic":
-		if array.activeMutBorrows > 0 {
-			return "", errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
-		}
 		return c.checkArrayGet(elem, name, args, env)
 	case "at", "at_mut":
-		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
-			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
-			name, name, name)
+		return c.checkArrayAtCondition(array, elem, name, args, env)
 	case "set":
-		return c.checkArraySet(array, elem, args, env)
+		return c.checkArraySet(elem, args, env)
 	case "deinit", "deinit_all":
-		if array.hasAnyBorrow() {
-			return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
-		}
 		if len(args) != 0 {
 			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		array.moved = true
 		return "void", nil
 	default:
-		return "", errorf("array error: Array has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("array error: method `%s` is classified but unhandled", name)
 	}
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
 func (c *Checker) checkStdArrayStorageMethod(
-	array *binding,
 	elem string,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if !c.currentStd {
-		return "", errorf("array error: Array has no method `%s`", name)
-	}
 	switch name {
 	case "truncate":
-		return c.checkArrayCountMutation(array, name, args, env)
+		return c.checkArrayCountMutation(name, args, env)
 	case "clear":
-		if array.hasAnyBorrow() {
-			return "", errorf("array error: `Array.clear` cannot run while array is borrowed")
-		}
 		if len(args) != 0 {
 			return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
 		}
@@ -5065,7 +5145,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		if elem != "u8" {
 			return "", errorf("array error: `Array.%s` requires Array<u8>", name)
 		}
-		return c.checkArrayReadNoArgs(array, name, args)
+		return c.checkArrayReadNoArgs(name, args)
 	}
 }
 
@@ -5077,14 +5157,10 @@ func isStdArrayStorageMethod(name string) bool {
 
 // checkArrayCountMutation validates one-count Array mutations.
 func (c *Checker) checkArrayCountMutation(
-	array *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if array.hasAnyBorrow() {
-		return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
-	}
 	if len(args) != 1 {
 		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
@@ -5098,14 +5174,10 @@ func (c *Checker) checkArrayCountMutation(
 
 // checkArrayAppend validates append mutation and element move.
 func (c *Checker) checkArrayAppend(
-	array *binding,
 	elem string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if array.hasAnyBorrow() {
-		return "", errorf("array error: `Array.append` cannot run while array is borrowed")
-	}
 	if len(args) != 1 {
 		return "", errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
 	}
@@ -5121,15 +5193,11 @@ func (c *Checker) checkArrayAppend(
 
 // checkArrayPop validates moving one initialized element out of an Array.
 func (c *Checker) checkArrayPop(
-	array *binding,
 	elem string,
 	name string,
 	args []ast.Expression,
 	returnsOptional bool,
 ) (string, error) {
-	if array.hasAnyBorrow() {
-		return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
-	}
 	if len(args) != 0 {
 		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 	}
@@ -5139,15 +5207,48 @@ func (c *Checker) checkArrayPop(
 	return "?" + elem, nil
 }
 
+// checkArrayAtCondition checks at/at_mut inside a capture condition — a
+// mutable binding for at_mut and one i64 index — and refuses them everywhere
+// else: the borrow optional they produce exists only there.
+func (c *Checker) checkArrayAtCondition(
+	array *binding,
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
+			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+			name, name, name)
+	}
+	// The flag covers exactly this call: clear it before the arguments are
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
+	if name == "at_mut" && !array.mutable {
+		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
+	}
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+	}
+	if name == "at_mut" {
+		return "?&var " + elem, nil
+	}
+	return "?&" + elem, nil
+}
+
 // checkArrayReadNoArgs validates len/capacity reads.
 func (c *Checker) checkArrayReadNoArgs(
-	array *binding,
 	name string,
 	args []ast.Expression,
 ) (string, error) {
-	if array.activeMutBorrows > 0 {
-		return "", errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
-	}
 	if len(args) != 0 {
 		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 	}
@@ -5156,14 +5257,10 @@ func (c *Checker) checkArrayReadNoArgs(
 
 // checkArraySet validates checked element replacement.
 func (c *Checker) checkArraySet(
-	array *binding,
 	elem string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if array.hasAnyBorrow() {
-		return "", errorf("array error: `Array.set` cannot run while array is borrowed")
-	}
 	if len(args) != 2 {
 		return "", errorf("array error: `Array.set` expects 2 args, got %d", len(args))
 	}
@@ -5221,21 +5318,19 @@ func (c *Checker) checkMapMethod(
 		return "", err
 	}
 	valueType := mapArgs[1]
-	if err := checkMapReadWhileMutBorrowed(mapValue, name); err != nil {
+	if err := checkContainerMethodAccess("std::map::Map", mapValue, name); err != nil {
 		return "", err
 	}
 	switch name {
 	case "insert":
-		return c.checkMapInsert(mapValue, valueType, args, env)
+		return c.checkMapInsert(valueType, args, env)
 	case "get":
 		if err := c.checkMapKeyArg(name, args, env); err != nil {
 			return "", err
 		}
 		return "?" + valueType, nil
 	case "at", "at_mut":
-		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
-			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
-			name, name, name)
+		return c.checkMapAtCondition(mapValue, valueType, name, args, env)
 	case "key_at":
 		if len(args) != 1 {
 			return "", errorf("map error: `Map.key_at` expects 1 arg, got %d", len(args))
@@ -5256,33 +5351,48 @@ func (c *Checker) checkMapMethod(
 	case "deinit":
 		return c.checkMapDeinit(mapValue, args)
 	default:
-		return "", errorf("map error: Map has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("map error: method `%s` is classified but unhandled", name)
 	}
 }
 
-// checkMapReadWhileMutBorrowed refuses map reads while an at_mut capture holds
-// the map mutably borrowed: the borrow aliases live map storage, so reads wait
-// the way Array reads do.
-func checkMapReadWhileMutBorrowed(mapValue *binding, name string) error {
-	switch name {
-	case "get", "key_at", "contains", "len":
-		if mapValue.activeMutBorrows > 0 {
-			return errorf("map error: `Map.%s` cannot read while mutably borrowed", name)
-		}
+// checkMapAtCondition checks at/at_mut inside a capture condition — a
+// mutable binding for at_mut and one []u8 key — and refuses them everywhere
+// else: the borrow optional they produce exists only there.
+func (c *Checker) checkMapAtCondition(
+	mapValue *binding,
+	valueType string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
+			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+			name, name, name)
 	}
-	return nil
+	// The flag covers exactly this call: clear it before the arguments are
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
+	if name == "at_mut" && !mapValue.mutable {
+		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
+	}
+	if err := c.checkMapKeyArg(name, args, env); err != nil {
+		return "", err
+	}
+	if name == "at_mut" {
+		return "?&var " + valueType, nil
+	}
+	return "?&" + valueType, nil
 }
 
 // checkMapInsert validates read-only key and copy value insertion.
 func (c *Checker) checkMapInsert(
-	mapValue *binding,
 	valueType string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if mapValue.hasAnyBorrow() {
-		return "", errorf("map error: `Map.insert` cannot run while map is borrowed")
-	}
 	if len(args) != 2 {
 		return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
 	}
@@ -5326,9 +5436,6 @@ func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string
 
 // checkMapDeinit validates owned Map cleanup and marks it moved.
 func (c *Checker) checkMapDeinit(mapValue *binding, args []ast.Expression) (string, error) {
-	if mapValue.hasAnyBorrow() {
-		return "", errorf("map error: `Map.deinit` cannot run while map is borrowed")
-	}
 	if len(args) != 0 {
 		return "", errorf("map error: `Map.deinit` expects 0 args, got %d", len(args))
 	}
@@ -5457,10 +5564,22 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 
 // checkArenaGet reads a handle and returns a local borrow-like value.
 func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	return c.checkArenaHandleArg(arena, args, env, "arena.get")
+}
+
+// checkArenaHandleArg validates the one handle argument an arena accessor
+// takes — count, provenance, and the read itself — and returns the element
+// type behind the handle. label names the accessor in the count error.
+func (c *Checker) checkArenaHandleArg(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+	label string,
+) (string, error) {
 	if len(args) != 1 {
-		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `%s` expects 1 arg, got %d", label, len(args))
 	}
-	base, arg, ok := splitGenericType(arena.typeName)
+	base, elem, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
@@ -5470,14 +5589,11 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
-	return arg, nil
+	return elem, nil
 }
 
 // checkArenaDeinit validates explicit arena cleanup and invalidates the binding.
 func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (string, error) {
-	if arena.hasAnyBorrow() {
-		return "", errorf("arena error: `arena.deinit` cannot run while arena is borrowed")
-	}
 	if len(args) != 0 {
 		return "", errorf("arena error: `arena.deinit` expects 0 args, got %d", len(args))
 	}

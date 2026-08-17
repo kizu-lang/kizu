@@ -19,7 +19,7 @@ import (
 // them.
 func TestEveryExampleLowersToVerifiedIR(t *testing.T) {
 	for _, path := range kizuSourcePaths(t, "../../examples") {
-		// The negative examples are supposed to fail, and the two pending
+		// The negative examples are supposed to fail, and the pending
 		// features fail in lowering. Only a Verify failure is this test's
 		// question, which is what the sentinel separates.
 		if _, err := lowerFile(path, false); errors.Is(err, ir.ErrVerify) {
