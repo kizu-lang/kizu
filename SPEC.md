@@ -1858,15 +1858,14 @@ safe Kizu code は `Allocator` 型を名前として使い、local binding に�
 
 `Allocator` は copy 型です。`Array<T>`、`String`、`Map<K, V>`、`Box<T>`、
 `std::arena::Arena<T>` の構築に渡しても allocator binding は move されません。
-作られた owner は自身の allocation と `deinit` に必要な runtime allocator handle を
-保持しますが、`Allocator` 値そのものに user-visible cleanup method はありません。
+作られた owner は自身の allocation と `deinit` に必要なものを内部で保持し、
+`Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
 
 hidden default allocator、implicit global allocator、missing allocator argument から
 `page_allocator()` への fallback は使いません。
 safe `std::mem` は raw pointer、allocation method、mutable backing slice、
 allocator metadata、deallocation primitive を公開しません。
-user-defined allocator、fixed-buffer allocator、testing allocator は #549 で別途仕様化します。
 
 `std::string::String` は、明示 allocator capability を受け取る
 owned byte buffer です。
