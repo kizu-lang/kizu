@@ -2134,7 +2134,7 @@ func (c *Checker) checkContainerBorrowCondition(
 	if !ok || (field.Name != "at" && field.Name != "at_mut") {
 		return "", false, false, nil
 	}
-	if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+	if !captureReceiverShape(field.Receiver) {
 		return "", false, false, nil
 	}
 	saved := c.captureCondition
@@ -5939,13 +5939,33 @@ func (c *Checker) checkMapReceiverMethod(
 }
 
 // mutableReceiverPlace reports whether a method receiver expression names a
-// place a mutable borrow may come from: a `var` binding or a `&var` borrow.
+// place a mutable borrow may come from: a `var` binding, a `&var` borrow, or
+// one direct field of either.
 func mutableReceiverPlace(receiver ast.Expression, env *scope) bool {
-	ident, ok := receiver.(*ast.IdentExpr)
-	if !ok {
+	switch expr := receiver.(type) {
+	case *ast.IdentExpr:
+		return env.isMutable(expr.Name) || env.isMutBorrowed(expr.Name)
+	case *ast.FieldExpr:
+		owner, ok := expr.Receiver.(*ast.IdentExpr)
+		return ok && (env.isMutable(owner.Name) || env.isMutBorrowed(owner.Name))
+	default:
 		return false
 	}
-	return env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name)
+}
+
+// captureReceiverShape reports whether a capture-condition receiver names a
+// borrowable place: a local binding, or one direct field of one — the same
+// shape field method receivers support.
+func captureReceiverShape(receiver ast.Expression) bool {
+	switch expr := receiver.(type) {
+	case *ast.IdentExpr:
+		return true
+	case *ast.FieldExpr:
+		_, ok := expr.Receiver.(*ast.IdentExpr)
+		return ok
+	default:
+		return false
+	}
 }
 
 // checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.

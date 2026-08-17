@@ -1398,9 +1398,11 @@ func isBufferTypeName(typeName string) bool {
 }
 
 // containerBorrowCondition describes a recognized container at/at_mut capture
-// condition: which container binding it borrows and how.
+// condition: which binding it borrows — a local container, or one direct
+// container field of an owner — and how.
 type containerBorrowCondition struct {
 	containerName string
+	field         string
 	elem          string
 	mutable       bool
 }
@@ -1422,21 +1424,23 @@ func (c *Checker) matchContainerBorrowCondition(
 	if !ok {
 		return containerBorrowCondition{}, false, nil
 	}
-	ident, ok := field.Receiver.(*ast.IdentExpr)
+	targetName, fieldName, typeName, ok := c.captureReceiverPlace(field.Receiver, env)
 	if !ok {
 		return containerBorrowCondition{}, false, nil
 	}
-	container, exists := env.lookup(ident.Name)
-	if !exists || container.moved {
-		return containerBorrowCondition{}, false, nil
-	}
-	base, _, ok := splitGenericType(container.typeName)
+	base, _, ok := splitGenericType(typeName)
 	if !ok || containerAccessTables[base].methods[field.Name] != accessCapture {
 		return containerBorrowCondition{}, false, nil
 	}
 	saved := c.captureCondition
 	c.captureCondition = true
-	result, err := c.checkLocalReceiverMethod(field, call.Args, env)
+	var result string
+	var err error
+	if fieldName == "" {
+		result, err = c.checkLocalReceiverMethod(field, call.Args, env)
+	} else {
+		result, _, err = c.checkDirectFieldReceiverMethod(field, call.Args, env)
+	}
 	c.captureCondition = saved
 	if err != nil {
 		return containerBorrowCondition{}, false, err
@@ -1448,14 +1452,47 @@ func (c *Checker) matchContainerBorrowCondition(
 			field.Name, result)
 	}
 	return containerBorrowCondition{
-		containerName: ident.Name, elem: elem, mutable: mutable,
+		containerName: targetName, field: fieldName, elem: elem, mutable: mutable,
 	}, true, nil
+}
+
+// captureReceiverPlace resolves the borrowable place a capture-condition
+// receiver names: a live local binding, or one direct field of a live owner —
+// the same shape field method receivers support.
+func (c *Checker) captureReceiverPlace(
+	receiver ast.Expression,
+	env *scope,
+) (string, string, string, bool) {
+	switch expr := receiver.(type) {
+	case *ast.IdentExpr:
+		container, exists := env.lookup(expr.Name)
+		if !exists || container.moved {
+			return "", "", "", false
+		}
+		return expr.Name, "", container.typeName, true
+	case *ast.FieldExpr:
+		owner, ok := expr.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return "", "", "", false
+		}
+		value, exists := env.lookup(owner.Name)
+		if !exists || value.moved {
+			return "", "", "", false
+		}
+		fieldType, ok := c.structs[value.typeName][expr.Name]
+		if !ok {
+			return "", "", "", false
+		}
+		return owner.Name, expr.Name, fieldType, true
+	default:
+		return "", "", "", false
+	}
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
 // at/at_mut condition and activates the payload borrow on the branch scope's
-// clone of the container, so the branch body sees mutation and deinit wait on
-// the capture.
+// clone of the container — the whole binding, or one field of its owner — so
+// the branch body sees mutation and deinit wait on the capture.
 func (c *Checker) tieContainerBorrowCapture(
 	name string,
 	match containerBorrowCondition,
@@ -1466,15 +1503,19 @@ func (c *Checker) tieContainerBorrowCapture(
 	if !exists {
 		return nil, errorf("move error: unknown value `%s`", match.containerName)
 	}
-	if err := checkBorrowConflict(target, match.mutable); err != nil {
+	if match.field != "" {
+		if err := checkBorrowConflictForField(target, match.field, match.mutable); err != nil {
+			return nil, err
+		}
+	} else if err := checkBorrowConflict(target, match.mutable); err != nil {
 		return nil, err
 	}
-	c.activateBorrow(target, "", match.mutable)
+	c.activateBorrow(target, match.field, match.mutable)
 	value := c.newBinding(name, match.elem)
 	value.declSpan = expressionSpan(cond)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTargets = []borrowSource{{target: target}}
+	value.borrowTargets = []borrowSource{{target: target, field: match.field}}
 	value.mutBorrow = match.mutable
 	return value, nil
 }
@@ -4686,6 +4727,8 @@ func (c *Checker) directFieldReceiver(
 func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *binding {
 	value := &binding{
 		name: receiver.path, typeName: receiver.typeName,
+		// A field of a mutable place is itself a mutable place.
+		mutable: mutablePlace(receiver.owner),
 		activeBorrows: receiver.owner.activeBorrows +
 			receiver.owner.fieldBorrows[receiver.field],
 		activeMutBorrows: receiver.owner.activeMutBorrows +
@@ -4740,9 +4783,8 @@ func (c *Checker) checkFieldArenaMethod(
 	case "get":
 		return c.checkFieldArenaGet(arena, args, env)
 	case "at_mut":
-		// Field-owned arenas cannot back an at_mut capture: the recognizer
-		// wants a local mutable binding, the same limit Array and Map have,
-		// so this always lands on the capture-only refusal.
+		// An owned arena field backs an at_mut capture like a local arena
+		// does; handle provenance stays strict.
 		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
@@ -5503,6 +5545,10 @@ func (c *Checker) checkImplMethodCall(
 		return "", true, err
 	}
 	if name == "deinit" && returnTypeName(method) == "void" {
+		if value.hasAnyBorrow() {
+			return "", true, errorf(
+				"borrow error: value `%s` cannot be moved while borrowed", value.name)
+		}
 		value.moved = true
 	}
 	return returnTypeName(method), true, nil

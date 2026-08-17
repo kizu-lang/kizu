@@ -47,6 +47,7 @@ go test ./...
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
 | `at_mut` through a `&var` parameter | `std_map_at_mut_helper.kizu` | moves counter-update logic into a helper taking the map by `&var` |
+| `at_mut` on an owner's container field | `std_array_at_mut_field.kizu` | a `&var self` method captures `self.users.at_mut(id)` and writes in place |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
@@ -162,6 +163,9 @@ single source file. Run them with `kizu check <package-root>`.
 | call results are not assignment targets | `negative/call_result_field_assignment.kizu` | `invalid assignment target` |
 | capture context covers one call only | `negative/std_array_at_in_argument.kizu` | `must be consumed by a capture` |
 | `at_mut` needs a mutable place, not a shared borrow | `negative/std_array_at_mut_shared_param.kizu` | `requires mutable array binding` |
+| fields of immutable owners are not mutable places | `negative/std_array_field_at_mut_immutable.kizu` | `requires mutable array binding` |
+| a field capture borrows the owner's field | `negative/std_array_field_read_while_mut_borrowed.kizu` | `cannot be read while mutably borrowed` |
+| owners cannot move while a field is borrowed | `negative/owner_move_while_field_borrowed.kizu` | `cannot be moved while borrowed` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |

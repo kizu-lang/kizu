@@ -994,8 +994,11 @@ owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
 `Array.at_mut`、`Map.at` / `Map.at_mut`、`Arena.at_mut` の capture 条件と
 してだけ存在します。capture が payload borrow そのものになり、その scope の
-間 container は borrow されます。保存・`orelse`・signature への出現はすべて
-拒否します(§std array、§std map、§10)。
+間 container は borrow されます。receiver は local binding のほか、owner の
+直 field(`owner.field.at_mut(...)`)を書けます: このとき borrow は owner の
+該当 field に付き、owner の move とその field の操作が capture の最終使用
+まで待ちます。保存・`orelse`・signature への出現はすべて拒否します
+(§std array、§std map、§10)。
 
 現在の制限:
 
