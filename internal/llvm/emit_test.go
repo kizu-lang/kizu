@@ -421,7 +421,7 @@ func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
 // later phi predecessors, the shape a Map.get feeding a branch produces.
 func TestEmitMapGetLabelFeedsFollowingPhi(t *testing.T) {
 	got := emitTestModule(t, mapGetPhiModule())
-	want := "%kizu.result = phi %kizu.error.i64 [ %kizu.found, %kizu.found.array.join ], " +
+	want := "%kizu.result = phi %kizu.opt.i64 [ %kizu.found, %kizu.found.array.join ], " +
 		"[ %kizu.fallback, %alt ]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -605,7 +605,7 @@ func mapGetPhiModule() *ir.Module {
 		}}, Functions: []*ir.Function{{
 			Name:   "lookup",
 			Params: []ir.Param{{Name: "%map", Type: mapType}},
-			Return: "!i64",
+			Return: "?i64",
 			Blocks: []*ir.Block{
 				mapGetPhiEntryBlock(mapType),
 				mapGetPhiAltBlock(),
@@ -619,7 +619,7 @@ func mapGetPhiEntryBlock(mapType string) *ir.Block {
 	return &ir.Block{Name: "entry", Instrs: []*ir.Instr{
 		{Result: ir.Value{Name: "%key", Type: "[]u8"}, Op: "const", Immediate: `"answer"`},
 		{
-			Result: ir.Value{Name: "%found", Type: "!i64"},
+			Result: ir.Value{Name: "%found", Type: "?i64"},
 			Op:     "map.get",
 			Args: []ir.Value{
 				{Name: "%map", Type: mapType},
@@ -634,8 +634,8 @@ func mapGetPhiAltBlock() *ir.Block {
 	return &ir.Block{Name: "alt", Instrs: []*ir.Instr{
 		{Result: ir.Value{Name: "%zero", Type: "i64"}, Op: "const", Immediate: "0"},
 		{
-			Result: ir.Value{Name: "%fallback", Type: "!i64"},
-			Op:     "error.ok",
+			Result: ir.Value{Name: "%fallback", Type: "?i64"},
+			Op:     "opt.some",
 			Args:   []ir.Value{{Name: "%zero", Type: "i64"}},
 		},
 	}, Terminator: ir.Terminator{Op: "jump", Target: "merge"}}
@@ -644,13 +644,13 @@ func mapGetPhiAltBlock() *ir.Block {
 // mapGetPhiMergeBlock returns the merge block that consumes Map.get output.
 func mapGetPhiMergeBlock() *ir.Block {
 	return &ir.Block{Name: "merge", Instrs: []*ir.Instr{{
-		Result: ir.Value{Name: "%result", Type: "!i64"},
+		Result: ir.Value{Name: "%result", Type: "?i64"},
 		Op:     "phi",
 		Incoming: []ir.Incoming{
-			{Block: "entry", Value: ir.Value{Name: "%found", Type: "!i64"}},
-			{Block: "alt", Value: ir.Value{Name: "%fallback", Type: "!i64"}},
+			{Block: "entry", Value: ir.Value{Name: "%found", Type: "?i64"}},
+			{Block: "alt", Value: ir.Value{Name: "%fallback", Type: "?i64"}},
 		},
-	}}, Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%result", Type: "!i64"}}}
+	}}, Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%result", Type: "?i64"}}}
 }
 
 // TestEmitErrorUnionFailure checks an error set member lowers to a failed !T

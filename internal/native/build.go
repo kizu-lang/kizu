@@ -385,6 +385,11 @@ typedef struct {
 } KizuErrorSliceU8;
 
 typedef struct {
+    _Bool has;
+    KizuSliceU8 value;
+} KizuOptSliceU8;
+
+typedef struct {
     _Bool ok;
     KizuFsMetadata value;
     int64_t error;
@@ -643,6 +648,20 @@ static KizuErrorSliceU8 kizu_err_slice(int64_t failure) {
     out.ok = 0;
     out.value = kizu_slice_from_cstr("");
     out.error = failure;
+    return out;
+}
+
+static KizuOptSliceU8 kizu_opt_slice(KizuSliceU8 value) {
+    KizuOptSliceU8 out;
+    out.has = 1;
+    out.value = value;
+    return out;
+}
+
+static KizuOptSliceU8 kizu_opt_null_slice(void) {
+    KizuOptSliceU8 out;
+    out.has = 0;
+    out.value = kizu_slice_from_cstr("");
     return out;
 }
 
@@ -996,34 +1015,21 @@ void std__internal__builtin__process_arg(KizuErrorSliceU8 *out, int64_t index) {
     *out = kizu_std_builtin_process_arg_result(index);
 }
 
-static KizuErrorSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
+static KizuOptSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
     char *key = kizu_slice_to_cstr(name);
     if (!key) {
-        return kizu_err_slice(KIZU_ERR_STD_PROCESS_ERROR_INVALID_ENV_NAME);
+        return kizu_opt_null_slice();
     }
     char *value = getenv(key);
     free(key);
     if (!value) {
-        return kizu_err_slice(KIZU_ERR_STD_PROCESS_ERROR_ENV_NOT_FOUND);
+        return kizu_opt_null_slice();
     }
-    return kizu_ok_slice(kizu_slice_from_cstr(value));
+    return kizu_opt_slice(kizu_slice_from_cstr(value));
 }
 
-void std__internal__builtin__process_env(KizuErrorSliceU8 *out, const KizuSliceU8 *name) {
+void std__internal__builtin__process_env(KizuOptSliceU8 *out, const KizuSliceU8 *name) {
     *out = kizu_std_builtin_process_env_result(*name);
-}
-
-KizuSliceU8 std__internal__builtin__process_env_or_empty(KizuSliceU8 name) {
-    char *key = kizu_slice_to_cstr(name);
-    if (!key) {
-        return kizu_slice_from_cstr("");
-    }
-    char *value = getenv(key);
-    free(key);
-    if (!value) {
-        return kizu_slice_from_cstr("");
-    }
-    return kizu_slice_from_cstr(value);
 }
 
 int64_t std__internal__builtin__process_monotonic_millis(void) {

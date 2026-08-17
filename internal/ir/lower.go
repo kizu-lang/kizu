@@ -962,7 +962,7 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		// The marker is a claim about who owns the obligation, not an
 		// operation, so it lowers to whatever it covers.
 		return l.lowerExpr(e.Value)
-	case *ast.IfStmt, *ast.MatchStmt:
+	case *ast.IfStmt, *ast.MatchStmt, *ast.OrelseGuardExpr:
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
@@ -975,14 +975,17 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	}
 }
 
-// lowerBranchingExpr lowers the two nodes that are both a statement and an
-// expression. Each ends in a phi over what its branches produced.
+// lowerBranchingExpr lowers the expressions that branch: if and match end in
+// a phi over what their branches produced, and an orelse guard's null arm
+// leaves the function or loop instead of rejoining.
 func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IfStmt:
 		return l.lowerIfExpr(e)
 	case *ast.MatchStmt:
 		return l.lowerMatchExpr(e)
+	case *ast.OrelseGuardExpr:
+		return l.lowerOrelseGuardExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
@@ -1611,7 +1614,7 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 	case "insert":
 		return l.emit("map.insert", "!void", args, valueType), nil
 	case "get":
-		return l.emit("map.get", "!"+valueType, args, valueType), nil
+		return l.emit("map.get", "?"+valueType, args, valueType), nil
 	case "contains":
 		return l.emit("map.contains", "bool", args, valueType), nil
 	case "len":
@@ -1633,11 +1636,11 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 	}
 	switch name {
 	case "pop":
-		return l.emit("array.pop", "!"+elem, args, elem), nil
+		return l.emit("array.pop", "?"+elem, args, elem), nil
 	case "pop_or_panic":
 		return l.emit("array.pop_or_panic", elem, args, elem), nil
 	case "get":
-		return l.emit("array.get", "!"+elem, args, elem), nil
+		return l.emit("array.get", "?"+elem, args, elem), nil
 	case "get_or_panic":
 		return l.emit("array.get_or_panic", elem, args, elem), nil
 	case "at":
