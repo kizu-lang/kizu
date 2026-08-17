@@ -103,3 +103,8 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0087: `!T` declares no error set](0087-error-union-declares-no-set.md)
 - [ADR-0088: map iterates in insertion order](0088-map-iterates-in-insertion-order.md)
 - [ADR-0089: `unsafe` は式のマーカーにし、不変条件は型に印を付ける](0089-unsafe-is-an-expression-marker.md)
+- [ADR-0090: owned な値への match は payload を取り出せる](0090-owned-match-moves-payloads-out.md)
+- [ADR-0091: owner は consume されなければならない](0091-owners-must-be-consumed.md) (決定 2 の生成宣言は置換)
+- [ADR-0092: Allocator は opaque capability のまま、実体化しない](0092-allocator-stays-opaque-capability.md)
+- [ADR-0093: statement match の arm body に `return` を許す](0093-match-arm-return.md)
+- [ADR-0094: 転送 deinit は手書きする(`= fields;` を削除)](0094-forwarding-deinit-is-handwritten.md)

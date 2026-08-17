@@ -2,8 +2,8 @@ import std::mem;
 import std::string;
 import std::testing;
 
-// ADR-0091: `= fields;` generates the forwarding deinit body. The calls to it
-// stay written in source; only the body is generated.
+// ADR-0094: forwarding deinit bodies are hand-written. The completeness check
+// (ADR-0091) rejects a body that misses an owner field or payload.
 
 struct Pair {
     pub first: string::String,
@@ -11,14 +11,22 @@ struct Pair {
     pub count: i64,
 }
 
-fn (self: Pair) deinit() -> void = fields;
+fn (self: Pair) deinit() -> void {
+    self.first.deinit();
+    self.second.deinit();
+}
 
 union Slot {
     Kept(string::String),
     Vacant,
 }
 
-fn (self: Slot) deinit() -> void = fields;
+fn (self: Slot) deinit() -> void {
+    match self {
+        Kept(name) => name.deinit(),
+        Vacant => return,
+    }
+}
 
 fn make_pair(allocator: Allocator) -> !Pair {
     var first = string::new(allocator);
@@ -30,14 +38,14 @@ fn make_pair(allocator: Allocator) -> !Pair {
     return Pair { first: first, second: second, count: 2 };
 }
 
-test "fields deinit consumes struct owners" {
+test "forwarding deinit consumes struct owners" {
     let allocator = mem::page_allocator();
     var pair = try make_pair(allocator);
     defer pair.deinit();
     testing::expect_equal<i64>(2, pair.count);
 }
 
-test "fields deinit dispatches union payloads" {
+test "forwarding deinit dispatches union payloads" {
     let allocator = mem::page_allocator();
     var kept = string::new(allocator);
     errdefer kept.deinit();

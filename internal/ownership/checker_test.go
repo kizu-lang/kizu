@@ -1192,7 +1192,9 @@ func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
 			name: "field cleanup outside owner deinit",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
-fn (self: Registry) deinit() -> void = fields;
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
@@ -1221,8 +1223,12 @@ fn main() {
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
-fn (self: Registry) deinit() -> void = fields;
-fn (self: Wrapper) deinit() -> void = fields;
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn (self: Wrapper) deinit() -> void {
+    self.registry.deinit();
+}
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };

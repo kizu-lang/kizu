@@ -6355,8 +6355,7 @@ func (c *Checker) ownerType(typ Type) bool {
 // the class whose only cleanup is `deinit_all()`. Such a container cannot
 // itself be a container element: `deinit_all` consumes each element through the
 // element's own `deinit()`, which owner-element containers reject. The class
-// has one definition, ast.CleanupMethodName, shared with the `= fields;`
-// generator.
+// has one definition, ast.CleanupMethodName.
 func (c *Checker) ownerElemContainer(typ Type) bool {
 	return ast.CleanupMethodName(string(typ), c.deinitOwners) == "deinit_all"
 }
