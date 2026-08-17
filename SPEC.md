@@ -44,8 +44,8 @@ borrow 中の値の move を許さない
 borrow escape を許さない
 borrow を struct field に保存させない
 borrow を comptime / unsafe 境界で延命させない
-arena.get(handle) は local borrow だけを返す
-borrow 中の arena の add / deinit、可変 borrow 中の get を許さない
+arena.at(handle) は local borrow だけを返す
+borrow 中の arena の add / deinit、可変 borrow 中の at を許さない
 別 arena の handle 使用を許さない
 handle を raw pointer として扱わせない
 unsafe の中でも type check / move check / borrow check を全面的に無効化しない
@@ -1427,7 +1427,7 @@ import std::arena;
 let allocator = mem::page_allocator();
 let users = arena::new<User>(allocator);
 let alice = users.add(User { name: "alice" });
-print(users.get(alice).name);
+print(users.at(alice).name);
 ```
 
 `std::arena::Arena<T>` は複数の `T` を所有します。
@@ -1441,7 +1441,7 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
 * `std::arena::Arena<T>.add(value)` は value を arena に move する
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
-* `std::arena::Arena<T>.get(handle)` はローカル borrow を返す
+* `std::arena::Arena<T>.at(handle)` はローカル borrow を返す
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
 * `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
@@ -1455,7 +1455,7 @@ core arena の構築は明示 allocator capability を要求し、
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
 条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding
 または `&var` 借用)を要求し、
-capture の scope の間 arena は mutable に borrow され、`get` / `add` /
+capture の scope の間 arena は mutable に borrow され、`at` / `add` /
 `deinit` は capture の最終使用まで待ちます(`add` は realloc で element
 storage を動かします)。
 

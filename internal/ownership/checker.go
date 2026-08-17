@@ -2170,7 +2170,7 @@ func (c *Checker) matchScrutineeOwner(value ast.Expression, env *scope) *binding
 
 // matchScrutineeOwned reports whether the matched value owns its payloads: an
 // owned named local, or a call temporary the match consumes for free. Borrows,
-// projections, and calls that may return borrows (arena.get, methods, `borrows`
+// projections, and calls that may return borrows (arena.at, methods, `borrows`
 // returns) match in borrow mode and their aggregate payloads cannot move out.
 func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
 	if c.matchScrutineeOwner(value, env) != nil {
@@ -2180,7 +2180,7 @@ func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
 	if !ok {
 		return false
 	}
-	if c.isArenaGetExpr(value, env) {
+	if c.isArenaAtExpr(value, env) {
 		return false
 	}
 	if field, ok := call.Callee.(*ast.FieldExpr); ok && !field.Namespace {
@@ -2626,7 +2626,7 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 	if deref, ok := expr.(*ast.DerefExpr); ok {
 		return c.moveDerefExpr(deref, env)
 	}
-	if c.isArenaGetExpr(expr, env) {
+	if c.isArenaAtExpr(expr, env) {
 		typeName, err := c.readExpr(expr, env)
 		if err != nil {
 			return "", err
@@ -2635,7 +2635,7 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 			return typeName, nil
 		}
 		return "", errorAt(expressionSpan(expr),
-			"arena error: arena.get returns a local borrow and cannot be moved")
+			"arena error: arena.at returns a local borrow and cannot be moved")
 	}
 	if st, ok := expr.(*ast.StructLiteralExpr); ok {
 		return c.moveStructLiteralExpr(st, env)
@@ -4489,10 +4489,10 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			name,
 		)
 	}
-	if c.containsArenaGet(expr.Receiver, env) {
+	if c.containsArenaAt(expr.Receiver, env) {
 		return "", errorAt(
 			expr.Span,
-			"arena error: arena.get returns a local borrow and its fields cannot be moved",
+			"arena error: arena.at returns a local borrow and its fields cannot be moved",
 		)
 	}
 	return "", errorAt(expr.Span, "move error: field `%s` cannot be moved out of aggregate",
@@ -4723,8 +4723,8 @@ func (c *Checker) checkArenaMethod(
 	switch name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)
-	case "get":
-		return c.checkArenaGet(arena, args, env)
+	case "at":
+		return c.checkArenaAt(arena, args, env)
 	case "at_mut":
 		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
@@ -4911,8 +4911,8 @@ func (c *Checker) checkFieldArenaMethod(
 	switch name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)
-	case "get":
-		return c.checkFieldArenaGet(arena, args, env)
+	case "at":
+		return c.checkFieldArenaAt(arena, args, env)
 	case "at_mut":
 		// An owned arena field backs an at_mut capture like a local arena
 		// does; handle provenance stays strict.
@@ -4926,14 +4926,14 @@ func (c *Checker) checkFieldArenaMethod(
 	}
 }
 
-// checkFieldArenaGet permits typed wrapper methods to unwrap their own arena handles.
-func (c *Checker) checkFieldArenaGet(
+// checkFieldArenaAt permits typed wrapper methods to unwrap their own arena handles.
+func (c *Checker) checkFieldArenaAt(
 	arena *binding,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `arena.at` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
@@ -5066,7 +5066,7 @@ var containerAccessTables = map[string]containerAccessTable{
 	}},
 	"std::arena::Arena": {kind: "arena", label: "Arena", methods: map[string]containerAccess{
 		"add":    accessMutate,
-		"get":    accessRead,
+		"at":     accessRead,
 		"at_mut": accessCapture,
 		"deinit": accessCleanup,
 	}},
@@ -5759,9 +5759,9 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
 }
 
-// checkArenaGet reads a handle and returns a local borrow-like value.
-func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	return c.checkArenaHandleArg(arena, args, env, "arena.get")
+// checkArenaAt reads a handle and returns a local borrow-like value.
+func (c *Checker) checkArenaAt(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	return c.checkArenaHandleArg(arena, args, env, "arena.at")
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor
@@ -6175,14 +6175,14 @@ func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
 	return c.bindingForDirectFieldReceiver(direct)
 }
 
-// isArenaGetExpr reports whether expr is an arena.get call.
-func (c *Checker) isArenaGetExpr(expr ast.Expression, env *scope) bool {
+// isArenaAtExpr reports whether expr is an arena.at call.
+func (c *Checker) isArenaAtExpr(expr ast.Expression, env *scope) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "get" {
+	if !ok || field.Name != "at" {
 		return false
 	}
 	receiver, err := c.readExpr(field.Receiver, env)
@@ -6193,31 +6193,31 @@ func (c *Checker) isArenaGetExpr(expr ast.Expression, env *scope) bool {
 	return ok && base == "std::arena::Arena"
 }
 
-// containsArenaGet reports whether an expression reads through arena.get.
-func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
+// containsArenaAt reports whether an expression reads through arena.at.
+func (c *Checker) containsArenaAt(expr ast.Expression, env *scope) bool {
 	if inner, ok := transparentExprValue(expr); ok {
-		return c.containsArenaGet(inner, env)
+		return c.containsArenaAt(inner, env)
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
-		if c.isArenaGetExpr(e, env) {
+		if c.isArenaAtExpr(e, env) {
 			return true
 		}
 		for _, arg := range e.Args {
-			if c.containsArenaGet(arg, env) {
+			if c.containsArenaAt(arg, env) {
 				return true
 			}
 		}
 	case *ast.FieldExpr:
-		return c.containsArenaGet(e.Receiver, env)
+		return c.containsArenaAt(e.Receiver, env)
 	case *ast.BinaryExpr:
-		return c.containsArenaGet(e.Left, env) || c.containsArenaGet(e.Right, env)
+		return c.containsArenaAt(e.Left, env) || c.containsArenaAt(e.Right, env)
 	case *ast.CastExpr:
-		return c.containsArenaGet(e.Value, env)
+		return c.containsArenaAt(e.Value, env)
 	case *ast.TryExpr:
-		return c.containsArenaGet(e.Value, env)
+		return c.containsArenaAt(e.Value, env)
 	case *ast.ComptimeExpr:
-		return c.containsArenaGet(e.Expr, env)
+		return c.containsArenaAt(e.Expr, env)
 	}
 	return false
 }

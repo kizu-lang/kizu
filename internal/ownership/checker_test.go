@@ -668,7 +668,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
-    print(users.get(alice).name);
+    print(users.at(alice).name);
     users.deinit();
 }`
 	if err := checkSource(source); err != nil {
@@ -686,7 +686,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
-    print(users.get(alice).name);
+    print(users.at(alice).name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -727,7 +727,7 @@ fn main() {
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
     let alice = left.add(User { name: "alice" });
-    print(right.get(alice).name);
+    print(right.at(alice).name);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
 		},
@@ -738,7 +738,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let left = std::arena::new<User>(allocator);
     let right = std::arena::new<User>(allocator);
-    print(right.get(left.add(User { name: "alice" })).name);
+    print(right.at(left.add(User { name: "alice" })).name);
 }`,
 			want: "handle from `left` does not belong to arena `right`",
 		},
@@ -746,7 +746,7 @@ fn main() {
 			name: "unknown handle parameter",
 			source: `struct User { name: []u8 }
 fn show(users: std::arena::Arena<User>, user: std::arena::Handle<User>) {
-    print(users.get(user).name);
+    print(users.at(user).name);
 }`,
 			want: "arena `users` has unknown provenance",
 		},
@@ -781,7 +781,7 @@ fn main() {
     let user = User { name: "alice" };
     let alice = users.add(user);
     print(user.name);
-    print(users.get(alice).name);
+    print(users.at(alice).name);
 }`,
 			want: "moved value `user` was used",
 		},
@@ -794,9 +794,9 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let boxes = std::arena::new<Box>(allocator);
     let h = boxes.add(Box { user: User { name: "alice" } });
-    take(boxes.get(h).user);
+    take(boxes.at(h).user);
 }`,
-			want: "arena.get returns a local borrow and its fields cannot be moved",
+			want: "arena.at returns a local borrow and its fields cannot be moved",
 		},
 	}
 	runErrorCases(t, cases)
@@ -839,7 +839,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
     users.deinit();
-    print(users.get(alice).name);
+    print(users.at(alice).name);
 			}`,
 			want: "arena `users` was deinitialized",
 		},
@@ -1357,7 +1357,7 @@ func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
 struct Registry { users: std::arena::Arena<User> }
 fn (self: Registry) add(user: User) -> void {
     let handle = self.users.add(user);
-    print(self.users.get(handle).name);
+    print(self.users.at(handle).name);
     return;
 }
 fn (self: Registry) deinit() -> void {

@@ -39,8 +39,8 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 		return e.writeArenaNew(instr)
 	case "arena.add":
 		return e.writeArenaAdd(instr)
-	case "arena.get":
-		return e.writeArenaGet(instr)
+	case "arena.at":
+		return e.writeArenaAt(instr)
 	case "arena.at_mut":
 		return e.writeArenaAtMut(instr)
 	case "arena.deinit":
@@ -73,17 +73,17 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArenaGet lowers Arena.get(handle) to a checked copy load.
-func (e *emitter) writeArenaGet(instr *ir.Instr) error {
+// writeArenaAt lowers Arena.at(handle) to a checked copy load.
+func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
-		return fmt.Errorf("llvm error: arena.get expects Arena<T>, Handle<T> -> T")
+		return fmt.Errorf("llvm error: arena.at expects Arena<T>, Handle<T> -> T")
 	}
 	arena := e.value(instr.Args[0])
 	handle := e.value(instr.Args[1])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
 		ptrName, arena.operand, handle.operand)
-	e.writeNullFailure(instr, ptrName, "arena.get", "arena_handle")
+	e.writeNullFailure(instr, ptrName, "arena.at", "arena_handle")
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)
@@ -93,7 +93,7 @@ func (e *emitter) writeArenaGet(instr *ir.Instr) error {
 
 // writeArenaAtMut lowers Arena.at_mut(handle) to a borrow optional: the
 // runtime's nullable element pointer becomes the payload and its presence,
-// branch-free. It calls the same kizu_arena_get as Arena.get and skips both
+// branch-free. It calls the same kizu_arena_get as Arena.at and skips both
 // the trap and the load.
 func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {

@@ -491,7 +491,7 @@ struct User {
 fn main(allocator: Allocator) {
     let users = arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
-    print(users.get(alice).name);
+    print(users.at(alice).name);
     users.deinit();
 }`
 
@@ -592,7 +592,7 @@ entry:
   %2: []u8 = const "alice"
   %3: User = struct.new {name: %2: []u8}
   %4: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %3: User
-  %5: User = arena.get %1: std::arena::Arena<User>, %4: std::arena::Handle<User>
+  %5: User = arena.at %1: std::arena::Arena<User>, %4: std::arena::Handle<User>
   %6: []u8 = field.name %5: User
   call.print %6: []u8
   arena.deinit %1: std::arena::Arena<User>

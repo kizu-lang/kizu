@@ -292,7 +292,7 @@ func instrPanicEntries(instr *ir.Instr) []string {
 		return []string{"bounds"}
 	case "array.pop_or_panic":
 		return []string{"array_empty"}
-	case "arena.get":
+	case "arena.at":
 		return []string{"arena_handle"}
 	case "arena.add":
 		return []string{"arena_add"}
@@ -2153,7 +2153,7 @@ func continuationLabel(instr *ir.Instr) (string, bool) {
 		return helperLabel(instr.Args[0].Name, "pass"), true
 	case "array.pop", "array.get", "map.get":
 		return helperLabel(instr.Result.Name, "array.join"), true
-	case "array.get_or_panic", "arena.get":
+	case "array.get_or_panic", "arena.at":
 		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true
 	case "arena.add":
 		return helperLabel(localName(instr.Result.Name)+".bad", "ok"), true
