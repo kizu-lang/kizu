@@ -794,6 +794,10 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			if err != nil {
 				return err
 			}
+			if _, ok := optionalElem(parsed); ok {
+				return errorf("type error: union payload `%s::%s` cannot store an optional yet",
+					decl.Name, variant.Name)
+			}
 			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, payload); err != nil {
 				return err
 			}
@@ -852,6 +856,10 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		}
 		if containsBufferType(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
+				decl.Name, field.Name)
+		}
+		if _, ok := optionalElem(typ); ok {
+			return errorf("type error: struct field `%s.%s` cannot store an optional yet",
 				decl.Name, field.Name)
 		}
 	}
@@ -1203,6 +1211,10 @@ func (c *Checker) checkFunctionParam(
 	if err := checkFunctionParamPolicy(param, paramType); err != nil {
 		return err
 	}
+	if _, ok := optionalElem(paramType); ok && param.Borrow {
+		return errorf(
+			"type error: parameter `%s` cannot borrow an optional yet", param.Name)
+	}
 	if _, ok := dynContract(paramType); ok {
 		if !param.Borrow {
 			return errorf("type error: dyn parameter `%s` must be borrowed", param.Name)
@@ -1433,6 +1445,9 @@ func argTexts(args []typ.Type) []string {
 
 // parseWrappingType validates the element of a type that wraps one.
 func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
+	if _, ok := elem.(*typ.Optional); ok {
+		return "", errorf("type error: `%s` cannot wrap an optional yet", name)
+	}
 	if _, err := c.parseType(elem.String()); err != nil {
 		return "", err
 	}
@@ -1477,11 +1492,22 @@ func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, 
 				errName)
 		}
 	}
+	// An optional success (`E!?T`) is the one composition optionals allow:
+	// the call can fail, and succeeding can still find nothing.
+	if _, ok := node.Ok.(*typ.Optional); ok {
+		if _, err := c.parseTypeNode(node.Ok); err != nil {
+			return "", err
+		}
+		return Type(name), nil
+	}
 	return c.parseWrappingType(name, node.Ok)
 }
 
 // parseGenericType validates supported generic-like type spellings.
 func (c *Checker) parseGenericType(name string, base string, args []string) (Type, error) {
+	if err := rejectOptionalArgs(args); err != nil {
+		return "", err
+	}
 	switch base {
 	case "std::mem::Box":
 		arg, err := singleGenericArg(base, args)
@@ -1583,14 +1609,38 @@ func isKnownGenericBase(base string) bool {
 
 // parseNullableType validates nullable pointer types.
 func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
-	inner, ok := elem.(*typ.Name)
-	if !ok || len(inner.Path) != 1 || inner.Path[0] != "ptr" || len(inner.Args) != 1 {
-		return "", errorf("type error: nullable type `%s` must wrap ptr<T>", name)
+	if inner, ok := elem.(*typ.Name); ok &&
+		len(inner.Path) == 1 && inner.Path[0] == "ptr" && len(inner.Args) == 1 {
+		if _, err := c.parsePointerType(elem.String(), inner.Args[0].String()); err != nil {
+			return "", err
+		}
+		return Type(name), nil
 	}
-	if _, err := c.parsePointerType(elem.String(), inner.Args[0].String()); err != nil {
+	elemType, err := c.parseTypeNode(elem)
+	if err != nil {
 		return "", err
 	}
+	if !c.optionalElementAllowed(elemType) {
+		return "", errorf(
+			"type error: optional element must be a scalar or enum, got `%s`", elemType)
+	}
 	return Type(name), nil
+}
+
+// optionalElem returns T for an optional value type `?T` (typ.OptionalElem
+// with this package's Type spelling).
+func optionalElem(t Type) (Type, bool) {
+	elem, ok := typ.OptionalElem(string(t))
+	return Type(elem), ok
+}
+
+// optionalElementAllowed lists the payload types `?T` accepts today: scalar
+// copies and enums, whose absence carries no ownership story (ADR-0101).
+func (c *Checker) optionalElementAllowed(elem Type) bool {
+	if integerTypes[elem] || elem == typeBool || elem == "f32" || elem == "f64" {
+		return true
+	}
+	return c.enums[string(elem)] != nil
 }
 
 // parsePointerType validates raw pointer element types.
@@ -2209,6 +2259,16 @@ func (c *Checker) checkReturnStmt(
 	if ident, ok := stmt.Value.(*ast.IdentExpr); ok && ident.Name == "void" {
 		return false, errorf("type error: void is not a value; use `return;`")
 	}
+	if _, ok := stmt.Value.(*ast.NullExpr); ok {
+		success := want
+		if elem, isUnion := errorUnionElement(success); isUnion {
+			success = Type(elem)
+		}
+		if _, isOptional := optionalElem(success); isOptional {
+			return true, nil
+		}
+		return false, errorf("type error: return expects %s, got null", want)
+	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
@@ -2226,6 +2286,17 @@ func (c *Checker) checkReturnValue(
 	if ok, err := c.checkErrorUnionReturn(expr, want, got); ok || err != nil {
 		return ok, err
 	}
+	if _, ok := optionalElem(want); ok {
+		// A plain value returned as `?T` wraps implicitly, like `!T` success.
+		wrapped, err := c.wrapsIntoOptional(expr, want, got)
+		if err != nil {
+			return false, err
+		}
+		if wrapped {
+			return true, nil
+		}
+		return false, errorf("type error: return expects %s, got %s", want, got)
+	}
 	if c.returnValueMatchesBorrowParam(expr, env, want, got) {
 		return true, nil
 	}
@@ -2238,6 +2309,28 @@ func (c *Checker) checkReturnValue(
 		return false, errorf("type error: return expects %s, got %s", want, got)
 	}
 	return true, nil
+}
+
+// wrapsIntoOptional reports whether got fills a `?T` slot: the element wraps
+// implicitly (like `!T` success), and an already-wrapped optional passes as
+// is. Every implicit-wrap site asks here so the rule cannot fork.
+func (c *Checker) wrapsIntoOptional(
+	expr ast.Expression,
+	want Type,
+	got Type,
+) (bool, error) {
+	elem, ok := optionalElem(want)
+	if !ok {
+		return false, nil
+	}
+	if sameType(got, want) {
+		return true, nil
+	}
+	coerced, err := c.coerceContextualIntegerLiteral(expr, elem, got)
+	if err != nil {
+		return false, err
+	}
+	return sameType(coerced, elem), nil
 }
 
 // absorbsErrorUnion reports whether returning a result that fails one way from a
@@ -2262,6 +2355,9 @@ func (c *Checker) checkErrorUnionReturn(
 		if sameType(coerced, success) {
 			return true, nil
 		}
+		if ok, err := c.wrapsIntoOptional(expr, success, got); ok || err != nil {
+			return ok, err
+		}
 	}
 	if absorbsErrorUnion(want, got) {
 		return true, nil
@@ -2279,6 +2375,9 @@ func (c *Checker) checkErrorUnionReturn(
 		}
 		if sameType(coerced, success) || sameType(got, Type(errorType)) {
 			return true, nil
+		}
+		if ok, err := c.wrapsIntoOptional(expr, success, got); ok || err != nil {
+			return ok, err
 		}
 	}
 	return false, nil
@@ -2608,10 +2707,11 @@ func (c *Checker) checkIfStmt(
 	if err != nil {
 		return false, err
 	}
-	if cond != typeBool {
-		return false, errorf("type error: if condition must be bool, got %s", cond)
+	consequence := env.child()
+	if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
+		return false, err
 	}
-	leftReturns, err := c.checkBlock(stmt.Consequence, env.child(), wantReturn, unsafe)
+	leftReturns, err := c.checkBlock(stmt.Consequence, consequence, wantReturn, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -2625,6 +2725,30 @@ func (c *Checker) checkIfStmt(
 	return leftReturns && rightReturns, nil
 }
 
+// bindConditionCapture types an if/while condition: with a capture the
+// condition must be an optional and the payload binds into the branch scope;
+// without one it must be bool.
+func (c *Checker) bindConditionCapture(
+	kind string,
+	capture string,
+	cond Type,
+	scope *scope,
+) error {
+	if capture == "" {
+		if cond != typeBool {
+			return errorf("type error: %s condition must be bool, got %s", kind, cond)
+		}
+		return nil
+	}
+	elem, ok := optionalElem(cond)
+	if !ok {
+		return errorf(
+			"type error: %s capture `|%s|` requires an optional condition, got %s",
+			kind, capture, cond)
+	}
+	return scope.define(capture, elem, false)
+}
+
 // checkWhileStmt validates loop condition and body types.
 func (c *Checker) checkWhileStmt(
 	stmt *ast.WhileStmt,
@@ -2636,15 +2760,16 @@ func (c *Checker) checkWhileStmt(
 	if err != nil {
 		return false, err
 	}
-	if cond != typeBool {
-		return false, errorf("type error: while condition must be bool, got %s", cond)
+	body := env.child()
+	if err := c.bindConditionCapture("while", stmt.Capture, cond, body); err != nil {
+		return false, err
 	}
 	leave, err := c.enterLoop(stmt.Label)
 	if err != nil {
 		return false, err
 	}
 	defer leave()
-	_, err = c.checkBlock(stmt.Body, env.child(), wantReturn, unsafe)
+	_, err = c.checkBlock(stmt.Body, body, wantReturn, unsafe)
 	return false, err
 }
 
@@ -2886,7 +3011,7 @@ func missingMatchVariants(
 // checkExpr computes the static type of an expression.
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) (Type, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.checkScalarExpr(e)
 	case *ast.ComptimeExpr:
 		return c.checkComptimeExpr(e, env, unsafe)
@@ -2948,6 +3073,10 @@ func (c *Checker) checkControlExpr(
 
 // checkIfExpr validates an if expression and returns the common branch type.
 func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeMark) (Type, error) {
+	if stmt.Capture != "" {
+		return "", errorf(
+			"type error: if capture is a statement form; use `orelse` in expressions")
+	}
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
 		return "", err
@@ -3161,9 +3290,40 @@ func literalType(expr ast.Expression) (Type, error) {
 		return typeByteString, nil
 	case *ast.BoolExpr:
 		return typeBool, nil
+	case *ast.NullExpr:
+		// A bare `null` reached a position with no `?T` to give it a type;
+		// contextual positions accept it before ever asking here.
+		return "", errorf(
+			"type error: `null` needs an optional context (a `?T` return or argument)")
 	default:
 		return "", errorf("type error: unsupported literal %T", expr)
 	}
+}
+
+// checkOrelseExpr types `opt orelse default`: the left side must be an
+// optional and the result is its element, with the default checked at the
+// element type.
+func (c *Checker) checkOrelseExpr(
+	expr *ast.BinaryExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	left, err := c.checkExpr(expr.Left, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := optionalElem(left)
+	if !ok {
+		return "", errorf("type error: `orelse` expects an optional left operand, got %s", left)
+	}
+	right, err := c.checkContextualExpr(expr.Right, elem, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(right, elem) {
+		return "", errorf("type error: `orelse` default must be %s, got %s", elem, right)
+	}
+	return elem, nil
 }
 
 // checkContextualExpr validates an expression and narrows integer literals to want.
@@ -3173,9 +3333,27 @@ func (c *Checker) checkContextualExpr(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if _, ok := expr.(*ast.NullExpr); ok {
+		if _, isOptional := optionalElem(want); isOptional {
+			return want, nil
+		}
+		return "", errorf("type error: `null` needs an optional context, expected %s", want)
+	}
 	got, err := c.checkExpr(expr, env, unsafe)
 	if err != nil {
 		return "", err
+	}
+	if _, ok := optionalElem(want); ok {
+		// A plain value in an optional context wraps implicitly, the same way a
+		// success value wraps into `!T`.
+		wrapped, err := c.wrapsIntoOptional(expr, want, got)
+		if err != nil {
+			return "", err
+		}
+		if wrapped {
+			return want, nil
+		}
+		return "", errorf("type error: expected %s, got %s", want, got)
 	}
 	return c.coerceContextualIntegerLiteral(expr, want, got)
 }
@@ -3321,6 +3499,9 @@ func (c *Checker) checkBinaryExpr(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if expr.Operator == "orelse" {
+		return c.checkOrelseExpr(expr, env, unsafe)
+	}
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
 		return "", err
@@ -3993,7 +4174,32 @@ func (c *Checker) typeApplyTarget(expr *ast.TypeApplyExpr) (string, string, erro
 	if err := c.rejectUnknownBuiltin(name); err != nil {
 		return "", "", err
 	}
-	return name, c.instantiateTypeArgText(expr.TypeArg), nil
+	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if err := rejectOptionalStaticArgs(typeArg); err != nil {
+		return "", "", err
+	}
+	return name, typeArg, nil
+}
+
+// rejectOptionalStaticArgs refuses an optional inside a call-site `<...>`
+// text, splitting it into the arguments rejectOptionalArgs checks.
+func rejectOptionalStaticArgs(typeArg string) error {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil {
+		args = []string{typeArg}
+	}
+	return rejectOptionalArgs(args)
+}
+
+// rejectOptionalArgs refuses an optional in a static-argument list: an
+// optional cannot sit inside another type yet (ADR-0101).
+func rejectOptionalArgs(args []string) error {
+	for _, arg := range args {
+		if _, ok := optionalElem(Type(arg)); ok {
+			return errorf("type error: optional `%s` cannot be a static argument yet", arg)
+		}
+	}
+	return nil
 }
 
 // checkTypeApplyCallExpr validates typed std constructor calls.
@@ -4781,11 +4987,7 @@ func (c *Checker) checkUserCallArg(
 			return err
 		}
 	}
-	got, err := c.checkExpr(checkedArg, env, unsafe)
-	if err != nil {
-		return err
-	}
-	got, err = c.coerceContextualIntegerLiteral(checkedArg, fn.params[idx], got)
+	got, err := c.checkContextualExpr(checkedArg, fn.params[idx], env, unsafe)
 	if err != nil {
 		return err
 	}
