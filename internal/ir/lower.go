@@ -551,6 +551,13 @@ func (l *lowerer) lowerParam(param ast.Param) Param {
 // comes back as a pointer is a borrow with two meanings.
 func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 	if mutable {
+		// A mutable slice borrow writes through the view's own pointer, never
+		// into the caller's binding — element writes only, no re-pointing
+		// (ADR-0096) — so the fat pointer itself is the storage and travels
+		// flat, exactly like a shared slice view.
+		if elem == "[]u8" {
+			return elem, PassValue
+		}
 		return "&var " + elem, PassCallerStorage
 	}
 	if _, ok := l.module.Unions[elem]; ok {
@@ -784,6 +791,11 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 		return l.fieldType(receiver, t.Name)
 	case *ast.DerefExpr:
 		return l.assignTargetType(t.Receiver)
+	case *ast.IndexExpr:
+		if !t.Slice {
+			return "u8"
+		}
+		return ""
 	default:
 		return ""
 	}
@@ -830,9 +842,33 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 		}
 		l.emit("ref.store", "void", []Value{receiver, value}, "")
 		return nil
+	case *ast.IndexExpr:
+		return l.lowerIndexAssign(t, value)
 	default:
 		return fmt.Errorf("ir error: unsupported assignment target `%s`", target.String())
 	}
+}
+
+// lowerIndexAssign stores one byte through a writable slice view. The bounds
+// test is emitted here for the same reason lowerIndexExpr emits it: every
+// backend inherits one check from one place.
+func (l *lowerer) lowerIndexAssign(target *ast.IndexExpr, value Value) error {
+	if target.Slice {
+		return fmt.Errorf("ir error: unsupported assignment target `%s`", target.String())
+	}
+	slice, err := l.lowerExpr(target.Target)
+	if err != nil {
+		return err
+	}
+	index, err := l.lowerExpr(target.Index)
+	if err != nil {
+		return err
+	}
+	length := l.emit("slice.len", "i64", []Value{slice}, "")
+	l.condFail(target.Span, "binary.<", index, zeroIndex, "bounds", index, length)
+	l.condFail(target.Span, "binary.>=", index, length, "bounds", index, length)
+	l.emit("slice.store", "void", []Value{slice, index, value}, "")
+	return nil
 }
 
 // lowerReturnStmt lowers explicit returns and wraps !T success values.
@@ -1445,6 +1481,7 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_append":       "append",
 	"std::internal::builtin::array_as_bytes":     "as_bytes",
+	"std::internal::builtin::array_as_mut_bytes": "as_mut_bytes",
 	"std::internal::builtin::array_at":           "at",
 	"std::internal::builtin::array_at_mut":       "at_mut",
 	"std::internal::builtin::array_capacity":     "capacity",
@@ -1520,6 +1557,10 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 		return l.emit("array.at", "!&"+elem, args, elem), nil
 	case "at_mut":
 		return l.emit("array.at_mut", "!&var "+elem, args, elem), nil
+	case "as_mut_bytes":
+		// The same view value as as_bytes: mutability is a checker-level
+		// permission, not a different runtime representation (ADR-0096).
+		return l.emit("array.as_bytes", "[]u8", args, elem), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
 	}

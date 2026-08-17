@@ -1,0 +1,40 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// ADR-0096: mutability rides the borrow. `&var []u8` holders may write
+// elements; the view is exclusive while it lives and releases at last use.
+
+fn upper_first(buf: &var []u8) -> void {
+    if mem::len(buf) > 0 {
+        buf[0] = 75;
+    }
+    return;
+}
+
+test "as_mut_bytes writes through the view" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("kizu");
+
+    let view = name.as_mut_bytes();
+    upper_first(view);
+    view[3] = 79;
+
+    let read = name.as_bytes();
+    testing::expect(mem::equal_bytes(read, "KizO"));
+}
+
+test "mutable view releases at last use" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("ab");
+
+    let view = name.as_mut_bytes();
+    view[0] = 65;
+
+    try name.append_bytes("c");
+    testing::expect_equal<i64>(3, name.len());
+}
