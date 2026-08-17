@@ -864,7 +864,7 @@ fn main() {
     users.deinit();
     print(borrowed);
 }`,
-			want: "`arena.deinit` cannot run while arena is borrowed",
+			want: "`Arena.deinit` cannot run while arena is borrowed",
 		},
 		{
 			name: "handle after deinit",
@@ -948,7 +948,7 @@ fn main() {
     defer users.deinit();
     while false { print(borrowed); }
 }`,
-			want: "`arena.deinit` cannot run while arena is borrowed",
+			want: "`Arena.deinit` cannot run while arena is borrowed",
 		},
 	}
 	runErrorCases(t, cases)
