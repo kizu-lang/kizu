@@ -1683,7 +1683,14 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	left := env.clone()
 	leftScope := left.child()
 	if stmt.Capture != "" {
-		leftScope.define(c.newCaptureBinding(stmt.Capture, condType, stmt.Condition))
+		capture := c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
+		// The tie borrows the branch's clone of each container: the branch
+		// body is checked against that clone, so only its bindings make the
+		// body's mutations wait.
+		if err := c.tieViewCapture(capture, condType, stmt.Condition, leftScope); err != nil {
+			return err
+		}
+		leftScope.define(capture)
 	}
 	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
 		return err
@@ -1713,7 +1720,12 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	body := env.clone()
 	child := body.child()
 	if stmt.Capture != "" {
-		child.define(c.newCaptureBinding(stmt.Capture, condType, stmt.Condition))
+		capture := c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
+		// Borrow the loop's clone of each container, as in checkIfStmt.
+		if err := c.tieViewCapture(capture, condType, stmt.Condition, child); err != nil {
+			return err
+		}
+		child.define(capture)
 	}
 	c.loopDepth++
 	defer func() { c.loopDepth-- }()
@@ -1745,6 +1757,110 @@ func (c *Checker) newCaptureBinding(
 	value := c.newBinding(name, optionalPayloadName(condType))
 	value.declSpan = expressionSpan(cond)
 	return value
+}
+
+// tieViewCapture ties a view-carrying capture to the containers its condition
+// call read: the captured view may alias their storage, so each stays
+// share-borrowed until the capture's last use, and mutation or deinit waits —
+// the same exclusion `let view = string.as_bytes()` gets from its let borrow.
+func (c *Checker) tieViewCapture(
+	capture *binding,
+	condType string,
+	cond ast.Expression,
+	env *scope,
+) error {
+	if _, ok := typ.OptionalElem(condType); !ok {
+		return nil
+	}
+	if !c.viewCarryingType(optionalPayloadName(condType)) {
+		return nil
+	}
+	for _, target := range condContainerBindings(cond, env) {
+		if err := checkBorrowConflict(target, false); err != nil {
+			return err
+		}
+		c.activateBorrow(target, "", false)
+		capture.borrowedParam = true
+		capture.localBorrow = true
+		capture.borrowTargets = append(capture.borrowTargets, borrowSource{target: target})
+	}
+	return nil
+}
+
+// condContainerBindings lists the owned container bindings a capture condition
+// call reads — its receiver and arguments, walking through `try`. A view
+// payload may alias any of their storage, and the producer's shape does not
+// say which, so a caller ties them all.
+func condContainerBindings(cond ast.Expression, env *scope) []*binding {
+	if tryExpr, ok := cond.(*ast.TryExpr); ok {
+		cond = tryExpr.Value
+	}
+	call, ok := cond.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	var targets []*binding
+	seen := map[*binding]bool{}
+	add := func(expr ast.Expression) {
+		ident, ok := expr.(*ast.IdentExpr)
+		if !ok {
+			return
+		}
+		value, exists := env.lookup(ident.Name)
+		if !exists || value.moved || seen[value] || !isContainerTypeName(value.typeName) {
+			return
+		}
+		seen[value] = true
+		targets = append(targets, value)
+	}
+	if field, ok := call.Callee.(*ast.FieldExpr); ok {
+		add(field.Receiver)
+	}
+	for _, arg := range call.Args {
+		add(arg)
+	}
+	return targets
+}
+
+// isContainerTypeName reports whether a type owns storage a returned view
+// could alias.
+func isContainerTypeName(typeName string) bool {
+	if typeName == "std::string::String" || isBufferTypeName(typeName) {
+		return true
+	}
+	base, _, ok := splitGenericType(typeName)
+	if !ok {
+		return false
+	}
+	switch base {
+	case "std::array::Array", "std::map::Map", "std::mem::Box", "std::arena::Arena":
+		return true
+	default:
+		return false
+	}
+}
+
+// refuseContainerViewOrelse rejects `orelse` over a view optional produced
+// from an owned container: the result is a bare view no binding ties back to
+// the container, so it could outlive a mutation. A capture ties the view for
+// exactly its scope instead.
+func (c *Checker) refuseContainerViewOrelse(
+	condType string,
+	cond ast.Expression,
+	env *scope,
+) error {
+	if _, ok := typ.OptionalElem(condType); !ok {
+		return nil
+	}
+	if !c.viewCarryingType(optionalPayloadName(condType)) {
+		return nil
+	}
+	if len(condContainerBindings(cond, env)) == 0 {
+		return nil
+	}
+	return errorf(
+		"move error: view optional `%s` from a container must be consumed by a capture"+
+			" (`if cond |name|` or `while cond |name|`)", condType)
 }
 
 // checkForStmt treats moves in the body as possible after the loop.
@@ -2096,6 +2212,9 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (string, error) {
 	condType, err := c.readExpr(expr.Cond, env)
 	if err != nil {
+		return "", err
+	}
+	if err := c.refuseContainerViewOrelse(condType, expr.Cond, env); err != nil {
 		return "", err
 	}
 	switch exit := expr.Exit.(type) {
@@ -2535,6 +2654,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 		return "", err
 	}
 	if expr.Operator == "orelse" {
+		if err := c.refuseContainerViewOrelse(left, expr.Left, env); err != nil {
+			return "", err
+		}
 		return c.readOrelseDefault(left, expr.Right, env)
 	}
 	if _, err := c.readExpr(expr.Right, env); err != nil {
@@ -4965,6 +5087,16 @@ func (c *Checker) checkMapMethod(
 			return "", err
 		}
 		return "?" + valueType, nil
+	case "key_at":
+		if len(args) != 1 {
+			return "", errorf("map error: `Map.key_at` expects 1 arg, got %d", len(args))
+		}
+		if got, err := c.readExpr(args[0], env); err != nil {
+			return "", err
+		} else if !sameOwnershipType(got, "i64") {
+			return "", errorf("map error: `Map.key_at` expects i64 index, got %s", got)
+		}
+		return "?[]u8", nil
 	case "contains":
 		if err := c.checkMapKeyArg(name, args, env); err != nil {
 			return "", err
