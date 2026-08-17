@@ -1347,14 +1347,21 @@ func (l *lowerer) lowerMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 ) (Value, error) {
-	receiver, err := l.lowerExpr(field.Receiver)
+	receiver, err := l.lowerReceiverAddress(field.Receiver)
 	if err != nil {
 		return Value{}, err
 	}
-	// A `&var` receiver is storage. No method takes `&var self`, so every one of
-	// them is asking for the value that is in there.
-	if isMutableReferenceType(receiver.Type) {
+	// A method that declares `&var self` receives the receiver's storage; every
+	// other method receives the value, so a receiver arriving as storage is
+	// loaded for it.
+	wantsStorage := l.methodTakesSelfStorage(receiver.Type, field.Name)
+	if isMutableReferenceType(receiver.Type) && !wantsStorage {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
+	}
+	if wantsStorage && !isMutableReferenceType(receiver.Type) {
+		return Value{}, fmt.Errorf(
+			"ir error: method `%s` takes `&var self`, receiver `%s` has no storage",
+			field.Name, field.Receiver.String())
 	}
 	if isBufferIRType(receiver.Type) {
 		return l.lowerBufferMethod(field.Name, receiver, args)
@@ -1485,6 +1492,17 @@ func (l *lowerer) stdContainerCallOp(
 		return "", Signature{}, err
 	}
 	return "call." + symbol, sig, nil
+}
+
+// methodTakesSelfStorage reports whether the method this receiver resolves
+// declares `&var self`, so the call passes storage instead of a loaded value.
+func (l *lowerer) methodTakesSelfStorage(receiverType string, method string) bool {
+	name, ok := l.implMethodCalleeName(receiverType, method)
+	if !ok {
+		return false
+	}
+	params := l.signatures[name].Params
+	return len(params) > 0 && params[0].Passing == PassCallerStorage
 }
 
 // implMethodCalleeName resolves a checked receiver method to its lowered symbol.
