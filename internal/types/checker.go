@@ -2111,10 +2111,12 @@ func (c *Checker) checkStringViewInitializer(
 	return sources, mutable, true, nil
 }
 
-// checkContainerBorrowCondition recognizes array/map at/at_mut capture
+// checkContainerBorrowCondition recognizes container at/at_mut capture
 // conditions: the borrow optional `?&T` exists only there, so the payload
 // borrow binds as the capture the way `let view = &value` binds a local
-// borrow. Array takes an i64 index, Map takes a []u8 key.
+// borrow. Array takes an i64 index, Map takes a []u8 key, Arena takes a
+// matching handle (and has no shared `at`: `get` already reads without a
+// capture).
 func (c *Checker) checkContainerBorrowCondition(
 	expr ast.Expression,
 	env *scope,
@@ -2142,6 +2144,11 @@ func (c *Checker) checkContainerBorrowCondition(
 		elem, err = c.checkArrayBorrowConditionCall(field, call, arg, env, unsafe)
 	case "std::map::Map":
 		elem, err = c.checkMapBorrowConditionCall(field, call, arg, env, unsafe)
+	case "std::arena::Arena":
+		if field.Name != "at_mut" {
+			return "", false, false, nil
+		}
+		elem, err = c.checkArenaBorrowConditionCall(field, call, arg, env, unsafe)
 	default:
 		// A receiver of another type may have its own `at` method; the
 		// generic condition path types that call.
@@ -2195,6 +2202,32 @@ func (c *Checker) checkMapBorrowConditionCall(
 		return "", err
 	}
 	return Type(mapArgs[1]), nil
+}
+
+// checkArenaBorrowConditionCall validates a recognized Arena at_mut capture
+// condition: a mutable binding and one handle of the arena's element type.
+func (c *Checker) checkArenaBorrowConditionCall(
+	field *ast.FieldExpr,
+	call *ast.CallExpr,
+	elem string,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
+	}
+	if len(call.Args) != 1 {
+		return "", errorf("type error: `Arena.at_mut` expects 1 arg, got %d", len(call.Args))
+	}
+	got, err := c.checkExpr(call.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	want := Type(fmt.Sprintf("std::arena::Handle<%s>", elem))
+	if !sameType(got, want) {
+		return "", errorf("type error: `Arena.at_mut` expects %s, got %s", want, got)
+	}
+	return Type(elem), nil
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -5779,6 +5812,9 @@ func (c *Checker) checkArenaOrImplMethod(
 		return c.checkArenaAdd(arg, args, env, unsafe)
 	case "get":
 		return c.checkArenaGet(arg, args, env, unsafe)
+	case "at_mut":
+		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	case "deinit":
 		return c.checkArenaDeinit(field, args, env)
 	default:

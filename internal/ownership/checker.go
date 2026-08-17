@@ -1393,7 +1393,7 @@ func isBufferTypeName(typeName string) bool {
 		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
-// containerBorrowCondition describes a recognized array/map at/at_mut capture
+// containerBorrowCondition describes a recognized container at/at_mut capture
 // condition: which container binding it borrows and how.
 type containerBorrowCondition struct {
 	containerName string
@@ -1401,10 +1401,10 @@ type containerBorrowCondition struct {
 	mutable       bool
 }
 
-// matchContainerBorrowCondition recognizes array/map at/at_mut capture
+// matchContainerBorrowCondition recognizes container at/at_mut capture
 // conditions and validates the pieces the generic condition path would have:
-// the receiver is a live Array or Map binding, and the argument reads as an
-// i64 index (Array) or a []u8 key (Map).
+// the receiver is a live Array, Map, or Arena binding, and the argument reads
+// as an i64 index (Array), a []u8 key (Map), or a matching handle (Arena).
 func (c *Checker) matchContainerBorrowCondition(
 	cond ast.Expression,
 	env *scope,
@@ -1436,6 +1436,11 @@ func (c *Checker) matchContainerBorrowCondition(
 		elem, err = c.checkArrayBorrowConditionArgs(field, call, container, arg, env)
 	case "std::map::Map":
 		elem, err = c.checkMapBorrowConditionArgs(field, call, container, arg, env)
+	case "std::arena::Arena":
+		if field.Name != "at_mut" {
+			return containerBorrowCondition{}, false, nil
+		}
+		elem, err = c.checkArenaBorrowConditionArgs(call, container, arg, env)
 	default:
 		return containerBorrowCondition{}, false, nil
 	}
@@ -1493,6 +1498,32 @@ func (c *Checker) checkMapBorrowConditionArgs(
 		return "", err
 	}
 	return mapArgs[1], nil
+}
+
+// checkArenaBorrowConditionArgs validates a recognized Arena at_mut capture
+// condition: a mutable binding and one handle whose provenance matches the
+// arena. Provenance is the guarantee here — a handle that passes it can only
+// go absent if the checker itself is wrong, so the capture's else branch is a
+// residue, not a normal path.
+func (c *Checker) checkArenaBorrowConditionArgs(
+	call *ast.CallExpr,
+	arena *binding,
+	elem string,
+	env *scope,
+) (string, error) {
+	if !arena.mutable {
+		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
+	}
+	if len(call.Args) != 1 {
+		return "", errorf("arena error: `Arena.at_mut` expects 1 arg, got %d", len(call.Args))
+	}
+	if err := c.checkHandleProvenance(arena, call.Args[0], env); err != nil {
+		return "", err
+	}
+	if _, err := c.readExpr(call.Args[0], env); err != nil {
+		return "", err
+	}
+	return elem, nil
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
@@ -4581,15 +4612,28 @@ func (c *Checker) checkLocalReceiverMethod(
 	if !ok || base != "std::arena::Arena" {
 		return c.checkNonArenaMethod(arena, field.Name, args, env)
 	}
-	switch field.Name {
+	return c.checkArenaMethod(arena, field.Name, args, env)
+}
+
+// checkArenaMethod dispatches methods on a local arena binding.
+func (c *Checker) checkArenaMethod(
+	arena *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)
 	case "get":
 		return c.checkArenaGet(arena, args, env)
+	case "at_mut":
+		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", errorf("arena error: unknown arena method `%s`", field.Name)
+		return "", errorf("arena error: unknown arena method `%s`", name)
 	}
 }
 
@@ -4735,6 +4779,11 @@ func (c *Checker) checkFieldArenaMethod(
 		return c.checkArenaAdd(arena, args, env)
 	case "get":
 		return c.checkFieldArenaGet(arena, args, env)
+	case "at_mut":
+		// Field-owned arenas cannot back an at_mut capture: the recognizer
+		// wants a local mutable binding, the same limit Array and Map have.
+		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
@@ -5438,6 +5487,11 @@ func (c *Checker) checkImplMethodArg(
 
 // checkArenaAdd moves one value into an arena and returns a handle.
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	if arena.hasAnyBorrow() {
+		// add grows storage by realloc, which moves every element a live
+		// borrow points into.
+		return "", errorf("arena error: `arena.add` cannot run while arena is borrowed")
+	}
 	if len(args) != 1 {
 		return "", errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
 	}
@@ -5457,6 +5511,9 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 
 // checkArenaGet reads a handle and returns a local borrow-like value.
 func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	if arena.activeMutBorrows > 0 {
+		return "", errorf("arena error: `arena.get` cannot read while mutably borrowed")
+	}
 	if len(args) != 1 {
 		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
 	}
