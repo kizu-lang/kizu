@@ -139,6 +139,17 @@ func isMutableReferenceType(name string) bool {
 	return strings.HasPrefix(name, "&var ")
 }
 
+// rawPointerElem returns T for ptr<T> and ptr<const T>. Nullable ?ptr<T> is
+// not dereferenceable, so it stays out. The checker owns mutability, so const
+// is stripped here: the value read through either spelling is a T.
+func rawPointerElem(name string) (string, bool) {
+	if !strings.HasPrefix(name, "ptr<") || !strings.HasSuffix(name, ">") {
+		return "", false
+	}
+	elem := name[len("ptr<") : len(name)-1]
+	return strings.TrimPrefix(elem, "const "), true
+}
+
 // derefType returns T for &T and &var T.
 func derefType(name string) string {
 	if strings.HasPrefix(name, "&var ") {

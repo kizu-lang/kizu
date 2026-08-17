@@ -83,13 +83,19 @@ func (e *emitter) hostedRuntimeIndirectABI(typ string) bool {
 	return ok
 }
 
-// derefLLVMType returns T for borrowed Kizu types &T and &var T.
+// derefLLVMType returns T for borrowed Kizu types &T and &var T, and for the
+// raw pointers ptr<T> and ptr<const T>. Both compile to a plain pointer, so a
+// load or store through either sees the same element type.
 func derefLLVMType(typ string) string {
 	if strings.HasPrefix(typ, "&var ") {
 		return strings.TrimPrefix(typ, "&var ")
 	}
 	if strings.HasPrefix(typ, "&") {
 		return strings.TrimPrefix(typ, "&")
+	}
+	if strings.HasPrefix(typ, "ptr<") && strings.HasSuffix(typ, ">") {
+		elem := typ[len("ptr<") : len(typ)-1]
+		return strings.TrimPrefix(elem, "const ")
 	}
 	return typ
 }
