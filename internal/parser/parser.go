@@ -353,7 +353,9 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	return decl
 }
 
-// parseReturnClause reads `-> T` and the `borrows a, b` that may follow it.
+// parseReturnClause reads the `-> T` return type. A `borrows` clause is no
+// longer part of the language (ADR-0098): return provenance is derived from
+// the signature, so a written clause falls through to a plain parse error.
 func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
 	if p.peek.Type != token.Arrow {
 		return true
@@ -361,25 +363,7 @@ func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
 	p.nextToken()
 	p.nextToken()
 	fn.ReturnType = p.parseTypeName()
-	if fn.ReturnType == nil {
-		return false
-	}
-	if p.peek.Type != token.Ident || p.peek.Literal != "borrows" {
-		return true
-	}
-	p.nextToken()
-	if !p.expectPeek(token.Ident) {
-		return false
-	}
-	fn.ReturnBorrows = append(fn.ReturnBorrows, p.cur.Literal)
-	for p.peek.Type == token.Comma {
-		p.nextToken()
-		if !p.expectPeek(token.Ident) {
-			return false
-		}
-		fn.ReturnBorrows = append(fn.ReturnBorrows, p.cur.Literal)
-	}
-	return true
+	return fn.ReturnType != nil
 }
 
 // parseReceiver reads the `(self: T)` slot a method declares before its name,

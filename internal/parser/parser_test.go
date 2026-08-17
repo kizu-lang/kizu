@@ -1092,7 +1092,7 @@ func TestParseTry(t *testing.T) {
 
 // TestParseBorrowReturnProvenance checks borrowed-return provenance syntax.
 func TestParseBorrowReturnProvenance(t *testing.T) {
-	input := `fn show(s: []u8) -> []u8 borrows s {
+	input := `fn show(s: []u8) -> []u8 {
     return s[0..1];
 }`
 	p := New(lexer.New(input))
@@ -1100,7 +1100,7 @@ func TestParseBorrowReturnProvenance(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn show(s: []u8) -> []u8 borrows s { return s[0..1]; }`
+	want := `fn show(s: []u8) -> []u8 { return s[0..1]; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

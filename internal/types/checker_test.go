@@ -531,7 +531,7 @@ fn main() {}`
 
 // TestCheckAcceptsBorrowReturnProvenance checks borrowed slice return syntax.
 func TestCheckAcceptsBorrowReturnProvenance(t *testing.T) {
-	source := `fn first(bytes: []u8) -> []u8 borrows bytes {
+	source := `fn first(bytes: []u8) -> []u8 {
     return bytes[0..1];
 }
 fn main() {}`
@@ -542,10 +542,10 @@ fn main() {}`
 
 // TestCheckAcceptsBorrowProvenanceReturns checks shared and mutable borrow returns.
 func TestCheckAcceptsBorrowProvenanceReturns(t *testing.T) {
-	source := `fn shared(value: &i64) -> &i64 borrows value {
+	source := `fn shared(value: &i64) -> &i64 {
     return value;
 }
-fn mutable(value: &var i64) -> &var i64 borrows value {
+fn mutable(value: &var i64) -> &var i64 {
     return value;
 }
 fn main() {}`
@@ -561,7 +561,7 @@ func TestCheckAcceptsBorrowProvenanceThroughFieldAliases(t *testing.T) {
 struct Owner {
     text: string::String,
 }
-fn (self: &Owner) bytes() -> []u8 borrows self {
+fn (self: &Owner) bytes() -> []u8 {
     let storage = &self.text;
     let view = storage.as_bytes();
     return view;
@@ -578,17 +578,17 @@ func TestCheckAcceptsMethodBorrowProvenance(t *testing.T) {
 	source := `struct Picker {
     bytes: []u8,
 }
-fn (self: &Picker) from_self() -> []u8 borrows self {
+fn (self: &Picker) from_self() -> []u8 {
     return self.bytes;
 }
-fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
+fn (self: &Picker) from_arg(value: []u8) -> []u8 {
     return value;
 }
-fn forward_self(picker: &Picker) -> []u8 borrows picker {
+fn forward_self(picker: &Picker) -> []u8 {
     let view = picker.from_self();
     return view;
 }
-fn forward_arg(picker: &Picker, value: []u8) -> []u8 borrows value {
+fn forward_arg(picker: &Picker, value: []u8) -> []u8 {
     let view = picker.from_arg(value);
     return view;
 }
@@ -614,18 +614,13 @@ fn main() {}`
 	}
 }
 
-// TestCheckRejectsBorrowProvenanceDeclarationErrors keeps borrowed returns explicit.
-func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
+// TestCheckRejectsBorrowFieldDeclaration keeps borrows out of stored fields.
+func TestCheckRejectsBorrowFieldDeclaration(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
 		want   string
 	}{
-		{
-			name:   "borrow return needs source",
-			source: `fn bad(value: &i64) -> &i64 { return value; }`,
-			want:   "borrow return requires `borrows <source>`",
-		},
 		{
 			name:   "borrow field rejected",
 			source: `struct View { bytes: &[]u8 } fn main() {}`,
@@ -635,62 +630,20 @@ func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
 	runErrorCases(t, cases)
 }
 
-// TestCheckRejectsBorrowProvenanceEscapeErrors rejects untied return provenance.
-func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
-	cases := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name: "return source mismatch",
-			source: `fn bad(left: []u8, right: []u8) -> []u8 borrows left {
+// TestCheckAcceptsStructuralReturnProvenance keeps ADR-0098 semantics: a view
+// return is conservatively tied to every view argument, so returning either
+// one needs no declaration.
+func TestCheckAcceptsStructuralReturnProvenance(t *testing.T) {
+	source := `fn pick(left: []u8, right: []u8, first: bool) -> []u8 {
+    if first {
+        return left;
+    }
     return right;
-}`,
-			want: "returned value may be tied to `right`, which `borrows left` does not declare",
-		},
-		{
-			name: "field alias source mismatch",
-			source: `import std::string;
-struct Owner {
-    text: string::String,
 }
-fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
-    let storage = &right.text;
-    let view = storage.as_bytes();
-    return view;
-}`,
-			want: "returned value may be tied to `right`, which `borrows left` does not declare",
-		},
-		{
-			name: "temporary field owner",
-			source: `import std::string;
-struct Owner {
-    text: string::String,
-}
-fn make(text: string::String) -> Owner {
-    return Owner { text: text };
-}
-fn bad(owner: &Owner, text: string::String) -> []u8 borrows owner {
-    let view = make(text).text.as_bytes();
-    return view;
-}`,
-			want: "returned value may be tied to `view`, which `borrows owner` does not declare",
-		},
-		{
-			name: "method explicit source mismatch",
-			source: `struct Picker {}
-fn (self: &Picker) from_arg(value: []u8) -> []u8 borrows value {
-    return value;
-}
-fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
-    let view = picker.from_arg(right);
-    return view;
-}`,
-			want: "returned value may be tied to `right`, which `borrows left` does not declare",
-		},
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("structural provenance rejected: %v", err)
 	}
-	runErrorCases(t, cases)
 }
 
 // TestCheckAcceptsArrayElementViewTiedToArrayOwner keeps `Array.at` provenance.
@@ -704,7 +657,7 @@ import std::string;
 struct Store {
     parts: array::Array<string::String>,
 }
-fn view(store: &Store, index: i64) -> ![]u8 borrows store {
+fn view(store: &Store, index: i64) -> ![]u8 {
     let parts = &store.parts;
     let part = try parts.at(index);
     let length = part.len();
@@ -714,32 +667,6 @@ fn view(store: &Store, index: i64) -> ![]u8 borrows store {
 fn main() {}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("array element view rejected: %v", err)
-	}
-}
-
-// TestCheckRejectsArrayElementViewFromAnotherOwner keeps the provenance answer
-// exact: an element view off one array must not satisfy another's borrow.
-func TestCheckRejectsArrayElementViewFromAnotherOwner(t *testing.T) {
-	source := `import std::array;
-import std::string;
-struct Store {
-    parts: array::Array<string::String>,
-}
-fn view(left: &Store, right: &Store, index: i64) -> ![]u8 borrows left {
-    let parts = &right.parts;
-    let part = try parts.at(index);
-    let length = part.len();
-    let bytes = part.as_bytes();
-    return bytes[0..length];
-}
-fn main() {}`
-	err := checkSource(source)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	want := "returned value may be tied to `right`, which `borrows left` does not declare"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("got %q, want substring %q", err.Error(), want)
 	}
 }
 
@@ -1094,7 +1021,7 @@ fn main() -> void {
 		{
 			name: "return projected field borrow",
 			source: `struct Facts { value: i64 }
-fn borrow_value(facts: &var Facts) -> &var i64 borrows facts {
+fn borrow_value(facts: &var Facts) -> &var i64 {
     return &var facts.value;
 }`,
 			want: "return expects &var i64, got i64",
