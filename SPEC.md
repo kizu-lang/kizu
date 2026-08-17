@@ -961,8 +961,13 @@ index / slice syntax は recoverable error を返しません。
 境界外を回復可能な値として扱いたい場合は、`std::mem::byte_at` や
 `std::mem::slice` のような明示 API を使います。
 
-mutable indexed assignment、indexed borrow、multi-dimensional slicing、
-`std::array::Array<T>` への直接 indexing は後続に分離します。
+writable slice place(`&var []u8` binding)への indexed assignment
+`buf[i] = x` は許可します。bounds は読みと同じく trap です。
+書き込みの供給源は §9 の mutable view 規則が定めます。
+indexed borrow、multi-dimensional slicing、
+`std::array::Array<T>` への直接 indexing は後続に分離します(ADR-0096
+決定 3: Array は std 定義の struct であり、組み込み indexing は IR の
+layout 結合か隠れ call になるため)。
 
 ### 7.2 明示 cast
 
@@ -1163,6 +1168,22 @@ exclusive borrow になるため、同じ値を 2 つの source に渡せませ�
 
 safe borrow binding は通常の field access 構文で field を読めます。
 `&var T` binding は通常の field assignment 構文で field を更新できます。
+
+可変性は型でなく borrow が運びます(ADR-0096)。view 型は `[]u8` の 1 つ
+だけで、`&var []u8` として view を持つときだけ要素書き込み `buf[i] = x` が
+できます。許すのは要素書き込みだけで、`buf.* = other` による view の
+差し替えはできません。`&var []u8` を作れるのは書き込み可能な place だけ
+です: `String.as_mut_bytes()`(mutable binding の String から。view が
+生きている間 String 全体が exclusive borrow)、および `&var []u8` 引数の
+再貸し。plain `[]u8` からは作れず、`var` 束縛の plain slice local も
+`&var []u8` parameter には渡せません(backing の書き込み可能性を保証
+しないため)。可変 view は borrow なので field に保存できず、escape
+できません。
+
+view binding(shared / writable どちらも)は、**戻り値が view を運ばない**
+関数(scalar / void 返し)の plain `[]u8` 引数に貸せます。貸与は呼び出し
+statement の終了で終わります。view を返し得る関数へ渡すことは、borrow の
+追跡が戻り値で失われるため escape として拒否します。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
 checker が lifetime、aliasing、move を検査する borrow capability です。
 raw pointer はこの省略対象ではなく、`unsafe` マーカーで明示的に扱います。
@@ -1877,6 +1898,7 @@ string.truncate(length: i64) -> !void
 string.len() -> i64
 string.capacity() -> i64
 string.as_bytes() -> []u8
+string.as_mut_bytes() -> &var []u8
 string.clear() -> void
 string.deinit() -> void
 ```
@@ -1894,6 +1916,11 @@ capacity の増加戦略は実装が決めます。保証するのは `capacity(
 `as_bytes` は owned buffer への local read-only view です。
 `as_bytes` の戻り値は local binding に束縛する必要があります。
 view が生きている間は `append_bytes`、`append_byte`、`truncate`、`clear`、`deinit` を禁止します。
+`as_mut_bytes` は owned buffer への local writable view(`&var []u8`)です。
+mutable binding の String からだけ作れ、戻り値は local binding に束縛する
+必要があります。view が生きている間、String は exclusive borrow です:
+すべての method 呼び出し、`deinit`、共有 view を禁止します。
+書き込みは既存 bytes の上書きだけで、length と capacity は変わりません。
 `append_bytes`、`append_byte`、`reserve`、`truncate`、`clear` は owned local `String` または
 `&var std::string::String` から呼べます。
 `clear` は length を 0 にしますが、capacity は保持します。
@@ -1904,9 +1931,10 @@ UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
 `std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
 private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
-raw pointer や mutable backing slice は公開しません。public
-`std::mem::OwnedBytes` または `std::bytes::Buffer` は、mutable slice と raw
-storage provenance の仕様後に検討します。
+raw pointer は公開しません。mutable backing は `as_mut_bytes` の
+exclusive borrow 経由でだけ公開します(ADR-0096)。public
+`std::mem::OwnedBytes` または `std::bytes::Buffer` は、raw storage
+provenance の仕様後に検討します。
 
 `std::fmt` は、diagnostic construction 用の最小 formatting API です。
 format string、locale、generic display trait、reflection は持ちません。

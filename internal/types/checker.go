@@ -1987,11 +1987,12 @@ func (c *Checker) defineSpecialLetInitializer(
 		}
 		return true, env.defineParam(stmt.Name, typ, true, mutable)
 	}
-	if sources, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
+	sources, mutable, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, false, sources)
+		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources)
 	}
 	return false, nil
 }
@@ -2042,33 +2043,44 @@ func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
 	}
 }
 
-// checkStringViewInitializer recognizes string.as_bytes() local byte views.
+// checkStringViewInitializer recognizes string.as_bytes() / as_mut_bytes()
+// local byte views. The boolean result mutable reports the as_mut_bytes form,
+// whose receiver must be a writable String place (ADR-0096).
 func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
-) ([]string, bool, error) {
+) ([]string, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "as_bytes" {
-		return nil, false, nil
+	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
+		return nil, false, false, nil
 	}
+	mutable := field.Name == "as_mut_bytes"
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
-		return nil, true, err
+		return nil, mutable, true, err
 	}
 	if receiver != "std::string::String" {
-		return nil, true, errorf("type error: `String.as_bytes` expects String receiver")
+		return nil, mutable, true, errorf("type error: `String.%s` expects String receiver",
+			field.Name)
 	}
 	if len(call.Args) != 0 {
-		return nil, true, errorf("type error: `String.as_bytes` expects 0 args, got %d",
-			len(call.Args))
+		return nil, mutable, true, errorf("type error: `String.%s` expects 0 args, got %d",
+			field.Name, len(call.Args))
+	}
+	if mutable {
+		ident, ok := field.Receiver.(*ast.IdentExpr)
+		if !ok || !(env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name)) {
+			return nil, mutable, true, errorf(
+				"type error: `String.as_mut_bytes` requires mutable String binding")
+		}
 	}
 	sources := c.exprBorrowSourceList(field.Receiver, env, unsafe)
-	return sources, true, nil
+	return sources, mutable, true, nil
 }
 
 // checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
@@ -2143,6 +2155,8 @@ func (c *Checker) checkAssignableTarget(
 		return c.checkAssignableField(target, env, unsafe)
 	case *ast.DerefExpr:
 		return c.checkAssignableDeref(target, env, unsafe)
+	case *ast.IndexExpr:
+		return c.checkAssignableIndex(target, env, unsafe)
 	case *ast.UnsafeExpr:
 		// `unsafe p.* = value` marks the store, so the marker sits on the
 		// target. It covers the target only: the assigned value is a separate
@@ -2153,6 +2167,38 @@ func (c *Checker) checkAssignableTarget(
 	default:
 		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
+}
+
+// checkAssignableIndex validates an element write through a writable slice
+// view (ADR-0096): `buf[i] = x` where buf is held as `&var []u8`. A plain
+// `[]u8` binding is rejected even when `var`-bound: it does not guarantee a
+// writable backing.
+func (c *Checker) checkAssignableIndex(
+	expr *ast.IndexExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if expr.Slice {
+		return "", errorf("type error: invalid assignment target `%s`", expr.String())
+	}
+	ident, ok := expr.Target.(*ast.IdentExpr)
+	if !ok {
+		return "", errorf(
+			"type error: indexed assignment target must be a local `&var []u8` binding")
+	}
+	typ, exists := env.lookup(ident.Name)
+	if !exists {
+		return "", errorf("type error: unknown local `%s`", ident.Name)
+	}
+	if !sameType(typ, typeByteString) || !env.isMutBorrowed(ident.Name) {
+		return "", errorf(
+			"type error: indexed assignment requires a writable slice view (`&var []u8`), `%s` is not one",
+			ident.Name)
+	}
+	if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
+		return "", err
+	}
+	return typeU8, nil
 }
 
 // checkAssignableIdent validates direct binding assignment.
@@ -2520,7 +2566,7 @@ func (c *Checker) methodBorrowSources(
 		return union, true, err
 	}
 	switch field.Name {
-	case "as_bytes", "borrow", "borrow_mut", "at", "at_mut":
+	case "as_bytes", "as_mut_bytes", "borrow", "borrow_mut", "at", "at_mut":
 		sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
 		return sources, true, err
 	default:
@@ -3373,17 +3419,17 @@ func (c *Checker) checkBorrowPrefix(
 	unsafe unsafeMark,
 ) (Type, bool, error) {
 	mutable := expr.Operator == "&var"
-	if mutable {
-		if err := requireMutableBorrowArg(expr.Right, env); err != nil {
-			return "", false, err
-		}
-	}
 	if err := checkBorrowTargetShape(expr.Right); err != nil {
 		return "", false, err
 	}
 	typ, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", false, err
+	}
+	if mutable {
+		if err := requireMutableBorrowArg(expr.Right, typ, env); err != nil {
+			return "", false, err
+		}
 	}
 	return typ, mutable, nil
 }
@@ -4344,7 +4390,8 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 		"std::internal::builtin::array_deinit",
 		"std::internal::builtin::array_truncate",
 		"std::internal::builtin::array_clear",
-		"std::internal::builtin::array_as_bytes":
+		"std::internal::builtin::array_as_bytes",
+		"std::internal::builtin::array_as_mut_bytes":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
 		return "", false, nil
@@ -4781,7 +4828,7 @@ func (c *Checker) checkGenericUserArg(
 		return err
 	}
 	if fn.mutBorrowParams[idx] {
-		if err := requireMutableBorrowArg(checkedArg, env); err != nil {
+		if err := requireMutableBorrowArg(checkedArg, want, env); err != nil {
 			return err
 		}
 	}
@@ -4846,7 +4893,7 @@ func (c *Checker) checkUserCallArg(
 		return err
 	}
 	if fn.mutBorrowParams[idx] {
-		if err := requireMutableBorrowArg(checkedArg, env); err != nil {
+		if err := requireMutableBorrowArg(checkedArg, fn.params[idx], env); err != nil {
 			return err
 		}
 	}
@@ -5264,6 +5311,14 @@ func (c *Checker) checkAssignableDeref(
 	unsafe unsafeMark,
 ) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
+		// A writable slice view grants element writes only (ADR-0096):
+		// re-pointing it would assign the caller's binding, which the flat
+		// view representation never reaches.
+		if typ, exists := env.lookup(ident.Name); exists && sameType(typ, typeByteString) {
+			return "", errorf(
+				"type error: `%s.*` cannot re-point a slice view; write elements with `%s[i] = ...`",
+				ident.Name, ident.Name)
+		}
 		return c.checkDerefExpr(expr, env, unsafe)
 	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
@@ -5521,9 +5576,9 @@ func (c *Checker) checkStringMethod(
 			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
-	case "as_bytes":
+	case "as_bytes", "as_mut_bytes":
 		return "", errorf(
-			"type error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
+			"type error: `String.%s` must be bound with `let name = string.%s()`", name, name)
 	case "truncate":
 		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
 			return "", err
@@ -5791,22 +5846,28 @@ func (c *Checker) checkStdArrayStorageMethod(
 		}
 		return typeVoid, nil
 	default:
-		return checkArrayAsBytes(elem, args)
+		return checkArrayAsBytes(elem, name, args)
 	}
 }
 
 // isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "truncate" || name == "clear" || name == "as_bytes"
+	return name == "truncate" || name == "clear" ||
+		name == "as_bytes" || name == "as_mut_bytes"
 }
 
-// checkArrayAsBytes validates Array<u8> to byte-slice view conversion.
-func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
+// checkArrayAsBytes validates Array<u8> to byte-slice view conversion. The
+// as_mut_bytes form hands back the writable view spelling (ADR-0096); the
+// view value itself is the same.
+func checkArrayAsBytes(elem Type, name string, args []ast.Expression) (Type, error) {
 	if elem != typeU8 {
-		return "", errorf("type error: `Array.as_bytes` requires Array<u8>")
+		return "", errorf("type error: `Array.%s` requires Array<u8>", name)
 	}
 	if len(args) != 0 {
-		return "", errorf("type error: `Array.as_bytes` expects 0 args, got %d", len(args))
+		return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	if name == "as_mut_bytes" {
+		return "&var []u8", nil
 	}
 	return typeByteString, nil
 }
@@ -6036,7 +6097,7 @@ func (c *Checker) checkCallableArgs(
 			return "", err
 		}
 		if method.mutBorrowParams[idx+offset] {
-			if err := requireMutableBorrowArg(checkedArg, env); err != nil {
+			if err := requireMutableBorrowArg(checkedArg, want, env); err != nil {
 				return "", err
 			}
 		}
@@ -6053,8 +6114,18 @@ func (c *Checker) checkCallableArgs(
 }
 
 // requireMutableBorrowArg restricts &var arguments to mutable locals or reborrowed &var params.
-func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
+// A `&var []u8` slot is stricter (ADR-0096): only a writable view binding may
+// be lent — a `var`-bound plain slice does not guarantee writable backing.
+// want may be "" when the slot's type is unknown at the call site.
+func requireMutableBorrowArg(expr ast.Expression, want Type, env *scope) error {
 	ident, ok := expr.(*ast.IdentExpr)
+	if sameType(want, typeByteString) {
+		if ok && env.isMutBorrowed(ident.Name) {
+			return nil
+		}
+		return errorf(
+			"type error: `&var []u8` argument must be a writable view binding")
+	}
 	if ok {
 		if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
 			return nil
@@ -6099,7 +6170,8 @@ func prepareBorrowArgument(
 		return nil, errorf("type error: argument expects &var T, got &T")
 	}
 	if wantMutable {
-		if err := requireMutableBorrowArg(prefix.Right, env); err != nil {
+		// The slot's type is unknown here; the caller re-checks with it.
+		if err := requireMutableBorrowArg(prefix.Right, "", env); err != nil {
 			return nil, err
 		}
 	}

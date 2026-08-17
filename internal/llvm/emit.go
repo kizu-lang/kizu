@@ -873,11 +873,36 @@ func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
 		return e.writeSliceLen(instr)
 	case "slice.index":
 		return e.writeSliceIndex(instr)
+	case "slice.store":
+		return e.writeSliceStore(instr)
 	case "slice.slice":
 		return e.writeSliceSlice(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported slice instruction `%s`", instr.Op)
 	}
+}
+
+// writeSliceStore writes one byte through a writable view. The bounds test
+// reaches the backend as preceding cond_fail instructions, so no check is
+// generated here.
+func (e *emitter) writeSliceStore(instr *ir.Instr) error {
+	if len(instr.Args) != 3 ||
+		instr.Args[0].Type != "[]u8" ||
+		instr.Args[1].Type != "i64" ||
+		instr.Args[2].Type != "u8" {
+		return fmt.Errorf("llvm error: slice.store expects []u8, i64, u8")
+	}
+	slice := e.value(instr.Args[0])
+	index := e.value(instr.Args[1])
+	byteValue := e.value(instr.Args[2])
+	base := "%" + e.nextSyntheticValue("slice.store")
+	ptrName := base + ".ptr"
+	elemPtrName := base + ".elem.ptr"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
+		elemPtrName, ptrName, index.operand)
+	fmt.Fprintf(&e.out, "  store i8 %s, ptr %s\n", byteValue.operand, elemPtrName)
+	return nil
 }
 
 // writeConst writes scalar and string constants.

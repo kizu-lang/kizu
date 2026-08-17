@@ -109,3 +109,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0093: statement match の arm body に `return` を許す](0093-match-arm-return.md)
 - [ADR-0094: 転送 deinit は手書きする(`= fields;` を削除)](0094-forwarding-deinit-is-handwritten.md)
 - [ADR-0095: `borrows a, b` — 複数 source の保守的統合](0095-multi-source-borrows.md)
+- [ADR-0096: 可変性は borrow が運ぶ — `&var []u8` の write-through](0096-mutable-slice-write-through.md)

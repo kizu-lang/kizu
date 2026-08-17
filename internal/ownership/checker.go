@@ -836,8 +836,8 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 		}
 		return c.checkBoxBorrowLetStmt(stmt, target, field, elem, mutable, env)
 	}
-	if target, ok := c.stringViewInitializer(stmt.Value, env); ok {
-		return c.checkStringViewLetStmt(stmt, target, env)
+	if target, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
+		return c.checkStringViewLetStmt(stmt, target, mutable, env)
 	}
 	sources, elem, mutable, ok, err := c.returnedBorrowInitializer(stmt.Value, env)
 	if ok || err != nil {
@@ -962,58 +962,75 @@ func borrowReturnParamIndex(fn *functionInfo, source string, mutable bool) int {
 	return -1
 }
 
-// checkStringViewLetStmt binds a local byte view and activates the String owner.
-func (c *Checker) checkStringViewLetStmt(stmt *ast.LetStmt, target *binding, env *scope) error {
+// checkStringViewLetStmt binds a local byte view and activates the String
+// owner. The as_mut_bytes form takes an exclusive borrow and requires a
+// writable String binding (ADR-0096).
+func (c *Checker) checkStringViewLetStmt(
+	stmt *ast.LetStmt,
+	target *binding,
+	mutable bool,
+	env *scope,
+) error {
 	if err := c.checkStringViewInitializerShape(stmt.Value); err != nil {
 		return err
 	}
-	if err := checkBorrowConflict(target, false); err != nil {
+	if mutable && !target.mutable && !(target.borrowedParam && target.mutBorrow) {
+		return errorf("string error: `String.as_mut_bytes` requires mutable String binding")
+	}
+	if err := checkBorrowConflict(target, mutable); err != nil {
 		return err
 	}
-	c.activateBorrow(target, "", false)
+	c.activateBorrow(target, "", mutable)
 	value := c.newBinding(stmt.Name, "[]u8")
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.borrowTargets = []borrowSource{{target: target}}
+	value.mutBorrow = mutable
 	env.define(value)
 	return nil
 }
 
-// checkStringViewInitializerShape validates string.as_bytes() local view syntax.
+// checkStringViewInitializerShape validates string.as_bytes() / as_mut_bytes()
+// local view syntax.
 func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "as_bytes" {
+	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
 		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	if len(call.Args) != 0 {
-		return errorf("string error: `String.as_bytes` expects 0 args, got %d", len(call.Args))
+		return errorf("string error: `String.%s` expects 0 args, got %d",
+			field.Name, len(call.Args))
 	}
 	return nil
 }
 
-// stringViewInitializer recognizes string.as_bytes() local byte-view initializers.
-func (c *Checker) stringViewInitializer(expr ast.Expression, env *scope) (*binding, bool) {
+// stringViewInitializer recognizes string.as_bytes() / as_mut_bytes() local
+// byte-view initializers.
+func (c *Checker) stringViewInitializer(
+	expr ast.Expression,
+	env *scope,
+) (*binding, bool, bool) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Name != "as_bytes" {
-		return nil, false
+	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
+		return nil, false, false
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	target, exists := env.lookup(ident.Name)
 	if !exists || target.moved || target.typeName != "std::string::String" {
-		return nil, false
+		return nil, false, false
 	}
-	return target, true
+	return target, field.Name == "as_mut_bytes", true
 }
 
 // checkArrayBorrowLetStmt binds an Array element borrow and activates the array owner.
@@ -2182,6 +2199,8 @@ func (c *Checker) checkUserCall(
 				continue
 			}
 			_, err = c.readExpr(arg, env)
+		} else if c.viewArgLend(fn, idx, arg, env) {
+			_, err = c.readExpr(arg, env)
 		} else {
 			_, err = c.moveExpr(arg, env)
 		}
@@ -2190,6 +2209,45 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// viewArgLend reports whether arg is a tracked view binding lent to a plain
+// `[]u8` parameter for the call's duration (SPEC §9: a borrow argument ends
+// with the call statement). Lending is only safe when the callee cannot hand
+// the view back out: a scalar or void return has nowhere to smuggle it, while
+// a view-carrying return would launder away the provenance the binding's
+// borrow tracks.
+func (c *Checker) viewArgLend(
+	fn *functionInfo,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+) bool {
+	if fn.params[idx].typeName != "[]u8" {
+		return false
+	}
+	ident, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	value, exists := env.lookup(ident.Name)
+	if !exists || !value.borrowedParam || value.typeName != "[]u8" {
+		return false
+	}
+	return viewFreeReturnType(returnTypeName(fn))
+}
+
+// viewFreeReturnType reports a return type that cannot carry a view out:
+// scalars and void, with or without an error union.
+func viewFreeReturnType(typeName string) bool {
+	if idx := strings.Index(typeName, "!"); idx >= 0 {
+		typeName = typeName[idx+1:]
+	}
+	switch typeName {
+	case "void", "bool", "u8", "i64", "i32", "u32", "u64", "f64":
+		return true
+	}
+	return false
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -3877,13 +3935,18 @@ func (c *Checker) checkStringMethod(
 		}
 		return c.checkStringAppendOrReserve(name, args, env)
 	case "len", "capacity":
+		// A live writable view is exclusive (ADR-0096): even reads wait.
+		if str.activeMutBorrows > 0 {
+			return "", errorf(
+				"string error: `String.%s` cannot run while string is mutably borrowed", name)
+		}
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
 		}
 		return "i64", nil
-	case "as_bytes":
+	case "as_bytes", "as_mut_bytes":
 		return "", errorf(
-			"string error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
+			"string error: `String.%s` must be bound with `let name = string.%s()`", name, name)
 	case "clear", "deinit":
 		if err := checkStringMutationAllowed(str, name); err != nil {
 			return "", err
@@ -4069,7 +4132,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		return "void", nil
 	default:
 		if elem != "u8" {
-			return "", errorf("array error: `Array.as_bytes` requires Array<u8>")
+			return "", errorf("array error: `Array.%s` requires Array<u8>", name)
 		}
 		return c.checkArrayReadNoArgs(array, name, args)
 	}
@@ -4077,7 +4140,8 @@ func (c *Checker) checkStdArrayStorageMethod(
 
 // isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "truncate" || name == "clear" || name == "as_bytes"
+	return name == "truncate" || name == "clear" ||
+		name == "as_bytes" || name == "as_mut_bytes"
 }
 
 // checkArrayCountMutation validates one-count Array mutations.
@@ -5328,6 +5392,11 @@ func exprIdentUses(expr ast.Expression) []string {
 		return exprIdentUses(e.Receiver)
 	case *ast.DerefExpr:
 		return exprIdentUses(e.Receiver)
+	case *ast.IndexExpr:
+		uses := exprIdentUses(e.Target)
+		uses = append(uses, exprIdentUses(e.Index)...)
+		uses = append(uses, exprIdentUses(e.Start)...)
+		return append(uses, exprIdentUses(e.End)...)
 	case *ast.ComptimeExpr:
 		return exprIdentUses(e.Expr)
 	default:

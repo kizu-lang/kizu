@@ -316,10 +316,15 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 			want: "borrowed value `s` cannot escape",
 		},
 		{
-			name: "pass borrowed parameter to owner",
-			source: `fn take(s: []u8) { print(s); }
+			// A view-carrying return could launder the borrow away, so the
+			// lend that a scalar/void return permits (ADR-0096) stays rejected.
+			name: "pass borrowed parameter to view-returning function",
+			source: `fn take(s: []u8) -> []u8 {
+    return s;
+}
 fn bad(s: &[]u8) {
-    take(s);
+    let escaped = take(s);
+    print(escaped);
 }`,
 			want: "borrowed value `s` cannot escape",
 		},

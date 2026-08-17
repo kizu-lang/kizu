@@ -93,6 +93,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::array_append":             true,
 	"std::internal::builtin::array_at":                 true,
 	"std::internal::builtin::array_as_bytes":           true,
+	"std::internal::builtin::array_as_mut_bytes":       true,
 	"std::internal::builtin::array_at_mut":             true,
 	"std::internal::builtin::array_capacity":           true,
 	"std::internal::builtin::array_clear":              true,
