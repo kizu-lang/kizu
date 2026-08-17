@@ -1073,11 +1073,13 @@ func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 	return ok
 }
 
-// hostedRuntimeParamTypes returns the lowered parameter ABI for hosted runtime calls.
+// hostedRuntimeParamTypes returns the lowered parameter ABI for hosted runtime
+// calls. Aggregates -- slices and module structs -- reach the C runtime behind
+// a pointer, never by value.
 func (e *emitter) hostedRuntimeParamTypes(args []ir.Value) []string {
 	params := make([]string, 0, len(args))
 	for _, arg := range args {
-		if arg.Type == "[]u8" {
+		if e.hostedRuntimeIndirectABI(arg.Type) {
 			params = append(params, "ptr")
 			continue
 		}
@@ -1095,10 +1097,11 @@ func (e *emitter) writeHostedRuntimeCall(name string, instr *ir.Instr) error {
 	args := []string{"ptr " + resultSlot}
 	for index, arg := range instr.Args {
 		value := e.value(arg)
-		if arg.Type == "[]u8" {
+		if e.hostedRuntimeIndirectABI(arg.Type) {
+			argType := e.llvmType(arg.Type)
 			argSlot := fmt.Sprintf("%s.arg.%d", resultName, index)
-			fmt.Fprintf(&e.out, "  %s = alloca %%kizu.slice.u8\n", argSlot)
-			fmt.Fprintf(&e.out, "  store %%kizu.slice.u8 %s, ptr %s\n", value.operand, argSlot)
+			fmt.Fprintf(&e.out, "  %s = alloca %s\n", argSlot, argType)
+			fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, argSlot)
 			args = append(args, "ptr "+argSlot)
 			continue
 		}

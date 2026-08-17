@@ -246,6 +246,16 @@ func (l *lowerer) bindLocal(name string, value Value) {
 	l.env.set(name, l.emit("local.slot", "&var "+value.Type, []Value{value}, ""))
 }
 
+// borrowTargetExpr unwraps explicit `&var x` call-site syntax to the name
+// whose storage the callee is lent. Caller storage only ever comes from a
+// `&var` parameter, so `&` needs no arm here.
+func borrowTargetExpr(expr ast.Expression) ast.Expression {
+	if prefix, ok := expr.(*ast.PrefixExpr); ok && prefix.Operator == "&var" {
+		return prefix.Right
+	}
+	return expr
+}
+
 // slotPointer returns the storage behind a name, for the places that need the
 // address rather than the value.
 func (l *lowerer) slotPointer(expr ast.Expression) (Value, bool) {
@@ -285,7 +295,7 @@ func (l *lowerer) lowerCallArgsAs(params []Param, args []ast.Expression) ([]Valu
 			want = params[index]
 		}
 		if want.Passing == PassCallerStorage {
-			if slot, ok := l.slotPointer(arg); ok {
+			if slot, ok := l.slotPointer(borrowTargetExpr(arg)); ok {
 				values = append(values, slot)
 				continue
 			}

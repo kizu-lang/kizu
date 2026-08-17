@@ -2286,6 +2286,9 @@ func (c *Checker) checkCoreArg(
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, name)
 	}
+	if want == stdprim.ArgStringOut {
+		return c.checkStringOutArg(name, arg, env)
+	}
 	got, err := c.readContextualExpr(arg, string(want), env)
 	if err != nil {
 		return err
@@ -2320,8 +2323,6 @@ func (c *Checker) checkFsBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std::internal::builtin::fs_read_file":
-		return c.checkFsReadFile(args, env)
 	case "std::internal::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env)
 	case "std::internal::builtin::fs_exists":
@@ -2342,23 +2343,35 @@ func (c *Checker) checkFsBuiltin(
 	}
 }
 
-// checkFsReadFile validates ownership effects for std::fs::read_file.
-func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 2 {
-		return "", true, errorf("move error: `std::fs::read_file` expects io and path")
+// checkStringOutArg reads a &var std::string::String destination argument
+// without moving the buffer behind it.
+func (c *Checker) checkStringOutArg(label string, arg ast.Expression, env *scope) error {
+	const stringType = "std::string::String"
+	if prefix, ok := borrowPrefix(arg); ok {
+		if prefix.Operator != "&var" {
+			return errorf("move error: `%s` expects &var %s out", label, stringType)
+		}
+		got, err := c.readExpr(prefix.Right, env)
+		if err != nil {
+			return err
+		}
+		if !sameOwnershipType(got, stringType) {
+			return errorf("move error: `%s` expects &var %s out, got &var %s",
+				label, stringType, got)
+		}
+		return nil
 	}
-	if err := c.checkIoArg(args[0], env, "std::fs::read_file"); err != nil {
-		return "", true, err
-	}
-	path, err := c.readExpr(args[1], env)
+	got, err := c.readExpr(arg, env)
 	if err != nil {
-		return "", true, err
+		return err
 	}
-	if !sameOwnershipType(path, "[]u8") {
-		return "", true, errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
-			path)
+	if ident, ok := arg.(*ast.IdentExpr); ok && sameOwnershipType(got, stringType) {
+		if value, bound := env.lookup(ident.Name); bound && value.mutBorrow {
+			return nil
+		}
 	}
-	return "std::fs::Error![]u8", true, nil
+	return errorf("move error: `%s` expects &var %s out, got %s",
+		label, stringType, got)
 }
 
 // checkFsWriteFile validates ownership effects for std::fs::write_file.
