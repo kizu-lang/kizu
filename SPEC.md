@@ -981,6 +981,12 @@ payload の階級は型が運びます: owner payload は capture / `orelse` の
 ます。owner / view を包んだ optional は「生まれた場所で消費」限定で、
 let / var への保存と引数渡しは copy element の optional だけができます。
 
+owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
+呼び出しが返す view payload は、さらに capture 限定です: capture は条件式が
+読んだ container を共有借用し、view の最終使用まで mutation と deinit を
+待たせます。`orelse` は container に紐づかない裸の view を作るため拒否されます
+(`let view = string.as_bytes()` が let 限定なのと同じ理由の位置制限です)。
+
 現在の制限:
 
 * `??T` / `?!T` は書けない(optional を包めるのは error union だけ)。
@@ -2140,7 +2146,14 @@ std::mem::equal_bytes(left: []u8, right: []u8) -> bool
 std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
 std::mem::slice(bytes: []u8, start: i64, end: i64) -> ?[]u8
 std::mem::trim_ascii(bytes: []u8) -> []u8
+std::mem::bytes_iter(bytes: []u8) -> std::mem::BytesIter
+bytes_iter.next() -> ?u8
 ```
+
+`std::mem::bytes_iter` は iterator protocol(§6.10)の std 綴りです。
+`next() -> ?u8` が `while it.next() |byte|` を終端まで駆動し、終端は
+失敗ではなく `null` です。cursor は view を capture する struct なので、
+歩いている bytes より長生きできません(ADR-0100)。
 
 `std::mem::page_allocator()` は安定 allocator capability factory です。
 返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
@@ -2227,6 +2240,7 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
 map.insert(key: []u8, value: V) -> !void
 map.get(key: []u8) -> ?V
+map.key_at(index: i64) -> ?[]u8
 map.contains(key: []u8) -> bool
 map.len() -> i64
 map.deinit() -> void
@@ -2236,10 +2250,13 @@ key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `null` として返します(docs/style.md)。
 `insert` / `get` / `contains` は amortized O(1) です。
-iteration は後続ですが、順序は先に決めてあります。**map は挿入順で反復します。**
-未定義の順序は露出しません。
+**map は挿入順で反復します。** 未定義の順序は露出しません。
+`key_at` は挿入位置 index の key を返し、末尾を越えたら `null` を返すので、
+`while m.key_at(i) |key|` が挿入順の iteration です。key は map storage への
+view なので capture 限定で、capture が生きている間 map は共有借用されます
+(§7)。
 value type は copy type 限定です。
-non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
+non-copy value、borrow view、deletion、custom hash/equality は後続で扱います。
 `std::map::new<K, V>()` のような hidden default allocator は使いません。
 `deinit` 後の map 使用は safe Kizu では禁止します。
 
