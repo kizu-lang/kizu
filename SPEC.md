@@ -1075,15 +1075,6 @@ cleanup contract を source 上に見えるようにします。
 `deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可し、
 body は self の owner field をすべての path で consume しなければなりません。
 `deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
-転送だけの `deinit` は宣言 1 行で body を生成できます。
-
-```kizu
-fn (self: BinaryExpr) deinit() -> void = fields;
-```
-
-`= fields;` は owner field を宣言順に deinit する body を生成します。
-呼び出しは常に source 上の `deinit()` / `defer` なので、hidden control flow では
-ありません(§1)。
 要素が owner 型の container は shallow な `deinit()` を型 error とし、要素ごと
 consume する `deinit_all()` だけを cleanup として認めます。空の container への
 `deinit_all()` は合法です。`deinit_all` は要素を要素自身の `deinit()` で consume
