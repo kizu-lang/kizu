@@ -2128,8 +2128,6 @@ func continuationLabel(instr *ir.Instr) (string, bool) {
 		return helperLabel(instr.Args[0].Name, "pass"), true
 	case "array.pop", "array.get", "map.get":
 		return helperLabel(instr.Result.Name, "array.join"), true
-	case "array.at", "array.at_mut":
-		return helperLabel(instr.Result.Name, "array.ref.join"), true
 	case "array.get_or_panic", "arena.get":
 		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true
 	case "arena.add":
