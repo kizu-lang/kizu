@@ -1,0 +1,118 @@
+import std::mem;
+import std::testing;
+
+fn find(bytes: []u8, needle: u8) -> ?i64 {
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// An optional return wraps its value implicitly, and `orelse` supplies the
+// default on null.
+test "orelse takes the value or the default" {
+    testing::expect_equal<i64>(2, find("kizu", cast<u8>(122)) orelse -1);
+    testing::expect_equal<i64>(-1, find("kizu", cast<u8>(120)) orelse -1);
+}
+
+// An if capture opens the payload only when a value is present.
+test "if capture branches on presence" {
+    var hit = 0;
+    if find("kizu", cast<u8>(107)) |at| {
+        hit = at + 10;
+    } else {
+        hit = -1;
+    }
+    testing::expect_equal<i64>(10, hit);
+    if find("kizu", cast<u8>(120)) |at| {
+        hit = at;
+    } else {
+        hit = -2;
+    }
+    testing::expect_equal<i64>(-2, hit);
+}
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: &var BytesIter) next() -> ?u8 {
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+// A single `next() -> ?u8` drives the loop to exhaustion: the iterator
+// protocol needs no separate has_next.
+test "while capture loops until null" {
+    var it = iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+}
+
+error ReadError {
+    Broken,
+}
+
+struct Stream {
+    pub bytes: []u8,
+    pub index: i64,
+    pub broken: bool,
+}
+
+fn (self: &var Stream) next() -> ReadError!?u8 {
+    if self.broken {
+        return ReadError::Broken;
+    }
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+fn drain(bytes: []u8, broken: bool) -> ReadError!i64 {
+    var s = Stream { bytes: bytes, index: 0, broken: broken };
+    var sum = 0;
+    while try s.next() |byte| {
+        sum = sum + cast<i64>(byte);
+    }
+    return sum;
+}
+
+// `E!?T` composes: the call can fail, and succeeding can still find nothing.
+// One signature carries the error member, null, and the payload; the failure
+// path is pinned by examples/negative/optional_stream_broken.kizu.
+test "error union with optional success drives a fallible stream" {
+    testing::expect_equal<i64>(451, try drain("kizu", false));
+    var s = Stream { bytes: "k", index: 0, broken: false };
+    testing::expect_equal<i64>(107, cast<i64>(try s.next() orelse 0));
+    testing::expect_equal<i64>(0, cast<i64>(try s.next() orelse 0));
+}
+
+fn or_one(value: ?u8) -> i64 {
+    return cast<i64>(value orelse cast<u8>(1));
+}
+
+// Optionals travel as arguments, and `null` is legal wherever a `?T` is
+// expected.
+test "optional arguments accept null and values" {
+    testing::expect_equal<i64>(1, or_one(null));
+    testing::expect_equal<i64>(9, or_one(cast<u8>(9)));
+}

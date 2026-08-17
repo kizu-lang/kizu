@@ -114,3 +114,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0098: `borrows` 節を削除し、契約を構造的に導出する](0098-remove-borrows-clause.md)
 - [ADR-0099: fixed_buffer allocator と allocator tie の構造的導出](0099-fixed-buffer-allocator.md)
 - [ADR-0100: struct への view 捕捉と tie の構造的導出](0100-view-capture-structs.md)
+- [ADR-0101: optional 型 `?T` の最小セット](0101-optional-type.md)
