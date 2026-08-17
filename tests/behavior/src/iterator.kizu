@@ -41,6 +41,37 @@ test "map key_at walks keys in insertion order" {
     testing::expect_equal<i64>(3, index);
 }
 
+// Non-copy elements iterate the same way: `at(index) -> ?&T` binds the
+// element borrow as the capture, null past the end stops the loop, and the
+// capture holds the array borrowed for the element's scope.
+test "array at drives non-copy element iteration" {
+    let allocator = mem::page_allocator();
+    var words = array::new<Word>(allocator);
+    defer words.deinit();
+    try words.append(Word { text: "kizu" });
+    try words.append(Word { text: "at" });
+
+    if words.at_mut(1) |slot| {
+        slot.* = Word { text: "iter" };
+    }
+
+    var lengths = 0;
+    var index = 0;
+    while words.at(index) |word| {
+        lengths = lengths * 10 + mem::len(word.text);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(44, lengths);
+    testing::expect_equal<i64>(2, index);
+    if words.at(9) |ghost| {
+        testing::expect_equal<i64>(-1, mem::len(ghost.text));
+    }
+}
+
+struct Word {
+    pub text: []u8,
+}
+
 // Array iteration needs no cursor type: `get(index) -> ?T` already drives a
 // while capture, and null past the end stops the loop.
 test "array get drives index iteration" {

@@ -987,6 +987,11 @@ owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 待たせます。`orelse` は container に紐づかない裸の view を作るため拒否されます
 (`let view = string.as_bytes()` が let 限定なのと同じ理由の位置制限です)。
 
+borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
+`Array.at_mut` の capture 条件としてだけ存在します。capture が element
+borrow そのものになり、その scope の間 array は borrow されます。保存・
+`orelse`・signature への出現はすべて拒否します(§std array)。
+
 現在の制限:
 
 * `??T` / `?!T` は書けない(optional を包めるのは error union だけ)。
@@ -2199,8 +2204,8 @@ array.pop() -> ?T
 array.pop_or_panic() -> T
 array.get(index: i64) -> ?T
 array.get_or_panic(index: i64) -> T
-array.at(index: i64) -> !&T
-array.at_mut(index: i64) -> !&var T
+array.at(index: i64) -> ?&T
+array.at_mut(index: i64) -> ?&var T
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```
@@ -2211,6 +2216,17 @@ array.deinit() -> void
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
 `get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
+`at` / `at_mut` は borrow optional `?&T` / `?&var T` を返し、範囲内なら
+element borrow、範囲外なら `null` です。borrow optional を消費できるのは
+capture 条件だけです(`if array.at(i) |elem|` / `while array.at(i) |elem|`)。
+capture が element borrow を bind し、その scope の間 array は
+borrow されたままです(`at` は shared、`at_mut` は mutable)。
+`?&T` を binding に保存する、`orelse` で受ける、関数 signature に書く、の
+いずれも拒否します。element borrow が array の変更や解放より長生きする
+経路を positional に閉じるためで、`as_bytes` の let-initializer 限定と
+同じ整理です。`at_mut` は mutable array binding を要求します。
+`while array.at(i) |elem|` は §6.10 の optional 条件 capture そのままなので、
+non-copy element の iteration も `get` と同じ形になります。
 `pop` は最後の initialized element を array から move して `?T` を返し、
 empty array なら `null` を返します。
 `pop_or_panic` も最後の initialized element を move して `T` を返し、
