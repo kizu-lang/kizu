@@ -234,28 +234,12 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.at expects Array<T>, i64 -> ?&T")
 	}
-	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
-		return fmt.Errorf(
-			"llvm error: %s expects a `?&T` result, got %s", instr.Op, instr.Result.Type)
-	}
 	array := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
-	resultName := localName(instr.Result.Name)
-	ptrName := resultName + ".ptr"
+	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	optType := e.llvmType(instr.Result.Type)
-	liveName := resultName + ".live"
-	tagName := resultName + ".tag"
-	someName := resultName + ".some"
-	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
-	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
-		someName, optType, tagName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
-		resultName, optType, someName, ptrName)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.

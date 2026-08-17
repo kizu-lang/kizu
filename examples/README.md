@@ -159,6 +159,7 @@ single source file. Run them with `kizu check <package-root>`.
 | fields on `let` bindings are immutable | `negative/immutable_field_assignment.kizu` | `cannot assign field` |
 | nested fields inherit base immutability | `negative/immutable_nested_field_assignment.kizu` | `cannot assign field` |
 | call results are not assignment targets | `negative/call_result_field_assignment.kizu` | `invalid assignment target` |
+| capture context covers one call only | `negative/std_array_at_in_argument.kizu` | `must be consumed by a capture` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |

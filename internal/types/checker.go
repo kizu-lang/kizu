@@ -2139,30 +2139,18 @@ func (c *Checker) checkContainerBorrowCondition(
 	}
 	saved := c.captureCondition
 	c.captureCondition = true
-	typ, err := c.checkExpr(expr, env, unsafe)
+	result, err := c.checkExpr(expr, env, unsafe)
 	c.captureCondition = saved
 	if err != nil {
 		return "", false, true, err
 	}
-	elem, mutable, ok := borrowOptionalElem(typ)
+	elem, mutable, ok := typ.BorrowOptionalElem(string(result))
 	if !ok {
 		// Another type's own `at` method: the generic condition path types
 		// that call.
 		return "", false, false, nil
 	}
-	return elem, mutable, true, nil
-}
-
-// borrowOptionalElem splits a borrow optional into its payload type and
-// mutability. ok is false for every other type.
-func borrowOptionalElem(typ Type) (Type, bool, bool) {
-	if elem, found := strings.CutPrefix(string(typ), "?&var "); found {
-		return Type(elem), true, true
-	}
-	if elem, found := strings.CutPrefix(string(typ), "?&"); found {
-		return Type(elem), false, true
-	}
-	return "", false, false
+	return Type(elem), mutable, true, nil
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -5769,19 +5757,14 @@ func (c *Checker) checkArenaAtMut(
 		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
 			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	}
+	// The flag covers exactly this call: clear it before the argument is
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
 	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
 		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
 	}
-	if len(args) != 1 {
-		return "", errorf("type error: `Arena.at_mut` expects 1 arg, got %d", len(args))
-	}
-	got, err := c.checkExpr(args[0], env, unsafe)
-	if err != nil {
+	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "Arena.at_mut"); err != nil {
 		return "", err
-	}
-	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
-	if !sameType(got, want) {
-		return "", errorf("type error: `Arena.at_mut` expects %s, got %s", want, got)
 	}
 	return Type("?&var " + arg), nil
 }
@@ -5997,6 +5980,10 @@ func (c *Checker) checkArrayMethod(
 				" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
 				name, name, name)
 		}
+		// The flag covers exactly this call: clear it before the arguments
+		// are read, so a nested at/at_mut in argument position refuses as
+		// usual.
+		c.captureCondition = false
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
@@ -6265,6 +6252,9 @@ func (c *Checker) checkMapAtCondition(
 			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
 			name, name, name)
 	}
+	// The flag covers exactly this call: clear it before the argument is
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
 	if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
 		return "", err
 	}
@@ -6570,18 +6560,33 @@ func (c *Checker) checkArenaGet(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "arena.get"); err != nil {
+		return "", err
+	}
+	return Type(arg), nil
+}
+
+// checkArenaHandleArg validates the one handle argument an arena accessor
+// takes against the arena's element type. label names the accessor in errors.
+func (c *Checker) checkArenaHandleArg(
+	arg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+	label string,
+) error {
 	if len(args) != 1 {
-		return "", errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
+		return errorf("type error: `%s` expects 1 arg, got %d", label, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
-		return "", err
+		return err
 	}
 	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
 	if !sameType(got, want) {
-		return "", errorf("type error: `arena.get` expects %s, got %s", want, got)
+		return errorf("type error: `%s` expects %s, got %s", label, want, got)
 	}
-	return Type(arg), nil
+	return nil
 }
 
 // checkArenaDeinit validates explicit arena cleanup syntax.

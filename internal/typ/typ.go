@@ -387,6 +387,20 @@ func OptionalElem(text string) (string, bool) {
 	return text[1:], true
 }
 
+// BorrowOptionalElem splits a borrow optional `?&T` / `?&var T` into its
+// payload type and mutability, and reports whether text is one. This is the
+// one definition of that split; both checkers ask here so the answer cannot
+// drift.
+func BorrowOptionalElem(text string) (string, bool, bool) {
+	if elem, found := strings.CutPrefix(text, "?&var "); found {
+		return elem, true, true
+	}
+	if elem, found := strings.CutPrefix(text, "?&"); found {
+		return elem, false, true
+	}
+	return "", false, false
+}
+
 // AbsorbsErrorSet reports whether a value of type got fills a slot declared
 // want by the absorption `try` does. `!T` declares no error set (ADR-0087), so
 // an `E!T` reaching it arrives with E absorbed. A declared `E!T` named the one

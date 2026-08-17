@@ -1436,32 +1436,20 @@ func (c *Checker) matchContainerBorrowCondition(
 	}
 	saved := c.captureCondition
 	c.captureCondition = true
-	typ, err := c.checkLocalReceiverMethod(field, call.Args, env)
+	result, err := c.checkLocalReceiverMethod(field, call.Args, env)
 	c.captureCondition = saved
 	if err != nil {
 		return containerBorrowCondition{}, false, err
 	}
-	elem, mutable, ok := borrowOptionalElem(typ)
+	elem, mutable, ok := typ.BorrowOptionalElem(result)
 	if !ok {
 		return containerBorrowCondition{}, false, errorf(
 			"move error: capture accessor `%s` returned %s, not a borrow optional",
-			field.Name, typ)
+			field.Name, result)
 	}
 	return containerBorrowCondition{
 		containerName: ident.Name, elem: elem, mutable: mutable,
 	}, true, nil
-}
-
-// borrowOptionalElem splits a borrow optional into its payload type and
-// mutability. ok is false for every other type.
-func borrowOptionalElem(typ string) (string, bool, bool) {
-	if elem, found := strings.CutPrefix(typ, "?&var "); found {
-		return elem, true, true
-	}
-	if elem, found := strings.CutPrefix(typ, "?&"); found {
-		return elem, false, true
-	}
-	return "", false, false
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
@@ -4573,7 +4561,9 @@ func (c *Checker) checkArenaMethod(
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", errorf("arena error: Arena has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("arena error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -4591,20 +4581,14 @@ func (c *Checker) checkArenaAtCondition(
 		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
 			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	}
+	// The flag covers exactly this call: clear it before the argument is
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
 	if !arena.mutable {
 		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
 	}
-	_, elem, ok := splitGenericType(arena.typeName)
-	if !ok {
-		return "", errorf("arena error: `%s` is not an arena", arena.name)
-	}
-	if len(args) != 1 {
-		return "", errorf("arena error: `Arena.at_mut` expects 1 arg, got %d", len(args))
-	}
-	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
-		return "", err
-	}
-	if _, err := c.readExpr(args[0], env); err != nil {
+	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at_mut")
+	if err != nil {
 		return "", err
 	}
 	return "?&var " + elem, nil
@@ -4757,13 +4741,15 @@ func (c *Checker) checkFieldArenaMethod(
 		return c.checkFieldArenaGet(arena, args, env)
 	case "at_mut":
 		// Field-owned arenas cannot back an at_mut capture: the recognizer
-		// wants a local mutable binding, the same limit Array and Map have.
-		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
-			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+		// wants a local mutable binding, the same limit Array and Map have,
+		// so this always lands on the capture-only refusal.
+		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", errorf("arena error: Arena has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("arena error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -4884,6 +4870,9 @@ var containerAccessTables = map[string]containerAccessTable{
 		"truncate": accessMutate, "clear": accessMutate,
 		"len": accessRead, "capacity": accessRead,
 		"get": accessRead, "get_or_panic": accessRead,
+		// Unlike String's, Array's as_bytes/as_mut_bytes are std-internal
+		// calls guarded here as reads; String's form view bindings and are
+		// guarded where the binding forms.
 		"as_bytes": accessRead, "as_mut_bytes": accessRead,
 		"at": accessCapture, "at_mut": accessCapture,
 		"deinit": accessCleanup, "deinit_all": accessCleanup,
@@ -4914,7 +4903,10 @@ var containerAccessTables = map[string]containerAccessTable{
 // and refuses it when a live borrow conflicts with what it does to storage.
 // An unknown method is refused here: default deny, not fall-through.
 func checkContainerMethodAccess(base string, value *binding, name string) error {
-	table := containerAccessTables[base]
+	table, ok := containerAccessTables[base]
+	if !ok {
+		return errorf("move error: `%s` has no container access table", base)
+	}
 	access, known := table.methods[name]
 	if !known {
 		return errorf("%s error: %s has no method `%s`", table.kind, table.label, name)
@@ -4990,7 +4982,9 @@ func (c *Checker) checkStringMethod(
 		}
 		return "void", nil
 	default:
-		return "", errorf("string error: String has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("string error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -5126,7 +5120,9 @@ func (c *Checker) checkArrayMethod(
 		array.moved = true
 		return "void", nil
 	default:
-		return "", errorf("array error: Array has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("array error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -5226,6 +5222,9 @@ func (c *Checker) checkArrayAtCondition(
 			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
 			name, name, name)
 	}
+	// The flag covers exactly this call: clear it before the arguments are
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
 	if name == "at_mut" && !array.mutable {
 		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
 	}
@@ -5352,7 +5351,9 @@ func (c *Checker) checkMapMethod(
 	case "deinit":
 		return c.checkMapDeinit(mapValue, args)
 	default:
-		return "", errorf("map error: Map has no method `%s`", name)
+		// Unreachable while this switch and the shared access table agree;
+		// the table refusal above is the user-facing one.
+		return "", errorf("map error: method `%s` is classified but unhandled", name)
 	}
 }
 
@@ -5371,6 +5372,9 @@ func (c *Checker) checkMapAtCondition(
 			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
 			name, name, name)
 	}
+	// The flag covers exactly this call: clear it before the arguments are
+	// read, so a nested at/at_mut in argument position refuses as usual.
+	c.captureCondition = false
 	if name == "at_mut" && !mapValue.mutable {
 		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
 	}
@@ -5560,10 +5564,22 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 
 // checkArenaGet reads a handle and returns a local borrow-like value.
 func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	return c.checkArenaHandleArg(arena, args, env, "arena.get")
+}
+
+// checkArenaHandleArg validates the one handle argument an arena accessor
+// takes — count, provenance, and the read itself — and returns the element
+// type behind the handle. label names the accessor in the count error.
+func (c *Checker) checkArenaHandleArg(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+	label string,
+) (string, error) {
 	if len(args) != 1 {
-		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `%s` expects 1 arg, got %d", label, len(args))
 	}
-	base, arg, ok := splitGenericType(arena.typeName)
+	base, elem, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
@@ -5573,7 +5589,7 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
-	return arg, nil
+	return elem, nil
 }
 
 // checkArenaDeinit validates explicit arena cleanup and invalidates the binding.

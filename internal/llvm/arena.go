@@ -99,28 +99,12 @@ func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
 		return fmt.Errorf("llvm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T")
 	}
-	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
-		return fmt.Errorf(
-			"llvm error: arena.at_mut expects a `?&var T` result, got %s", instr.Result.Type)
-	}
 	arena := e.value(instr.Args[0])
 	handle := e.value(instr.Args[1])
-	resultName := localName(instr.Result.Name)
-	ptrName := resultName + ".ptr"
+	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
 		ptrName, arena.operand, handle.operand)
-	optType := e.llvmType(instr.Result.Type)
-	liveName := resultName + ".live"
-	tagName := resultName + ".tag"
-	someName := resultName + ".some"
-	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
-	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
-		someName, optType, tagName)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
-		resultName, optType, someName, ptrName)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 
 // writeArenaDeinit lowers Arena.deinit().

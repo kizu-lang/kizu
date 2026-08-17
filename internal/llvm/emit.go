@@ -381,6 +381,31 @@ func optionalElemLLVM(name string) (string, bool) {
 	return typ.OptionalElem(name)
 }
 
+// writeBorrowOptionalResult wraps a nullable runtime pointer into a borrow
+// optional `{i8, ptr}` result, branch-free: the pointer becomes the payload
+// and its non-nullness the presence tag. Array.at, Map.at, and Arena.at_mut
+// all end here.
+func (e *emitter) writeBorrowOptionalResult(instr *ir.Instr, ptrName string) error {
+	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
+		return fmt.Errorf(
+			"llvm error: %s expects a borrow optional result, got %s",
+			instr.Op, instr.Result.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	optType := e.llvmType(instr.Result.Type)
+	liveName := resultName + ".live"
+	tagName := resultName + ".tag"
+	someName := resultName + ".some"
+	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
+	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
+		someName, optType, tagName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
+		resultName, optType, someName, ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
 // llvmOptionalTypeName names the LLVM aggregate of one optional type.
 func llvmOptionalTypeName(name string) string {
 	elem, _ := optionalElemLLVM(name)
