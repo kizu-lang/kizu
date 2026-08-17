@@ -1167,9 +1167,11 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 		return nil, errorf("type error: function `%s` cannot return dyn", fn.Name)
 	}
 	if !fn.Std && containsBorrowOptional(ret) {
-		return nil, errorf(
-			"type error: function `%s` cannot return a borrow optional;"+
-				" `?&T` exists only as a capture condition", fn.Name)
+		if _, _, bare := typ.BorrowOptionalElem(string(ret)); !bare {
+			return nil, errorf(
+				"type error: function `%s` cannot nest a borrow optional in its"+
+					" return; declare a bare `?&T` / `?&var T`", fn.Name)
+		}
 	}
 	return &functionType{
 		name: fn.Name, sig: fn, params: paramInfo.params,
@@ -2115,12 +2117,12 @@ func (c *Checker) checkStringViewInitializer(
 	return sources, mutable, true, nil
 }
 
-// checkContainerBorrowCondition recognizes at/at_mut capture conditions: the
-// borrow optional `?&T` exists only there, so the payload borrow binds as the
-// capture the way `let view = &value` binds a local borrow. The call is typed
-// through the normal method path with the capture context set, so each
-// accessor's own checker validates receiver and arguments once, and this
-// recognizer only reads the payload class of the type that comes back.
+// checkContainerBorrowCondition recognizes capture conditions whose call
+// produces a borrow optional — std at/at_mut, or a function that declares a
+// `?&T` / `?&var T` return. The call is typed through the normal call path
+// with the capture context set, so each callee's own checker validates
+// receiver and arguments once, and this recognizer only reads the payload
+// class of the type that comes back.
 func (c *Checker) checkContainerBorrowCondition(
 	expr ast.Expression,
 	env *scope,
@@ -2130,11 +2132,13 @@ func (c *Checker) checkContainerBorrowCondition(
 	if !ok {
 		return "", false, false, nil
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "at" && field.Name != "at_mut") {
-		return "", false, false, nil
-	}
-	if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+	switch callee := call.Callee.(type) {
+	case *ast.FieldExpr:
+		if !captureReceiverShape(callee.Receiver) {
+			return "", false, false, nil
+		}
+	case *ast.IdentExpr:
+	default:
 		return "", false, false, nil
 	}
 	saved := c.captureCondition
@@ -2146,7 +2150,7 @@ func (c *Checker) checkContainerBorrowCondition(
 	}
 	elem, mutable, ok := typ.BorrowOptionalElem(string(result))
 	if !ok {
-		// Another type's own `at` method: the generic condition path types
+		// A call producing any other type: the generic condition path types
 		// that call.
 		return "", false, false, nil
 	}
@@ -2272,7 +2276,14 @@ func (c *Checker) checkReturnStmt(
 		}
 		return false, errorf("type error: return expects %s, got null", want)
 	}
+	saved := c.captureCondition
+	if _, _, bare := typ.BorrowOptionalElem(string(want)); bare {
+		// A declared borrow-optional return is the second consumer of `?&T`:
+		// the returned borrow flows on to the caller's capture.
+		c.captureCondition = true
+	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
+	c.captureCondition = saved
 	if err != nil {
 		return false, err
 	}
@@ -2776,8 +2787,7 @@ func (c *Checker) bindContainerBorrowCapture(
 	if !ok || err != nil {
 		return ok, err
 	}
-	receiver := cond.(*ast.CallExpr).Callee.(*ast.FieldExpr).Receiver
-	sources := c.exprBorrowSourceList(receiver, env, unsafe)
+	sources := c.exprBorrowSourceList(cond, env, unsafe)
 	if len(sources) == 0 {
 		sources = []string{capture}
 	}
@@ -3745,6 +3755,26 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark)
 
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeMark) (Type, error) {
+	result, err := c.checkCallExprDispatch(expr, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	// One gate for every call form: a borrow-optional result exists only
+	// inside a capture condition or a declared borrow-optional return, so a
+	// call producing one anywhere else stops here.
+	if _, _, bare := typ.BorrowOptionalElem(string(result)); bare && !c.captureCondition {
+		return "", errorf("type error: a call returning %s must be consumed by a capture"+
+			" (`if call |name|` or `while call |name|`)", result)
+	}
+	return result, nil
+}
+
+// checkCallExprDispatch routes one call expression to its checker.
+func (c *Checker) checkCallExprDispatch(
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
 	}
@@ -5757,13 +5787,16 @@ func (c *Checker) checkArenaAtMut(
 		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
 			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	}
-	// The flag covers exactly this call: clear it before the argument is
-	// read, so a nested at/at_mut in argument position refuses as usual.
-	c.captureCondition = false
-	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+	if !mutableReceiverPlace(field.Receiver, env) {
 		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
 	}
-	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "Arena.at_mut"); err != nil {
+	// The flag covers exactly this call: off while the argument is read —
+	// a nested at/at_mut in argument position refuses as usual — and back
+	// on for the result the call gate reads.
+	c.captureCondition = false
+	err := c.checkArenaHandleArg(arg, args, env, unsafe, "Arena.at_mut")
+	c.captureCondition = true
+	if err != nil {
 		return "", err
 	}
 	return Type("?&var " + arg), nil
@@ -5911,10 +5944,8 @@ func (c *Checker) checkArrayReceiverMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Array.at_mut` requires mutable array binding")
-		}
+	if field.Name == "at_mut" && !mutableReceiverPlace(field.Receiver, env) {
+		return "", errorf("type error: `Array.at_mut` requires mutable array binding")
 	}
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
 }
@@ -5930,16 +5961,44 @@ func (c *Checker) checkMapReceiverMethod(
 	if err := checkMapReceiverBorrow(field, env); err != nil {
 		return "", err
 	}
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Map.at_mut` requires mutable map binding")
-		}
+	if field.Name == "at_mut" && !mutableReceiverPlace(field.Receiver, env) {
+		return "", errorf("type error: `Map.at_mut` requires mutable map binding")
 	}
 	mapArgs, err := c.checkedMapArgs(arg)
 	if err != nil {
 		return "", err
 	}
 	return c.checkMapMethod(Type(mapArgs[1]), field.Name, args, env, unsafe)
+}
+
+// mutableReceiverPlace reports whether a method receiver expression names a
+// place a mutable borrow may come from: a `var` binding, a `&var` borrow, or
+// one direct field of either.
+func mutableReceiverPlace(receiver ast.Expression, env *scope) bool {
+	switch expr := receiver.(type) {
+	case *ast.IdentExpr:
+		return env.isMutable(expr.Name) || env.isMutBorrowed(expr.Name)
+	case *ast.FieldExpr:
+		owner, ok := expr.Receiver.(*ast.IdentExpr)
+		return ok && (env.isMutable(owner.Name) || env.isMutBorrowed(owner.Name))
+	default:
+		return false
+	}
+}
+
+// captureReceiverShape reports whether a capture-condition receiver names a
+// borrowable place: a local binding, or one direct field of one — the same
+// shape field method receivers support.
+func captureReceiverShape(receiver ast.Expression) bool {
+	switch expr := receiver.(type) {
+	case *ast.IdentExpr:
+		return true
+	case *ast.FieldExpr:
+		_, ok := expr.Receiver.(*ast.IdentExpr)
+		return ok
+	default:
+		return false
+	}
 }
 
 // checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
@@ -5973,17 +6032,21 @@ func (c *Checker) checkArrayMethod(
 	// leak (ADR-0091), so the element type picks between deinit and deinit_all.
 	switch name {
 	case "at", "at_mut":
-		// In a capture condition the std declaration below answers everything:
+		// In a capture condition the std declaration answers everything:
 		// args and the `?&T` / `?&var T` return both come from the signature.
 		if !c.captureCondition {
 			return "", errorf("type error: `Array.%s` must be consumed by a capture"+
 				" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
 				name, name, name)
 		}
-		// The flag covers exactly this call: clear it before the arguments
-		// are read, so a nested at/at_mut in argument position refuses as
-		// usual.
+		// The flag covers exactly this call: off while the arguments are
+		// read — a nested at/at_mut in argument position refuses as usual —
+		// and back on for the result the call gate reads.
 		c.captureCondition = false
+		result, err := c.checkStdMethod("std::array::Array", []Type{elem}, "Array",
+			name, args, env, unsafe)
+		c.captureCondition = true
+		return result, err
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
@@ -6252,10 +6315,13 @@ func (c *Checker) checkMapAtCondition(
 			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
 			name, name, name)
 	}
-	// The flag covers exactly this call: clear it before the argument is
-	// read, so a nested at/at_mut in argument position refuses as usual.
+	// The flag covers exactly this call: off while the argument is read —
+	// a nested at/at_mut in argument position refuses as usual — and back
+	// on for the result the call gate reads.
 	c.captureCondition = false
-	if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+	err := c.checkMapKeyArg(name, args, env, unsafe)
+	c.captureCondition = true
+	if err != nil {
 		return "", err
 	}
 	if name == "at_mut" {
