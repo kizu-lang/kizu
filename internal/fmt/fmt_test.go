@@ -286,3 +286,48 @@ func TestFormatMultilineStringPreservesNewlines(t *testing.T) {
 		t.Fatalf("non-idempotent multiline string:\n--- got1 ---\n%s\n--- got2 ---\n%s", got, got2)
 	}
 }
+
+// TestFormatUnaryMinusHugsValue checks a sign hugs its value while
+// subtraction keeps its spaces.
+func TestFormatUnaryMinusHugsValue(t *testing.T) {
+	src := "fn f(x: i64) -> i64 {\n" +
+		"    let a = x - 1;\n" +
+		"    let b = x - - 1;\n" +
+		"    if x < - 2 {\n" +
+		"        return - 3;\n" +
+		"    }\n" +
+		"    return f(- 4) orelse - 5;\n" +
+		"}\n"
+	want := "fn f(x: i64) -> i64 {\n" +
+		"    let a = x - 1;\n" +
+		"    let b = x - -1;\n" +
+		"    if x < -2 {\n" +
+		"        return -3;\n" +
+		"    }\n" +
+		"    return f(-4) orelse -5;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(unary minus):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(unary minus idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatGroupingParenTakesSpace checks `(` hugs a callee but not a group.
+func TestFormatGroupingParenTakesSpace(t *testing.T) {
+	src := "fn f(x: i64) -> i64 {\n" +
+		"    let c =(x + 1) * 2;\n" +
+		"    return f(c)(x);\n" +
+		"}\n"
+	want := "fn f(x: i64) -> i64 {\n" +
+		"    let c = (x + 1) * 2;\n" +
+		"    return f(c)(x);\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(grouping paren):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(grouping paren idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
