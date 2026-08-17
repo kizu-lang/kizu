@@ -964,9 +964,6 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		return c.checkBorrowLetStmt(stmt, borrow, env)
 	}
-	if target, elem, mutable, ok := c.arrayBorrowInitializer(stmt.Value, env); ok {
-		return c.checkArrayBorrowLetStmt(stmt, target, elem, mutable, env)
-	}
 	target, field, elem, mutable, ok, err := c.boxBorrowInitializer(stmt.Value, env)
 	if ok || err != nil {
 		if err != nil {
@@ -1396,90 +1393,85 @@ func isBufferTypeName(typeName string) bool {
 		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
-// checkArrayBorrowLetStmt binds an Array element borrow and activates the array owner.
-func (c *Checker) checkArrayBorrowLetStmt(
-	stmt *ast.LetStmt,
-	target *binding,
-	elem string,
-	mutable bool,
-	env *scope,
-) error {
-	if mutable && !target.mutable {
-		return errorf("array error: `Array.at_mut` requires mutable array binding")
-	}
-	if err := c.checkArrayBorrowInitializerIndex(stmt.Value, env); err != nil {
-		return err
-	}
-	if err := checkBorrowConflict(target, mutable); err != nil {
-		return err
-	}
-	c.activateBorrow(target, "", mutable)
-	value := c.newBinding(stmt.Name, elem)
-	value.borrowedParam = true
-	value.localBorrow = true
-	value.borrowTargets = []borrowSource{{target: target}}
-	value.mutBorrow = mutable
-	env.define(value)
-	return nil
+// arrayBorrowCondition describes a recognized `array.at/at_mut(index)` capture
+// condition: which array binding it borrows and how.
+type arrayBorrowCondition struct {
+	arrayName string
+	elem      string
+	mutable   bool
 }
 
-// checkArrayBorrowInitializerIndex validates the checked index for Array.at/at_mut.
-func (c *Checker) checkArrayBorrowInitializerIndex(expr ast.Expression, env *scope) error {
-	tryExpr, ok := expr.(*ast.TryExpr)
+// matchArrayBorrowCondition recognizes array.at/at_mut(index) capture
+// conditions and validates the pieces the generic condition path would have:
+// the receiver is a live Array binding and the index reads as i64.
+func (c *Checker) matchArrayBorrowCondition(
+	cond ast.Expression,
+	env *scope,
+) (arrayBorrowCondition, bool, error) {
+	call, ok := cond.(*ast.CallExpr)
 	if !ok {
-		return errorf("array error: Array borrow initializer must use try")
-	}
-	call, ok := tryExpr.Value.(*ast.CallExpr)
-	if !ok {
-		return errorf("array error: Array borrow initializer must call Array.at")
+		return arrayBorrowCondition{}, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || (field.Name != "at" && field.Name != "at_mut") {
-		return errorf("array error: Array borrow initializer must call Array.at")
-	}
-	if len(call.Args) != 1 {
-		return errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
-	}
-	got, err := c.readExpr(call.Args[0], env)
-	if err != nil {
-		return err
-	}
-	if got != "i64" {
-		return errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
-	}
-	return nil
-}
-
-// arrayBorrowInitializer recognizes try array.at/at_mut(index) local borrow initializers.
-func (c *Checker) arrayBorrowInitializer(
-	expr ast.Expression,
-	env *scope,
-) (*binding, string, bool, bool) {
-	tryExpr, ok := expr.(*ast.TryExpr)
-	if !ok {
-		return nil, "", false, false
-	}
-	call, ok := tryExpr.Value.(*ast.CallExpr)
-	if !ok {
-		return nil, "", false, false
-	}
-	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "at" && field.Name != "at_mut") {
-		return nil, "", false, false
+		return arrayBorrowCondition{}, false, nil
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return nil, "", false, false
+		return arrayBorrowCondition{}, false, nil
 	}
 	array, exists := env.lookup(ident.Name)
 	if !exists || array.moved {
-		return nil, "", false, false
+		return arrayBorrowCondition{}, false, nil
 	}
 	base, elem, ok := splitGenericType(array.typeName)
 	if !ok || base != "std::array::Array" {
-		return nil, "", false, false
+		return arrayBorrowCondition{}, false, nil
 	}
-	return array, elem, field.Name == "at_mut", true
+	mutable := field.Name == "at_mut"
+	if mutable && !array.mutable {
+		return arrayBorrowCondition{}, false,
+			errorf("array error: `Array.at_mut` requires mutable array binding")
+	}
+	if len(call.Args) != 1 {
+		return arrayBorrowCondition{}, false,
+			errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
+	}
+	got, err := c.readExpr(call.Args[0], env)
+	if err != nil {
+		return arrayBorrowCondition{}, false, err
+	}
+	if got != "i64" {
+		return arrayBorrowCondition{}, false,
+			errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
+	}
+	return arrayBorrowCondition{arrayName: ident.Name, elem: elem, mutable: mutable}, true, nil
+}
+
+// tieArrayBorrowCapture builds the capture binding for a recognized at/at_mut
+// condition and activates the element borrow on the branch scope's clone of
+// the array, so the branch body sees mutation and deinit wait on the capture.
+func (c *Checker) tieArrayBorrowCapture(
+	name string,
+	match arrayBorrowCondition,
+	cond ast.Expression,
+	branch *scope,
+) (*binding, error) {
+	target, exists := branch.lookup(match.arrayName)
+	if !exists {
+		return nil, errorf("move error: unknown value `%s`", match.arrayName)
+	}
+	if err := checkBorrowConflict(target, match.mutable); err != nil {
+		return nil, err
+	}
+	c.activateBorrow(target, "", match.mutable)
+	value := c.newBinding(name, match.elem)
+	value.declSpan = expressionSpan(cond)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTargets = []borrowSource{{target: target}}
+	value.mutBorrow = match.mutable
+	return value, nil
 }
 
 // checkBoxBorrowLetStmt binds a Box payload borrow and activates the Box owner.
@@ -1708,18 +1700,38 @@ func (c *Checker) checkExprStmt(stmt *ast.ExprStmt, env *scope) error {
 
 // checkIfStmt merges possible moves from either branch into the outer scope.
 func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
-	condType, err := c.readExpr(stmt.Condition, env)
-	if err != nil {
-		return err
+	var borrowCond arrayBorrowCondition
+	isBorrowCond := false
+	var condType string
+	if stmt.Capture != "" {
+		match, ok, err := c.matchArrayBorrowCondition(stmt.Condition, env)
+		if err != nil {
+			return err
+		}
+		borrowCond, isBorrowCond = match, ok
+	}
+	if !isBorrowCond {
+		read, err := c.readExpr(stmt.Condition, env)
+		if err != nil {
+			return err
+		}
+		condType = read
 	}
 	left := env.clone()
 	leftScope := left.child()
 	if stmt.Capture != "" {
-		capture := c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
 		// The tie borrows the branch's clone of each container: the branch
 		// body is checked against that clone, so only its bindings make the
 		// body's mutations wait.
-		if err := c.tieViewCapture(capture, condType, stmt.Condition, leftScope); err != nil {
+		var capture *binding
+		var err error
+		if isBorrowCond {
+			capture, err = c.tieArrayBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, leftScope)
+		} else {
+			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
+			err = c.tieViewCapture(capture, condType, stmt.Condition, leftScope)
+		}
+		if err != nil {
 			return err
 		}
 		leftScope.define(capture)
@@ -1745,16 +1757,36 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 
 // checkWhileStmt treats moves in the body as possible after the loop.
 func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
-	condType, err := c.readExpr(stmt.Condition, env)
-	if err != nil {
-		return err
+	var borrowCond arrayBorrowCondition
+	isBorrowCond := false
+	var condType string
+	if stmt.Capture != "" {
+		match, ok, err := c.matchArrayBorrowCondition(stmt.Condition, env)
+		if err != nil {
+			return err
+		}
+		borrowCond, isBorrowCond = match, ok
+	}
+	if !isBorrowCond {
+		read, err := c.readExpr(stmt.Condition, env)
+		if err != nil {
+			return err
+		}
+		condType = read
 	}
 	body := env.clone()
 	child := body.child()
 	if stmt.Capture != "" {
-		capture := c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
 		// Borrow the loop's clone of each container, as in checkIfStmt.
-		if err := c.tieViewCapture(capture, condType, stmt.Condition, child); err != nil {
+		var capture *binding
+		var err error
+		if isBorrowCond {
+			capture, err = c.tieArrayBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, child)
+		} else {
+			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
+			err = c.tieViewCapture(capture, condType, stmt.Condition, child)
+		}
+		if err != nil {
 			return err
 		}
 		child.define(capture)
@@ -3742,12 +3774,12 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		if _, err := c.checkOneI64Arg("Array.at", args, env); err != nil {
 			return "", err
 		}
-		return "!&" + elem, nil
+		return "?&" + elem, nil
 	case "at_mut":
 		if _, err := c.checkOneI64Arg("Array.at_mut", args, env); err != nil {
 			return "", err
 		}
-		return "!&var " + elem, nil
+		return "?&var " + elem, nil
 	case "get", "get_or_panic":
 		if len(args) != 1 {
 			return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
@@ -4912,8 +4944,9 @@ func (c *Checker) checkArrayMethod(
 		}
 		return c.checkArrayGet(elem, name, args, env)
 	case "at", "at_mut":
-		return "", errorf("array error: `Array.%s` must be bound with `let name = try array.%s(...)`",
-			name, name)
+		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
+			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+			name, name, name)
 	case "set":
 		return c.checkArraySet(array, elem, args, env)
 	case "deinit", "deinit_all":

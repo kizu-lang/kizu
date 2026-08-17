@@ -1162,6 +1162,11 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if containsDynType(ret) {
 		return nil, errorf("type error: function `%s` cannot return dyn", fn.Name)
 	}
+	if !fn.Std && containsBorrowOptional(ret) {
+		return nil, errorf(
+			"type error: function `%s` cannot return a borrow optional;"+
+				" `?&T` exists only as a capture condition", fn.Name)
+	}
 	return &functionType{
 		name: fn.Name, sig: fn, params: paramInfo.params,
 		borrowParams:    paramInfo.borrowParams,
@@ -1181,6 +1186,11 @@ func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParam
 		paramType, err := c.parseTypeNode(param.TypeName)
 		if err != nil {
 			return functionParamInfo{}, err
+		}
+		if !fn.Std && containsBorrowOptional(paramType) {
+			return functionParamInfo{}, errorf(
+				"type error: parameter `%s` cannot hold a borrow optional;"+
+					" `?&T` exists only as a capture condition", param.Name)
 		}
 		if err := c.checkFunctionParam(param, paramType); err != nil {
 			return functionParamInfo{}, err
@@ -1300,6 +1310,13 @@ func containsBufferType(t Type) bool {
 		}
 	}
 	return false
+}
+
+// containsBorrowOptional reports whether a spelling mentions `?&T`. A borrow
+// optional is positional-only: it appears as an at/at_mut capture condition
+// and never crosses a user signature.
+func containsBorrowOptional(t Type) bool {
+	return strings.Contains(string(t), "?&")
 }
 
 // isBorrowedViewReturnType reports whether typ returns a non-owned view.
@@ -1987,23 +2004,7 @@ func (c *Checker) defineSpecialLetInitializer(
 		sources := c.exprBorrowSourceList(borrow.Right, env, unsafe)
 		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
 	}
-	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
-	if ok || err != nil {
-		if err != nil {
-			return true, err
-		}
-		// `Array.at` is declared `-> !&T borrows self`, so the element view is backed by
-		// whatever backs the array. Binding it without that provenance made
-		// `self.parts.at(index)` read as a fresh owner and refused a view off the element
-		// that is in fact tied to `self`. Falling back to the bound name keeps the older,
-		// owner-of-itself answer whenever the initializer names no single source.
-		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
-		if len(sources) == 0 {
-			sources = []string{stmt.Name}
-		}
-		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
-	}
-	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
+	typ, mutable, ok, err := c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
@@ -2110,17 +2111,15 @@ func (c *Checker) checkStringViewInitializer(
 	return sources, mutable, true, nil
 }
 
-// checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
-func (c *Checker) checkArrayBorrowInitializer(
+// checkArrayBorrowCondition recognizes array.at/at_mut(index) capture
+// conditions: the borrow optional `?&T` exists only there, so the element
+// borrow binds as the capture the way `let view = &value` binds a local borrow.
+func (c *Checker) checkArrayBorrowCondition(
 	expr ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, bool, error) {
-	tryExpr, ok := expr.(*ast.TryExpr)
-	if !ok {
-		return "", false, false, nil
-	}
-	call, ok := tryExpr.Value.(*ast.CallExpr)
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return "", false, false, nil
 	}
@@ -2134,7 +2133,9 @@ func (c *Checker) checkArrayBorrowInitializer(
 	}
 	base, elem, ok := splitGenericType(string(receiver))
 	if !ok || base != "std::array::Array" {
-		return "", false, true, errorf("type error: `Array.%s` expects Array receiver", field.Name)
+		// A non-Array receiver may have its own `at` method; the generic
+		// condition path types that call.
+		return "", false, false, nil
 	}
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
@@ -2700,13 +2701,19 @@ func (c *Checker) checkIfStmt(
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
-	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+	consequence := env.child()
+	handled, err := c.bindArrayBorrowCapture(stmt.Capture, stmt.Condition, consequence, env, unsafe)
 	if err != nil {
 		return false, err
 	}
-	consequence := env.child()
-	if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
-		return false, err
+	if !handled {
+		cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+		if err != nil {
+			return false, err
+		}
+		if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
+			return false, err
+		}
 	}
 	leftReturns, err := c.checkBlock(stmt.Consequence, consequence, wantReturn, unsafe)
 	if err != nil {
@@ -2746,6 +2753,31 @@ func (c *Checker) bindConditionCapture(
 	return scope.define(capture, elem, false)
 }
 
+// bindArrayBorrowCapture handles an `array.at/at_mut(index)` capture condition:
+// the capture binds the element borrow directly, carrying the array's
+// provenance the way `let view = try array.at(...)` used to.
+func (c *Checker) bindArrayBorrowCapture(
+	capture string,
+	cond ast.Expression,
+	branch *scope,
+	env *scope,
+	unsafe unsafeMark,
+) (bool, error) {
+	if capture == "" {
+		return false, nil
+	}
+	elem, mutable, ok, err := c.checkArrayBorrowCondition(cond, env, unsafe)
+	if !ok || err != nil {
+		return ok, err
+	}
+	receiver := cond.(*ast.CallExpr).Callee.(*ast.FieldExpr).Receiver
+	sources := c.exprBorrowSourceList(receiver, env, unsafe)
+	if len(sources) == 0 {
+		sources = []string{capture}
+	}
+	return true, branch.defineParamWithSource(capture, elem, true, mutable, sources)
+}
+
 // checkWhileStmt validates loop condition and body types.
 func (c *Checker) checkWhileStmt(
 	stmt *ast.WhileStmt,
@@ -2753,13 +2785,19 @@ func (c *Checker) checkWhileStmt(
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
-	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+	body := env.child()
+	handled, err := c.bindArrayBorrowCapture(stmt.Capture, stmt.Condition, body, env, unsafe)
 	if err != nil {
 		return false, err
 	}
-	body := env.child()
-	if err := c.bindConditionCapture("while", stmt.Capture, cond, body); err != nil {
-		return false, err
+	if !handled {
+		cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+		if err != nil {
+			return false, err
+		}
+		if err := c.bindConditionCapture("while", stmt.Capture, cond, body); err != nil {
+			return false, err
+		}
 	}
 	leave, err := c.enterLoop(stmt.Label)
 	if err != nil {
@@ -4588,12 +4626,12 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("!&" + string(elem)), nil
+		return Type("?&" + string(elem)), nil
 	case "at_mut":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("!&var " + string(elem)), nil
+		return Type("?&var " + string(elem)), nil
 	case "get", "get_or_panic":
 		return c.checkArrayPrimitiveGet(elem, name, args, env, unsafe)
 	case "deinit":
@@ -5859,8 +5897,9 @@ func (c *Checker) checkArrayMethod(
 	// leak (ADR-0091), so the element type picks between deinit and deinit_all.
 	switch name {
 	case "at", "at_mut":
-		return "", errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
-			name, name)
+		return "", errorf("type error: `Array.%s` must be consumed by a capture"+
+			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+			name, name, name)
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)

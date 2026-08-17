@@ -599,14 +599,16 @@ fn main() {}`
 }
 
 // TestCheckPreservesArrayElementNominalTypeThroughAt pins the exact receiver
-// identity used by field lookup after a generic method and try unwrap.
+// identity used by field lookup after a generic method and capture unwrap.
 func TestCheckPreservesArrayElementNominalTypeThroughAt(t *testing.T) {
 	source := `struct MirCallArg {
     string_index: i64,
 }
 fn read(args: std::array::Array<MirCallArg>) -> !i64 {
-    let arg = try args.at(0);
-    return arg.string_index;
+    if args.at(0) |arg| {
+        return arg.string_index;
+    }
+    return 0;
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -647,8 +649,8 @@ fn main() {}`
 }
 
 // TestCheckAcceptsArrayElementViewTiedToArrayOwner keeps `Array.at` provenance.
-// The element borrow is declared `-> !&T borrows self`, so a view read off the
-// element is backed by whatever backs the array; binding the element without
+// The element borrow is declared `-> ?&T borrows self`, so a view read off the
+// element is backed by whatever backs the array; binding the capture without
 // that source made `self.parts.at(index)` read as a fresh owner and refused a
 // return that is in fact tied to `self`.
 func TestCheckAcceptsArrayElementViewTiedToArrayOwner(t *testing.T) {
@@ -659,10 +661,12 @@ struct Store {
 }
 fn view(store: &Store, index: i64) -> ![]u8 {
     let parts = &store.parts;
-    let part = try parts.at(index);
-    let length = part.len();
-    let bytes = part.as_bytes();
-    return bytes[0..length];
+    if parts.at(index) |part| {
+        let length = part.len();
+        let bytes = part.as_bytes();
+        return bytes[0..length];
+    }
+    return "";
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
