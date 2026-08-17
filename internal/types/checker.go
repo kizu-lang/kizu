@@ -245,6 +245,10 @@ type Checker struct {
 	// deinitOwners marks the base type names whose values carry a deinit
 	// contract, seeded from ast.DeinitOwners — the one definition of owner-ness.
 	deinitOwners map[string]bool
+	// captureCondition is set while an if/while capture condition is typed.
+	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
+	// `?&var T` only in this context and refuse everywhere else.
+	captureCondition bool
 }
 
 type enumType struct {
@@ -2111,12 +2115,12 @@ func (c *Checker) checkStringViewInitializer(
 	return sources, mutable, true, nil
 }
 
-// checkContainerBorrowCondition recognizes container at/at_mut capture
-// conditions: the borrow optional `?&T` exists only there, so the payload
-// borrow binds as the capture the way `let view = &value` binds a local
-// borrow. Array takes an i64 index, Map takes a []u8 key, Arena takes a
-// matching handle (and has no shared `at`: `get` already reads without a
-// capture).
+// checkContainerBorrowCondition recognizes at/at_mut capture conditions: the
+// borrow optional `?&T` exists only there, so the payload borrow binds as the
+// capture the way `let view = &value` binds a local borrow. The call is typed
+// through the normal method path with the capture context set, so each
+// accessor's own checker validates receiver and arguments once, and this
+// recognizer only reads the payload class of the type that comes back.
 func (c *Checker) checkContainerBorrowCondition(
 	expr ast.Expression,
 	env *scope,
@@ -2130,104 +2134,35 @@ func (c *Checker) checkContainerBorrowCondition(
 	if !ok || (field.Name != "at" && field.Name != "at_mut") {
 		return "", false, false, nil
 	}
-	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+		return "", false, false, nil
+	}
+	saved := c.captureCondition
+	c.captureCondition = true
+	typ, err := c.checkExpr(expr, env, unsafe)
+	c.captureCondition = saved
 	if err != nil {
 		return "", false, true, err
 	}
-	base, arg, ok := splitGenericType(string(receiver))
+	elem, mutable, ok := borrowOptionalElem(typ)
 	if !ok {
+		// Another type's own `at` method: the generic condition path types
+		// that call.
 		return "", false, false, nil
 	}
-	var elem Type
-	switch base {
-	case "std::array::Array":
-		elem, err = c.checkArrayBorrowConditionCall(field, call, arg, env, unsafe)
-	case "std::map::Map":
-		elem, err = c.checkMapBorrowConditionCall(field, call, arg, env, unsafe)
-	case "std::arena::Arena":
-		if field.Name != "at_mut" {
-			return "", false, false, nil
-		}
-		elem, err = c.checkArenaBorrowConditionCall(field, call, arg, env, unsafe)
-	default:
-		// A receiver of another type may have its own `at` method; the
-		// generic condition path types that call.
-		return "", false, false, nil
-	}
-	if err != nil {
-		return "", false, true, err
-	}
-	return elem, field.Name == "at_mut", true, nil
+	return elem, mutable, true, nil
 }
 
-// checkArrayBorrowConditionCall validates a recognized Array at/at_mut capture
-// condition: a mutable binding for at_mut and one i64 index.
-func (c *Checker) checkArrayBorrowConditionCall(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	elem string,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Array.at_mut` requires mutable array binding")
-		}
+// borrowOptionalElem splits a borrow optional into its payload type and
+// mutability. ok is false for every other type.
+func borrowOptionalElem(typ Type) (Type, bool, bool) {
+	if elem, found := strings.CutPrefix(string(typ), "?&var "); found {
+		return Type(elem), true, true
 	}
-	if err := c.checkArrayIndexArg(field.Name, call.Args, env, unsafe); err != nil {
-		return "", err
+	if elem, found := strings.CutPrefix(string(typ), "?&"); found {
+		return Type(elem), false, true
 	}
-	return Type(elem), nil
-}
-
-// checkMapBorrowConditionCall validates a recognized Map at/at_mut capture
-// condition: a mutable binding for at_mut and one []u8 key.
-func (c *Checker) checkMapBorrowConditionCall(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	arg string,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Map.at_mut` requires mutable map binding")
-		}
-	}
-	mapArgs, err := c.checkedMapArgs(arg)
-	if err != nil {
-		return "", err
-	}
-	if err := c.checkMapKeyArg(field.Name, call.Args, env, unsafe); err != nil {
-		return "", err
-	}
-	return Type(mapArgs[1]), nil
-}
-
-// checkArenaBorrowConditionCall validates a recognized Arena at_mut capture
-// condition: a mutable binding and one handle of the arena's element type.
-func (c *Checker) checkArenaBorrowConditionCall(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	elem string,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
-	}
-	if len(call.Args) != 1 {
-		return "", errorf("type error: `Arena.at_mut` expects 1 arg, got %d", len(call.Args))
-	}
-	got, err := c.checkExpr(call.Args[0], env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	want := Type(fmt.Sprintf("std::arena::Handle<%s>", elem))
-	if !sameType(got, want) {
-		return "", errorf("type error: `Arena.at_mut` expects %s, got %s", want, got)
-	}
-	return Type(elem), nil
+	return "", false, false
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -5813,13 +5748,42 @@ func (c *Checker) checkArenaOrImplMethod(
 	case "get":
 		return c.checkArenaGet(arg, args, env, unsafe)
 	case "at_mut":
-		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
-			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+		return c.checkArenaAtMut(field, arg, args, env, unsafe)
 	case "deinit":
 		return c.checkArenaDeinit(field, args, env)
 	default:
 		return "", errorf("type error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkArenaAtMut validates std::arena::Arena<T>.at_mut(handle): capture
+// conditions consume the `?&var T` it returns, everywhere else refuses it.
+func (c *Checker) checkArenaAtMut(
+	field *ast.FieldExpr,
+	arg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if !c.captureCondition {
+		return "", errorf("type error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+	}
+	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
+	}
+	if len(args) != 1 {
+		return "", errorf("type error: `Arena.at_mut` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
+	if !sameType(got, want) {
+		return "", errorf("type error: `Arena.at_mut` expects %s, got %s", want, got)
+	}
+	return Type("?&var " + arg), nil
 }
 
 // checkStringReceiverMethod validates receiver-sensitive String methods.
@@ -6026,9 +5990,13 @@ func (c *Checker) checkArrayMethod(
 	// leak (ADR-0091), so the element type picks between deinit and deinit_all.
 	switch name {
 	case "at", "at_mut":
-		return "", errorf("type error: `Array.%s` must be consumed by a capture"+
-			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
-			name, name, name)
+		// In a capture condition the std declaration below answers everything:
+		// args and the `?&T` / `?&var T` return both come from the signature.
+		if !c.captureCondition {
+			return "", errorf("type error: `Array.%s` must be consumed by a capture"+
+				" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+				name, name, name)
+		}
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
@@ -6250,9 +6218,7 @@ func (c *Checker) checkMapMethod(
 		}
 		return Type("?" + string(valueType)), nil
 	case "at", "at_mut":
-		return "", errorf("type error: `Map.%s` must be consumed by a capture"+
-			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
-			name, name, name)
+		return c.checkMapAtCondition(valueType, name, args, env, unsafe)
 	case "key_at":
 		if len(args) != 1 {
 			return "", errorf("type error: `Map.key_at` expects 1 arg, got %d", len(args))
@@ -6283,6 +6249,29 @@ func (c *Checker) checkMapMethod(
 	default:
 		return "", errorf("type error: Map has no method `%s`", name)
 	}
+}
+
+// checkMapAtCondition types at/at_mut inside a capture condition and refuses
+// them anywhere else: the borrow optional they produce exists only there.
+func (c *Checker) checkMapAtCondition(
+	valueType Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if !c.captureCondition {
+		return "", errorf("type error: `Map.%s` must be consumed by a capture"+
+			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+			name, name, name)
+	}
+	if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+		return "", err
+	}
+	if name == "at_mut" {
+		return Type("?&var " + string(valueType)), nil
+	}
+	return Type("?&" + string(valueType)), nil
 }
 
 // checkMapInsert validates copy-only Map.insert arguments.

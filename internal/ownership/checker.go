@@ -33,6 +33,10 @@ type Checker struct {
 	// binding; a statement ending with entries left over used the result some
 	// other way, which would lose the tie, so checkBlock rejects it.
 	pendingAllocTaints []allocTaint
+	// captureCondition is set while an if/while capture condition is checked.
+	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
+	// `?&var T` only in this context and refuse everywhere else.
+	captureCondition bool
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -1401,10 +1405,11 @@ type containerBorrowCondition struct {
 	mutable       bool
 }
 
-// matchContainerBorrowCondition recognizes container at/at_mut capture
-// conditions and validates the pieces the generic condition path would have:
-// the receiver is a live Array, Map, or Arena binding, and the argument reads
-// as an i64 index (Array), a []u8 key (Map), or a matching handle (Arena).
+// matchContainerBorrowCondition recognizes capture conditions built from a
+// container's capture accessor — the accessCapture entries of the shared
+// table. The call is checked through the normal method dispatch with the
+// capture context set, so each accessor's own checker validates receiver and
+// arguments once, and this recognizer only reads the payload type it returns.
 func (c *Checker) matchContainerBorrowCondition(
 	cond ast.Expression,
 	env *scope,
@@ -1414,7 +1419,7 @@ func (c *Checker) matchContainerBorrowCondition(
 		return containerBorrowCondition{}, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || (field.Name != "at" && field.Name != "at_mut") {
+	if !ok {
 		return containerBorrowCondition{}, false, nil
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
@@ -1425,105 +1430,38 @@ func (c *Checker) matchContainerBorrowCondition(
 	if !exists || container.moved {
 		return containerBorrowCondition{}, false, nil
 	}
-	base, arg, ok := splitGenericType(container.typeName)
-	if !ok {
+	base, _, ok := splitGenericType(container.typeName)
+	if !ok || containerAccessTables[base].methods[field.Name] != accessCapture {
 		return containerBorrowCondition{}, false, nil
 	}
-	var elem string
-	var err error
-	switch base {
-	case "std::array::Array":
-		elem, err = c.checkArrayBorrowConditionArgs(field, call, container, arg, env)
-	case "std::map::Map":
-		elem, err = c.checkMapBorrowConditionArgs(field, call, container, arg, env)
-	case "std::arena::Arena":
-		if field.Name != "at_mut" {
-			return containerBorrowCondition{}, false, nil
-		}
-		elem, err = c.checkArenaBorrowConditionArgs(call, container, arg, env)
-	default:
-		return containerBorrowCondition{}, false, nil
-	}
+	saved := c.captureCondition
+	c.captureCondition = true
+	typ, err := c.checkLocalReceiverMethod(field, call.Args, env)
+	c.captureCondition = saved
 	if err != nil {
 		return containerBorrowCondition{}, false, err
 	}
+	elem, mutable, ok := borrowOptionalElem(typ)
+	if !ok {
+		return containerBorrowCondition{}, false, errorf(
+			"move error: capture accessor `%s` returned %s, not a borrow optional",
+			field.Name, typ)
+	}
 	return containerBorrowCondition{
-		containerName: ident.Name, elem: elem, mutable: field.Name == "at_mut",
+		containerName: ident.Name, elem: elem, mutable: mutable,
 	}, true, nil
 }
 
-// checkArrayBorrowConditionArgs validates a recognized Array at/at_mut capture
-// condition: a mutable binding for at_mut and one i64 index.
-func (c *Checker) checkArrayBorrowConditionArgs(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	array *binding,
-	elem string,
-	env *scope,
-) (string, error) {
-	if field.Name == "at_mut" && !array.mutable {
-		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
+// borrowOptionalElem splits a borrow optional into its payload type and
+// mutability. ok is false for every other type.
+func borrowOptionalElem(typ string) (string, bool, bool) {
+	if elem, found := strings.CutPrefix(typ, "?&var "); found {
+		return elem, true, true
 	}
-	if len(call.Args) != 1 {
-		return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
-			field.Name, len(call.Args))
+	if elem, found := strings.CutPrefix(typ, "?&"); found {
+		return elem, false, true
 	}
-	got, err := c.readExpr(call.Args[0], env)
-	if err != nil {
-		return "", err
-	}
-	if got != "i64" {
-		return "", errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
-	}
-	return elem, nil
-}
-
-// checkMapBorrowConditionArgs validates a recognized Map at/at_mut capture
-// condition: a mutable binding for at_mut and one []u8 key.
-func (c *Checker) checkMapBorrowConditionArgs(
-	field *ast.FieldExpr,
-	call *ast.CallExpr,
-	mapValue *binding,
-	arg string,
-	env *scope,
-) (string, error) {
-	mapArgs, err := c.checkedMapArgs(arg)
-	if err != nil {
-		return "", err
-	}
-	if field.Name == "at_mut" && !mapValue.mutable {
-		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
-	}
-	if err := c.checkMapKeyArg(field.Name, call.Args, env); err != nil {
-		return "", err
-	}
-	return mapArgs[1], nil
-}
-
-// checkArenaBorrowConditionArgs validates a recognized Arena at_mut capture
-// condition: a mutable binding and one handle whose provenance matches the
-// arena. Provenance is the guarantee here — a handle that passes it can only
-// go absent if the checker itself is wrong, so the capture's else branch is a
-// residue, not a normal path.
-func (c *Checker) checkArenaBorrowConditionArgs(
-	call *ast.CallExpr,
-	arena *binding,
-	elem string,
-	env *scope,
-) (string, error) {
-	if !arena.mutable {
-		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
-	}
-	if len(call.Args) != 1 {
-		return "", errorf("arena error: `Arena.at_mut` expects 1 arg, got %d", len(call.Args))
-	}
-	if err := c.checkHandleProvenance(arena, call.Args[0], env); err != nil {
-		return "", err
-	}
-	if _, err := c.readExpr(call.Args[0], env); err != nil {
-		return "", err
-	}
-	return elem, nil
+	return "", false, false
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
@@ -4631,13 +4569,45 @@ func (c *Checker) checkArenaMethod(
 	case "get":
 		return c.checkArenaGet(arena, args, env)
 	case "at_mut":
-		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
-			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+		return c.checkArenaAtCondition(arena, args, env)
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
 		return "", errorf("arena error: Arena has no method `%s`", name)
 	}
+}
+
+// checkArenaAtCondition checks at_mut inside a capture condition — a mutable
+// binding and one handle whose provenance matches the arena — and refuses it
+// everywhere else. Provenance is the guarantee here: a handle that passes it
+// can only go absent if the checker itself is wrong, so the capture's else
+// branch is a residue, not a normal path.
+func (c *Checker) checkArenaAtCondition(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
+			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
+	}
+	if !arena.mutable {
+		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
+	}
+	_, elem, ok := splitGenericType(arena.typeName)
+	if !ok {
+		return "", errorf("arena error: `%s` is not an arena", arena.name)
+	}
+	if len(args) != 1 {
+		return "", errorf("arena error: `Arena.at_mut` expects 1 arg, got %d", len(args))
+	}
+	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
+		return "", err
+	}
+	if _, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	}
+	return "?&var " + elem, nil
 }
 
 // checkNonArenaMethod validates methods on non-arena owned values.
@@ -5146,9 +5116,7 @@ func (c *Checker) checkArrayMethod(
 	case "get", "get_or_panic":
 		return c.checkArrayGet(elem, name, args, env)
 	case "at", "at_mut":
-		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
-			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
-			name, name, name)
+		return c.checkArrayAtCondition(array, elem, name, args, env)
 	case "set":
 		return c.checkArraySet(elem, args, env)
 	case "deinit", "deinit_all":
@@ -5243,6 +5211,40 @@ func (c *Checker) checkArrayPop(
 	return "?" + elem, nil
 }
 
+// checkArrayAtCondition checks at/at_mut inside a capture condition — a
+// mutable binding for at_mut and one i64 index — and refuses them everywhere
+// else: the borrow optional they produce exists only there.
+func (c *Checker) checkArrayAtCondition(
+	array *binding,
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
+			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+			name, name, name)
+	}
+	if name == "at_mut" && !array.mutable {
+		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
+	}
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+	}
+	if name == "at_mut" {
+		return "?&var " + elem, nil
+	}
+	return "?&" + elem, nil
+}
+
 // checkArrayReadNoArgs validates len/capacity reads.
 func (c *Checker) checkArrayReadNoArgs(
 	name string,
@@ -5329,9 +5331,7 @@ func (c *Checker) checkMapMethod(
 		}
 		return "?" + valueType, nil
 	case "at", "at_mut":
-		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
-			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
-			name, name, name)
+		return c.checkMapAtCondition(mapValue, valueType, name, args, env)
 	case "key_at":
 		if len(args) != 1 {
 			return "", errorf("map error: `Map.key_at` expects 1 arg, got %d", len(args))
@@ -5354,6 +5354,33 @@ func (c *Checker) checkMapMethod(
 	default:
 		return "", errorf("map error: Map has no method `%s`", name)
 	}
+}
+
+// checkMapAtCondition checks at/at_mut inside a capture condition — a
+// mutable binding for at_mut and one []u8 key — and refuses them everywhere
+// else: the borrow optional they produce exists only there.
+func (c *Checker) checkMapAtCondition(
+	mapValue *binding,
+	valueType string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.captureCondition {
+		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
+			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+			name, name, name)
+	}
+	if name == "at_mut" && !mapValue.mutable {
+		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
+	}
+	if err := c.checkMapKeyArg(name, args, env); err != nil {
+		return "", err
+	}
+	if name == "at_mut" {
+		return "?&var " + valueType, nil
+	}
+	return "?&" + valueType, nil
 }
 
 // checkMapInsert validates read-only key and copy value insertion.
