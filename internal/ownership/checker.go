@@ -2,7 +2,6 @@ package ownership
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -794,12 +793,11 @@ func (c *Checker) returnedTypeName(expr ast.Expression, env *scope) (string, boo
 	}
 }
 
-// borrowedReturnAllowed permits returning a declared borrowed source parameter.
+// borrowedReturnAllowed permits returning a borrowed source parameter. Every
+// borrow parameter is a presumed provenance source (ADR-0098), so what remains
+// to check is that the parameter's shape matches the declared borrow return.
 func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if c.currentFunction == nil {
-		return false
-	}
-	if !slices.Contains(c.currentFunction.sig.ReturnBorrows, name) {
 		return false
 	}
 	_, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
@@ -884,7 +882,10 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	return nil
 }
 
-// returnedBorrowInitializer recognizes calls returning a declared borrowed view.
+// returnedBorrowInitializer recognizes calls returning a borrowed view. The
+// sources are derived structurally (ADR-0098): every borrow parameter that can
+// back the return — all of them for a shared return, the `&var` ones for a
+// mutable return — is kept borrowed while the result lives.
 func (c *Checker) returnedBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
@@ -901,16 +902,13 @@ func (c *Checker) returnedBorrowInitializer(
 	if !ok {
 		return nil, "", false, false, nil
 	}
-	if len(fn.sig.ReturnBorrows) == 0 {
-		return nil, "", false, true,
-			errorf("borrow error: `%s` borrowed return has no source parameter", name)
-	}
-	sources := make([]borrowSource, 0, len(fn.sig.ReturnBorrows))
-	for _, sourceName := range fn.sig.ReturnBorrows {
-		idx := borrowReturnParamIndex(fn, sourceName, mutable)
-		if idx < 0 || idx >= len(call.Args) {
-			return nil, "", false, true,
-				errorf("borrow error: `%s` borrowed return has no source parameter", name)
+	sources := []borrowSource{}
+	for idx := range fn.params {
+		if !fn.params[idx].borrow || (mutable && !fn.params[idx].mutBorrow) {
+			continue
+		}
+		if idx >= len(call.Args) {
+			continue
 		}
 		target, field, err := c.callBorrowTarget(call.Args[idx], env)
 		if err != nil {
@@ -918,13 +916,17 @@ func (c *Checker) returnedBorrowInitializer(
 		}
 		if target == nil {
 			// callBorrowTarget tolerates non-place args for temporary call
-			// borrows, but a declared borrow source must be a place the caller
-			// can keep alive while the returned view is used.
+			// borrows, but a provenance source must be a place the caller can
+			// keep alive while the returned view is used.
 			return nil, "", false, true, errorf(
 				"borrow error: `%s` borrow source `%s` must be a local binding or direct field",
-				name, sourceName)
+				name, fn.sig.Params[idx].Name)
 		}
 		sources = append(sources, borrowSource{target: target, field: field})
+	}
+	if len(sources) == 0 {
+		return nil, "", false, true,
+			errorf("borrow error: `%s` borrowed return has no source parameter", name)
 	}
 	if _, err := c.checkUserCall(name, call.Args, env); err != nil {
 		return nil, "", false, true, err
@@ -946,20 +948,6 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 	default:
 		return "", nil
 	}
-}
-
-// borrowReturnParamIndex finds the parameter a return-borrow source names.
-func borrowReturnParamIndex(fn *functionInfo, source string, mutable bool) int {
-	for idx, param := range fn.sig.Params {
-		if param.Name != source || !fn.params[idx].borrow {
-			continue
-		}
-		if mutable && !fn.params[idx].mutBorrow {
-			continue
-		}
-		return idx
-	}
-	return -1
 }
 
 // checkStringViewLetStmt binds a local byte view and activates the String
@@ -1519,7 +1507,9 @@ func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
 		return false
 	}
 	if _, fn := c.calledFunction(call.Callee); fn != nil {
-		return len(fn.sig.ReturnBorrows) == 0
+		// A borrow-typed return is a view of caller state, not a fresh
+		// temporary (ADR-0098: provenance is structural).
+		return !strings.HasPrefix(returnTypeName(fn), "&")
 	}
 	// An unresolved namespace call is a variant constructor: a fresh temporary.
 	return true

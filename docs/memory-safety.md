@@ -73,7 +73,8 @@ policy.
 - A borrowed parameter cannot be stored in a local owned binding.
 - A borrowed parameter cannot be passed to an owning parameter.
 - A borrow cannot be stored in a struct or union field.
-- A borrowed return must declare its source with `borrows <source>`.
+- A borrowed return's sources are derived from the signature: every view or
+  borrow argument backs it conservatively (ADR-0098).
 - A non-copy value cannot be moved out through `value.*`.
 - Copy values may be copied through `value.*`.
 - `&T` cannot be used for mutation.

@@ -99,10 +99,10 @@ fn main() {
 
 // TestCheckAllowsBorrowProvenanceReturns keeps returned borrows tied to local owners.
 func TestCheckAllowsBorrowProvenanceReturns(t *testing.T) {
-	source := `fn shared(value: &i64) -> &i64 borrows value {
+	source := `fn shared(value: &i64) -> &i64 {
     return value;
 }
-fn mutable(value: &var i64) -> &var i64 borrows value {
+fn mutable(value: &var i64) -> &var i64 {
     return value;
 }
 fn main() {
@@ -127,7 +127,7 @@ func TestCheckRejectsBorrowProvenanceReturnConflicts(t *testing.T) {
 	}{
 		{
 			name: "assign while shared return live",
-			source: `fn shared(value: &i64) -> &i64 borrows value {
+			source: `fn shared(value: &i64) -> &i64 {
     return value;
 }
 fn main() {
@@ -140,7 +140,7 @@ fn main() {
 		},
 		{
 			name: "read while mutable return live",
-			source: `fn mutable(value: &var i64) -> &var i64 borrows value {
+			source: `fn mutable(value: &var i64) -> &var i64 {
     return value;
 }
 fn main() {

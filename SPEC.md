@@ -88,7 +88,7 @@ Kizu は次を目指します。
 - GCなしのメモリ安全性
 - 単純な所有権
 - move semantics
-- borrowed view の戻り値は `borrows <source>` で由来を明示する
+- borrowed view の戻り値の由来は署名から構造的に導出する(ADR-0098)
 - borrow はローカル限定
 - 書き方の自由度を増やしすぎない
 - 標準ライブラリを厚めにする
@@ -182,12 +182,12 @@ Kizu の値は、基本的に1つの所有者を持ちます。
 move された値を再利用するとコンパイルエラーになります。
 
 Kizu には borrow があります。ローカル borrow は `&T` / `&var T` で表します。
-関数境界を越えて borrowed view を返す場合は `borrows <source>` で由来を明示します。
+関数境界を越えて borrowed view を返す場合、由来は署名から構造的に
+導出されます: 戻り値は view / borrow を運べる全引数に tied です(ADR-0098)。
 
 borrow は次のことができません。
 
 * struct / union の field に保存できない
-* `borrows <source>` なしに関数から返せない
 * lexical block の外へ escape できない
 
 長生きする関係は、参照ではなく次の型で表します。
@@ -1143,7 +1143,6 @@ borrow のルール:
 * local borrow binding は straight-line code では最後に使った場所で終了する
 * borrow argument は呼び出し statement の終了で終了する
 * borrow field は struct / union に保存できない
-* borrow return は `borrows <source>` を必須にする
 * borrow 中の値は move できない
 * `&T` と `&var T` は重複できない
 * `&var T` 同士は同じ値に対して重複できない
@@ -1156,22 +1155,27 @@ borrow のルール:
 * indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
 
-境界に現れる borrowed-return provenance syntax:
+境界を越える borrowed view の由来は、注釈でなく署名から構造的に
+導出されます(ADR-0098):
 
 ```kizu
-fn first(bytes: []u8) -> []u8 borrows bytes
-fn show(value: &i64) -> &i64 borrows value
-fn pick(a: []u8, b: []u8, take_first: bool) -> []u8 borrows a, b
+fn first(bytes: []u8) -> []u8            // 戻り値は bytes に tied
+fn show(value: &i64) -> &i64             // 戻り値は value に tied
+fn pick(a: []u8, b: []u8, f: bool) -> []u8   // 戻り値は a と b の両方に tied
 ```
 
-`borrows` は戻り値の由来になり得る引数(または `self` receiver)を comma 区切りで
-列挙します。戻り値は列挙したどの source よりも長生きできません。
-callee 側では、すべての return 値が列挙した source のどれかに由来している
-必要があり、列挙にない source へ tie され得る値を返すと error です。
-caller 側は、checker がどの source を選んだかを追跡しないため、戻り値が
-生きている間は列挙された全 source を borrow 中として扱います。同じ source の
-重複列挙は error です。mutable な戻り値では、列挙された全 source が
-exclusive borrow になるため、同じ値を 2 つの source に渡せません。
+規則は 1 つです: **戻り値は、その型が構造的に運べる範囲で、view / borrow を
+運べる全引数(と `self` receiver)に tied**。
+
+* scalar / bool / enum の戻り値は tie を運べず、常に自由です
+* view / borrow の戻り値は、view / borrow 引数の保守的統合に tied です。
+  checker はどの引数が選ばれたかを追跡せず、戻り値が生きている間は
+  全 source を borrow 中として扱います
+* `&var T` の戻り値の source は `&var` 引数に限ります(`&T` からは作れない)
+* mutable な戻り値では全 source が exclusive borrow になるため、
+  同じ値を 2 つの source 位置に渡せません
+
+契約は署名だけから導出され、body は参照されません。
 名前付き lifetime parameter、lifetime bounds、anonymous lifetime は
 採用しません。borrow field と view struct は、後続の bounded issue で
 必要性を確認します。
@@ -1989,15 +1993,15 @@ std::set::Set<T>      後続 phase
 std::mem::page_allocator() -> Allocator
 std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
 std::mem::leak<T>(value: T) -> void
-box.borrow() -> &T borrows self
-box.borrow_mut() -> &var T borrows self
+box.borrow() -> &T
+box.borrow_mut() -> &var T
 box.deinit() -> void
 std::mem::len(bytes: []u8) -> i64
 std::mem::byte_at(bytes: []u8, index: i64) -> !u8
 std::mem::equal_bytes(left: []u8, right: []u8) -> bool
 std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
-std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8 borrows bytes
-std::mem::trim_ascii(bytes: []u8) -> []u8 borrows bytes
+std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8
+std::mem::trim_ascii(bytes: []u8) -> []u8
 ```
 
 `std::mem::page_allocator()` は安定 allocator capability factory です。
@@ -2016,8 +2020,8 @@ leak-on-exit(短命 process が解放を OS に任せる)を source 上に明示
 non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
 `Box<T>` を含む struct / union は non-copy です。
 `borrow` / `borrow_mut` は local borrow source であり、戻り値は local binding に束縛する
-必要があります。borrow return は `borrows self` のように source が結び付く場合だけ
-許可します。borrow field は許可しません。borrow が生きている間は対象
+必要があります。戻り値の由来は署名から構造的に self に tied と導出されます
+(ADR-0098)。borrow field は許可しません。borrow が生きている間は対象
 `Box<T>` の move / deinit を禁止します。
 `deinit` は owned local `Box<T>` receiver 限定です。
 safe API は raw pointer を公開しません。
@@ -2043,8 +2047,8 @@ array.pop() -> !T
 array.pop_or_panic() -> T
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
-array.at(index: i64) -> !&T borrows self
-array.at_mut(index: i64) -> !&var T borrows self
+array.at(index: i64) -> !&T
+array.at_mut(index: i64) -> !&var T
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```
@@ -2224,9 +2228,9 @@ runtime selection の方針は ADR-0039 に従います。
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す
 * `std::path::clean(allocator, path)` は `!std::string::String` を返す
-* `std::path::basename(path: []u8) -> []u8 borrows path`
-* `std::path::dirname(path: []u8) -> []u8 borrows path`
-* `std::path::extension(path: []u8) -> []u8 borrows path`
+* `std::path::basename(path: []u8) -> []u8`
+* `std::path::dirname(path: []u8) -> []u8`
+* `std::path::extension(path: []u8) -> []u8`
 * path helper は pure helper であり、filesystem を読まない
 * `join` と `clean` は owned buffer を構築するため、allocator を明示し、allocation
   failure を `!T` error として返す

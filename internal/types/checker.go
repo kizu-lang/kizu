@@ -2,7 +2,6 @@ package types
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1155,9 +1154,6 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if containsDynType(ret) {
 		return nil, errorf("type error: function `%s` cannot return dyn", fn.Name)
 	}
-	if err := checkReturnBorrowPolicy(fn); err != nil {
-		return nil, err
-	}
 	return &functionType{
 		name: fn.Name, sig: fn, params: paramInfo.params,
 		borrowParams:    paramInfo.borrowParams,
@@ -1245,55 +1241,6 @@ func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 		"type error: Function parameter `%s` belongs in `<...>`, not `(...)`", param.Name)
 }
 
-// checkReturnBorrowPolicy validates source provenance for borrowed returns.
-func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
-	if fn.ReturnType == nil {
-		if len(fn.ReturnBorrows) != 0 {
-			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
-		}
-		return nil
-	}
-	if len(fn.ReturnBorrows) == 0 {
-		if isBorrowReturnType(Type(typ.Text(fn.ReturnType))) {
-			return errorf(
-				"type error: function `%s` borrow return requires `borrows <source>`",
-				fn.Name)
-		}
-		return nil
-	}
-	if !isBorrowedViewReturnType(Type(typ.Text(fn.ReturnType))) {
-		return errorf("type error: function `%s` `borrows` requires borrowed view return",
-			fn.Name)
-	}
-	seen := map[string]bool{}
-	for _, source := range fn.ReturnBorrows {
-		if seen[source] {
-			return errorf("type error: function `%s` borrows source `%s` twice",
-				fn.Name, source)
-		}
-		seen[source] = true
-		if !returnBorrowSourceDeclared(fn, source) {
-			return errorf("type error: function `%s` borrows unknown source `%s`",
-				fn.Name, source)
-		}
-	}
-	return nil
-}
-
-// returnBorrowSourceDeclared reports whether a borrow source names a parameter.
-func returnBorrowSourceDeclared(fn ast.FunctionSignature, source string) bool {
-	if borrowReturnParamIndex(fn, source) >= 0 {
-		return true
-	}
-	// A contract writes no receiver but every method has one, so `self` names it
-	// there. A method declared with a receiver slot has it among its parameters
-	// already, which is why this only speaks for the ones that do not.
-	return source == receiverName && !fn.Receiver
-}
-
-// receiverName is what a method calls the value it is called on.
-const receiverName = "self"
-
 // checkStructFieldBorrowPolicy rejects borrow fields until a non-lifetime model exists.
 func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 	if !field.Borrow {
@@ -1341,12 +1288,6 @@ func containsBufferType(t Type) bool {
 		}
 	}
 	return false
-}
-
-// isBorrowReturnType reports whether typ is an explicit local borrow return.
-func isBorrowReturnType(typ Type) bool {
-	success := unwrapReturnSuccessType(typ)
-	return strings.HasPrefix(string(success), "&")
 }
 
 // isBorrowedViewReturnType reports whether typ returns a non-owned view.
@@ -2272,7 +2213,7 @@ func (c *Checker) checkReturnStmt(
 	if err != nil {
 		return false, err
 	}
-	return c.checkReturnValue(stmt.Value, env, want, got, unsafe)
+	return c.checkReturnValue(stmt.Value, env, want, got)
 }
 
 // checkReturnValue validates a non-void return expression against the result type.
@@ -2281,15 +2222,11 @@ func (c *Checker) checkReturnValue(
 	env *scope,
 	want Type,
 	got Type,
-	unsafe unsafeMark,
 ) (bool, error) {
-	if ok, err := c.checkErrorUnionReturn(expr, env, want, got, unsafe); ok || err != nil {
+	if ok, err := c.checkErrorUnionReturn(expr, want, got); ok || err != nil {
 		return ok, err
 	}
 	if c.returnValueMatchesBorrowParam(expr, env, want, got) {
-		if err := c.checkReturnBorrowSources(expr, env, want, unsafe); err != nil {
-			return false, err
-		}
 		return true, nil
 	}
 	coerced, err := c.coerceContextualIntegerLiteral(expr, want, got)
@@ -2299,9 +2236,6 @@ func (c *Checker) checkReturnValue(
 	got = coerced
 	if !sameType(got, want) {
 		return false, errorf("type error: return expects %s, got %s", want, got)
-	}
-	if err := c.checkReturnBorrowSources(expr, env, want, unsafe); err != nil {
-		return false, err
 	}
 	return true, nil
 }
@@ -2316,10 +2250,8 @@ func absorbsErrorUnion(want Type, got Type) bool {
 // checkErrorUnionReturn accepts success or error payloads for !T returns.
 func (c *Checker) checkErrorUnionReturn(
 	expr ast.Expression,
-	env *scope,
 	want Type,
 	got Type,
-	unsafe unsafeMark,
 ) (bool, error) {
 	if elem, ok := errorUnionElement(want); ok {
 		success := Type(elem)
@@ -2328,9 +2260,6 @@ func (c *Checker) checkErrorUnionReturn(
 			return false, err
 		}
 		if sameType(coerced, success) {
-			if err := c.checkReturnBorrowSources(expr, env, success, unsafe); err != nil {
-				return false, err
-			}
 			return true, nil
 		}
 	}
@@ -2349,11 +2278,6 @@ func (c *Checker) checkErrorUnionReturn(
 			return false, err
 		}
 		if sameType(coerced, success) || sameType(got, Type(errorType)) {
-			if sameType(coerced, success) {
-				if err := c.checkReturnBorrowSources(expr, env, success, unsafe); err != nil {
-					return false, err
-				}
-			}
 			return true, nil
 		}
 	}
@@ -2395,55 +2319,9 @@ func (c *Checker) returnValueMatchesBorrowParam(
 	if !sameType(got, inner) {
 		return false
 	}
-	return c.currentFunction != nil &&
-		slices.Contains(c.currentFunction.sig.ReturnBorrows, ident.Name)
-}
-
-// checkReturnBorrowSources rejects returned views not tied to a declared source.
-// Every provenance candidate of the returned value must be declared, and at
-// least one must tie the value to the declaration: the caller keeps exactly the
-// declared sources alive, so an undeclared candidate would dangle.
-func (c *Checker) checkReturnBorrowSources(
-	expr ast.Expression,
-	env *scope,
-	_ Type,
-	unsafe unsafeMark,
-) error {
-	if c.currentFunction == nil || len(c.currentFunction.sig.ReturnBorrows) == 0 {
-		return nil
-	}
-	if c.trustedStdBorrowReturn(expr) {
-		return nil
-	}
-	sources, err := c.exprBorrowSources(expr, env, unsafe)
-	if err != nil {
-		return err
-	}
-	if sources["$static"] {
-		return nil
-	}
-	declared := c.currentFunction.sig.ReturnBorrows
-	if len(sources) == 0 {
-		return errorf("type error: return borrows `%s` but returned value is not tied to that source",
-			strings.Join(declared, ", "))
-	}
-	// The reported candidate is the lexicographically first undeclared one, so
-	// the diagnostic is deterministic without sorting on the success path.
-	undeclared := ""
-	for candidate := range sources {
-		if slices.Contains(declared, candidate) {
-			continue
-		}
-		if undeclared == "" || candidate < undeclared {
-			undeclared = candidate
-		}
-	}
-	if undeclared != "" {
-		return errorf(
-			"type error: returned value may be tied to `%s`, which `borrows %s` does not declare",
-			undeclared, strings.Join(declared, ", "))
-	}
-	return nil
+	// Every borrow parameter is a presumed provenance source (ADR-0098), so
+	// returning it as the declared borrow type is always in contract.
+	return c.currentFunction != nil
 }
 
 // exprBorrowSources reports parameter names that can back a returned view.
@@ -2521,7 +2399,7 @@ func (c *Checker) callBorrowSources(
 	if fn == nil {
 		return map[string]bool{}, nil
 	}
-	return c.returnBorrowSourceUnion(fn.name, fn.sig, env, unsafe,
+	return c.structuralReturnSources(fn, env, unsafe,
 		func(idx int) ast.Expression {
 			if idx >= len(expr.Args) {
 				return nil
@@ -2530,26 +2408,28 @@ func (c *Checker) callBorrowSources(
 		})
 }
 
-// returnBorrowSourceUnion unions the provenance of every declared borrow
-// source's argument — the conservative rule of ADR-0095. argAt maps a
-// parameter index to its call expression and returns nil when the call has no
-// expression in that slot.
-func (c *Checker) returnBorrowSourceUnion(
-	name string,
-	sig ast.FunctionSignature,
+// structuralReturnSources unions the provenance of every tie-capable argument
+// of a call whose return type can carry a view. The contract is derived from
+// the signature alone (ADR-0098): a view-capable return is conservatively tied
+// to every view or borrow argument. argAt maps a parameter index to its call
+// expression; nil slots are skipped.
+func (c *Checker) structuralReturnSources(
+	fn *functionType,
 	env *scope,
 	unsafe unsafeMark,
 	argAt func(idx int) ast.Expression,
 ) (map[string]bool, error) {
+	if !isBorrowedViewReturnType(fn.returnType) {
+		return map[string]bool{}, nil
+	}
 	union := map[string]bool{}
-	for _, source := range sig.ReturnBorrows {
-		var arg ast.Expression
-		if idx := borrowReturnParamIndex(sig, source); idx >= 0 {
-			arg = argAt(idx)
+	for idx := range fn.params {
+		if !tieCapableParam(fn.params[idx], fn.borrowParams[idx]) {
+			continue
 		}
+		arg := argAt(idx)
 		if arg == nil {
-			return map[string]bool{}, errorf("type error: `%s` borrows unknown source `%s`",
-				name, source)
+			continue
 		}
 		part, err := c.exprBorrowSources(arg, env, unsafe)
 		if err != nil {
@@ -2562,14 +2442,10 @@ func (c *Checker) returnBorrowSourceUnion(
 	return union, nil
 }
 
-// borrowReturnParamIndex finds the parameter a return-borrow source names.
-func borrowReturnParamIndex(sig ast.FunctionSignature, source string) int {
-	for idx, param := range sig.Params {
-		if param.Name == source {
-			return idx
-		}
-	}
-	return -1
+// tieCapableParam reports whether an argument in this slot can back a
+// returned view: an explicit borrow, or a view-typed parameter.
+func tieCapableParam(param Type, borrowed bool) bool {
+	return borrowed || isBorrowedViewReturnType(param)
 }
 
 // methodBorrowSources handles built-in method-style view returns.
@@ -2587,12 +2463,9 @@ func (c *Checker) methodBorrowSources(
 		return nil, true, err
 	}
 	if method := c.implMethod(string(receiver), field.Name); method != nil {
-		if len(method.sig.ReturnBorrows) == 0 {
-			return map[string]bool{}, true, nil
-		}
 		// A method's params start with self, so index 0 is the receiver
 		// expression and the rest offset into the call arguments.
-		union, err := c.returnBorrowSourceUnion(method.name, method.sig, env, unsafe,
+		union, err := c.structuralReturnSources(method, env, unsafe,
 			func(idx int) ast.Expression {
 				if idx == 0 {
 					return field.Receiver
@@ -2691,43 +2564,6 @@ func (c *Checker) calledFunction(callee ast.Expression) *functionType {
 		return c.functions[name]
 	default:
 		return nil
-	}
-}
-
-// trustedStdBorrowReturn accepts std wrappers around provenance-aware primitives.
-func (c *Checker) trustedStdBorrowReturn(expr ast.Expression) bool {
-	if !c.currentStd {
-		return false
-	}
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	name, ok := callCalleeName(call.Callee)
-	if !ok {
-		return false
-	}
-	switch name {
-	case "std::internal::builtin::box_borrow", "std::internal::builtin::box_borrow_mut",
-		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut":
-		return true
-	default:
-		return false
-	}
-}
-
-// callCalleeName resolves direct, qualified, and type-applied call names.
-func callCalleeName(callee ast.Expression) (string, bool) {
-	if typeApply, ok := callee.(*ast.TypeApplyExpr); ok {
-		return callCalleeName(typeApply.Callee)
-	}
-	switch e := callee.(type) {
-	case *ast.IdentExpr:
-		return e.Name, true
-	case *ast.FieldExpr:
-		return qualifiedName(e)
-	default:
-		return "", false
 	}
 }
 

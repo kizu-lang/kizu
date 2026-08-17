@@ -123,7 +123,6 @@ single source file. Run them with `kizu check <package-root>`.
 | rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields cannot be stored | `negative/borrow_field.kizu` | `cannot store borrow` |
-| borrow returns need provenance | `negative/borrow_return_missing_source.kizu` | `borrows <source>` |
 | borrowed parameters cannot be stored in owned locals | `negative/borrow_local_alias.kizu` | `borrowed value` |
 | borrowed parameters cannot be passed as owned values | `negative/borrow_to_owner.kizu` | `borrowed value` |
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
@@ -241,7 +240,6 @@ single source file. Run them with `kizu check <package-root>`.
 | string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
 | string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |
-| borrowed return must match its source | `negative/borrow_return_source_mismatch.kizu` | `not tied to that source` |
 | borrowed return cannot use local string view | `negative/borrow_return_dangling_string_view.kizu` | `borrowed value` |
 | mutable borrowed return blocks parent read | `negative/borrow_return_mut_alias.kizu` | `cannot be read while mutably borrowed` |
 | shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
