@@ -5763,8 +5763,8 @@ func (c *Checker) checkArenaOrImplMethod(
 	switch field.Name {
 	case "add":
 		return c.checkArenaAdd(arg, args, env, unsafe)
-	case "get":
-		return c.checkArenaGet(arg, args, env, unsafe)
+	case "at":
+		return c.checkArenaAt(arg, args, env, unsafe)
 	case "at_mut":
 		return c.checkArenaAtMut(field, arg, args, env, unsafe)
 	case "deinit":
@@ -6619,14 +6619,14 @@ func (c *Checker) checkArenaAdd(
 	return Type(fmt.Sprintf("std::arena::Handle<%s>", arg)), nil
 }
 
-// checkArenaGet validates std::arena::Arena<T>.get(std::arena::Handle<T>).
-func (c *Checker) checkArenaGet(
+// checkArenaAt validates std::arena::Arena<T>.at(std::arena::Handle<T>).
+func (c *Checker) checkArenaAt(
 	arg string,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "arena.get"); err != nil {
+	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "arena.at"); err != nil {
 		return "", err
 	}
 	return Type(arg), nil

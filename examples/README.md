@@ -136,15 +136,15 @@ single source file. Run them with `kizu check <package-root>`.
 | `&var` requires mutable binding | `negative/mut_borrow_immutable.kizu` | `must be mutable` |
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
-| `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
+| `arena.at` returns a local borrow | `negative/arena_at_move.kizu` | `cannot be moved` |
 | `arena.at_mut` must be consumed by a capture | `negative/arena_at_mut_requires_capture.kizu` | `must be consumed by a capture` |
 | `arena.at_mut` requires a mutable binding | `negative/arena_at_mut_immutable.kizu` | `requires mutable arena binding` |
 | `arena.add` waits for element borrows | `negative/arena_add_while_borrowed.kizu` | `cannot run while arena is borrowed` |
-| `arena.get` waits for mutable borrows | `negative/arena_get_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
+| `arena.at` waits for mutable borrows | `negative/arena_at_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
 | arena construction requires an allocator | `negative/arena_missing_allocator.kizu` | `allocator argument` |
 | arena construction accepts one allocator | `negative/arena_extra_allocator_arg.kizu` | `allocator argument` |
 | arena allocator argument must be `Allocator` | `negative/arena_non_allocator_arg.kizu` | `expects Allocator` |
-| arena cannot be used after deinit | `negative/arena_double_deinit.kizu`, `negative/arena_add_after_deinit.kizu`, `negative/arena_get_after_deinit.kizu` | `deinitialized` |
+| arena cannot be used after deinit | `negative/arena_double_deinit.kizu`, `negative/arena_add_after_deinit.kizu`, `negative/arena_at_after_deinit.kizu` | `deinitialized` |
 | borrowed arenas cannot be deinitialized | `negative/arena_deinit_while_borrowed.kizu` | `cannot run while arena is borrowed` |
 | arena deinit needs an owned local receiver | `negative/arena_deinit_wrong_receiver.kizu`, `negative/arena_deinit_borrowed_receiver.kizu`, `negative/arena_deinit_temporary_receiver.kizu`, `negative/arena_deinit_moved_receiver.kizu` | `receiver` |
 | defer only registers cleanup expression statements | `negative/defer_invalid_statement.kizu`, `negative/defer_non_cleanup_expr.kizu` | `defer expects` |

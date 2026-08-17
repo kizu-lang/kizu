@@ -1255,7 +1255,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { name: "alice" });
-    print(users.get(alice).name);
+    print(users.at(alice).name);
     users.deinit();
 }`
 	if err := checkSource(source); err != nil {
@@ -1273,7 +1273,7 @@ fn main() {
     let users = std::arena::new<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
-    print(users.get(alice).name);
+    print(users.at(alice).name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)

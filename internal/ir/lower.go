@@ -1437,8 +1437,8 @@ func (l *lowerer) lowerArenaMethod(
 	switch name {
 	case "add":
 		return l.emit("arena.add", handleType(receiverType), allArgs, ""), nil
-	case "get":
-		return l.emit("arena.get", arenaElementType(receiverType), allArgs, ""), nil
+	case "at":
+		return l.emit("arena.at", arenaElementType(receiverType), allArgs, ""), nil
 	case "at_mut":
 		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType), allArgs, ""), nil
 	case "deinit":

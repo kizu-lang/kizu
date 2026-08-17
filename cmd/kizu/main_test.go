@@ -1708,7 +1708,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let alice = users.add(User { age: 41 });
-    print(users.get(alice).age);
+    print(users.at(alice).age);
     users.deinit();
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {
