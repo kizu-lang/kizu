@@ -1425,15 +1425,26 @@ func (l *lowerer) lowerMethodCallExpr(
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
 	}
-	switch field.Name {
+	return l.lowerArenaMethod(field.Name, receiver.Type, allArgs)
+}
+
+// lowerArenaMethod lowers the compiler-known arena methods.
+func (l *lowerer) lowerArenaMethod(
+	name string,
+	receiverType string,
+	allArgs []Value,
+) (Value, error) {
+	switch name {
 	case "add":
-		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
+		return l.emit("arena.add", handleType(receiverType), allArgs, ""), nil
 	case "get":
-		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
+		return l.emit("arena.get", arenaElementType(receiverType), allArgs, ""), nil
+	case "at_mut":
+		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType), allArgs, ""), nil
 	case "deinit":
 		return l.emit("arena.deinit", "void", allArgs, ""), nil
 	default:
-		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
+		return Value{}, fmt.Errorf("ir error: unknown method `%s`", name)
 	}
 }
 
