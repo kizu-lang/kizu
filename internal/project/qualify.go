@@ -410,9 +410,34 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyTryExpr(module, e)
 	case *ast.UnsafeExpr:
 		return c.qualifyUnsafeExpr(module, e)
+	case *ast.OrelseGuardExpr:
+		return c.qualifyOrelseGuardExpr(module, e)
 	default:
 		return c.qualifyTypeOrControlExpr(module, expr)
 	}
+}
+
+// qualifyOrelseGuardExpr rewrites the condition and any returned value of an
+// orelse guard.
+func (c *graphChecker) qualifyOrelseGuardExpr(
+	module *moduleUnit,
+	expr *ast.OrelseGuardExpr,
+) (*ast.OrelseGuardExpr, error) {
+	cp := *expr
+	var err error
+	cp.Cond, err = c.qualifyExpr(module, expr.Cond)
+	if err != nil {
+		return nil, err
+	}
+	if ret, ok := expr.Exit.(*ast.ReturnStmt); ok {
+		retCp := *ret
+		retCp.Value, err = c.qualifyExpr(module, ret.Value)
+		if err != nil {
+			return nil, err
+		}
+		cp.Exit = &retCp
+	}
+	return &cp, nil
 }
 
 // qualifyTypeOrControlExpr rewrites type-bearing and control expressions.

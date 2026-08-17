@@ -766,7 +766,6 @@ func (e *StringExpr) String() string {
 	return fmt.Sprintf("%q", e.Value)
 }
 
-// BoolExpr represents a boolean literal.
 // NullExpr is the `null` literal of an optional type.
 type NullExpr struct {
 	Span Span
@@ -778,6 +777,25 @@ func (*NullExpr) expressionNode() {}
 // String returns the null literal spelling.
 func (e *NullExpr) String() string { return "null" }
 
+// OrelseGuardExpr is `cond orelse return/break/continue`: on null the guard
+// leaves the enclosing function or loop, so the expression itself always
+// yields the payload. Exit is a *ReturnStmt, *BreakStmt, or *ContinueStmt.
+type OrelseGuardExpr struct {
+	Cond Expression
+	Exit Statement
+	Span Span
+}
+
+// expressionNode marks OrelseGuardExpr as an expression node.
+func (*OrelseGuardExpr) expressionNode() {}
+
+// String returns a compact debug representation of the guard.
+func (e *OrelseGuardExpr) String() string {
+	exit := strings.TrimSuffix(e.Exit.String(), ";")
+	return "(" + e.Cond.String() + " orelse " + exit + ")"
+}
+
+// BoolExpr represents a boolean literal.
 type BoolExpr struct {
 	Value bool
 }
