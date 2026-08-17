@@ -6081,6 +6081,18 @@ func (c *Checker) checkMapMethod(
 			return "", err
 		}
 		return Type("?" + string(valueType)), nil
+	case "key_at":
+		if len(args) != 1 {
+			return "", errorf("type error: `Map.key_at` expects 1 arg, got %d", len(args))
+		}
+		got, err := c.checkExpr(args[0], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != typeI64 {
+			return "", errorf("type error: `Map.key_at` expects i64 index, got %s", got)
+		}
+		return Type("?[]u8"), nil
 	case "contains":
 		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
 			return "", err

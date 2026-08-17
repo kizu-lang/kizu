@@ -1593,6 +1593,7 @@ var mapPrimitives = map[string]string{
 	"std::internal::builtin::map_deinit":   "deinit",
 	"std::internal::builtin::map_get":      "get",
 	"std::internal::builtin::map_insert":   "insert",
+	"std::internal::builtin::map_key_at":   "key_at",
 	"std::internal::builtin::map_len":      "len",
 }
 
@@ -1615,6 +1616,8 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 		return l.emit("map.insert", "!void", args, valueType), nil
 	case "get":
 		return l.emit("map.get", "?"+valueType, args, valueType), nil
+	case "key_at":
+		return l.emit("map.key_at", "?[]u8", args, valueType), nil
 	case "contains":
 		return l.emit("map.contains", "bool", args, valueType), nil
 	case "len":

@@ -1,0 +1,61 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::testing;
+
+// std::mem::bytes_iter is the std spelling of the iterator protocol: a
+// `next() -> ?u8` cursor drives `while` to exhaustion, no has_next needed.
+test "std bytes_iter walks a view to exhaustion" {
+    var it = mem::bytes_iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+    if it.next() |ghost| {
+        testing::expect_equal<i64>(-1, cast<i64>(ghost));
+    }
+}
+
+// Map.key_at(index) walks keys in insertion order (ADR-0088). The key is a
+// view into map storage, so the capture holds the map share-borrowed for the
+// key's scope.
+test "map key_at walks keys in insertion order" {
+    let allocator = mem::page_allocator();
+    let scores = map::new<[]u8, i64>(allocator);
+    defer scores.deinit();
+    try scores.insert("one", 1);
+    try scores.insert("two", 2);
+    try scores.insert("three", 3);
+
+    var lengths = 0;
+    var total = 0;
+    var index = 0;
+    while scores.key_at(index) |key| {
+        lengths = lengths * 10 + mem::len(key);
+        total = total + (scores.get(key) orelse 0);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(335, lengths);
+    testing::expect_equal<i64>(6, total);
+    testing::expect_equal<i64>(3, index);
+}
+
+// Array iteration needs no cursor type: `get(index) -> ?T` already drives a
+// while capture, and null past the end stops the loop.
+test "array get drives index iteration" {
+    let allocator = mem::page_allocator();
+    let values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(5);
+    try values.append(7);
+    try values.append(11);
+
+    var product = 1;
+    var index = 0;
+    while values.get(index) |value| {
+        product = product * value;
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(385, product);
+}

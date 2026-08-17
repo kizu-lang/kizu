@@ -15,6 +15,7 @@ func (e *emitter) writeMapRuntimeDecls() {
 	e.out.WriteString("declare ptr @kizu_map_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
+	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_map_len(ptr)\n")
 	e.out.WriteString("declare void @kizu_map_deinit(ptr)\n\n")
@@ -43,6 +44,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 		return e.writeMapInsert(instr)
 	case "map.get":
 		return e.writeMapGet(instr)
+	case "map.key_at":
+		return e.writeMapKeyAt(instr)
 	case "map.contains":
 		return e.writeMapContains(instr)
 	case "map.len":
@@ -93,6 +96,26 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
 	return e.writeArrayOptionalLoadResult(instr, ptrName)
+}
+
+// writeMapKeyAt lowers Map.key_at(index). The runtime fills a `?[]u8` slot
+// through an out pointer: a by-value struct return would pin this declaration
+// to the C ABI's aggregate-return rules, and the out pointer sidesteps that.
+func (e *emitter) writeMapKeyAt(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || instr.Result.Type != "?[]u8" {
+		return fmt.Errorf("llvm error: map.key_at expects Map, i64 -> ?[]u8")
+	}
+	mapValue := e.value(instr.Args[0])
+	index := e.value(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	slotName := resultName + ".slot"
+	optType := llvmOptionalTypeName(instr.Result.Type)
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, optType)
+	fmt.Fprintf(&e.out, "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)\n",
+		slotName, mapValue.operand, index.operand)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, optType, slotName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeMapContains lowers Map.contains(key).

@@ -1740,6 +1740,18 @@ void *kizu_map_get(void *handle, const unsigned char *key, int64_t key_len) {
     return map->entries[found].value;
 }
 
+void kizu_map_key_at(KizuOptSliceU8 *out, void *handle, int64_t index) {
+    KizuMap *map = (KizuMap *)handle;
+    if (!map || index < 0 || index >= map->len) {
+        *out = kizu_opt_null_slice();
+        return;
+    }
+    KizuSliceU8 key;
+    key.ptr = map->entries[index].key;
+    key.len = map->entries[index].key_len;
+    *out = kizu_opt_slice(key);
+}
+
 _Bool kizu_map_contains(void *handle, const unsigned char *key, int64_t key_len) {
     return kizu_map_find((KizuMap *)handle, key, key_len) >= 0;
 }
