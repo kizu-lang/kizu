@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -65,8 +66,7 @@ type binding struct {
 	moved            bool
 	borrowedParam    bool
 	localBorrow      bool
-	borrowTarget     *binding
-	borrowField      string
+	borrowTargets    []borrowSource
 	mutBorrow        bool
 	activeBorrows    int
 	activeMutBorrows int
@@ -80,6 +80,14 @@ type binding struct {
 	consumeExempt    bool
 	deferCleanup     bool
 	declSpan         ast.Span
+}
+
+// borrowSource is one owner a local borrow keeps active: the borrowed binding
+// and, for a field borrow, the borrowed field name. A multi-source `borrows`
+// result holds one entry per declared source.
+type borrowSource struct {
+	target *binding
+	field  string
 }
 
 type scope struct {
@@ -786,12 +794,12 @@ func (c *Checker) returnedTypeName(expr ast.Expression, env *scope) (string, boo
 	}
 }
 
-// borrowedReturnAllowed permits returning the declared borrowed source parameter.
+// borrowedReturnAllowed permits returning a declared borrowed source parameter.
 func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if c.currentFunction == nil {
 		return false
 	}
-	if c.currentFunction.sig.ReturnBorrow != name {
+	if !slices.Contains(c.currentFunction.sig.ReturnBorrows, name) {
 		return false
 	}
 	_, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
@@ -831,12 +839,12 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if target, ok := c.stringViewInitializer(stmt.Value, env); ok {
 		return c.checkStringViewLetStmt(stmt, target, env)
 	}
-	target, field, elem, mutable, ok, err = c.returnedBorrowInitializer(stmt.Value, env)
+	sources, elem, mutable, ok, err := c.returnedBorrowInitializer(stmt.Value, env)
 	if ok || err != nil {
 		if err != nil {
 			return err
 		}
-		return c.checkReturnedBorrowLetStmt(stmt, target, field, elem, mutable, env)
+		return c.checkReturnedBorrowLetStmt(stmt, sources, elem, mutable, env)
 	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
@@ -853,21 +861,24 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 // checkReturnedBorrowLetStmt binds a function-returned borrow to its source owner.
 func (c *Checker) checkReturnedBorrowLetStmt(
 	stmt *ast.LetStmt,
-	target *binding,
-	field string,
+	sources []borrowSource,
 	elem string,
 	mutable bool,
 	env *scope,
 ) error {
-	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
-		return err
+	// Checking before each activation (not all checks first) rejects the same
+	// value passed for two mutable sources: the second check sees the first
+	// activation.
+	for _, source := range sources {
+		if err := checkBorrowConflictForField(source.target, source.field, mutable); err != nil {
+			return err
+		}
+		c.activateBorrow(source.target, source.field, mutable)
 	}
-	c.activateBorrow(target, field, mutable)
 	value := c.newBinding(stmt.Name, elem)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTarget = target
-	value.borrowField = field
+	value.borrowTargets = sources
 	value.mutBorrow = mutable
 	env.define(value)
 	return nil
@@ -877,32 +888,48 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 func (c *Checker) returnedBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
-) (*binding, string, string, bool, bool, error) {
+) ([]borrowSource, string, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return nil, "", "", false, false, nil
+		return nil, "", false, false, nil
 	}
 	name, fn := c.calledFunction(call.Callee)
 	if fn == nil {
-		return nil, "", "", false, false, nil
+		return nil, "", false, false, nil
 	}
 	_, mutable, elem, ok := explicitOwnershipBorrowType(returnTypeName(fn))
 	if !ok {
-		return nil, "", "", false, false, nil
+		return nil, "", false, false, nil
 	}
-	idx := borrowReturnParamIndex(fn, mutable)
-	if idx < 0 || idx >= len(call.Args) {
-		return nil, "", "", false, true,
+	if len(fn.sig.ReturnBorrows) == 0 {
+		return nil, "", false, true,
 			errorf("borrow error: `%s` borrowed return has no source parameter", name)
 	}
-	target, field, err := c.borrowTarget(call.Args[idx], env)
-	if err != nil {
-		return nil, "", "", false, true, err
+	sources := make([]borrowSource, 0, len(fn.sig.ReturnBorrows))
+	for _, sourceName := range fn.sig.ReturnBorrows {
+		idx := borrowReturnParamIndex(fn, sourceName, mutable)
+		if idx < 0 || idx >= len(call.Args) {
+			return nil, "", false, true,
+				errorf("borrow error: `%s` borrowed return has no source parameter", name)
+		}
+		target, field, err := c.callBorrowTarget(call.Args[idx], env)
+		if err != nil {
+			return nil, "", false, true, err
+		}
+		if target == nil {
+			// callBorrowTarget tolerates non-place args for temporary call
+			// borrows, but a declared borrow source must be a place the caller
+			// can keep alive while the returned view is used.
+			return nil, "", false, true, errorf(
+				"borrow error: `%s` borrow source `%s` must be a local binding or direct field",
+				name, sourceName)
+		}
+		sources = append(sources, borrowSource{target: target, field: field})
 	}
 	if _, err := c.checkUserCall(name, call.Args, env); err != nil {
-		return nil, "", "", false, true, err
+		return nil, "", false, true, err
 	}
-	return target, field, elem, mutable, true, nil
+	return sources, elem, mutable, true, nil
 }
 
 // calledFunction resolves direct and namespace-qualified source function calls.
@@ -921,10 +948,10 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 	}
 }
 
-// borrowReturnParamIndex finds the parameter that owns a returned borrow.
-func borrowReturnParamIndex(fn *functionInfo, mutable bool) int {
+// borrowReturnParamIndex finds the parameter a return-borrow source names.
+func borrowReturnParamIndex(fn *functionInfo, source string, mutable bool) int {
 	for idx, param := range fn.sig.Params {
-		if param.Name != fn.sig.ReturnBorrow || !fn.params[idx].borrow {
+		if param.Name != source || !fn.params[idx].borrow {
 			continue
 		}
 		if mutable && !fn.params[idx].mutBorrow {
@@ -947,7 +974,7 @@ func (c *Checker) checkStringViewLetStmt(stmt *ast.LetStmt, target *binding, env
 	value := c.newBinding(stmt.Name, "[]u8")
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTarget = target
+	value.borrowTargets = []borrowSource{{target: target}}
 	env.define(value)
 	return nil
 }
@@ -1010,7 +1037,7 @@ func (c *Checker) checkArrayBorrowLetStmt(
 	value := c.newBinding(stmt.Name, elem)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTarget = target
+	value.borrowTargets = []borrowSource{{target: target}}
 	value.mutBorrow = mutable
 	env.define(value)
 	return nil
@@ -1097,8 +1124,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	value := c.newBinding(stmt.Name, elem)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTarget = target
-	value.borrowField = field
+	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
 	env.define(value)
 	return nil
@@ -1179,8 +1205,7 @@ func (c *Checker) checkBorrowLetStmt(
 	value := c.newBinding(stmt.Name, typeName)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTarget = target
-	value.borrowField = field
+	value.borrowTargets = []borrowSource{{target: target, field: field}}
 	value.mutBorrow = mutable
 	env.define(value)
 	return nil
@@ -1463,7 +1488,7 @@ func (c *Checker) matchScrutineeOwned(value ast.Expression, env *scope) bool {
 		return false
 	}
 	if _, fn := c.calledFunction(call.Callee); fn != nil {
-		return fn.sig.ReturnBorrow == ""
+		return len(fn.sig.ReturnBorrows) == 0
 	}
 	// An unresolved namespace call is a variant constructor: a fresh temporary.
 	return true
@@ -4646,13 +4671,17 @@ func releaseTemporaryBorrow(borrow temporaryBorrow) {
 	}
 }
 
-// releaseBorrow clears one local borrow from its owner.
+// releaseBorrow clears one local borrow from each of its owners.
 func releaseBorrow(value *binding) {
-	target := value.borrowTarget
-	if target == nil {
-		return
+	for _, source := range value.borrowTargets {
+		releaseBorrowSource(value, source)
 	}
-	if value.borrowField == "" {
+}
+
+// releaseBorrowSource clears one owner's share of a local borrow.
+func releaseBorrowSource(value *binding, source borrowSource) {
+	target := source.target
+	if source.field == "" {
 		if value.mutBorrow && target.activeMutBorrows > 0 {
 			target.activeMutBorrows--
 		} else if target.activeBorrows > 0 {
@@ -4660,17 +4689,17 @@ func releaseBorrow(value *binding) {
 		}
 		return
 	}
-	if value.mutBorrow && target.fieldMutBorrows[value.borrowField] > 0 {
-		target.fieldMutBorrows[value.borrowField]--
-		if target.fieldMutBorrows[value.borrowField] == 0 {
-			delete(target.fieldMutBorrows, value.borrowField)
+	if value.mutBorrow && target.fieldMutBorrows[source.field] > 0 {
+		target.fieldMutBorrows[source.field]--
+		if target.fieldMutBorrows[source.field] == 0 {
+			delete(target.fieldMutBorrows, source.field)
 		}
 		return
 	}
-	if target.fieldBorrows[value.borrowField] > 0 {
-		target.fieldBorrows[value.borrowField]--
-		if target.fieldBorrows[value.borrowField] == 0 {
-			delete(target.fieldBorrows, value.borrowField)
+	if target.fieldBorrows[source.field] > 0 {
+		target.fieldBorrows[source.field]--
+		if target.fieldBorrows[source.field] == 0 {
+			delete(target.fieldBorrows, source.field)
 		}
 	}
 }
@@ -5130,7 +5159,7 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 // releaseLastUseBorrows ends local borrows whose binding is no longer used.
 func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
 	for name, value := range s.values {
-		if !value.localBorrow || value.borrowTarget == nil {
+		if !value.localBorrow || len(value.borrowTargets) == 0 {
 			continue
 		}
 		last, ok := lastUses[name]
@@ -5138,7 +5167,7 @@ func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
 			continue
 		}
 		releaseBorrow(value)
-		value.borrowTarget = nil
+		value.borrowTargets = nil
 	}
 }
 

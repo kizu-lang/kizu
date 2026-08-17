@@ -1146,13 +1146,20 @@ borrow のルール:
 ```kizu
 fn first(bytes: []u8) -> []u8 borrows bytes
 fn show(value: &i64) -> &i64 borrows value
+fn pick(a: []u8, b: []u8, take_first: bool) -> []u8 borrows a, b
 ```
 
-`borrows source` は戻り値が `source` 引数または `self` receiver 由来の view であり、
-その source より長生きできないことを表します。名前付き lifetime parameter、
-lifetime bounds、anonymous lifetime は採用しません。
-`borrows` は単一 source だけを受け取ります。borrow field、view struct、
-複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
+`borrows` は戻り値の由来になり得る引数(または `self` receiver)を comma 区切りで
+列挙します。戻り値は列挙したどの source よりも長生きできません。
+callee 側では、すべての return 値が列挙した source のどれかに由来している
+必要があり、列挙にない source へ tie され得る値を返すと error です。
+caller 側は、checker がどの source を選んだかを追跡しないため、戻り値が
+生きている間は列挙された全 source を borrow 中として扱います。同じ source の
+重複列挙は error です。mutable な戻り値では、列挙された全 source が
+exclusive borrow になるため、同じ値を 2 つの source に渡せません。
+名前付き lifetime parameter、lifetime bounds、anonymous lifetime は
+採用しません。borrow field と view struct は、後続の bounded issue で
+必要性を確認します。
 
 safe borrow binding は通常の field access 構文で field を読めます。
 `&var T` binding は通常の field assignment 構文で field を更新できます。

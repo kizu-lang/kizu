@@ -78,7 +78,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0056: allocator-backed byte storage boundary](0056-allocator-backed-byte-storage.md)
 - [ADR-0057: Kizu String over Array storage](0057-kizu-string-array-storage.md)
 - [ADR-0059: removed lifetime annotation proposal for borrowed views](0059-explicit-lifetime-syntax.md) (置換)
-- [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md)
+- [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md) (単一 source 制限は 0095 で置換)
 - [ADR-0061: defer explicit cleanup statement](0061-defer-explicit-cleanup.md)
 - [ADR-0063: page_allocator capability stability](0063-page-allocator-capability.md)
 - [ADR-0064: comma list delimiters](0064-comma-list-delimiters.md)
@@ -108,3 +108,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0092: Allocator は opaque capability のまま、実体化しない](0092-allocator-stays-opaque-capability.md)
 - [ADR-0093: statement match の arm body に `return` を許す](0093-match-arm-return.md)
 - [ADR-0094: 転送 deinit は手書きする(`= fields;` を削除)](0094-forwarding-deinit-is-handwritten.md)
+- [ADR-0095: `borrows a, b` — 複数 source の保守的統合](0095-multi-source-borrows.md)

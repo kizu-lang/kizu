@@ -101,10 +101,13 @@ type FunctionSignature struct {
 	// StaticParams is the `<...>` list. An entry with no declared type is a
 	// type parameter; one with a type is a compile-time value. Both are
 	// compile-time, which is why they live here and not in Params.
-	StaticParams   []StaticParam
-	Params         []Param
-	ReturnType     typ.Type
-	ReturnBorrow   string
+	StaticParams []StaticParam
+	Params       []Param
+	ReturnType   typ.Type
+	// ReturnBorrows lists the parameters the returned view may derive from.
+	// The caller treats the result as borrowing every listed source; the body
+	// must tie each returned value to one of them.
+	ReturnBorrows  []string
 	RequiresUnsafe bool
 	ExternABI      string
 	Public         bool
@@ -166,8 +169,8 @@ func (d *FunctionDecl) String() string {
 	ret := ""
 	if d.ReturnType != nil {
 		ret = " -> " + d.ReturnType.String()
-		if d.ReturnBorrow != "" {
-			ret += " borrows " + d.ReturnBorrow
+		if len(d.ReturnBorrows) > 0 {
+			ret += " borrows " + strings.Join(d.ReturnBorrows, ", ")
 		}
 	}
 	typeParams := staticParamText(d.StaticParams)

@@ -353,7 +353,7 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	return decl
 }
 
-// parseReturnClause reads `-> T` and the `borrows name` that may follow it.
+// parseReturnClause reads `-> T` and the `borrows a, b` that may follow it.
 func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
 	if p.peek.Type != token.Arrow {
 		return true
@@ -371,7 +371,14 @@ func (p *Parser) parseReturnClause(fn *ast.FunctionDecl) bool {
 	if !p.expectPeek(token.Ident) {
 		return false
 	}
-	fn.ReturnBorrow = p.cur.Literal
+	fn.ReturnBorrows = append(fn.ReturnBorrows, p.cur.Literal)
+	for p.peek.Type == token.Comma {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return false
+		}
+		fn.ReturnBorrows = append(fn.ReturnBorrows, p.cur.Literal)
+	}
 	return true
 }
 

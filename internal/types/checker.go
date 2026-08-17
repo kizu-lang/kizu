@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -301,7 +302,7 @@ type scope struct {
 	mutable      map[string]bool
 	borrowed     map[string]bool
 	mutBorrow    map[string]bool
-	borrowSource map[string]string
+	borrowSource map[string][]string
 	// unread holds the locals this scope declared that nothing has read yet. A
 	// read removes one; whatever is left when the scope closes was never needed.
 	// Parameters are not in here: they are part of a signature, and a caller can
@@ -1233,12 +1234,12 @@ func checkFunctionParamPolicy(param ast.Param, typ Type) error {
 // checkReturnBorrowPolicy validates source provenance for borrowed returns.
 func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 	if fn.ReturnType == nil {
-		if fn.ReturnBorrow != "" {
+		if len(fn.ReturnBorrows) != 0 {
 			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
 		}
 		return nil
 	}
-	if fn.ReturnBorrow == "" {
+	if len(fn.ReturnBorrows) == 0 {
 		if isBorrowReturnType(Type(typ.Text(fn.ReturnType))) {
 			return errorf(
 				"type error: function `%s` borrow return requires `borrows <source>`",
@@ -1250,19 +1251,30 @@ func checkReturnBorrowPolicy(fn ast.FunctionSignature) error {
 		return errorf("type error: function `%s` `borrows` requires borrowed view return",
 			fn.Name)
 	}
-	for _, param := range fn.Params {
-		if param.Name == fn.ReturnBorrow {
-			return nil
+	seen := map[string]bool{}
+	for _, source := range fn.ReturnBorrows {
+		if seen[source] {
+			return errorf("type error: function `%s` borrows source `%s` twice",
+				fn.Name, source)
 		}
+		seen[source] = true
+		if !returnBorrowSourceDeclared(fn, source) {
+			return errorf("type error: function `%s` borrows unknown source `%s`",
+				fn.Name, source)
+		}
+	}
+	return nil
+}
+
+// returnBorrowSourceDeclared reports whether a borrow source names a parameter.
+func returnBorrowSourceDeclared(fn ast.FunctionSignature, source string) bool {
+	if borrowReturnParamIndex(fn, source) >= 0 {
+		return true
 	}
 	// A contract writes no receiver but every method has one, so `self` names it
 	// there. A method declared with a receiver slot has it among its parameters
 	// already, which is why this only speaks for the ones that do not.
-	if fn.ReturnBorrow == receiverName && !fn.Receiver {
-		return nil
-	}
-	return errorf("type error: function `%s` borrows unknown source `%s`",
-		fn.Name, fn.ReturnBorrow)
+	return source == receiverName && !fn.Receiver
 }
 
 // receiverName is what a method calls the value it is called on.
@@ -1926,13 +1938,13 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 		return false, errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
-		source := c.singleBorrowSource(stmt.Value, env, unsafe)
-		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, source)
+		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
+		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources)
 	}
 	if isBorrowedViewReturnType(typ) {
-		source := c.singleBorrowSource(stmt.Value, env, unsafe)
-		if source != "" {
-			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, source)
+		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
+		if len(sources) > 0 {
+			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources)
 		}
 	}
 	return false, env.define(stmt.Name, typ, stmt.Mutable)
@@ -1949,8 +1961,8 @@ func (c *Checker) defineSpecialLetInitializer(
 		if err != nil {
 			return true, err
 		}
-		source := c.singleBorrowSource(borrow.Right, env, unsafe)
-		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, source)
+		sources := c.exprBorrowSourceList(borrow.Right, env, unsafe)
+		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
 	}
 	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
@@ -1962,11 +1974,11 @@ func (c *Checker) defineSpecialLetInitializer(
 		// `self.parts.at(index)` read as a fresh owner and refused a view off the element
 		// that is in fact tied to `self`. Falling back to the bound name keeps the older,
 		// owner-of-itself answer whenever the initializer names no single source.
-		source := c.singleBorrowSource(stmt.Value, env, unsafe)
-		if source == "" {
-			source = stmt.Name
+		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
+		if len(sources) == 0 {
+			sources = []string{stmt.Name}
 		}
-		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, source)
+		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
 	}
 	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
@@ -1975,11 +1987,11 @@ func (c *Checker) defineSpecialLetInitializer(
 		}
 		return true, env.defineParam(stmt.Name, typ, true, mutable)
 	}
-	if source, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
+	if sources, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, false, source)
+		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, false, sources)
 	}
 	return false, nil
 }
@@ -2035,28 +2047,28 @@ func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
-) (string, bool, error) {
+) ([]string, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return "", false, nil
+		return nil, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "as_bytes" {
-		return "", false, nil
+		return nil, false, nil
 	}
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
-		return "", true, err
+		return nil, true, err
 	}
 	if receiver != "std::string::String" {
-		return "", true, errorf("type error: `String.as_bytes` expects String receiver")
+		return nil, true, errorf("type error: `String.as_bytes` expects String receiver")
 	}
 	if len(call.Args) != 0 {
-		return "", true, errorf("type error: `String.as_bytes` expects 0 args, got %d",
+		return nil, true, errorf("type error: `String.as_bytes` expects 0 args, got %d",
 			len(call.Args))
 	}
-	source := c.singleBorrowSource(field.Receiver, env, unsafe)
-	return source, true, nil
+	sources := c.exprBorrowSourceList(field.Receiver, env, unsafe)
+	return sources, true, nil
 }
 
 // checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
@@ -2298,17 +2310,21 @@ func (c *Checker) returnValueMatchesBorrowParam(
 	if !sameType(got, inner) {
 		return false
 	}
-	return c.currentFunction != nil && c.currentFunction.sig.ReturnBorrow == ident.Name
+	return c.currentFunction != nil &&
+		slices.Contains(c.currentFunction.sig.ReturnBorrows, ident.Name)
 }
 
-// checkReturnBorrowSources rejects returned views not tied to the declared source.
+// checkReturnBorrowSources rejects returned views not tied to a declared source.
+// Every provenance candidate of the returned value must be declared, and at
+// least one must tie the value to the declaration: the caller keeps exactly the
+// declared sources alive, so an undeclared candidate would dangle.
 func (c *Checker) checkReturnBorrowSources(
 	expr ast.Expression,
 	env *scope,
 	_ Type,
 	unsafe unsafeMark,
 ) error {
-	if c.currentFunction == nil || c.currentFunction.sig.ReturnBorrow == "" {
+	if c.currentFunction == nil || len(c.currentFunction.sig.ReturnBorrows) == 0 {
 		return nil
 	}
 	if c.trustedStdBorrowReturn(expr) {
@@ -2321,12 +2337,28 @@ func (c *Checker) checkReturnBorrowSources(
 	if sources["$static"] {
 		return nil
 	}
-	source := c.currentFunction.sig.ReturnBorrow
-	if sources[source] {
-		return nil
+	declared := c.currentFunction.sig.ReturnBorrows
+	if len(sources) == 0 {
+		return errorf("type error: return borrows `%s` but returned value is not tied to that source",
+			strings.Join(declared, ", "))
 	}
-	return errorf("type error: return borrows `%s` but returned value is not tied to that source",
-		source)
+	// The reported candidate is the lexicographically first undeclared one, so
+	// the diagnostic is deterministic without sorting on the success path.
+	undeclared := ""
+	for candidate := range sources {
+		if slices.Contains(declared, candidate) {
+			continue
+		}
+		if undeclared == "" || candidate < undeclared {
+			undeclared = candidate
+		}
+	}
+	if undeclared != "" {
+		return errorf(
+			"type error: returned value may be tied to `%s`, which `borrows %s` does not declare",
+			undeclared, strings.Join(declared, ", "))
+	}
+	return nil
 }
 
 // exprBorrowSources reports parameter names that can back a returned view.
@@ -2361,18 +2393,34 @@ func (c *Checker) exprBorrowSources(
 }
 
 // identBorrowSources derives a local value's borrow provenance from its binding.
+// A binding may record several sources (a multi-source `borrows` result), so
+// the walk resolves each recorded source to its root and unions the roots.
 func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
-	source := name
+	roots := map[string]bool{}
 	seen := map[string]bool{}
-	for !seen[source] {
+	work := []string{name}
+	for len(work) > 0 {
+		source := work[len(work)-1]
+		work = work[:len(work)-1]
+		if seen[source] {
+			continue
+		}
 		seen[source] = true
 		next, ok := env.lookupBorrowSource(source)
-		if !ok || next == source {
-			return map[string]bool{source: true}
+		if !ok {
+			roots[source] = true
+			continue
 		}
-		source = next
+		for _, n := range next {
+			if n == source {
+				// A name whose recorded provenance includes itself is a root.
+				roots[source] = true
+				continue
+			}
+			work = append(work, n)
+		}
 	}
-	return map[string]bool{}
+	return roots
 }
 
 // callBorrowSources maps returned borrow provenance back to call arguments.
@@ -2388,24 +2436,51 @@ func (c *Checker) callBorrowSources(
 	if fn == nil {
 		return map[string]bool{}, nil
 	}
-	if fn.sig.ReturnBorrow == "" {
-		return map[string]bool{}, nil
-	}
-	idx := borrowReturnParamIndex(fn)
-	if idx < 0 || idx >= len(expr.Args) {
-		return map[string]bool{}, errorf("type error: `%s` borrows unknown source `%s`",
-			fn.name, fn.sig.ReturnBorrow)
-	}
-	return c.exprBorrowSources(expr.Args[idx], env, unsafe)
+	return c.returnBorrowSourceUnion(fn.name, fn.sig, env, unsafe,
+		func(idx int) ast.Expression {
+			if idx >= len(expr.Args) {
+				return nil
+			}
+			return expr.Args[idx]
+		})
 }
 
-// borrowReturnParamIndex finds the parameter named by a return-borrow annotation.
-func borrowReturnParamIndex(fn *functionType) int {
-	if fn == nil || fn.sig.ReturnBorrow == "" {
-		return -1
+// returnBorrowSourceUnion unions the provenance of every declared borrow
+// source's argument — the conservative rule of ADR-0095. argAt maps a
+// parameter index to its call expression and returns nil when the call has no
+// expression in that slot.
+func (c *Checker) returnBorrowSourceUnion(
+	name string,
+	sig ast.FunctionSignature,
+	env *scope,
+	unsafe unsafeMark,
+	argAt func(idx int) ast.Expression,
+) (map[string]bool, error) {
+	union := map[string]bool{}
+	for _, source := range sig.ReturnBorrows {
+		var arg ast.Expression
+		if idx := borrowReturnParamIndex(sig, source); idx >= 0 {
+			arg = argAt(idx)
+		}
+		if arg == nil {
+			return map[string]bool{}, errorf("type error: `%s` borrows unknown source `%s`",
+				name, source)
+		}
+		part, err := c.exprBorrowSources(arg, env, unsafe)
+		if err != nil {
+			return map[string]bool{}, err
+		}
+		for candidate := range part {
+			union[candidate] = true
+		}
 	}
-	for idx, param := range fn.sig.Params {
-		if param.Name == fn.sig.ReturnBorrow {
+	return union, nil
+}
+
+// borrowReturnParamIndex finds the parameter a return-borrow source names.
+func borrowReturnParamIndex(sig ast.FunctionSignature, source string) int {
+	for idx, param := range sig.Params {
+		if param.Name == source {
 			return idx
 		}
 	}
@@ -2427,27 +2502,22 @@ func (c *Checker) methodBorrowSources(
 		return nil, true, err
 	}
 	if method := c.implMethod(string(receiver), field.Name); method != nil {
-		if method.sig.ReturnBorrow == "" {
+		if len(method.sig.ReturnBorrows) == 0 {
 			return map[string]bool{}, true, nil
 		}
-		idx := borrowReturnParamIndex(method)
-		if idx < 0 {
-			return map[string]bool{}, true, errorf(
-				"type error: `%s` borrows unknown source `%s`",
-				method.name, method.sig.ReturnBorrow)
-		}
-		if idx == 0 {
-			sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
-			return sources, true, err
-		}
-		arg := idx - 1
-		if arg >= len(expr.Args) {
-			return map[string]bool{}, true, errorf(
-				"type error: `%s` borrowed return has no source argument",
-				method.name)
-		}
-		sources, err := c.exprBorrowSources(expr.Args[arg], env, unsafe)
-		return sources, true, err
+		// A method's params start with self, so index 0 is the receiver
+		// expression and the rest offset into the call arguments.
+		union, err := c.returnBorrowSourceUnion(method.name, method.sig, env, unsafe,
+			func(idx int) ast.Expression {
+				if idx == 0 {
+					return field.Receiver
+				}
+				if idx-1 >= len(expr.Args) {
+					return nil
+				}
+				return expr.Args[idx-1]
+			})
+		return union, true, err
 	}
 	switch field.Name {
 	case "as_bytes", "borrow", "borrow_mut", "at", "at_mut":
@@ -2458,23 +2528,26 @@ func (c *Checker) methodBorrowSources(
 	}
 }
 
-// singleBorrowSource extracts a deterministic source name when one source is known.
-func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe unsafeMark) string {
+// exprBorrowSourceList returns the provenance names backing expr. Static
+// backing is not a provenance to keep alive and is dropped. Order is not
+// significant: the only consumer unions the names back into a set.
+func (c *Checker) exprBorrowSourceList(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) []string {
 	sources, err := c.exprBorrowSources(expr, env, unsafe)
 	if err != nil {
-		return ""
+		return nil
 	}
-	source := ""
+	list := make([]string, 0, len(sources))
 	for candidate := range sources {
 		if candidate == "$static" {
 			continue
 		}
-		if source != "" {
-			return ""
-		}
-		source = candidate
+		list = append(list, candidate)
 	}
-	return source
+	return list
 }
 
 // fieldBorrowSources preserves the receiver provenance through direct fields.
@@ -6571,7 +6644,7 @@ func newScope(parent *scope) *scope {
 	return &scope{
 		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
 		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
-		borrowSource: map[string]string{}, unread: map[string]ast.Span{},
+		borrowSource: map[string][]string{}, unread: map[string]ast.Span{},
 	}
 }
 
@@ -6623,40 +6696,40 @@ func (s *scope) define(name string, typ Type, mutable bool) error {
 }
 
 // defineWithSource binds a non-borrow local while preserving view provenance.
-func (s *scope) defineWithSource(name string, typ Type, mutable bool, source string) error {
+func (s *scope) defineWithSource(name string, typ Type, mutable bool, sources []string) error {
 	if err := s.define(name, typ, mutable); err != nil {
 		return err
 	}
-	if source != "" {
-		s.borrowSource[name] = source
+	if len(sources) > 0 {
+		s.borrowSource[name] = sources
 	}
 	return nil
 }
 
 // defineParam binds a function parameter and records borrow capabilities.
 func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
-	source := ""
+	var sources []string
 	if borrowed || isBorrowedViewReturnType(typ) {
-		source = name
+		sources = []string{name}
 	}
-	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, source)
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources)
 }
 
-// defineParamWithSource binds a borrowed local and records its source owner.
+// defineParamWithSource binds a borrowed local and records its source owners.
 func (s *scope) defineParamWithSource(
 	name string,
 	typ Type,
 	borrowed bool,
 	mutBorrow bool,
-	source string,
+	sources []string,
 ) error {
 	if err := s.define(name, typ, false); err != nil {
 		return err
 	}
 	s.borrowed[name] = borrowed
 	s.mutBorrow[name] = mutBorrow
-	if source != "" {
-		s.borrowSource[name] = source
+	if len(sources) > 0 {
+		s.borrowSource[name] = sources
 	}
 	return nil
 }
@@ -6702,15 +6775,15 @@ func (s *scope) isMutBorrowed(name string) bool {
 	return false
 }
 
-// lookupBorrowSource resolves the provenance source for a borrowed local.
-func (s *scope) lookupBorrowSource(name string) (string, bool) {
+// lookupBorrowSource resolves the provenance sources for a borrowed local.
+func (s *scope) lookupBorrowSource(name string) ([]string, bool) {
 	for cur := s; cur != nil; cur = cur.parent {
 		if _, ok := cur.values[name]; ok {
-			source := cur.borrowSource[name]
-			return source, source != ""
+			sources := cur.borrowSource[name]
+			return sources, len(sources) > 0
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 // splitGenericType extracts base and raw arguments from base<args>.

@@ -647,7 +647,7 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 			source: `fn bad(left: []u8, right: []u8) -> []u8 borrows left {
     return right;
 }`,
-			want: "return borrows `left` but returned value is not tied to that source",
+			want: "returned value may be tied to `right`, which `borrows left` does not declare",
 		},
 		{
 			name: "field alias source mismatch",
@@ -660,7 +660,7 @@ fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
     let view = storage.as_bytes();
     return view;
 }`,
-			want: "return borrows `left` but returned value is not tied to that source",
+			want: "returned value may be tied to `right`, which `borrows left` does not declare",
 		},
 		{
 			name: "temporary field owner",
@@ -675,7 +675,7 @@ fn bad(owner: &Owner, text: string::String) -> []u8 borrows owner {
     let view = make(text).text.as_bytes();
     return view;
 }`,
-			want: "return borrows `owner` but returned value is not tied to that source",
+			want: "returned value may be tied to `view`, which `borrows owner` does not declare",
 		},
 		{
 			name: "method explicit source mismatch",
@@ -687,7 +687,7 @@ fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
     let view = picker.from_arg(right);
     return view;
 }`,
-			want: "return borrows `left` but returned value is not tied to that source",
+			want: "returned value may be tied to `right`, which `borrows left` does not declare",
 		},
 	}
 	runErrorCases(t, cases)
@@ -737,7 +737,7 @@ fn main() {}`
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	want := "return borrows `left` but returned value is not tied to that source"
+	want := "returned value may be tied to `right`, which `borrows left` does not declare"
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("got %q, want substring %q", err.Error(), want)
 	}
