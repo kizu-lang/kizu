@@ -975,7 +975,11 @@ func (c *Checker) checkStringViewLetStmt(
 		return err
 	}
 	if mutable && !target.mutable && !(target.borrowedParam && target.mutBorrow) {
-		return errorf("string error: `String.as_mut_bytes` requires mutable String binding")
+		kind := "String"
+		if isBufferTypeName(target.typeName) {
+			kind = "buffer"
+		}
+		return errorf("string error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
 	}
 	if err := checkBorrowConflict(target, mutable); err != nil {
 		return err
@@ -1027,10 +1031,20 @@ func (c *Checker) stringViewInitializer(
 		return nil, false, false
 	}
 	target, exists := env.lookup(ident.Name)
-	if !exists || target.moved || target.typeName != "std::string::String" {
+	if !exists || target.moved {
+		return nil, false, false
+	}
+	if target.typeName != "std::string::String" && !isBufferTypeName(target.typeName) {
 		return nil, false, false
 	}
 	return target, field.Name == "as_mut_bytes", true
+}
+
+// isBufferTypeName reports whether a type spelling is a fixed-length stack
+// buffer (`[N]u8`).
+func isBufferTypeName(typeName string) bool {
+	return len(typeName) > 1 && typeName[0] == '[' &&
+		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
 // checkArrayBorrowLetStmt binds an Array element borrow and activates the array owner.
@@ -1657,6 +1671,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
 		return c.readScalarExpr(e)
+	case *ast.BufferLiteralExpr:
+		return e.TypeText(), nil
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:

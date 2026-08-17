@@ -966,6 +966,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
+	case *ast.BufferLiteralExpr:
+		return l.emit("buffer.new", e.TypeText(), nil, ""), nil
 	case *ast.FieldExpr, *ast.IndexExpr, *ast.DerefExpr:
 		return l.lowerAccessExpr(e)
 	default:
@@ -1354,6 +1356,9 @@ func (l *lowerer) lowerMethodCallExpr(
 	if isMutableReferenceType(receiver.Type) {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
+	if isBufferIRType(receiver.Type) {
+		return l.lowerBufferMethod(field.Name, receiver, args)
+	}
 	params, err := l.methodCalleeParams(receiver.Type, field.Name)
 	if err != nil {
 		return Value{}, err
@@ -1381,6 +1386,32 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.deinit", "void", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
+	}
+}
+
+// isBufferIRType reports whether an IR type spelling is a fixed-length stack
+// buffer (`[N]u8`).
+func isBufferIRType(typeName string) bool {
+	return len(typeName) > 1 && typeName[0] == '[' &&
+		typeName[1] >= '0' && typeName[1] <= '9'
+}
+
+// lowerBufferMethod lowers stack buffer view methods (ADR-0097). Both view
+// forms hand back the same {ptr, len} value; mutability is a checker-level
+// permission, not a runtime representation.
+func (l *lowerer) lowerBufferMethod(
+	name string,
+	receiver Value,
+	args []ast.Expression,
+) (Value, error) {
+	switch name {
+	case "as_bytes", "as_mut_bytes":
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("ir error: buffer `%s` expects 0 args", name)
+		}
+		return l.emit("buffer.as_bytes", "[]u8", []Value{receiver}, ""), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown buffer method `%s`", name)
 	}
 }
 

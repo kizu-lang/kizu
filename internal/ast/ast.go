@@ -1026,6 +1026,26 @@ type StructLiteralExpr struct {
 // expressionNode marks StructLiteralExpr as an expression node.
 func (*StructLiteralExpr) expressionNode() {}
 
+// BufferLiteralExpr is `[N]u8{}`: a zero-filled fixed-length stack buffer
+// (ADR-0097).
+type BufferLiteralExpr struct {
+	Size int64
+	Span Span
+}
+
+// expressionNode marks BufferLiteralExpr as an expression node.
+func (*BufferLiteralExpr) expressionNode() {}
+
+// String returns the literal as written in source.
+func (e *BufferLiteralExpr) String() string {
+	return e.TypeText() + "{}"
+}
+
+// TypeText returns the buffer's type spelling.
+func (e *BufferLiteralExpr) TypeText() string {
+	return fmt.Sprintf("[%d]u8", e.Size)
+}
+
 // String returns a compact debug representation of the struct literal.
 func (e *StructLiteralExpr) String() string {
 	fields := make([]string, 0, len(e.Fields))

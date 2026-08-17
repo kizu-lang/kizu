@@ -9,6 +9,7 @@ package typ
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +33,12 @@ type Name struct {
 
 // Slice is `[]T`.
 type Slice struct{ Elem Type }
+
+// Buffer is `[N]T`, a fixed-length stack buffer (ADR-0097).
+type Buffer struct {
+	Size int64
+	Elem Type
+}
 
 // Borrow is `&T` or, when Mut is set, `&var T`.
 type Borrow struct {
@@ -59,6 +66,9 @@ func (*Name) typeNode() {}
 
 // typeNode marks Slice as a type.
 func (*Slice) typeNode() {}
+
+// typeNode marks Buffer as a type.
+func (*Buffer) typeNode() {}
 
 // typeNode marks Borrow as a type.
 func (*Borrow) typeNode() {}
@@ -90,6 +100,11 @@ func (t *Name) String() string {
 
 // String returns the spelling of a slice type.
 func (t *Slice) String() string { return "[]" + t.Elem.String() }
+
+// String returns the spelling of a fixed-length buffer type.
+func (t *Buffer) String() string {
+	return "[" + strconv.FormatInt(t.Size, 10) + "]" + t.Elem.String()
+}
 
 // String returns the spelling of a borrow type.
 func (t *Borrow) String() string {
@@ -205,6 +220,12 @@ func (t *Slice) equal(other Type) bool {
 	return ok && Equal(t.Elem, b.Elem)
 }
 
+// equal reports whether other is a buffer of the same size and element.
+func (t *Buffer) equal(other Type) bool {
+	b, ok := other.(*Buffer)
+	return ok && t.Size == b.Size && Equal(t.Elem, b.Elem)
+}
+
 // equal reports whether other is the same borrow of the same element.
 func (t *Borrow) equal(other Type) bool {
 	b, ok := other.(*Borrow)
@@ -253,22 +274,13 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 	case nil:
 		return nil, nil
 	case *Name:
-		path, err := rename(node.Path)
-		if err != nil {
-			return nil, err
-		}
-		args := make([]Type, 0, len(node.Args))
-		for _, arg := range node.Args {
-			mapped, err := MapNames(arg, rename)
-			if err != nil {
-				return nil, err
-			}
-			args = append(args, mapped)
-		}
-		return &Name{Path: path, Args: args}, nil
+		return mapNameNode(node, rename)
 	case *Slice:
 		elem, err := MapNames(node.Elem, rename)
 		return &Slice{Elem: elem}, err
+	case *Buffer:
+		elem, err := MapNames(node.Elem, rename)
+		return &Buffer{Size: node.Size, Elem: elem}, err
 	case *Borrow:
 		elem, err := MapNames(node.Elem, rename)
 		return &Borrow{Elem: elem, Mut: node.Mut}, err
@@ -297,6 +309,23 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 	default:
 		return t, nil
 	}
+}
+
+// mapNameNode rewrites a name node and its static arguments.
+func mapNameNode(node *Name, rename func(path []string) ([]string, error)) (Type, error) {
+	path, err := rename(node.Path)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]Type, 0, len(node.Args))
+	for _, arg := range node.Args {
+		mapped, err := MapNames(arg, rename)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, mapped)
+	}
+	return &Name{Path: path, Args: args}, nil
 }
 
 // Walk calls visit for t and for every type inside it, outermost first. A

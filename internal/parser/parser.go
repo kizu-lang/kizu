@@ -1235,10 +1235,35 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		left := p.parseExpression(lowest)
 		p.expectPeek(token.RParen)
 		return left
+	case token.LBracket:
+		return p.parseBufferLiteralExpr()
 	default:
 		p.errorf("expected expression, got %s", tokenDescription(p.cur))
 		return &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}
 	}
+}
+
+// parseBufferLiteralExpr parses `[N]u8{}`, the zero-filled fixed-length stack
+// buffer literal (ADR-0097).
+func (p *Parser) parseBufferLiteralExpr() ast.Expression {
+	span := tokenSpan(p.cur)
+	parsed := p.parseTypeName()
+	if parsed == nil {
+		return &ast.IdentExpr{Name: "<error>", Span: span}
+	}
+	buffer, ok := parsed.(*typ.Buffer)
+	if !ok {
+		p.errorf("expected buffer literal `[N]u8{}`, got type `%s`", typ.Text(parsed))
+		return &ast.IdentExpr{Name: "<error>", Span: span}
+	}
+	if typ.Text(buffer.Elem) != "u8" {
+		p.errorf("buffer element must be u8, got %s", typ.Text(buffer.Elem))
+		return &ast.IdentExpr{Name: "<error>", Span: span}
+	}
+	if !p.expectPeek(token.LBrace) || !p.expectPeek(token.RBrace) {
+		return &ast.IdentExpr{Name: "<error>", Span: span}
+	}
+	return &ast.BufferLiteralExpr{Size: buffer.Size, Span: span}
 }
 
 // parseMarkerExpression parses the keywords that sit in front of an expression
@@ -1425,8 +1450,11 @@ func (p *Parser) parseBorrowTypeName() typ.Type {
 	return &typ.Borrow{Elem: inner, Mut: mut}
 }
 
-// parseSliceTypeName parses []T type spellings.
+// parseSliceTypeName parses []T and [N]T type spellings.
 func (p *Parser) parseSliceTypeName() typ.Type {
+	if p.peek.Type == token.Int {
+		return p.parseBufferTypeName()
+	}
 	if !p.expectPeek(token.RBracket) {
 		return nil
 	}
@@ -1436,6 +1464,25 @@ func (p *Parser) parseSliceTypeName() typ.Type {
 		return nil
 	}
 	return &typ.Slice{Elem: arg}
+}
+
+// parseBufferTypeName parses `[N]T` fixed-length buffer type spellings.
+func (p *Parser) parseBufferTypeName() typ.Type {
+	p.nextToken()
+	size, err := strconv.ParseInt(p.cur.Literal, 10, 64)
+	if err != nil || size <= 0 {
+		p.errorf("buffer size must be a positive integer, got %s", p.cur.Literal)
+		return nil
+	}
+	if !p.expectPeek(token.RBracket) {
+		return nil
+	}
+	p.nextToken()
+	arg := p.parseTypeArg(false)
+	if arg == nil {
+		return nil
+	}
+	return &typ.Buffer{Size: size, Elem: arg}
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.

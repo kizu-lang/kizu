@@ -851,6 +851,10 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return errorf("type error: struct field `%s.%s` cannot store dyn value",
 				decl.Name, field.Name)
 		}
+		if containsBufferType(typ) {
+			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
+				decl.Name, field.Name)
+		}
 	}
 	return nil
 }
@@ -1140,6 +1144,11 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if ret == typeFunction {
 		return nil, errorf("type error: function `%s` cannot return Function", fn.Name)
 	}
+	if containsBufferType(ret) {
+		return nil, errorf(
+			"type error: function `%s` cannot return a stack buffer; "+
+				"return an owned buffer or write through a view", fn.Name)
+	}
 	if containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
@@ -1189,6 +1198,11 @@ func (c *Checker) checkFunctionParam(
 	}
 	if containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
+	}
+	if containsBufferType(paramType) {
+		return errorf(
+			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
+			param.Name)
 	}
 	if err := checkFunctionParamPolicy(param, paramType); err != nil {
 		return err
@@ -1308,6 +1322,25 @@ func checkBorrowFieldPolicy(typeName string, fieldName string, payload string) e
 	}
 	return errorf("type error: borrow payload `%s.%s` cannot store borrow",
 		typeName, fieldName)
+}
+
+// isBufferType reports whether t is a fixed-length stack buffer (`[N]u8`).
+func isBufferType(t Type) bool {
+	s := string(t)
+	return len(s) > 1 && s[0] == '[' && s[1] >= '0' && s[1] <= '9'
+}
+
+// containsBufferType reports whether a spelling mentions a stack buffer.
+// A stack buffer is local-only in v1 (ADR-0097): it cannot appear in
+// signatures, fields, payloads, or container elements.
+func containsBufferType(t Type) bool {
+	s := string(t)
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '[' && s[i+1] >= '0' && s[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // isBorrowReturnType reports whether typ is an explicit local borrow return.
@@ -1431,6 +1464,8 @@ func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
 	case *typ.Borrow:
 		return c.parseWrappingType(name, node.Elem)
 	case *typ.Slice:
+		return c.parseWrappingType(name, node.Elem)
+	case *typ.Buffer:
 		return c.parseWrappingType(name, node.Elem)
 	case *typ.Optional:
 		return c.parseNullableType(name, node.Elem)
@@ -2064,19 +2099,23 @@ func (c *Checker) checkStringViewInitializer(
 	if err != nil {
 		return nil, mutable, true, err
 	}
-	if receiver != "std::string::String" {
-		return nil, mutable, true, errorf("type error: `String.%s` expects String receiver",
-			field.Name)
+	if receiver != "std::string::String" && !isBufferType(receiver) {
+		return nil, mutable, true, errorf(
+			"type error: `%s` expects String or stack buffer receiver", field.Name)
+	}
+	kind := "String"
+	if isBufferType(receiver) {
+		kind = "buffer"
 	}
 	if len(call.Args) != 0 {
-		return nil, mutable, true, errorf("type error: `String.%s` expects 0 args, got %d",
-			field.Name, len(call.Args))
+		return nil, mutable, true, errorf("type error: `%s.%s` expects 0 args, got %d",
+			kind, field.Name, len(call.Args))
 	}
 	if mutable {
 		ident, ok := field.Receiver.(*ast.IdentExpr)
 		if !ok || !(env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name)) {
 			return nil, mutable, true, errorf(
-				"type error: `String.as_mut_bytes` requires mutable String binding")
+				"type error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
 		}
 	}
 	sources := c.exprBorrowSourceList(field.Receiver, env, unsafe)
@@ -3033,6 +3072,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 		return c.checkIndexExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
+	case *ast.BufferLiteralExpr:
+		return Type(e.TypeText()), nil
 	case *ast.FieldExpr:
 		return c.checkFieldExpr(e, env, unsafe)
 	case *ast.DerefExpr:
@@ -3425,6 +3466,10 @@ func (c *Checker) checkBorrowPrefix(
 	typ, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", false, err
+	}
+	if isBufferType(typ) {
+		return "", false, errorf(
+			"type error: cannot borrow a stack buffer; use `as_bytes()` / `as_mut_bytes()`")
 	}
 	if mutable {
 		if err := requireMutableBorrowArg(expr.Right, typ, env); err != nil {
@@ -4030,6 +4075,9 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	}
 	if _, ok := dynContract(typ); ok {
 		return errorf("type error: Array element cannot be dyn")
+	}
+	if containsBufferType(typ) {
+		return errorf("type error: Array element cannot be stack buffer")
 	}
 	if base, arg, ok := splitGenericType(string(typ)); ok && base == "option" {
 		argType, err := c.parseType(arg)
