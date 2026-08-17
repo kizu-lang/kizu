@@ -376,6 +376,17 @@ func ErrorUnionParts(text string) (string, string, bool) {
 	return errorType, node.Ok.String(), true
 }
 
+// OptionalElem returns T for an optional value type `?T`, and reports whether
+// text is one. A `?ptr<...>` spelling keeps its raw-pointer C-ABI meaning and
+// is not an optional value type. This is the one definition of that carve-out;
+// every checker and backend asks here so the answer cannot drift.
+func OptionalElem(text string) (string, bool) {
+	if !strings.HasPrefix(text, "?") || strings.HasPrefix(text, "?ptr<") {
+		return "", false
+	}
+	return text[1:], true
+}
+
 // AbsorbsErrorSet reports whether a value of type got fills a slot declared
 // want by the absorption `try` does. `!T` declares no error set (ADR-0087), so
 // an `E!T` reaching it arrives with E absorbed. A declared `E!T` named the one

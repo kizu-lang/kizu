@@ -882,6 +882,11 @@ func (p *Parser) parseIfStmt() *ast.IfStmt {
 	stmt := &ast.IfStmt{}
 	p.nextToken()
 	stmt.Condition = p.parseExpression(lowest)
+	capture, ok := p.parsePayloadCapture()
+	if !ok {
+		return stmt
+	}
+	stmt.Capture = capture
 	if !p.expectPeek(token.LBrace) {
 		return stmt
 	}
@@ -896,11 +901,45 @@ func (p *Parser) parseIfStmt() *ast.IfStmt {
 	return stmt
 }
 
-// parseWhileStmt parses a while loop statement.
+// parseKeywordLiteralExpression parses the keyword-spelled literals.
+func (p *Parser) parseKeywordLiteralExpression() ast.Expression {
+	switch p.cur.Type {
+	case token.True:
+		return &ast.BoolExpr{Value: true}
+	case token.False:
+		return &ast.BoolExpr{Value: false}
+	default:
+		return &ast.NullExpr{Span: tokenSpan(p.cur)}
+	}
+}
+
+// parsePayloadCapture parses a `|name|` payload capture when one follows the
+// current expression, reporting false on a malformed one.
+func (p *Parser) parsePayloadCapture() (string, bool) {
+	if p.peek.Type != token.Pipe {
+		return "", true
+	}
+	if !p.expectPeek(token.Pipe) || !p.expectPeek(token.Ident) {
+		return "", false
+	}
+	capture := p.cur.Literal
+	if !p.expectPeek(token.Pipe) {
+		return "", false
+	}
+	return capture, true
+}
+
+// parseWhileStmt parses a while loop statement, with an optional payload
+// capture (`while expr |name| { ... }`) matching the for-loop spelling.
 func (p *Parser) parseWhileStmt(label string) ast.Statement {
 	stmt := &ast.WhileStmt{Label: label}
 	p.nextToken()
 	stmt.Condition = p.parseExpression(lowest)
+	capture, ok := p.parsePayloadCapture()
+	if !ok {
+		return stmt
+	}
+	stmt.Capture = capture
 	if !p.expectPeek(token.LBrace) {
 		return stmt
 	}
@@ -1058,6 +1097,7 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 const (
 	_ int = iota
 	lowest
+	orElse
 	logicalOr
 	logicalAnd
 	equals
@@ -1070,6 +1110,7 @@ const (
 )
 
 var precedences = map[token.Type]int{
+	token.Orelse:      orElse,
 	token.Or:          logicalOr,
 	token.And:         logicalAnd,
 	token.Eq:          equals,
@@ -1099,7 +1140,8 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			(p.peek.Type == token.LT && p.shouldParseTypeApply(left))) {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
-			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
+			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE,
+			token.Orelse:
 			p.nextToken()
 			left = p.parseBinaryExpr(left)
 		case token.LParen:
@@ -1192,10 +1234,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return expr
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
-	case token.True:
-		return &ast.BoolExpr{Value: true}
-	case token.False:
-		return &ast.BoolExpr{Value: false}
+	case token.True, token.False, token.Null:
+		return p.parseKeywordLiteralExpression()
 	case token.If:
 		return p.parseIfStmt()
 	case token.Match:

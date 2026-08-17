@@ -540,6 +540,9 @@ type IfStmt struct {
 	Condition   Expression
 	Consequence *BlockStmt
 	Alternative *BlockStmt
+	// Capture names the unwrapped payload of an optional condition
+	// (`if expr |name| { ... }`). Empty for a plain bool condition.
+	Capture string
 }
 
 // statementNode marks IfStmt as a statement node.
@@ -562,6 +565,9 @@ type WhileStmt struct {
 	Label     string
 	Condition Expression
 	Body      *BlockStmt
+	// Capture names the unwrapped payload of an optional condition
+	// (`while expr |name| { ... }`). Empty for a plain bool condition.
+	Capture string
 }
 
 // statementNode marks WhileStmt as a statement node.
@@ -761,6 +767,17 @@ func (e *StringExpr) String() string {
 }
 
 // BoolExpr represents a boolean literal.
+// NullExpr is the `null` literal of an optional type.
+type NullExpr struct {
+	Span Span
+}
+
+// expressionNode marks NullExpr as an expression node.
+func (*NullExpr) expressionNode() {}
+
+// String returns the null literal spelling.
+func (e *NullExpr) String() string { return "null" }
+
 type BoolExpr struct {
 	Value bool
 }
