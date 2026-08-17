@@ -607,10 +607,22 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	if curr.Type == token.LParen && prev.Type == token.Function {
 		return true
 	}
+	// `(` hugs a callee -- a name, a call or index result, or a closing
+	// generic bracket -- and takes a space when it groups: `x = (a + b)`.
+	if curr.Type == token.LParen {
+		switch prev.Type {
+		case token.Ident, token.RParen, token.RBracket, token.GT:
+			return false
+		}
+		return !noSpaceAfter(prev)
+	}
 	if noSpaceBefore(curr) {
 		return false
 	}
 	if noSpaceAfter(prev) {
+		return false
+	}
+	if prev.Type == token.Minus && b.signMinus() {
 		return false
 	}
 	// A `|name|` capture hugs its pipes: no space after the opening one and
@@ -640,7 +652,7 @@ func (b *builder) tightGenericBracket(curr token.Token) bool {
 func noSpaceBefore(t token.Token) bool {
 	switch t.Type {
 	case token.RParen, token.RBracket, token.Semicolon, token.Comma,
-		token.Dot, token.DoubleColon, token.LParen, token.Colon,
+		token.Dot, token.DoubleColon, token.Colon,
 		token.Range:
 		return true
 	}
@@ -652,6 +664,23 @@ func noSpaceAfter(t token.Token) bool {
 	switch t.Type {
 	case token.LParen, token.LBracket, token.Dot, token.DoubleColon,
 		token.Bang, token.Question, token.Amp, token.Range:
+		return true
+	}
+	return false
+}
+
+// signMinus reports whether the just-emitted `-` signs a value rather than
+// subtracting: nothing before it, or a token that cannot end an operand.
+func (b *builder) signMinus() bool {
+	return b.prevIndex == 0 || !endsOperand(b.tokens[b.prevIndex-1])
+}
+
+// endsOperand reports whether t can end an operand, which makes a following
+// `-` a subtraction rather than a sign.
+func endsOperand(t token.Token) bool {
+	switch t.Type {
+	case token.Ident, token.Int, token.String, token.True, token.False,
+		token.Null, token.RParen, token.RBracket:
 		return true
 	}
 	return false
