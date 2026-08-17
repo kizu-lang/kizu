@@ -1436,7 +1436,8 @@ core arena の構築は明示 allocator capability を要求し、
 * arena からの削除は実装しない
 
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
-条件だけが消費できます(§7)。`at_mut` は mutable な arena binding を要求し、
+条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding
+または `&var` 借用)を要求し、
 capture の scope の間 arena は mutable に borrow され、`get` / `add` /
 `deinit` は capture の最終使用まで待ちます(`add` は realloc で element
 storage を動かします)。
@@ -2246,7 +2247,8 @@ borrow されたままです(`at` は shared、`at_mut` は mutable)。
 `?&T` を binding に保存する、`orelse` で受ける、関数 signature に書く、の
 いずれも拒否します。element borrow が array の変更や解放より長生きする
 経路を positional に閉じるためで、`as_bytes` の let-initializer 限定と
-同じ整理です。`at_mut` は mutable array binding を要求します。
+同じ整理です。`at_mut` は mutable な受け手(`var` binding または
+`&var` 借用)を要求します。
 `while array.at(i) |elem|` は §6.10 の optional 条件 capture そのままなので、
 non-copy element の iteration も `get` と同じ形になります。
 `pop` は最後の initialized element を array から move して `?T` を返し、
@@ -2294,8 +2296,8 @@ key があれば value borrow、なければ `null` です。消費は Array と
 capture 条件だけです(`if m.at(key) |v|` / `while m.at(key) |v|`)。
 capture の scope の間 map は borrow され(`at` は shared、`at_mut` は
 mutable)、shared borrow 中は `insert` / `deinit` が、mutable borrow 中は
-すべての map 操作が capture の最終使用まで待ちます。`at_mut` は mutable
-map binding を要求します。in-place 更新は
+すべての map 操作が capture の最終使用まで待ちます。`at_mut` は mutable な
+受け手(`var` binding または `&var` 借用)を要求します。in-place 更新は
 `if m.at_mut(key) |v| { v.* = ...; } else { try m.insert(key, ...); }`
 の形で 1 回の lookup になります(ADR-0104)。
 `insert` / `get` / `at` / `at_mut` / `contains` は amortized O(1) です。

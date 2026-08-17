@@ -4584,7 +4584,7 @@ func (c *Checker) checkArenaAtCondition(
 	// The flag covers exactly this call: clear it before the argument is
 	// read, so a nested at/at_mut in argument position refuses as usual.
 	c.captureCondition = false
-	if !arena.mutable {
+	if !mutablePlace(arena) {
 		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
 	}
 	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at_mut")
@@ -5207,6 +5207,12 @@ func (c *Checker) checkArrayPop(
 	return "?" + elem, nil
 }
 
+// mutablePlace reports whether a binding is a place a mutable borrow may come
+// from: a `var` local or a `&var` borrow.
+func mutablePlace(value *binding) bool {
+	return value.mutable || value.mutBorrow
+}
+
 // checkArrayAtCondition checks at/at_mut inside a capture condition — a
 // mutable binding for at_mut and one i64 index — and refuses them everywhere
 // else: the borrow optional they produce exists only there.
@@ -5225,7 +5231,7 @@ func (c *Checker) checkArrayAtCondition(
 	// The flag covers exactly this call: clear it before the arguments are
 	// read, so a nested at/at_mut in argument position refuses as usual.
 	c.captureCondition = false
-	if name == "at_mut" && !array.mutable {
+	if name == "at_mut" && !mutablePlace(array) {
 		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
 	}
 	if len(args) != 1 {
@@ -5375,7 +5381,7 @@ func (c *Checker) checkMapAtCondition(
 	// The flag covers exactly this call: clear it before the arguments are
 	// read, so a nested at/at_mut in argument position refuses as usual.
 	c.captureCondition = false
-	if name == "at_mut" && !mapValue.mutable {
+	if name == "at_mut" && !mutablePlace(mapValue) {
 		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
 	}
 	if err := c.checkMapKeyArg(name, args, env); err != nil {

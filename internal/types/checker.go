@@ -5760,7 +5760,7 @@ func (c *Checker) checkArenaAtMut(
 	// The flag covers exactly this call: clear it before the argument is
 	// read, so a nested at/at_mut in argument position refuses as usual.
 	c.captureCondition = false
-	if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+	if !mutableReceiverPlace(field.Receiver, env) {
 		return "", errorf("type error: `Arena.at_mut` requires mutable arena binding")
 	}
 	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "Arena.at_mut"); err != nil {
@@ -5911,10 +5911,8 @@ func (c *Checker) checkArrayReceiverMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Array.at_mut` requires mutable array binding")
-		}
+	if field.Name == "at_mut" && !mutableReceiverPlace(field.Receiver, env) {
+		return "", errorf("type error: `Array.at_mut` requires mutable array binding")
 	}
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
 }
@@ -5930,16 +5928,24 @@ func (c *Checker) checkMapReceiverMethod(
 	if err := checkMapReceiverBorrow(field, env); err != nil {
 		return "", err
 	}
-	if field.Name == "at_mut" {
-		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", errorf("type error: `Map.at_mut` requires mutable map binding")
-		}
+	if field.Name == "at_mut" && !mutableReceiverPlace(field.Receiver, env) {
+		return "", errorf("type error: `Map.at_mut` requires mutable map binding")
 	}
 	mapArgs, err := c.checkedMapArgs(arg)
 	if err != nil {
 		return "", err
 	}
 	return c.checkMapMethod(Type(mapArgs[1]), field.Name, args, env, unsafe)
+}
+
+// mutableReceiverPlace reports whether a method receiver expression names a
+// place a mutable borrow may come from: a `var` binding or a `&var` borrow.
+func mutableReceiverPlace(receiver ast.Expression, env *scope) bool {
+	ident, ok := receiver.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	return env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name)
 }
 
 // checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
