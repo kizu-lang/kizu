@@ -1,0 +1,85 @@
+import std::arena;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct Visitor {
+    pub name: []u8,
+}
+
+// A fixed-buffer allocator serves every container kind from stack bytes.
+test "fixed buffer allocator backs containers" {
+    var buf = [4096]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(41);
+    try values.append(1);
+    testing::expect_equal<i64>(2, values.len());
+    testing::expect_equal<i64>(41, values.get_or_panic(0));
+
+    var text = string::new(alloc);
+    defer text.deinit();
+    try text.append_bytes("fixed");
+    testing::expect_equal<i64>(5, text.len());
+
+    let visitors = arena::new<Visitor>(alloc);
+    defer visitors.deinit();
+    let alice = visitors.add(Visitor { name: "alice" });
+    testing::expect_equal<[]u8>("alice", visitors.get(alice).name);
+}
+
+fn fill(allocator: Allocator, seed: i64) -> !array::Array<i64> {
+    var values = array::new<i64>(allocator);
+    errdefer values.deinit();
+    try values.append(seed);
+    return values;
+}
+
+// A helper taking Allocator works unchanged; the caller's result inherits the
+// buffer tie and must be consumed in this frame.
+test "fixed buffer allocator flows through helpers" {
+    var buf = [1024]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+    var values = try fill(alloc, 7);
+    defer values.deinit();
+    testing::expect_equal<i64>(7, values.get_or_panic(0));
+}
+
+fn scratch_alloc(bytes: &var []u8) -> Allocator {
+    return mem::fixed_buffer(bytes);
+}
+
+// A wrapper may return the factory result when its sources are its own
+// parameters: the tie travels with the signature and the caller re-derives it.
+test "fixed buffer factory wrapper returns through its parameter" {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = scratch_alloc(scratch);
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(11);
+    testing::expect_equal<i64>(11, values.get_or_panic(0));
+}
+
+fn sum_round(bytes: &var []u8, seed: i64) -> !i64 {
+    let alloc = mem::fixed_buffer(bytes);
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(seed);
+    try values.append(seed + 1);
+    return values.get_or_panic(0) + values.get_or_panic(1);
+}
+
+// Once a round's owners are gone, the same buffer backs a fresh allocator:
+// per-call scratch memory with no heap involved.
+test "fixed buffer is reusable between rounds" {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    testing::expect_equal<i64>(3, try sum_round(scratch, 1));
+    testing::expect_equal<i64>(7, try sum_round(scratch, 3));
+}

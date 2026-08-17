@@ -12,7 +12,7 @@ func (e *emitter) writeArenaRuntimeDecls() {
 	if !e.usesArenaRuntime() {
 		return
 	}
-	e.out.WriteString("declare ptr @kizu_arena_new(i64)\n")
+	e.out.WriteString("declare ptr @kizu_arena_new(ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_arena_add(ptr, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_arena_get(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_arena_deinit(ptr)\n\n")
@@ -50,14 +50,8 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 
 // writeArenaNew lowers std::arena::new<T>(allocator).
 func (e *emitter) writeArenaNew(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || !isArenaLLVMType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: arena.new expects allocator -> Arena<T>")
-	}
-	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_new(i64 %s)\n",
-		resultName, e.elementSizeOperand(instr.Immediate))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	return e.writeContainerNew(instr, "kizu_arena_new",
+		isArenaLLVMType, "arena.new expects allocator -> Arena<T>")
 }
 
 // writeArenaAdd lowers Arena.add(value) to an opaque i64 handle.

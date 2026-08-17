@@ -118,6 +118,89 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsFixedBufferAllocator keeps the tied-allocator chain usable:
+// buffer -> view -> allocator -> owner, including a helper that takes the
+// Allocator parameter, with everything consumed in the frame (ADR-0099).
+func TestCheckAcceptsFixedBufferAllocator(t *testing.T) {
+	source := `fn fill(allocator: Allocator) -> !std::array::Array<i64> {
+    var values = std::array::new<i64>(allocator);
+    errdefer values.deinit();
+    try values.append(7);
+    return values;
+}
+fn main() -> !void {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = std::mem::fixed_buffer(scratch);
+    var values = try fill(alloc);
+    defer values.deinit();
+    try values.append(1);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsFixedBufferEscapes pins the tied-allocator escape rules
+// (ADR-0099): owners and allocators tied to a local buffer stay in the frame.
+func TestCheckRejectsFixedBufferEscapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "owner return",
+			source: `fn leak() -> std::array::Array<i64> {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = std::mem::fixed_buffer(scratch);
+    let values = std::array::new<i64>(alloc);
+    return values;
+}
+fn main() -> !void {
+    var values = leak();
+    values.deinit();
+    return;
+}`,
+			want: "allocated from a tied allocator and cannot escape its frame",
+		},
+		{
+			name: "allocator local escape",
+			source: `fn leak() -> Allocator {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    return std::mem::fixed_buffer(scratch);
+}
+fn main() -> !void {
+    let alloc = leak();
+    var values = std::array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(1);
+    return;
+}`,
+			want: "returns an allocator tied to local state and cannot escape",
+		},
+		{
+			name: "buffer reborrow while allocator lives",
+			source: `fn main() -> !void {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = std::mem::fixed_buffer(scratch);
+    var values = std::array::new<i64>(alloc);
+    defer values.deinit();
+    let sneak = buf.as_mut_bytes();
+    sneak[0] = cast<u8>(1);
+    try values.append(1);
+    return;
+}`,
+			want: "value `buf` cannot be borrowed while mutably borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsBorrowProvenanceReturnConflicts checks parent restrictions stay local.
 func TestCheckRejectsBorrowProvenanceReturnConflicts(t *testing.T) {
 	cases := []struct {

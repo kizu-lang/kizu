@@ -1174,6 +1174,9 @@ fn pick(a: []u8, b: []u8, f: bool) -> []u8   // 戻り値は a と b の両方�
 * `&var T` の戻り値の source は `&var` 引数に限ります(`&T` からは作れない)
 * mutable な戻り値では全 source が exclusive borrow になるため、
   同じ値を 2 つの source 位置に渡せません
+* `Allocator` も tie を運びます。tied な `Allocator` 引数(§15.3)を受けて
+  scalar 以外を返す関数の戻り値は、その allocator の tie を継承します。
+  tie のない allocator からは何も継承せず、既存コードの意味は変わりません
 
 契約は署名だけから導出され、body は参照されません。
 名前付き lifetime parameter、lifetime bounds、anonymous lifetime は
@@ -1878,10 +1881,12 @@ owned string は primitive ではなく、将来 `std::string::String` で扱い
 C ABI へ `std::string::String` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
-安定 allocator factory は `std::mem::page_allocator()` です。
+安定 allocator factory は `std::mem::page_allocator()` と
+`std::mem::fixed_buffer(bytes)` の 2 つです。
 
 ```text
 std::mem::page_allocator() -> Allocator
+std::mem::fixed_buffer(bytes: &var []u8) -> Allocator
 ```
 
 `Allocator` は visible opaque capability type です。
@@ -1890,11 +1895,30 @@ user code が実装できる interface でもありません。
 safe Kizu code は `Allocator` 型を名前として使い、local binding に束縛し、
 明示 allocator を要求する API に渡せます。
 
-`Allocator` は copy 型です。`Array<T>`、`String`、`Map<K, V>`、`Box<T>`、
-`std::arena::Arena<T>` の構築に渡しても allocator binding は move されません。
+tie のない `Allocator`(`page_allocator()`)は copy 型です。`Array<T>`、
+`String`、`Map<K, V>`、`Box<T>`、`std::arena::Arena<T>` の構築に渡しても
+allocator binding は move されません。
 作られた owner は自身の allocation と `deinit` に必要なものを内部で保持し、
 `Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
+
+`fixed_buffer` は stack buffer(§7.1)の writable view から allocator を
+作ります。返る `Allocator` は **tied** で、borrow と同じ扱いです:
+
+* `let` 束縛が必須です。factory 呼び出しを引数位置に inline 書きできません
+* tied `Allocator` は copy / alias / escape できません。ただし `&var []u8`
+  引数から allocator を作って返す関数は書けます(tie は署名で運ばれ、
+  呼び出し側が引数から再導出します)
+* allocator が生きている間、元の buffer は exclusive borrow のままです
+* tied allocator から作った owner は buffer に tied です: 通常の owner として
+  `deinit` を要求されつつ、frame から escape(return、field 格納、move)
+  できません。`Allocator` 引数を取る関数へ渡して作らせることはでき、
+  その結果は呼び出し側で tie を継承します(§9)
+* tied allocator を使う構築・呼び出しの結果は `let` に直接束縛します
+* 解放は no-op です。メモリが戻るのは owner の `deinit` ではなく、
+  allocator と全 owner の解放後(同じ buffer に新しい `fixed_buffer` を
+  作れます)、または buffer の frame 終了です
+* buffer 容量の枯渇は `OutOfMemory` です
 
 hidden default allocator、implicit global allocator、missing allocator argument から
 `page_allocator()` への fallback は使いません。

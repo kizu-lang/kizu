@@ -56,10 +56,19 @@ under `lib/kizu/std/src`.
 
 ## Allocator Capability
 
-`std::mem::page_allocator() -> Allocator` is the stable allocator factory.
-`Allocator` is a visible opaque capability type, not a user-facing contract or
-struct. It is copyable: passing it to `Array<T>`, `String`, `Map<K, V>`,
-`Box<T>`, or `std::arena::Arena<T>` reads the capability and does not move the binding.
+`std::mem::page_allocator() -> Allocator` and
+`std::mem::fixed_buffer(bytes: &var []u8) -> Allocator` are the stable
+allocator factories. `Allocator` is a visible opaque capability type, not a
+user-facing contract or struct. An untied allocator is copyable: passing it to
+`Array<T>`, `String`, `Map<K, V>`, `Box<T>`, or `std::arena::Arena<T>` reads
+the capability and does not move the binding.
+
+`fixed_buffer` returns a **tied** allocator: it holds the buffer's writable
+view exclusively, must be bound with `let`, cannot be aliased or escape the
+frame, and every owner allocated from it is tied to the buffer the same way
+(SPEC §15.3, ADR-0099). Freeing is a no-op; the memory comes back when the
+allocator and its owners are gone or the buffer's frame ends. Exhaustion is
+`OutOfMemory`.
 
 Owned storage created with an allocator keeps whatever it needs for allocation
 and `deinit` internally. The allocator value itself has no public cleanup

@@ -336,6 +336,7 @@ typedef struct {
     int64_t len;
     int64_t cap;
     int64_t elem_size;
+    void *allocator;
 } KizuArray;
 
 typedef struct {
@@ -416,6 +417,7 @@ typedef struct {
        a free slot and terminates. */
     int64_t *index;
     int64_t index_cap;
+    void *allocator;
 } KizuMap;
 
 typedef struct {
@@ -423,9 +425,118 @@ typedef struct {
     int64_t len;
     int64_t cap;
     int64_t elem_size;
+    void *allocator;
 } KizuArena;
 
-void *kizu_array_new(int64_t elem_size);
+/* An Allocator handle is one pointer. NULL is the page allocator (libc).
+   Non-NULL points at a KizuFixedBuffer header that mem_fixed_buffer wrote at
+   the start of the caller's buffer, so a fixed-buffer allocator owns no
+   storage beyond the buffer it was given. Every container allocation and
+   release routes through kizu_rt_* below; that branch is the whole dispatch. */
+typedef struct {
+    unsigned char *data; /* first usable byte, past this header, aligned */
+    int64_t cap;         /* usable bytes */
+    int64_t offset;      /* bump position within data */
+} KizuFixedBuffer;
+
+#define KIZU_FIXED_ALIGN ((int64_t)16)
+/* Round up to a power-of-two alignment; works for any integer operand type. */
+#define KIZU_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
+
+/* Shared zero-capacity state for buffers too small to hold a header. Every
+   allocation from it fails; nothing ever writes to it. */
+static KizuFixedBuffer kizu_fixed_empty;
+
+void *std__internal__builtin__mem_fixed_buffer(KizuSliceU8 view) {
+    if (!view.ptr || view.len <= 0) {
+        return &kizu_fixed_empty;
+    }
+    uintptr_t align = (uintptr_t)KIZU_FIXED_ALIGN;
+    uintptr_t header = KIZU_ALIGN_UP((uintptr_t)view.ptr, align);
+    uintptr_t data = KIZU_ALIGN_UP(header + sizeof(KizuFixedBuffer), align);
+    uintptr_t end = (uintptr_t)view.ptr + (uintptr_t)view.len;
+    if (data > end) {
+        return &kizu_fixed_empty;
+    }
+    KizuFixedBuffer *fixed = (KizuFixedBuffer *)header;
+    fixed->data = (unsigned char *)data;
+    fixed->cap = (int64_t)(end - data);
+    fixed->offset = 0;
+    return fixed;
+}
+
+/* Small allocations align to their own size class, so byte-sized map keys do
+   not burn 16 bytes each of a buffer that never gets memory back. */
+static int64_t kizu_fixed_alignment(int64_t size) {
+    int64_t align = 1;
+    while (align < size && align < KIZU_FIXED_ALIGN) {
+        align *= 2;
+    }
+    return align;
+}
+
+static void *kizu_rt_alloc(void *allocator, int64_t size) {
+    if (size < 0) {
+        return NULL;
+    }
+    if (!allocator) {
+        return malloc((size_t)size);
+    }
+    KizuFixedBuffer *fixed = (KizuFixedBuffer *)allocator;
+    int64_t offset = KIZU_ALIGN_UP(fixed->offset, kizu_fixed_alignment(size));
+    if (offset > fixed->cap - size) {
+        return NULL;
+    }
+    void *out = fixed->data + offset;
+    fixed->offset = offset + size;
+    return out;
+}
+
+static void *kizu_rt_zalloc(void *allocator, int64_t size) {
+    void *out = kizu_rt_alloc(allocator, size);
+    if (out) {
+        memset(out, 0, (size_t)size);
+    }
+    return out;
+}
+
+static void kizu_rt_free(void *allocator, void *ptr) {
+    if (!allocator) {
+        free(ptr);
+    }
+    /* Fixed-buffer memory is reclaimed with the buffer's frame. */
+}
+
+static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64_t new_size) {
+    if (old_size < 0 || new_size < 0) {
+        return NULL;
+    }
+    if (!allocator) {
+        return realloc(ptr, (size_t)new_size);
+    }
+    KizuFixedBuffer *fixed = (KizuFixedBuffer *)allocator;
+    unsigned char *bytes = (unsigned char *)ptr;
+    /* Growing the most recent allocation extends the bump in place, so a
+       container growing step by step does not burn the buffer. */
+    if (bytes && bytes + old_size == fixed->data + fixed->offset) {
+        int64_t start = fixed->offset - old_size;
+        if (start > fixed->cap - new_size) {
+            return NULL;
+        }
+        fixed->offset = start + new_size;
+        return ptr;
+    }
+    void *out = kizu_rt_alloc(allocator, new_size);
+    if (!out) {
+        return NULL;
+    }
+    if (bytes) {
+        memcpy(out, bytes, (size_t)(old_size < new_size ? old_size : new_size));
+    }
+    return out;
+}
+
+void *kizu_array_new(void *allocator, int64_t elem_size);
 _Bool kizu_array_append(void *handle, const void *elem);
 _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
@@ -1154,7 +1265,7 @@ static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 pa
         free(cpath);
         return kizu_err_ptr(kizu_errno_failure(code));
     }
-    void *array = kizu_array_new((int64_t)sizeof(KizuFsDirEntry));
+    void *array = kizu_array_new(NULL, (int64_t)sizeof(KizuFsDirEntry));
     if (!array) {
         closedir(dir);
         free(cpath);
@@ -1271,27 +1382,29 @@ _Bool kizu_bytes_equal(
     return memcmp(left, right, (size_t)left_len) == 0;
 }
 
-void *kizu_array_new(int64_t elem_size) {
+void *kizu_array_new(void *allocator, int64_t elem_size) {
     if (elem_size <= 0) {
         return NULL;
     }
-    KizuArray *array = (KizuArray *)calloc(1, sizeof(KizuArray));
+    KizuArray *array = (KizuArray *)kizu_rt_zalloc(allocator, sizeof(KizuArray));
     if (!array) {
         return NULL;
     }
     array->elem_size = elem_size;
+    array->allocator = allocator;
     return array;
 }
 
-void *kizu_arena_new(int64_t elem_size) {
+void *kizu_arena_new(void *allocator, int64_t elem_size) {
     if (elem_size <= 0) {
         return NULL;
     }
-    KizuArena *arena = (KizuArena *)calloc(1, sizeof(KizuArena));
+    KizuArena *arena = (KizuArena *)kizu_rt_zalloc(allocator, sizeof(KizuArena));
     if (!arena) {
         return NULL;
     }
     arena->elem_size = elem_size;
+    arena->allocator = allocator;
     return arena;
 }
 
@@ -1309,7 +1422,8 @@ static _Bool kizu_arena_reserve(KizuArena *arena, int64_t needed) {
     if (arena->elem_size > 0 && next > INT64_MAX / arena->elem_size) {
         return 0;
     }
-    unsigned char *data = (unsigned char *)realloc(arena->data, (size_t)(next * arena->elem_size));
+    unsigned char *data = (unsigned char *)kizu_rt_realloc(
+        arena->allocator, arena->data, arena->cap * arena->elem_size, next * arena->elem_size);
     if (!data) {
         return 0;
     }
@@ -1342,8 +1456,8 @@ void kizu_arena_deinit(void *handle) {
     if (!arena) {
         return;
     }
-    free(arena->data);
-    free(arena);
+    kizu_rt_free(arena->allocator, arena->data);
+    kizu_rt_free(arena->allocator, arena);
 }
 
 /* One cache line's worth of elements, at least one, so a small Array does not
@@ -1379,7 +1493,8 @@ static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed) {
     if (array->elem_size > 0 && next > INT64_MAX / array->elem_size) {
         return 0;
     }
-    unsigned char *data = (unsigned char *)realloc(array->data, (size_t)(next * array->elem_size));
+    unsigned char *data = (unsigned char *)kizu_rt_realloc(
+        array->allocator, array->data, array->cap * array->elem_size, next * array->elem_size);
     if (!data) {
         return 0;
     }
@@ -1466,15 +1581,16 @@ KizuSliceU8 kizu_array_as_bytes(void *handle) {
     return result;
 }
 
-void *kizu_map_new(int64_t value_size) {
+void *kizu_map_new(void *allocator, int64_t value_size) {
     if (value_size <= 0) {
         return NULL;
     }
-    KizuMap *map = (KizuMap *)calloc(1, sizeof(KizuMap));
+    KizuMap *map = (KizuMap *)kizu_rt_zalloc(allocator, sizeof(KizuMap));
     if (!map) {
         return NULL;
     }
     map->value_size = value_size;
+    map->allocator = allocator;
     return map;
 }
 
@@ -1524,14 +1640,14 @@ static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
     if (next == map->index_cap) {
         return 1;
     }
-    int64_t *index = (int64_t *)malloc((size_t)next * sizeof(int64_t));
+    int64_t *index = (int64_t *)kizu_rt_alloc(map->allocator, next * (int64_t)sizeof(int64_t));
     if (!index) {
         return 0;
     }
     for (int64_t slot = 0; slot < next; slot += 1) {
         index[slot] = -1;
     }
-    free(map->index);
+    kizu_rt_free(map->allocator, map->index);
     map->index = index;
     map->index_cap = next;
     uint64_t mask = (uint64_t)next - 1;
@@ -1559,8 +1675,9 @@ static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
     if (next > INT64_MAX / (int64_t)sizeof(KizuMapEntry)) {
         return 0;
     }
-    KizuMapEntry *entries = (KizuMapEntry *)realloc(
-        map->entries, (size_t)(next * (int64_t)sizeof(KizuMapEntry)));
+    KizuMapEntry *entries = (KizuMapEntry *)kizu_rt_realloc(
+        map->allocator, map->entries,
+        map->cap * (int64_t)sizeof(KizuMapEntry), next * (int64_t)sizeof(KizuMapEntry));
     if (!entries) {
         return 0;
     }
@@ -1588,11 +1705,11 @@ _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, c
     if (!kizu_map_reserve(map, map->len + 1)) {
         return 0;
     }
-    unsigned char *key_copy = (unsigned char *)malloc((size_t)key_len);
-    unsigned char *value_copy = (unsigned char *)malloc((size_t)map->value_size);
+    unsigned char *key_copy = (unsigned char *)kizu_rt_alloc(map->allocator, key_len);
+    unsigned char *value_copy = (unsigned char *)kizu_rt_alloc(map->allocator, map->value_size);
     if ((!key_copy && key_len > 0) || !value_copy) {
-        free(key_copy);
-        free(value_copy);
+        kizu_rt_free(map->allocator, key_copy);
+        kizu_rt_free(map->allocator, value_copy);
         return 0;
     }
     if (key_len > 0) {
@@ -1632,12 +1749,12 @@ void kizu_map_deinit(void *handle) {
         return;
     }
     for (int64_t i = 0; i < map->len; i += 1) {
-        free(map->entries[i].key);
-        free(map->entries[i].value);
+        kizu_rt_free(map->allocator, map->entries[i].key);
+        kizu_rt_free(map->allocator, map->entries[i].value);
     }
-    free(map->entries);
-    free(map->index);
-    free(map);
+    kizu_rt_free(map->allocator, map->entries);
+    kizu_rt_free(map->allocator, map->index);
+    kizu_rt_free(map->allocator, map);
 }
 
 void kizu_array_deinit(void *handle) {
@@ -1645,7 +1762,7 @@ void kizu_array_deinit(void *handle) {
     if (!array) {
         return;
     }
-    free(array->data);
-    free(array);
+    kizu_rt_free(array->allocator, array->data);
+    kizu_rt_free(array->allocator, array);
 }
 `

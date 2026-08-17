@@ -12,7 +12,7 @@ func (e *emitter) writeMapRuntimeDecls() {
 	if !e.usesMapRuntime() {
 		return
 	}
-	e.out.WriteString("declare ptr @kizu_map_new(i64)\n")
+	e.out.WriteString("declare ptr @kizu_map_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
@@ -56,14 +56,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 
 // writeMapNew lowers std::map::new<[]u8, V>(allocator).
 func (e *emitter) writeMapNew(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || !isMapLLVMType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: map.new expects allocator -> Map<[]u8, V>")
-	}
-	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_new(i64 %s)\n",
-		resultName, e.elementSizeOperand(instr.Immediate))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	return e.writeContainerNew(instr, "kizu_map_new",
+		isMapLLVMType, "map.new expects allocator -> Map<[]u8, V>")
 }
 
 // writeMapInsert lowers Map.insert(key, value).
