@@ -997,8 +997,22 @@ borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
 間 container は borrow されます。receiver は local binding のほか、owner の
 直 field(`owner.field.at_mut(...)`)を書けます: このとき borrow は owner の
 該当 field に付き、owner の move とその field の操作が capture の最終使用
-まで待ちます。保存・`orelse`・signature への出現はすべて拒否します
-(§std array、§std map、§10)。
+まで待ちます。保存と `orelse` は拒否します(§std array、§std map、§10)。
+
+関数は bare の `?&T` / `?&var T` を戻り値型として宣言できます。契約は
+署名から構造的に導出され(ADR-0098)、呼び出し側の capture は borrow を
+運べる引数(receiver 含む)を保守的に borrow します。body が返せるのは
+borrowed parameter 由来の borrow だけで、local な container の borrow を
+返す経路は拒否します。宣言した borrow-optional return は capture 条件と
+並ぶ第二の消費位置で、それ以外の場所に `?&T` の値は存在できません。
+
+```kizu
+fn (self: &var Registry) user(id: i64) -> ?&var User {
+    return self.users.at_mut(id);
+}
+
+if registry.user(id) |u| { u.visits = u.visits + 1; }
+```
 
 現在の制限:
 
@@ -2247,10 +2261,10 @@ element borrow、範囲外なら `null` です。borrow optional を消費でき
 capture 条件だけです(`if array.at(i) |elem|` / `while array.at(i) |elem|`)。
 capture が element borrow を bind し、その scope の間 array は
 borrow されたままです(`at` は shared、`at_mut` は mutable)。
-`?&T` を binding に保存する、`orelse` で受ける、関数 signature に書く、の
-いずれも拒否します。element borrow が array の変更や解放より長生きする
-経路を positional に閉じるためで、`as_bytes` の let-initializer 限定と
-同じ整理です。`at_mut` は mutable な受け手(`var` binding または
+`?&T` を binding に保存する、`orelse` で受ける、のどちらも拒否します
+(戻り値型としての宣言は §7)。element borrow が array の変更や解放より
+長生きする経路を positional に閉じるためで、`as_bytes` の let-initializer
+限定と同じ整理です。`at_mut` は mutable な受け手(`var` binding または
 `&var` 借用)を要求します。
 `while array.at(i) |elem|` は §6.10 の optional 条件 capture そのままなので、
 non-copy element の iteration も `get` と同じ形になります。

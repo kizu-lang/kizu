@@ -33,10 +33,12 @@ type Checker struct {
 	// binding; a statement ending with entries left over used the result some
 	// other way, which would lose the tie, so checkBlock rejects it.
 	pendingAllocTaints []allocTaint
-	// captureCondition is set while an if/while capture condition is checked.
-	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
-	// `?&var T` only in this context and refuse everywhere else.
+	// captureCondition is set while an if/while capture condition is checked,
+	// borrowReturn while the value of a declared borrow-optional return is.
+	// Calls producing `?&T` / `?&var T` are legal only in these two contexts
+	// and refuse everywhere else.
 	captureCondition bool
+	borrowReturn     bool
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -811,7 +813,17 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 			return err
 		}
 	}
-	if _, err := c.moveExpr(stmt.Value, env); err != nil {
+	saved := c.borrowReturn
+	if c.currentFunction != nil {
+		if _, _, bare := typ.BorrowOptionalElem(returnTypeName(c.currentFunction)); bare {
+			// A declared borrow-optional return is the second consumer of
+			// `?&T`: the returned borrow flows on to the caller's capture.
+			c.borrowReturn = true
+		}
+	}
+	_, err := c.moveExpr(stmt.Value, env)
+	c.borrowReturn = saved
+	if err != nil {
 		return err
 	}
 	exit := leakExit{}
@@ -1397,21 +1409,29 @@ func isBufferTypeName(typeName string) bool {
 		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
-// containerBorrowCondition describes a recognized container at/at_mut capture
-// condition: which binding it borrows — a local container, or one direct
-// container field of an owner — and how.
-type containerBorrowCondition struct {
-	containerName string
-	field         string
-	elem          string
-	mutable       bool
+// borrowCaptureTarget names one binding (or one field of it) a recognized
+// capture condition borrows, and how.
+type borrowCaptureTarget struct {
+	name    string
+	field   string
+	mutable bool
 }
 
-// matchContainerBorrowCondition recognizes capture conditions built from a
-// container's capture accessor — the accessCapture entries of the shared
-// table. The call is checked through the normal method dispatch with the
-// capture context set, so each accessor's own checker validates receiver and
-// arguments once, and this recognizer only reads the payload type it returns.
+// containerBorrowCondition describes a recognized borrow-optional capture
+// condition: which bindings it borrows and what payload the capture binds.
+type containerBorrowCondition struct {
+	targets []borrowCaptureTarget
+	elem    string
+	mutable bool
+}
+
+// matchContainerBorrowCondition recognizes capture conditions whose call
+// produces a borrow optional — a container capture accessor, or a function
+// declaring a `?&T` / `?&var T` return. The call is read exactly once through
+// the normal call path with the capture context set, so each callee's own
+// checker validates receiver and arguments; this recognizer reads the payload
+// type that comes back and the bindings the borrow ties to (ADR-0098:
+// conservative union of borrow-capable arguments).
 func (c *Checker) matchContainerBorrowCondition(
 	cond ast.Expression,
 	env *scope,
@@ -1420,27 +1440,13 @@ func (c *Checker) matchContainerBorrowCondition(
 	if !ok {
 		return containerBorrowCondition{}, false, nil
 	}
-	field, ok := call.Callee.(*ast.FieldExpr)
+	targets, fromAccessor, ok := c.borrowOptionalCallTargets(call, env)
 	if !ok {
-		return containerBorrowCondition{}, false, nil
-	}
-	targetName, fieldName, typeName, ok := c.captureReceiverPlace(field.Receiver, env)
-	if !ok {
-		return containerBorrowCondition{}, false, nil
-	}
-	base, _, ok := splitGenericType(typeName)
-	if !ok || containerAccessTables[base].methods[field.Name] != accessCapture {
 		return containerBorrowCondition{}, false, nil
 	}
 	saved := c.captureCondition
 	c.captureCondition = true
-	var result string
-	var err error
-	if fieldName == "" {
-		result, err = c.checkLocalReceiverMethod(field, call.Args, env)
-	} else {
-		result, _, err = c.checkDirectFieldReceiverMethod(field, call.Args, env)
-	}
+	result, err := c.readExpr(cond, env)
 	c.captureCondition = saved
 	if err != nil {
 		return containerBorrowCondition{}, false, err
@@ -1449,11 +1455,94 @@ func (c *Checker) matchContainerBorrowCondition(
 	if !ok {
 		return containerBorrowCondition{}, false, errorf(
 			"move error: capture accessor `%s` returned %s, not a borrow optional",
-			field.Name, result)
+			call.Callee.String(), result)
 	}
-	return containerBorrowCondition{
-		containerName: targetName, field: fieldName, elem: elem, mutable: mutable,
-	}, true, nil
+	if fromAccessor {
+		// A container accessor borrows its container the way the payload
+		// says: `at` shared, `at_mut` mutable.
+		for i := range targets {
+			targets[i].mutable = mutable
+		}
+	}
+	return containerBorrowCondition{targets: targets, elem: elem, mutable: mutable}, true, nil
+}
+
+// borrowOptionalCallTargets pre-gates a capture condition without reading it:
+// whether the call can produce a borrow optional, and which bindings the
+// capture would borrow. fromAccessor separates container capture accessors,
+// whose one target follows the payload's mutability, from declared returns,
+// whose targets follow each borrow parameter's kind.
+func (c *Checker) borrowOptionalCallTargets(
+	call *ast.CallExpr,
+	env *scope,
+) ([]borrowCaptureTarget, bool, bool) {
+	switch callee := call.Callee.(type) {
+	case *ast.FieldExpr:
+		place, fieldName, typeName, ok := c.captureReceiverPlace(callee.Receiver, env)
+		if !ok {
+			return nil, false, false
+		}
+		if base, generic := splitGenericBase(typeName); generic &&
+			containerAccessTables[base].methods[callee.Name] == accessCapture {
+			return []borrowCaptureTarget{{name: place, field: fieldName}}, true, true
+		}
+		method := c.implMethod(typeName, callee.Name)
+		if method == nil {
+			return nil, false, false
+		}
+		if _, _, bare := typ.BorrowOptionalElem(returnTypeName(method)); !bare {
+			return nil, false, false
+		}
+		targets := []borrowCaptureTarget{}
+		if len(method.params) > 0 && method.params[0].borrow {
+			targets = append(targets, borrowCaptureTarget{
+				name: place, field: fieldName, mutable: method.params[0].mutBorrow,
+			})
+		}
+		return append(targets, c.borrowArgTargets(method.params[1:], call.Args, env)...),
+			false, true
+	case *ast.IdentExpr:
+		fn, ok := c.functions[callee.Name]
+		if !ok {
+			return nil, false, false
+		}
+		if _, _, bare := typ.BorrowOptionalElem(returnTypeName(fn)); !bare {
+			return nil, false, false
+		}
+		return c.borrowArgTargets(fn.params, call.Args, env), false, true
+	default:
+		return nil, false, false
+	}
+}
+
+// splitGenericBase returns the base of a generic type name, or "" when the
+// spelling is not generic.
+func splitGenericBase(typeName string) (string, bool) {
+	base, _, ok := splitGenericType(typeName)
+	return base, ok
+}
+
+// borrowArgTargets resolves the bindings borrow parameters tie a returned
+// borrow to. An argument that is not a nameable place carries no tie.
+func (c *Checker) borrowArgTargets(
+	params []paramInfo,
+	args []ast.Expression,
+	env *scope,
+) []borrowCaptureTarget {
+	targets := []borrowCaptureTarget{}
+	for idx, param := range params {
+		if idx >= len(args) || !param.borrow {
+			continue
+		}
+		value, field, err := c.callBorrowTarget(args[idx], env)
+		if err != nil || value == nil {
+			continue
+		}
+		targets = append(targets, borrowCaptureTarget{
+			name: value.name, field: field, mutable: param.mutBorrow,
+		})
+	}
+	return targets
 }
 
 // captureReceiverPlace resolves the borrowable place a capture-condition
@@ -1490,33 +1579,36 @@ func (c *Checker) captureReceiverPlace(
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
-// at/at_mut condition and activates the payload borrow on the branch scope's
-// clone of the container — the whole binding, or one field of its owner — so
-// the branch body sees mutation and deinit wait on the capture.
+// borrow-optional condition and activates the payload borrow on the branch
+// scope's clones of every tied binding — whole bindings and owner fields
+// alike — so the branch body sees mutation and deinit wait on the capture.
 func (c *Checker) tieContainerBorrowCapture(
 	name string,
 	match containerBorrowCondition,
 	cond ast.Expression,
 	branch *scope,
 ) (*binding, error) {
-	target, exists := branch.lookup(match.containerName)
-	if !exists {
-		return nil, errorf("move error: unknown value `%s`", match.containerName)
-	}
-	if match.field != "" {
-		if err := checkBorrowConflictForField(target, match.field, match.mutable); err != nil {
-			return nil, err
-		}
-	} else if err := checkBorrowConflict(target, match.mutable); err != nil {
-		return nil, err
-	}
-	c.activateBorrow(target, match.field, match.mutable)
 	value := c.newBinding(name, match.elem)
 	value.declSpan = expressionSpan(cond)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTargets = []borrowSource{{target: target, field: match.field}}
 	value.mutBorrow = match.mutable
+	for _, target := range match.targets {
+		holder, exists := branch.lookup(target.name)
+		if !exists {
+			return nil, errorf("move error: unknown value `%s`", target.name)
+		}
+		if target.field != "" {
+			if err := checkBorrowConflictForField(holder, target.field, target.mutable); err != nil {
+				return nil, err
+			}
+		} else if err := checkBorrowConflict(holder, target.mutable); err != nil {
+			return nil, err
+		}
+		c.activateBorrow(holder, target.field, target.mutable)
+		value.borrowTargets = append(value.borrowTargets,
+			borrowSource{target: holder, field: target.field})
+	}
 	return value, nil
 }
 
@@ -2812,12 +2904,48 @@ func isBooleanBinaryOperator(op string) bool {
 // the funnel every call form passes through, so the tied-allocator taint of
 // the result is recorded here once, and no call path can forget it.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
-	typ, err := c.dispatchCallExpr(expr, env)
+	result, err := c.dispatchCallExpr(expr, env)
 	if err != nil {
-		return typ, err
+		return result, err
 	}
-	c.pendTiedAllocatorArgs(expr.Args, typ, env)
-	return typ, nil
+	if err := c.checkBorrowOptionalResult(expr, result, env); err != nil {
+		return "", err
+	}
+	c.pendTiedAllocatorArgs(expr.Args, result, env)
+	return result, nil
+}
+
+// checkBorrowOptionalResult is the one gate for every call that produces a
+// borrow optional: legal inside a capture condition, legal as the value of a
+// declared borrow-optional return when every tied binding is a borrowed
+// parameter (the borrow must survive the frame), refused everywhere else.
+func (c *Checker) checkBorrowOptionalResult(
+	expr *ast.CallExpr,
+	result string,
+	env *scope,
+) error {
+	if _, _, bare := typ.BorrowOptionalElem(result); !bare {
+		return nil
+	}
+	if c.captureCondition {
+		return nil
+	}
+	if !c.borrowReturn {
+		return errorf("move error: a call returning %s must be consumed by a capture"+
+			" (`if call |name|` or `while call |name|`)", result)
+	}
+	targets, _, ok := c.borrowOptionalCallTargets(expr, env)
+	if !ok {
+		return errorf("borrow error: returned %s has no recognizable borrow source", result)
+	}
+	for _, target := range targets {
+		holder, exists := env.lookup(target.name)
+		if !exists || !holder.borrowedParam {
+			return errorf("borrow error: returned %s must borrow a borrowed parameter,"+
+				" not local `%s`", result, target.name)
+		}
+	}
+	return nil
 }
 
 // dispatchCallExpr routes a call expression to its checker by callee shape.
@@ -4618,17 +4746,20 @@ func (c *Checker) checkArenaAtCondition(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if !c.captureCondition {
+	if !c.captureCondition && !c.borrowReturn {
 		return "", errorf("arena error: `Arena.at_mut` must be consumed by a capture" +
 			" (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)")
 	}
-	// The flag covers exactly this call: clear it before the argument is
-	// read, so a nested at/at_mut in argument position refuses as usual.
-	c.captureCondition = false
 	if !mutablePlace(arena) {
 		return "", errorf("arena error: `Arena.at_mut` requires mutable arena binding")
 	}
+	// The context covers exactly this call: both flags off while the
+	// argument is read — a nested at/at_mut in argument position refuses as
+	// usual — and back for the result the call gate reads.
+	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
+	c.captureCondition, c.borrowReturn = false, false
 	elem, err := c.checkArenaHandleArg(arena, args, env, "Arena.at_mut")
+	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
 	if err != nil {
 		return "", err
 	}
@@ -5265,21 +5396,21 @@ func (c *Checker) checkArrayAtCondition(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if !c.captureCondition {
+	if !c.captureCondition && !c.borrowReturn {
 		return "", errorf("array error: `Array.%s` must be consumed by a capture"+
 			" (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
 			name, name, name)
 	}
-	// The flag covers exactly this call: clear it before the arguments are
-	// read, so a nested at/at_mut in argument position refuses as usual.
-	c.captureCondition = false
 	if name == "at_mut" && !mutablePlace(array) {
 		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
 	}
 	if len(args) != 1 {
 		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.readExpr(args[0], env)
+	// The context covers exactly this call: both flags off while the
+	// argument is read — a nested at/at_mut in argument position refuses as
+	// usual — and back for the result the call gate reads.
+	got, err := c.readOutsideBorrowContext(args[0], env)
 	if err != nil {
 		return "", err
 	}
@@ -5290,6 +5421,16 @@ func (c *Checker) checkArrayAtCondition(
 		return "?&var " + elem, nil
 	}
 	return "?&" + elem, nil
+}
+
+// readOutsideBorrowContext reads one expression with the borrow-optional
+// contexts off, so producers nested inside it refuse as usual.
+func (c *Checker) readOutsideBorrowContext(expr ast.Expression, env *scope) (string, error) {
+	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
+	c.captureCondition, c.borrowReturn = false, false
+	result, err := c.readExpr(expr, env)
+	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
+	return result, err
 }
 
 // checkArrayReadNoArgs validates len/capacity reads.
@@ -5415,18 +5556,22 @@ func (c *Checker) checkMapAtCondition(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if !c.captureCondition {
+	if !c.captureCondition && !c.borrowReturn {
 		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
 			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
 			name, name, name)
 	}
-	// The flag covers exactly this call: clear it before the arguments are
-	// read, so a nested at/at_mut in argument position refuses as usual.
-	c.captureCondition = false
 	if name == "at_mut" && !mutablePlace(mapValue) {
 		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
 	}
-	if err := c.checkMapKeyArg(name, args, env); err != nil {
+	// The context covers exactly this call: both flags off while the
+	// argument is read — a nested at/at_mut in argument position refuses as
+	// usual — and back for the result the call gate reads.
+	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
+	c.captureCondition, c.borrowReturn = false, false
+	err := c.checkMapKeyArg(name, args, env)
+	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
+	if err != nil {
 		return "", err
 	}
 	if name == "at_mut" {

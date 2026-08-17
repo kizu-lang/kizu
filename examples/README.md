@@ -48,6 +48,7 @@ go test ./...
 | `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
 | `at_mut` through a `&var` parameter | `std_map_at_mut_helper.kizu` | moves counter-update logic into a helper taking the map by `&var` |
 | `at_mut` on an owner's container field | `std_array_at_mut_field.kizu` | a `&var self` method captures `self.users.at_mut(id)` and writes in place |
+| borrow-optional return accessors | `borrow_accessor.kizu` | `fn (self: &var Registry) user(id) -> ?&var User` feeds the caller's capture |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
@@ -166,6 +167,8 @@ single source file. Run them with `kizu check <package-root>`.
 | fields of immutable owners are not mutable places | `negative/std_array_field_at_mut_immutable.kizu` | `requires mutable array binding` |
 | a field capture borrows the owner's field | `negative/std_array_field_read_while_mut_borrowed.kizu` | `cannot be read while mutably borrowed` |
 | owners cannot move while a field is borrowed | `negative/owner_move_while_field_borrowed.kizu` | `cannot be moved while borrowed` |
+| returned borrows must root in a borrowed parameter | `negative/borrow_accessor_local_escape.kizu` | `must borrow a borrowed parameter` |
+| borrow-optional call results are capture-only | `negative/borrow_accessor_store.kizu` | `must be consumed by a capture` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
@@ -234,7 +237,6 @@ single source file. Run them with `kizu check <package-root>`.
 | mutable array borrow blocks reads | `negative/std_array_read_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
 | mutable array borrow requires `var` | `negative/std_array_at_mut_immutable.kizu` | `requires mutable array binding` |
 | array element borrows cannot be passed as owned values | `negative/std_array_at_pass_to_owned_param.kizu` | `` borrowed value `first` cannot escape `` |
-| array element borrows cannot escape through return | `negative/std_array_at_return_escape.kizu` | `cannot return a borrow optional` |
 | array borrow optionals are capture-only | `negative/std_array_at_requires_capture.kizu` | `` `Array.at` must be consumed by a capture `` |
 | array elements reject raw pointers through structs | `negative/std_array_struct_raw_pointer_element.kizu` | `raw pointer` |
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
