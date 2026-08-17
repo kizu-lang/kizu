@@ -61,17 +61,14 @@ under `lib/kizu/std/src`.
 struct. It is copyable: passing it to `Array<T>`, `String`, `Map<K, V>`,
 `Box<T>`, or `std::arena::Arena<T>` reads the capability and does not move the binding.
 
-Owned storage created with an allocator stores the runtime allocator handle it
-needs for allocation and `deinit`. The allocator value itself has no public
-cleanup method. Allocating operations continue to report allocation failure as
+Owned storage created with an allocator keeps whatever it needs for allocation
+and `deinit` internally. The allocator value itself has no public cleanup
+method. Allocating operations continue to report allocation failure as
 `!T` or `!void`.
 
 There is no hidden default allocator and no implicit fallback to
 `page_allocator()`. Safe `std::mem` APIs do not expose raw pointer allocation
 methods, allocator metadata, mutable backing slices, or deallocation primitives.
-User-defined allocators, `fixed_buffer_allocator`, and `testing_allocator` are
-deferred to #549 so their ownership, alignment, failure, and unsafe-boundary
-rules can be specified explicitly.
 
 ## Builtin Thinning Policy
 
