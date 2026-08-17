@@ -95,6 +95,8 @@ func (e *emitter) writeHeader() {
 	if e.usesSliceABI() {
 		e.out.WriteString("%kizu.slice.u8 = type { ptr, i64 }\n")
 	}
+	// Optionals go first: an `E!?T` union references its `?T` member.
+	e.writeOptionalTypes()
 	e.writeErrorUnionTypes()
 	e.writeUnionTypes()
 	e.writeStructTypes()
@@ -339,6 +341,54 @@ func (e *emitter) writeErrorUnionTypes() {
 	}
 }
 
+// writeOptionalTypes writes named optional-value ABI definitions: a presence
+// tag and the payload, the layout `!T` success already uses.
+func (e *emitter) writeOptionalTypes() {
+	names := e.sortedOptionalNames()
+	for _, name := range names {
+		elem, _ := optionalElemLLVM(name)
+		fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
+			llvmOptionalTypeName(name), e.llvmType(elem))
+	}
+	if len(names) > 0 {
+		e.out.WriteByte('\n')
+	}
+}
+
+// sortedOptionalNames returns every optional type this module spells.
+func (e *emitter) sortedOptionalNames() []string {
+	return e.collectModuleTypeNames(collectOptionalName)
+}
+
+// collectOptionalName records name when it is an optional value type, or an
+// error union whose success is one (`E!?T` defines `?T`'s aggregate too).
+func collectOptionalName(seen map[string]bool, name string) {
+	if _, ok := optionalElemLLVM(name); ok {
+		seen[name] = true
+		return
+	}
+	// Only an error union can hold an optional, and every error-union
+	// spelling contains `!`; the byte check keeps this walk parse-free for
+	// the scalar names that dominate a module.
+	if !strings.Contains(name, "!") {
+		return
+	}
+	if success, ok := errorUnionSuccessType(name); ok {
+		collectOptionalName(seen, success)
+	}
+}
+
+// optionalElemLLVM returns T for an optional value type `?T`.
+func optionalElemLLVM(name string) (string, bool) {
+	return typ.OptionalElem(name)
+}
+
+// llvmOptionalTypeName names the LLVM aggregate of one optional type.
+func llvmOptionalTypeName(name string) string {
+	elem, _ := optionalElemLLVM(name)
+	return "%kizu.opt." + llvmNamePart(elem)
+}
+
 // writeExternalCallDecls declares runtime calls that are not defined in the module.
 func (e *emitter) writeExternalCallDecls() {
 	decls := e.externalCallDecls()
@@ -551,32 +601,39 @@ func isSliceType(typ string) bool {
 
 // sortedErrorUnionNames returns all error-union types referenced by this module.
 func (e *emitter) sortedErrorUnionNames() []string {
+	return e.collectModuleTypeNames(e.collectErrorUnionName)
+}
+
+// collectModuleTypeNames hands every type spelling the module holds to
+// collect, then returns the recorded names sorted. One walk serves every
+// named-type collector, so none of them can drop a position the others scan.
+func (e *emitter) collectModuleTypeNames(collect func(map[string]bool, string)) []string {
 	seen := map[string]bool{}
 	for _, st := range e.module.Structs {
 		for _, field := range st.Fields {
-			e.collectErrorUnionName(seen, field.Type)
+			collect(seen, field.Type)
 		}
 	}
 	for _, fn := range e.module.Functions {
-		e.collectErrorUnionName(seen, fn.Return)
+		collect(seen, fn.Return)
 		for _, param := range fn.Params {
-			e.collectErrorUnionName(seen, param.Type)
+			collect(seen, param.Type)
 		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				e.collectErrorUnionName(seen, instr.Result.Type)
+				collect(seen, instr.Result.Type)
 				for _, arg := range instr.Args {
-					e.collectErrorUnionName(seen, arg.Type)
+					collect(seen, arg.Type)
 				}
 				for _, field := range instr.Fields {
-					e.collectErrorUnionName(seen, field.Value.Type)
+					collect(seen, field.Value.Type)
 				}
 				for _, incoming := range instr.Incoming {
-					e.collectErrorUnionName(seen, incoming.Value.Type)
+					collect(seen, incoming.Value.Type)
 				}
 			}
-			e.collectErrorUnionName(seen, block.Terminator.Value.Type)
-			e.collectErrorUnionName(seen, block.Terminator.Cond.Type)
+			collect(seen, block.Terminator.Value.Type)
+			collect(seen, block.Terminator.Cond.Type)
 		}
 	}
 	names := make([]string, 0, len(seen))
@@ -836,9 +893,95 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeSliceInstr(instr)
 	case strings.HasPrefix(instr.Op, "error."):
 		return e.writeErrorInstr(instr)
+	case strings.HasPrefix(instr.Op, "opt."):
+		return e.writeOptInstr(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
+}
+
+// writeOptInstr dispatches optional-value operations.
+func (e *emitter) writeOptInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "opt.some":
+		return e.writeOptSome(instr)
+	case "opt.null":
+		return e.writeOptNull(instr)
+	case "opt.has":
+		return e.writeOptHas(instr)
+	case "opt.value":
+		return e.writeOptValue(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported optional instruction `%s`", instr.Op)
+	}
+}
+
+// writeOptSome wraps a payload into a present optional.
+func (e *emitter) writeOptSome(instr *ir.Instr) error {
+	elem, ok := optionalElemLLVM(instr.Result.Type)
+	if !ok || len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: opt.some expects one payload and a `?T` result")
+	}
+	resultName := localName(instr.Result.Name)
+	optType := e.llvmType(instr.Result.Type)
+	someName := resultName + ".some"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
+		someName, optType)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
+		resultName, optType, someName, e.llvmType(elem), e.value(instr.Args[0]).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeOptNull builds the empty optional.
+func (e *emitter) writeOptNull(instr *ir.Instr) error {
+	if _, ok := optionalElemLLVM(instr.Result.Type); !ok || len(instr.Args) != 0 {
+		return fmt.Errorf("llvm error: opt.null expects no args and a `?T` result")
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
+		resultName, e.llvmType(instr.Result.Type))
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeOptHas tests whether an optional holds a value.
+func (e *emitter) writeOptHas(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: opt.has expects 1 arg")
+	}
+	source := instr.Args[0]
+	if _, ok := optionalElemLLVM(source.Type); !ok {
+		return fmt.Errorf("llvm error: opt.has expects `?T`, got %s", source.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	tagName := resultName + ".tag"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
+		tagName, e.llvmType(source.Type), e.value(source).operand)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", resultName, tagName)
+	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
+	return nil
+}
+
+// writeOptValue extracts the payload of an optional. The caller has already
+// branched on presence; an absent payload is only ever produced, never read.
+func (e *emitter) writeOptValue(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: opt.value expects 1 arg")
+	}
+	source := instr.Args[0]
+	elem, ok := optionalElemLLVM(source.Type)
+	if !ok {
+		return fmt.Errorf("llvm error: opt.value expects `?T`, got %s", source.Type)
+	}
+	if instr.Result.Type != elem {
+		return fmt.Errorf("llvm error: opt.value returns %s, got %s", elem, instr.Result.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",
+		resultName, e.llvmType(source.Type), e.value(source).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: elem, operand: resultName}
+	return nil
 }
 
 // writeFieldInstr dispatches struct field reads and writes. The borrowed-write

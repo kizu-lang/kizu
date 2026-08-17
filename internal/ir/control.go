@@ -13,11 +13,22 @@ type branchResult struct {
 	value     Value
 }
 
-// lowerIfStmt lowers if/else into branches and a merge block.
+// lowerIfStmt lowers if/else into branches and a merge block. With a capture,
+// the condition is an optional: the branch tests presence and the payload is
+// bound for the consequence only.
 func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	cond, err := l.lowerExpr(stmt.Condition)
 	if err != nil {
 		return err
+	}
+	var payload Value
+	if stmt.Capture != "" {
+		elem, ok := optionalElemType(cond.Type)
+		if !ok {
+			return fmt.Errorf("ir error: if capture needs a `?T` condition, got %s", cond.Type)
+		}
+		payload = l.emit("opt.value", elem, []Value{cond}, "")
+		cond = l.emit("opt.has", "bool", []Value{cond}, "")
 	}
 	thenBlock := l.newBlock(l.nextBlockName("if.then"))
 	elseBlock := l.newBlock(l.nextBlockName("if.else"))
@@ -25,7 +36,21 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
+	var previous Value
+	var hadPrevious bool
+	if stmt.Capture != "" {
+		previous, hadPrevious = l.env.get(stmt.Capture)
+		l.env.set(stmt.Capture, payload)
+	}
 	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, false)
+	if stmt.Capture != "" {
+		// The capture is scoped to the consequence; the else branch and the
+		// merged environment see whatever the name meant outside.
+		l.restoreLoopVar(stmt.Capture, previous, hadPrevious)
+		if err == nil {
+			restoreBranchVar(thenResult.env, stmt.Capture, previous, hadPrevious)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -49,6 +74,54 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 		mergeBlock.Terminator = Terminator{Op: "unreachable"}
 	}
 	return nil
+}
+
+// restoreBranchVar puts a scoped capture's outer meaning back into a branch
+// environment, so the merge after the branch never sees the capture.
+func restoreBranchVar(branchEnv *env, name string, previous Value, hadPrevious bool) {
+	if hadPrevious {
+		branchEnv.set(name, previous)
+		return
+	}
+	branchEnv.remove(name)
+}
+
+// lowerOrelseExpr lowers `opt orelse default` as a presence branch merged by a
+// phi, the same shape the short-circuit boolean operators take.
+func (l *lowerer) lowerOrelseExpr(expr *ast.BinaryExpr) (Value, error) {
+	opt, err := l.lowerExpr(expr.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := optionalElemType(opt.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: orelse needs a `?T` left operand, got %s", opt.Type)
+	}
+	has := l.emit("opt.has", "bool", []Value{opt}, "")
+	someBlock := l.newBlock(l.nextBlockName("orelse.some"))
+	elseBlock := l.newBlock(l.nextBlockName("orelse.else"))
+	mergeBlock := l.newBlock(l.nextBlockName("orelse.end"))
+	l.block.Terminator = Terminator{
+		Op: "branch", Cond: has, Target: someBlock.Name, Else: elseBlock.Name,
+	}
+	l.block = someBlock
+	value := l.emit("opt.value", elem, []Value{opt}, "")
+	someEnd := l.block.Name
+	l.block.Terminator = Terminator{Op: "jump", Target: mergeBlock.Name}
+	l.block = elseBlock
+	fallback, err := l.lowerContextualExpr(expr.Right, elem)
+	if err != nil {
+		return Value{}, err
+	}
+	elseEnd := l.block.Name
+	if l.block.Terminator.Op == "" {
+		l.block.Terminator = Terminator{Op: "jump", Target: mergeBlock.Name}
+	}
+	l.block = mergeBlock
+	return l.addPhi(mergeBlock, elem, []Incoming{
+		{Block: someEnd, Value: value},
+		{Block: elseEnd, Value: fallback},
+	}), nil
 }
 
 // lowerLogicalExpr lowers short-circuit boolean operators into control flow.
@@ -297,13 +370,29 @@ func (l *lowerer) lowerLoop(shape loopShape) error {
 }
 
 // lowerWhileStmt lowers a loop that tests a condition and goes straight back.
+// With a capture, the condition is an optional tested per round: the loop
+// runs while it holds a value, and the payload is the capture binding.
 func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
+	if stmt.Capture != "" {
+		previous, hadPrevious := l.env.get(stmt.Capture)
+		defer l.restoreLoopVar(stmt.Capture, previous, hadPrevious)
+	}
 	return l.lowerLoop(loopShape{
 		name:  "while",
 		label: stmt.Label,
 		body:  stmt.Body,
 		header: func(string) (Value, error) {
-			return l.lowerExpr(stmt.Condition)
+			cond, err := l.lowerExpr(stmt.Condition)
+			if err != nil || stmt.Capture == "" {
+				return cond, err
+			}
+			elem, ok := optionalElemType(cond.Type)
+			if !ok {
+				return Value{}, fmt.Errorf(
+					"ir error: while capture needs a `?T` condition, got %s", cond.Type)
+			}
+			l.env.set(stmt.Capture, l.emit("opt.value", elem, []Value{cond}, ""))
+			return l.emit("opt.has", "bool", []Value{cond}, ""), nil
 		},
 	})
 }
@@ -350,13 +439,11 @@ func (l *lowerer) createForIndexPhi(block *Block, incoming string, start Value) 
 	return phi
 }
 
-// restoreLoopVar removes the scoped for variable after lowering the loop.
+// restoreLoopVar removes a scoped loop variable after lowering the loop. It
+// reads l.env at call time, so a deferred restore lands in whatever
+// environment is current then.
 func (l *lowerer) restoreLoopVar(name string, previous Value, hadPrevious bool) {
-	if hadPrevious {
-		l.env.set(name, previous)
-		return
-	}
-	l.env.remove(name)
+	restoreBranchVar(l.env, name, previous, hadPrevious)
 }
 
 // lowerLoopBranch lowers break and continue as jumps to loop blocks.

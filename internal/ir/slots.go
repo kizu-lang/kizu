@@ -167,7 +167,7 @@ func (l *lowerer) collectMutBorrowsExpr(expr ast.Expression, found map[string]bo
 func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr, *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr,
-		*ast.BufferLiteralExpr:
+		*ast.BufferLiteralExpr, *ast.NullExpr:
 		return nil, true
 	case *ast.PrefixExpr:
 		return []ast.Expression{e.Right}, true
