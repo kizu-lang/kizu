@@ -345,7 +345,9 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return nil
 	}
 	env := newScope(nil)
-	c.defineParams(fn, env, nil)
+	if err := c.defineParams(fn, env, nil); err != nil {
+		return err
+	}
 	c.pendingAllocTaints = nil
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
@@ -429,7 +431,7 @@ func (c *Checker) checkDeinitCompleteness(fn *functionInfo, env *scope) error {
 
 // defineParams binds a function's params into env, substituting generic type
 // spellings when subst is non-nil.
-func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]string) {
+func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]string) error {
 	// A `<...>` entry that declares a type is a compile-time value, in scope
 	// for the body like a parameter but never moved or borrowed.
 	for _, param := range fn.sig.StaticParams {
@@ -443,6 +445,12 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		if subst != nil {
 			typeName = substituteOwnershipType(typeName, subst)
 		}
+		// A parameter is storage, so it obeys the same rule as a binding:
+		// an optional whose payload owns memory or carries a view cannot
+		// cross a call boundary as a value.
+		if err := c.rejectStoredOptional(typeName); err != nil {
+			return err
+		}
 		value := c.newBinding(param.Name, typeName)
 		value.borrowedParam = fn.params[idx].borrow
 		value.mutBorrow = fn.params[idx].mutBorrow
@@ -453,6 +461,7 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		value.consumeExempt = (fn.sig.Receiver && idx == 0) || isConsumePrimitive(fn.name)
 		env.define(value)
 	}
+	return nil
 }
 
 // isConsumePrimitive names the std functions whose whole job is consuming an
@@ -950,6 +959,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
+	if err := c.rejectStoredOptional(typeName); err != nil {
+		return err
+	}
 	value := c.newBinding(stmt.Name, typeName)
 	value.mutable = stmt.Mutable
 	value.declSpan = expressionSpan(stmt.Value)
@@ -958,6 +970,23 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 		return err
 	}
 	env.define(value)
+	return nil
+}
+
+// rejectStoredOptional refuses to store a `?T` whose payload owns memory or
+// carries a view. Inside the optional the payload is invisible to move and
+// borrow tracking, so such a value lives only where it is consumed: a
+// capture, an `orelse`, or a return path.
+func (c *Checker) rejectStoredOptional(typeName string) error {
+	elem, ok := typ.OptionalElem(typeName)
+	if !ok {
+		return nil
+	}
+	if strings.HasPrefix(elem, "&") || c.viewCarryingType(elem) || c.valueTypeNeedsConsume(elem) {
+		return errorf(
+			"move error: optional `%s` must be consumed where it is produced (capture or orelse)",
+			typeName)
+	}
 	return nil
 }
 
@@ -1654,7 +1683,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	left := env.clone()
 	leftScope := left.child()
 	if stmt.Capture != "" {
-		leftScope.define(c.newBinding(stmt.Capture, optionalPayloadName(condType)))
+		leftScope.define(c.newCaptureBinding(stmt.Capture, condType, stmt.Condition))
 	}
 	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
 		return err
@@ -1684,7 +1713,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	body := env.clone()
 	child := body.child()
 	if stmt.Capture != "" {
-		child.define(c.newBinding(stmt.Capture, optionalPayloadName(condType)))
+		child.define(c.newCaptureBinding(stmt.Capture, condType, stmt.Condition))
 	}
 	c.loopDepth++
 	defer func() { c.loopDepth-- }()
@@ -1696,13 +1725,26 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 }
 
 // optionalPayloadName returns T for a `?T` condition type, or the type itself
-// when it is not an optional. Optional payloads are scalar copies today
-// (ADR-0101), so the capture binding is a plain copy.
+// when it is not an optional.
 func optionalPayloadName(typeName string) string {
 	if elem, ok := typ.OptionalElem(typeName); ok {
 		return elem
 	}
 	return typeName
+}
+
+// newCaptureBinding builds the `|name|` payload binding for an optional
+// condition. The payload's class rides on its type: an owner payload owes a
+// consume before the branch ends (checkBlock's sweep), a view payload is a
+// free view like a parameter's, and a copy payload is a plain copy.
+func (c *Checker) newCaptureBinding(
+	name string,
+	condType string,
+	cond ast.Expression,
+) *binding {
+	value := c.newBinding(name, optionalPayloadName(condType))
+	value.declSpan = expressionSpan(cond)
+	return value
 }
 
 // checkForStmt treats moves in the body as possible after the loop.
@@ -2040,9 +2082,37 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 		return c.readIfExpr(e, env)
 	case *ast.MatchStmt:
 		return c.readMatchExpr(e, env)
+	case *ast.OrelseGuardExpr:
+		return c.readOrelseGuardExpr(e, env)
 	default:
 		return "", errorf("move error: unsupported expression %T", expr)
 	}
+}
+
+// readOrelseGuardExpr reads `cond orelse return/break/continue`. The null arm
+// is a real exit, so it carries the matching statement's obligations, checked
+// in a clone: the fall-through path did not take the exit, so nothing the
+// exit consumes may look moved after the guard.
+func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (string, error) {
+	condType, err := c.readExpr(expr.Cond, env)
+	if err != nil {
+		return "", err
+	}
+	switch exit := expr.Exit.(type) {
+	case *ast.ReturnStmt:
+		if err := c.checkReturnStmt(exit, env.clone()); err != nil {
+			return "", err
+		}
+	case *ast.BreakStmt:
+		if err := c.checkLoopBranch(exit.Label); err != nil {
+			return "", err
+		}
+	case *ast.ContinueStmt:
+		if err := c.checkLoopBranch(exit.Label); err != nil {
+			return "", err
+		}
+	}
+	return optionalPayloadName(condType), nil
 }
 
 // readIndexExpr reads checked byte indexing and slicing without moving bytes.
@@ -2464,6 +2534,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	if err != nil {
 		return "", err
 	}
+	if expr.Operator == "orelse" {
+		return c.readOrelseDefault(left, expr.Right, env)
+	}
 	if _, err := c.readExpr(expr.Right, env); err != nil {
 		return "", err
 	}
@@ -2473,10 +2546,24 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	if isBooleanBinaryOperator(expr.Operator) {
 		return "bool", nil
 	}
-	if expr.Operator == "orelse" {
-		return optionalPayloadName(left), nil
-	}
 	return left, nil
+}
+
+// readOrelseDefault reads the default arm of `orelse`. The default stands in
+// for the payload, so when the payload carries a deinit contract the default
+// is a competing owner producer and must be moved, not aliased.
+func (c *Checker) readOrelseDefault(left string, right ast.Expression, env *scope) (string, error) {
+	elem := optionalPayloadName(left)
+	if c.valueTypeNeedsConsume(elem) {
+		if _, err := c.moveExpr(right, env); err != nil {
+			return "", err
+		}
+		return elem, nil
+	}
+	if _, err := c.readExpr(right, env); err != nil {
+		return "", err
+	}
+	return elem, nil
 }
 
 // isBooleanBinaryOperator reports whether a binary operator returns bool.
@@ -2707,11 +2794,21 @@ func (c *Checker) viewCarryingType(typeName string) bool {
 	return c.viewCarryingTypeSeen(typeName, map[string]bool{})
 }
 
-// viewCarryingTypeSeen is viewCarryingType with a cycle guard over named types.
-func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bool {
+// viewCarrierPayload strips the wrappers a view rides through: the success of
+// `!T` and the payload of `?T` carry their views the same way.
+func viewCarrierPayload(typeName string) string {
 	if idx := strings.Index(typeName, "!"); idx >= 0 {
 		typeName = typeName[idx+1:]
 	}
+	if elem, ok := typ.OptionalElem(typeName); ok {
+		return elem
+	}
+	return typeName
+}
+
+// viewCarryingTypeSeen is viewCarryingType with a cycle guard over named types.
+func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bool {
+	typeName = viewCarrierPayload(typeName)
 	if typeName == "[]u8" || strings.HasPrefix(typeName, "&") || isDynType(typeName) {
 		return true
 	}
@@ -3513,7 +3610,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", errorf("array error: `Array.%s` requires copy element", name)
 		}
 		if name == "get" {
-			return "!" + elem, nil
+			return "?" + elem, nil
 		}
 		return elem, nil
 	default:
@@ -3594,7 +3691,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
 			return "", err
 		}
-		return "!" + valueType, nil
+		return "?" + valueType, nil
 	case "contains":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
 			return "", err
@@ -3705,7 +3802,9 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
 	env := newScope(nil)
-	c.defineParams(fn, env, subst)
+	if err := c.defineParams(fn, env, subst); err != nil {
+		return err
+	}
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -4762,7 +4861,7 @@ func (c *Checker) checkArrayPop(
 	elem string,
 	name string,
 	args []ast.Expression,
-	returnsError bool,
+	returnsOptional bool,
 ) (string, error) {
 	if array.hasAnyBorrow() {
 		return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
@@ -4770,10 +4869,10 @@ func (c *Checker) checkArrayPop(
 	if len(args) != 0 {
 		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 	}
-	if !returnsError {
+	if !returnsOptional {
 		return elem, nil
 	}
-	return "!" + elem, nil
+	return "?" + elem, nil
 }
 
 // checkArrayReadNoArgs validates len/capacity reads.
@@ -4840,7 +4939,7 @@ func (c *Checker) checkArrayGet(
 		return "", errorf("array error: `Array.%s` requires copy element", name)
 	}
 	if name == "get" {
-		return "!" + elem, nil
+		return "?" + elem, nil
 	}
 	return elem, nil
 }
@@ -4865,7 +4964,7 @@ func (c *Checker) checkMapMethod(
 		if err := c.checkMapKeyArg(name, args, env); err != nil {
 			return "", err
 		}
-		return "!" + valueType, nil
+		return "?" + valueType, nil
 	case "contains":
 		if err := c.checkMapKeyArg(name, args, env); err != nil {
 			return "", err

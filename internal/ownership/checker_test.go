@@ -1213,8 +1213,9 @@ func TestCheckArrayPopMovesNonCopyElement(t *testing.T) {
 	source := `struct Name { value: []u8 }
 fn check(values: std::array::Array<Name>) -> !void {
     defer values.deinit();
-    let value = try values.pop();
-    print(value.value);
+    if values.pop() |value| {
+        print(value.value);
+    }
     return;
 }
 fn main() {}`
@@ -1279,8 +1280,9 @@ fn (self: Parsed) deinit() -> void {
 }
 fn check(values: std::array::Array<Parsed>) -> !void {
     defer values.deinit();
-    let item = try values.pop();
-    item.deinit();
+    if values.pop() |item| {
+        item.deinit();
+    }
     return;
 }
 fn main() {}`
