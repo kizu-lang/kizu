@@ -42,6 +42,7 @@ borrow escape を許さない
 borrow を struct field に保存させない
 borrow を comptime / unsafe 境界で延命させない
 arena.get(handle) は local borrow だけを返す
+borrow 中の arena の add / deinit、可変 borrow 中の get を許さない
 別 arena の handle 使用を許さない
 handle を raw pointer として扱わせない
 unsafe の中でも type check / move check / borrow check を全面的に無効化しない
@@ -988,10 +989,10 @@ owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 (`let view = string.as_bytes()` が let 限定なのと同じ理由の位置制限です)。
 
 borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
-`Array.at_mut`、`Map.at` / `Map.at_mut` の capture 条件としてだけ存在
-します。capture が payload borrow そのものになり、その scope の間
-container は borrow されます。保存・`orelse`・signature への出現はすべて
-拒否します(§std array、§std map)。
+`Array.at_mut`、`Map.at` / `Map.at_mut`、`Arena.at_mut` の capture 条件と
+してだけ存在します。capture が payload borrow そのものになり、その scope の
+間 container は borrow されます。保存・`orelse`・signature への出現はすべて
+拒否します(§std array、§std map、§10)。
 
 現在の制限:
 
@@ -1421,6 +1422,7 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::Arena<T>.add(value)` は value を arena に move する
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
 * `std::arena::Arena<T>.get(handle)` はローカル borrow を返す
+* `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
 * `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可する
@@ -1429,6 +1431,22 @@ core arena の構築は明示 allocator capability を要求し、
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
 * arena からの削除は実装しない
+
+`at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
+条件だけが消費できます(§7)。`at_mut` は mutable な arena binding を要求し、
+capture の scope の間 arena は mutable に borrow され、`get` / `add` /
+`deinit` は capture の最終使用まで待ちます(`add` は realloc で element
+storage を動かします)。
+
+```kizu
+if users.at_mut(alice) |u| {
+    u.visits = u.visits + 1;
+}
+```
+
+handle の由来は静的 provenance 検査が保証するため、capture の else 分岐が
+受けるのは検査をすり抜けた別 arena handle の残余だけで、通常の経路では
+到達しません。
 
 ## 11. エラー処理
 
