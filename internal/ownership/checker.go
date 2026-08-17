@@ -858,7 +858,7 @@ func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool
 	if fn == nil || returnTypeName(fn) != "Allocator" {
 		return false, nil
 	}
-	sources, err := c.callBorrowReturnSources(name, fn, call, true, true, env)
+	sources, err := c.callBorrowReturnSources(name, fn, call, true, true, false, env)
 	if err != nil {
 		return true, err
 	}
@@ -943,6 +943,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 		}
 		return c.checkReturnedBorrowLetStmt(stmt, sources, elem, mutable, env)
 	}
+	if handled, err := c.checkCaptureLetStmt(stmt, env); handled || err != nil {
+		return err
+	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
@@ -956,6 +959,86 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	}
 	env.define(value)
 	return nil
+}
+
+// checkCaptureLetStmt runs the let recognizers that tie a binding to
+// borrow-class views: struct literal capture and view field reads.
+func (c *Checker) checkCaptureLetStmt(stmt *ast.LetStmt, env *scope) (bool, error) {
+	sources, elem, ok, err := c.structCaptureInitializer(stmt.Value, env)
+	if err != nil {
+		return true, err
+	}
+	if ok {
+		return true, c.checkReturnedBorrowLetStmt(stmt, sources, elem, false, env)
+	}
+	source, ok, err := c.viewFieldBorrowInitializer(stmt.Value, env)
+	if err != nil {
+		return true, err
+	}
+	if ok {
+		return true, c.checkReturnedBorrowLetStmt(stmt,
+			[]borrowSource{{target: source}}, "[]u8", false, env)
+	}
+	return false, nil
+}
+
+// structCaptureInitializer recognizes a struct literal that captures
+// borrow-class views in its fields. Only a let can carry the tie, so the
+// recognizer lives on the let path; everywhere else the literal keeps being
+// rejected by the move on its field values.
+func (c *Checker) structCaptureInitializer(
+	expr ast.Expression,
+	env *scope,
+) ([]borrowSource, string, bool, error) {
+	literal, ok := expr.(*ast.StructLiteralExpr)
+	if !ok || !c.viewCaptureStructType(literal.TypeName) {
+		return nil, "", false, nil
+	}
+	captures := false
+	for _, field := range literal.Fields {
+		if c.borrowClassViewRoot(field.Value, env) != nil {
+			captures = true
+			break
+		}
+	}
+	if !captures {
+		return nil, "", false, nil
+	}
+	sources := []borrowSource{}
+	for _, field := range literal.Fields {
+		if view := c.borrowClassViewRoot(field.Value, env); view != nil {
+			if _, err := c.readExpr(field.Value, env); err != nil {
+				return nil, "", true, err
+			}
+			sources = append(sources, borrowSource{target: view})
+			continue
+		}
+		if _, err := c.moveExpr(field.Value, env); err != nil {
+			return nil, "", true, err
+		}
+	}
+	return sources, literal.TypeName, true, nil
+}
+
+// viewFieldBorrowInitializer recognizes reading a `[]u8` field out of a
+// borrow-class value: the copy is a view of the same backing, so the binding
+// stays tied to the value it was read from.
+func (c *Checker) viewFieldBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+) (*binding, bool, error) {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok || field.Namespace {
+		return nil, false, nil
+	}
+	root := c.borrowClassViewRoot(expr, env)
+	if root == nil {
+		return nil, false, nil
+	}
+	if _, err := c.readExpr(expr, env); err != nil {
+		return nil, true, err
+	}
+	return root, true, nil
 }
 
 // attachAllocProvenance ties a fresh owner to the tied allocators its
@@ -1032,24 +1115,33 @@ func (c *Checker) returnedBorrowInitializer(
 	retName := returnTypeName(fn)
 	_, mutable, elem, ok := explicitOwnershipBorrowType(retName)
 	allocatorReturn := false
+	viewStructReturn := false
 	if !ok {
 		// An Allocator return with tie-capable sources is a tied allocator: it
 		// holds the buffer's writable view exclusively, so it behaves as a
 		// mutable borrow of its sources (page_allocator has none and falls
-		// through as a plain copy value).
-		if retName != "Allocator" {
+		// through as a plain copy value). A view-capturing struct return ties
+		// the same way when a borrow-class view flows in, and falls through as
+		// a plain value when none does.
+		switch {
+		case retName == "Allocator":
+			allocatorReturn = true
+			mutable = true
+			elem = "Allocator"
+		case c.viewCaptureStructType(retName):
+			viewStructReturn = true
+			elem = retName
+		default:
 			return nil, "", false, false, nil
 		}
-		allocatorReturn = true
-		mutable = true
-		elem = "Allocator"
 	}
-	sources, err := c.callBorrowReturnSources(name, fn, call, mutable, allocatorReturn, env)
+	sources, err := c.callBorrowReturnSources(name, fn, call, mutable, allocatorReturn,
+		viewStructReturn, env)
 	if err != nil {
 		return nil, "", false, true, err
 	}
 	if len(sources) == 0 {
-		if allocatorReturn {
+		if allocatorReturn || viewStructReturn {
 			return nil, "", false, false, nil
 		}
 		return nil, "", false, true,
@@ -1064,13 +1156,15 @@ func (c *Checker) returnedBorrowInitializer(
 // callBorrowReturnSources lists the caller-side bindings a borrow-shaped call
 // result stays tied to: every qualifying borrow argument, plus — for Allocator
 // returns — every already-tied allocator argument, so re-wrapping an allocator
-// cannot launder its tie away.
+// cannot launder its tie away, plus — for view-capturing struct returns —
+// every borrow-class view argument the result could have captured.
 func (c *Checker) callBorrowReturnSources(
 	name string,
 	fn *functionInfo,
 	call *ast.CallExpr,
 	mutable bool,
 	allocatorReturn bool,
+	viewStructReturn bool,
 	env *scope,
 ) ([]borrowSource, error) {
 	sources := []borrowSource{}
@@ -1082,6 +1176,11 @@ func (c *Checker) callBorrowReturnSources(
 			if allocatorReturn {
 				if alloc := c.tiedAllocatorArg(call.Args[idx], env); alloc != nil {
 					sources = append(sources, borrowSource{target: alloc})
+				}
+			}
+			if viewStructReturn && fn.params[idx].typeName == "[]u8" {
+				if view := c.borrowClassViewRoot(call.Args[idx], env); view != nil {
+					sources = append(sources, borrowSource{target: view})
 				}
 			}
 			continue
@@ -2433,7 +2532,8 @@ func (c *Checker) checkUserCall(
 				continue
 			}
 			_, err = c.readExpr(arg, env)
-		} else if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) {
+		} else if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) ||
+			c.sanctionedViewLend(sanctioned, fn, idx, arg, env) {
 			_, err = c.readExpr(arg, env)
 		} else {
 			_, err = c.moveExpr(arg, env)
@@ -2443,6 +2543,24 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// sanctionedViewLend reports whether arg is a borrow-class view lent to a
+// `[]u8` parameter under a caller that ties the result itself — the let
+// recognizer, which records the view as a borrow source of the binding. In
+// every other context the view would escape untracked, so the lend stays
+// refused and the move path rejects it.
+func (c *Checker) sanctionedViewLend(
+	sanctioned bool,
+	fn *functionInfo,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+) bool {
+	if !sanctioned || fn.params[idx].typeName != "[]u8" {
+		return false
+	}
+	return c.borrowClassViewRoot(arg, env) != nil
 }
 
 // allocatorArgLend reports whether arg is a tied allocator binding lent to an
@@ -2497,10 +2615,9 @@ func allocationCarryingReturnType(typeName string) bool {
 
 // viewArgLend reports whether arg is a tracked view binding lent to a plain
 // `[]u8` parameter for the call's duration (SPEC §9: a borrow argument ends
-// with the call statement). Lending is only safe when the callee cannot hand
-// the view back out: a scalar or void return has nowhere to smuggle it, while
-// a view-carrying return would launder away the provenance the binding's
-// borrow tracks.
+// with the call statement). Lending is only safe when the callee cannot retain
+// the view past the statement: neither the return type nor any `&var`
+// parameter it could write into may carry a view out.
 func (c *Checker) viewArgLend(
 	fn *functionInfo,
 	idx int,
@@ -2510,15 +2627,38 @@ func (c *Checker) viewArgLend(
 	if fn.params[idx].typeName != "[]u8" {
 		return false
 	}
+	if c.borrowClassViewRoot(arg, env) == nil && !borrowedViewParamArg(arg, env) {
+		return false
+	}
+	return !c.viewCarryingType(returnTypeName(fn)) && !c.viewSmugglingParams(fn)
+}
+
+// borrowedViewParamArg reports whether arg names a `&var []u8` borrow
+// parameter: its backing outlives the frame, but the binding itself cannot
+// move, so passing it on is a lend rather than a copy.
+func borrowedViewParamArg(arg ast.Expression, env *scope) bool {
 	ident, ok := arg.(*ast.IdentExpr)
 	if !ok {
 		return false
 	}
 	value, exists := env.lookup(ident.Name)
-	if !exists || !value.borrowedParam || value.typeName != "[]u8" {
-		return false
+	return exists && value.borrowedParam && value.typeName == "[]u8"
+}
+
+// viewSmugglingParams reports whether fn declares a `&var` parameter whose
+// type can hold a view: a callee could store a lent view through it, so the
+// storage outliving the call makes lending unsafe. A `&var []u8` slot cannot
+// be re-pointed (ADR-0096) and is exempt.
+func (c *Checker) viewSmugglingParams(fn *functionInfo) bool {
+	for _, param := range fn.params {
+		if !param.borrow || !param.mutBorrow || param.typeName == "[]u8" {
+			continue
+		}
+		if c.viewCarryingType(param.typeName) {
+			return true
+		}
 	}
-	return viewFreeReturnType(returnTypeName(fn))
+	return false
 }
 
 // viewFreeReturnType reports a return type that cannot carry a view out:
@@ -2532,6 +2672,112 @@ func viewFreeReturnType(typeName string) bool {
 		return true
 	}
 	return false
+}
+
+// viewCarryingType reports whether a value of typeName can hold a view: view
+// spellings themselves, and declared structs or unions any of whose field
+// types carry one. Generic applications are judged conservatively through
+// their arguments; opaque runtime types own their memory and carry none.
+func (c *Checker) viewCarryingType(typeName string) bool {
+	return c.viewCarryingTypeSeen(typeName, map[string]bool{})
+}
+
+// viewCarryingTypeSeen is viewCarryingType with a cycle guard over named types.
+func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bool {
+	if idx := strings.Index(typeName, "!"); idx >= 0 {
+		typeName = typeName[idx+1:]
+	}
+	if typeName == "[]u8" || strings.HasPrefix(typeName, "&") || isDynType(typeName) {
+		return true
+	}
+	if seen[typeName] {
+		return false
+	}
+	seen[typeName] = true
+	base := typeName
+	if genericBase, arg, ok := splitGenericType(typeName); ok {
+		base = genericBase
+		args, err := typ.SplitArgs(arg)
+		if err != nil {
+			args = []string{arg}
+		}
+		for _, argType := range args {
+			if c.viewCarryingTypeSeen(argType, seen) {
+				return true
+			}
+		}
+	}
+	for _, fieldType := range c.structs[base] {
+		if c.viewCarryingTypeSeen(fieldType, seen) {
+			return true
+		}
+	}
+	for _, payload := range c.unions[base] {
+		if payload != "" && c.viewCarryingTypeSeen(payload, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// viewCaptureStructType reports a struct type a let binding may capture views
+// into: a declared struct that can hold a view and owes no deinit, so the
+// whole value rides the borrow class without dropping an owner obligation.
+func (c *Checker) viewCaptureStructType(typeName string) bool {
+	if strings.Contains(typeName, "!") {
+		return false
+	}
+	if c.structs[typeName] == nil {
+		return false
+	}
+	return c.viewCarryingType(typeName) && c.ownerFreeStruct(typeName, map[string]bool{})
+}
+
+// ownerFreeStruct reports a declared struct none of whose fields carry an
+// owner obligation: every field is a copy value, a view, or such a struct.
+func (c *Checker) ownerFreeStruct(typeName string, seen map[string]bool) bool {
+	if seen[typeName] {
+		return true
+	}
+	seen[typeName] = true
+	fields := c.structs[typeName]
+	if fields == nil {
+		return false
+	}
+	for _, fieldType := range fields {
+		if c.isCopyType(fieldType) || isRawPointerType(fieldType) {
+			continue
+		}
+		if !c.ownerFreeStruct(fieldType, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+// borrowClassViewRoot resolves expr to the borrow-class binding backing a view
+// read — a local view binding, or a view-capturing struct whose `[]u8` field
+// is read — or nil for params, statics, and owned values, whose views are
+// free: a parameter outlives the frame, so what it backs cannot dangle here.
+func (c *Checker) borrowClassViewRoot(expr ast.Expression, env *scope) *binding {
+	root, field, ok := directFieldRoot(expr, env)
+	if !ok || root == nil {
+		return nil
+	}
+	if !root.localBorrow && len(root.borrowTargets) == 0 {
+		return nil
+	}
+	if field == "" {
+		if root.typeName != "[]u8" {
+			return nil
+		}
+		return root
+	}
+	fields := c.structs[root.typeName]
+	if fields == nil || fields[field] != "[]u8" {
+		return nil
+	}
+	return root
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -3712,6 +3958,12 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	typeName, err := c.readFieldExpr(expr, env)
 	if err != nil {
 		return "", err
+	}
+	// A `[]u8` field of a borrow-class value is a view of the same backing;
+	// copying it out in a move context would shed the tie.
+	if typeName == "[]u8" && c.borrowClassViewRoot(expr, env) != nil {
+		return "", errorAt(expr.Span,
+			"borrow error: view field `%s` cannot escape its borrowed owner", expr.String())
 	}
 	if c.isCopyType(typeName) {
 		return typeName, nil

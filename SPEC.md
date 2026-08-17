@@ -1177,11 +1177,35 @@ fn pick(a: []u8, b: []u8, f: bool) -> []u8   // 戻り値は a と b の両方�
 * `Allocator` も tie を運びます。tied な `Allocator` 引数(§15.3)を受けて
   scalar 以外を返す関数の戻り値は、その allocator の tie を継承します。
   tie のない allocator からは何も継承せず、既存コードの意味は変わりません
+* **view を持てる struct** も tie を運びます(ADR-0100)。全 field が
+  copy 値・view・そのような struct で、transitively `[]u8` field を含む
+  型がこれに当たります。この型を返す関数の戻り値は、borrow-class な
+  view 引数(local view binding、または捕捉済み struct の view field)の
+  保守的統合に tied です。source が無ければ通常の値で、既存コードの
+  意味は変わりません
+
+view を持てる struct は、`let` / `var` binding の初期化位置でだけ
+local view を捕捉できます:
+
+```kizu
+struct BytesIter { pub bytes: []u8, pub index: i64 }
+let it = BytesIter { bytes: view, index: 0 };   // it は view の source に tied
+var it2 = iter(view);                            // 関数経由でも同じ
+```
+
+捕捉した binding は borrow class に入ります: frame から escape できず
+(return、move、struct への再格納は拒否)、source が生きている間
+source は borrow 中で、binding は最後の使用で終了します。owner field を
+持つ struct は捕捉できません(borrow class は deinit 義務を運ばない
+ため)。borrow-class 値の `[]u8` field 読みは let では同じ tie を継ぎ、
+move 文脈では escape として拒否します。source が関数 parameter だけの
+捕捉は自由な値のままです: parameter は frame より長生きし、呼び出し側が
+署名から tie を再導出します。
 
 契約は署名だけから導出され、body は参照されません。
 名前付き lifetime parameter、lifetime bounds、anonymous lifetime は
-採用しません。borrow field と view struct は、後続の bounded issue で
-必要性を確認します。
+採用しません。borrow field(`&T` の field 保存)は採用せず、view の
+struct 捕捉は上記の view-capture 規則が担います。
 
 safe borrow binding は通常の field access 構文で field を読めます。
 `&var T` binding は通常の field assignment 構文で field を更新できます。
@@ -1198,10 +1222,13 @@ exclusive borrow)、および `&var []u8` 引数の
 しないため)。可変 view は borrow なので field に保存できず、escape
 できません。
 
-view binding(shared / writable どちらも)は、**戻り値が view を運ばない**
-関数(scalar / void 返し)の plain `[]u8` 引数に貸せます。貸与は呼び出し
-statement の終了で終わります。view を返し得る関数へ渡すことは、borrow の
-追跡が戻り値で失われるため escape として拒否します。
+view binding(shared / writable どちらも)は、**callee が view を statement を
+越えて保持できない**関数の plain `[]u8` 引数に貸せます: 戻り値の型が view を
+運べず(scalar / void / view を持てない struct)、かつ view を保持できる型の
+`&var` parameter が無いこと(`&var []u8` は差し替え不可のため除外)。貸与は
+呼び出し statement の終了で終わります。view を捕捉し得る struct を返す
+関数へは、tie を記録できる `let` / `var` 初期化の位置でだけ渡せます。
+それ以外の位置では borrow の追跡が失われるため escape として拒否します。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
 checker が lifetime、aliasing、move を検査する borrow capability です。
 raw pointer はこの省略対象ではなく、`unsafe` マーカーで明示的に扱います。

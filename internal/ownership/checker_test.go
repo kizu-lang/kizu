@@ -201,6 +201,109 @@ fn main() -> !void {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsViewCapture pins the view-capture chain (ADR-0100):
+// buffer -> view -> struct, through both the literal and a factory call, plus
+// the precision case of a view-free struct return.
+func TestCheckAcceptsViewCapture(t *testing.T) {
+	source := `struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+struct Stats {
+    pub len: i64,
+}
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+fn stats(bytes: []u8) -> Stats {
+    return Stats { len: std::mem::len(bytes) };
+}
+fn main() -> !void {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let direct = BytesIter { bytes: view, index: 0 };
+    print(direct.index);
+    var made = iter(view);
+    print(made.index);
+    let s = stats(view);
+    print(s.len);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsViewCaptureEscapes pins the view-capture escape rules
+// (ADR-0100): a struct tied to a local view stays in the frame, and views
+// cannot smuggle out through `&var` parameters.
+func TestCheckRejectsViewCaptureEscapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "capture return",
+			source: `struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+fn make() -> BytesIter {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    return it;
+}
+fn main() -> !void {
+    let it = make();
+    print(it.index);
+    return;
+}`,
+			want: "borrowed value `it` cannot escape",
+		},
+		{
+			name: "view field escape",
+			source: `struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+fn leak() -> []u8 {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    return it.bytes;
+}
+fn main() -> !void {
+    print(leak());
+    return;
+}`,
+			want: "view field `it.bytes` cannot escape its borrowed owner",
+		},
+		{
+			name: "out-parameter smuggle",
+			source: `struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+fn smuggle(bytes: []u8, out: &var BytesIter) -> void {
+    out.bytes = bytes;
+    return;
+}
+fn main() -> !void {
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    var it = BytesIter { bytes: "", index: 0 };
+    smuggle(view, it);
+    print(it.index);
+    return;
+}`,
+			want: "borrowed value `view` cannot escape",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsBorrowProvenanceReturnConflicts checks parent restrictions stay local.
 func TestCheckRejectsBorrowProvenanceReturnConflicts(t *testing.T) {
 	cases := []struct {

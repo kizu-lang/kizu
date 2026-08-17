@@ -1,0 +1,94 @@
+import std::mem;
+import std::testing;
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: BytesIter) has_next() -> bool {
+    return self.index < mem::len(self.bytes);
+}
+
+fn (self: &var BytesIter) next() -> u8 {
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+fn fill(bytes: &var []u8, first: u8) -> void {
+    bytes[0] = first;
+    bytes[1] = first + cast<u8>(1);
+    return;
+}
+
+// A struct literal may capture a runtime view at a let; the binding joins the
+// borrow class and walks the buffer through `&var self` methods.
+test "struct literal captures a runtime view" {
+    var buf = [2]u8{};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 10);
+    let view = buf.as_bytes();
+    var it = BytesIter { bytes: view, index: 0 };
+    var total = 0;
+    while it.has_next() {
+        total = total + cast<i64>(it.next());
+    }
+    testing::expect_equal<i64>(21, total);
+}
+
+// A factory returning a view-capturing struct ties its result to the view
+// argument; the tie is derived from the signature, not the body.
+test "factory call ties its result to the view argument" {
+    var buf = [2]u8{};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 30);
+    let view = buf.as_bytes();
+    var it = iter(view);
+    testing::expect_equal<i64>(30, cast<i64>(it.next()));
+    testing::expect_equal<i64>(31, cast<i64>(it.next()));
+}
+
+struct Stats {
+    pub len: i64,
+}
+
+fn stats(bytes: []u8) -> Stats {
+    return Stats { len: mem::len(bytes) };
+}
+
+// A struct that cannot hold a view takes view arguments freely: the checker
+// reads the field types instead of rejecting every struct return.
+test "view-free struct returns take view arguments freely" {
+    var buf = [4]u8{};
+    let view = buf.as_bytes();
+    let s = stats(view);
+    testing::expect_equal<i64>(4, s.len);
+}
+
+// Reading the captured view back out keeps the tie; the copy is a view of the
+// same backing.
+test "captured view field reads stay tied" {
+    var buf = [2]u8{};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    let inner = it.bytes;
+    testing::expect_equal<i64>(2, mem::len(inner));
+}
+
+// Once the cursor's last use passes, its borrows release and the buffer is
+// writable again.
+test "capture releases at last use" {
+    var buf = [2]u8{};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    testing::expect_equal<i64>(0, it.index);
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 50);
+    let check = buf.as_bytes();
+    testing::expect_equal<i64>(50, cast<i64>(check[0]));
+}
