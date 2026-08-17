@@ -26,6 +26,7 @@ type CoreSignature struct {
 // SimpleCoreSignatures lists primitives whose type and ownership shape is declarative.
 var SimpleCoreSignatures = map[string]CoreSignature{
 	"std::internal::builtin::mem_page_allocator": {Return: "Allocator"},
+	"std::internal::builtin::mem_fixed_buffer":   {Args: []ArgKind{ArgBytes}, Return: "Allocator"},
 	"std::internal::builtin::mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
 	"std::internal::builtin::io_write_stdout": {
 		Args:   []ArgKind{ArgIo, ArgBytes},
@@ -132,6 +133,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::map_get":                  true,
 	"std::internal::builtin::map_insert":               true,
 	"std::internal::builtin::map_len":                  true,
+	"std::internal::builtin::mem_fixed_buffer":         true,
 	"std::internal::builtin::mem_len":                  true,
 	"std::internal::builtin::mem_page_allocator":       true,
 	"std::internal::builtin::process_arg":              true,

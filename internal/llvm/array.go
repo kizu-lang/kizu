@@ -12,7 +12,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayRuntime() {
 		return
 	}
-	e.out.WriteString("declare ptr @kizu_array_new(i64)\n")
+	e.out.WriteString("declare ptr @kizu_array_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr)\n")
 	e.out.WriteString("declare i64 @kizu_array_len(ptr)\n")
 	e.out.WriteString("declare i64 @kizu_array_capacity(ptr)\n")
@@ -94,12 +94,25 @@ func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 
 // writeArrayNew lowers std::array::new<T>(allocator) to an opaque runtime handle.
 func (e *emitter) writeArrayNew(instr *ir.Instr) error {
-	if len(instr.Args) != 1 || !isArrayLLVMType(instr.Result.Type) {
-		return fmt.Errorf("llvm error: array.new expects allocator -> Array<T>")
+	return e.writeContainerNew(instr, "kizu_array_new",
+		isArrayLLVMType, "array.new expects allocator -> Array<T>")
+}
+
+// writeContainerNew lowers one container constructor to its runtime call:
+// the allocator handle and the element size are the whole ABI.
+func (e *emitter) writeContainerNew(
+	instr *ir.Instr,
+	runtime string,
+	isResultType func(string) bool,
+	shape string,
+) error {
+	if len(instr.Args) != 1 || !isResultType(instr.Result.Type) {
+		return fmt.Errorf("llvm error: %s", shape)
 	}
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_new(i64 %s)\n",
-		resultName, e.elementSizeOperand(instr.Immediate))
+	allocator := e.value(instr.Args[0])
+	fmt.Fprintf(&e.out, "  %s = call ptr @%s(ptr %s, i64 %s)\n",
+		resultName, runtime, allocator.operand, e.elementSizeOperand(instr.Immediate))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
