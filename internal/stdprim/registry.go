@@ -124,6 +124,8 @@ var primitives = map[string]bool{
 	"std::internal::builtin::io_write_stderr":          true,
 	"std::internal::builtin::io_write_stdout":          true,
 	"std::internal::builtin::map":                      true,
+	"std::internal::builtin::map_at":                   true,
+	"std::internal::builtin::map_at_mut":               true,
 	"std::internal::builtin::map_contains":             true,
 	"std::internal::builtin::map_deinit":               true,
 	"std::internal::builtin::map_get":                  true,

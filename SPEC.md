@@ -988,9 +988,10 @@ owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 (`let view = string.as_bytes()` が let 限定なのと同じ理由の位置制限です)。
 
 borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
-`Array.at_mut` の capture 条件としてだけ存在します。capture が element
-borrow そのものになり、その scope の間 array は borrow されます。保存・
-`orelse`・signature への出現はすべて拒否します(§std array)。
+`Array.at_mut`、`Map.at` / `Map.at_mut` の capture 条件としてだけ存在
+します。capture が payload borrow そのものになり、その scope の間
+container は borrow されます。保存・`orelse`・signature への出現はすべて
+拒否します(§std array、§std map)。
 
 現在の制限:
 
@@ -2256,6 +2257,8 @@ mutable element borrow が生きている間は array 全体の read も禁止�
 std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
 map.insert(key: []u8, value: V) -> !void
 map.get(key: []u8) -> ?V
+map.at(key: []u8) -> ?&V
+map.at_mut(key: []u8) -> ?&var V
 map.key_at(index: i64) -> ?[]u8
 map.contains(key: []u8) -> bool
 map.len() -> i64
@@ -2265,14 +2268,23 @@ map.deinit() -> void
 key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `null` として返します(docs/style.md)。
-`insert` / `get` / `contains` は amortized O(1) です。
+`at` / `at_mut` は value への borrow optional `?&V` / `?&var V` を返し、
+key があれば value borrow、なければ `null` です。消費は Array と同じく
+capture 条件だけです(`if m.at(key) |v|` / `while m.at(key) |v|`)。
+capture の scope の間 map は borrow され(`at` は shared、`at_mut` は
+mutable)、shared borrow 中は `insert` / `deinit` が、mutable borrow 中は
+すべての map 操作が capture の最終使用まで待ちます。`at_mut` は mutable
+map binding を要求します。in-place 更新は
+`if m.at_mut(key) |v| { v.* = ...; } else { try m.insert(key, ...); }`
+の形で 1 回の lookup になります(ADR-0104)。
+`insert` / `get` / `at` / `at_mut` / `contains` は amortized O(1) です。
 **map は挿入順で反復します。** 未定義の順序は露出しません。
 `key_at` は挿入位置 index の key を返し、末尾を越えたら `null` を返すので、
 `while m.key_at(i) |key|` が挿入順の iteration です。key は map storage への
 view なので capture 限定で、capture が生きている間 map は共有借用されます
 (§7)。
 value type は copy type 限定です。
-non-copy value、borrow view、deletion、custom hash/equality は後続で扱います。
+non-copy value、deletion、custom hash/equality は後続で扱います。
 `std::map::new<K, V>()` のような hidden default allocator は使いません。
 `deinit` 後の map 使用は safe Kizu では禁止します。
 

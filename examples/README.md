@@ -89,6 +89,7 @@ go test ./...
 | resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]u8, V>` for compiler-style symbol lookup |
 | loop-built string map key | `std_map_string_key_loop.kizu` | builds copied map keys from `String.as_bytes()` and deinitializes builders inside a loop |
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&var Map` |
+| map value borrow | `std_map_borrow.kizu` | reads and updates values in place through `at`/`at_mut` captures |
 | deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
@@ -252,6 +253,10 @@ single source file. Run them with `kizu check <package-root>`.
 | map values are copy-only | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |
 | map keys are `[]u8` | `negative/std_map_wrong_key_type.kizu` | `key type must be []u8` |
 | map insert value type must match `V` | `negative/std_map_wrong_insert_type.kizu` | `Map.insert` |
+| map borrow optionals are capture-only | `negative/std_map_at_requires_capture.kizu` | `` `Map.at` must be consumed by a capture `` |
+| borrowed map blocks insert | `negative/std_map_insert_while_borrowed.kizu` | `cannot run while map is borrowed` |
+| mutable map borrow requires `var` | `negative/std_map_at_mut_immutable.kizu` | `requires mutable map binding` |
+| mutable map borrow blocks reads | `negative/std_map_read_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
 | maps cannot be used after `deinit` | `negative/std_map_use_after_deinit.kizu` | `moved value` |
 | shared map borrows cannot insert | `negative/std_map_insert_through_shared_borrow.kizu` | `requires mutable Map receiver` |
 | shared map borrows cannot deinit | `negative/std_map_deinit_through_shared_borrow.kizu` | `requires owned Map receiver` |

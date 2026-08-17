@@ -44,6 +44,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 		return e.writeMapInsert(instr)
 	case "map.get":
 		return e.writeMapGet(instr)
+	case "map.at", "map.at_mut":
+		return e.writeMapAt(instr)
 	case "map.key_at":
 		return e.writeMapKeyAt(instr)
 	case "map.contains":
@@ -96,6 +98,41 @@ func (e *emitter) writeMapGet(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
 	return e.writeArrayOptionalLoadResult(instr, ptrName)
+}
+
+// writeMapAt lowers Map.at(key) and Map.at_mut(key) to a borrow optional: the
+// runtime's nullable value pointer becomes the payload and its presence,
+// branch-free. It calls the same kizu_map_get as Map.get and skips the load.
+func (e *emitter) writeMapAt(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" {
+		return fmt.Errorf("llvm error: %s expects Map, []u8 -> ?&V", instr.Op)
+	}
+	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
+		return fmt.Errorf(
+			"llvm error: %s expects a `?&V` result, got %s", instr.Op, instr.Result.Type)
+	}
+	mapValue := e.value(instr.Args[0])
+	key, err := e.sliceValue(instr.Args[1])
+	if err != nil {
+		return err
+	}
+	resultName := localName(instr.Result.Name)
+	keyPtr, keyLen := e.writeSliceParts(resultName+".key", key)
+	ptrName := resultName + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
+		ptrName, mapValue.operand, keyPtr, keyLen)
+	optType := e.llvmType(instr.Result.Type)
+	liveName := resultName + ".live"
+	tagName := resultName + ".tag"
+	someName := resultName + ".some"
+	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
+	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
+		someName, optType, tagName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
+		resultName, optType, someName, ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeMapKeyAt lowers Map.key_at(index). The runtime fills a `?[]u8` slot

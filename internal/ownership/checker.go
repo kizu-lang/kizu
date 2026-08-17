@@ -1393,73 +1393,121 @@ func isBufferTypeName(typeName string) bool {
 		typeName[1] >= '0' && typeName[1] <= '9'
 }
 
-// arrayBorrowCondition describes a recognized `array.at/at_mut(index)` capture
-// condition: which array binding it borrows and how.
-type arrayBorrowCondition struct {
-	arrayName string
-	elem      string
-	mutable   bool
+// containerBorrowCondition describes a recognized array/map at/at_mut capture
+// condition: which container binding it borrows and how.
+type containerBorrowCondition struct {
+	containerName string
+	elem          string
+	mutable       bool
 }
 
-// matchArrayBorrowCondition recognizes array.at/at_mut(index) capture
+// matchContainerBorrowCondition recognizes array/map at/at_mut capture
 // conditions and validates the pieces the generic condition path would have:
-// the receiver is a live Array binding and the index reads as i64.
-func (c *Checker) matchArrayBorrowCondition(
+// the receiver is a live Array or Map binding, and the argument reads as an
+// i64 index (Array) or a []u8 key (Map).
+func (c *Checker) matchContainerBorrowCondition(
 	cond ast.Expression,
 	env *scope,
-) (arrayBorrowCondition, bool, error) {
+) (containerBorrowCondition, bool, error) {
 	call, ok := cond.(*ast.CallExpr)
 	if !ok {
-		return arrayBorrowCondition{}, false, nil
+		return containerBorrowCondition{}, false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || (field.Name != "at" && field.Name != "at_mut") {
-		return arrayBorrowCondition{}, false, nil
+		return containerBorrowCondition{}, false, nil
 	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return arrayBorrowCondition{}, false, nil
+		return containerBorrowCondition{}, false, nil
 	}
-	array, exists := env.lookup(ident.Name)
-	if !exists || array.moved {
-		return arrayBorrowCondition{}, false, nil
+	container, exists := env.lookup(ident.Name)
+	if !exists || container.moved {
+		return containerBorrowCondition{}, false, nil
 	}
-	base, elem, ok := splitGenericType(array.typeName)
-	if !ok || base != "std::array::Array" {
-		return arrayBorrowCondition{}, false, nil
+	base, arg, ok := splitGenericType(container.typeName)
+	if !ok {
+		return containerBorrowCondition{}, false, nil
 	}
-	mutable := field.Name == "at_mut"
-	if mutable && !array.mutable {
-		return arrayBorrowCondition{}, false,
-			errorf("array error: `Array.at_mut` requires mutable array binding")
+	var elem string
+	var err error
+	switch base {
+	case "std::array::Array":
+		elem, err = c.checkArrayBorrowConditionArgs(field, call, container, arg, env)
+	case "std::map::Map":
+		elem, err = c.checkMapBorrowConditionArgs(field, call, container, arg, env)
+	default:
+		return containerBorrowCondition{}, false, nil
+	}
+	if err != nil {
+		return containerBorrowCondition{}, false, err
+	}
+	return containerBorrowCondition{
+		containerName: ident.Name, elem: elem, mutable: field.Name == "at_mut",
+	}, true, nil
+}
+
+// checkArrayBorrowConditionArgs validates a recognized Array at/at_mut capture
+// condition: a mutable binding for at_mut and one i64 index.
+func (c *Checker) checkArrayBorrowConditionArgs(
+	field *ast.FieldExpr,
+	call *ast.CallExpr,
+	array *binding,
+	elem string,
+	env *scope,
+) (string, error) {
+	if field.Name == "at_mut" && !array.mutable {
+		return "", errorf("array error: `Array.at_mut` requires mutable array binding")
 	}
 	if len(call.Args) != 1 {
-		return arrayBorrowCondition{}, false,
-			errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
+			field.Name, len(call.Args))
 	}
 	got, err := c.readExpr(call.Args[0], env)
 	if err != nil {
-		return arrayBorrowCondition{}, false, err
+		return "", err
 	}
 	if got != "i64" {
-		return arrayBorrowCondition{}, false,
-			errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
 	}
-	return arrayBorrowCondition{arrayName: ident.Name, elem: elem, mutable: mutable}, true, nil
+	return elem, nil
 }
 
-// tieArrayBorrowCapture builds the capture binding for a recognized at/at_mut
-// condition and activates the element borrow on the branch scope's clone of
-// the array, so the branch body sees mutation and deinit wait on the capture.
-func (c *Checker) tieArrayBorrowCapture(
+// checkMapBorrowConditionArgs validates a recognized Map at/at_mut capture
+// condition: a mutable binding for at_mut and one []u8 key.
+func (c *Checker) checkMapBorrowConditionArgs(
+	field *ast.FieldExpr,
+	call *ast.CallExpr,
+	mapValue *binding,
+	arg string,
+	env *scope,
+) (string, error) {
+	mapArgs, err := c.checkedMapArgs(arg)
+	if err != nil {
+		return "", err
+	}
+	if field.Name == "at_mut" && !mapValue.mutable {
+		return "", errorf("map error: `Map.at_mut` requires mutable map binding")
+	}
+	if err := c.checkMapKeyArg(field.Name, call.Args, env); err != nil {
+		return "", err
+	}
+	return mapArgs[1], nil
+}
+
+// tieContainerBorrowCapture builds the capture binding for a recognized
+// at/at_mut condition and activates the payload borrow on the branch scope's
+// clone of the container, so the branch body sees mutation and deinit wait on
+// the capture.
+func (c *Checker) tieContainerBorrowCapture(
 	name string,
-	match arrayBorrowCondition,
+	match containerBorrowCondition,
 	cond ast.Expression,
 	branch *scope,
 ) (*binding, error) {
-	target, exists := branch.lookup(match.arrayName)
+	target, exists := branch.lookup(match.containerName)
 	if !exists {
-		return nil, errorf("move error: unknown value `%s`", match.arrayName)
+		return nil, errorf("move error: unknown value `%s`", match.containerName)
 	}
 	if err := checkBorrowConflict(target, match.mutable); err != nil {
 		return nil, err
@@ -1700,11 +1748,11 @@ func (c *Checker) checkExprStmt(stmt *ast.ExprStmt, env *scope) error {
 
 // checkIfStmt merges possible moves from either branch into the outer scope.
 func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
-	var borrowCond arrayBorrowCondition
+	var borrowCond containerBorrowCondition
 	isBorrowCond := false
 	var condType string
 	if stmt.Capture != "" {
-		match, ok, err := c.matchArrayBorrowCondition(stmt.Condition, env)
+		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, env)
 		if err != nil {
 			return err
 		}
@@ -1726,7 +1774,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 		var capture *binding
 		var err error
 		if isBorrowCond {
-			capture, err = c.tieArrayBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, leftScope)
+			capture, err = c.tieContainerBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, leftScope)
 		} else {
 			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
 			err = c.tieViewCapture(capture, condType, stmt.Condition, leftScope)
@@ -1757,11 +1805,11 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 
 // checkWhileStmt treats moves in the body as possible after the loop.
 func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
-	var borrowCond arrayBorrowCondition
+	var borrowCond containerBorrowCondition
 	isBorrowCond := false
 	var condType string
 	if stmt.Capture != "" {
-		match, ok, err := c.matchArrayBorrowCondition(stmt.Condition, env)
+		match, ok, err := c.matchContainerBorrowCondition(stmt.Condition, env)
 		if err != nil {
 			return err
 		}
@@ -1781,7 +1829,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 		var capture *binding
 		var err error
 		if isBorrowCond {
-			capture, err = c.tieArrayBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, child)
+			capture, err = c.tieContainerBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, child)
 		} else {
 			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
 			err = c.tieViewCapture(capture, condType, stmt.Condition, child)
@@ -3851,10 +3899,38 @@ func (c *Checker) checkMapPrimitiveMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	// at/at_mut come first: only the std wrapper body reaches the primitive,
+	// and routing a concrete instantiation to checkMapMethod would hit the
+	// user-facing capture-only refusal.
+	switch name {
+	case "at":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
+			return "", err
+		}
+		return "?&" + valueType, nil
+	case "at_mut":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
+			return "", err
+		}
+		return "?&var " + valueType, nil
+	}
 	if !isGenericParamName(keyType) && !isGenericParamName(valueType) {
 		argsText := mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]
 		return c.checkMapMethod(mapValue, argsText, name, args, env)
 	}
+	return c.checkGenericMapPrimitiveMethod(mapValue, keyType, valueType, name, args, env)
+}
+
+// checkGenericMapPrimitiveMethod validates Map primitives applied to generic
+// static arguments, which only a std wrapper body can spell.
+func (c *Checker) checkGenericMapPrimitiveMethod(
+	mapValue *binding,
+	keyType string,
+	valueType string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
 	switch name {
 	case "insert":
 		if len(args) != 2 {
@@ -5145,6 +5221,9 @@ func (c *Checker) checkMapMethod(
 		return "", err
 	}
 	valueType := mapArgs[1]
+	if err := checkMapReadWhileMutBorrowed(mapValue, name); err != nil {
+		return "", err
+	}
 	switch name {
 	case "insert":
 		return c.checkMapInsert(mapValue, valueType, args, env)
@@ -5153,6 +5232,10 @@ func (c *Checker) checkMapMethod(
 			return "", err
 		}
 		return "?" + valueType, nil
+	case "at", "at_mut":
+		return "", errorf("map error: `Map.%s` must be consumed by a capture"+
+			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+			name, name, name)
 	case "key_at":
 		if len(args) != 1 {
 			return "", errorf("map error: `Map.key_at` expects 1 arg, got %d", len(args))
@@ -5175,6 +5258,19 @@ func (c *Checker) checkMapMethod(
 	default:
 		return "", errorf("map error: Map has no method `%s`", name)
 	}
+}
+
+// checkMapReadWhileMutBorrowed refuses map reads while an at_mut capture holds
+// the map mutably borrowed: the borrow aliases live map storage, so reads wait
+// the way Array reads do.
+func checkMapReadWhileMutBorrowed(mapValue *binding, name string) error {
+	switch name {
+	case "get", "key_at", "contains", "len":
+		if mapValue.activeMutBorrows > 0 {
+			return errorf("map error: `Map.%s` cannot read while mutably borrowed", name)
+		}
+	}
+	return nil
 }
 
 // checkMapInsert validates read-only key and copy value insertion.

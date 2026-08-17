@@ -129,6 +129,33 @@ test "container lookups miss as null" {
     testing::expect_equal<i64>(-1, table.get("miss") orelse -1);
 }
 
+// A borrow payload rides the optional too: `at(key) -> ?&V` binds the value
+// borrow as the capture, at_mut writes through it in place, and the else arm
+// runs the miss path with the map no longer borrowed.
+test "map at_mut updates values in place" {
+    let allocator = mem::page_allocator();
+    var counts = map::new<[]u8, i64>(allocator);
+    defer counts.deinit();
+    try counts.insert("kizu", 41);
+
+    if counts.at_mut("kizu") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("kizu", 1);
+    }
+    if counts.at_mut("lang") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("lang", 1);
+    }
+
+    testing::expect_equal<i64>(42, counts.get("kizu") orelse -1);
+    testing::expect_equal<i64>(1, counts.get("lang") orelse -1);
+    if counts.at("miss") |ghost| {
+        testing::expect_equal<i64>(-1, ghost.*);
+    }
+}
+
 // A view payload rides the optional: mem::slice misses as null, and the
 // unset-environment lookup does too.
 test "view payloads miss as null" {

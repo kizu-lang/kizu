@@ -2111,10 +2111,11 @@ func (c *Checker) checkStringViewInitializer(
 	return sources, mutable, true, nil
 }
 
-// checkArrayBorrowCondition recognizes array.at/at_mut(index) capture
-// conditions: the borrow optional `?&T` exists only there, so the element
-// borrow binds as the capture the way `let view = &value` binds a local borrow.
-func (c *Checker) checkArrayBorrowCondition(
+// checkContainerBorrowCondition recognizes array/map at/at_mut capture
+// conditions: the borrow optional `?&T` exists only there, so the payload
+// borrow binds as the capture the way `let view = &value` binds a local
+// borrow. Array takes an i64 index, Map takes a []u8 key.
+func (c *Checker) checkContainerBorrowCondition(
 	expr ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
@@ -2131,21 +2132,69 @@ func (c *Checker) checkArrayBorrowCondition(
 	if err != nil {
 		return "", false, true, err
 	}
-	base, elem, ok := splitGenericType(string(receiver))
-	if !ok || base != "std::array::Array" {
-		// A non-Array receiver may have its own `at` method; the generic
-		// condition path types that call.
+	base, arg, ok := splitGenericType(string(receiver))
+	if !ok {
 		return "", false, false, nil
 	}
+	var elem Type
+	switch base {
+	case "std::array::Array":
+		elem, err = c.checkArrayBorrowConditionCall(field, call, arg, env, unsafe)
+	case "std::map::Map":
+		elem, err = c.checkMapBorrowConditionCall(field, call, arg, env, unsafe)
+	default:
+		// A receiver of another type may have its own `at` method; the
+		// generic condition path types that call.
+		return "", false, false, nil
+	}
+	if err != nil {
+		return "", false, true, err
+	}
+	return elem, field.Name == "at_mut", true, nil
+}
+
+// checkArrayBorrowConditionCall validates a recognized Array at/at_mut capture
+// condition: a mutable binding for at_mut and one i64 index.
+func (c *Checker) checkArrayBorrowConditionCall(
+	field *ast.FieldExpr,
+	call *ast.CallExpr,
+	elem string,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", false, true, errorf("type error: `Array.at_mut` requires mutable array binding")
+			return "", errorf("type error: `Array.at_mut` requires mutable array binding")
 		}
 	}
 	if err := c.checkArrayIndexArg(field.Name, call.Args, env, unsafe); err != nil {
-		return "", false, true, err
+		return "", err
 	}
-	return Type(elem), field.Name == "at_mut", true, nil
+	return Type(elem), nil
+}
+
+// checkMapBorrowConditionCall validates a recognized Map at/at_mut capture
+// condition: a mutable binding for at_mut and one []u8 key.
+func (c *Checker) checkMapBorrowConditionCall(
+	field *ast.FieldExpr,
+	call *ast.CallExpr,
+	arg string,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if field.Name == "at_mut" {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+			return "", errorf("type error: `Map.at_mut` requires mutable map binding")
+		}
+	}
+	mapArgs, err := c.checkedMapArgs(arg)
+	if err != nil {
+		return "", err
+	}
+	if err := c.checkMapKeyArg(field.Name, call.Args, env, unsafe); err != nil {
+		return "", err
+	}
+	return Type(mapArgs[1]), nil
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -2702,7 +2751,8 @@ func (c *Checker) checkIfStmt(
 	unsafe unsafeMark,
 ) (bool, error) {
 	consequence := env.child()
-	handled, err := c.bindArrayBorrowCapture(stmt.Capture, stmt.Condition, consequence, env, unsafe)
+	handled, err := c.bindContainerBorrowCapture(
+		stmt.Capture, stmt.Condition, consequence, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -2753,10 +2803,10 @@ func (c *Checker) bindConditionCapture(
 	return scope.define(capture, elem, false)
 }
 
-// bindArrayBorrowCapture handles an `array.at/at_mut(index)` capture condition:
-// the capture binds the element borrow directly, carrying the array's
+// bindContainerBorrowCapture handles an array/map at/at_mut capture condition:
+// the capture binds the payload borrow directly, carrying the container's
 // provenance the way `let view = try array.at(...)` used to.
-func (c *Checker) bindArrayBorrowCapture(
+func (c *Checker) bindContainerBorrowCapture(
 	capture string,
 	cond ast.Expression,
 	branch *scope,
@@ -2766,7 +2816,7 @@ func (c *Checker) bindArrayBorrowCapture(
 	if capture == "" {
 		return false, nil
 	}
-	elem, mutable, ok, err := c.checkArrayBorrowCondition(cond, env, unsafe)
+	elem, mutable, ok, err := c.checkContainerBorrowCondition(cond, env, unsafe)
 	if !ok || err != nil {
 		return ok, err
 	}
@@ -2786,7 +2836,7 @@ func (c *Checker) checkWhileStmt(
 	unsafe unsafeMark,
 ) (bool, error) {
 	body := env.child()
-	handled, err := c.bindArrayBorrowCapture(stmt.Capture, stmt.Condition, body, env, unsafe)
+	handled, err := c.bindContainerBorrowCapture(stmt.Capture, stmt.Condition, body, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -4731,9 +4781,37 @@ func (c *Checker) checkMapPrimitiveMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	// at/at_mut come first: only the std wrapper body reaches the primitive,
+	// and routing a concrete instantiation to checkMapMethod would hit the
+	// user-facing capture-only refusal.
+	switch name {
+	case "at":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("?&" + string(valueType)), nil
+	case "at_mut":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("?&var " + string(valueType)), nil
+	}
 	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
 		return c.checkMapMethod(valueType, name, args, env, unsafe)
 	}
+	return c.checkGenericMapPrimitiveMethod(keyType, valueType, name, args, env, unsafe)
+}
+
+// checkGenericMapPrimitiveMethod validates Map primitives applied to generic
+// static arguments, which only a std wrapper body can spell.
+func (c *Checker) checkGenericMapPrimitiveMethod(
+	keyType string,
+	valueType Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
 	switch name {
 	case "insert":
 		if len(args) != 2 {
@@ -5859,6 +5937,11 @@ func (c *Checker) checkMapReceiverMethod(
 	if err := checkMapReceiverBorrow(field, env); err != nil {
 		return "", err
 	}
+	if field.Name == "at_mut" {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+			return "", errorf("type error: `Map.at_mut` requires mutable map binding")
+		}
+	}
 	mapArgs, err := c.checkedMapArgs(arg)
 	if err != nil {
 		return "", err
@@ -6120,6 +6203,10 @@ func (c *Checker) checkMapMethod(
 			return "", err
 		}
 		return Type("?" + string(valueType)), nil
+	case "at", "at_mut":
+		return "", errorf("type error: `Map.%s` must be consumed by a capture"+
+			" (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+			name, name, name)
 	case "key_at":
 		if len(args) != 1 {
 			return "", errorf("type error: `Map.key_at` expects 1 arg, got %d", len(args))
