@@ -1,4 +1,8 @@
+import std::array;
+import std::map;
 import std::mem;
+import std::process;
+import std::string;
 import std::testing;
 
 fn find(bytes: []u8, needle: u8) -> ?i64 {
@@ -104,6 +108,81 @@ test "error union with optional success drives a fallible stream" {
     var s = Stream { bytes: "k", index: 0, broken: false };
     testing::expect_equal<i64>(107, cast<i64>(try s.next() orelse 0));
     testing::expect_equal<i64>(0, cast<i64>(try s.next() orelse 0));
+}
+
+// Container lookups answer a question, and "not there" is an answer: the
+// miss is null, not an error (docs/style.md).
+test "container lookups miss as null" {
+    let allocator = mem::page_allocator();
+    var values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(41);
+    testing::expect_equal<i64>(41, values.get(0) orelse -1);
+    testing::expect_equal<i64>(-1, values.get(9) orelse -1);
+    testing::expect_equal<i64>(41, values.pop() orelse -1);
+    testing::expect_equal<i64>(-1, values.pop() orelse -1);
+
+    var table = map::new<[]u8, i64>(allocator);
+    defer table.deinit();
+    try table.insert("hit", 7);
+    testing::expect_equal<i64>(7, table.get("hit") orelse -1);
+    testing::expect_equal<i64>(-1, table.get("miss") orelse -1);
+}
+
+// A view payload rides the optional: mem::slice misses as null, and the
+// unset-environment lookup does too.
+test "view payloads miss as null" {
+    testing::expect_equal<[]u8>("ab", mem::slice("abc", 0, 2) orelse "");
+    testing::expect_equal<[]u8>("", mem::slice("abc", 0, 4) orelse "");
+    testing::expect_equal<[]u8>(
+        "",
+        process::env("KIZU_SURELY_UNSET_VAR_12345") orelse "");
+}
+
+fn guarded_find(bytes: []u8, needle: u8) -> i64 {
+    let at = find(bytes, needle) orelse return -1;
+    return at + 100;
+}
+
+// `orelse return/break` is the guard form: the null arm leaves the function
+// or loop, so the payload flows on without a nested capture.
+test "orelse guards exit on null" {
+    testing::expect_equal<i64>(102, guarded_find("kizu", cast<u8>(122)));
+    testing::expect_equal<i64>(-1, guarded_find("kizu", cast<u8>(120)));
+
+    var it = iter("kz");
+    var total = 0;
+    while true {
+        let byte = it.next() orelse break;
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(229, total);
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return name;
+}
+
+// An owner payload moves out through the capture and owes its cleanup there.
+test "owner payload pops through the capture" {
+    let allocator = mem::page_allocator();
+    var names = array::new<string::String>(allocator);
+    defer names.deinit_all();
+    try names.append(try make_name(allocator, "kizu"));
+
+    var length = 0;
+    if names.pop() |taken| {
+        length = taken.len();
+        taken.deinit();
+    }
+    testing::expect_equal<i64>(4, length);
+    if names.pop() |ghost| {
+        ghost.deinit();
+        testing::expect(false);
+    }
 }
 
 fn or_one(value: ?u8) -> i64 {
