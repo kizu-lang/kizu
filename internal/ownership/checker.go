@@ -524,7 +524,7 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	if blockTerminates(block) {
 		return nil
 	}
-	return c.checkOwnersConsumed(env, bindingMark, false)
+	return c.checkOwnersConsumed(env, bindingMark, leakExit{})
 }
 
 // checkStmt validates one statement.
@@ -672,12 +672,29 @@ func (c *Checker) bindingNeedsConsume(value *binding) bool {
 	return c.valueTypeNeedsConsume(value.typeName)
 }
 
+// leakExit names the exit a leak check guards. An early error exit points its
+// diagnostic at the exit that leaks — a later cleanup exists but is never
+// reached — while a plain exit points at the declaration nothing ever cleans.
+type leakExit struct {
+	kind leakExitKind
+	span ast.Span
+}
+
+type leakExitKind int
+
+const (
+	exitPlain leakExitKind = iota
+	exitTry
+	exitErrorReturn
+)
+
 // checkOwnersConsumed rejects an exit that would leak a live owner. sinceID
 // limits the check to bindings declared after that watermark: a function exit
 // passes 0 and checks everything live, a block fall-through passes the ID the
 // block started at and checks only its own declarations. On an error path a
 // registered errdefer cleanup counts as the consume.
-func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, errorPath bool) error {
+func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, exit leakExit) error {
+	errorPath := exit.kind != exitPlain
 	var leaked *binding
 	env.walkBindings(func(value *binding) {
 		if value.id <= sinceID || !c.bindingNeedsConsume(value) {
@@ -693,11 +710,22 @@ func (c *Checker) checkOwnersConsumed(env *scope, sinceID int, errorPath bool) e
 	if leaked == nil {
 		return nil
 	}
-	return leakError(leaked)
+	return leakError(leaked, exit)
 }
 
-// leakError reports one unconsumed owner at its declaration site.
-func leakError(value *binding) error {
+// leakError reports one unconsumed owner: at the early error exit that skips
+// its cleanup, or at its declaration when nothing ever cleans it.
+func leakError(value *binding, exit leakExit) error {
+	switch exit.kind {
+	case exitTry:
+		return errorAt(exit.span,
+			"move error: owned value `%s` would leak on this `try`'s error exit;"+
+				" register `defer` or `errdefer` cleanup before it", value.name)
+	case exitErrorReturn:
+		return errorAt(exit.span,
+			"move error: owned value `%s` would leak on this error return;"+
+				" register `defer` or `errdefer` cleanup before it", value.name)
+	}
 	return errorAt(value.declSpan, "move error: owned value `%s` is never deinitialized",
 		value.name)
 }
@@ -765,7 +793,7 @@ func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) err
 // checkReturnStmt rejects borrowed values before applying normal move rules.
 func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if stmt.Value == nil {
-		return c.checkOwnersConsumed(env, 0, false)
+		return c.checkOwnersConsumed(env, 0, leakExit{})
 	}
 	if done, err := c.checkReturnValueEscapes(stmt, env); done {
 		return err
@@ -782,7 +810,11 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if _, err := c.moveExpr(stmt.Value, env); err != nil {
 		return err
 	}
-	return c.checkOwnersConsumed(env, 0, errorPath)
+	exit := leakExit{}
+	if errorPath {
+		exit = leakExit{kind: exitErrorReturn, span: expressionSpan(stmt.Value)}
+	}
+	return c.checkOwnersConsumed(env, 0, exit)
 }
 
 // returnTakesErrorPath reports whether returning expr exits through the error
@@ -851,7 +883,7 @@ func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (boo
 			if err != nil {
 				return true, err
 			}
-			return true, c.checkOwnersConsumed(env, 0, false)
+			return true, c.checkOwnersConsumed(env, 0, leakExit{})
 		}
 	}
 	return false, nil
@@ -1946,7 +1978,7 @@ func (c *Checker) checkArmPayloadConsumed(arm ast.MatchArm, child *scope) error 
 	if !ok || !c.bindingNeedsConsume(value) {
 		return nil
 	}
-	return leakError(value)
+	return leakError(value, leakExit{})
 }
 
 // matchScrutineeOwner returns the binding of a matched value that is an owned
@@ -2605,7 +2637,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	if err := c.checkDeferredCleanups(defers, env); err != nil {
 		return "", err
 	}
-	if err := c.checkOwnersConsumed(env, bindingMark, false); err != nil {
+	if err := c.checkOwnersConsumed(env, bindingMark, leakExit{}); err != nil {
 		return "", err
 	}
 	return valueType, nil
@@ -4022,7 +4054,8 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	}
 	// The same early exit must not leak a live owner: every owner must be
 	// consumed or covered by a defer / errdefer cleanup before the try.
-	if err := c.checkOwnersConsumed(env, 0, true); err != nil {
+	if err := c.checkOwnersConsumed(env, 0,
+		leakExit{kind: exitTry, span: expressionSpan(expr)}); err != nil {
 		return "", err
 	}
 	return arg, nil
