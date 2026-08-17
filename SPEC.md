@@ -482,7 +482,7 @@ Kizu は型や名前空間に属する item lookup に `::` を使います。
 let color = Color::Red;
 let shape = Shape::Circle(10);
 let handle = io::blocking();
-let bytes = try fs::read_file(handle, "config.toml");
+let text = try fs::read_file(handle, allocator, "config.toml", mem::Limit::Unlimited);
 ```
 
 `.` は runtime value の field / method access だけに使います。
@@ -540,7 +540,7 @@ std も同じ規則です。import せずに `std::` で始まる名前は書け
 ```kizu
 import std::fs;
 
-let bytes = try fs::read_file(io, "config.toml");
+let text = try fs::read_file(io, allocator, "config.toml", mem::Limit::Unlimited);
 ```
 
 package 根も import できます。根を import すると根の名前が束縛され、その下の
@@ -2126,9 +2126,11 @@ API の形と個数は未定です。撤回した 8 個の型を一度に戻す�
 
 ```kizu
 import std::fs;
+import std::mem;
+import std::string;
 
-fn read_config(io: Io, path: []u8) -> ![]u8 {
-    return fs::read_file(io, path);
+fn read_config(io: Io, allocator: Allocator, path: []u8) -> !string::String {
+    return fs::read_file(io, allocator, path, mem::Limit::Bytes(1048576));
 }
 ```
 
@@ -2162,7 +2164,8 @@ runtime selection の方針は ADR-0039 に従います。
 `std::fs`:
 
 * `std::fs::read_file(io, allocator, path, limit)` は `!std::string::String` を返す。
-  `limit: std::mem::Limit` で確保上限を明示する
+  `limit: std::mem::Limit` で確保上限を明示する。超過は
+  `std::fs::Error::LimitExceeded` で、`OutOfMemory`(確保失敗)とは分ける
 * `std::fs::read_file_into(io, path, out: &var std::string::String)` は `!void` を
   返し、fs 側では確保しない
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
@@ -2196,7 +2199,8 @@ runtime selection の方針は ADR-0039 に従います。
 
 * `std::io::write_stdout(io, bytes)` は `!void` を返す
 * `std::io::write_stderr(io, bytes)` は `!void` を返す
-* `std::io::read_stdin(io, allocator, limit)` は `!std::string::String` を返す
+* `std::io::read_stdin(io, allocator, limit)` は `!std::string::String` を返す。
+  limit 超過は `std::io::Error::LimitExceeded`
 * `std::io::read_stdin_into(io, out: &var std::string::String)` は `!void` を返す
 * stdio helper は `Io` capability を必ず要求する
 * `std::process::arg_count()` は `i64` を返す

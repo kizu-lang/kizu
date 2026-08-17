@@ -343,6 +343,12 @@ typedef struct {
     int64_t len;
 } KizuSliceU8;
 
+/* A Kizu std::string::String is one field: the Array<u8> handle its bytes
+ * live in. A &var String argument arrives as a pointer to that struct. */
+typedef struct {
+    void *bytes;
+} KizuString;
+
 typedef struct {
     int64_t size;
     _Bool is_dir;
@@ -421,6 +427,8 @@ typedef struct {
 
 void *kizu_array_new(int64_t elem_size);
 _Bool kizu_array_append(void *handle, const void *elem);
+_Bool kizu_array_truncate(void *handle, int64_t len);
+static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
 
 static int kizu_runtime_argc = 0;
 static char **kizu_runtime_argv = NULL;
@@ -779,44 +787,84 @@ void std__internal__builtin__io_write_stderr(
     *out = kizu_std_builtin_io_write_stderr_result(io, *bytes);
 }
 
-static KizuErrorSliceU8 kizu_std_builtin_io_read_stdin_result(void *io) {
-    if (kizu_io_is_failing(io)) {
-        return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_IO_FAILING);
+/* kizu_read_stream_into appends a whole stream to a String buffer, reading
+ * straight into the buffer's own storage. The cap is enforced while reading,
+ * so a caller-declared ceiling bounds the allocation rather than checking it
+ * after the fact; reading one byte past the cap is how overflow is seen.
+ * size_hint pre-reserves for a stream whose size is known, and on any failure
+ * the buffer is truncated back to where it started. */
+static int64_t kizu_read_stream_into(
+    FILE *stream,
+    KizuString *dst,
+    int64_t max,
+    int64_t size_hint,
+    int64_t limit_failure,
+    int64_t oom_failure,
+    int64_t read_failure
+) {
+    KizuArray *array = dst ? (KizuArray *)dst->bytes : NULL;
+    if (!array || array->elem_size != 1) {
+        return read_failure;
     }
-    int64_t len = 0;
-    int64_t cap = 4096;
-    unsigned char *data = (unsigned char *)malloc((size_t)cap);
-    if (!data) {
-        return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
+    int64_t start_len = array->len;
+    if (size_hint > 0) {
+        int64_t reserve = size_hint;
+        if (max >= 0 && max + 1 < reserve) {
+            reserve = max + 1;
+        }
+        if (!kizu_array_reserve_storage(array, start_len + reserve)) {
+            return oom_failure;
+        }
     }
+    int64_t total = 0;
     for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            unsigned char *next = (unsigned char *)realloc(data, (size_t)cap);
-            if (!next) {
-                free(data);
-                return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY);
-            }
-            data = next;
+        int64_t want = 65536;
+        if (max >= 0 && max + 1 - total < want) {
+            want = max + 1 - total;
         }
-        size_t read_count = fread(data + len, 1, (size_t)(cap - len), stdin);
-        len += (int64_t)read_count;
+        if (!kizu_array_reserve_storage(array, array->len + want)) {
+            kizu_array_truncate(array, start_len);
+            return oom_failure;
+        }
+        size_t read_count = fread(array->data + array->len, 1, (size_t)want, stream);
         if (read_count == 0) {
-            if (ferror(stdin)) {
-                free(data);
-                return kizu_err_slice(KIZU_ERR_STD_IO_ERROR_READ_FAILED);
+            if (ferror(stream)) {
+                kizu_array_truncate(array, start_len);
+                return read_failure;
             }
-            break;
+            return 0;
+        }
+        array->len += (int64_t)read_count;
+        total += (int64_t)read_count;
+        if (max >= 0 && total > max) {
+            kizu_array_truncate(array, start_len);
+            return limit_failure;
         }
     }
-    KizuSliceU8 out;
-    out.ptr = data;
-    out.len = len;
-    return kizu_ok_slice(out);
 }
 
-void std__internal__builtin__io_read_stdin(KizuErrorSliceU8 *out, void *io) {
-    *out = kizu_std_builtin_io_read_stdin_result(io);
+static KizuErrorVoid kizu_std_builtin_io_read_stdin_into_result(
+    void *io, KizuString *dst, int64_t max) {
+    if (kizu_io_is_failing(io)) {
+        return kizu_err_void(KIZU_ERR_STD_IO_ERROR_IO_FAILING);
+    }
+    int64_t failure = kizu_read_stream_into(
+        stdin,
+        dst,
+        max,
+        0,
+        KIZU_ERR_STD_IO_ERROR_LIMIT_EXCEEDED,
+        KIZU_ERR_STD_IO_ERROR_OUT_OF_MEMORY,
+        KIZU_ERR_STD_IO_ERROR_READ_FAILED);
+    if (failure != 0) {
+        return kizu_err_void(failure);
+    }
+    return kizu_ok_void();
+}
+
+void std__internal__builtin__io_read_stdin_into(
+    KizuErrorVoid *out, void *io, KizuString *dst, int64_t max) {
+    *out = kizu_std_builtin_io_read_stdin_into_result(io, dst, max);
 }
 
 int64_t std__internal__builtin__process_arg_count(void) {
@@ -940,52 +988,44 @@ void std__internal__builtin__process_spawn_wait8(
     *out = kizu_ok_i64((int64_t)code);
 }
 
-static KizuErrorSliceU8 kizu_std_builtin_fs_read_file_result(void *io, KizuSliceU8 path) {
+static KizuErrorVoid kizu_std_builtin_fs_read_file_into_result(
+    void *io, KizuSliceU8 path, KizuString *dst, int64_t max) {
     if (kizu_io_is_failing(io)) {
-        return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
+        return kizu_err_void(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
     }
     char *cpath = kizu_slice_to_cstr(path);
     if (!cpath) {
-        return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
+        return kizu_err_void(KIZU_ERR_STD_FS_ERROR_INVALID_PATH);
     }
     FILE *file = fopen(cpath, "rb");
     int code = errno;
     free(cpath);
     if (!file) {
-        return kizu_err_slice(kizu_errno_failure(code));
+        return kizu_err_void(kizu_errno_failure(code));
     }
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_READ_FAILED);
+    struct stat st;
+    int64_t size_hint = 0;
+    if (fstat(fileno(file), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+        size_hint = (int64_t)st.st_size;
     }
-    long size = ftell(file);
-    if (size < 0 || fseek(file, 0, SEEK_SET) != 0) {
-        fclose(file);
-        return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_READ_FAILED);
-    }
-    unsigned char *data = NULL;
-    if (size > 0) {
-        data = (unsigned char *)malloc((size_t)size);
-        if (!data) {
-            fclose(file);
-            return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY);
-        }
-        if (fread(data, 1, (size_t)size, file) != (size_t)size) {
-            free(data);
-            fclose(file);
-            return kizu_err_slice(KIZU_ERR_STD_FS_ERROR_READ_FAILED);
-        }
-    }
+    int64_t failure = kizu_read_stream_into(
+        file,
+        dst,
+        max,
+        size_hint,
+        KIZU_ERR_STD_FS_ERROR_LIMIT_EXCEEDED,
+        KIZU_ERR_STD_FS_ERROR_OUT_OF_MEMORY,
+        KIZU_ERR_STD_FS_ERROR_READ_FAILED);
     fclose(file);
-    KizuSliceU8 out;
-    out.ptr = data;
-    out.len = (int64_t)size;
-    return kizu_ok_slice(out);
+    if (failure != 0) {
+        return kizu_err_void(failure);
+    }
+    return kizu_ok_void();
 }
 
-void std__internal__builtin__fs_read_file(
-    KizuErrorSliceU8 *out, void *io, const KizuSliceU8 *path) {
-    *out = kizu_std_builtin_fs_read_file_result(io, *path);
+void std__internal__builtin__fs_read_file_into(
+    KizuErrorVoid *out, void *io, const KizuSliceU8 *path, KizuString *dst, int64_t max) {
+    *out = kizu_std_builtin_fs_read_file_into_result(io, *path, dst, max);
 }
 
 static KizuErrorVoid kizu_std_builtin_fs_write_file_result(

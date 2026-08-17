@@ -3654,6 +3654,9 @@ func (c *Checker) checkCoreArg(
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, unsafe, name)
 	}
+	if want == stdprim.ArgStringOut {
+		return c.checkStringOutArg(name, arg, env, unsafe)
+	}
 	got, err := c.checkContextualExpr(arg, Type(want), env, unsafe)
 	if err != nil {
 		return err
@@ -3692,8 +3695,6 @@ func (c *Checker) checkFsBuiltin(
 	unsafe unsafeMark,
 ) (Type, bool, error) {
 	switch name {
-	case "std::internal::builtin::fs_read_file":
-		return c.checkFsReadFile(args, env, unsafe)
 	case "std::internal::builtin::fs_write_file":
 		return c.checkFsWriteFile(args, env, unsafe)
 	case "std::internal::builtin::fs_exists":
@@ -3713,27 +3714,36 @@ func (c *Checker) checkFsBuiltin(
 	}
 }
 
-// checkFsReadFile validates std::fs::read_file.
-func (c *Checker) checkFsReadFile(
-	args []ast.Expression,
+// checkStringOutArg validates a &var std::string::String destination argument:
+// either explicit `&var local` syntax or an already-borrowed &var param.
+func (c *Checker) checkStringOutArg(
+	label string,
+	arg ast.Expression,
 	env *scope,
 	unsafe unsafeMark,
-) (Type, bool, error) {
-	if len(args) != 2 {
-		return "", true, errorf("type error: `std::fs::read_file` expects io and path")
+) error {
+	const stringType = Type("std::string::String")
+	if prefix, ok := borrowPrefix(arg); ok && prefix.Operator == "&var" {
+		typ, _, err := c.checkBorrowPrefix(prefix, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if sameType(typ, stringType) {
+			return nil
+		}
+		return errorf("type error: `%s` expects &var std::string::String out, got &var %s",
+			label, typ)
 	}
-	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::read_file"); err != nil {
-		return "", true, err
-	}
-	path, err := c.checkExpr(args[1], env, unsafe)
+	typ, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
-		return "", true, err
+		return err
 	}
-	if !sameType(path, typeByteString) {
-		return "", true, errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
-			path)
+	if ident, ok := arg.(*ast.IdentExpr); ok &&
+		sameType(typ, stringType) && env.isMutBorrowed(ident.Name) {
+		return nil
 	}
-	return "std::fs::Error![]u8", true, nil
+	return errorf("type error: `%s` expects &var std::string::String out, got %s",
+		label, typ)
 }
 
 // checkFsWriteFile validates std::fs::write_file.

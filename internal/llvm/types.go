@@ -66,6 +66,20 @@ func (e *emitter) usesIndirectStructParamABI(typ string) bool {
 	return ok
 }
 
+// hostedRuntimeIndirectABI reports whether a hosted runtime call passes typ
+// behind a pointer: aggregates -- slices, module structs, unions -- never
+// cross the C boundary by value.
+func (e *emitter) hostedRuntimeIndirectABI(typ string) bool {
+	if typ == "[]u8" {
+		return true
+	}
+	if _, ok := e.module.Structs[typ]; ok {
+		return true
+	}
+	_, ok := e.module.Unions[typ]
+	return ok
+}
+
 // derefLLVMType returns T for borrowed Kizu types &T and &var T.
 func derefLLVMType(typ string) string {
 	if strings.HasPrefix(typ, "&var ") {

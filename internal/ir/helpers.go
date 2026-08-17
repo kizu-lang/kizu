@@ -155,8 +155,6 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 	switch name {
 	case "std::internal::builtin::io_blocking", "std::internal::builtin::io_failing":
 		return "Io", true
-	case "std::internal::builtin::fs_read_file":
-		return "std::fs::Error![]u8", true
 	case "std::internal::builtin::fs_write_file",
 		"std::internal::builtin::fs_create_dir",
 		"std::internal::builtin::fs_rename",

@@ -13,22 +13,51 @@ pub error Error {
     OutOfMemory,
     OperationFailed,
     IoFailing,
+    LimitExceeded,
 }
 
+// The C runtime mirrors this layout as KizuFsDirEntry
+// (internal/native/build.go); changing the fields means changing it there too.
 pub struct DirEntry {
     pub name: []u8,
     pub path: []u8,
     pub is_dir: bool,
 }
 
+// The C runtime mirrors this layout as KizuFsMetadata
+// (internal/native/build.go); changing the fields means changing it there too.
 pub struct Metadata {
     pub size: i64,
     pub is_dir: bool,
 }
 
-pub fn read_file(io: Io, path: &[]u8) -> std::fs::Error![]u8 {
-    let bytes = try std::internal::builtin::fs_read_file(io, path);
-    return bytes;
+// read_file reads a whole file into a String the caller owns. The allocator
+// and the allocation ceiling are both explicit; limit overflow is
+// LimitExceeded, not OutOfMemory, because the input was refused while memory
+// was fine.
+pub fn read_file(
+    io: Io,
+    allocator: Allocator,
+    path: &[]u8,
+    limit: std::mem::Limit
+) -> std::fs::Error!std::string::String {
+    var out = std::string::new(allocator);
+    errdefer out.deinit();
+    try std::internal::builtin::fs_read_file_into(
+        io, path, &var out, std::mem::limit_bytes(limit));
+    return out;
+}
+
+// read_file_into appends a whole file to a caller buffer; fs allocates
+// nothing of its own.
+pub fn read_file_into(
+    io: Io,
+    path: &[]u8,
+    out: &var std::string::String
+) -> std::fs::Error!void {
+    try std::internal::builtin::fs_read_file_into(
+        io, path, out, std::mem::limit_bytes(std::mem::Limit::Unlimited));
+    return;
 }
 
 pub fn write_file(io: Io, path: &[]u8, bytes: &[]u8) -> std::fs::Error!void {

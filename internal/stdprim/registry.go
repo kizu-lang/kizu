@@ -12,6 +12,9 @@ const (
 	ArgI64 ArgKind = "i64"
 	// ArgIo is an explicit I/O capability argument.
 	ArgIo ArgKind = "Io"
+	// ArgStringOut is a &var std::string::String destination the callee
+	// appends into; the caller's buffer, mutated in place, never moved.
+	ArgStringOut ArgKind = "&var std::string::String"
 )
 
 // CoreSignature describes simple std::internal::builtin calls with no ownership transfer.
@@ -32,9 +35,13 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Args:   []ArgKind{ArgIo, ArgBytes},
 		Return: "std::io::Error!void",
 	},
-	"std::internal::builtin::io_read_stdin": {
-		Args:   []ArgKind{ArgIo},
-		Return: "std::io::Error![]u8",
+	"std::internal::builtin::fs_read_file_into": {
+		Args:   []ArgKind{ArgIo, ArgBytes, ArgStringOut, ArgI64},
+		Return: "std::fs::Error!void",
+	},
+	"std::internal::builtin::io_read_stdin_into": {
+		Args:   []ArgKind{ArgIo, ArgStringOut, ArgI64},
+		Return: "std::io::Error!void",
 	},
 	"std::internal::builtin::process_arg_count": {Return: "i64"},
 	"std::internal::builtin::process_arg": {
@@ -107,7 +114,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::fs_exists":                true,
 	"std::internal::builtin::fs_metadata":              true,
 	"std::internal::builtin::fs_read_dir":              true,
-	"std::internal::builtin::fs_read_file":             true,
+	"std::internal::builtin::fs_read_file_into":        true,
 	"std::internal::builtin::fs_remove_dir":            true,
 	"std::internal::builtin::fs_remove_file":           true,
 	"std::internal::builtin::fs_rename":                true,
@@ -115,7 +122,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::io_blocking":              true,
 	"std::internal::builtin::io_evented":               true,
 	"std::internal::builtin::io_failing":               true,
-	"std::internal::builtin::io_read_stdin":            true,
+	"std::internal::builtin::io_read_stdin_into":       true,
 	"std::internal::builtin::io_write_stderr":          true,
 	"std::internal::builtin::io_write_stdout":          true,
 	"std::internal::builtin::map":                      true,
