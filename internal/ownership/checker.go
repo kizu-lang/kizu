@@ -28,6 +28,18 @@ type Checker struct {
 	currentStd      bool
 	typeArgValues   map[string]string
 	liveErrDefers   []errDeferEntry
+	// pendingAllocTaints holds tied allocators read as call arguments whose
+	// call result has not yet reached a `let`. The let attaches them to the new
+	// binding; a statement ending with entries left over used the result some
+	// other way, which would lose the tie, so checkBlock rejects it.
+	pendingAllocTaints []allocTaint
+}
+
+// allocTaint is one tied allocator a call consumed while its result has not
+// reached a `let` yet, and where that consumption happened.
+type allocTaint struct {
+	alloc *binding
+	span  ast.Span
 }
 
 // errDeferEntry records one active errdefer cleanup whose receiver must stay
@@ -79,6 +91,14 @@ type binding struct {
 	consumeExempt    bool
 	deferCleanup     bool
 	declSpan         ast.Span
+}
+
+// allocTied reports an owner allocated from a frame-tied allocator: it keeps
+// its owner obligations (deinit) but cannot escape the frame. Owners are the
+// only non-borrow bindings that ever hold borrowTargets, so the combination
+// identifies them without a separate flag.
+func (b *binding) allocTied() bool {
+	return !b.borrowedParam && len(b.borrowTargets) > 0
 }
 
 // borrowSource is one owner a local borrow keeps active: the borrowed binding
@@ -292,7 +312,16 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 	if _, exists := methods[name]; exists {
 		return errorf("move error: duplicate method `%s`", decl.Name)
 	}
-	methods[name] = functionInfoFromDecl(decl.Name, decl)
+	info := functionInfoFromDecl(decl.Name, decl)
+	// Method calls have no tied-allocator recognizer, so a method that built a
+	// tied allocator from a borrowed buffer would hand it back untracked.
+	// Free functions carry this shape; methods refuse it at the declaration.
+	if returnTypeName(info) == "Allocator" && c.callTiesAllocator(info, nil, nil) {
+		return errorf(
+			"borrow error: method `%s` cannot return a tied allocator; use a free function",
+			decl.Name)
+	}
+	methods[name] = info
 	return nil
 }
 
@@ -317,6 +346,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	}
 	env := newScope(nil)
 	c.defineParams(fn, env, nil)
+	c.pendingAllocTaints = nil
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -470,6 +500,12 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 		}
 		if err := c.checkStmt(stmt, env); err != nil {
 			return err
+		}
+		if len(c.pendingAllocTaints) > 0 {
+			span := c.pendingAllocTaints[0].span
+			c.pendingAllocTaints = nil
+			return errorAt(span,
+				"borrow error: a value allocated from a tied allocator must be bound with `let`")
 		}
 		env.releaseLastUseBorrows(idx, lastUses)
 	}
@@ -722,22 +758,8 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if stmt.Value == nil {
 		return c.checkOwnersConsumed(env, 0, false)
 	}
-	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
-		value, exists := env.lookup(ident.Name)
-		if exists && value.borrowedParam {
-			if c.borrowedReturnAllowed(ident.Name, value) {
-				return nil
-			}
-			return errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
-				ident.Name)
-		}
-		if exists && value.handleArenaID != 0 {
-			return errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
-				ident.Name)
-		}
-	}
-	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
-		return errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
+	if done, err := c.checkReturnValueEscapes(stmt, env); done {
+		return err
 	}
 	// An error return runs active errdefer cleanups before the function exits,
 	// so their receivers must still be valid here. A success return transfers
@@ -791,6 +813,83 @@ func (c *Checker) returnedTypeName(expr ast.Expression, env *scope) (string, boo
 	default:
 		return "", false
 	}
+}
+
+// checkReturnValueEscapes vets a returned value for frame escapes: borrowed
+// bindings, arena handles, and tied-allocator factory calls. done means the
+// return is fully checked here, including any consume checking it needs;
+// every error comes back with done set.
+func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (bool, error) {
+	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
+		value, exists := env.lookup(ident.Name)
+		if exists && value.borrowedParam {
+			if c.borrowedReturnAllowed(ident.Name, value) {
+				return true, nil
+			}
+			return true, errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
+				ident.Name)
+		}
+		if exists && value.handleArenaID != 0 {
+			return true, errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
+				ident.Name)
+		}
+	}
+	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
+		return true, errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
+	}
+	if call, ok := stmt.Value.(*ast.CallExpr); ok {
+		if handled, err := c.checkTiedAllocatorReturn(call, env); handled {
+			if err != nil {
+				return true, err
+			}
+			return true, c.checkOwnersConsumed(env, 0, false)
+		}
+	}
+	return false, nil
+}
+
+// checkTiedAllocatorReturn handles `return <factory>(...)` for tied-allocator
+// factories. Sources rooted in the caller's own parameters travel with the
+// signature — the caller re-derives the tie from its arguments — while a
+// source rooted in local state would dangle and is rejected. Every error
+// comes back with handled set.
+func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool, error) {
+	name, fn := c.calledFunction(call.Callee)
+	if fn == nil || returnTypeName(fn) != "Allocator" {
+		return false, nil
+	}
+	sources, err := c.callBorrowReturnSources(name, fn, call, true, true, env)
+	if err != nil {
+		return true, err
+	}
+	if len(sources) == 0 {
+		return false, nil
+	}
+	for _, source := range sources {
+		if !paramRootedBinding(source.target) {
+			return true, errorf(
+				"borrow error: `%s` returns an allocator tied to local state and cannot escape",
+				name)
+		}
+	}
+	if _, err := c.checkUserCall(name, call.Args, env, true); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// paramRootedBinding reports whether a binding's provenance chain ends only in
+// function parameters.
+func paramRootedBinding(value *binding) bool {
+	if len(value.borrowTargets) > 0 {
+		for _, source := range value.borrowTargets {
+			if !paramRootedBinding(source.target) {
+				return false
+			}
+		}
+		return true
+	}
+	return value.borrowedParam && !value.localBorrow
 }
 
 // borrowedReturnAllowed permits returning a borrowed source parameter. Every
@@ -852,7 +951,46 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	value.mutable = stmt.Mutable
 	value.declSpan = expressionSpan(stmt.Value)
 	c.setArenaProvenance(value, stmt.Value, env)
+	if err := c.attachAllocProvenance(value); err != nil {
+		return err
+	}
 	env.define(value)
+	return nil
+}
+
+// attachAllocProvenance ties a fresh owner to the tied allocators its
+// initializer consumed. The owner keeps its consume obligation; the shared
+// borrow keeps each allocator — and transitively its buffer — alive until the
+// owner's last use.
+func (c *Checker) attachAllocProvenance(value *binding) error {
+	if len(c.pendingAllocTaints) == 0 {
+		return nil
+	}
+	taints := c.pendingAllocTaints
+	c.pendingAllocTaints = nil
+	sources := make([]borrowSource, 0, len(taints))
+	for _, taint := range taints {
+		sources = append(sources, borrowSource{target: taint.alloc})
+	}
+	return c.bindBorrowSources(value, sources, false)
+}
+
+// bindBorrowSources activates every source for a binding and records them as
+// its borrow targets. Checking before each activation (not all checks first)
+// rejects the same value passed for two mutable sources: the second check
+// sees the first activation.
+func (c *Checker) bindBorrowSources(
+	value *binding,
+	sources []borrowSource,
+	mutable bool,
+) error {
+	for _, source := range sources {
+		if err := checkBorrowConflictForField(source.target, source.field, mutable); err != nil {
+			return err
+		}
+		c.activateBorrow(source.target, source.field, mutable)
+		value.borrowTargets = append(value.borrowTargets, source)
+	}
 	return nil
 }
 
@@ -864,20 +1002,13 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	mutable bool,
 	env *scope,
 ) error {
-	// Checking before each activation (not all checks first) rejects the same
-	// value passed for two mutable sources: the second check sees the first
-	// activation.
-	for _, source := range sources {
-		if err := checkBorrowConflictForField(source.target, source.field, mutable); err != nil {
-			return err
-		}
-		c.activateBorrow(source.target, source.field, mutable)
-	}
 	value := c.newBinding(stmt.Name, elem)
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTargets = sources
 	value.mutBorrow = mutable
+	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
+		return err
+	}
 	env.define(value)
 	return nil
 }
@@ -898,40 +1029,110 @@ func (c *Checker) returnedBorrowInitializer(
 	if fn == nil {
 		return nil, "", false, false, nil
 	}
-	_, mutable, elem, ok := explicitOwnershipBorrowType(returnTypeName(fn))
+	retName := returnTypeName(fn)
+	_, mutable, elem, ok := explicitOwnershipBorrowType(retName)
+	allocatorReturn := false
 	if !ok {
-		return nil, "", false, false, nil
+		// An Allocator return with tie-capable sources is a tied allocator: it
+		// holds the buffer's writable view exclusively, so it behaves as a
+		// mutable borrow of its sources (page_allocator has none and falls
+		// through as a plain copy value).
+		if retName != "Allocator" {
+			return nil, "", false, false, nil
+		}
+		allocatorReturn = true
+		mutable = true
+		elem = "Allocator"
 	}
+	sources, err := c.callBorrowReturnSources(name, fn, call, mutable, allocatorReturn, env)
+	if err != nil {
+		return nil, "", false, true, err
+	}
+	if len(sources) == 0 {
+		if allocatorReturn {
+			return nil, "", false, false, nil
+		}
+		return nil, "", false, true,
+			errorf("borrow error: `%s` borrowed return has no source parameter", name)
+	}
+	if _, err := c.checkUserCall(name, call.Args, env, true); err != nil {
+		return nil, "", false, true, err
+	}
+	return sources, elem, mutable, true, nil
+}
+
+// callBorrowReturnSources lists the caller-side bindings a borrow-shaped call
+// result stays tied to: every qualifying borrow argument, plus — for Allocator
+// returns — every already-tied allocator argument, so re-wrapping an allocator
+// cannot launder its tie away.
+func (c *Checker) callBorrowReturnSources(
+	name string,
+	fn *functionInfo,
+	call *ast.CallExpr,
+	mutable bool,
+	allocatorReturn bool,
+	env *scope,
+) ([]borrowSource, error) {
 	sources := []borrowSource{}
 	for idx := range fn.params {
-		if !fn.params[idx].borrow || (mutable && !fn.params[idx].mutBorrow) {
+		if idx >= len(call.Args) {
 			continue
 		}
-		if idx >= len(call.Args) {
+		if !fn.params[idx].borrow || (mutable && !fn.params[idx].mutBorrow) {
+			if allocatorReturn {
+				if alloc := c.tiedAllocatorArg(call.Args[idx], env); alloc != nil {
+					sources = append(sources, borrowSource{target: alloc})
+				}
+			}
 			continue
 		}
 		target, field, err := c.callBorrowTarget(call.Args[idx], env)
 		if err != nil {
-			return nil, "", false, true, err
+			return nil, err
 		}
 		if target == nil {
 			// callBorrowTarget tolerates non-place args for temporary call
 			// borrows, but a provenance source must be a place the caller can
 			// keep alive while the returned view is used.
-			return nil, "", false, true, errorf(
+			return nil, errorf(
 				"borrow error: `%s` borrow source `%s` must be a local binding or direct field",
 				name, fn.sig.Params[idx].Name)
 		}
 		sources = append(sources, borrowSource{target: target, field: field})
 	}
-	if len(sources) == 0 {
-		return nil, "", false, true,
-			errorf("borrow error: `%s` borrowed return has no source parameter", name)
+	return sources, nil
+}
+
+// tiedAllocatorArg resolves an argument to a tied allocator binding, or nil.
+func (c *Checker) tiedAllocatorArg(arg ast.Expression, env *scope) *binding {
+	value, ok := directAssignmentRoot(arg, env)
+	if !ok || value.typeName != "Allocator" {
+		return nil
 	}
-	if _, err := c.checkUserCall(name, call.Args, env); err != nil {
-		return nil, "", false, true, err
+	if !value.borrowedParam || len(value.borrowTargets) == 0 {
+		return nil
 	}
-	return sources, elem, mutable, true, nil
+	return value
+}
+
+// callTiesAllocator reports whether a call to fn yields a tied allocator: the
+// signature takes a `&var` borrow the result stays tied to, or an argument is
+// itself a tied allocator being re-wrapped. Callers pass nil args to ask about
+// the signature alone.
+func (c *Checker) callTiesAllocator(
+	fn *functionInfo,
+	args []ast.Expression,
+	env *scope,
+) bool {
+	for idx := range fn.params {
+		if fn.params[idx].borrow && fn.params[idx].mutBorrow {
+			return true
+		}
+		if idx < len(args) && c.tiedAllocatorArg(args[idx], env) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // calledFunction resolves direct and namespace-qualified source function calls.
@@ -1893,6 +2094,11 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	if value.borrowedParam {
 		return "", errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
+	if value.allocTied() {
+		return "", errorAt(ident.Span,
+			"borrow error: value `%s` is allocated from a tied allocator and cannot escape its frame",
+			ident.Name)
+	}
 	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
 		return "", errorAt(ident.Span,
 			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
@@ -2159,8 +2365,20 @@ func isBooleanBinaryOperator(op string) bool {
 	}
 }
 
-// checkCallExpr validates ownership effects of builtin and user calls.
+// checkCallExpr validates ownership effects of builtin and user calls. It is
+// the funnel every call form passes through, so the tied-allocator taint of
+// the result is recorded here once, and no call path can forget it.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
+	typ, err := c.dispatchCallExpr(expr, env)
+	if err != nil {
+		return typ, err
+	}
+	c.pendTiedAllocatorArgs(expr.Args, typ, env)
+	return typ, nil
+}
+
+// dispatchCallExpr routes a call expression to its checker by callee shape.
+func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return c.checkFieldCallExpr(field, expr.Args, env)
 	}
@@ -2174,14 +2392,18 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
-	return c.checkUserCall(name.Name, expr.Args, env)
+	return c.checkUserCall(name.Name, expr.Args, env, false)
 }
 
 // checkUserCall validates ownership effects for a declared function call.
+// checkUserCall validates one declared-function call. sanctioned marks the
+// callers that tie a factory result themselves and so may skip the
+// tied-allocator let-binding requirement.
 func (c *Checker) checkUserCall(
 	name string,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, error) {
 	fn, ok := c.functions[name]
 	if !ok {
@@ -2194,6 +2416,12 @@ func (c *Checker) checkUserCall(
 		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
+	// A tied-allocator factory call is only legal where something ties its
+	// result (the let recognizer, a param-rooted return — those pass
+	// sanctioned); anywhere else the tie would silently drop.
+	if !sanctioned && returnTypeName(fn) == "Allocator" && c.callTiesAllocator(fn, args, env) {
+		return "", errorf("borrow error: `%s` returns a tied allocator; bind it with `let`", name)
+	}
 	borrowed, err := c.activateBorrowArgs(fn, args, env)
 	if err != nil {
 		return "", err
@@ -2205,7 +2433,7 @@ func (c *Checker) checkUserCall(
 				continue
 			}
 			_, err = c.readExpr(arg, env)
-		} else if c.viewArgLend(fn, idx, arg, env) {
+		} else if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) {
 			_, err = c.readExpr(arg, env)
 		} else {
 			_, err = c.moveExpr(arg, env)
@@ -2215,6 +2443,56 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// allocatorArgLend reports whether arg is a tied allocator binding lent to an
+// Allocator parameter. The lend itself is free; what the callee's result may
+// carry out is covered by pendTiedAllocatorArgs at the call site.
+func (c *Checker) allocatorArgLend(
+	fn *functionInfo,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+) bool {
+	if fn.params[idx].typeName != "Allocator" {
+		return false
+	}
+	return c.tiedAllocatorArg(arg, env) != nil
+}
+
+// pendTiedAllocatorArgs records the tie obligation of a call that consumed a
+// tied allocator argument and returns something that can carry its memory.
+// The obligation is discharged by the `let` that binds the result; anything
+// else leaves it pending and checkBlock rejects the statement.
+func (c *Checker) pendTiedAllocatorArgs(
+	args []ast.Expression,
+	returnType string,
+	env *scope,
+) {
+	if !allocationCarryingReturnType(returnType) {
+		return
+	}
+	for _, arg := range args {
+		if alloc := c.tiedAllocatorArg(arg, env); alloc != nil {
+			c.pendingAllocTaints = append(c.pendingAllocTaints,
+				allocTaint{alloc: alloc, span: expressionSpan(arg)})
+		}
+	}
+}
+
+// allocationCarryingReturnType reports a return type that can hold memory the
+// callee allocated: owners and aggregates. Scalars carry nothing, a view
+// carries only the view channel (a view of callee-allocated memory cannot
+// leave the callee — its owner would leak there), and an Allocator result is
+// the factory recognizer's job, not a taint.
+func allocationCarryingReturnType(typeName string) bool {
+	if viewFreeReturnType(typeName) || typeName == "Allocator" {
+		return false
+	}
+	if idx := strings.Index(typeName, "!"); idx >= 0 {
+		typeName = typeName[idx+1:]
+	}
+	return !strings.HasPrefix(typeName, "&") && !strings.HasPrefix(typeName, "[]")
 }
 
 // viewArgLend reports whether arg is a tracked view binding lent to a plain
@@ -2291,7 +2569,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
-	typ, err := c.checkUserCall(name, args, env)
+	typ, err := c.checkUserCall(name, args, env, false)
 	return typ, true, err
 }
 
@@ -3143,7 +3421,14 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err := c.checkGenericInstantiation(fn, subst); err != nil {
 		return "", true, err
 	}
-	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
+	ret := substituteOwnershipType(returnTypeName(fn), subst)
+	// No recognizer ties a generic factory's result, so a tied result would
+	// silently lose its buffer tie. Nothing needs this shape yet.
+	if ret == "Allocator" && c.callTiesAllocator(fn, args, env) {
+		return "", true, errorf(
+			"borrow error: generic function `%s` cannot return a tied allocator", name)
+	}
+	return ret, true, nil
 }
 
 // checkGenericInstantiation checks a generic function body for one static type set.
@@ -5227,17 +5512,40 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 }
 
 // releaseLastUseBorrows ends local borrows whose binding is no longer used.
+// A binding that is itself still borrowed keeps its own sources active: the
+// chain buffer <- view <- allocator <- owner releases from the leaf inward,
+// each release re-examining only the bindings it just unblocked.
 func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
 	for name, value := range s.values {
-		if !value.localBorrow || len(value.borrowTargets) == 0 {
-			continue
+		s.releaseIfUnused(name, value, stmtIndex, lastUses)
+	}
+}
+
+// releaseIfUnused releases one binding's borrow targets once it is past its
+// last use and nothing borrows it, then retries the targets that release may
+// have unblocked.
+func (s *scope) releaseIfUnused(
+	name string,
+	value *binding,
+	stmtIndex int,
+	lastUses map[string]int,
+) {
+	if len(value.borrowTargets) == 0 {
+		return
+	}
+	if last, ok := lastUses[name]; ok && last > stmtIndex {
+		return
+	}
+	if value.hasAnyBorrow() {
+		return
+	}
+	targets := value.borrowTargets
+	releaseBorrow(value)
+	value.borrowTargets = nil
+	for _, source := range targets {
+		if held, ok := s.values[source.target.name]; ok && held == source.target {
+			s.releaseIfUnused(source.target.name, held, stmtIndex, lastUses)
 		}
-		last, ok := lastUses[name]
-		if ok && last > stmtIndex {
-			continue
-		}
-		releaseBorrow(value)
-		value.borrowTargets = nil
 	}
 }
 
