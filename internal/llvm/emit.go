@@ -808,6 +808,10 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeRefLoad(instr)
 	case instr.Op == "local.slot":
 		return e.writeLocalSlot(instr)
+	case instr.Op == "buffer.new":
+		return e.writeBufferNew(instr)
+	case instr.Op == "buffer.as_bytes":
+		return e.writeBufferAsBytes(instr)
 	case instr.Op == "cond_fail":
 		return e.writeCondFail(instr)
 	default:
@@ -1539,6 +1543,56 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 		resultName, baseName, sliceLenName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeBufferNew allocates a zero-filled fixed-length stack buffer. The value
+// registered for the result is the alloca pointer: a buffer is its storage,
+// and the views buffer.as_bytes hands out point into it (ADR-0097).
+func (e *emitter) writeBufferNew(instr *ir.Instr) error {
+	size, ok := bufferSize(instr.Result.Type)
+	if !ok {
+		return fmt.Errorf("llvm error: buffer.new expects `[N]u8` result, got %s",
+			instr.Result.Type)
+	}
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = alloca [%d x i8]\n", name, size)
+	fmt.Fprintf(&e.out, "  store [%d x i8] zeroinitializer, ptr %s\n", size, name)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeBufferAsBytes builds the {ptr, len} view of a stack buffer.
+func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
+		return fmt.Errorf("llvm error: buffer.as_bytes expects buffer -> []u8")
+	}
+	size, ok := bufferSize(instr.Args[0].Type)
+	if !ok {
+		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]u8`, got %s",
+			instr.Args[0].Type)
+	}
+	buffer := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+		baseName, buffer.operand)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
+		resultName, baseName, size)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// bufferSize parses N from a `[N]u8` spelling.
+func bufferSize(typeName string) (int64, bool) {
+	parsed, err := typ.Parse(typeName)
+	if err != nil {
+		return 0, false
+	}
+	buffer, ok := parsed.(*typ.Buffer)
+	if !ok {
+		return 0, false
+	}
+	return buffer.Size, true
 }
 
 // writeCondFail reports the named failure when the tested condition holds.

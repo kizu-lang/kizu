@@ -969,6 +969,16 @@ indexed borrow、multi-dimensional slicing、
 決定 3: Array は std 定義の struct であり、組み込み indexing は IR の
 layout 結合か隠れ call になるため)。
 
+固定長の stack buffer は `[N]u8` です(ADR-0097)。N は正の整数 literal で、
+`var buf = [64]u8{};` が zero 埋めで生成します。view の入口は
+`buf.as_bytes()` / `buf.as_mut_bytes()` で、規則は `String` の同名 method と
+同じです(束縛必須、`as_mut_bytes` は mutable binding 限定で exclusive)。
+stack buffer は local 限定です: struct field / union payload / parameter /
+返り値 / container element に置けず、`&` / `&var` で直接 borrow できません。
+関数境界へは view を渡します。element は `u8` だけで、buffer への直接
+indexing は持ちません(書き込みは view 経由の 1 経路)。stack buffer は
+owner ではなく、`deinit` は不要です。
+
 ### 7.2 明示 cast
 
 Kizu は暗黙の numeric promotion をしません。
@@ -1173,8 +1183,9 @@ safe borrow binding は通常の field access 構文で field を読めます。
 だけで、`&var []u8` として view を持つときだけ要素書き込み `buf[i] = x` が
 できます。許すのは要素書き込みだけで、`buf.* = other` による view の
 差し替えはできません。`&var []u8` を作れるのは書き込み可能な place だけ
-です: `String.as_mut_bytes()`(mutable binding の String から。view が
-生きている間 String 全体が exclusive borrow)、および `&var []u8` 引数の
+です: `String.as_mut_bytes()` と stack buffer の `as_mut_bytes()`
+(どちらも mutable binding から。view が生きている間、元の値全体が
+exclusive borrow)、および `&var []u8` 引数の
 再貸し。plain `[]u8` からは作れず、`var` 束縛の plain slice local も
 `&var []u8` parameter には渡せません(backing の書き込み可能性を保証
 しないため)。可変 view は borrow なので field に保存できず、escape

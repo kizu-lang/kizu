@@ -2,6 +2,7 @@ package typ
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -37,12 +38,8 @@ func (p *parser) parsePrefix() (Type, error) {
 			return nil, err
 		}
 		return &ErrorUnion{Ok: elem}, nil
-	case p.accept("[]"):
-		elem, err := p.parsePrefix()
-		if err != nil {
-			return nil, err
-		}
-		return &Slice{Elem: elem}, nil
+	case p.peekByte('['):
+		return p.parseBracketed()
 	case p.accept("&var "):
 		elem, err := p.parsePrefix()
 		if err != nil {
@@ -76,6 +73,47 @@ func (p *parser) parsePrefix() (Type, error) {
 	default:
 		return p.parseName()
 	}
+}
+
+// peekByte reports whether the next unread byte is ch.
+func (p *parser) peekByte(ch byte) bool {
+	return p.pos < len(p.input) && p.input[p.pos] == ch
+}
+
+// parseBracketed reads the `[]T` and `[N]T` spellings.
+func (p *parser) parseBracketed() (Type, error) {
+	if p.accept("[]") {
+		elem, err := p.parsePrefix()
+		if err != nil {
+			return nil, err
+		}
+		return &Slice{Elem: elem}, nil
+	}
+	return p.parseBuffer()
+}
+
+// parseBuffer reads a `[N]T` fixed-length buffer spelling.
+func (p *parser) parseBuffer() (Type, error) {
+	p.pos++
+	start := p.pos
+	for p.pos < len(p.input) && p.input[p.pos] >= '0' && p.input[p.pos] <= '9' {
+		p.pos++
+	}
+	if start == p.pos {
+		return nil, fmt.Errorf("type error: expected buffer size in `%s`", p.input)
+	}
+	size, err := strconv.ParseInt(p.input[start:p.pos], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("type error: buffer size in `%s`: %v", p.input, err)
+	}
+	if !p.accept("]") {
+		return nil, fmt.Errorf("type error: expected `]` in `%s`", p.input)
+	}
+	elem, err := p.parsePrefix()
+	if err != nil {
+		return nil, err
+	}
+	return &Buffer{Size: size, Elem: elem}, nil
 }
 
 // parseName reads a `::` separated name and the static arguments it applies.
