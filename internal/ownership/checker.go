@@ -4702,6 +4702,16 @@ func (c *Checker) checkImplMethodCall(
 		return "", true, errorf("move error: method `%s` must have self parameter",
 			method.name)
 	}
+	if method.params[0].mutBorrow {
+		if value.hasAnyBorrow() {
+			return "", true, errorf(
+				"borrow error: method `%s` mutates its receiver while it is borrowed", method.name)
+		}
+		// The receiver is mutably lent for the call, so an argument that reads
+		// or borrows the same binding hits the usual exclusivity checks.
+		value.activeMutBorrows++
+		defer func() { value.activeMutBorrows-- }()
+	}
 	if len(args) != len(method.params)-1 {
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))

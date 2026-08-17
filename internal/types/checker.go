@@ -5380,7 +5380,8 @@ func (c *Checker) checkBoxReceiverMethod(
 		receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
-			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
+			return c.checkMethodArgs(method, receiver, field.Receiver, expressionSpan(field),
+				args, env, unsafe)
 		}
 		return "", errorf("type error: Box has no method `%s`", field.Name)
 	}
@@ -5398,7 +5399,8 @@ func (c *Checker) checkArenaOrImplMethod(
 	if !ok || base != "std::arena::Arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
-			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
+			return c.checkMethodArgs(method, receiver, field.Receiver, expressionSpan(field),
+				args, env, unsafe)
 		}
 		return "", errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
@@ -5930,6 +5932,7 @@ func (c *Checker) checkDynMethodCall(
 func (c *Checker) checkMethodArgs(
 	method *functionType,
 	receiver Type,
+	receiverExpr ast.Expression,
 	span ast.Span,
 	args []ast.Expression,
 	env *scope,
@@ -5942,7 +5945,27 @@ func (c *Checker) checkMethodArgs(
 		return "", errorf("type error: method `%s` self expects %s, got %s",
 			method.name, method.params[0], receiver)
 	}
+	if method.mutBorrowParams[0] {
+		if err := requireMutableSelfReceiver(method, receiverExpr, env); err != nil {
+			return "", err
+		}
+	}
 	return c.checkCallableArgs(method, 1, span, args, env, unsafe)
+}
+
+// requireMutableSelfReceiver restricts `&var self` methods to receivers whose
+// storage the caller can hand over: a mutable local or a reborrowed &var param.
+func requireMutableSelfReceiver(method *functionType, receiver ast.Expression, env *scope) error {
+	ident, ok := receiver.(*ast.IdentExpr)
+	if !ok {
+		return errorf("type error: method `%s` takes `&var self` and requires a local receiver",
+			method.name)
+	}
+	if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
+		return nil
+	}
+	return errorf("type error: method `%s` takes `&var self`, receiver `%s` must be mutable",
+		method.name, ident.Name)
 }
 
 // checkCallableArgs validates the arguments a call passes, starting at the
