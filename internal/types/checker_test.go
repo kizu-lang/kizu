@@ -130,7 +130,7 @@ fn save(writer: ?dyn Writer) -> !void {
     return;
 }
 fn main() {}`,
-			want: "nullable type `?dyn Writer` must wrap ptr<T>",
+			want: "optional element must be a scalar or enum, got `dyn Writer`",
 		},
 	}
 	for _, tc := range cases {

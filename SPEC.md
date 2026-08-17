@@ -727,6 +727,18 @@ let label = if age >= 20 {
 
 三項演算子は採用しません。
 
+optional 条件(§7)には payload capture を書けます。capture は statement
+形だけで、consequence の中でだけ見えます。expression では `orelse` を
+使います。
+
+```kizu
+if find(text, b) |at| {
+    print(at);
+} else {
+    print(-1);
+}
+```
+
 ### 6.9.1 bool 演算
 
 Kizu は boolean logic に `and` と `or` を使います。
@@ -736,11 +748,16 @@ Kizu は boolean logic に `and` と `or` を使います。
 優先順位は低い順に次の通りです。
 
 ```text
+orelse
 or
 and
 == !=
 < <= > >=
 ```
+
+`opt orelse default` は optional の値、無ければ default を返します。
+左辺は `?T`、右辺と結果は `T` です。右辺は左辺が null のときだけ評価
+されます。
 
 例:
 
@@ -765,6 +782,16 @@ Kizu は `loop` keyword を採用しません。
 ```kizu
 while true {
     break;
+}
+```
+
+optional 条件には payload capture を書けます。値がある間 loop し、
+payload は毎周 capture に束縛されます。`?T` を返す `next()` がそのまま
+iterator protocol になる形です。
+
+```kizu
+while it.next() |byte| {
+    print(byte);
 }
 ```
 
@@ -903,6 +930,49 @@ ptr<const T>
 ```
 
 type alias は持ちません。導入するかどうかは未検討です。
+
+**optional 型 `?T`** は「値が無いかもしれない」を型にします(ADR-0101)。
+不在は error ではありません: 回復する失敗は `E!T`、正常な不在(検索の
+miss、iterator の終端)は `?T` と使い分けます。
+
+```kizu
+fn find(bytes: []u8, needle: u8) -> ?i64 {
+    ...
+    return index;    // T は ?T へ暗黙に wrap(!T の成功と同じ規則)
+    ...
+    return null;     // 不在
+}
+
+if find(text, b) |at| { print(at); }     // payload capture(§6.9)
+let at = find(text, b) orelse -1;        // 既定値(§6.9.1)
+while it.next() |byte| { ... }           // 終端まで loop(§6.10)
+```
+
+`null` は文脈が `?T` の位置(return、引数、`orelse` の右辺以外の対象
+位置)でだけ書けます。payload に触る手段は capture と `orelse` の 2 つ
+だけで、presence を確かめない取り出しはありません。
+
+error union との合成 `E!?T` / `!?T` は書けます: 呼び出しは失敗しうるし、
+成功しても値が無いかもしれない。`try` は error 層だけを剥がして `?T` を
+返すので、`while try s.next() |byte|` や `try s.next() orelse 0` と
+そのまま組み合わせられます。
+
+```kizu
+fn (self: &var Stream) next() -> ReadError!?u8 {
+    if self.broken { return ReadError::Broken; }  // 失敗
+    if self.done() { return null; }               // 正常な終端
+    return byte;                                  // 値(二重 wrap は暗黙)
+}
+```
+
+現在の制限:
+
+* element は scalar(明示幅整数 / bool / f32 / f64)と enum に限定
+* `??T` / `?!T` は書けない(optional を包めるのは error union だけ)
+* struct field・union payload・static argument(`Array<?u8>` など)・
+  borrow(`&?T`)の対象にはできない
+* `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
+  semantics の対象外(unsafe 世界の C ABI 用)
 
 collection は primitive ではなく、標準ライブラリ型として扱います。
 実装済みの collection / ownership 型:

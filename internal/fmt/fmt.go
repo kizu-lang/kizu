@@ -259,6 +259,9 @@ type builder struct {
 	commentIdx   int
 	blockStack   []blockKind
 	afterComment bool
+	// inCapture is true between the pipes of a `|name|` payload capture, the
+	// only place `|` appears; the name hugs both pipes.
+	inCapture bool
 }
 
 type blockKind int
@@ -387,6 +390,9 @@ func (b *builder) recordEmitted(t token.Token) {
 		b.sourceLine = t.Line
 	}
 	b.afterComment = false
+	if t.Type == token.Pipe {
+		b.inCapture = !b.inCapture
+	}
 }
 
 // maybeTrailingNewline handles structural tokens that always force a line break.
@@ -605,6 +611,11 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 		return false
 	}
 	if noSpaceAfter(prev) {
+		return false
+	}
+	// A `|name|` capture hugs its pipes: no space after the opening one and
+	// none before the closing one.
+	if b.inCapture && (curr.Type == token.Pipe || prev.Type == token.Pipe) {
 		return false
 	}
 	if prev.Type == token.RBracket && canFollowSliceMarker(curr) {

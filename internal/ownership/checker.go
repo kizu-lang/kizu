@@ -1647,11 +1647,16 @@ func (c *Checker) checkExprStmt(stmt *ast.ExprStmt, env *scope) error {
 
 // checkIfStmt merges possible moves from either branch into the outer scope.
 func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
-	if _, err := c.readExpr(stmt.Condition, env); err != nil {
+	condType, err := c.readExpr(stmt.Condition, env)
+	if err != nil {
 		return err
 	}
 	left := env.clone()
-	if err := c.checkBlock(stmt.Consequence, left.child()); err != nil {
+	leftScope := left.child()
+	if stmt.Capture != "" {
+		leftScope.define(c.newBinding(stmt.Capture, optionalPayloadName(condType)))
+	}
+	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
 		return err
 	}
 	right := env.clone()
@@ -1672,17 +1677,32 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 
 // checkWhileStmt treats moves in the body as possible after the loop.
 func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
-	if _, err := c.readExpr(stmt.Condition, env); err != nil {
+	condType, err := c.readExpr(stmt.Condition, env)
+	if err != nil {
 		return err
 	}
 	body := env.clone()
+	child := body.child()
+	if stmt.Capture != "" {
+		child.define(c.newBinding(stmt.Capture, optionalPayloadName(condType)))
+	}
 	c.loopDepth++
 	defer func() { c.loopDepth-- }()
-	if err := c.checkBlock(stmt.Body, body.child()); err != nil {
+	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
 	env.mergeMovedFrom(body)
 	return nil
+}
+
+// optionalPayloadName returns T for a `?T` condition type, or the type itself
+// when it is not an optional. Optional payloads are scalar copies today
+// (ADR-0101), so the capture binding is a plain copy.
+func optionalPayloadName(typeName string) string {
+	if elem, ok := typ.OptionalElem(typeName); ok {
+		return elem
+	}
+	return typeName
 }
 
 // checkForStmt treats moves in the body as possible after the loop.
@@ -1959,7 +1979,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readExpr(inner, env)
 	}
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr, *ast.NullExpr:
 		return c.readScalarExpr(e)
 	case *ast.BufferLiteralExpr:
 		return e.TypeText(), nil
@@ -2062,6 +2082,8 @@ func readLiteralType(expr ast.Expression) (string, error) {
 		return "[]u8", nil
 	case *ast.BoolExpr:
 		return "bool", nil
+	case *ast.NullExpr:
+		return "null", nil
 	default:
 		return "", errorf("move error: unsupported literal %T", expr)
 	}
@@ -2450,6 +2472,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	}
 	if isBooleanBinaryOperator(expr.Operator) {
 		return "bool", nil
+	}
+	if expr.Operator == "orelse" {
+		return optionalPayloadName(left), nil
 	}
 	return left, nil
 }

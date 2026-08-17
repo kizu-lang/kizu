@@ -940,7 +940,7 @@ func (l *lowerer) returnVoidValue() Value {
 // lowerExpr lowers an expression and returns its typed SSA value.
 func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
 		return l.lowerLiteralExpr(e)
 	case *ast.TypeExpr:
 		return l.emitConst("type", e.TypeName), nil
@@ -1024,6 +1024,9 @@ func (l *lowerer) lowerAccessExpr(expr ast.Expression) (Value, error) {
 // non-integer type; the expression then lowers with the type it carries itself.
 func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, error) {
 	want = l.resolveType(want)
+	if elem, ok := optionalElemType(want); ok {
+		return l.lowerOptionalContextExpr(expr, want, elem)
+	}
 	if !narrowsIntegerLiteral(want) {
 		return l.lowerExpr(expr)
 	}
@@ -1042,6 +1045,34 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 		}
 	}
 	return l.lowerExpr(expr)
+}
+
+// lowerOptionalContextExpr lowers an expression written where a `?T` is
+// expected: `null` becomes the empty optional, a plain T wraps, and a value
+// that is already optional passes through — the same shape `!T` success takes.
+func (l *lowerer) lowerOptionalContextExpr(
+	expr ast.Expression,
+	want string,
+	elem string,
+) (Value, error) {
+	if _, ok := expr.(*ast.NullExpr); ok {
+		return l.emit("opt.null", want, nil, ""), nil
+	}
+	value, err := l.lowerContextualExpr(expr, elem)
+	if err != nil {
+		return Value{}, err
+	}
+	if value.Type != elem {
+		// Not the payload: an already-wrapped optional passes through, and so
+		// does an error-set member on its way to the enclosing error path.
+		return value, nil
+	}
+	return l.emit("opt.some", want, []Value{value}, ""), nil
+}
+
+// optionalElemType returns T for an optional value type `?T`.
+func optionalElemType(typeName string) (string, bool) {
+	return typ.OptionalElem(typeName)
 }
 
 // narrowsIntegerLiteral reports whether an integer literal written in a
@@ -1065,6 +1096,10 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 		return l.emitConst("[]u8", fmt.Sprintf("%q", e.Value)), nil
 	case *ast.BoolExpr:
 		return l.emitConst("bool", e.String()), nil
+	case *ast.NullExpr:
+		// A `null` with no `?T` context never reaches a type; the contextual
+		// path (lowerOptionalContextExpr) is the one that lowers it.
+		return Value{}, fmt.Errorf("ir error: `null` needs an optional context")
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported literal %T", expr)
 	}
@@ -1122,6 +1157,9 @@ func (l *lowerer) lowerBorrowExpr(_ string, expr ast.Expression) (Value, error) 
 func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 	if expr.Operator == "and" || expr.Operator == "or" {
 		return l.lowerLogicalExpr(expr)
+	}
+	if expr.Operator == "orelse" {
+		return l.lowerOrelseExpr(expr)
 	}
 	left, err := l.lowerExpr(expr.Left)
 	if err != nil {

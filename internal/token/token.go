@@ -76,6 +76,8 @@ const (
 	Extern   Type = "extern"
 	Comptime Type = "comptime"
 	Try      Type = "try"
+	Null     Type = "null"
+	Orelse   Type = "orelse"
 )
 
 type Token struct {
@@ -125,6 +127,8 @@ var keywords = map[string]Type{
 	"extern":   Extern,
 	"comptime": Comptime,
 	"try":      Try,
+	"null":     Null,
+	"orelse":   Orelse,
 }
 
 // LookupIdent returns the keyword token for ident or Ident for user names.
