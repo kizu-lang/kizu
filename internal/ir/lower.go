@@ -790,7 +790,13 @@ func (l *lowerer) assignTargetType(target ast.Expression) string {
 		}
 		return l.fieldType(receiver, t.Name)
 	case *ast.DerefExpr:
-		return l.assignTargetType(t.Receiver)
+		receiver := l.assignTargetType(t.Receiver)
+		if elem, ok := rawPointerElem(receiver); ok {
+			return elem
+		}
+		return receiver
+	case *ast.UnsafeExpr:
+		return l.assignTargetType(t.Value)
 	case *ast.IndexExpr:
 		if !t.Slice {
 			return "u8"
@@ -836,8 +842,9 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 		if err != nil {
 			return err
 		}
-		if !isReferenceType(receiver.Type) {
-			return fmt.Errorf("ir error: dereference assignment target `%s` is not a borrow",
+		if _, raw := rawPointerElem(receiver.Type); !raw && !isReferenceType(receiver.Type) {
+			return fmt.Errorf(
+				"ir error: dereference assignment target `%s` is not a borrow or raw pointer",
 				target.String())
 		}
 		l.emit("ref.store", "void", []Value{receiver, value}, "")
@@ -991,13 +998,16 @@ func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
 	}
 }
 
-// lowerDerefExpr reads what a borrow points at. The write side already stored
-// through the borrow while this side handed the borrow itself back, so a
-// dereferenced borrow was compared against the value it pointed at.
+// lowerDerefExpr reads what a borrow or raw pointer points at. The write side
+// already stored through the borrow while this side handed the borrow itself
+// back, so a dereferenced borrow was compared against the value it pointed at.
 func (l *lowerer) lowerDerefExpr(expr *ast.DerefExpr) (Value, error) {
 	receiver, err := l.lowerExpr(expr.Receiver)
 	if err != nil {
 		return Value{}, err
+	}
+	if elem, ok := rawPointerElem(receiver.Type); ok {
+		return l.emit("ref.load", elem, []Value{receiver}, ""), nil
 	}
 	if !isReferenceType(receiver.Type) {
 		return receiver, nil
