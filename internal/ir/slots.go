@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmethod"
 )
 
 // A local is an SSA value, which is enough until something writes through a
@@ -211,6 +212,10 @@ func structLiteralValues(expr *ast.StructLiteralExpr) []ast.Expression {
 // so a parameter that starts being passed this way is marked here by having
 // been passed this way.
 func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
+	if field, ok := expr.Callee.(*ast.FieldExpr); ok && !field.Namespace {
+		l.markLentMethodArgs(field, expr.Args, found)
+		return
+	}
 	name, ok := l.functionCalleeName(expr.Callee)
 	if !ok {
 		return
@@ -225,6 +230,31 @@ func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 		}
 		if sig.Params[index].Passing == PassCallerStorage {
 			markIfName(arg, found)
+		}
+	}
+}
+
+// markLentMethodArgs records the names a method call may hand over as storage.
+// The receiver's type is unknown before lowering, so the walk unions every
+// method bearing the name: a position is marked when any method the call could
+// resolve to receives it as the caller's storage. Marking a name that resolves
+// elsewhere costs it its SSA form, never its meaning.
+func (l *lowerer) markLentMethodArgs(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	found map[string]bool,
+) {
+	for name, sig := range l.signatures {
+		if _, method, ok := stdmethod.SplitMethodName(name); !ok || method != field.Name {
+			continue
+		}
+		if len(sig.Params) > 0 && sig.Params[0].Passing == PassCallerStorage {
+			markIfName(field.Receiver, found)
+		}
+		for index, arg := range args {
+			if index+1 < len(sig.Params) && sig.Params[index+1].Passing == PassCallerStorage {
+				markIfName(arg, found)
+			}
 		}
 	}
 }
