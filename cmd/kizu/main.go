@@ -242,7 +242,7 @@ func checkFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkProgram(program); err != nil {
+	if err := checkLoadedProgram(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")
@@ -255,11 +255,24 @@ func checkPackage(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkProgram(program); err != nil {
+	if err := checkLoadedProgram(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")
 	return nil
+}
+
+// checkLoadedProgram runs every static gate `run` and `build` would pass the
+// program through: the checkers, then the same ir.Lower they use, with the
+// module discarded. `check: ok` is a promise the backend accepts the program,
+// not just the checkers, so a lowering gap surfaces here instead of waiting
+// for the first `run`.
+func checkLoadedProgram(program *ast.Program) error {
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	_, err := ir.Lower(program)
+	return err
 }
 
 // isPackageRoot reports whether path names a directory or kizu.toml manifest.

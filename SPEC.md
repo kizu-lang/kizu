@@ -28,6 +28,9 @@ safe Kizu の詳細な安全契約と regression coverage は
 
 `kizu run` / `kizu check` / `kizu test` は生成した実行ファイルを走らせます。経路は
 1 本で、interpreter はありません(ADR-0083)。実装は Go 一本です(ADR-0082)。
+`check: ok` は「checker を通った」ではなく「`run` / `build` が使う lowering が
+この program を受理する」の約束です: check は同じ `ir.Lower` を通し、module を
+捨てます。
 
 ### 0.1 メモリ安全 gate
 
