@@ -152,6 +152,8 @@ single source file. Run them with `kizu check <package-root>`.
 | unknown loop labels are rejected | `negative/unknown_loop_label.kizu` | `unknown loop label` |
 | labels only attach to loops | `negative/label_on_non_loop.kizu` | `must be attached` |
 | fields on `let` bindings are immutable | `negative/immutable_field_assignment.kizu` | `cannot assign field` |
+| nested fields inherit base immutability | `negative/immutable_nested_field_assignment.kizu` | `cannot assign field` |
+| call results are not assignment targets | `negative/call_result_field_assignment.kizu` | `invalid assignment target` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |

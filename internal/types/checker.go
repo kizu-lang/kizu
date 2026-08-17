@@ -5512,30 +5512,40 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeM
 }
 
 // checkAssignableField validates mutation of a field on a mutable value.
+// The receiver must itself be an assignable place — a mutable binding, a
+// mutable borrow dereference, or a field chain that bottoms out in one.
+// Anything else (a call result, an index) is refused here so the accept set
+// matches what assignment lowering can store into.
 func (c *Checker) checkAssignableField(
 	expr *ast.FieldExpr,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
-		if env.isBorrowed(ident.Name) {
-			if !env.isMutBorrowed(ident.Name) {
+	switch receiver := expr.Receiver.(type) {
+	case *ast.IdentExpr:
+		if env.isBorrowed(receiver.Name) {
+			if !env.isMutBorrowed(receiver.Name) {
 				return "", errorf(
 					"type error: cannot assign field through shared borrow `%s`",
-					ident.Name,
+					receiver.Name,
 				)
 			}
-		} else if !env.isMutable(ident.Name) {
+		} else if !env.isMutable(receiver.Name) {
 			return "", errorf(
 				"type error: cannot assign field of immutable binding `%s`",
-				ident.Name,
+				receiver.Name,
 			)
 		}
-	}
-	if _, ok := expr.Receiver.(*ast.DerefExpr); ok {
-		if _, err := c.checkAssignableDeref(expr.Receiver.(*ast.DerefExpr), env, unsafe); err != nil {
+	case *ast.DerefExpr:
+		if _, err := c.checkAssignableDeref(receiver, env, unsafe); err != nil {
 			return "", err
 		}
+	case *ast.FieldExpr:
+		if _, err := c.checkAssignableField(receiver, env, unsafe); err != nil {
+			return "", err
+		}
+	default:
+		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
 	fieldType, decl, err := c.resolveFieldExpr(expr, env, unsafe)
 	if err != nil {
