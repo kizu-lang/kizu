@@ -115,4 +115,5 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0099: fixed_buffer allocator と allocator tie の構造的導出](0099-fixed-buffer-allocator.md)
 - [ADR-0100: struct への view 捕捉と tie の構造的導出](0100-view-capture-structs.md)
 - [ADR-0101: optional 型 `?T` の最小セット](0101-optional-type.md) (element 制限は 0102 が置換)
-- [ADR-0102: std の不在 API は `?T` を返す](0102-std-absence-apis-return-optional.md)
+- [ADR-0102: std の不在 API は `?T` を返す](0102-std-absence-apis-return-optional.md) (見送り「`at` / `at_mut` の `?&T` 化」は 0103 が履行)
+- [ADR-0103: `array::at` / `at_mut` は borrow optional `?&T` を返す](0103-array-at-borrow-optional.md)

@@ -1647,9 +1647,9 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 	case "get_or_panic":
 		return l.emit("array.get_or_panic", elem, args, elem), nil
 	case "at":
-		return l.emit("array.at", "!&"+elem, args, elem), nil
+		return l.emit("array.at", "?&"+elem, args, elem), nil
 	case "at_mut":
-		return l.emit("array.at_mut", "!&var "+elem, args, elem), nil
+		return l.emit("array.at_mut", "?&var "+elem, args, elem), nil
 	case "as_mut_bytes":
 		// The same view value as as_bytes: mutability is a checker-level
 		// permission, not a different runtime representation (ADR-0096).

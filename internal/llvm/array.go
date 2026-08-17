@@ -227,21 +227,35 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArrayAt lowers Array.at(index) and Array.at_mut(index) to a checked pointer result.
+// writeArrayAt lowers Array.at(index) and Array.at_mut(index) to a borrow
+// optional: the runtime's nullable element pointer becomes the payload and its
+// presence, branch-free.
 func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
-		return fmt.Errorf("llvm error: array.at expects Array<T>, i64 -> !&T")
+		return fmt.Errorf("llvm error: array.at expects Array<T>, i64 -> ?&T")
+	}
+	if _, ok := optionalElemLLVM(instr.Result.Type); !ok {
+		return fmt.Errorf(
+			"llvm error: %s expects a `?&T` result, got %s", instr.Op, instr.Result.Type)
 	}
 	array := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
+	resultName := localName(instr.Result.Name)
+	ptrName := resultName + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
 		ptrName, array.operand, index.operand)
-	return e.writeArrayOptionalPointerResult(
-		instr,
-		ptrName,
-		"array_bounds",
-	)
+	optType := e.llvmType(instr.Result.Type)
+	liveName := resultName + ".live"
+	tagName := resultName + ".tag"
+	someName := resultName + ".some"
+	fmt.Fprintf(&e.out, "  %s = icmp ne ptr %s, null\n", liveName, ptrName)
+	fmt.Fprintf(&e.out, "  %s = zext i1 %s to i8\n", tagName, liveName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
+		someName, optType, tagName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
+		resultName, optType, someName, ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.
@@ -339,40 +353,6 @@ func (e *emitter) writeArrayOptionalLoadResult(instr *ir.Instr, ptrName string) 
 	return nil
 }
 
-// writeArrayOptionalPointerResult converts a nullable element pointer to !&T.
-func (e *emitter) writeArrayOptionalPointerResult(
-	instr *ir.Instr,
-	ptrName string,
-	failureKey string,
-) error {
-	success, _ := errorUnionSuccessType(instr.Result.Type)
-	resultName := localName(instr.Result.Name)
-	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array.ref")
-	e.markCurrentBlockExit(joinLabel)
-	nullName := resultName + ".is_null"
-	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
-	if err := e.writeArrayFailureBlock(
-		failLabel,
-		resultName+".fail",
-		instr.Result.Type,
-		failureKey,
-		joinLabel,
-	); err != nil {
-		return err
-	}
-	fmt.Fprintf(&e.out, "%s:\n", okLabel)
-	e.values[ptrName] = valueInfo{typ: success, operand: ptrName}
-	okName := resultName + ".success"
-	e.writeErrorSuccessValue(okName, instr.Result.Type, ir.Value{Name: ptrName, Type: success})
-	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
-	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
-	fmt.Fprintf(&e.out, "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]\n",
-		resultName, e.llvmType(instr.Result.Type), resultName+".fail", failLabel, okName, okLabel)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
-}
-
 // writeArrayBoolResult converts a runtime boolean into a !void result.
 func (e *emitter) writeArrayBoolResult(
 	result ir.Value,
@@ -393,47 +373,6 @@ func (e *emitter) writeArrayBoolResult(
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %d, %d\n",
 		resultName, unionType, baseName, code, errorUnionFailureIndex(result.Type))
 	e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}
-	return nil
-}
-
-// writeArrayFailureBlock writes one failed !T branch and jumps to joinLabel.
-func (e *emitter) writeArrayFailureBlock(
-	label string,
-	resultName string,
-	resultType string,
-	failureKey string,
-	joinLabel string,
-) error {
-	fmt.Fprintf(&e.out, "%s:\n", label)
-	if err := e.writeErrorFailureValue(resultName, resultType, failureKey); err != nil {
-		return err
-	}
-	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
-	return nil
-}
-
-// writeErrorSuccessValue writes an error-union success value.
-func (e *emitter) writeErrorSuccessValue(resultName string, resultType string, value ir.Value) {
-	unionType := e.llvmType(resultType)
-	baseName := resultName + ".base"
-	valueInfo := e.value(value)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
-		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
-		resultName, unionType, baseName, e.llvmType(value.Type), valueInfo.operand)
-}
-
-// writeErrorFailureValue writes an error-union failure value around one code.
-func (e *emitter) writeErrorFailureValue(
-	resultName string,
-	resultType string,
-	failureKey string,
-) error {
-	code, err := e.failureErrorCode(failureKey)
-	if err != nil {
-		return err
-	}
-	e.writeErrorFailureCode(resultName, resultType, fmt.Sprintf("%d", code))
 	return nil
 }
 

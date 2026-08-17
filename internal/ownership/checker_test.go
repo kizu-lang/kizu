@@ -1250,10 +1250,11 @@ fn (self: Parsed) deinit() -> void {
 }
 fn observe(value: &Parsed) -> void {}
 fn check(values: std::array::Array<Parsed>) -> !void {
-    let first = try values.at(0);
-    let value = values.pop_or_panic();
-    observe(first);
-    value.deinit();
+    if values.at(0) |first| {
+        let value = values.pop_or_panic();
+        observe(first);
+        value.deinit();
+    }
     values.deinit();
     return;
 }

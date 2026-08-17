@@ -77,7 +77,7 @@ go test ./...
 | contextual integer literals | `contextual_integer_literals.kizu` | narrows integer literals in explicit `u8` / `i32` std and user API contexts |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
-| array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
+| array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through `at`/`at_mut` captures |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&var String` |
@@ -218,9 +218,9 @@ single source file. Run them with `kizu check <package-root>`.
 | borrowed array blocks set | `negative/std_array_set_while_borrowed.kizu` | `cannot run while array is borrowed` |
 | mutable array borrow blocks reads | `negative/std_array_read_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
 | mutable array borrow requires `var` | `negative/std_array_at_mut_immutable.kizu` | `requires mutable array binding` |
-| array element borrows cannot be passed as owned values | `negative/std_array_at_pass_to_owned_param.kizu` | `Array.at` must be bound |
-| array element borrows cannot escape through return | `negative/std_array_at_return_escape.kizu` | `Array.at` must be bound |
-| array borrow access is bounds-checked | `negative/std_array_at_out_of_bounds.kizu` | `index out of bounds` |
+| array element borrows cannot be passed as owned values | `negative/std_array_at_pass_to_owned_param.kizu` | `` borrowed value `first` cannot escape `` |
+| array element borrows cannot escape through return | `negative/std_array_at_return_escape.kizu` | `cannot return a borrow optional` |
+| array borrow optionals are capture-only | `negative/std_array_at_requires_capture.kizu` | `` `Array.at` must be consumed by a capture `` |
 | array elements reject raw pointers through structs | `negative/std_array_struct_raw_pointer_element.kizu` | `raw pointer` |
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
 | string storage builtins are removed | `negative/std_string_builtin_direct_call.kizu` | `was removed` |

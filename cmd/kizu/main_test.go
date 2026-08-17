@@ -1566,8 +1566,7 @@ fn print_stmt(stmt: &Stmt) -> void {
 fn render_bag(bag: &Bag) -> !void {
     let stmts = &bag.stmts;
     var index = 0;
-    while index < stmts.len() {
-        let stmt = try stmts.at(index);
+    while stmts.at(index) |stmt| {
         print_stmt(stmt);
         index = index + 1;
     }
