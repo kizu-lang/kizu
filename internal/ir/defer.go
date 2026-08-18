@@ -81,6 +81,20 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 	if _, ok := mapValueType(receiverType); ok && method == "deinit" {
 		return Cleanup{Op: "map.deinit", Args: []Value{receiver}}, nil
 	}
+	if elem, ok := boxElementType(receiverType); ok {
+		if method == "deinit" {
+			return Cleanup{Op: "box.deinit", Args: []Value{receiver}}, nil
+		}
+		if method == "deinit_all" {
+			// deinit_all is the std wrapper's body, not a runtime op: the
+			// cleanup calls its instance exactly like a direct call would.
+			op, _, err := l.stdContainerCallOp(boxTypeName, method, elem)
+			if err != nil {
+				return Cleanup{}, err
+			}
+			return Cleanup{Op: op, Args: []Value{receiver}}, nil
+		}
+	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, method); ok {
 		sig := l.signatures[methodName]
 		if sig.Return != "void" {

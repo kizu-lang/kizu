@@ -1380,6 +1380,9 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if _, ok := mapPrimitives[qualified]; ok {
 		return qualified, true
 	}
+	if _, ok := boxPrimitives[qualified]; ok {
+		return qualified, true
+	}
 	return "", false
 }
 
@@ -1433,6 +1436,13 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 			return Value{}, err
 		}
 		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
+	}
+	if method, ok := boxPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, err
+		}
+		return l.lowerBoxMethod(method, l.resolveType(typeArg), args)
 	}
 	// expect_equal lowers to its own instruction, so its std wrapper body is
 	// never called. Its arguments still arrive at the types that wrapper
@@ -1572,6 +1582,9 @@ func (l *lowerer) lowerMethodCallExpr(
 	if valueType, ok := mapValueType(receiver.Type); ok {
 		return l.lowerStdContainerMethod(mapTypeName, field.Name, valueType, allArgs)
 	}
+	if elem, ok := boxElementType(receiver.Type); ok {
+		return l.lowerStdContainerMethod(boxTypeName, field.Name, elem, allArgs)
+	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
 	}
@@ -1634,6 +1647,9 @@ func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, e
 	}
 	if valueType, ok := mapValueType(receiver); ok {
 		return l.stdContainerParams(mapTypeName, method, valueType)
+	}
+	if elem, ok := boxElementType(receiver); ok {
+		return l.stdContainerParams(boxTypeName, method, elem)
 	}
 	if name, ok := l.implMethodCalleeName(receiver, method); ok {
 		return paramsAfterSelf(l.signatures[name].Params), nil
@@ -1758,6 +1774,43 @@ var mapPrimitives = map[string]string{
 	"std::internal::builtin::map_insert":   "insert",
 	"std::internal::builtin::map_key_at":   "key_at",
 	"std::internal::builtin::map_len":      "len",
+}
+
+// boxPrimitives maps a std::internal::builtin Box primitive to the operation it
+// lowers as. std/src/mem.kizu forwards the constructor and each method to one
+// of these, reached the same way the Array and Map primitives are.
+var boxPrimitives = map[string]string{
+	"std::internal::builtin::box":            "new",
+	"std::internal::builtin::box_borrow":     "borrow",
+	"std::internal::builtin::box_borrow_mut": "borrow_mut",
+	"std::internal::builtin::box_deinit":     "deinit",
+	"std::internal::builtin::box_take":       "take",
+}
+
+// lowerBoxMethod lowers the runtime primitive one std::mem::Box<T> wrapper
+// forwards to. Only a wrapper body in std/src/mem.kizu reaches it.
+func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value, error) {
+	switch name {
+	case "new":
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
+		}
+		return l.emit("box.new", "!"+boxTypeName+"<"+elem+">", args, elem), nil
+	case "borrow":
+		// A returned borrow travels under the same rule any borrow return
+		// does: unions stay behind a pointer, everything else as a copy.
+		spelling, _ := l.borrowIRType(elem, false)
+		return l.emit("box.borrow", spelling, args, elem), nil
+	case "borrow_mut":
+		spelling, _ := l.borrowIRType(elem, true)
+		return l.emit("box.borrow_mut", spelling, args, elem), nil
+	case "deinit":
+		return l.emit("box.deinit", "void", args, elem), nil
+	case "take":
+		return l.emit("box.take", elem, args, elem), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown box method `%s`", name)
+	}
 }
 
 // mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map

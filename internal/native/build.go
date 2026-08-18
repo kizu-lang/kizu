@@ -1466,6 +1466,36 @@ void kizu_arena_deinit(void *handle) {
     kizu_rt_free(arena->allocator, arena);
 }
 
+/* A Box cell is one max-aligned header holding the owning allocator, followed
+ * by the payload. The handle Kizu code carries is the payload pointer, so
+ * borrow is pointer identity and only new/deinit reach the runtime. */
+#define KIZU_BOX_HEADER ((int64_t)16)
+
+void *kizu_box_new(void *allocator, int64_t size, const void *value) {
+    if (size <= 0 || !value || size > INT64_MAX - KIZU_BOX_HEADER) {
+        return NULL;
+    }
+    unsigned char *cell =
+        (unsigned char *)kizu_rt_alloc(allocator, KIZU_BOX_HEADER + size);
+    if (!cell) {
+        return NULL;
+    }
+    memcpy(cell, &allocator, sizeof(allocator));
+    unsigned char *payload = cell + KIZU_BOX_HEADER;
+    memcpy(payload, value, (size_t)size);
+    return payload;
+}
+
+void kizu_box_deinit(void *payload) {
+    if (!payload) {
+        return;
+    }
+    unsigned char *cell = (unsigned char *)payload - KIZU_BOX_HEADER;
+    void *allocator;
+    memcpy(&allocator, cell, sizeof(allocator));
+    kizu_rt_free(allocator, cell);
+}
+
 /* One cache line's worth of elements, at least one, so a small Array does not
  * start with a sub-cache-line allocation. */
 static int64_t kizu_array_init_capacity(int64_t elem_size) {

@@ -47,6 +47,9 @@ func (e *emitter) llvmType(typ string) string {
 	if strings.HasPrefix(typ, "std::arena::Arena<") {
 		return "ptr"
 	}
+	if isBoxLLVMType(typ) {
+		return "ptr"
+	}
 	if _, ok := e.module.Structs[typ]; ok {
 		return llvmStructTypeName(typ)
 	}
