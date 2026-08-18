@@ -6960,7 +6960,65 @@ func (c *Checker) isCopyType(typ Type) bool {
 	if c.errorSets[string(typ)] != nil {
 		return true
 	}
-	return copyTypes[typ]
+	if copyTypes[typ] {
+		return true
+	}
+	return c.isPlainDataType(string(typ), nil)
+}
+
+// isPlainDataType reports whether name is plain copy data: a scalar, enum,
+// error set, or a declared struct / union whose fields and payloads are all
+// plain copy data. Duplicating such a value creates no cleanup obligation, so
+// copy propagates through it structurally. Views, capabilities, and owners are
+// not plain data — aggregates holding them keep their own regimes — and a type
+// that declares an explicit deinit stays move-only because the declared
+// cleanup contract implies a consumption obligation.
+func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
+	if inner, ok := strings.CutPrefix(name, "?"); ok {
+		return c.isPlainDataType(inner, seen)
+	}
+	t := Type(name)
+	if t == typeBool || t == typeVoid || numericTypes[t] {
+		return true
+	}
+	if c.enums[name] != nil || c.errorSets[name] != nil {
+		return true
+	}
+	// seen holds the current recursion path only: a revisit is a recursive
+	// aggregate, which needs indirection and is never plain data.
+	if seen[name] {
+		return false
+	}
+	return c.isPlainDataAggregate(name, seen)
+}
+
+// isPlainDataAggregate walks a declared struct / union for isPlainDataType.
+// A declared deinit keeps the type move-only regardless of its fields.
+func (c *Checker) isPlainDataAggregate(name string, seen map[string]bool) bool {
+	st, isStruct := c.structs[name]
+	union, isUnion := c.unions[name]
+	if (!isStruct && !isUnion) || c.implMethod(name, "deinit") != nil {
+		return false
+	}
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	seen[name] = true
+	defer delete(seen, name)
+	if isStruct {
+		for _, field := range st.Fields {
+			if field.Borrow || !c.isPlainDataType(typ.Text(field.TypeName), seen) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, payload := range union.variants {
+		if payload != "" && !c.isPlainDataType(payload, seen) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkNoArgConstructor validates a zero-argument builtin constructor.
