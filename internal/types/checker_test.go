@@ -1050,6 +1050,70 @@ fn main() -> void {
 	runErrorCases(t, cases)
 }
 
+// TestCheckMutableSelfFieldReceiver admits one direct field of a mutable
+// place as a `&var self` receiver: the borrow derives from the owner's
+// storage, whether the owner is a mutable local or a `&var` parameter.
+func TestCheckMutableSelfFieldReceiver(t *testing.T) {
+	source := `struct Counter { count: i64 }
+fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
+struct Holder { counter: Counter }
+fn (self: &var Holder) go() -> void {
+    self.counter.bump();
+}
+fn main() -> void {
+    var h = Holder { counter: Counter { count: 0 } };
+    h.counter.bump();
+    h.go();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsMutableSelfFieldReceiverShapes keeps `&var self` receivers
+// on mutable places: one direct field, mutable owner, nothing deeper.
+func TestCheckRejectsMutableSelfFieldReceiverShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "immutable owner",
+			source: `struct Counter { count: i64 }
+fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
+struct Holder { counter: Counter }
+fn main() -> void {
+    let h = Holder { counter: Counter { count: 0 } };
+    h.counter.bump();
+}`,
+			want: "receiver `h` must be mutable",
+		},
+		{
+			name: "shared owner param",
+			source: `struct Counter { count: i64 }
+fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
+struct Holder { counter: Counter }
+fn (self: &Holder) go() -> void {
+    self.counter.bump();
+}`,
+			want: "receiver `self` must be mutable",
+		},
+		{
+			name: "nested field path",
+			source: `struct Counter { count: i64 }
+fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
+struct Inner { counter: Counter }
+struct Outer { inner: Inner }
+fn (self: &var Outer) go() -> void {
+    self.inner.counter.bump();
+}`,
+			want: "field method receiver only supports one direct field",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsSharedBorrowForwarding rejects shared-to-mutable reborrows.
 func TestCheckRejectsSharedBorrowForwarding(t *testing.T) {
 	source := `struct User { name: []u8 }
