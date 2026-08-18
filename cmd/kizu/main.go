@@ -117,6 +117,8 @@ func dispatch(cmd string, args []string) error {
 		return cacheCommand(args)
 	case "import-c-header":
 		return importCHeaderFile(args[0])
+	case "version", "--version":
+		return versionCommand(args)
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -146,6 +148,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu version")
 }
 
 // parseFile parses a source file and prints its AST summary.

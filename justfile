@@ -135,3 +135,13 @@ opt-smoke file="examples/arithmetic.kizu":
 
 # Run the everyday local validation sequence.
 verify: fmt test lint
+
+# Cut a release: tag main and push the tag. CI builds and attaches binaries.
+release version:
+    @echo "{{version}}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "error: version must look like v0.1.2" >&2; exit 1; }; \
+    test "$(git branch --show-current)" = main || { echo "error: release from main" >&2; exit 1; }; \
+    test -z "$(git status --porcelain)" || { echo "error: working tree is not clean" >&2; exit 1; }; \
+    git fetch origin main; \
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || { echo "error: main is not in sync with origin/main" >&2; exit 1; }; \
+    git tag "{{version}}"; \
+    git push origin "{{version}}"
