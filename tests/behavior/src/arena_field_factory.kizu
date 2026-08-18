@@ -1,0 +1,36 @@
+import std::arena;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub value: i64,
+}
+
+pub struct Registry {
+    pub items: arena::Arena<Item>,
+}
+
+fn (self: &var Registry) add_direct(v: i64) -> arena::Handle<Item> {
+    return self.items.add(Item { value: v });
+}
+
+fn (self: &var Registry) add_bound(v: i64) -> arena::Handle<Item> {
+    let handle = self.items.add(Item { value: v });
+    return handle;
+}
+
+fn (self: Registry) deinit() -> void {
+    self.items.deinit();
+}
+
+// A factory method on a borrowed receiver hands back the handle it added:
+// the arena is the caller's storage, so the handle does not outlive it
+// (§10). A handle from an arena the frame itself owns still cannot escape.
+test "a factory method returns a handle into its receiver's field arena" {
+    let allocator = mem::page_allocator();
+    var registry = Registry { items: arena::new<Item>(allocator) };
+    let first = registry.add_direct(7);
+    let second = registry.add_bound(35);
+    testing::expect_equal<i64>(42, registry.items.at(first).value + registry.items.at(second).value);
+    registry.deinit();
+}

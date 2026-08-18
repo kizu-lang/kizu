@@ -900,12 +900,13 @@ func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (boo
 			return true, errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
 				ident.Name)
 		}
-		if exists && value.handleArenaID != 0 {
+		if exists && value.handleArenaID != 0 && !c.arenaOutlivesFrame(value.handleArenaID, env) {
 			return true, errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
 				ident.Name)
 		}
 	}
-	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
+	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 &&
+		!c.arenaOutlivesFrame(arena.arenaID, env) {
 		return true, errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
 	if call, ok := stmt.Value.(*ast.CallExpr); ok {
@@ -6289,6 +6290,17 @@ func isArenaConstructorExpr(expr ast.Expression) bool {
 	return ok && name == "std::arena::new"
 }
 
+// arenaOutlivesFrame reports whether the arena with this provenance ID is
+// storage the caller keeps: a field arena of a borrowed parameter. A handle
+// into such an arena escapes this frame without outliving its arena (§10),
+// which is what lets a method on `&var self` hand back the handle it added.
+// An arena this frame owns — a local binding, or a field of one — still pins
+// its handles to the frame.
+func (c *Checker) arenaOutlivesFrame(arenaID int, env *scope) bool {
+	owner, ok := env.fieldArenaOwner(arenaID)
+	return ok && owner.borrowedParam
+}
+
 // directFieldArenaID returns a stable arena identity for one owner field.
 func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
 	if receiver.owner.fieldArenaIDs == nil {
@@ -6744,6 +6756,22 @@ func (s *scope) lookup(name string) (*binding, bool) {
 	for cur := s; cur != nil; cur = cur.parent {
 		if value, ok := cur.values[name]; ok {
 			return value, true
+		}
+	}
+	return nil, false
+}
+
+// fieldArenaOwner resolves the binding whose field holds the arena with this
+// provenance ID. Field arena bindings are transient projections, so the owner's
+// fieldArenaIDs map is where the identity persists.
+func (s *scope) fieldArenaOwner(arenaID int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.values {
+			for _, id := range value.fieldArenaIDs {
+				if id == arenaID {
+					return value, true
+				}
+			}
 		}
 	}
 	return nil, false
