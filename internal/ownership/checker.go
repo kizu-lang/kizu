@@ -3013,22 +3013,36 @@ func (c *Checker) checkUserCall(
 	}
 	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
-		if fn.params[idx].borrow {
-			if fn.params[idx].mutBorrow {
-				continue
-			}
-			_, err = c.readExpr(arg, env)
-		} else if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) ||
-			c.sanctionedViewLend(sanctioned, fn, idx, arg, env) {
-			_, err = c.readExpr(arg, env)
-		} else {
-			_, err = c.moveExpr(arg, env)
-		}
-		if err != nil {
+		if err := c.checkUserCallArg(fn, idx, arg, env, sanctioned); err != nil {
 			return "", err
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// checkUserCallArg applies one argument's ownership effect for a user call:
+// a shared borrow reads, a lent view or allocator reads, anything else moves.
+func (c *Checker) checkUserCallArg(
+	fn *functionInfo,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+	sanctioned bool,
+) error {
+	if fn.params[idx].borrow {
+		if fn.params[idx].mutBorrow {
+			return nil
+		}
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	if c.viewArgLend(fn, idx, arg, env) || c.allocatorArgLend(fn, idx, arg, env) ||
+		c.sanctionedViewLend(sanctioned, fn, idx, arg, env) {
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	_, err := c.moveExpr(arg, env)
+	return err
 }
 
 // sanctionedViewLend reports whether arg is a borrow-class view lent to a
@@ -4163,25 +4177,9 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
-	staticArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
-		return "", true, errorf("move error: `%s` expects %d static arguments",
-			name, len(fn.sig.StaticParams))
-	}
-	// Only the entries that declare types take part in substitution; a
-	// compile-time value carries no ownership.
-	typeArgs := []string{}
-	for idx, param := range fn.sig.StaticParams {
-		if param.IsType() {
-			typeArgs = append(typeArgs, staticArgs[idx])
-		}
-	}
-	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
+	subst, err := c.genericCallSubst(name, fn, typeArg)
+	if err != nil {
 		return "", true, err
-	}
-	subst := map[string]string{}
-	for idx, param := range fn.sig.TypeParamNames() {
-		subst[param] = typeArgs[idx]
 	}
 	for idx, arg := range args {
 		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
@@ -4199,6 +4197,36 @@ func (c *Checker) checkGenericUserTypeApply(
 			"borrow error: generic function `%s` cannot return a tied allocator", name)
 	}
 	return ret, true, nil
+}
+
+// genericCallSubst resolves a generic call's static arguments into the
+// type-parameter substitution the ownership check applies.
+func (c *Checker) genericCallSubst(
+	name string,
+	fn *functionInfo,
+	typeArg string,
+) (map[string]string, error) {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+		return nil, errorf("move error: `%s` expects %d static arguments",
+			name, len(fn.sig.StaticParams))
+	}
+	// Only the entries that declare types take part in substitution; a
+	// compile-time value carries no ownership.
+	typeArgs := []string{}
+	for idx, param := range fn.sig.StaticParams {
+		if param.IsType() {
+			typeArgs = append(typeArgs, staticArgs[idx])
+		}
+	}
+	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
+		return nil, err
+	}
+	subst := map[string]string{}
+	for idx, param := range fn.sig.TypeParamNames() {
+		subst[param] = typeArgs[idx]
+	}
+	return subst, nil
 }
 
 // checkGenericInstantiation checks a generic function body for one static type set.
