@@ -1056,7 +1056,10 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
 * `??T` / `?!T` は書けない(optional を包めるのは error union だけ)。
   generic 実体化が作る綴り(`Array<!i64>` の `pop()` が返す `?!i64`)も
   同じ規則で拒否される
-* struct field・union payload・static argument(`Array<?u8>` など)・
+* struct field に置けるのは plain copy data と arena handle の optional
+  (`?i64`、`?arena::Handle<T>` など)だけ。owner / view を包んだ optional
+  は field に置けない(field 型を読む消費・捕捉規則から義務が見えなく
+  なるため)。union payload・static argument(`Array<?u8>` など)・
   borrow(`&?T`)の対象にはできない
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
   semantics の対象外(unsafe 世界の C ABI 用)
@@ -1229,6 +1232,9 @@ owner aggregate と、明示 deinit を宣言した struct / union
 ```
 
 `std::mem::Box<T>` は型として存在しますが、native lowering はまだありません。
+そのため木や入れ子のような再帰的データ構造は、要素を
+`std::arena::Arena<T>` に置き、子を `?arena::Handle<T>` field で
+参照する平坦な形で表します(§7 optional field、§10)。
 
 owner field または owner payload を含む struct / union は owner aggregate です。
 owner aggregate は copy できず、値渡しや代入では move されます。
@@ -1500,6 +1506,9 @@ core arena の構築は明示 allocator capability を要求し、
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
 * arena からの削除は実装しない
+* `?arena::Handle<T>` は struct field に置ける(§7)。「子が無い」を
+  番兵値でなく型で表し、再帰的データ構造は arena + optional handle の
+  平坦な形で書く
 
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
 条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding

@@ -29,6 +29,15 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 	if e.lowersToWord(typ) {
 		return 8, 8, true
 	}
+	// An optional is the two-field aggregate writeOptionalTypes declares:
+	// `{ i8, elem }`, laid out the C way like any struct.
+	if elem, ok := optionalElemLLVM(typ); ok {
+		elemSize, elemAlign, ok := e.typeLayoutVisiting(elem, seen)
+		if !ok {
+			return 0, 0, false
+		}
+		return roundUp(roundUp(1, elemAlign)+elemSize, elemAlign), elemAlign, true
+	}
 	if st, ok := e.module.Structs[typ]; ok {
 		return e.structLayout(typ, st, seen)
 	}

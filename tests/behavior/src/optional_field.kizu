@@ -1,0 +1,132 @@
+import std::arena;
+import std::mem;
+import std::testing;
+
+pub struct Config {
+    pub limit: ?i64,
+    pub label: []u8,
+}
+
+fn set_limit(c: &var Config, n: i64) -> void {
+    c.limit = n;
+}
+
+fn clear_limit(c: &var Config) -> void {
+    c.limit = null;
+}
+
+// An optional field starts from `null` or a plain value in the literal, wraps
+// implicitly on assignment like a `?T` return, and clears back to `null`
+// through the same `&var` rules any field write follows.
+test "optional scalar field wraps, clears, and reads back" {
+    var cfg = Config { limit: null, label: "a" };
+    testing::expect_equal<i64>(-1, cfg.limit orelse -1);
+    set_limit(cfg, 10);
+    testing::expect_equal<i64>(10, cfg.limit orelse -1);
+    clear_limit(cfg);
+    testing::expect_equal<i64>(-1, cfg.limit orelse -1);
+    cfg.limit = 7;
+    testing::expect_equal<i64>(7, cfg.limit orelse -1);
+}
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+pub struct Anchor {
+    pub at: ?Point,
+}
+
+// A copy struct is plain data, so it sits behind the presence tag the same
+// way a scalar does, and the capture reads it out by value.
+test "optional copy struct field captures its payload" {
+    var anchor = Anchor { at: null };
+    var total = 0;
+    if anchor.at |p| {
+        total = p.x;
+    } else {
+        total = -1;
+    }
+    testing::expect_equal<i64>(-1, total);
+    anchor.at = Point { x: 3, y: 4 };
+    if anchor.at |p| {
+        total = p.x + p.y;
+    }
+    testing::expect_equal<i64>(7, total);
+}
+
+pub struct TreeNode {
+    pub value: i64,
+    pub next: ?arena::Handle<TreeNode>,
+}
+
+pub struct Chain {
+    pub nodes: arena::Arena<TreeNode>,
+}
+
+fn (self: &Chain) total(h: arena::Handle<TreeNode>) -> i64 {
+    var sum = self.nodes.at(h).value;
+    if self.nodes.at(h).next |n| {
+        sum = sum + self.total(n);
+    }
+    return sum;
+}
+
+fn (self: Chain) deinit() -> void {
+    self.nodes.deinit();
+}
+
+// `?Handle<T>` in a field is the type-safe spelling of "child or nothing", so
+// a recursive structure walks itself through the arena without sentinels.
+test "optional handle field links a recursive structure" {
+    let allocator = mem::page_allocator();
+    var chain = Chain { nodes: arena::new<TreeNode>(allocator) };
+    let tail = chain.nodes.add(TreeNode { value: 30, next: null });
+    let mid = chain.nodes.add(TreeNode { value: 12, next: tail });
+    let head = chain.nodes.add(TreeNode { value: 0, next: mid });
+    testing::expect_equal<i64>(42, chain.total(head));
+    chain.deinit();
+}
+
+pub struct Branch {
+    pub condition: ?arena::Handle<Expr>,
+    pub value: i64,
+}
+
+pub union Expr {
+    Literal(i64),
+    If(Branch),
+}
+
+pub struct Prog {
+    pub exprs: arena::Arena<Expr>,
+}
+
+fn (self: &Prog) eval(h: arena::Handle<Expr>) -> i64 {
+    return match self.exprs.at(h) {
+        Literal(n) => n,
+        If(b) => {
+            var inner = b.value;
+            if b.condition |c| {
+                inner = inner + self.eval(c);
+            }
+            inner
+        },
+    };
+}
+
+fn (self: Prog) deinit() -> void {
+    self.exprs.deinit();
+}
+
+// A struct with an optional field also works as a union payload: the inline
+// tagged-union ABI lays the optional out as its presence tag plus payload.
+test "optional handle field inside a union payload evaluates recursively" {
+    let allocator = mem::page_allocator();
+    var prog = Prog { exprs: arena::new<Expr>(allocator) };
+    let lit = prog.exprs.add(Expr::Literal(40));
+    let top = prog.exprs.add(Expr::If(Branch { condition: lit, value: 2 }));
+    testing::expect_equal<i64>(42, prog.eval(top));
+    prog.deinit();
+}
