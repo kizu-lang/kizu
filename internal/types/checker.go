@@ -5721,7 +5721,8 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 		return nil
 	}
 	if _, ok := receiver.Receiver.(*ast.IdentExpr); !ok {
-		return errorf("type error: field method receiver only supports one direct field")
+		return errorAt(receiver.Span,
+			"type error: field method receiver only supports one direct field")
 	}
 	if !typ.CleanupMethod(field.Name) || c.allowsDirectFieldCleanup(receiver, env) {
 		return nil
@@ -6681,9 +6682,11 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 		if _, ok := target.Receiver.(*ast.IdentExpr); ok {
 			return nil
 		}
-		return errorf("type error: field borrow only supports one direct field")
+		return errorAt(target.Span,
+			"type error: field borrow only supports one direct field")
 	default:
-		return errorf("type error: borrow target must be a local binding or direct field")
+		return errorAt(expressionSpan(expr),
+			"type error: borrow target must be a local binding or direct field")
 	}
 }
 
