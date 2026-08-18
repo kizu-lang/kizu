@@ -233,6 +233,10 @@ func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 		l.markLentMethodArgs(field, expr.Args, found)
 		return
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		l.markLentGenericArgs(typeApply, expr.Args, found)
+		return
+	}
 	name, ok := l.functionCalleeName(expr.Callee)
 	if !ok {
 		return
@@ -272,6 +276,31 @@ func (l *lowerer) markLentMethodArgs(
 			if index+1 < len(sig.Params) && sig.Params[index+1].Passing == PassCallerStorage {
 				markIfName(arg, found)
 			}
+		}
+	}
+}
+
+// markLentGenericArgs records the names a generic call lends. Like the direct
+// arms above it reads the answer lowerParam gave rather than deciding again
+// from the declaration: declaredInstanceParams binds the type arguments
+// without asking for the instance, so the passing is the one the call will
+// use. A callee this cannot resolve lends nothing.
+func (l *lowerer) markLentGenericArgs(
+	typeApply *ast.TypeApplyExpr,
+	args []ast.Expression,
+	found map[string]bool,
+) {
+	name, ok := l.functionCalleeName(typeApply.Callee)
+	if !ok {
+		return
+	}
+	params, err := l.declaredInstanceParams(name, typeApply.TypeArg)
+	if err != nil {
+		return
+	}
+	for index, arg := range args {
+		if index < len(params) && params[index].Passing == PassCallerStorage {
+			markIfName(arg, found)
 		}
 	}
 }

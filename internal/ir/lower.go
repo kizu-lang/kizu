@@ -50,6 +50,9 @@ type lowerer struct {
 	// parameters that arrive as such storage. Their entry in env is the
 	// storage, not the value.
 	slots map[string]bool
+	// genericDecls indexes the program's generic function declarations by
+	// name, so every call site resolves in one lookup.
+	genericDecls map[string]*ast.FunctionDecl
 	// externSymbols maps a resolved extern "c" function name to its C symbol.
 	// Module resolution qualifies every declared name, but the linker knows the
 	// declaration's own identifier, so calls emit that instead.
@@ -95,6 +98,12 @@ type loopPhi struct {
 
 // newLowerer prepares lookup tables used during lowering.
 func newLowerer(program *ast.Program) *lowerer {
+	generics := map[string]*ast.FunctionDecl{}
+	for _, decl := range program.Decls {
+		if fn, ok := decl.(*ast.FunctionDecl); ok && len(fn.StaticParams) > 0 {
+			generics[fn.Name] = fn
+		}
+	}
 	return &lowerer{
 		program: program,
 		module: &Module{
@@ -108,6 +117,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		instantiated:  map[string]bool{},
 		staticValues:  map[string]staticValue{},
 		externSymbols: map[string]string{},
+		genericDecls:  generics,
 	}
 }
 
@@ -260,16 +270,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 
 // genericDecl returns the generic function declaration with this IR name.
 func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
-	for _, decl := range l.program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok || len(fn.StaticParams) == 0 {
-			continue
-		}
-		if fn.Name == name {
-			return fn
-		}
-	}
-	return nil
+	return l.genericDecls[name]
 }
 
 // genericInstanceName is the symbol one instantiation is lowered under. Static
