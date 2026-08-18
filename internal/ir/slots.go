@@ -306,10 +306,14 @@ func (l *lowerer) markLentGenericArgs(
 }
 
 // markIfName records the local whose storage expr would hand over: the name
-// itself, or the owner of a one-level field path -- a `field.addr` projection
-// needs the owner in memory, so the owner is the local that loses SSA form.
+// itself, or the root of a field path -- a `field.addr` projection needs the
+// root owner in memory, so the root is the local that loses SSA form.
 func markIfName(expr ast.Expression, found map[string]bool) {
-	if field, ok := expr.(*ast.FieldExpr); ok && !field.Namespace {
+	for {
+		field, ok := expr.(*ast.FieldExpr)
+		if !ok || field.Namespace {
+			break
+		}
 		expr = field.Receiver
 	}
 	if ident, ok := expr.(*ast.IdentExpr); ok {
@@ -372,16 +376,19 @@ func (l *lowerer) lowerReceiverAddress(expr ast.Expression) (Value, error) {
 }
 
 // lowerFieldStorage lowers `base.field` to the field's own storage: a
-// `field.addr` projection out of the base's storage. ok is false when the
-// expression is not a one-level field of a storage name -- a slot-backed
-// local or a `&var` parameter -- which is the shape the checker admits for
-// every `&var` position.
+// `field.addr` projection out of the base's storage. A nested path chains one
+// projection per hop. ok is false when the path is not rooted in a storage
+// name -- a slot-backed local or a `&var` parameter -- which is the shape the
+// checker admits for every `&var` position.
 func (l *lowerer) lowerFieldStorage(expr ast.Expression) (Value, bool) {
 	field, isField := expr.(*ast.FieldExpr)
 	if !isField || field.Namespace {
 		return Value{}, false
 	}
 	storage, ok := l.slotPointer(field.Receiver)
+	if !ok {
+		storage, ok = l.lowerFieldStorage(field.Receiver)
+	}
 	if !ok {
 		return Value{}, false
 	}

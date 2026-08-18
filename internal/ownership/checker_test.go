@@ -1740,6 +1740,30 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsNestedFieldReceiverMethods checks method receivers reach
+// through a nested field path while cleanup still descends one level at a time.
+func TestCheckAcceptsNestedFieldReceiverMethods(t *testing.T) {
+	source := `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+struct Wrapper { registry: Registry }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn (self: Wrapper) deinit() -> void {
+    self.registry.deinit();
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let registry = Registry { users: std::arena::new<User>(allocator) };
+    let wrapper = Wrapper { registry: registry };
+    wrapper.registry.users.add(User { name: "alice" });
+    wrapper.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsDirectFieldReceiverPolicy keeps field cleanup and paths bounded.
 func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
 	cases := []struct {
@@ -1778,7 +1802,7 @@ fn main() {
 			want: "field `self.users` was deinitialized",
 		},
 		{
-			name: "nested field receiver",
+			name: "nested field cleanup",
 			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
@@ -1786,15 +1810,15 @@ fn (self: Registry) deinit() -> void {
     self.users.deinit();
 }
 fn (self: Wrapper) deinit() -> void {
-    self.registry.deinit();
+    self.registry.users.deinit();
 }
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
     let wrapper = Wrapper { registry: registry };
-    wrapper.registry.users.add(User { name: "alice" });
+    wrapper.deinit();
 }`,
-			want: "field method receiver only supports one direct field",
+			want: "field cleanup `self.registry.users.deinit` is only allowed on one direct field",
 		},
 	}
 	runErrorCases(t, cases)

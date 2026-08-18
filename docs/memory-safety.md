@@ -80,11 +80,12 @@ policy.
 - `&T` cannot be used for mutation.
 - `&var T` requires a mutable local binding.
 - `&T` and `&var T` cannot overlap in a way that creates mutable aliasing.
-- One-level direct field borrow such as `&user.name` is supported.
+- Field-path borrow such as `&user.name` or `&user.profile.name` is supported.
 - A field borrow allows disjoint field assignment, such as assigning `user.age`
   while `user.name` is borrowed.
-- A field borrow blocks owner moves and conflicting access to the same field.
-- Nested field borrow, such as `&user.profile.name`, is rejected.
+- A field borrow blocks owner moves and any access to an aliasing path: a
+  borrow of `user.profile.name` conflicts with `user.profile` and with
+  `user.profile.name`, but not with `user.age`.
 - Indexed borrow syntax is not implemented. If indexed access is added later,
   `&items[0]` must get explicit safety rules and regression coverage first.
 
@@ -226,7 +227,7 @@ memory-safety invariants to representative examples.
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
 | borrow does not move owner | `examples/borrow.kizu`, `examples/last_use_borrow.kizu`, `examples/borrow_call_then_move.kizu` | `examples/negative/borrow_escape.kizu` |
 | non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu`, `examples/negative/borrow_before_last_use_move.kizu`, `examples/negative/borrow_loop_last_use.kizu` |
-| one-level field borrow permits disjoint fields | `examples/field_borrow.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow.kizu` |
+| field-path borrow permits disjoint fields | `examples/field_borrow.kizu`, `examples/nested_field_path.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow_overlap.kizu` |
 | borrow cannot be stored or passed as owned | | `examples/negative/borrow_field.kizu`, `examples/negative/borrow_local_alias.kizu`, `examples/negative/borrow_to_owner.kizu` |
 | copy value can be copied through borrow deref | `examples/borrow_deref_copy.kizu` | |
 | non-copy value cannot move out of borrow deref | `examples/borrow_deref_copy.kizu` | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |

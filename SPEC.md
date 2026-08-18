@@ -500,18 +500,20 @@ self.related.len();
 `Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
 compile error です。互換構文としては扱いません。
 
-method receiver path は local binding または one-level direct field に限定します。
+method receiver path は local binding を root とする field path です。
 
 ```kizu
 values.len();          // ok: local receiver
 self.related.len();    // ok: direct field receiver
-self.a.b.len();        // error
+self.a.b.len();        // ok: nested field receiver
 ```
 
-direct field receiver は owner の ownership state に従います。read-only method は
-owner / field が読めるときだけ、mutating method は owner / field が borrow 中でないときだけ
-呼べます。`field.deinit()` のような destructive cleanup は、owner 型自身の
-`deinit(self: Owner) -> void` method body の中だけ許可します。
+field receiver は root owner の ownership state に従います。read-only method は
+owner / path が読めるときだけ、mutating method は owner と重なる path が borrow 中で
+ないときだけ呼べます。`field.deinit()` のような destructive cleanup は、owner 型自身の
+`deinit(self: Owner) -> void` method body の中の direct field 1 段だけ許可します。
+`self.a.b.deinit()` のような nested cleanup は、中間型 `a` 自身の deinit を迂回する
+ため拒否します。
 
 ### 6.6 import と visibility
 
@@ -1034,9 +1036,9 @@ owned container(`Map` / `Array` / `String` / `Box` / stack buffer)を読んだ
 borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
 `Array.at_mut`、`Map.at` / `Map.at_mut`、`Arena.at_mut` の capture 条件と
 してだけ存在します。capture が payload borrow そのものになり、その scope の
-間 container は borrow されます。receiver は local binding のほか、owner の
-直 field(`owner.field.at_mut(...)`)を書けます: このとき borrow は owner の
-該当 field に付き、owner の move とその field の操作が capture の最終使用
+間 container は borrow されます。receiver は local binding のほか、owner からの
+field path(`owner.field.at_mut(...)`)を書けます: このとき borrow は owner の
+該当 path に付き、owner の move とその path に重なる操作が capture の最終使用
 まで待ちます。保存と `orelse` は拒否します(§std array、§std map、§10)。
 
 関数は bare の `?&T` / `?&var T` を戻り値型として宣言できます。契約は
@@ -1323,10 +1325,11 @@ borrow のルール:
 * method call の `&var` receiver は two-phase: 引数の評価中は共有借用として
   予約し、引数がすべて確定した時点で排他化する。引数は receiver を読めるが、
   receiver を borrow / move する引数は拒否する(ADR-0106)
-* `&user.name` のような one-level direct field borrow を許可する
-* field borrow 中でも disjoint field assignment は許可する
-* field borrow 中の owner 全体の move と同一 field assignment は禁止する
-* `&user.profile.name` のような nested field borrow を拒否する
+* `&user.name` や `&user.profile.name` のような field path borrow を許可する
+* field borrow 中でも disjoint な path への assignment は許可する
+* field borrow 中の owner 全体の move と、borrow 中の path に重なる path への
+  assignment / borrow は禁止する。path の重なりは一方が他方を含むこと:
+  `user.profile.name` は `user.profile` と重なり、`user.age` とは重ならない
 * index / slice expression は read-only checked access から始める
 * indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
