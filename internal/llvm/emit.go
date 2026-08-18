@@ -122,6 +122,7 @@ func (e *emitter) writeHeader() {
 	e.writeArrayRuntimeDecls()
 	e.writeMapRuntimeDecls()
 	e.writeArenaRuntimeDecls()
+	e.writeBoxRuntimeDecls()
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
 	e.writePanicDecls()
@@ -178,6 +179,7 @@ var failureErrors = map[string]struct{ set, member string }{
 	"array_reserve":  {"std::array::Error", "OutOfMemory"},
 	"array_truncate": {"std::array::Error", "OutOfBounds"},
 	"map_insert":     {"std::map::Error", "OutOfMemory"},
+	"box_new":        {"std::mem::Error", "OutOfMemory"},
 }
 
 // failureErrorCode returns the global code one container failure lowers to.
@@ -911,6 +913,8 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeMapInstr(instr)
 	case strings.HasPrefix(instr.Op, "arena."):
 		return e.writeArenaInstr(instr)
+	case strings.HasPrefix(instr.Op, "box."):
+		return e.writeBoxInstr(instr)
 	case strings.HasPrefix(instr.Op, "union."):
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "test."):

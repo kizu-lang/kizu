@@ -176,7 +176,8 @@ func keepLiveInstrs(instrs []*Instr, used map[string]bool) []*Instr {
 // device registers change state when read.
 func hasEffect(instr *Instr) bool {
 	switch instr.Op {
-	case "call.print", "arena.add", "arena.at", "volatile.load":
+	case "call.print", "arena.add", "arena.at", "volatile.load",
+		"box.new", "box.take":
 		return true
 	default:
 		return instr.Result.Type == "void"

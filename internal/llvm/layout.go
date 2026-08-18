@@ -74,7 +74,8 @@ func (e *emitter) lowersToWord(typ string) bool {
 	if typ == "std::string::String" || isArenaHandleType(typ) {
 		return true
 	}
-	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) {
+	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) ||
+		isBoxLLVMType(typ) {
 		return true
 	}
 	if _, ok := e.module.Enums[typ]; ok {

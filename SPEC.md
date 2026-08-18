@@ -1236,10 +1236,10 @@ arena-owned value
 owner aggregate と、明示 deinit を宣言した struct / union
 ```
 
-`std::mem::Box<T>` は型として存在しますが、native lowering はまだありません。
-そのため木や入れ子のような再帰的データ構造は、要素を
+木や入れ子のような再帰的データ構造は、子を `std::mem::Box<T>` の
+struct / union payload として直接持つ形でも、要素を
 `std::arena::Arena<T>` に置き、子を `?arena::Handle<T>` field で
-参照する平坦な形で表します(§7 optional field、§10)。
+参照する平坦な形でも表せます(§7 optional field、§10)。
 
 owner field または owner payload を含む struct / union は owner aggregate です。
 owner aggregate は copy できず、値渡しや代入では move されます。

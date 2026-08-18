@@ -82,11 +82,21 @@ func (l *lowerer) fieldType(structName string, fieldName string) string {
 const (
 	arrayTypeName = "std::array::Array"
 	mapTypeName   = "std::map::Map"
+	boxTypeName   = "std::mem::Box"
 )
 
 // arrayElementType returns T for std::array::Array<T>.
 func arrayElementType(name string) (string, bool) {
 	const prefix = arrayTypeName + "<"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"), true
+}
+
+// boxElementType returns T for std::mem::Box<T>.
+func boxElementType(name string) (string, bool) {
+	const prefix = boxTypeName + "<"
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
 		return "", false
 	}
