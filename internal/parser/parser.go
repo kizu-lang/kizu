@@ -836,7 +836,8 @@ func (p *Parser) parseReturnStmt() ast.Statement {
 }
 
 // parseMatchArmReturn parses `return` or `return <expr>` as a match arm body.
-// The arm's own comma is the terminator, so no semicolon is consumed here.
+// The arm's comma or the closing `}` is the terminator, so no semicolon is
+// consumed here.
 func (p *Parser) parseMatchArmReturn() ast.Statement {
 	stmt := &ast.ReturnStmt{}
 	if p.peek.Type == token.Comma || p.peek.Type == token.RBrace {
@@ -1022,16 +1023,6 @@ func (p *Parser) consumeListDelimiter(context string) bool {
 	}
 }
 
-// consumeRequiredListComma consumes a comma-only list delimiter.
-func (p *Parser) consumeRequiredListComma(context string) bool {
-	if p.peek.Type == token.Comma {
-		p.nextToken()
-		return true
-	}
-	p.errorf("expected `,` after %s", context)
-	return false
-}
-
 // parseMatchStmt parses a simple enum tag match statement.
 func (p *Parser) parseMatchStmt() *ast.MatchStmt {
 	stmt := &ast.MatchStmt{}
@@ -1054,7 +1045,7 @@ func (p *Parser) parseMatchArms() []ast.MatchArm {
 			return arms
 		}
 		arms = append(arms, arm)
-		if !p.consumeRequiredListComma("match arm") {
+		if !p.consumeListDelimiter("match arm") {
 			return arms
 		}
 		p.nextToken()
@@ -1085,7 +1076,8 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 	}
 	p.nextToken()
 	// An arm body is an expression, a `return` statement, or a block
-	// (SPEC §6.12); the arm's comma terminates it in place of `;`.
+	// (SPEC §6.12); the arm's comma or the closing `}` terminates it in
+	// place of `;`.
 	if p.cur.Type == token.Return {
 		arm.Body = p.parseMatchArmReturn()
 		return arm, true

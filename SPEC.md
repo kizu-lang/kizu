@@ -852,16 +852,19 @@ fn main() {
 guard と多段 destructuring は扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
-すべての `match` arm は terminal comma を必須にします。
+arm は `,` で区切ります。最後の arm の `,` は、他の comma-separated list と
+同じく省略できます(ADR-0110)。
 wildcard pattern `_` を fallback arm として許可します。
 `_` arm は最後に 1 つだけ書けます。payload binding はできません。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
 `_` arm がない場合は、すべての tag を明示しなければなりません。
 expression として使う場合は、すべての arm の value type が一致しなければなりません。
-arm value に `;` は付けません。arm の comma が body を終端します。
+arm value に `;` は付けません。arm の comma、または match を閉じる `}` が
+body を終端します。
 
 `match` の arm body は、expression、`return` 文、または block です
-(ADR-0093、ADR-0107)。arm の comma が body を終端します。
+(ADR-0093、ADR-0107)。arm の comma、または match を閉じる `}` が
+body を終端します。
 
 statement として使う `match` の arm block は文の並びで、他の block と同じく
 `let` / 代入 / `defer` / `return` / `break` / `continue` を書けます。

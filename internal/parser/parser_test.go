@@ -774,6 +774,25 @@ fn main() { let user = User { name: "alice" }; let values = std::array::new<i64>
 	}
 }
 
+// TestParseMatchLastArmCommaOptional checks that the comma after the last
+// match arm can be omitted, matching the comma-separated list rule.
+func TestParseMatchLastArmCommaOptional(t *testing.T) {
+	input := `fn main() {
+    let color = Color::Red;
+    match color { Red => print("red"), Green => print("green") }
+    let label = match color { Red => "red", Green => { "green" } };
+    print(label);
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	if got := len(program.Decls); got != 1 {
+		t.Fatalf("got %d decls", got)
+	}
+}
+
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {
