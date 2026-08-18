@@ -1,0 +1,52 @@
+import std::arena;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub score: i64,
+}
+
+fn read_score(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
+    return items.at(h).score;
+}
+
+fn bump_score(items: &var arena::Arena<Item>, h: arena::Handle<Item>) -> arena::Handle<Item> {
+    if items.at_mut(h) |item| {
+        item.score = item.score + 1;
+    }
+    return h;
+}
+
+// An arena handed to a helper as a borrow keeps its handles usable: the
+// callee cannot see where either was made, so the signature carries the
+// contract and only known confusions are rejected. A handle moves into a
+// call, so the mutating helper hands it back for the next one.
+test "a borrowed arena parameter accepts its caller's handle" {
+    let allocator = mem::page_allocator();
+    var items = arena::new<Item>(allocator);
+    let h = items.add(Item { score: 41 });
+    testing::expect_equal<i64>(41, items.at(h).score);
+    let bumped = bump_score(items, h);
+    testing::expect_equal<i64>(42, read_score(&items, bumped));
+    items.deinit();
+}
+
+pub struct LinkNode {
+    pub value: i64,
+    pub next: ?arena::Handle<LinkNode>,
+}
+
+// A handle read out of an optional field has no visible origin, so a local
+// arena accepts it the same way a borrowed one does.
+test "a local arena accepts handles read out of fields" {
+    let allocator = mem::page_allocator();
+    let nodes = arena::new<LinkNode>(allocator);
+    let tail = nodes.add(LinkNode { value: 2, next: null });
+    let head = nodes.add(LinkNode { value: 40, next: tail });
+    var total = nodes.at(head).value;
+    if nodes.at(head).next |n| {
+        total = total + nodes.at(n).value;
+    }
+    testing::expect_equal<i64>(42, total);
+    nodes.deinit();
+}

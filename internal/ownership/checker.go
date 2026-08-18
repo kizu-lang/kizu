@@ -5823,7 +5823,7 @@ func (c *Checker) checkArenaHandleArg(
 	if !ok || base != "std::arena::Arena" {
 		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
+	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
 		return "", err
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
@@ -5842,37 +5842,12 @@ func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (strin
 	return "void", nil
 }
 
-// checkHandleProvenance rejects handles that came from a different known arena.
-func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env *scope) error {
-	if arena.arenaID == 0 {
-		return errorf("arena error: arena `%s` has unknown provenance", arena.name)
-	}
-	if addArena := c.arenaAddReceiver(expr, env); addArena != nil {
-		if addArena.arenaID != arena.arenaID {
-			return errorf("arena error: handle from `%s` does not belong to arena `%s`",
-				addArena.name, arena.name)
-		}
-		return nil
-	}
-	ident, ok := expr.(*ast.IdentExpr)
-	if !ok {
-		return errorf("arena error: handle expression has unknown arena provenance")
-	}
-	handle, exists := env.lookup(ident.Name)
-	if !exists {
-		return errorf("arena error: undefined handle `%s`", ident.Name)
-	}
-	if handle.handleArenaID == 0 {
-		return errorf("arena error: handle `%s` has unknown arena provenance", ident.Name)
-	}
-	if handle.handleArenaID != arena.arenaID {
-		return errorf("arena error: handle `%s` does not belong to arena `%s`",
-			ident.Name, arena.name)
-	}
-	return nil
-}
-
-// checkKnownHandleProvenance rejects only known mismatches for field-owned arenas.
+// checkKnownHandleProvenance rejects handle uses whose provenance is known to
+// mismatch: both sides carry an arena identity and they differ. An unknown
+// side — an arena that arrived as a borrow, a handle read out of a field —
+// passes, because the reader cannot see where it was made and the signature
+// is what carries the contract (ADR-0098). This is the one provenance rule;
+// local arenas always carry an identity, so known confusions still stop.
 func (c *Checker) checkKnownHandleProvenance(
 	arena *binding,
 	expr ast.Expression,
@@ -5890,6 +5865,10 @@ func (c *Checker) checkKnownHandleProvenance(
 	}
 	provenance := c.knownHandleProvenance(expr, env)
 	if provenance != 0 && provenance != arena.arenaID {
+		if ident, ok := expr.(*ast.IdentExpr); ok {
+			return errorf("arena error: handle `%s` does not belong to arena `%s`",
+				ident.Name, arena.name)
+		}
 		return errorf("arena error: handle expression does not belong to arena `%s`",
 			arena.name)
 	}
