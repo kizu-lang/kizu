@@ -58,3 +58,8 @@ commit 前は原則 `pre-commit run --all-files` を通してください。
 **commit の前に必ず停止し、ユーザーのコードチェックを受けてください。**
 自動での commit / push / merge は、ユーザーがその変更のチェックを終えてから行います。
 PR には目的、主要変更、検証結果、対応 Issue を短く書いてください。
+
+## Release
+
+release はユーザー指示があったときだけ、main で `just release <version>`(例: `v0.1.2`)を実行します。
+version の source は git tag のみで、tag push を受けて CI が binary を build し Release に添付します。

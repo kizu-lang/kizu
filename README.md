@@ -154,6 +154,18 @@ what the conformance test reads.
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
 
+## Getting a Binary
+
+Development runs the compiler from source (`go run ./cmd/kizu`). Prebuilt
+binaries are attached to [GitHub Releases](https://github.com/kizu-lang/kizu/releases);
+each names its version with `kizu version`, so an old binary identifies itself
+instead of producing confusing parse errors against newer sources. The flake
+builds the same layout locally:
+
+```sh
+nix build   # ./result/bin/kizu with its library tree in ./result/lib/kizu
+```
+
 ## Development Environment
 
 The recommended development environment is the Nix flake.
@@ -196,6 +208,7 @@ go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu import-c-header examples/c_abi.h
+go run ./cmd/kizu version
 ```
 
 ## CLI

@@ -11,7 +11,7 @@ const initMainSource = "fn main() {\n    print(\"hello, kizu\");\n}\n"
 
 // commandAllowsNoTarget reports commands that may run with no path argument.
 func commandAllowsNoTarget(command string) bool {
-	return command == "init"
+	return command == "init" || command == "version" || command == "--version"
 }
 
 // initCommand scaffolds a minimal Kizu package.
