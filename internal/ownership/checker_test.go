@@ -855,8 +855,53 @@ fn make() -> std::arena::Handle<User> {
 }`,
 			want: "handle `alice` cannot outlive its arena",
 		},
+		{
+			name: "returned handle from a local struct's field arena",
+			source: `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn make() -> std::arena::Handle<User> {
+    let allocator = std::mem::page_allocator();
+    var registry = Registry { users: std::arena::new<User>(allocator) };
+    return registry.users.add(User { name: "alice" });
+}`,
+			want: "handle from `registry.users` cannot outlive its arena",
+		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsFieldArenaHandleReturn lets a factory method hand back the
+// handle it added: the arena is a field of the borrowed receiver, so it is the
+// caller's storage and the handle does not outlive it (§10). A local owner's
+// field arena still pins its handles to the frame (the reject cases above).
+func TestCheckAcceptsFieldArenaHandleReturn(t *testing.T) {
+	source := `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+fn (self: &var Registry) add_direct(name: []u8) -> std::arena::Handle<User> {
+    return self.users.add(User { name: name });
+}
+fn (self: &var Registry) add_bound(name: []u8) -> std::arena::Handle<User> {
+    let handle = self.users.add(User { name: name });
+    return handle;
+}
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    var registry = Registry { users: std::arena::new<User>(allocator) };
+    let alice = registry.add_direct("alice");
+    let bob = registry.add_bound("bob");
+    print(registry.users.at(alice).name);
+    print(registry.users.at(bob).name);
+    registry.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // TestCheckAcceptsArenaParamHandle keeps the provenance rule lenient where
