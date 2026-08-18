@@ -41,6 +41,7 @@ go test ./...
 | last-use borrow | `last_use_borrow.kizu` | local borrow ends at its final use |
 | borrow call then owner move | `borrow_call_then_move.kizu` | a call-scoped borrow does not block a later owner move |
 | one-level field borrow | `field_borrow.kizu` | updates a disjoint field while a field is borrowed |
+| nested field path borrow and receiver | `nested_field_path.kizu` | borrows and mutates through `s.current.budget` |
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&var` updates through checked field access |
@@ -127,7 +128,8 @@ single source file. Run them with `kizu check <package-root>`.
 | loop body use does not end an outer borrow | `negative/borrow_loop_last_use.kizu` | `cannot be moved while borrowed` |
 | field borrow blocks same-field assignment | `negative/field_borrow_same_field_assignment.kizu` | `cannot be assigned while borrowed` |
 | field borrow blocks owner move | `negative/field_borrow_owner_move.kizu` | `cannot be moved while borrowed` |
-| rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
+| nested field borrow blocks overlapping-path assignment | `negative/nested_field_borrow_overlap.kizu` | `cannot be assigned while borrowed` |
+| rejects nested field cleanup | `negative/nested_field_cleanup.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields cannot be stored | `negative/borrow_field.kizu` | `cannot store borrow` |
 | borrowed parameters cannot be stored in owned locals | `negative/borrow_local_alias.kizu` | `borrowed value` |

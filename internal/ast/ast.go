@@ -1113,6 +1113,29 @@ func (e *FieldExpr) String() string {
 	return e.Receiver.String() + "." + e.Name
 }
 
+// FieldPathRoot walks a runtime field chain to its root identifier and returns
+// the dotted field path relative to it ("a.b" for `owner.a.b`). ok is false
+// when any hop is a namespace lookup or the chain does not bottom out in a
+// plain identifier.
+func FieldPathRoot(expr Expression) (*IdentExpr, string, bool) {
+	field, ok := expr.(*FieldExpr)
+	if !ok || field.Namespace {
+		return nil, "", false
+	}
+	switch receiver := field.Receiver.(type) {
+	case *IdentExpr:
+		return receiver, field.Name, true
+	case *FieldExpr:
+		root, path, ok := FieldPathRoot(receiver)
+		if !ok {
+			return nil, "", false
+		}
+		return root, path + "." + field.Name, true
+	default:
+		return nil, "", false
+	}
+}
+
 // DerefExpr represents explicit postfix dereference with Zig-style .*
 type DerefExpr struct {
 	Receiver     Expression

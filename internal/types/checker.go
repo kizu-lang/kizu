@@ -2078,17 +2078,14 @@ func (c *Checker) checkBoxBorrowInitializer(
 	return Type(elem), field.Name == "borrow_mut", true, nil
 }
 
-// boxBorrowMutReceiverIsMutable accepts a mutable local Box or direct field owner.
+// boxBorrowMutReceiverIsMutable accepts a mutable local Box or a Box reached
+// through a field path on a mutable owner.
 func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
-	switch receiver := expr.(type) {
-	case *ast.IdentExpr:
+	if receiver, ok := expr.(*ast.IdentExpr); ok {
 		return env.isMutable(receiver.Name)
-	case *ast.FieldExpr:
-		ident, ok := receiver.Receiver.(*ast.IdentExpr)
-		return ok && env.isMutable(ident.Name)
-	default:
-		return false
 	}
+	root, _, ok := ast.FieldPathRoot(expr)
+	return ok && env.isMutable(root.Name)
 }
 
 // checkStringViewInitializer recognizes string.as_bytes() / as_mut_bytes()
@@ -5714,17 +5711,28 @@ func (c *Checker) checkMethodCallExpr(
 	return c.checkArenaOrImplMethod(field, receiver, args, env, unsafe)
 }
 
-// checkMethodReceiverPath enforces the direct field receiver boundary.
+// checkMethodReceiverPath enforces the field receiver boundary: any field path
+// rooted in a local binding may receive a method, but destructive cleanup stays
+// on one direct field so every type cleans its own fields.
 func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) error {
 	receiver, ok := field.Receiver.(*ast.FieldExpr)
-	if !ok {
+	if !ok || receiver.Namespace {
 		return nil
 	}
-	if _, ok := receiver.Receiver.(*ast.IdentExpr); !ok {
+	if _, _, ok := ast.FieldPathRoot(receiver); !ok {
 		return errorAt(receiver.Span,
-			"type error: field method receiver only supports one direct field")
+			"type error: field method receiver must be a field path on a local binding")
 	}
-	if !typ.CleanupMethod(field.Name) || c.allowsDirectFieldCleanup(receiver, env) {
+	if !typ.CleanupMethod(field.Name) {
+		return nil
+	}
+	if _, direct := receiver.Receiver.(*ast.IdentExpr); !direct {
+		return errorf(
+			"type error: field cleanup `%s.%s` is only allowed on one direct field",
+			receiver.String(), field.Name,
+		)
+	}
+	if c.allowsDirectFieldCleanup(receiver, env) {
 		return nil
 	}
 	return errorf(
@@ -6055,32 +6063,21 @@ func (c *Checker) checkMapReceiverMethod(
 
 // mutableReceiverPlace reports whether a method receiver expression names a
 // place a mutable borrow may come from: a `var` binding, a `&var` borrow, or
-// one direct field of either.
+// a field path rooted in either.
 func mutableReceiverPlace(receiver ast.Expression, env *scope) bool {
-	switch expr := receiver.(type) {
-	case *ast.IdentExpr:
-		return env.isMutable(expr.Name) || env.isMutBorrowed(expr.Name)
-	case *ast.FieldExpr:
-		owner, ok := expr.Receiver.(*ast.IdentExpr)
-		return ok && (env.isMutable(owner.Name) || env.isMutBorrowed(owner.Name))
-	default:
-		return false
-	}
+	base, ok := mutablePlaceBase(receiver)
+	return ok && (env.isMutable(base.Name) || env.isMutBorrowed(base.Name))
 }
 
 // captureReceiverShape reports whether a capture-condition receiver names a
-// borrowable place: a local binding, or one direct field of one — the same
+// borrowable place: a local binding, or a field path rooted in one — the same
 // shape field method receivers support.
 func captureReceiverShape(receiver ast.Expression) bool {
-	switch expr := receiver.(type) {
-	case *ast.IdentExpr:
+	if _, ok := receiver.(*ast.IdentExpr); ok {
 		return true
-	case *ast.FieldExpr:
-		_, ok := expr.Receiver.(*ast.IdentExpr)
-		return ok
-	default:
-		return false
 	}
+	_, _, ok := ast.FieldPathRoot(receiver)
+	return ok
 }
 
 // checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
@@ -6543,19 +6540,15 @@ func requireMutableSelfReceiver(method *functionType, receiver ast.Expression, e
 }
 
 // mutablePlaceBase resolves the binding whose storage a mutable place hands
-// over: the name itself, or the owner of a one-level field path. This is the
-// one shape rule for every `&var` position -- method receivers and call
-// arguments read the same answer.
+// over: the name itself, or the root of a field path. This is the one shape
+// rule for every `&var` position -- method receivers and call arguments read
+// the same answer.
 func mutablePlaceBase(expr ast.Expression) (*ast.IdentExpr, bool) {
-	switch place := expr.(type) {
-	case *ast.IdentExpr:
+	if place, ok := expr.(*ast.IdentExpr); ok {
 		return place, true
-	case *ast.FieldExpr:
-		ident, ok := place.Receiver.(*ast.IdentExpr)
-		return ident, ok && !place.Namespace
-	default:
-		return nil, false
 	}
+	root, _, ok := ast.FieldPathRoot(expr)
+	return root, ok
 }
 
 // checkCallableArgs validates the arguments a call passes, starting at the
@@ -6673,21 +6666,17 @@ func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 	return prefix, true
 }
 
-// checkBorrowTargetShape restricts explicit borrows to direct locals or one field.
+// checkBorrowTargetShape restricts explicit borrows to direct locals or a
+// field path rooted in one.
 func checkBorrowTargetShape(expr ast.Expression) error {
-	switch target := expr.(type) {
-	case *ast.IdentExpr:
+	if _, ok := expr.(*ast.IdentExpr); ok {
 		return nil
-	case *ast.FieldExpr:
-		if _, ok := target.Receiver.(*ast.IdentExpr); ok {
-			return nil
-		}
-		return errorAt(target.Span,
-			"type error: field borrow only supports one direct field")
-	default:
-		return errorAt(expressionSpan(expr),
-			"type error: borrow target must be a local binding or direct field")
 	}
+	if _, _, ok := ast.FieldPathRoot(expr); ok {
+		return nil
+	}
+	return errorAt(expressionSpan(expr),
+		"type error: borrow target must be a local binding or field path")
 }
 
 // checkArenaAdd validates std::arena::Arena<T>.add(value).

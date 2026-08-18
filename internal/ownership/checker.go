@@ -1561,36 +1561,32 @@ func (c *Checker) borrowArgTargets(
 }
 
 // captureReceiverPlace resolves the borrowable place a capture-condition
-// receiver names: a live local binding, or one direct field of a live owner —
+// receiver names: a live local binding, or a field path on a live owner —
 // the same shape field method receivers support.
 func (c *Checker) captureReceiverPlace(
 	receiver ast.Expression,
 	env *scope,
 ) (string, string, string, bool) {
-	switch expr := receiver.(type) {
-	case *ast.IdentExpr:
+	if expr, ok := receiver.(*ast.IdentExpr); ok {
 		container, exists := env.lookup(expr.Name)
 		if !exists || container.moved {
 			return "", "", "", false
 		}
 		return expr.Name, "", container.typeName, true
-	case *ast.FieldExpr:
-		owner, ok := expr.Receiver.(*ast.IdentExpr)
-		if !ok {
-			return "", "", "", false
-		}
-		value, exists := env.lookup(owner.Name)
-		if !exists || value.moved {
-			return "", "", "", false
-		}
-		fieldType, ok := c.structs[value.typeName][expr.Name]
-		if !ok {
-			return "", "", "", false
-		}
-		return owner.Name, expr.Name, fieldType, true
-	default:
+	}
+	owner, path, ok := ast.FieldPathRoot(receiver)
+	if !ok {
 		return "", "", "", false
 	}
+	value, exists := env.lookup(owner.Name)
+	if !exists || value.moved {
+		return "", "", "", false
+	}
+	fieldType, ok := c.fieldPathType(value.typeName, path)
+	if !ok {
+		return "", "", "", false
+	}
+	return owner.Name, path, fieldType, true
 }
 
 // tieContainerBorrowCapture builds the capture binding for a recognized
@@ -1754,10 +1750,10 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 		}
 		return value, "", nil
 	case *ast.FieldExpr:
-		ident, ok := target.Receiver.(*ast.IdentExpr)
+		ident, path, ok := ast.FieldPathRoot(target)
 		if !ok {
 			return nil, "", errorAt(target.Span,
-				"borrow error: field borrow only supports one direct field")
+				"borrow error: borrow target must be a local binding or field path")
 		}
 		value, ok := env.lookup(ident.Name)
 		if !ok {
@@ -1771,14 +1767,14 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 			return nil, "", errorAt(ident.Span,
 				"borrow error: moved value `%s` was borrowed", ident.Name)
 		}
-		if value.fieldDeinit[target.Name] {
+		if deinit, ok := overlappingFieldDeinit(value.fieldDeinit, path); ok {
 			return nil, "", errorAt(target.Span,
 				"move error: field `%s.%s` was deinitialized",
-				ident.Name, target.Name)
+				ident.Name, deinit)
 		}
-		return value, target.Name, nil
+		return value, path, nil
 	default:
-		return nil, "", errorf("borrow error: borrow target must be a local binding or direct field")
+		return nil, "", errorf("borrow error: borrow target must be a local binding or field path")
 	}
 }
 
@@ -3292,8 +3288,7 @@ func (c *Checker) borrowClassViewRoot(expr ast.Expression, env *scope) *binding 
 		}
 		return root
 	}
-	fields := c.structs[root.typeName]
-	if fields == nil || fields[field] != "[]u8" {
+	if fieldType, ok := c.fieldPathType(root.typeName, field); !ok || fieldType != "[]u8" {
 		return nil
 	}
 	return root
@@ -4572,7 +4567,8 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 		return errorf("borrow error: field `%s.%s` cannot be assigned while value is borrowed",
 			root.name, field)
 	}
-	if root.fieldBorrows[field] > 0 || root.fieldMutBorrows[field] > 0 {
+	if overlappingFieldCount(root.fieldBorrows, field) > 0 ||
+		overlappingFieldCount(root.fieldMutBorrows, field) > 0 {
 		return errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
 			root.name, field)
 	}
@@ -4872,11 +4868,21 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	if err != nil {
 		return "", true, err
 	}
-	if typ.CleanupMethod(field.Name) && !c.allowsDirectFieldCleanup(receiver) {
-		return "", true, errorf(
-			"move error: field cleanup `%s.%s` is only allowed inside owner deinit",
-			receiver.path, field.Name,
-		)
+	if typ.CleanupMethod(field.Name) {
+		// Destructive cleanup stays on one direct field: a nested path would
+		// bypass the intermediate type's own deinit (ADR-0067).
+		if strings.Contains(receiver.field, ".") {
+			return "", true, errorf(
+				"move error: field cleanup `%s.%s` is only allowed on one direct field",
+				receiver.path, field.Name,
+			)
+		}
+		if !c.allowsDirectFieldCleanup(receiver) {
+			return "", true, errorf(
+				"move error: field cleanup `%s.%s` is only allowed inside owner deinit",
+				receiver.path, field.Name,
+			)
+		}
 	}
 	value := c.bindingForDirectFieldReceiver(receiver)
 	result, err := c.checkDirectFieldReceiverByType(value, field.Name, args, env)
@@ -4889,15 +4895,16 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	return result, true, nil
 }
 
-// directFieldReceiver resolves the one-level field path used as a method receiver.
+// directFieldReceiver resolves the field path used as a method receiver: the
+// root binding and the dotted path of the field the method runs on.
 func (c *Checker) directFieldReceiver(
 	field *ast.FieldExpr,
 	env *scope,
 ) (*directFieldReceiver, error) {
-	ownerIdent, ok := field.Receiver.(*ast.IdentExpr)
+	ownerIdent, fieldPath, ok := ast.FieldPathRoot(field)
 	if !ok {
 		return nil, errorAt(field.Span,
-			"move error: field method receiver only supports one direct field")
+			"move error: field method receiver must be a field path on a local binding")
 	}
 	owner, exists := env.lookup(ownerIdent.Name)
 	if !exists {
@@ -4916,21 +4923,23 @@ func (c *Checker) directFieldReceiver(
 		return nil, err
 	}
 	return &directFieldReceiver{
-		owner: owner, field: field.Name, typeName: typeName,
-		path: ownerIdent.Name + "." + field.Name,
+		owner: owner, field: fieldPath, typeName: typeName,
+		path: ownerIdent.Name + "." + fieldPath,
 	}, nil
 }
 
-// bindingForDirectFieldReceiver projects owner borrow state onto one owned field.
+// bindingForDirectFieldReceiver projects owner borrow state onto one owned
+// field path. Whole-value borrows and borrows of any aliasing path count;
+// borrows of disjoint sibling fields do not.
 func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *binding {
 	value := &binding{
 		name: receiver.path, typeName: receiver.typeName,
 		// A field of a mutable place is itself a mutable place.
 		mutable: mutablePlace(receiver.owner),
 		activeBorrows: receiver.owner.activeBorrows +
-			receiver.owner.fieldBorrows[receiver.field],
+			overlappingFieldCount(receiver.owner.fieldBorrows, receiver.field),
 		activeMutBorrows: receiver.owner.activeMutBorrows +
-			receiver.owner.fieldMutBorrows[receiver.field],
+			overlappingFieldCount(receiver.owner.fieldMutBorrows, receiver.field),
 		fieldOwner:     receiver.owner,
 		fieldOwnerName: receiver.field,
 	}
@@ -6127,6 +6136,9 @@ func checkBorrowConflict(value *binding, mutable bool) error {
 }
 
 // checkBorrowConflictForField rejects overlapping whole-value or field borrows.
+// Field paths conflict when they alias: one path names the other or a struct
+// containing it, so `a.b` collides with `a.b.c` while `a.b` and `a.c` stay
+// disjoint.
 func checkBorrowConflictForField(value *binding, field string, mutable bool) error {
 	if field != "" {
 		if value.activeMutBorrows > 0 {
@@ -6142,14 +6154,14 @@ func checkBorrowConflictForField(value *binding, field string, mutable bool) err
 				field,
 			)
 		}
-		if mutable && value.fieldBorrows[field] > 0 {
+		if mutable && overlappingFieldCount(value.fieldBorrows, field) > 0 {
 			return errorf(
 				"borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
 				value.name,
 				field,
 			)
 		}
-		if value.fieldMutBorrows[field] > 0 {
+		if overlappingFieldCount(value.fieldMutBorrows, field) > 0 {
 			return errorf(
 				"borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
 				value.name,
@@ -6849,22 +6861,72 @@ func (b *binding) clearFieldDeinit(field string) {
 	delete(b.fieldDeinit, field)
 }
 
-// directFieldRoot returns a direct local field assignment or read target.
+// directFieldRoot returns a local field-path assignment or read target: the
+// root binding and the dotted field path relative to it.
 func directFieldRoot(expr ast.Expression, env *scope) (*binding, string, bool) {
-	switch target := expr.(type) {
-	case *ast.IdentExpr:
-		value, ok := env.lookup(target.Name)
-		return value, "", ok
-	case *ast.FieldExpr:
-		ident, ok := target.Receiver.(*ast.IdentExpr)
-		if !ok {
-			return nil, "", false
-		}
-		value, exists := env.lookup(ident.Name)
-		return value, target.Name, exists
-	default:
+	if target, ok := expr.(*ast.IdentExpr); ok {
+		value, exists := env.lookup(target.Name)
+		return value, "", exists
+	}
+	ident, path, ok := ast.FieldPathRoot(expr)
+	if !ok {
 		return nil, "", false
 	}
+	value, exists := env.lookup(ident.Name)
+	return value, path, exists
+}
+
+// fieldPathsOverlap reports whether two dotted field paths alias the same
+// storage: equal paths, or one naming a struct that contains the other
+// ("a.b" overlaps "a.b.c"; "a.b" does not overlap "a.bc").
+func fieldPathsOverlap(a, b string) bool {
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if !strings.HasPrefix(b, a) {
+		return false
+	}
+	return len(a) == len(b) || b[len(a)] == '.'
+}
+
+// overlappingFieldCount sums the borrow counts of every tracked field path
+// that aliases path.
+func overlappingFieldCount(counts map[string]int, path string) int {
+	total := 0
+	for key, count := range counts {
+		if fieldPathsOverlap(key, path) {
+			total += count
+		}
+	}
+	return total
+}
+
+// overlappingFieldDeinit returns a deinitialized field path that aliases path.
+func overlappingFieldDeinit(deinit map[string]bool, path string) (string, bool) {
+	for key, done := range deinit {
+		if done && fieldPathsOverlap(key, path) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// fieldPathType resolves a dotted field path against struct declarations,
+// hop by hop, starting from the root's type.
+func (c *Checker) fieldPathType(typeName string, path string) (string, bool) {
+	current := typeName
+	for _, segment := range strings.Split(path, ".") {
+		fields := c.structs[current]
+		if fields == nil {
+			return "", false
+		}
+		next, ok := fields[segment]
+		if !ok {
+			return "", false
+		}
+		current = next
+	}
+	return current, true
 }
 
 // blockLastUses returns the last statement index where each identifier appears.

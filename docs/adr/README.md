@@ -84,7 +84,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0064: comma list delimiters](0064-comma-list-delimiters.md)
 - [ADR-0065: contextual integer literals](0065-contextual-integer-literals.md)
 - [ADR-0066: minimal explicit static arguments for function generics](0066-minimal-explicit-generics.md)
-- [ADR-0067: direct field method receivers](0067-direct-field-method-receivers.md)
+- [ADR-0067: direct field method receivers](0067-direct-field-method-receivers.md) (receiver / borrow の 1 段上限は 0111 が N 段に拡張。cleanup 1 段の境界は維持)
 - [ADR-0068: safe borrow field access](0068-safe-borrow-field-access.md)
 - [ADR-0069: raw pointer dereference syntax](0069-raw-pointer-dereference-syntax.md)
 - [ADR-0070: package export surface](0070-package-export-surface.md)
@@ -124,3 +124,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0108: copy 判定を struct / union の構造から導出する](0108-structural-copy-propagation.md)
 - [ADR-0109: `std::arena::Handle<T>` を copy 型にする](0109-arena-handle-copy.md)
 - [ADR-0110: match の最後の arm の comma を省略可にする](0110-match-arm-optional-last-comma.md) (0107 の terminal comma 必須を覆す)
+- [ADR-0111: field path の borrow / method receiver を N 段に広げる](0111-nested-field-paths.md) (0067 の 1 段上限を拡張、cleanup 境界は維持)

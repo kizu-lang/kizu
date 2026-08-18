@@ -165,3 +165,37 @@ test "a mutating method reaches a non-copy field" {
     try recorder.note(9);
     testing::expect_equal<i64>(9, recorder.journal.last());
 }
+
+pub struct Studio {
+    pub recorder: Recorder,
+}
+
+fn (self: Studio) deinit() -> void {
+    self.recorder.deinit();
+}
+
+fn sum_entries(entries: &array::Array<i64>) -> i64 {
+    var total = 0;
+    var index = 0;
+    while index < entries.len() {
+        total = total + entries.get_or_panic(index);
+        index = index + 1;
+    }
+    return total;
+}
+
+// A method receiver reaches through a nested field path -- two hops to a
+// `&var` method, three hops into the field's own storage API -- and a borrow
+// argument lends the same nested path. Every mutation lands in the root
+// owner's storage.
+test "nested field paths reach methods and borrows" {
+    let allocator = mem::page_allocator();
+    var studio = Studio {
+        recorder: Recorder { journal: Journal { entries: array::new<i64>(allocator) } },
+    };
+    defer studio.deinit();
+    try studio.recorder.journal.push(4);
+    try studio.recorder.journal.entries.append(6);
+    testing::expect_equal<i64>(6, studio.recorder.journal.last());
+    testing::expect_equal<i64>(10, sum_entries(studio.recorder.journal.entries));
+}

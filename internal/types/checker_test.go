@@ -1070,8 +1070,28 @@ fn main() -> void {
 	}
 }
 
+// TestCheckMutableSelfNestedFieldReceiver accepts `&var self` methods on a
+// nested field path rooted in a mutable place.
+func TestCheckMutableSelfNestedFieldReceiver(t *testing.T) {
+	source := `struct Counter { count: i64 }
+fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
+struct Inner { counter: Counter }
+struct Outer { inner: Inner }
+fn (self: &var Outer) go() -> void {
+    self.inner.counter.bump();
+}
+fn main() -> void {
+    var o = Outer { inner: Inner { counter: Counter { count: 0 } } };
+    o.inner.counter.bump();
+    o.go();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsMutableSelfFieldReceiverShapes keeps `&var self` receivers
-// on mutable places: one direct field, mutable owner, nothing deeper.
+// on mutable places: a field path whose root is mutable, nothing else.
 func TestCheckRejectsMutableSelfFieldReceiverShapes(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1100,15 +1120,16 @@ fn (self: &Holder) go() -> void {
 			want: "receiver `self` must be mutable",
 		},
 		{
-			name: "nested field path",
+			name: "nested field path on immutable owner",
 			source: `struct Counter { count: i64 }
 fn (self: &var Counter) bump() -> void { self.count = self.count + 1; }
 struct Inner { counter: Counter }
 struct Outer { inner: Inner }
-fn (self: &var Outer) go() -> void {
-    self.inner.counter.bump();
+fn main() -> void {
+    let o = Outer { inner: Inner { counter: Counter { count: 0 } } };
+    o.inner.counter.bump();
 }`,
-			want: "field method receiver only supports one direct field",
+			want: "receiver `o` must be mutable",
 		},
 	}
 	runErrorCases(t, cases)
