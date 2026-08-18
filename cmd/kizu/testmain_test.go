@@ -6,9 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"testing"
+
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdlib/stdlibtest"
-	"testing"
 )
 
 // kizuBinaryPath is the shared CLI binary built once for all command smokes.
