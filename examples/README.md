@@ -167,6 +167,8 @@ single source file. Run them with `kizu check <package-root>`.
 | fields of immutable owners are not mutable places | `negative/std_array_field_at_mut_immutable.kizu` | `requires mutable array binding` |
 | a field capture borrows the owner's field | `negative/std_array_field_read_while_mut_borrowed.kizu` | `cannot be read while mutably borrowed` |
 | owners cannot move while a field is borrowed | `negative/owner_move_while_field_borrowed.kizu` | `cannot be moved while borrowed` |
+| arguments cannot mutate a `&var self` receiver | `negative/method_arg_mutates_receiver.kizu` | `mutates its receiver while it is borrowed` |
+| borrow arguments cannot overlap a `&var self` receiver | `negative/method_arg_borrows_receiver_field.kizu` | `cannot be mutably borrowed while field is borrowed` |
 | returned borrows must root in a borrowed parameter | `negative/borrow_accessor_local_escape.kizu` | `must borrow a borrowed parameter` |
 | borrow-optional call results are capture-only | `negative/borrow_accessor_store.kizu` | `must be consumed by a capture` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |

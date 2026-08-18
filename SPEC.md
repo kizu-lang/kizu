@@ -1267,6 +1267,9 @@ borrow のルール:
 * `&T` と `&var T` は重複できない
 * `&var T` 同士は同じ値に対して重複できない
 * `&var T` argument は mutable local binding に限定する
+* method call の `&var` receiver は two-phase: 引数の評価中は共有借用として
+  予約し、引数がすべて確定した時点で排他化する。引数は receiver を読めるが、
+  receiver を borrow / move する引数は拒否する(ADR-0106)
 * `&user.name` のような one-level direct field borrow を許可する
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
