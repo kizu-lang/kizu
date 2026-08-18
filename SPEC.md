@@ -1370,7 +1370,11 @@ move 文脈では escape として拒否します。source が関数 parameter �
 struct 捕捉は上記の view-capture 規則が担います。
 
 safe borrow binding は通常の field access 構文で field を読めます。
-`&var T` binding は通常の field assignment 構文で field を更新できます。
+`&var T` binding は通常の field assignment 構文で field を更新でき、
+binding そのものへの assignment は borrow の指す caller の storage へ
+store します。`n = v` と `n.* = v` は同じ場所への store です。ただし
+T が deinit 義務を持つ型の場合、caller の生きた所有値を黙って落とす
+ことになるため拒否します(所有者だけが値を消費できます)。
 
 可変性は型でなく borrow が運びます(ADR-0096)。view 型は `[]u8` の 1 つ
 だけで、`&var []u8` として view を持つときだけ要素書き込み `buf[i] = x` が
@@ -1446,6 +1450,9 @@ assignment のルール:
 * `let` binding への再代入は禁止
 * `let` binding の field assignment は禁止
 * `var` binding の field assignment は許可
+* `&T` binding への assignment は禁止
+* `&var T` binding への assignment は許可(caller の storage へ store。
+  T が deinit 義務を持つ型は拒否)
 * `&T` 経由の dereference assignment は禁止
 * `&var T` 経由の dereference assignment は許可
 * `&T` 経由の field assignment は禁止

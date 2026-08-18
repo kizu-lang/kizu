@@ -107,6 +107,12 @@ func (b *binding) allocTied() bool {
 	return !b.borrowedParam && len(b.borrowTargets) > 0
 }
 
+// isMutBorrowParam reports whether the binding is itself a `&var` parameter:
+// the caller's storage, which assigning the binding stores into.
+func (b *binding) isMutBorrowParam() bool {
+	return b.borrowedParam && !b.localBorrow && b.mutBorrow
+}
+
 // borrowSource is one owner a local borrow keeps active: the borrowed binding
 // and, for a field borrow, the borrowed field name. A multi-source `borrows`
 // result holds one entry per declared source.
@@ -1804,8 +1810,11 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 			return errorf("borrow error: value `%s` cannot be assigned while borrowed",
 				target.name)
 		}
-		// Overwriting a live owner silently drops it (ADR-0091).
-		if c.bindingNeedsConsume(target) {
+		// Overwriting a live owner silently drops it (ADR-0091). A `&var`
+		// parameter always points at a live value the caller still owns, so
+		// the same rule stops overwriting an owned type through it.
+		if c.bindingNeedsConsume(target) ||
+			(target.isMutBorrowParam() && c.valueTypeNeedsConsume(target.typeName)) {
 			return errorAt(expressionSpan(stmt.Value),
 				"move error: owned value `%s` is overwritten before cleanup", target.name)
 		}
@@ -4610,6 +4619,19 @@ func assignmentRoot(expr ast.Expression, env *scope) (*binding, bool) {
 
 // directAssignmentRoot returns a binding only for whole-binding assignment.
 func directAssignmentRoot(expr ast.Expression, env *scope) (*binding, bool) {
+	// `n.*` through a `&var` parameter names the same storage `n` does, so
+	// both spellings take the direct-assignment path and its rules.
+	if deref, ok := expr.(*ast.DerefExpr); ok {
+		ident, ok := deref.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return nil, false
+		}
+		value, found := env.lookup(ident.Name)
+		if !found || !value.isMutBorrowParam() {
+			return nil, false
+		}
+		return value, true
+	}
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return nil, false
