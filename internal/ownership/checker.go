@@ -5672,22 +5672,22 @@ func (c *Checker) checkImplMethodCall(
 		return "", true, errorf("move error: method `%s` must have self parameter",
 			method.name)
 	}
-	if method.params[0].mutBorrow {
-		if value.hasAnyBorrow() {
-			return "", true, errorf(
-				"borrow error: method `%s` mutates its receiver while it is borrowed", method.name)
-		}
-		// The receiver is mutably lent for the call, so an argument that reads
-		// or borrows the same binding hits the usual exclusivity checks.
-		value.activeMutBorrows++
-		defer func() { value.activeMutBorrows-- }()
+	if method.params[0].mutBorrow && value.hasAnyBorrow() {
+		return "", true, errorf(
+			"borrow error: method `%s` mutates its receiver while it is borrowed", method.name)
 	}
 	if len(args) != len(method.params)-1 {
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))
 	}
-	if err := c.checkImplMethodArgs(method, args, env); err != nil {
+	if err := c.checkImplMethodArgs(method, value, args, env); err != nil {
 		return "", true, err
+	}
+	if method.params[0].mutBorrow {
+		// The exclusive receiver borrow is active from here through the call,
+		// so the deinit path below sees the receiver as borrowed.
+		value.activeMutBorrows++
+		defer func() { value.activeMutBorrows-- }()
 	}
 	if name == "deinit" && returnTypeName(method) == "void" {
 		if value.hasAnyBorrow() {
@@ -5700,25 +5700,41 @@ func (c *Checker) checkImplMethodCall(
 }
 
 // checkImplMethodArgs applies ownership effects for explicit method arguments.
+//
+// A `&var` receiver is two-phase: while the arguments are evaluated it is only
+// reserved — a shared borrow, so arguments can read the receiver — and the
+// exclusive borrow activates once every argument has settled.
 func (c *Checker) checkImplMethodArgs(
 	method *functionInfo,
+	receiver *binding,
 	args []ast.Expression,
 	env *scope,
 ) error {
 	call := &functionInfo{
 		name: method.name, sig: method.sig, params: method.params[1:], body: method.body,
 	}
-	borrowed, err := c.activateBorrowArgs(call, args, env)
-	if err != nil {
-		return err
+	receiverMut := method.params[0].mutBorrow
+	if receiverMut {
+		receiver.activeBorrows++
 	}
-	defer releaseTemporaryBorrows(borrowed)
-	for idx, arg := range args {
-		if err := c.checkImplMethodArg(method, idx+1, arg, env); err != nil {
-			return err
+	borrowed, err := c.activateBorrowArgs(call, args, env)
+	if err == nil {
+		for idx, arg := range args {
+			if err = c.checkImplMethodArg(method, idx+1, arg, env); err != nil {
+				break
+			}
 		}
 	}
-	return nil
+	if receiverMut {
+		receiver.activeBorrows--
+		if err == nil {
+			// Activation: argument borrows still live at the call must not
+			// overlap the receiver's exclusive borrow.
+			err = checkBorrowConflict(receiver, true)
+		}
+	}
+	releaseTemporaryBorrows(borrowed)
+	return err
 }
 
 // checkImplMethodArg mirrors user-call argument ownership for one method parameter.

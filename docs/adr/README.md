@@ -119,3 +119,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0103: `array::at` / `at_mut` は borrow optional `?&T` を返す](0103-array-at-borrow-optional.md)
 - [ADR-0104: `Map.at` / `at_mut` は borrow optional `?&V` を返す](0104-map-at-borrow-optional.md)
 - [ADR-0105: `Arena.at` が borrow read accessor(`get` は copy の綴り)](0105-arena-at-read-accessor.md)
+- [ADR-0106: `&var` receiver の two-phase borrow](0106-two-phase-receiver-borrow.md)

@@ -642,6 +642,83 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsTwoPhaseReceiverBorrow checks a `&var self` call can read
+// its own receiver in argument position: the exclusive borrow activates after
+// the arguments settle.
+func TestCheckAcceptsTwoPhaseReceiverBorrow(t *testing.T) {
+	source := `struct Registry { cursor: i64 }
+fn (self: &Registry) peek() -> i64 {
+    return self.cursor + 1;
+}
+fn (self: &var Registry) select(index: i64) -> void {
+    self.cursor = index;
+}
+fn (self: &var Registry) advance() -> void {
+    self.select(self.cursor);
+    self.select(self.peek());
+}
+fn main() {
+    var reg = Registry { cursor: 1 };
+    reg.advance();
+    reg.select(reg.cursor + 1);
+    print(reg.cursor);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsTwoPhaseReceiverBorrowConflicts keeps arguments that borrow
+// the receiver themselves out of a `&var self` call.
+func TestCheckRejectsTwoPhaseReceiverBorrowConflicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "mutating method in argument position",
+			source: `struct Registry { cursor: i64 }
+fn (self: &var Registry) next() -> i64 {
+    self.cursor = self.cursor + 1;
+    return self.cursor;
+}
+fn (self: &var Registry) select(index: i64) -> void {
+    self.cursor = index;
+}
+fn (self: &var Registry) advance() -> void {
+    self.select(self.next());
+}`,
+			want: "method `Registry.next` mutates its receiver while it is borrowed",
+		},
+		{
+			name: "receiver field borrow argument",
+			source: `struct Registry { cursor: i64 }
+fn (self: &var Registry) inspect(peek: &i64) -> void {
+    self.cursor = peek.*;
+}
+fn main() {
+    var reg = Registry { cursor: 1 };
+    reg.inspect(&reg.cursor);
+}`,
+			want: "value `reg` cannot be mutably borrowed while field is borrowed",
+		},
+		{
+			name: "receiver mutable field borrow argument",
+			source: `struct Registry { cursor: i64 }
+fn (self: &var Registry) inspect(peek: &var i64) -> void {
+    self.cursor = peek.*;
+}
+fn main() {
+    var reg = Registry { cursor: 1 };
+    reg.inspect(&var reg.cursor);
+}`,
+			want: "field `reg.cursor` cannot be mutably borrowed while value is borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsBorrowedFieldMove checks field access cannot bypass borrow rules.
 func TestCheckRejectsBorrowedFieldMove(t *testing.T) {
 	source := `struct User { name: []u8 }
