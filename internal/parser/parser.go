@@ -1084,10 +1084,14 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 		return arm, false
 	}
 	p.nextToken()
-	// A statement-position arm body is an expression or a `return` statement
+	// An arm body is an expression, a `return` statement, or a block
 	// (SPEC §6.12); the arm's comma terminates it in place of `;`.
 	if p.cur.Type == token.Return {
 		arm.Body = p.parseMatchArmReturn()
+		return arm, true
+	}
+	if p.cur.Type == token.LBrace {
+		arm.Body = p.parseBlockStmt()
 		return arm, true
 	}
 	arm.Body = p.parseStatement()

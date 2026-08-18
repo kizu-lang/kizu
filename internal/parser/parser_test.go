@@ -573,6 +573,33 @@ fn main() { let color = Color::Red; match color { Red => print("red"), ` +
 	}
 }
 
+// TestParseMatchArmBlock checks block arm bodies, the empty `{}` no-op
+// included (ADR-0107).
+func TestParseMatchArmBlock(t *testing.T) {
+	input := `enum Color { Red, Green }
+fn main() {
+    var count = 0;
+    match Color::Red {
+        Red => {
+            print("red");
+            count = count + 1;
+        },
+        Green => {},
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `enum Color { Red, Green }
+fn main() { var count = 0; match Color::Red { ` +
+		`Red => { print("red"); count = (count + 1); }, Green => {  } } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseMatchWildcard checks fallback arm parsing.
 func TestParseMatchWildcard(t *testing.T) {
 	input := `enum Color { Red, Green, Blue }

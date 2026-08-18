@@ -274,6 +274,9 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		return c.qualifyForStmt(module, s)
 	case *ast.MatchStmt:
 		return c.qualifyMatchStmt(module, s)
+	case *ast.BlockStmt:
+		// Only a match arm body is a bare block statement (SPEC §6.12).
+		return c.qualifyBlock(module, s)
 	case *ast.ComptimeIfStmt:
 		return c.qualifyComptimeIfStmt(module, s)
 	default:

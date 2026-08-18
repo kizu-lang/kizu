@@ -858,18 +858,55 @@ wildcard pattern `_` を fallback arm として許可します。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
 `_` arm がない場合は、すべての tag を明示しなければなりません。
 expression として使う場合は、すべての arm の value type が一致しなければなりません。
-arm value は expression なので `;` を付けません。
+arm value に `;` は付けません。arm の comma が body を終端します。
 
-statement として使う `match` の arm body は、expression または `return` 文です
-(ADR-0093)。`Tag => return,` は関数からの早期 return で、payload なし variant の
-「何もしない」を明示する書き方でもあります。expression として使う `match` の
-arm に `return` は書けません。
+`match` の arm body は、expression、`return` 文、または block です
+(ADR-0093、ADR-0107)。arm の comma が body を終端します。
+
+statement として使う `match` の arm block は文の並びで、他の block と同じく
+`let` / 代入 / `defer` / `return` / `break` / `continue` を書けます。
+空の block `Tag => {},` はその arm で何もしないことを明示する no-op です。
+
+```kizu
+match kind {
+    A => {
+        count = count + 1;
+        print(count);
+    },
+    B => {},
+}
+```
+
+expression として使う `match` の arm block は if expression の分岐 block と
+同じで、末尾を value で終えます。末尾が `;` で終わる block と空の `{}` は
+compile error です。
+
+```kizu
+let label = match color {
+    Red => {
+        let tag = "r";
+        tag
+    },
+    Green => "green",
+    Blue => "blue",
+};
+```
+
+`Tag => return,` は囲む関数からの早期 return です。match の後に実行される文が
+ない位置(関数末尾の match と、その直後の `return;` だけが続く形)では結果として
+「何もしない」と同じに見えますが、loop 内や後続の文がある位置では関数ごと抜けます。
+「何もしない」を意図する arm には `{}` を使ってください。expression として使う
+`match` の arm に `return` は書けません。
+
+owner-payload union の deinit 契約(§8)が受理する cleanup arm は
+`Kept(payload) => payload.deinit(),` の直接形のままです。block に包んだ
+cleanup は契約 error になります。
 
 ```kizu
 fn (self: Slot) deinit() -> void {
     match self {
         Kept(payload) => payload.deinit(),
-        Vacant => return,
+        Vacant => {},
     }
     return;
 }

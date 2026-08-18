@@ -231,8 +231,12 @@ func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) error
 	return nil
 }
 
-// lowerMatchArmValue lowers the expression value of a match expression arm.
+// lowerMatchArmValue lowers the value of a match expression arm: a block with
+// a trailing expression, or a bare expression.
 func (l *lowerer) lowerMatchArmValue(stmt ast.Statement) (Value, error) {
+	if block, ok := stmt.(*ast.BlockStmt); ok {
+		return l.lowerBlockBody(block, true)
+	}
 	expr, ok := statementValue(stmt)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: match expression arms must be expressions")
