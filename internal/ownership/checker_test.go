@@ -413,6 +413,7 @@ fn main() {
 		{
 			name: "moved base",
 			source: `struct Pair { left: i64, right: i64 }
+fn (self: Pair) deinit() -> void { }
 fn touch(left: &var i64) { print(left); }
 fn main() {
     var pair = Pair { left: 1, right: 2 };

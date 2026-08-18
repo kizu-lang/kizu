@@ -693,9 +693,9 @@ match a {
 payload binding の所有は、payload の型と match される値の所有で決まります
 (ADR-0090)。
 
-* scalar(bool / 整数 / float / enum / error set)の payload は copy として
+* copy 型(scalar と copy aggregate — §8)の payload は copy として
   束縛され、どの match からでもそのまま使えます。
-* 宣言された struct / union 型の payload は、owned なローカル値または
+* copy でない struct / union 型の payload は、owned なローカル値または
   呼び出し結果の temporary への match で move out として束縛されます。
   move する arm が 1 つでもあれば、match 以降そのローカル値全体は moved に
   なります。borrow への match では move out できず、payload は borrow として
@@ -1195,27 +1195,29 @@ pointer cast の memory safety obligation はプログラマが負います。
 ## 8. 所有権
 
 所有される値を代入または関数引数として渡すと move されます。
+copy 型は複製しても cleanup 義務を生まないと構造から証明できる型で、
+代入・値渡し・コレクションからの読み出しで複製され、
+元の binding は使い続けられます。
 
 copy 型:
 
 ```text
-bool
-void
-i8
-i16
-i32
-i64
-u8
-u16
-u32
-u64
-usize
-isize
-f32
-f64
+bool / void
+i8 / i16 / i32 / i64 / u8 / u16 / u32 / u64 / usize / isize
+f32 / f64
+enum / error set
+copy aggregate
 ```
 
-copy できない型:
+copy aggregate は、scalar・enum・error set・copy aggregate だけを
+field / payload に持つ struct / union です(#1597)。copy 判定は型の構造から
+導出され、注釈はありません。ただし明示 `deinit` を宣言した型は、
+その宣言が cleanup contract なので全 field が copy でも move-only に留まります。
+`[]u8` を transitively 含む struct は copy ではなく view の規則
+(§9, ADR-0100)に従います。この一覧の他に `[]u8`(§7)、
+tie のない `Allocator`(§14)、raw pointer(§12)が copy です。
+
+上のどれでもない型の値は所有され、代入と値渡しで move されます:
 
 ```text
 std::array::Array<T>
@@ -1223,7 +1225,7 @@ std::map::Map<K, V>
 std::string::String
 std::mem::Box<T>
 arena-owned value
-non-copy field を含む struct
+owner aggregate と、明示 deinit を宣言した struct / union
 ```
 
 `std::mem::Box<T>` は型として存在しますが、native lowering はまだありません。

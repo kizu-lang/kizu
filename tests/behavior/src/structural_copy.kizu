@@ -1,0 +1,80 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::testing;
+
+// Copy propagates structurally (#1597): a struct / union whose fields and
+// payloads are all copy is itself copy. Collections hand such elements out
+// by value, signatures take them by value, and the source binding survives.
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+struct Rect {
+    pub a: Point,
+    pub b: Point,
+}
+
+union Event {
+    Visit(i64),
+    Step(Point),
+    Nothing,
+}
+
+fn area(r: Rect) -> i64 {
+    return (r.b.x - r.a.x) * (r.b.y - r.a.y);
+}
+
+fn weight(e: Event) -> i64 {
+    return match e {
+        Visit(n) => n,
+        Step(p) => p.x + p.y,
+        Nothing => 0,
+    };
+}
+
+test "struct element comes out of an array by value" {
+    let allocator = mem::page_allocator();
+    var rects = array::new<Rect>(allocator);
+    defer rects.deinit();
+    try rects.append(Rect { a: Point { x: 0, y: 0 }, b: Point { x: 3, y: 4 } });
+    let r = rects.get_or_panic(0);
+    testing::expect_equal<i64>(12, area(r));
+    testing::expect_equal<i64>(12, area(r));
+}
+
+test "union element comes out of an array by value" {
+    let allocator = mem::page_allocator();
+    var events = array::new<Event>(allocator);
+    defer events.deinit();
+    try events.append(Event::Visit(2));
+    try events.append(Event::Step(Point { x: 4, y: 6 }));
+    var total = 0;
+    var i = 0;
+    while i < events.len() {
+        let e = events.get_or_panic(i);
+        total = total + weight(e);
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(12, total);
+}
+
+test "copy struct assignment leaves the source usable" {
+    let p = Point { x: 1, y: 2 };
+    let q = p;
+    testing::expect_equal<i64>(3, p.x + q.y);
+}
+
+test "map holds a copy struct value" {
+    let allocator = mem::page_allocator();
+    let table = map::new<[]u8, Point>(allocator);
+    defer table.deinit();
+    try table.insert("home", Point { x: 7, y: 9 });
+    if table.get("home") |p| {
+        testing::expect_equal<i64>(16, p.x + p.y);
+    } else {
+        testing::expect(false);
+    }
+}

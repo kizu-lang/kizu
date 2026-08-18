@@ -6367,9 +6367,65 @@ func (c *Checker) isCopyType(typeName string) bool {
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]u8":
 		return true
-	default:
+	}
+	return c.isPlainDataType(typeName, nil)
+}
+
+// isPlainDataType reports whether typeName is plain copy data: a scalar, enum,
+// error set, or a declared struct / union whose fields and payloads are all
+// plain copy data. Duplicating such a value creates no cleanup obligation, so
+// copy propagates through it structurally. Views, capabilities, and owners are
+// not plain data — aggregates holding them keep their own regimes — and a type
+// that declares an explicit deinit stays move-only because the declared
+// cleanup contract implies a consumption obligation.
+func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
+	if inner, ok := strings.CutPrefix(typeName, "?"); ok {
+		return c.isPlainDataType(inner, seen)
+	}
+	switch typeName {
+	case "bool", "void",
+		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+		"usize", "isize", "f32", "f64":
+		return true
+	}
+	if c.enums[typeName] != nil || c.errorSets[typeName] != nil {
+		return true
+	}
+	// seen holds the current recursion path only: a revisit is a recursive
+	// aggregate, which needs indirection and is never plain data.
+	if seen[typeName] {
 		return false
 	}
+	return c.isPlainDataAggregate(typeName, seen)
+}
+
+// isPlainDataAggregate walks a declared struct / union for isPlainDataType.
+// A declared deinit keeps the type move-only regardless of its fields.
+func (c *Checker) isPlainDataAggregate(typeName string, seen map[string]bool) bool {
+	fields, isStruct := c.structs[typeName]
+	variants, isUnion := c.unions[typeName]
+	if (!isStruct && !isUnion) || c.implMethod(typeName, "deinit") != nil {
+		return false
+	}
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	seen[typeName] = true
+	defer delete(seen, typeName)
+	if isStruct {
+		for _, fieldType := range fields {
+			if !c.isPlainDataType(fieldType, seen) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, payload := range variants {
+		if payload != "" && !c.isPlainDataType(payload, seen) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameOwnershipType compares exact type spellings.
