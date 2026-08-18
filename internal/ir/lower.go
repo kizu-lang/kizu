@@ -1182,8 +1182,12 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 	// mutable reference type and PassCallerStorage are the same fact
 	// (borrowIRType), which TestLowerParamAgreesWithItself pins.
 	if isMutableReferenceType(want) {
-		if slot, ok := l.slotPointer(borrowTargetExpr(expr)); ok {
+		target := borrowTargetExpr(expr)
+		if slot, ok := l.slotPointer(target); ok {
 			return slot, nil
+		}
+		if storage, ok := l.lowerFieldStorage(target); ok {
+			return storage, nil
 		}
 	}
 	if !narrowsIntegerLiteral(want) {
@@ -1543,12 +1547,28 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	return result, nil
 }
 
+// lowerMethodReceiver lowers a method call's receiver. A `&var self` method
+// on a one-level field path receives the field's own storage, projected out
+// of the owner's; every other receiver keeps the slot-or-value shape
+// lowerReceiverAddress picks. The method is resolved from the receiver's
+// declared type before anything is emitted, so choosing the projection never
+// leaves a dead read behind.
+func (l *lowerer) lowerMethodReceiver(field *ast.FieldExpr) (Value, error) {
+	if receiverType := l.assignTargetType(field.Receiver); receiverType != "" &&
+		l.methodTakesSelfStorage(receiverType, field.Name) {
+		if storage, ok := l.lowerFieldStorage(field.Receiver); ok {
+			return storage, nil
+		}
+	}
+	return l.lowerReceiverAddress(field.Receiver)
+}
+
 // lowerMethodCallExpr lowers arena method calls.
 func (l *lowerer) lowerMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 ) (Value, error) {
-	receiver, err := l.lowerReceiverAddress(field.Receiver)
+	receiver, err := l.lowerMethodReceiver(field)
 	if err != nil {
 		return Value{}, err
 	}
