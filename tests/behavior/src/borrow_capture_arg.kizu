@@ -1,0 +1,75 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub value: i64,
+}
+
+fn read_it(x: &Item) -> i64 {
+    return x.value;
+}
+
+fn bump(x: &var Item) -> void {
+    x.value = x.value + 1;
+}
+
+// A borrow capture is a reference binding, and a `&T` parameter of a
+// non-union travels as the element value: the call reads the capture the
+// same way a slot-backed borrow is read, whichever mutability the capture
+// carries.
+test "a borrow capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(41, read_it(r));
+    }
+    if xs.at_mut(0) |m| {
+        testing::expect_equal<i64>(41, read_it(m));
+    }
+}
+
+pub union Shape {
+    Dot,
+    Bar(i64),
+}
+
+fn read_shape(s: &Shape) -> i64 {
+    return match s {
+        Dot => 0,
+        Bar(n) => n,
+    };
+}
+
+// A union's `&T` parameter wants an address to match through, and a mutable
+// capture reads down to the value that address is taken of, the same way the
+// struct case does.
+test "a mutable union capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var shapes = array::new<Shape>(allocator);
+    defer shapes.deinit();
+    try shapes.append(Shape::Bar(42));
+    if shapes.at(0) |r| {
+        testing::expect_equal<i64>(42, read_shape(r));
+    }
+    if shapes.at_mut(0) |m| {
+        testing::expect_equal<i64>(42, read_shape(m));
+    }
+}
+
+// A mutable capture handed on to a `&var T` parameter keeps handing over the
+// same storage, so the callee's write lands in the element.
+test "a mutable capture forwards to a mutable borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at_mut(0) |m| {
+        bump(m);
+    }
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(42, read_it(r));
+    }
+}

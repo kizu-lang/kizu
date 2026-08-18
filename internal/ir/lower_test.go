@@ -164,6 +164,43 @@ fn main() {}`)
 	}
 }
 
+// TestLowerBorrowCaptureArgumentReadsValue hands borrow-capture bindings to
+// `&T` parameters, which travel as the element value (borrowIRType): the call
+// has to read the capture's reference, the way a slot-backed borrow is read.
+// Lower verifies its module, so ill-typed call arguments fail here.
+func TestLowerBorrowCaptureArgumentReadsValue(t *testing.T) {
+	lowerSource(t, `struct Item { value: i64 }
+fn read_it(x: &Item) -> i64 {
+    return x.value;
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    var xs = std::array::new<Item>(allocator);
+    if xs.at(0) |r| {
+        print(read_it(r));
+    }
+    if xs.at_mut(0) |m| {
+        print(read_it(m));
+    }
+    xs.deinit();
+}`)
+	lowerSource(t, `union Shape { Dot, Bar(i64) }
+fn read_shape(s: &Shape) -> i64 {
+    return match s {
+        Dot => 0,
+        Bar(n) => n,
+    };
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    var xs = std::array::new<Shape>(allocator);
+    if xs.at_mut(0) |m| {
+        print(read_shape(m));
+    }
+    xs.deinit();
+}`)
+}
+
 // TestLowerNamespaceQualifiedFunctionCall keeps std-style namespace calls from
 // being lowered as field or method access on a local `std` value.
 func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {

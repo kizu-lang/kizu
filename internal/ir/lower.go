@@ -1191,7 +1191,11 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 		}
 	}
 	if !narrowsIntegerLiteral(want) {
-		return l.lowerExpr(expr)
+		value, err := l.lowerExpr(expr)
+		if err != nil {
+			return Value{}, err
+		}
+		return l.readBorrowForContext(value, want), nil
 	}
 	switch e := expr.(type) {
 	case *ast.IntExpr:
@@ -1208,6 +1212,29 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 		}
 	}
 	return l.lowerExpr(expr)
+}
+
+// readBorrowForContext reads a borrow's value where the position wants the
+// value itself. A borrow-capture binding (`if xs.at_mut(i) |m|`) is a raw
+// reference value, and a `&T` parameter travels as a copy (borrowIRType), so
+// handing the capture to such a parameter needs the read a slot-backed borrow
+// gets in lowerIdentExpr. A union's `&T` spelling wants the copy's address
+// (PassCopyAddress); the read produces the value that address is taken of,
+// so a mutable capture degrades through the same load.
+func (l *lowerer) readBorrowForContext(value Value, want string) Value {
+	if want == "" || !isReferenceType(value.Type) || isMutableReferenceType(want) {
+		return value
+	}
+	if !isReferenceType(want) {
+		if derefType(value.Type) != want {
+			return value
+		}
+		return l.emit("ref.load", want, []Value{value}, "")
+	}
+	if !isMutableReferenceType(value.Type) || derefType(value.Type) != derefType(want) {
+		return value
+	}
+	return l.emit("ref.load", derefType(want), []Value{value}, "")
 }
 
 // lowerOptionalContextExpr lowers an expression written where a `?T` is
