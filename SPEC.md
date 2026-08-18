@@ -1509,6 +1509,10 @@ core arena の構築は明示 allocator capability を要求し、
 * `?arena::Handle<T>` は struct field に置ける(§7)。「子が無い」を
   番兵値でなく型で表し、再帰的データ構造は arena + optional handle の
   平坦な形で書く
+* handle と arena の取り違えは、両者の由来が判明している場合だけ拒否する。
+  borrow で受けた arena や field から読んだ handle は由来不明として通り、
+  契約は署名が運ぶ(ADR-0098)。由来不明の handle が範囲外を指した場合、
+  `at_mut` は null を返し、`at` は runtime error で停止する
 
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
 条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding

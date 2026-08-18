@@ -821,14 +821,6 @@ fn main() {
 			want: "handle from `left` does not belong to arena `right`",
 		},
 		{
-			name: "unknown handle parameter",
-			source: `struct User { name: []u8 }
-fn show(users: std::arena::Arena<User>, user: std::arena::Handle<User>) {
-    print(users.at(user).name);
-}`,
-			want: "arena `users` has unknown provenance",
-		},
-		{
 			name: "returned handle",
 			source: `struct User { name: []u8 }
 fn make() -> std::arena::Handle<User> {
@@ -841,6 +833,27 @@ fn make() -> std::arena::Handle<User> {
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsArenaParamHandle keeps the provenance rule lenient where
+// nothing is known: an arena that arrived as a parameter cannot name where it
+// was made, so a handle parameter is accepted and the signature carries the
+// contract (ADR-0098). Known confusions between local arenas still stop.
+func TestCheckAcceptsArenaParamHandle(t *testing.T) {
+	source := `struct User { name: []u8 }
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let users = std::arena::new<User>(allocator);
+    let alice = users.add(User { name: "alice" });
+    show(&users, alice);
+    users.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // TestCheckRejectsArenaHandleMoveErrors checks arena move diagnostics.
