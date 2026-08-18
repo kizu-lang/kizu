@@ -191,9 +191,7 @@ func (l *lowerer) lowerMatchArmBody(
 ) (matchArmResult, error) {
 	l.env = saved.clone()
 	l.block = block
-	if err := l.bindMatchPayload(subject, arm); err != nil {
-		return matchArmResult{}, err
-	}
+	unbindPayload := l.bindMatchPayload(subject, arm)
 	var value Value
 	var err error
 	if wantValue {
@@ -204,6 +202,7 @@ func (l *lowerer) lowerMatchArmBody(
 	if err != nil {
 		return matchArmResult{}, err
 	}
+	unbindPayload()
 	result := matchArmResult{block: l.block.Name, env: l.env, value: value}
 	if l.block.Terminator.Op == "" {
 		l.block.Terminator = Terminator{Op: "jump", Target: endLabel}
@@ -213,22 +212,32 @@ func (l *lowerer) lowerMatchArmBody(
 	return result, nil
 }
 
-// bindMatchPayload binds a union payload for `Tag(name)` arms.
-func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) error {
+// bindMatchPayload binds a union payload for `Tag(name)` arms and returns a
+// function that takes the binding back out of scope, the way a block does with
+// its declarations. A binding left in the arm environment reaches the merge,
+// where a later match would phi over a value its own arms never defined.
+func (l *lowerer) bindMatchPayload(subject matchSubject, arm ast.MatchArm) func() {
 	if arm.Binding == "" || arm.IsWildcard() || subject.union.Name == "" {
-		return nil
+		return func() {}
 	}
 	variant, ok := subject.union.Variants[arm.Tag]
 	if !ok || variant.Payload == "" {
-		return nil
+		return func() {}
 	}
+	previous, bound := l.env.get(arm.Binding)
 	l.env.set(arm.Binding, l.emit(
 		"union.payload",
 		variant.Payload,
 		[]Value{subject.unionValue},
 		variant.Name,
 	))
-	return nil
+	return func() {
+		if bound {
+			l.env.set(arm.Binding, previous)
+			return
+		}
+		l.env.remove(arm.Binding)
+	}
 }
 
 // lowerMatchArmValue lowers the value of a match expression arm: a block with

@@ -420,6 +420,37 @@ func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {
 	}
 }
 
+// TestLowerMatchPayloadBindingStaysArmLocal keeps a payload binding out of the
+// environment after its match, so a later match in the same function does not
+// phi over a value only some of the first match's arms defined.
+func TestLowerMatchPayloadBindingStaysArmLocal(t *testing.T) {
+	module := lowerSource(t, `union Slot {
+    Empty,
+    A(i64),
+    B(i64),
+}
+
+fn main() {
+    var w = -1;
+    let p = Slot::A(1);
+    match p {
+        A(x) => { w = x; },
+        B(x) => { w = x; },
+        Empty => { w = 0; },
+    }
+    let q = Slot::B(2);
+    match q {
+        A(x) => { w = w + x; },
+        B(x) => { w = w + x; },
+        Empty => { w = 0; },
+    }
+    print(w);
+}`)
+	if err := Verify(module); err != nil {
+		t.Fatalf("verify failed: %v", err)
+	}
+}
+
 // TestLowerSkipsGenericDeclarations keeps the non-monomorphized backend from
 // lowering unused generic wrapper bodies.
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
