@@ -93,11 +93,16 @@ func derefLLVMType(typ string) string {
 	if strings.HasPrefix(typ, "&") {
 		return strings.TrimPrefix(typ, "&")
 	}
-	if strings.HasPrefix(typ, "ptr<") && strings.HasSuffix(typ, ">") {
+	if isRawPointerType(typ) {
 		elem := typ[len("ptr<") : len(typ)-1]
 		return strings.TrimPrefix(elem, "const ")
 	}
 	return typ
+}
+
+// isRawPointerType reports whether typ is ptr<T> or ptr<const T>.
+func isRawPointerType(typ string) bool {
+	return strings.HasPrefix(typ, "ptr<") && strings.HasSuffix(typ, ">")
 }
 
 // integerLLVMType maps Kizu integer spellings to LLVM integer widths.

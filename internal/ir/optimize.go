@@ -171,10 +171,12 @@ func keepLiveInstrs(instrs []*Instr, used map[string]bool) []*Instr {
 	return out
 }
 
-// hasEffect reports whether an instruction must remain even if its result is unused.
+// hasEffect reports whether an instruction must remain even if its result is
+// unused. A volatile load is here because the access itself is the effect:
+// device registers change state when read.
 func hasEffect(instr *Instr) bool {
 	switch instr.Op {
-	case "call.print", "arena.add", "arena.at":
+	case "call.print", "arena.add", "arena.at", "volatile.load":
 		return true
 	default:
 		return instr.Result.Type == "void"
