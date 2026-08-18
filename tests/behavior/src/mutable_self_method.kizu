@@ -1,7 +1,8 @@
+import std::array;
 import std::mem;
 import std::testing;
 
-struct Counter {
+pub struct Counter {
     pub count: i64,
 }
 
@@ -84,4 +85,83 @@ test "mutable self methods drive a byte cursor" {
         total = total + cast<i64>(it.next());
     }
     testing::expect_equal<i64>(451, total);
+}
+
+pub struct Tally {
+    pub hits: Counter,
+    pub faults: Counter,
+}
+
+fn (self: &var Tally) record_hit() -> void {
+    self.hits.bump();
+}
+
+// A `&var self` method reaches one direct field of a mutable owner: the
+// exclusive borrow derives from the owner's storage, from the owner's own
+// `&var self` methods and from call sites alike, and each field's borrow
+// stays its own.
+test "mutable self method runs on a direct field receiver" {
+    var tally = Tally { hits: Counter { count: 0 }, faults: Counter { count: 0 } };
+    tally.record_hit();
+    tally.hits.bump();
+    tally.faults.bump();
+    testing::expect_equal<i64>(2, tally.hits.count);
+    testing::expect_equal<i64>(1, tally.faults.count);
+}
+
+fn clear(counter: &var Counter) -> void {
+    counter.count = 0;
+}
+
+// A `&var` argument projects the same one-level field storage a method
+// receiver does -- bare or with explicit `&var`, the callee writes into the
+// owner's field.
+test "a &var argument reaches one direct field" {
+    var tally = Tally { hits: Counter { count: 3 }, faults: Counter { count: 5 } };
+    clear(tally.hits);
+    clear(&var tally.faults);
+    testing::expect_equal<i64>(0, tally.hits.count);
+    testing::expect_equal<i64>(0, tally.faults.count);
+}
+
+pub struct Journal {
+    pub entries: array::Array<i64>,
+}
+
+fn (self: Journal) deinit() -> void {
+    self.entries.deinit();
+}
+
+fn (self: &var Journal) push(value: i64) -> !void {
+    try self.entries.append(value);
+    return;
+}
+
+fn (self: Journal) last() -> i64 {
+    return self.entries.get_or_panic(self.entries.len() - 1);
+}
+
+pub struct Recorder {
+    pub journal: Journal,
+}
+
+fn (self: Recorder) deinit() -> void {
+    self.journal.deinit();
+}
+
+fn (self: &var Recorder) note(value: i64) -> !void {
+    try self.journal.push(value);
+    return;
+}
+
+// A non-copy field -- one that owns an Array -- cannot be copied out, moved
+// out, or rebuilt, so reaching its mutating methods through the owner is the
+// only composition there is.
+test "a mutating method reaches a non-copy field" {
+    let allocator = mem::page_allocator();
+    var recorder = Recorder { journal: Journal { entries: array::new<i64>(allocator) } };
+    defer recorder.deinit();
+    try recorder.note(7);
+    try recorder.note(9);
+    testing::expect_equal<i64>(9, recorder.journal.last());
 }

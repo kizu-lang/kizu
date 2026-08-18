@@ -305,9 +305,13 @@ func (l *lowerer) markLentGenericArgs(
 	}
 }
 
-// markIfName records expr when it is a plain name, the only thing that has a
-// local to give storage to.
+// markIfName records the local whose storage expr would hand over: the name
+// itself, or the owner of a one-level field path -- a `field.addr` projection
+// needs the owner in memory, so the owner is the local that loses SSA form.
 func markIfName(expr ast.Expression, found map[string]bool) {
+	if field, ok := expr.(*ast.FieldExpr); ok && !field.Namespace {
+		expr = field.Receiver
+	}
 	if ident, ok := expr.(*ast.IdentExpr); ok {
 		found[ident.Name] = true
 	}
@@ -365,6 +369,27 @@ func (l *lowerer) lowerReceiverAddress(expr ast.Expression) (Value, error) {
 		return slot, nil
 	}
 	return l.lowerExpr(expr)
+}
+
+// lowerFieldStorage lowers `base.field` to the field's own storage: a
+// `field.addr` projection out of the base's storage. ok is false when the
+// expression is not a one-level field of a storage name -- a slot-backed
+// local or a `&var` parameter -- which is the shape the checker admits for
+// every `&var` position.
+func (l *lowerer) lowerFieldStorage(expr ast.Expression) (Value, bool) {
+	field, isField := expr.(*ast.FieldExpr)
+	if !isField || field.Namespace {
+		return Value{}, false
+	}
+	storage, ok := l.slotPointer(field.Receiver)
+	if !ok {
+		return Value{}, false
+	}
+	fieldType := l.fieldType(derefType(storage.Type), field.Name)
+	if fieldType == "unknown" {
+		return Value{}, false
+	}
+	return l.emit("field.addr."+field.Name, "&var "+fieldType, []Value{storage}, ""), true
 }
 
 // lowerCallArgs lowers the arguments of a call to name.

@@ -6525,18 +6525,36 @@ func (c *Checker) checkMethodArgs(
 }
 
 // requireMutableSelfReceiver restricts `&var self` methods to receivers whose
-// storage the caller can hand over: a mutable local or a reborrowed &var param.
+// storage the caller can hand over: a mutable place, so a local, a reborrowed
+// &var param, or one direct field of either.
 func requireMutableSelfReceiver(method *functionType, receiver ast.Expression, env *scope) error {
-	ident, ok := receiver.(*ast.IdentExpr)
+	base, ok := mutablePlaceBase(receiver)
 	if !ok {
-		return errorf("type error: method `%s` takes `&var self` and requires a local receiver",
+		return errorf(
+			"type error: method `%s` takes `&var self` and requires a local or direct field receiver",
 			method.name)
 	}
-	if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
+	if env.isMutable(base.Name) || env.isMutBorrowed(base.Name) {
 		return nil
 	}
 	return errorf("type error: method `%s` takes `&var self`, receiver `%s` must be mutable",
-		method.name, ident.Name)
+		method.name, base.Name)
+}
+
+// mutablePlaceBase resolves the binding whose storage a mutable place hands
+// over: the name itself, or the owner of a one-level field path. This is the
+// one shape rule for every `&var` position -- method receivers and call
+// arguments read the same answer.
+func mutablePlaceBase(expr ast.Expression) (*ast.IdentExpr, bool) {
+	switch place := expr.(type) {
+	case *ast.IdentExpr:
+		return place, true
+	case *ast.FieldExpr:
+		ident, ok := place.Receiver.(*ast.IdentExpr)
+		return ident, ok && !place.Namespace
+	default:
+		return nil, false
+	}
 }
 
 // checkCallableArgs validates the arguments a call passes, starting at the
@@ -6596,32 +6614,21 @@ func (c *Checker) checkCallableArgs(
 // be lent — a `var`-bound plain slice does not guarantee writable backing.
 // want may be "" when the slot's type is unknown at the call site.
 func requireMutableBorrowArg(expr ast.Expression, want Type, env *scope) error {
-	ident, ok := expr.(*ast.IdentExpr)
 	if sameType(want, typeByteString) {
-		if ok && env.isMutBorrowed(ident.Name) {
+		if ident, ok := expr.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 			return nil
 		}
 		return errorf(
 			"type error: `&var []u8` argument must be a writable view binding")
 	}
-	if ok {
-		if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
-			return nil
-		}
-		return errorf("type error: &var argument `%s` must be mutable", ident.Name)
-	}
-	field, fieldOK := expr.(*ast.FieldExpr)
-	if !fieldOK {
-		return errorf("type error: &var argument must be a mutable local binding")
-	}
-	ident, ok = field.Receiver.(*ast.IdentExpr)
+	base, ok := mutablePlaceBase(expr)
 	if !ok {
 		return errorf("type error: &var argument must be a mutable local binding")
 	}
-	if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
+	if env.isMutable(base.Name) || env.isMutBorrowed(base.Name) {
 		return nil
 	}
-	return errorf("type error: &var argument `%s` must be mutable", ident.Name)
+	return errorf("type error: &var argument `%s` must be mutable", base.Name)
 }
 
 // prepareBorrowArgument unwraps explicit &/&var syntax only for borrowed parameters.

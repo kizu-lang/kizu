@@ -1022,6 +1022,8 @@ func (e *emitter) writeFieldInstr(instr *ir.Instr) error {
 		return e.writeFieldRefSet(instr)
 	case strings.HasPrefix(instr.Op, "field.ref."):
 		return e.writeFieldRef(instr)
+	case strings.HasPrefix(instr.Op, "field.addr."):
+		return e.writeFieldAddr(instr)
 	case strings.HasPrefix(instr.Op, "field.set."):
 		return e.writeFieldSet(instr)
 	default:
@@ -1530,6 +1532,40 @@ func (e *emitter) writeFieldRef(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
 		ptrName, e.llvmType(structType), value.operand, index)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, e.llvmType(instr.Result.Type), ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeFieldAddr lowers a field borrow out of a borrowed struct pointer: the
+// projection is the GEP alone, and the result is the field's own storage.
+func (e *emitter) writeFieldAddr(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: field address expects 1 arg")
+	}
+	receiver := instr.Args[0]
+	structType := derefLLVMType(receiver.Type)
+	st, ok := e.module.Structs[structType]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown borrowed struct type `%s`", receiver.Type)
+	}
+	fieldName := strings.TrimPrefix(instr.Op, "field.addr.")
+	index, ok := structFieldIndex(st, fieldName)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, fieldName)
+	}
+	if derefLLVMType(instr.Result.Type) != st.Fields[index].Type {
+		return fmt.Errorf(
+			"llvm error: field address `%s.%s` returns &var %s, got %s",
+			st.Name,
+			fieldName,
+			st.Fields[index].Type,
+			instr.Result.Type,
+		)
+	}
+	value := e.value(receiver)
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
+		name, e.llvmType(structType), value.operand, index)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }

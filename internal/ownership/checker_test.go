@@ -716,6 +716,30 @@ fn main() {
 }`,
 			want: "field `reg.cursor` cannot be mutably borrowed while value is borrowed",
 		},
+		{
+			name: "field receiver aliased by mutable borrow of the same field",
+			source: `struct Counter { count: i64 }
+fn (self: &var Counter) steal(other: &var Counter) -> void {
+    self.count = other.count;
+}
+struct Holder { counter: Counter }
+fn (self: &var Holder) go() -> void {
+    self.counter.steal(&var self.counter);
+}`,
+			want: "field `self.counter` cannot be mutably borrowed while borrowed",
+		},
+		{
+			name: "field receiver aliased by shared borrow of the owner",
+			source: `struct Counter { count: i64 }
+struct Holder { counter: Counter }
+fn (self: &var Counter) load(owner: &Holder) -> void {
+    self.count = owner.counter.count;
+}
+fn (self: &var Holder) go() -> void {
+    self.counter.load(&self);
+}`,
+			want: "field `self.counter` cannot be mutably borrowed while value is borrowed",
+		},
 	}
 	runErrorCases(t, cases)
 }

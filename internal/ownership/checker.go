@@ -97,6 +97,11 @@ type binding struct {
 	consumeExempt    bool
 	deferCleanup     bool
 	declSpan         ast.Span
+	// fieldOwner and fieldOwnerName link a direct-field receiver projection
+	// back to the owner binding and its field, so a call-duration receiver
+	// borrow lands where argument borrows of the same place land.
+	fieldOwner     *binding
+	fieldOwnerName string
 }
 
 // allocTied reports an owner allocated from a frame-tied allocator: it keeps
@@ -4925,6 +4930,8 @@ func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *
 			receiver.owner.fieldBorrows[receiver.field],
 		activeMutBorrows: receiver.owner.activeMutBorrows +
 			receiver.owner.fieldMutBorrows[receiver.field],
+		fieldOwner:     receiver.owner,
+		fieldOwnerName: receiver.field,
 	}
 	base, _, ok := splitGenericType(receiver.typeName)
 	if ok && base == "std::arena::Arena" {
@@ -5760,6 +5767,17 @@ func (c *Checker) checkImplMethodCall(
 	return returnTypeName(method), true, nil
 }
 
+// receiverPlace returns the binding and field the receiver's call-duration
+// borrow lands on: the owner and its field for a direct-field projection, the
+// receiver binding itself otherwise. Routing through the owner is what makes
+// an argument borrow of the same field collide with the receiver.
+func receiverPlace(receiver *binding) (*binding, string) {
+	if receiver.fieldOwner != nil {
+		return receiver.fieldOwner, receiver.fieldOwnerName
+	}
+	return receiver, ""
+}
+
 // checkImplMethodArgs applies ownership effects for explicit method arguments.
 //
 // A `&var` receiver is two-phase: while the arguments are evaluated it is only
@@ -5778,8 +5796,9 @@ func (c *Checker) checkImplMethodArgs(
 		return err
 	}
 	receiverMut := method.params[0].mutBorrow
+	target, targetField := receiverPlace(receiver)
 	if receiverMut {
-		receiver.activeBorrows++
+		c.activateBorrow(target, targetField, false)
 	}
 	borrowed, err := c.activateBorrowArgs(call, args, env)
 	if err == nil {
@@ -5790,11 +5809,11 @@ func (c *Checker) checkImplMethodArgs(
 		}
 	}
 	if receiverMut {
-		receiver.activeBorrows--
+		releaseTemporaryBorrow(temporaryBorrow{value: target, field: targetField})
 		if err == nil {
 			// Activation: argument borrows still live at the call must not
 			// overlap the receiver's exclusive borrow.
-			err = checkBorrowConflict(receiver, true)
+			err = checkBorrowConflictForField(target, targetField, true)
 		}
 	}
 	releaseTemporaryBorrows(borrowed)
