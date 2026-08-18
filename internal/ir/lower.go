@@ -46,9 +46,13 @@ type lowerer struct {
 	// staticValues binds the compile-time values of the instance being lowered.
 	staticValues map[string]staticValue
 	// slots names the locals of the function being lowered that live in memory
-	// because something writes through a `&var` borrow of them. Their entry in
-	// env is the storage, not the value.
+	// because something writes through a `&var` borrow of them, and the `&var`
+	// parameters that arrive as such storage. Their entry in env is the
+	// storage, not the value.
 	slots map[string]bool
+	// genericDecls indexes the program's generic function declarations by
+	// name, so every call site resolves in one lookup.
+	genericDecls map[string]*ast.FunctionDecl
 	// externSymbols maps a resolved extern "c" function name to its C symbol.
 	// Module resolution qualifies every declared name, but the linker knows the
 	// declaration's own identifier, so calls emit that instead.
@@ -94,6 +98,12 @@ type loopPhi struct {
 
 // newLowerer prepares lookup tables used during lowering.
 func newLowerer(program *ast.Program) *lowerer {
+	generics := map[string]*ast.FunctionDecl{}
+	for _, decl := range program.Decls {
+		if fn, ok := decl.(*ast.FunctionDecl); ok && len(fn.StaticParams) > 0 {
+			generics[fn.Name] = fn
+		}
+	}
 	return &lowerer{
 		program: program,
 		module: &Module{
@@ -107,6 +117,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		instantiated:  map[string]bool{},
 		staticValues:  map[string]staticValue{},
 		externSymbols: map[string]string{},
+		genericDecls:  generics,
 	}
 }
 
@@ -259,16 +270,7 @@ func (l *lowerer) lowerPendingGenerics() error {
 
 // genericDecl returns the generic function declaration with this IR name.
 func (l *lowerer) genericDecl(name string) *ast.FunctionDecl {
-	for _, decl := range l.program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok || len(fn.StaticParams) == 0 {
-			continue
-		}
-		if fn.Name == name {
-			return fn
-		}
-	}
-	return nil
+	return l.genericDecls[name]
 }
 
 // genericInstanceName is the symbol one instantiation is lowered under. Static
@@ -532,6 +534,12 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.deferFrames = nil
 	for index, param := range fn.Params {
 		l.env.set(param.Name, signature.Params[index].Value())
+		// A parameter that arrives as the caller's storage is a storage name
+		// like a lent local: reads load, assignments store, and address
+		// consumers take the pointer itself.
+		if signature.Params[index].Passing == PassCallerStorage {
+			l.slots[param.Name] = true
+		}
 	}
 	l.block = l.newBlock("entry")
 	if err := l.lowerBlock(fn.Body); err != nil {
@@ -859,6 +867,11 @@ func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
 		updated := l.emit("field.set."+t.Name, receiver.Type, []Value{receiver, value}, "")
 		return l.lowerAssignTarget(t.Receiver, updated)
 	case *ast.DerefExpr:
+		// `.*` through a `&var` parameter names the same storage the bare
+		// name does, so both spellings assign through the same rule.
+		if ident, ok := t.Receiver.(*ast.IdentExpr); ok && l.isStorageParam(ident.Name) {
+			return l.lowerAssignTarget(ident, value)
+		}
 		receiver, err := l.lowerExpr(t.Receiver)
 		if err != nil {
 			return err
@@ -1162,6 +1175,16 @@ func (l *lowerer) lowerContextualExpr(expr ast.Expression, want string) (Value, 
 	want = l.resolveType(want)
 	if elem, ok := optionalElemType(want); ok {
 		return l.lowerOptionalContextExpr(expr, want, elem)
+	}
+	// A `&var` context wants the storage itself, not the value read out of it:
+	// a `&var` argument and a returned `&var self` both hand over the same
+	// pointer the caller lent. This is the one place that decides it; a
+	// mutable reference type and PassCallerStorage are the same fact
+	// (borrowIRType), which TestLowerParamAgreesWithItself pins.
+	if isMutableReferenceType(want) {
+		if slot, ok := l.slotPointer(borrowTargetExpr(expr)); ok {
+			return slot, nil
+		}
 	}
 	if !narrowsIntegerLiteral(want) {
 		return l.lowerExpr(expr)
@@ -1847,7 +1870,9 @@ func (l *lowerer) lowerFieldExpr(expr *ast.FieldExpr) (Value, error) {
 			return value, nil
 		}
 	}
-	receiver, err := l.lowerExpr(expr.Receiver)
+	// A storage-backed receiver reads the field through its address, so one
+	// field read does not load the whole aggregate out of the storage.
+	receiver, err := l.lowerReceiverAddress(expr.Receiver)
 	if err != nil {
 		return Value{}, err
 	}

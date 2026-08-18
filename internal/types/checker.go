@@ -300,11 +300,14 @@ type contractType struct {
 }
 
 type scope struct {
-	parent       *scope
-	values       map[string]Type
-	mutable      map[string]bool
-	borrowed     map[string]bool
-	mutBorrow    map[string]bool
+	parent    *scope
+	values    map[string]Type
+	mutable   map[string]bool
+	borrowed  map[string]bool
+	mutBorrow map[string]bool
+	// param marks the names bound by the function signature. A `&var` among
+	// them is the caller's storage, which a local mut borrow binding is not.
+	param        map[string]bool
 	borrowSource map[string][]string
 	// unread holds the locals this scope declared that nothing has read yet. A
 	// read removes one; whatever is left when the scope closes was never needed.
@@ -1793,7 +1796,8 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
-		if err := env.defineParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow); err != nil {
+		err := env.defineSignatureParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+		if err != nil {
 			return err
 		}
 	}
@@ -2241,13 +2245,15 @@ func (c *Checker) checkAssignableIndex(
 	return typeU8, nil
 }
 
-// checkAssignableIdent validates direct binding assignment.
+// checkAssignableIdent validates direct binding assignment. A `&var T`
+// parameter is the caller's storage, so assigning the binding stores there,
+// under the same rule that lets a field write through it.
 func checkAssignableIdent(expr *ast.IdentExpr, env *scope) (Type, error) {
 	want, ok := env.lookup(expr.Name)
 	if !ok {
 		return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
 	}
-	if !env.isMutable(expr.Name) {
+	if !env.isMutable(expr.Name) && !env.isMutBorrowedParam(expr.Name) {
 		return "", errorf("type error: cannot assign to immutable binding `%s`", expr.Name)
 	}
 	return want, nil
@@ -4981,7 +4987,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	}
 	for idx, param := range fn.sig.Params {
 		typ := substituteTypeParams(fn.params[idx], subst)
-		if err := env.defineParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
+		if err := env.defineSignatureParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
 			return err
 		}
 	}
@@ -7191,6 +7197,7 @@ func newScope(parent *scope) *scope {
 	return &scope{
 		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
 		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
+		param:        map[string]bool{},
 		borrowSource: map[string][]string{}, unread: map[string]ast.Span{},
 	}
 }
@@ -7262,6 +7269,17 @@ func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool
 	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources)
 }
 
+// defineSignatureParam binds one function parameter. Only these bindings are
+// the caller's storage, which is what lets assignment through a `&var` one
+// reach the caller.
+func (s *scope) defineSignatureParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
+	if err := s.defineParam(name, typ, borrowed, mutBorrow); err != nil {
+		return err
+	}
+	s.param[name] = true
+	return nil
+}
+
 // defineParamWithSource binds a borrowed local and records its source owners.
 func (s *scope) defineParamWithSource(
 	name string,
@@ -7297,6 +7315,18 @@ func (s *scope) isMutable(name string) bool {
 	for cur := s; cur != nil; cur = cur.parent {
 		if _, ok := cur.values[name]; ok {
 			return cur.mutable[name]
+		}
+	}
+	return false
+}
+
+// isMutBorrowedParam reports whether a resolved local name is a `&var`
+// parameter: the one mut-borrow binding that is the caller's storage, so
+// assigning it stores there. A local mut borrow binding or capture is not.
+func (s *scope) isMutBorrowedParam(name string) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if _, ok := cur.values[name]; ok {
+			return cur.mutBorrow[name] && cur.param[name]
 		}
 	}
 	return false

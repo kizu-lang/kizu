@@ -1,0 +1,93 @@
+import std::testing;
+
+fn bump(n: &var i64) -> void {
+    n = n + 1;
+}
+
+fn bump_twice(n: &var i64) -> void {
+    bump(n);
+    bump(n);
+}
+
+// A `&var` scalar parameter is the caller's storage: assigning the binding
+// stores there, under the same rule that lets a field write through a
+// `&var` struct. Forwarding the parameter lends the same storage on.
+test "assignment through a scalar mut borrow reaches the caller" {
+    var count = 0;
+    bump(count);
+    testing::expect_equal<i64>(1, count);
+    bump_twice(count);
+    testing::expect_equal<i64>(3, count);
+}
+
+fn double(n: &var i64) -> void {
+    n = n * 2;
+}
+
+// Reading the binding loads the borrowed storage, so a read-modify-write
+// round-trips through the caller's value.
+test "a scalar mut borrow reads its current value" {
+    var size = 21;
+    double(size);
+    testing::expect_equal<i64>(42, size);
+}
+
+fn halve(n: &var i64) -> void {
+    n.* = n.* / 2;
+}
+
+// Explicit dereference names the same storage the bare binding does, so
+// `n.* = v` and `n = v` store into the same place.
+test "explicit deref assignment through a scalar mut borrow" {
+    var size = 84;
+    halve(size);
+    testing::expect_equal<i64>(42, size);
+}
+
+fn accumulate(total: &var i64, upto: i64) -> void {
+    var i = 1;
+    while i <= upto {
+        total = total + i;
+        i = i + 1;
+    }
+}
+
+// A loop body stores through the borrow on every pass, so the caller sees
+// the final sum rather than the value of any single pass.
+test "a loop writes through a scalar mut borrow" {
+    var sum = 0;
+    accumulate(sum, 4);
+    testing::expect_equal<i64>(10, sum);
+}
+
+struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+fn reset(p: &var Point) -> void {
+    p = Point { x: 0, y: 0 };
+}
+
+// Whole-binding assignment through `&var` is the same rule for a copy struct
+// as for a scalar: the new value lands in the caller's storage.
+test "whole struct assignment through a mut borrow reaches the caller" {
+    var origin = Point { x: 3, y: 4 };
+    reset(origin);
+    testing::expect_equal<i64>(0, origin.x + origin.y);
+}
+
+fn set<T>(dst: &var T, v: T) -> void {
+    dst = v;
+}
+
+// A generic `&var T` helper behaves the same at every binding of T: the
+// signature alone says the argument's storage is lent.
+test "a generic mut borrow helper writes through at scalar and struct" {
+    var n = 1;
+    set<i64>(n, 42);
+    testing::expect_equal<i64>(42, n);
+    var p = Point { x: 1, y: 2 };
+    set<Point>(p, Point { x: 40, y: 2 });
+    testing::expect_equal<i64>(42, p.x + p.y);
+}

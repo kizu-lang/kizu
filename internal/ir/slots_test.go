@@ -39,7 +39,7 @@ func TestLentLocalGetsStorage(t *testing.T) {
 	for _, want := range []string{
 		"= local.slot",         // the local lives in memory
 		"call.rename %3: &var", // its address goes to the callee
-		"= ref.load",           // and the caller re-reads after the call
+		"= field.ref.name %3",  // and the caller reads through it after the call
 	} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("caller does not `%s`:\n%s", want, dump)

@@ -11,7 +11,9 @@ import (
 // borrow of it: the callee stores into the borrowed storage, and the caller has
 // to read the store back. An SSA value has no storage to write into, so a local
 // that is passed as `&var` gets a slot and lives in memory for the whole
-// function.
+// function. A `&var` parameter arrives as such storage already, so it joins the
+// same set: either way the name means storage — reads load, assignments store,
+// and the places that need the address take the pointer itself.
 //
 // The decision is made once, before the body is lowered, because it has to hold
 // everywhere the name is used. Deciding it where the address is first needed
@@ -24,8 +26,9 @@ func (l *lowerer) mutablyBorrowedLocals(fn *ast.FunctionDecl) (map[string]bool, 
 	if err := l.collectMutBorrowsStmt(fn.Body, found); err != nil {
 		return nil, err
 	}
-	// A parameter already arrives as whatever its own declaration says, so
-	// passing it on borrows storage that exists rather than asking for more.
+	// A parameter never allocates a slot: one that arrives as caller storage
+	// is added to the set by lowerFunctionNamed with the storage it came with,
+	// and any other parameter has no storage to lend.
 	for _, param := range fn.Params {
 		delete(found, param.Name)
 	}
@@ -230,6 +233,10 @@ func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 		l.markLentMethodArgs(field, expr.Args, found)
 		return
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		l.markLentGenericArgs(typeApply, expr.Args, found)
+		return
+	}
 	name, ok := l.functionCalleeName(expr.Callee)
 	if !ok {
 		return
@@ -273,6 +280,31 @@ func (l *lowerer) markLentMethodArgs(
 	}
 }
 
+// markLentGenericArgs records the names a generic call lends. Like the direct
+// arms above it reads the answer lowerParam gave rather than deciding again
+// from the declaration: declaredInstanceParams binds the type arguments
+// without asking for the instance, so the passing is the one the call will
+// use. A callee this cannot resolve lends nothing.
+func (l *lowerer) markLentGenericArgs(
+	typeApply *ast.TypeApplyExpr,
+	args []ast.Expression,
+	found map[string]bool,
+) {
+	name, ok := l.functionCalleeName(typeApply.Callee)
+	if !ok {
+		return
+	}
+	params, err := l.declaredInstanceParams(name, typeApply.TypeArg)
+	if err != nil {
+		return
+	}
+	for index, arg := range args {
+		if index < len(params) && params[index].Passing == PassCallerStorage {
+			markIfName(arg, found)
+		}
+	}
+}
+
 // markIfName records expr when it is a plain name, the only thing that has a
 // local to give storage to.
 func markIfName(expr ast.Expression, found map[string]bool) {
@@ -299,6 +331,19 @@ func borrowTargetExpr(expr ast.Expression) ast.Expression {
 		return prefix.Right
 	}
 	return expr
+}
+
+// isStorageParam reports whether name is a parameter whose storage is the
+// borrow the source names. For such a name `n.*` dereferences the slot itself;
+// a lent local's slot holds the binding's value instead, which `.*` first
+// reads out.
+func (l *lowerer) isStorageParam(name string) bool {
+	for _, param := range l.current.Params {
+		if param.Name == "%"+name {
+			return param.Passing == PassCallerStorage
+		}
+	}
+	return false
 }
 
 // slotPointer returns the storage behind a name, for the places that need the
@@ -329,21 +374,17 @@ func (l *lowerer) lowerCallArgs(name string, args []ast.Expression) ([]Value, er
 
 // lowerCallArgsAs lowers call arguments at the types the callee declares for
 // them, which is the one place a call decides what it hands over. An argument
-// the callee receives as the caller's storage is passed as the local itself.
-// Params the lowerer cannot name -- a callee it has no signature for, or a
-// variadic tail -- leave those arguments with the types they carry themselves.
+// the callee receives as the caller's storage is passed as the local itself:
+// its declared `&var T` type is a borrow context, and lowerContextualExpr
+// hands over the storage. Params the lowerer cannot name -- a callee it has no
+// signature for, or a variadic tail -- leave those arguments with the types
+// they carry themselves.
 func (l *lowerer) lowerCallArgsAs(params []Param, args []ast.Expression) ([]Value, error) {
 	values := make([]Value, 0, len(args))
 	for index, arg := range args {
 		want := Param{}
 		if index < len(params) {
 			want = params[index]
-		}
-		if want.Passing == PassCallerStorage {
-			if slot, ok := l.slotPointer(borrowTargetExpr(arg)); ok {
-				values = append(values, slot)
-				continue
-			}
 		}
 		value, err := l.lowerContextualExpr(arg, want.Type)
 		if err != nil {
