@@ -885,9 +885,9 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeStructNew(instr)
 	case strings.HasPrefix(instr.Op, "field."):
 		return e.writeFieldInstr(instr)
-	case instr.Op == "ref.store":
+	case instr.Op == "ref.store", instr.Op == "volatile.store":
 		return e.writeRefStore(instr)
-	case instr.Op == "ref.load":
+	case instr.Op == "ref.load", instr.Op == "volatile.load":
 		return e.writeRefLoad(instr)
 	case instr.Op == "local.slot":
 		return e.writeLocalSlot(instr)
@@ -1343,9 +1343,34 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
 			return e.writeIntegerCast(instr)
 		}
+		if isRawPointerType(instr.Result.Type) {
+			return e.writePointerIntegerCast(instr, "inttoptr")
+		}
+	}
+	if isRawPointerType(source.Type) {
+		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
+			return e.writePointerIntegerCast(instr, "ptrtoint")
+		}
 	}
 	value := e.value(instr.Args[0])
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	return nil
+}
+
+// writePointerIntegerCast emits the address conversion between a raw pointer
+// and an integer. Width changes ride the conversion itself: inttoptr and
+// ptrtoint extend and truncate to the target on their own.
+func (e *emitter) writePointerIntegerCast(instr *ir.Instr, op string) error {
+	source := instr.Args[0]
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n",
+		name,
+		op,
+		e.llvmType(source.Type),
+		e.value(source).operand,
+		e.llvmType(instr.Result.Type),
+	)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
@@ -1607,13 +1632,24 @@ func (e *emitter) writeRefStore(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: dereference write returns void, got %s",
 			instr.Result.Type)
 	}
-	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+	fmt.Fprintf(&e.out, "  store %s%s %s, ptr %s\n",
+		volatileKeyword(instr.Op),
 		e.llvmType(instr.Args[1].Type),
 		e.value(instr.Args[1]).operand,
 		e.value(receiver).operand,
 	)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
+}
+
+// volatileKeyword marks the memory accesses no pass may drop, merge, or
+// reorder against other volatile accesses: device registers change state on
+// access, so each one the source wrote has to happen.
+func volatileKeyword(op string) string {
+	if strings.HasPrefix(op, "volatile.") {
+		return "volatile "
+	}
+	return ""
 }
 
 // writeLocalSlot gives a local storage and puts its first value there. A local
@@ -1648,8 +1684,9 @@ func (e *emitter) writeRefLoad(instr *ir.Instr) error {
 			receiver.Type, want, instr.Result.Type)
 	}
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
-		resultName, e.llvmType(instr.Result.Type), e.value(receiver).operand)
+	fmt.Fprintf(&e.out, "  %s = load %s%s, ptr %s\n",
+		resultName, volatileKeyword(instr.Op), e.llvmType(instr.Result.Type),
+		e.value(receiver).operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

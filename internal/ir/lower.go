@@ -49,6 +49,10 @@ type lowerer struct {
 	// because something writes through a `&var` borrow of them. Their entry in
 	// env is the storage, not the value.
 	slots map[string]bool
+	// externSymbols maps a resolved extern "c" function name to its C symbol.
+	// Module resolution qualifies every declared name, but the linker knows the
+	// declaration's own identifier, so calls emit that instead.
+	externSymbols map[string]string
 	// nextErrorCode is the next global code for an error set the program
 	// declares itself; std members keep the codes std assigns.
 	nextErrorCode int
@@ -98,10 +102,11 @@ func newLowerer(program *ast.Program) *lowerer {
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
 		},
-		signatures:   map[string]Signature{},
-		typeBindings: map[string]string{},
-		instantiated: map[string]bool{},
-		staticValues: map[string]staticValue{},
+		signatures:    map[string]Signature{},
+		typeBindings:  map[string]string{},
+		instantiated:  map[string]bool{},
+		staticValues:  map[string]staticValue{},
+		externSymbols: map[string]string{},
 	}
 }
 
@@ -418,9 +423,22 @@ func (l *lowerer) collectDecls() error {
 	for _, decl := range l.program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok {
 			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
+			if fn.ExternABI == "c" {
+				l.externSymbols[fn.Name] = externCSymbol(fn.Name)
+			}
 		}
 	}
 	return nil
+}
+
+// externCSymbol strips the module qualification a resolver added to an extern
+// "c" declaration. The C symbol is the identifier the declaration was written
+// with; the qualified spelling exists only inside this compiler.
+func externCSymbol(name string) string {
+	if index := strings.LastIndex(name, "::"); index >= 0 {
+		return name[index+2:]
+	}
+	return name
 }
 
 // lowerUnion converts an AST union declaration to IR metadata.
@@ -1015,6 +1033,108 @@ func (l *lowerer) lowerDerefExpr(expr *ast.DerefExpr) (Value, error) {
 	return l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, ""), nil
 }
 
+// lowerTypeApplyCall lowers calls whose callee carries a static argument list.
+// The std storage constructors lower to one instruction each, so their std
+// bodies are never walked. Every other generic call resolves by name.
+func (l *lowerer) lowerTypeApplyCall(
+	typeApply *ast.TypeApplyExpr,
+	args []ast.Expression,
+) (Value, error) {
+	switch typeApply.Callee.String() {
+	case "std::arena::new":
+		return l.lowerArenaConstructor(typeApply.TypeArg, args)
+	case "std::array::new":
+		return l.lowerArrayConstructor(typeApply.TypeArg, args)
+	case "std::map::new":
+		return l.lowerMapConstructor(typeApply.TypeArg, args)
+	case "ptr_from_int", "int_from_ptr":
+		return l.lowerPtrIntCast(typeApply.TypeArg, args)
+	}
+	if name, ok := l.functionCalleeName(typeApply.Callee); ok {
+		return l.lowerTypedNamedCallExpr(name, typeApply.TypeArg, args)
+	}
+	return Value{}, fmt.Errorf("ir error: unsupported callee `%s`", typeApply.String())
+}
+
+// lowerPtrBuiltinCall lowers the raw pointer builtins ptr_read, ptr_write,
+// volatile_read, and volatile_write. The plain pair are call spellings of the
+// deref the checker already proved, so they lower to the same load and store
+// the explicit `p.*` forms use. The volatile pair carries its own ops: a
+// volatile access is an effect, not a value read, so no pass may drop or
+// merge one.
+func (l *lowerer) lowerPtrBuiltinCall(expr *ast.CallExpr) (Value, bool, error) {
+	ident, ok := expr.Callee.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, false, nil
+	}
+	switch ident.Name {
+	case "ptr_read":
+		value, err := l.lowerPtrLoad(ident.Name, "ref.load", expr.Args)
+		return value, true, err
+	case "ptr_write":
+		value, err := l.lowerPtrStore(ident.Name, "ref.store", expr.Args)
+		return value, true, err
+	case "volatile_read":
+		value, err := l.lowerPtrLoad(ident.Name, "volatile.load", expr.Args)
+		return value, true, err
+	case "volatile_write":
+		value, err := l.lowerPtrStore(ident.Name, "volatile.store", expr.Args)
+		return value, true, err
+	default:
+		return Value{}, false, nil
+	}
+}
+
+// lowerPtrLoad lowers a raw pointer read builtin to op.
+func (l *lowerer) lowerPtrLoad(name string, op string, args []ast.Expression) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("ir error: %s expects 1 arg", name)
+	}
+	pointer, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := rawPointerElem(pointer.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: %s expects raw pointer, got %s", name, pointer.Type)
+	}
+	return l.emit(op, elem, []Value{pointer}, ""), nil
+}
+
+// lowerPtrStore lowers a raw pointer write builtin to op.
+func (l *lowerer) lowerPtrStore(name string, op string, args []ast.Expression) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("ir error: %s expects 2 args", name)
+	}
+	pointer, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	elem, ok := rawPointerElem(pointer.Type)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: %s expects raw pointer, got %s", name, pointer.Type)
+	}
+	value, err := l.lowerContextualExpr(args[1], elem)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit(op, "void", []Value{pointer, value}, ""), nil
+}
+
+// lowerPtrIntCast lowers ptr_from_int<ptr<T>>(v) and int_from_ptr<usize>(p).
+// Both are casts the checker proved; the backend reads the operand and result
+// types to pick the conversion.
+func (l *lowerer) lowerPtrIntCast(target string, args []ast.Expression) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("ir error: pointer-integer cast expects 1 arg")
+	}
+	value, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("cast", target, []Value{value}, target), nil
+}
+
 // lowerAccessExpr lowers field, index, and explicit dereference expressions.
 func (l *lowerer) lowerAccessExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
@@ -1194,19 +1314,10 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		}
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
-		// The std storage constructors lower to one instruction each, so their
-		// std bodies are never walked. Every other generic call falls through.
-		switch typeApply.Callee.String() {
-		case "std::arena::new":
-			return l.lowerArenaConstructor(typeApply.TypeArg, expr.Args)
-		case "std::array::new":
-			return l.lowerArrayConstructor(typeApply.TypeArg, expr.Args)
-		case "std::map::new":
-			return l.lowerMapConstructor(typeApply.TypeArg, expr.Args)
-		}
-		if name, ok := l.functionCalleeName(typeApply.Callee); ok {
-			return l.lowerTypedNamedCallExpr(name, typeApply.TypeArg, expr.Args)
-		}
+		return l.lowerTypeApplyCall(typeApply, expr.Args)
+	}
+	if value, handled, err := l.lowerPtrBuiltinCall(expr); handled || err != nil {
+		return value, err
 	}
 	if name, ok := l.functionCalleeName(expr.Callee); ok {
 		return l.lowerNamedCallExpr(name, expr.Args)
@@ -1268,6 +1379,9 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		ret = sig.Return
 	} else if builtinReturn, ok := runtimeBuiltinReturnType(name); ok {
 		ret = builtinReturn
+	}
+	if symbol, ok := l.externSymbols[name]; ok {
+		name = symbol
 	}
 	return l.emit("call."+name, ret, args, ""), nil
 }

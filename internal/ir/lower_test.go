@@ -76,6 +76,35 @@ entry:
 	}
 }
 
+// TestOptimizeKeepsUnusedVolatileLoad pins the volatile access as an effect:
+// a device register changes state when read, so DCE must keep a volatile.load
+// nothing reads the result of.
+func TestOptimizeKeepsUnusedVolatileLoad(t *testing.T) {
+	module := &Module{Functions: []*Function{{Name: "main", Return: "void"}}}
+	fn := module.Functions[0]
+	block := &Block{Name: "entry"}
+	fn.Blocks = append(fn.Blocks, block)
+	pointer := Value{Name: "%1", Type: "ptr<u8>"}
+	unused := Value{Name: "%2", Type: "u8"}
+	block.Instrs = []*Instr{
+		{Result: pointer, Op: "const", Immediate: "0"},
+		{Result: unused, Op: "volatile.load", Args: []Value{pointer}},
+	}
+	block.Terminator = Terminator{Op: "return"}
+	if err := Optimize(module); err != nil {
+		t.Fatalf("optimize failed: %v", err)
+	}
+	kept := false
+	for _, instr := range module.Functions[0].Blocks[0].Instrs {
+		if instr.Op == "volatile.load" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("volatile.load was eliminated:\n%s", Dump(module))
+	}
+}
+
 // TestOptimizeKeepsStructFieldAndCleanupOperandsLive pins struct field values and
 // cleanup arguments as real uses: copy propagation has to rewrite them through the
 // `id` copy, and DCE must keep a producer whose only readers sit in those two
