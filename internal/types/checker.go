@@ -1896,6 +1896,9 @@ func (c *Checker) checkStmt(
 		return false, c.checkLoopBranch("continue", s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env, wantReturn, unsafe)
+	case *ast.BlockStmt:
+		// Only a match arm body is a bare block statement (SPEC §6.12).
+		return c.checkBlock(s, env.child(), wantReturn, unsafe)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
@@ -3226,6 +3229,8 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeMa
 	case *ast.ReturnStmt:
 		// ADR-0093 allows `return` arms only in statement matches.
 		return "", errorf("type error: expression match arm cannot `return`")
+	case *ast.BlockStmt:
+		return c.checkBlockValue(s, env.child(), unsafe)
 	default:
 		return "", errorf("type error: expression block must end with a value")
 	}

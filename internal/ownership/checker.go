@@ -560,6 +560,9 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkLoopBranch(s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env)
+	case *ast.BlockStmt:
+		// Only a match arm body is a bare block statement (SPEC §6.12).
+		return c.checkBlock(s, env)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env)
 	default:
@@ -2828,6 +2831,8 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) 
 		return c.checkIfExprValue(s, env, moveTail)
 	case *ast.MatchStmt:
 		return c.checkMatchExprValue(s, env, moveTail)
+	case *ast.BlockStmt:
+		return c.checkBlockValue(s, env, moveTail)
 	default:
 		return "", errorf("move error: expression block must end with a value")
 	}

@@ -772,6 +772,9 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerLoopBranch("continue", s.Label)
 	case *ast.MatchStmt:
 		return l.lowerMatchStmt(s)
+	case *ast.BlockStmt:
+		// Only a match arm body is a bare block statement (SPEC §6.12).
+		return l.lowerBlock(s)
 	case *ast.ComptimeIfStmt:
 		return l.lowerComptimeIfStmt(s)
 	default:

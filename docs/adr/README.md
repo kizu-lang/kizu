@@ -120,3 +120,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0104: `Map.at` / `at_mut` は borrow optional `?&V` を返す](0104-map-at-borrow-optional.md)
 - [ADR-0105: `Arena.at` が borrow read accessor(`get` は copy の綴り)](0105-arena-at-read-accessor.md)
 - [ADR-0106: `&var` receiver の two-phase borrow](0106-two-phase-receiver-borrow.md)
+- [ADR-0107: match arm body に block を許す](0107-match-arm-block-body.md) (0093 の block 却下案を覆す)
