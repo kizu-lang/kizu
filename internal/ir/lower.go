@@ -49,6 +49,10 @@ type lowerer struct {
 	// because something writes through a `&var` borrow of them. Their entry in
 	// env is the storage, not the value.
 	slots map[string]bool
+	// externSymbols maps a resolved extern "c" function name to its C symbol.
+	// Module resolution qualifies every declared name, but the linker knows the
+	// declaration's own identifier, so calls emit that instead.
+	externSymbols map[string]string
 	// nextErrorCode is the next global code for an error set the program
 	// declares itself; std members keep the codes std assigns.
 	nextErrorCode int
@@ -98,10 +102,11 @@ func newLowerer(program *ast.Program) *lowerer {
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
 		},
-		signatures:   map[string]Signature{},
-		typeBindings: map[string]string{},
-		instantiated: map[string]bool{},
-		staticValues: map[string]staticValue{},
+		signatures:    map[string]Signature{},
+		typeBindings:  map[string]string{},
+		instantiated:  map[string]bool{},
+		staticValues:  map[string]staticValue{},
+		externSymbols: map[string]string{},
 	}
 }
 
@@ -418,9 +423,22 @@ func (l *lowerer) collectDecls() error {
 	for _, decl := range l.program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok {
 			l.signatures[fn.Name] = l.lowerSignature(fn.FunctionSignature)
+			if fn.ExternABI == "c" {
+				l.externSymbols[fn.Name] = externCSymbol(fn.Name)
+			}
 		}
 	}
 	return nil
+}
+
+// externCSymbol strips the module qualification a resolver added to an extern
+// "c" declaration. The C symbol is the identifier the declaration was written
+// with; the qualified spelling exists only inside this compiler.
+func externCSymbol(name string) string {
+	if index := strings.LastIndex(name, "::"); index >= 0 {
+		return name[index+2:]
+	}
+	return name
 }
 
 // lowerUnion converts an AST union declaration to IR metadata.
@@ -1268,6 +1286,9 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 		ret = sig.Return
 	} else if builtinReturn, ok := runtimeBuiltinReturnType(name); ok {
 		ret = builtinReturn
+	}
+	if symbol, ok := l.externSymbols[name]; ok {
+		name = symbol
 	}
 	return l.emit("call."+name, ret, args, ""), nil
 }
