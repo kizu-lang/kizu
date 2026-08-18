@@ -1209,11 +1209,16 @@ bool / void
 i8 / i16 / i32 / i64 / u8 / u16 / u32 / u64 / usize / isize
 f32 / f64
 enum / error set
+std::arena::Handle<T>
 copy aggregate
 ```
 
-copy aggregate は、scalar・enum・error set・copy aggregate だけを
-field / payload に持つ struct / union です(#1597)。copy 判定は型の構造から
+`std::arena::Handle<T>` は arena 内の値を指す opaque な ID で、値を
+所有するのは arena です。ID の複製は解放責務を生まないため copy です
+(§10)。
+
+copy aggregate は、scalar・enum・error set・arena handle・copy aggregate
+だけを field / payload に持つ struct / union です(#1597)。copy 判定は型の構造から
 導出され、注釈はありません。ただし明示 `deinit` を宣言した型は、
 その宣言が cleanup contract なので全 field が copy でも move-only に留まります。
 `[]u8` を transitively 含む struct は copy ではなく view の規則
@@ -1490,6 +1495,7 @@ core arena の構築は明示 allocator capability を要求し、
 `std::arena::new<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 
 `std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
+値を所有するのは arena なので、handle は copy 型です(§8)。
 
 ルール:
 
@@ -1501,6 +1507,8 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可する
+* handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
+  複製は元と同じ arena 由来を引き継ぎ、以下の規則は複製にも適用される
 * handle は borrow より長生きしてよい
 * handle は対応する arena より長生きしてはいけない
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない

@@ -6249,7 +6249,11 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 	}
 	if arena := c.arenaAddReceiver(expr, env); arena != nil {
 		value.handleArenaID = arena.arenaID
+		return
 	}
+	// A copied handle still points into the arena the original came from,
+	// so the copy carries the source's provenance.
+	value.handleArenaID = c.knownHandleProvenance(expr, env)
 }
 
 // isArenaConstructorExpr reports the public std::arena::new<T>(allocator) constructor.
@@ -6524,8 +6528,8 @@ func (c *Checker) isCopyType(typeName string) bool {
 }
 
 // isPlainDataType reports whether typeName is plain copy data: a scalar, enum,
-// error set, or a declared struct / union whose fields and payloads are all
-// plain copy data. Duplicating such a value creates no cleanup obligation, so
+// error set, arena handle, or a declared struct / union whose fields and
+// payloads are all plain copy data. Duplicating such a value creates no cleanup obligation, so
 // copy propagates through it structurally. Views, capabilities, and owners are
 // not plain data — aggregates holding them keep their own regimes — and a type
 // that declares an explicit deinit stays move-only because the declared
@@ -6541,6 +6545,11 @@ func (c *Checker) isPlainDataType(typeName string, seen map[string]bool) bool {
 		return true
 	}
 	if c.enums[typeName] != nil || c.errorSets[typeName] != nil {
+		return true
+	}
+	// An arena handle is an opaque ID; the arena owns the value, so
+	// duplicating the ID creates no cleanup obligation.
+	if strings.HasPrefix(typeName, "std::arena::Handle<") {
 		return true
 	}
 	// seen holds the current recursion path only: a revisit is a recursive

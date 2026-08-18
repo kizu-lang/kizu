@@ -46,6 +46,7 @@ go test ./...
 | mutable borrow parameter | `mutable_borrow.kizu` | `&var` updates through checked field access |
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
+| handles are copy IDs | `arena_dag.kizu` | two parents share one child and the handle stays usable |
 | `at_mut` through a `&var` parameter | `std_map_at_mut_helper.kizu` | moves counter-update logic into a helper taking the map by `&var` |
 | `at_mut` on an owner's container field | `std_array_at_mut_field.kizu` | a `&var self` method captures `self.users.at_mut(id)` and writes in place |
 | borrow-optional return accessors | `borrow_accessor.kizu` | `fn (self: &var Registry) user(id) -> ?&var User` feeds the caller's capture |
@@ -149,8 +150,8 @@ single source file. Run them with `kizu check <package-root>`.
 | arena deinit needs an owned local receiver | `negative/arena_deinit_wrong_receiver.kizu`, `negative/arena_deinit_borrowed_receiver.kizu`, `negative/arena_deinit_temporary_receiver.kizu`, `negative/arena_deinit_moved_receiver.kizu` | `receiver` |
 | defer only registers cleanup expression statements | `negative/defer_invalid_statement.kizu`, `negative/defer_non_cleanup_expr.kizu` | `defer expects` |
 | deferred cleanup obeys ownership at block exit | `negative/defer_after_move.kizu`, `negative/defer_after_explicit_deinit.kizu`, `negative/defer_cleanup_while_borrowed.kizu` | `moved value` / `deinitialized` / `borrowed` |
-| handles die with their arena | `negative/arena_handle_after_deinit.kizu` | `cannot be used after arena` |
-| handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
+| handles die with their arena | `negative/arena_handle_after_deinit.kizu`, `negative/handle_copy_after_deinit.kizu` | `cannot be used after arena` |
+| handles are tied to one arena | `negative/arena_wrong_handle.kizu`, `negative/handle_copy_wrong_arena.kizu` | `does not belong to arena` |
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |
 | handles cannot outlive their arena | `negative/arena_handle_outlive.kizu` | `cannot outlive` |

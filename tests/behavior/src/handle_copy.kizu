@@ -1,0 +1,90 @@
+import std::arena;
+import std::array;
+import std::mem;
+import std::testing;
+
+// A handle is an opaque ID into its arena; the arena owns the value, so
+// duplicating the ID creates no cleanup obligation and `Handle<T>` is copy
+// (#1605). Rebinding, storing, and passing by value all leave the source
+// binding usable, and a struct holding only handles and copy data is itself
+// copy by structural propagation (#1597).
+
+pub struct Item {
+    pub value: i64,
+}
+
+pub struct Node {
+    pub value: i64,
+    pub child: ?arena::Handle<Node>,
+}
+
+pub struct Ref {
+    pub h: arena::Handle<Item>,
+    pub weight: i64,
+}
+
+fn read_value(items: &arena::Arena<Item>, h: arena::Handle<Item>) -> i64 {
+    return items.at(h).value;
+}
+
+test "handle assignment leaves the source usable" {
+    let allocator = mem::page_allocator();
+    let items = arena::new<Item>(allocator);
+    let h = items.add(Item { value: 7 });
+    let h2 = h;
+    testing::expect_equal<i64>(14, items.at(h).value + items.at(h2).value);
+    items.deinit();
+}
+
+test "a helper takes the same handle twice" {
+    let allocator = mem::page_allocator();
+    let items = arena::new<Item>(allocator);
+    let h = items.add(Item { value: 21 });
+    testing::expect_equal<i64>(42, read_value(&items, h) + read_value(&items, h));
+    items.deinit();
+}
+
+test "two parents share one child" {
+    let allocator = mem::page_allocator();
+    let nodes = arena::new<Node>(allocator);
+    let leaf = nodes.add(Node { value: 5, child: null });
+    let a = nodes.add(Node { value: 10, child: leaf });
+    let b = nodes.add(Node { value: 20, child: leaf });
+    var total = nodes.at(leaf).value;
+    if nodes.at(a).child |c| {
+        total = total + nodes.at(c).value;
+    }
+    if nodes.at(b).child |c| {
+        total = total + nodes.at(c).value;
+    }
+    testing::expect_equal<i64>(15, total);
+    nodes.deinit();
+}
+
+test "an array holds handles as a worklist" {
+    let allocator = mem::page_allocator();
+    let nodes = arena::new<Node>(allocator);
+    defer nodes.deinit();
+    let leaf = nodes.add(Node { value: 1, child: null });
+    var work = array::new<arena::Handle<Node>>(allocator);
+    defer work.deinit();
+    try work.append(leaf);
+    try work.append(leaf);
+    var total = 0;
+    var i = 0;
+    while i < work.len() {
+        total = total + nodes.at(work.get_or_panic(i)).value;
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(2, total);
+}
+
+test "a struct holding a handle is copy" {
+    let allocator = mem::page_allocator();
+    let items = arena::new<Item>(allocator);
+    let h = items.add(Item { value: 7 });
+    let r = Ref { h: h, weight: 3 };
+    let r2 = r;
+    testing::expect_equal<i64>(17, items.at(r.h).value + items.at(r2.h).value + r.weight);
+    items.deinit();
+}

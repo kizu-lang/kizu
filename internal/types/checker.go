@@ -876,14 +876,11 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 }
 
 // optionalFieldElemAllowed reports whether ?elem may be a struct field. Plain
-// copy data and arena handles carry no cleanup obligation, so the presence tag
-// is the whole story. An optional owner would hide a conditional deinit
-// obligation inside a field, and an optional view would hide a capture from
-// the rules that read field types, so both stay out until they can be seen.
+// copy data (arena handles included) carries no cleanup obligation, so the
+// presence tag is the whole story. An optional owner would hide a conditional
+// deinit obligation inside a field, and an optional view would hide a capture
+// from the rules that read field types, so both stay out until they can be seen.
 func (c *Checker) optionalFieldElemAllowed(elem Type) bool {
-	if strings.HasPrefix(string(elem), "std::arena::Handle<") {
-		return true
-	}
 	return c.isPlainDataType(string(elem), nil)
 }
 
@@ -7046,8 +7043,8 @@ func (c *Checker) isCopyType(typ Type) bool {
 }
 
 // isPlainDataType reports whether name is plain copy data: a scalar, enum,
-// error set, or a declared struct / union whose fields and payloads are all
-// plain copy data. Duplicating such a value creates no cleanup obligation, so
+// error set, arena handle, or a declared struct / union whose fields and
+// payloads are all plain copy data. Duplicating such a value creates no cleanup obligation, so
 // copy propagates through it structurally. Views, capabilities, and owners are
 // not plain data — aggregates holding them keep their own regimes — and a type
 // that declares an explicit deinit stays move-only because the declared
@@ -7061,6 +7058,11 @@ func (c *Checker) isPlainDataType(name string, seen map[string]bool) bool {
 		return true
 	}
 	if c.enums[name] != nil || c.errorSets[name] != nil {
+		return true
+	}
+	// An arena handle is an opaque ID; the arena owns the value, so
+	// duplicating the ID creates no cleanup obligation.
+	if strings.HasPrefix(name, "std::arena::Handle<") {
 		return true
 	}
 	// seen holds the current recursion path only: a revisit is a recursive
