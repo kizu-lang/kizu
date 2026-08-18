@@ -865,12 +865,26 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
 				decl.Name, field.Name)
 		}
-		if _, ok := optionalElem(typ); ok {
-			return errorf("type error: struct field `%s.%s` cannot store an optional yet",
+		if elem, ok := optionalElem(typ); ok && !c.optionalFieldElemAllowed(elem) {
+			return errorf(
+				"type error: struct field `%s.%s` cannot store an optional owner yet;"+
+					" only plain copy data and arena handles can be optional fields",
 				decl.Name, field.Name)
 		}
 	}
 	return nil
+}
+
+// optionalFieldElemAllowed reports whether ?elem may be a struct field. Plain
+// copy data and arena handles carry no cleanup obligation, so the presence tag
+// is the whole story. An optional owner would hide a conditional deinit
+// obligation inside a field, and an optional view would hide a capture from
+// the rules that read field types, so both stay out until they can be seen.
+func (c *Checker) optionalFieldElemAllowed(elem Type) bool {
+	if strings.HasPrefix(string(elem), "std::arena::Handle<") {
+		return true
+	}
+	return c.isPlainDataType(string(elem), nil)
 }
 
 // ownedContainerBases lists the inline-stored std containers that own heap
@@ -2710,6 +2724,62 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 // fieldDeclaredType returns the full field type, including borrow prefixes.
 func fieldDeclaredType(field ast.Field) Type {
 	return Type(borrowWrappedType(field.Borrow, field.MutBorrow, typ.Text(field.TypeName)))
+}
+
+// declaredFieldType returns the declared type of a struct field by name, or
+// "" when the struct declares no such field.
+func declaredFieldType(decl *ast.StructDecl, name string) Type {
+	for _, field := range decl.Fields {
+		if field.Name == name {
+			return fieldDeclaredType(field)
+		}
+	}
+	return ""
+}
+
+// structLiteralFieldMatches reports whether a written value fits the declared
+// field type. A plain value written where the field wants `?T` wraps
+// implicitly, like a `?T` return.
+func (c *Checker) structLiteralFieldMatches(
+	expr ast.Expression,
+	env *scope,
+	want Type,
+	got Type,
+) (bool, error) {
+	if sameType(got, want) {
+		return true, nil
+	}
+	if _, isOptional := optionalElem(want); isOptional {
+		wrapped, err := c.wrapsIntoOptional(expr, want, got)
+		if err != nil || wrapped {
+			return wrapped, err
+		}
+	}
+	return c.returnValueMatchesBorrowParam(expr, env, want, got), nil
+}
+
+// structLiteralFieldValue types one written field value. `null` has no type
+// of its own; the declared optional field is its context, the same way a
+// `?T` return is.
+func (c *Checker) structLiteralFieldValue(
+	decl *ast.StructDecl,
+	typeName string,
+	field ast.FieldValue,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if _, isNull := field.Value.(*ast.NullExpr); !isNull {
+		return c.checkExpr(field.Value, env, unsafe)
+	}
+	want := declaredFieldType(decl, field.Name)
+	if want == "" {
+		return "", errorf("type error: unknown field `%s.%s`", typeName, field.Name)
+	}
+	if _, isOptional := optionalElem(want); !isOptional {
+		return "", errorf("type error: field `%s.%s` expects %s, got null",
+			typeName, field.Name, want)
+	}
+	return want, nil
 }
 
 // addBorrowSources unions src into dst.
@@ -5265,7 +5335,7 @@ func (c *Checker) checkStructLiteralExpr(
 		if _, written := values[field.Name]; written {
 			return "", errorf("type error: duplicate field `%s.%s`", expr.TypeName, field.Name)
 		}
-		got, err := c.checkExpr(field.Value, env, unsafe)
+		got, err := c.structLiteralFieldValue(decl, expr.TypeName, field, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5285,8 +5355,11 @@ func (c *Checker) checkStructLiteralExpr(
 		if err != nil {
 			return "", err
 		}
-		if !sameType(got, want) &&
-			!c.returnValueMatchesBorrowParam(exprs[field.Name], env, want, got) {
+		matches, err := c.structLiteralFieldMatches(exprs[field.Name], env, want, got)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
 			return "", errorf("type error: field `%s.%s` expects %s, got %s",
 				expr.TypeName, field.Name, want, got)
 		}
