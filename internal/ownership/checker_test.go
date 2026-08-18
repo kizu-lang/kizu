@@ -856,6 +856,211 @@ fn main() {
 	}
 }
 
+// TestCheckRejectsArenaParamHandleMismatch checks the caller re-derives the
+// arena/handle pairing from a helper's signature (ADR-0098): when a borrowed
+// `Arena<T>` and a by-value `Handle<T>` pair up exactly once and both call
+// arguments have known origins, a confusion is rejected at the call site.
+func TestCheckRejectsArenaParamHandleMismatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "shared borrow helper",
+			source: `struct User { name: []u8 }
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
+    let alice = left.add(User { name: "alice" });
+    show(&right, alice);
+}`,
+			want: "handle `alice` does not belong to arena `right`",
+		},
+		{
+			name: "mutable borrow helper",
+			source: `struct User { name: []u8 }
+fn touch(users: &var std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    if users.at_mut(user) |u| {
+        u.name = "bob";
+    }
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    var right = std::arena::new<User>(allocator);
+    let alice = left.add(User { name: "alice" });
+    touch(right, alice);
+}`,
+			want: "handle `alice` does not belong to arena `right`",
+		},
+		{
+			name: "inline add argument",
+			source: `struct User { name: []u8 }
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
+    show(&right, left.add(User { name: "alice" }));
+}`,
+			want: "handle from `left` does not belong to arena `right`",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsArenaParamHandleMismatchOtherForms checks the derived
+// pairing also fires through generic instantiation and impl method calls.
+func TestCheckRejectsArenaParamHandleMismatchOtherForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "generic helper",
+			source: `struct User { name: []u8 }
+fn show<T>(items: &std::arena::Arena<T>, item: std::arena::Handle<T>) -> void {
+    print(items.at(item).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
+    let alice = left.add(User { name: "alice" });
+    show<User>(&right, alice);
+}`,
+			want: "handle `alice` does not belong to arena `right`",
+		},
+		{
+			name: "method helper",
+			source: `struct User { name: []u8 }
+struct Viewer { id: i64 }
+fn (self: &Viewer) show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
+    let alice = left.add(User { name: "alice" });
+    let viewer = Viewer { id: 1 };
+    viewer.show(&right, alice);
+}`,
+			want: "handle `alice` does not belong to arena `right`",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsArenaParamHandleUnknowns keeps the derived pairing lenient
+// where a side is unknown or the signature is ambiguous: the contract chains
+// through forwarding helpers, and a signature with two arenas of the same T
+// derives nothing.
+func TestCheckAcceptsArenaParamHandleUnknowns(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "forwarded arena chains the contract",
+			source: `struct User { name: []u8 }
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn outer(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    show(users, user);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let users = std::arena::new<User>(allocator);
+    let alice = users.add(User { name: "alice" });
+    outer(&users, alice);
+    users.deinit();
+}`,
+		},
+		{
+			name: "two arenas of the same T derive nothing",
+			source: `struct User { name: []u8 }
+fn pick(
+    a: &std::arena::Arena<User>,
+    b: &std::arena::Arena<User>,
+    user: std::arena::Handle<User>,
+) -> void {
+    print(a.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let left = std::arena::new<User>(allocator);
+    let right = std::arena::new<User>(allocator);
+    let alice = left.add(User { name: "alice" });
+    pick(&left, &right, alice);
+    left.deinit();
+    right.deinit();
+}`,
+		},
+		{
+			name: "matching field arena passes",
+			source: `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let registry = Registry { users: std::arena::new<User>(allocator) };
+    let alice = registry.users.add(User { name: "alice" });
+    show(&registry.users, alice);
+    registry.deinit();
+}`,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := checkSource(tt.source); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestCheckRejectsArenaFieldParamHandleMismatch checks the derived pairing
+// also sees an arena lent from one direct owner field.
+func TestCheckRejectsArenaFieldParamHandleMismatch(t *testing.T) {
+	source := `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+fn (self: Registry) deinit() -> void {
+    self.users.deinit();
+}
+fn show(users: &std::arena::Arena<User>, user: std::arena::Handle<User>) -> void {
+    print(users.at(user).name);
+}
+fn main() {
+    let allocator = std::mem::page_allocator();
+    let registry = Registry { users: std::arena::new<User>(allocator) };
+    let stray = std::arena::new<User>(allocator);
+    let alice = stray.add(User { name: "alice" });
+    show(&registry.users, alice);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "handle `alice` does not belong to arena `registry.users`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsArenaHandleMoveErrors checks arena move diagnostics.
 func TestCheckRejectsArenaHandleMoveErrors(t *testing.T) {
 	cases := []struct {

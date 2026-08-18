@@ -1513,6 +1513,11 @@ core arena の構築は明示 allocator capability を要求し、
   borrow で受けた arena や field から読んだ handle は由来不明として通り、
   契約は署名が運ぶ(ADR-0098)。由来不明の handle が範囲外を指した場合、
   `at_mut` は null を返し、`at` は runtime error で停止する
+* 署名に借用 `Arena<T>` 引数と値渡し `Handle<T>` 引数が同じ `T` で
+  1 つずつだけ現れる場合、caller はその組を「この handle はこの arena の
+  もの」という契約として署名から導出し、call site で両引数の由来が判明して
+  いれば一致を検査する。片方でも由来不明なら通り、契約は次の署名に連鎖する。
+  同じ `T` の arena 引数が複数あるなど組が曖昧な署名からは導出しない
 
 `at_mut` は handle の指す値への borrow optional `?&var T` を返し、capture
 条件だけが消費できます(§7)。`at_mut` は mutable な受け手(`var` binding

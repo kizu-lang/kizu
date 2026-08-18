@@ -3001,6 +3001,9 @@ func (c *Checker) checkUserCall(
 		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
+	if err := c.checkCallHandlePairing(fn.params, nil, args, env); err != nil {
+		return "", err
+	}
 	// A tied-allocator factory call is only legal where something ties its
 	// result (the let recognizer, a param-rooted return — those pass
 	// sanctioned); anywhere else the tie would silently drop.
@@ -4179,6 +4182,9 @@ func (c *Checker) checkGenericUserTypeApply(
 	}
 	subst, err := c.genericCallSubst(name, fn, typeArg)
 	if err != nil {
+		return "", true, err
+	}
+	if err := c.checkCallHandlePairing(fn.params, subst, args, env); err != nil {
 		return "", true, err
 	}
 	for idx, arg := range args {
@@ -5768,6 +5774,9 @@ func (c *Checker) checkImplMethodArgs(
 	call := &functionInfo{
 		name: method.name, sig: method.sig, params: method.params[1:], body: method.body,
 	}
+	if err := c.checkCallHandlePairing(call.params, nil, args, env); err != nil {
+		return err
+	}
 	receiverMut := method.params[0].mutBorrow
 	if receiverMut {
 		receiver.activeBorrows++
@@ -5913,6 +5922,120 @@ func (c *Checker) knownHandleProvenance(expr ast.Expression, env *scope) int {
 		}
 	}
 	return 0
+}
+
+// arenaHandlePair names the parameter indices of one derived contract: the
+// handle argument must come from the arena argument.
+type arenaHandlePair struct {
+	arena  int
+	handle int
+}
+
+// arenaHandlePairs derives handle-pairing contracts from a signature, the
+// same division of labor borrow provenance uses (ADR-0098: the callee trusts
+// the signature, the caller re-derives the contract from it). A pair exists
+// when a borrowed `Arena<T>` parameter and a by-value `Handle<T>` parameter
+// appear for the same T exactly once each; any other shape — repeated T, a
+// by-value arena, a borrowed handle — is ambiguous and derives nothing.
+func arenaHandlePairs(params []paramInfo, subst map[string]string) []arenaHandlePair {
+	const ambiguous = -1
+	note := func(m map[string]int, elem string, idx int, eligible bool) {
+		if _, seen := m[elem]; seen || !eligible {
+			m[elem] = ambiguous
+			return
+		}
+		m[elem] = idx
+	}
+	resolved := make([]string, len(params))
+	arenas := map[string]int{}
+	handles := map[string]int{}
+	for idx, param := range params {
+		typeName := param.typeName
+		if subst != nil {
+			typeName = substituteOwnershipType(typeName, subst)
+		}
+		resolved[idx] = typeName
+		base, elem, ok := splitGenericType(typeName)
+		if !ok {
+			continue
+		}
+		switch base {
+		case "std::arena::Arena":
+			note(arenas, elem, idx, param.borrow)
+		case "std::arena::Handle":
+			note(handles, elem, idx, !param.borrow)
+		}
+	}
+	pairs := []arenaHandlePair{}
+	for idx := range params {
+		_, elem, ok := splitGenericType(resolved[idx])
+		if !ok {
+			continue
+		}
+		handleIdx, ok := handles[elem]
+		if !ok || handleIdx != idx {
+			continue
+		}
+		arenaIdx, ok := arenas[elem]
+		if !ok || arenaIdx == ambiguous {
+			continue
+		}
+		pairs = append(pairs, arenaHandlePair{arena: arenaIdx, handle: idx})
+	}
+	return pairs
+}
+
+// checkCallHandlePairing enforces derived arena/handle contracts at a call
+// site where both origins are visible. An unknown side — the caller itself
+// received the arena or handle — passes, and the contract chains to the next
+// signature (ADR-0098).
+func (c *Checker) checkCallHandlePairing(
+	params []paramInfo,
+	subst map[string]string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	for _, pair := range arenaHandlePairs(params, subst) {
+		arena := c.arenaArgBinding(args[pair.arena], env)
+		if arena == nil || arena.arenaID == 0 {
+			continue
+		}
+		if err := c.checkKnownHandleProvenance(arena, args[pair.handle], env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// arenaArgBinding resolves the arena identity an argument lends, if visible:
+// a bare or &-prefixed local, or one direct owner field. Anything else has no
+// visible identity and resolves to nil.
+func (c *Checker) arenaArgBinding(expr ast.Expression, env *scope) *binding {
+	if prefix, ok := borrowPrefix(expr); ok {
+		expr = prefix.Right
+	}
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		value, ok := env.lookup(e.Name)
+		if !ok {
+			return nil
+		}
+		return value
+	case *ast.FieldExpr:
+		if e.Namespace {
+			return nil
+		}
+		direct, err := c.directFieldReceiver(e, env)
+		if err != nil {
+			return nil
+		}
+		base, _, ok := splitGenericType(direct.typeName)
+		if !ok || base != "std::arena::Arena" {
+			return nil
+		}
+		return c.bindingForDirectFieldReceiver(direct)
+	}
+	return nil
 }
 
 // activateBorrowArgs marks identifier arguments that are borrowed for this call.
