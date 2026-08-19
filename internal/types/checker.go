@@ -1710,8 +1710,11 @@ func (c *Checker) checkStringViewInitializer(
 			kind, field.Name, len(call.Args))
 	}
 	if mutable {
-		ident, ok := field.Receiver.(*ast.IdentExpr)
-		if !ok || !(env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name)) {
+		// A `String` reached through a field path is writable when the local
+		// at the root of that path is, which is the rule every other `&var`
+		// position reads (ADR-0111).
+		place, ok := mutablePlaceBase(field.Receiver)
+		if !ok || !(env.isMutable(place.Name) || env.isMutBorrowed(place.Name)) {
 			return nil, mutable, true, errorf(
 				"type error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
 		}

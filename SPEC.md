@@ -2363,7 +2363,11 @@ source に残す唯一の手段です。`std::mem::Limit` は確保上限の uni
 
 **view を返す accessor.** `String.as_bytes` は owned buffer への local
 read-only view、`as_mut_bytes` は writable view(`&var []u8`)です。
-どちらも戻り値を local binding に束縛する必要があります。read-only view が
+どちらも戻り値を local binding に束縛する必要があります。receiver は local
+binding のほか、そこを root とする field path(`owner.field.as_bytes()`)を
+書けます: このとき borrow は root の該当 path に付き、その path に重なる操作と
+root 全体の move が view の最終使用まで待ちます(§9)。`as_mut_bytes` は root が
+mutable であることを要求します。read-only view が
 生きている間は `append_bytes` / `append_byte` / `truncate` / `clear` /
 `deinit` を禁止します。writable view は mutable binding の String からだけ
 作れ、生きている間 String は exclusive borrow です —— すべての method 呼び出し、
