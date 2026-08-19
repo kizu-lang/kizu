@@ -1,6 +1,6 @@
 # ADR-0113: structural reflection は comptime 専用型ではなく組み込みの式の形にする
 
-Status: 採用(方針確定・実装は #1078 で続く)
+Status: 採用
 
 Issue: #1078
 
@@ -139,12 +139,18 @@ collection element / return value として保持できない」は**そのま�
 
 ## 影響
 
-- SPEC §13 に `comptime for`、`std::meta` の形、`f` の位置規則を追加
-- comptime expression の評価対象に `is_struct` / `is_optional` の組み込み形を追加
-- `internal/types` / `internal/ownership`: instantiation 時に `comptime for` を
-  展開し、各反復を検査する。`field<T, f>` は既存の field path borrow に落とす
-- `std::json` に `encode<T>` を足せるようになる。対象は所有の木(値・struct・
-  `Box`・`Array`・`?T`・`Map`)で、`Handle<T>` は共有参照のため compile error
+- SPEC §13.1 に `comptime for`、`std::meta` の形、capture の位置規則を追加
+- comptime expression の評価対象に `is_*` の組み込み形を追加
+- 形の名前と arity は `internal/stdmeta` が 1 つだけ持つ。3 phase がそこを
+  読む。名前表を 3 回書くと、増やしたときに 1 箇所だけ古いという状態を
+  作れてしまう
+- parser / project(qualify)/ types / ownership / ir に `comptime for` の
+  arm を足す。`comptime if` と同じく、各 phase が自前で展開して通常の walker
+  に流す。AST 書き換えの事前 phase は作っていない
+- `field<T, f>` は合成した field path に落とし、既存の borrow 追跡がそのまま
+  効く。新しい borrow 規則は入っていない
+- `std::json::encode<T>` が乗った。対象は所有の木(値・struct・`Box`・
+  `Array`・`?T`・`Map`)で、`Handle<T>` は共有参照のため compile error
 - `partial<T>` と `decode<T>` は本 ADR の対象外(#1626)
 
 ## 実装が示したこと

@@ -158,6 +158,9 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 	case stdmeta.IsMap:
 		_, ok := mapValueType(subject)
 		return ok, nil
+	case stdmeta.HasPublicFields:
+		fields, err := l.publicFields(subject)
+		return err == nil && len(fields) > 0, nil
 	default:
 		return false, fmt.Errorf("ir error: `%s` is not a predicate", form)
 	}

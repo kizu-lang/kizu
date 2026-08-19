@@ -310,6 +310,9 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 		return metaGenericBase(string(subject)) == "std::mem::Box", nil
 	case stdmeta.IsMap:
 		return metaGenericBase(string(subject)) == "std::map::Map", nil
+	case stdmeta.HasPublicFields:
+		fields, err := c.publicFields(string(subject))
+		return err == nil && len(fields) > 0, nil
 	default:
 		return false, errorf("comptime error: `%s` is not a predicate", form)
 	}

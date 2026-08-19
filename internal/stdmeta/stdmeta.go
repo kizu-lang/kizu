@@ -29,6 +29,11 @@ const (
 	IsBox Form = "std::meta::is_box"
 	// IsMap reports whether its type argument is `std::map::Map<K, V>`.
 	IsMap Form = "std::meta::is_map"
+	// HasPublicFields reports whether a struct has any public field. A type
+	// whose state is all private looks like an empty object to a walk, so a
+	// walk that means to carry data asks this before treating one as a
+	// destination.
+	HasPublicFields Form = "std::meta::has_public_fields"
 	// Element names what a container type holds.
 	Element Form = "std::meta::element"
 	// PublicFields lists a struct's public fields in declaration order.
@@ -58,17 +63,18 @@ type Shape struct {
 }
 
 var forms = map[Form]Shape{
-	IsStruct:     {StaticArgs: 1},
-	IsOptional:   {StaticArgs: 1},
-	IsArray:      {StaticArgs: 1},
-	IsBox:        {StaticArgs: 1},
-	IsMap:        {StaticArgs: 1},
-	Element:      {StaticArgs: 1, Type: true},
-	PublicFields: {StaticArgs: 1},
-	FieldName:    {StaticArgs: 2, Capture: true},
-	FieldType:    {StaticArgs: 2, Capture: true, Type: true},
-	Field:        {StaticArgs: 2, Capture: true, Args: 1},
-	Unsupported:  {StaticArgs: 1},
+	IsStruct:        {StaticArgs: 1},
+	IsOptional:      {StaticArgs: 1},
+	IsArray:         {StaticArgs: 1},
+	IsBox:           {StaticArgs: 1},
+	IsMap:           {StaticArgs: 1},
+	HasPublicFields: {StaticArgs: 1},
+	Element:         {StaticArgs: 1, Type: true},
+	PublicFields:    {StaticArgs: 1},
+	FieldName:       {StaticArgs: 2, Capture: true},
+	FieldType:       {StaticArgs: 2, Capture: true, Type: true},
+	Field:           {StaticArgs: 2, Capture: true, Args: 1},
+	Unsupported:     {StaticArgs: 1},
 }
 
 // Lookup reports the shape of a form, and whether name is one at all.
@@ -82,7 +88,7 @@ func Lookup(name string) (Shape, bool) {
 // operators of SPEC §13.
 func Predicate(name string) bool {
 	switch Form(name) {
-	case IsStruct, IsOptional, IsArray, IsBox, IsMap:
+	case IsStruct, IsOptional, IsArray, IsBox, IsMap, HasPublicFields:
 		return true
 	default:
 		return false

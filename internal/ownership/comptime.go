@@ -160,6 +160,8 @@ func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
 		return metaGenericBase(subject) == "std::mem::Box", true
 	case stdmeta.IsMap:
 		return metaGenericBase(subject) == "std::map::Map", true
+	case stdmeta.HasPublicFields:
+		return len(c.structPublicOrder[subject]) > 0, true
 	default:
 		return false, false
 	}

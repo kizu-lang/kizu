@@ -128,6 +128,10 @@ byte 列は決定的に escape する(`"`、`\`、newline、CR、tab は 2 文�
 
 - method 戻り値の borrow provenance が入ったとき、`finish_into` を
   `finish() -> []u8` に戻す
-- `encode<T>` を入れるとき、reflection 側は検査なしの内部経路を使う
-  (#1078)。対象は所有の木(値・struct・`Box`・`Array`・`?T`・`Map`)に
-  限り、`Handle<T>` は共有参照で JSON の木と対応しないため compile error
+- `encode<T>` は ADR-0113 の structural reflection の上に入った。対象は
+  予定どおり所有の木(値・struct・`Box`・`Array`・`?T`・`Map`)で、
+  `Handle<T>` は共有参照で JSON の木と対応しないため compile error。
+  実装は本 ADR の streaming API をそのまま使い、`write_key` のような
+  key 単体の入口は足していない —— key と value の対を壊さないため、
+  名前を運ぶ既存の入口(`begin_object_field` / `write_*_field`)だけで
+  組んでいる
