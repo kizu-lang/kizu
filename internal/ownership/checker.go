@@ -26,6 +26,10 @@ type Checker struct {
 	// structPublicOrder lists each struct's public fields in declaration order,
 	// which is what `std::meta::public_fields` walks.
 	structPublicOrder map[string][]string
+	// checkedInstances records the generic instantiations already checked, and
+	// instantiationDepth counts those open above the current one (#1627).
+	checkedInstances   map[string]bool
+	instantiationDepth int
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open. A capture is not a value, so it is not a scope binding.
 	metaFields      map[string]metaField
@@ -164,6 +168,7 @@ func New() *Checker {
 
 		structPublicOrder: map[string][]string{},
 		metaFields:        map[string]metaField{},
+		checkedInstances:  map[string]bool{},
 	}
 }
 
@@ -4266,6 +4271,11 @@ func (c *Checker) genericCallSubst(
 
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
+	done, err := c.enterInstantiation(fn, subst)
+	if err != nil || done {
+		return err
+	}
+	defer func() { c.instantiationDepth-- }()
 	env := newScope(nil)
 	if err := c.defineParams(fn, env, subst); err != nil {
 		return err
@@ -4285,6 +4295,42 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 		c.typeArgValues = previousTypeArgValues
 	}()
 	return c.checkBlock(fn.body, env)
+}
+
+// maxInstantiationDepth bounds how deep generic instantiation may nest, for
+// the reason the type checker's bound of the same name gives (#1627). The two
+// checkers walk the same instantiations, so they carry the same bound.
+const maxInstantiationDepth = 64
+
+// enterInstantiation records one instantiation and reports whether it has
+// already been checked.
+func (c *Checker) enterInstantiation(fn *functionInfo, subst map[string]string) (bool, error) {
+	args := make([]string, 0, len(subst))
+	for _, param := range fn.sig.TypeParamNames() {
+		args = append(args, subst[param])
+	}
+	key := fn.name + "<" + strings.Join(args, ", ") + ">"
+	if c.checkedInstances[key] {
+		return true, nil
+	}
+	if c.instantiationDepth >= maxInstantiationDepth {
+		return true, errorf(
+			"move error: generic instantiation nested deeper than %d at `%s`",
+			maxInstantiationDepth, elideTypeText(key))
+	}
+	c.checkedInstances[key] = true
+	c.instantiationDepth++
+	return false, nil
+}
+
+// elideTypeText shortens a spelling for a diagnostic, so a type that grew past
+// the bound does not bury the sentence that says what went wrong.
+func elideTypeText(text string) string {
+	const budget = 60
+	if len(text) <= budget*2 {
+		return text
+	}
+	return text[:budget] + " ... " + text[len(text)-budget:]
 }
 
 // checkGenericWrapperTypeArgs validates std wrapper-specific static ownership contracts.

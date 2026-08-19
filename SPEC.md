@@ -2016,7 +2016,9 @@ format string など、type 以外の comptime value が必要になった場合
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
 明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /
-borrow check します。static 引数は type だけなので、`T` は instantiated body
+borrow check します。同じ関数と同じ static 引数の組は 1 回だけ検査します。
+instantiation の入れ子は 64 段までで、超えると診断になります。呼ぶたびに
+static 引数が育つ body は同じ組に戻らないため、上限がなければ検査が止まりません。static 引数は type だけなので、`T` は instantiated body
 内で comptime-only の `type` 値として扱います。`type` 値は runtime local、field、
 collection element、return value として保持できません。
 

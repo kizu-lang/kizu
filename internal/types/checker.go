@@ -78,6 +78,14 @@ type Checker struct {
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
+	// checkedInstances records the generic instantiations already checked, by
+	// the same key. One instance means one body with one set of static
+	// arguments, so checking it twice can only reach the same answer.
+	checkedInstances map[string]bool
+	// instantiationDepth counts the generic instantiations open above the one
+	// being checked, which is what bounds a body whose own calls grow their
+	// type argument (issue #1627).
+	instantiationDepth int
 	// deinitOwners marks the base type names whose values carry a deinit
 	// contract, seeded from ast.DeinitOwners — the one definition of owner-ness.
 	deinitOwners map[string]bool
@@ -116,6 +124,7 @@ func New() *Checker {
 		impls:            map[string]map[string]*functionType{},
 		declaredTypes:    map[string]bool{},
 		checkedStdBodies: map[string]bool{},
+		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
 	}
 }
@@ -4570,6 +4579,11 @@ func isIdentifierText(text string) bool {
 
 // checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
+	done, err := c.enterInstantiation(fn, subst)
+	if err != nil || done {
+		return err
+	}
+	defer func() { c.instantiationDepth-- }()
 	env := newScope(nil)
 	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
@@ -4590,6 +4604,25 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	if err := c.revalidateSubstituted(returnType); err != nil {
 		return err
 	}
+	defer c.enterInstanceContext(fn, subst, staticParams, returnType)()
+	returns, err := c.checkBlock(fn.body, env, returnType, nil)
+	if err != nil {
+		return err
+	}
+	if returnType != typeVoid && !returns {
+		return errorf("type error: function `%s` must return %s", fn.name, returnType)
+	}
+	return nil
+}
+
+// enterInstanceContext makes one instantiation the body being checked, and
+// returns the call that puts back what was current before it.
+func (c *Checker) enterInstanceContext(
+	fn *functionType,
+	subst map[string]Type,
+	staticParams map[string]Type,
+	returnType Type,
+) func() {
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -4604,7 +4637,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	c.typeArgValues = subst
 	c.staticParams = staticParams
 	c.loopLabels = nil
-	defer func() {
+	return func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
@@ -4612,15 +4645,55 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		c.typeArgValues = previousTypeArgValues
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
-	}()
-	returns, err := c.checkBlock(fn.body, env, returnType, nil)
-	if err != nil {
-		return err
 	}
-	if returnType != typeVoid && !returns {
-		return errorf("type error: function `%s` must return %s", fn.name, returnType)
+}
+
+// maxInstantiationDepth bounds how deep generic instantiation may nest. A body
+// whose own calls grow their type argument never repeats an instance, so no
+// memo stops it and the checker would run forever; a bound turns that into a
+// diagnostic (#1627). Reflection walks nest by struct depth, so real programs
+// stay far below this.
+const maxInstantiationDepth = 64
+
+// enterInstantiation records one instantiation and reports whether it has
+// already been checked. An instance is one body with one set of static
+// arguments, so the second visit can only reach the same answer -- which is
+// also what stops a body that reaches itself.
+func (c *Checker) enterInstantiation(fn *functionType, subst map[string]Type) (bool, error) {
+	key := instanceKey(fn, subst)
+	if c.checkedInstances[key] {
+		return true, nil
 	}
-	return nil
+	if c.instantiationDepth >= maxInstantiationDepth {
+		return true, errorf(
+			"type error: generic instantiation nested deeper than %d at `%s`\n"+
+				"help: each call grew its static argument, so no instance repeats",
+			maxInstantiationDepth, elideTypeText(key))
+	}
+	c.checkedInstances[key] = true
+	c.instantiationDepth++
+	return false, nil
+}
+
+// elideTypeText shortens a spelling for a diagnostic. A type that grew past
+// the instantiation bound is thousands of characters of nesting, and printing
+// all of it buries the sentence that says what went wrong.
+func elideTypeText(text string) string {
+	const budget = 60
+	if len(text) <= budget*2 {
+		return text
+	}
+	return text[:budget] + " ... " + text[len(text)-budget:]
+}
+
+// instanceKey names one instantiation: the body, and what its static
+// parameters were bound to, in declaration order.
+func instanceKey(fn *functionType, subst map[string]Type) string {
+	args := make([]Type, 0, len(subst))
+	for _, param := range fn.sig.TypeParamNames() {
+		args = append(args, subst[param])
+	}
+	return fn.name + "<" + joinTypes(args) + ">"
 }
 
 // parseGenericWrapperTypeArgs validates static type arguments for wrappers.
