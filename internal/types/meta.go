@@ -134,7 +134,9 @@ func (c *Checker) resolveMetaTypeText(text string) (string, error) {
 		return text, nil
 	}
 	for idx, arg := range args {
-		resolved, err := c.resolveMetaTypeText(arg)
+		// A form's own arguments carry the type parameters of the body being
+		// instantiated, so they are bound before the form is resolved.
+		resolved, err := c.resolveMetaTypeText(string(substituteTypeParams(Type(arg), c.typeArgValues)))
 		if err != nil {
 			return "", err
 		}
@@ -273,9 +275,25 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 	case stdmeta.IsOptional:
 		_, ok := optionalElem(subject)
 		return ok, nil
+	case stdmeta.IsArray:
+		return metaGenericBase(string(subject)) == "std::array::Array", nil
+	case stdmeta.IsBox:
+		return metaGenericBase(string(subject)) == "std::mem::Box", nil
+	case stdmeta.IsMap:
+		return metaGenericBase(string(subject)) == "std::map::Map", nil
 	default:
 		return false, errorf("comptime error: `%s` is not a predicate", form)
 	}
+}
+
+// metaGenericBase names the container a spelling applies, or "" for a type
+// that applies none.
+func metaGenericBase(typeName string) string {
+	open := strings.IndexByte(typeName, '<')
+	if open < 0 || !strings.HasSuffix(typeName, ">") {
+		return ""
+	}
+	return typeName[:open]
 }
 
 // borrowElem reads the type behind a borrow spelling.

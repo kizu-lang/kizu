@@ -149,6 +149,15 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 	case stdmeta.IsOptional:
 		_, ok := typ.OptionalElem(subject)
 		return ok, nil
+	case stdmeta.IsArray:
+		_, ok := arrayElementType(subject)
+		return ok, nil
+	case stdmeta.IsBox:
+		_, ok := boxElementType(subject)
+		return ok, nil
+	case stdmeta.IsMap:
+		_, ok := mapValueType(subject)
+		return ok, nil
 	default:
 		return false, fmt.Errorf("ir error: `%s` is not a predicate", form)
 	}

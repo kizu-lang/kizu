@@ -2108,6 +2108,9 @@ comptime 専用の**型**は持ちません(ADR-0113)。
 ```text
 std::meta::is_struct<T>()          -> bool    comptime-only
 std::meta::is_optional<T>()        -> bool    comptime-only
+std::meta::is_array<T>()           -> bool    comptime-only
+std::meta::is_box<T>()             -> bool    comptime-only
+std::meta::is_map<T>()             -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
 std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
 std::meta::field_name<T, f>()      -> []u8    comptime-only
@@ -2115,15 +2118,18 @@ std::meta::field_type<T, f>                   comptime-only、型の位置に書
 std::meta::field<T, f>(value: &T)  -> &F
 ```
 
-`is_struct` と `is_optional` は `comptime if` の条件に書けます。
-`comptime` expression はこの 2 つの組み込み形も評価します。
+`is_*` は `comptime if` の条件に書けます。`comptime` expression はこれらの
+組み込み形も評価します。述語が答える型の種類は std が持つ container で
+閉じています。ユーザーは generic 型を宣言できない(§7)ので、この集合の外に
+新しい種類は現れません。
 
 `field_name` の値は source の field 名を持つ `[]u8` literal です。static
 storage を指し、確保は起きません。
 
 `element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
 返します。`field_type<T, f>` はその field の型を返します。どちらも型の位置に
-書けるので、static 引数として渡して再帰できます。
+書くので、型値として比べるときは `type<std::meta::element<T>>` と綴ります。
+static 引数にも書けるので、そのまま再帰できます。
 
 ```kizu
 fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {

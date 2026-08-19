@@ -73,7 +73,7 @@ func (l *lowerer) constTypeName(expr ast.Expression) (string, bool) {
 			return bound, true
 		}
 	case *ast.TypeExpr:
-		return e.TypeName, true
+		return l.resolveType(e.TypeName), true
 	}
 	return "", false
 }

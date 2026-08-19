@@ -23,6 +23,12 @@ const (
 	IsStruct Form = "std::meta::is_struct"
 	// IsOptional reports whether its type argument is `?T`.
 	IsOptional Form = "std::meta::is_optional"
+	// IsArray reports whether its type argument is `std::array::Array<T>`.
+	IsArray Form = "std::meta::is_array"
+	// IsBox reports whether its type argument is `std::mem::Box<T>`.
+	IsBox Form = "std::meta::is_box"
+	// IsMap reports whether its type argument is `std::map::Map<K, V>`.
+	IsMap Form = "std::meta::is_map"
 	// Element names what a container type holds.
 	Element Form = "std::meta::element"
 	// PublicFields lists a struct's public fields in declaration order.
@@ -48,6 +54,9 @@ type Shape struct {
 var forms = map[Form]Shape{
 	IsStruct:     {StaticArgs: 1},
 	IsOptional:   {StaticArgs: 1},
+	IsArray:      {StaticArgs: 1},
+	IsBox:        {StaticArgs: 1},
+	IsMap:        {StaticArgs: 1},
 	Element:      {StaticArgs: 1, Type: true},
 	PublicFields: {StaticArgs: 1},
 	FieldName:    {StaticArgs: 2, Capture: true},
@@ -66,7 +75,7 @@ func Lookup(name string) (Shape, bool) {
 // operators of SPEC §13.
 func Predicate(name string) bool {
 	switch Form(name) {
-	case IsStruct, IsOptional:
+	case IsStruct, IsOptional, IsArray, IsBox, IsMap:
 		return true
 	default:
 		return false

@@ -1,6 +1,8 @@
 package ownership
 
 import (
+	"strings"
+
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -104,6 +106,16 @@ func (c *Checker) resolveMetaTypeText(text string) string {
 	default:
 		return text
 	}
+}
+
+// metaGenericBase names the container a spelling applies, or "" for a type
+// that applies none.
+func metaGenericBase(typeName string) string {
+	open := strings.IndexByte(typeName, '<')
+	if open < 0 || !strings.HasSuffix(typeName, ">") {
+		return ""
+	}
+	return typeName[:open]
 }
 
 // metaElementType names what a container holds.

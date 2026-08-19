@@ -154,6 +154,12 @@ func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
 	case stdmeta.IsOptional:
 		_, known := typ.OptionalElem(subject)
 		return known, true
+	case stdmeta.IsArray:
+		return metaGenericBase(subject) == "std::array::Array", true
+	case stdmeta.IsBox:
+		return metaGenericBase(subject) == "std::mem::Box", true
+	case stdmeta.IsMap:
+		return metaGenericBase(subject) == "std::map::Map", true
 	default:
 		return false, false
 	}
@@ -195,7 +201,8 @@ func (c *Checker) comptimeTypeValue(expr ast.Expression) (string, bool) {
 	case *ast.ComptimeExpr:
 		return c.comptimeTypeValue(e.Expr)
 	case *ast.TypeExpr:
-		return e.TypeName, e.TypeName != ""
+		name := c.instantiateTypeArgText(e.TypeName)
+		return name, name != ""
 	case *ast.IdentExpr:
 		value, ok := c.typeArgValues[e.Name]
 		return value, ok

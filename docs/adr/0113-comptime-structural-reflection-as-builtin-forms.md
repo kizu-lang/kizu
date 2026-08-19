@@ -81,6 +81,9 @@ comptime if f == other { }          // NG
 ```text
 std::meta::is_struct<T>()               -> bool     comptime-only
 std::meta::is_optional<T>()             -> bool     comptime-only
+std::meta::is_array<T>()                -> bool     comptime-only
+std::meta::is_box<T>()                  -> bool     comptime-only
+std::meta::is_map<T>()                  -> bool     comptime-only
 std::meta::element<T>                              comptime-only 型の位置
 std::meta::public_fields<T>()                      comptime-only list(comptime for 専用)
 std::meta::field_name<T, f>()           -> []u8     comptime-only
@@ -89,7 +92,9 @@ std::meta::field<T, f>(value: &T)       -> &F
 ```
 
 - `is_*` は `comptime if` の条件に書ける。そのため comptime expression の
-  評価対象に、これらの組み込み形を加える
+  評価対象に、これらの組み込み形を加える。述語の集合が閉じているのは
+  ユーザーが generic 型を宣言できないからであり、この前提が変わるときは
+  集合を見直す(再評価条件)
 - `field_name` の値は source の field 名を持つ `[]u8` literal である。
   static storage を指し、確保は起きない(原理 4)
 - `field_type<T, f>` は型の位置に書ける。`encode_value<field_type<T, f>>(...)`
@@ -140,6 +145,21 @@ collection element / return value として保持できない」は**そのま�
 - `std::json` に `encode<T>` を足せるようになる。対象は所有の木(値・struct・
   `Box`・`Array`・`?T`・`Map`)で、`Handle<T>` は共有参照のため compile error
 - `partial<T>` と `decode<T>` は本 ADR の対象外(#1626)
+
+## 実装が示した制約
+
+- **optional field は今のところ walk できない。** `?T` は static 引数に
+  書けない(ADR-0101)ので、`field_type<T, f>` が `?i64` に解決した瞬間、
+  それを次の generic に渡せない。`is_optional` と `element<?T>` は実装
+  してあるが、ADR-0101 が開くまで struct の optional field は列挙の先で
+  止まる
+- **再帰的な所有データ構造は今のところ作れない。** `Array<Box<Node>>` は
+  Box の owner payload cleanup 規則で、`?Box<Node>` は optional owner field
+  の規則で、それぞれ宣言時に拒否される。したがって reflection の再帰が
+  循環することも今はない
+- **型が無限に育つ generic 呼び出しはコンパイラが停止しない**(#1627)。
+  本 ADR の前からある instantiation の穴で、`comptime for` は新たな経路を
+  作っていない。ただし型を辿る generic を書く機会は増える
 
 ## 再評価条件
 
