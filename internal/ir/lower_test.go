@@ -926,6 +926,45 @@ fn main() -> void {
 	}
 }
 
+// TestLowerMetaConstructBuildsInOneLiteral pins the shape the form expands to:
+// one call per field, an errdefer covering the fields already built, and the
+// struct literal that consumes them. Nothing holds a half-built value, and the
+// cleanup does not outlive the literal.
+func TestLowerMetaConstructBuildsInOneLiteral(t *testing.T) {
+	module := lowerSource(t, `
+struct Names { pub first: std::string::String, pub second: std::string::String }
+fn (self: Names) deinit() -> void {
+    self.first.deinit();
+    self.second.deinit();
+    return;
+}
+fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> {
+    var out = std::string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(std::meta::field_name<T, f>());
+    return out;
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var names = try std::meta::construct<Names, field_from_name>(allocator);
+    defer names.deinit();
+    return;
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"  %2: !std::string::String = call.field_from_name.Names.first %1: Allocator\n",
+		"  %4: !std::string::String = call.field_from_name.Names.second %1: Allocator\n",
+		"  %5: std::string::String = error.try %4: !std::string::String," +
+			" cleanup call.std::string::String.deinit %3: std::string::String\n",
+		"  %6: Names = struct.new {first: %3: std::string::String," +
+			" second: %5: std::string::String}\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+}
+
 // withStdImport gives a snippet the root import a file needs to spell full std
 // paths. The snippets are about what the checker does with std types, not about
 // import lines, and a file that writes `std::mem::page_allocator` has to bring

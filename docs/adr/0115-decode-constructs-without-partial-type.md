@@ -87,6 +87,12 @@ return User { name: name, age: age };
   local を capture せず、top-level 関数名である。`<T, f>` は construct が補う。
   今の `Function` は非 generic な関数名を forward する用途なので、この補いを
   実装時に確定させる
+  —— **確定した。** `f` は `Field` static parameter として宣言する
+  (`fn decode_field<T, f: Field>(...)`)。owner はその直前に書かれた型引数で、
+  `field_type<T, f>` がその順で書かれるのに合わせた。`Field` は型引数と同じく
+  実体化キーになる(body が form を読むため)。`Function` と違い std 限定には
+  しない —— construct を使った decoder を利用者が自分で書けないと、std が
+  その利用者に対して特権を持つことになるため
 - **runtime 引数は全 field に同じものが渡る。** field ごとの差は
   `field_name<T, f>()` と `field_type<T, f>` から worker 自身が読む
 - **対象は public field を 1 つ以上持つ struct。** 持たない struct は compile

@@ -1000,10 +1000,12 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 // type.
 func (c *Checker) parseType(name string) (Type, error) {
 	// A `std::meta` form written where a type goes names a type rather than
-	// being one, so it resolves before the spelling is read (ADR-0113).
-	resolved, err := c.resolveMetaTypeText(name)
-	if err != nil {
-		return "", err
+	// being one, so it resolves before the spelling is read (ADR-0113). A form
+	// whose capture is not bound here keeps its spelling: that is a declaration,
+	// and parseMetaTypeForm is the one place that decides what to do with it.
+	resolved := name
+	if rewritten, err := c.resolveMetaTypeText(name); err == nil {
+		resolved = rewritten
 	}
 	parsed, err := typ.Parse(resolved)
 	if err != nil {
@@ -4747,7 +4749,7 @@ func (c *Checker) checkGenericInstantiation(
 // A declaration writes `std::meta::field_type<T, f>` because neither name is
 // bound where it is written; the instance is where both are.
 func (c *Checker) resolveInstanceType(declared Type) (Type, error) {
-	resolved, err := c.resolveMetaTypeText(string(declared))
+	resolved, err := c.resolveMetaTypeDeep(string(declared))
 	if err != nil {
 		return "", err
 	}

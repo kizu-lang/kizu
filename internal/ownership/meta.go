@@ -174,9 +174,62 @@ func (c *Checker) checkMetaApply(
 	case stdmeta.Field:
 		typeName, err := c.checkMetaFieldBorrow(form, staticArgs, args, env)
 		return typeName, true, err
+	case stdmeta.Construct:
+		typeName, err := c.checkMetaConstruct(staticArgs, args, env)
+		return typeName, true, err
 	default:
 		return "", true, errorf("move error: `%s` cannot be called", name)
 	}
+}
+
+// checkMetaConstruct applies the ownership effect of
+// `std::meta::construct<T, worker>(args...)`: the code it stands for. Each
+// worker result is an owner until the struct literal takes it, and the
+// `errdefer` the expansion carries is what releases the fields already built
+// when a later worker fails. The expansion is built in one place
+// (ast.ConstructExpansion), so this reads the same statements the type checker
+// and lowering do.
+func (c *Checker) checkMetaConstruct(
+	staticArgs []string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(staticArgs) != 2 {
+		return "", errorf("move error: `%s` expects 2 static arguments", stdmeta.Construct)
+	}
+	owner := c.resolveMetaTypeText(staticArgs[0])
+	fields, err := c.publicFields(owner)
+	if err != nil {
+		return "", err
+	}
+	expansion := make([]ast.ConstructField, 0, len(fields))
+	for _, field := range fields {
+		expansion = append(expansion, ast.ConstructField{Name: field.name, Type: field.typ})
+	}
+	statements, literal := ast.ConstructExpansion(
+		owner, staticArgs[1], expansion, args, c.deinitOwners)
+	scope := env.child()
+	mark := len(c.liveErrDefers)
+	defer func() { c.liveErrDefers = c.liveErrDefers[:mark] }()
+	for _, stmt := range statements {
+		// The expansion registers cleanups the way a block does, which is the
+		// one place `errdefer` is accepted; the statements are a block in
+		// everything but the braces.
+		if errDefer, ok := stmt.(*ast.ErrDeferStmt); ok {
+			if err := c.checkErrDeferStmt(errDefer, scope); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if err := c.checkStmt(stmt, scope); err != nil {
+			return "", err
+		}
+	}
+	built, err := c.readExpr(literal, scope)
+	if err != nil {
+		return "", err
+	}
+	return "!" + built, nil
 }
 
 // checkMetaFieldBorrow borrows one field out of a borrowed struct. The borrow

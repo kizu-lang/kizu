@@ -90,6 +90,66 @@ func TestCheckRejectsCompileTimeOnlyTypeAsValue(t *testing.T) {
 	}
 }
 
+// TestCheckMetaConstruct types the form as the code it stands for: one worker
+// call per public field, then the struct literal that takes all of them.
+func TestCheckMetaConstruct(t *testing.T) {
+	source := `struct Counts { pub visits: i64, pub n: i64 }
+fn width<T, f: Field>(base: i64) -> !std::meta::field_type<T, f> {
+    return base + std::mem::len(std::meta::field_name<T, f>());
+}
+fn main() -> !void {
+    let c = try std::meta::construct<Counts, width>(100);
+    print(c.visits);
+    print(c.n);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsMetaConstruct covers what the form refuses.
+func TestCheckRejectsMetaConstruct(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "no public field",
+			source: `struct Opaque { count: i64 }
+fn make<T, f: Field>(base: i64) -> !std::meta::field_type<T, f> { return base; }
+fn main() -> !void {
+    let value = try std::meta::construct<Opaque, make>(1);
+    return;
+}`,
+			want: "has no public field to construct `Opaque` from",
+		},
+		{
+			name: "worker returns the wrong type for the field",
+			source: `struct Counts { pub visits: i64 }
+fn wrong<T, f: Field>(base: i64) -> ![]u8 { return std::meta::field_name<T, f>(); }
+fn main() -> !void {
+    let counts = try std::meta::construct<Counts, wrong>(1);
+    print(counts.visits);
+    return;
+}`,
+			want: "field `Counts.visits` expects i64",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckRejectsFieldStaticArg covers what a field token may name.
 func TestCheckRejectsFieldStaticArg(t *testing.T) {
 	cases := []struct {

@@ -145,7 +145,7 @@ func newLowerer(program *ast.Program) *lowerer {
 func (l *lowerer) resolveType(name string) string {
 	// A `std::meta` form written where a type goes resolves first: it names a
 	// type through the capture in force rather than being one (ADR-0113).
-	name = l.resolveMetaTypeText(name)
+	name = l.resolveMetaTypeDeep(name)
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}

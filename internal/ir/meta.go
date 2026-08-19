@@ -111,6 +111,9 @@ func (l *lowerer) lowerMetaApply(
 	case stdmeta.Field:
 		value, err := l.lowerMetaFieldBorrow(form, typeArg, args)
 		return value, true, err
+	case stdmeta.Construct:
+		value, err := l.lowerMetaConstruct(typeArg, args)
+		return value, true, err
 	case stdmeta.IsStruct, stdmeta.IsOptional:
 		known, err := l.metaPredicate(form, typeArg)
 		if err != nil {
@@ -137,6 +140,79 @@ func (l *lowerer) lowerMetaFieldBorrow(
 		return Value{}, fmt.Errorf("ir error: `%s` expects 1 argument, got %d", form, len(args))
 	}
 	return l.lowerFieldExpr(&ast.FieldExpr{Receiver: args[0], Name: field.name})
+}
+
+// lowerMetaConstruct lowers `std::meta::construct<T, worker>(args...)` as the
+// code it stands for. The expansion is built in one place
+// (ast.ConstructExpansion), so what is emitted here is what the two checkers
+// already read; lowering adds no rule of its own.
+//
+// The statements go in a cleanup frame of their own: the `errdefer` each owner
+// field registers protects the fields already built, and it must not outlive
+// the literal that takes them.
+func (l *lowerer) lowerMetaConstruct(typeArg string, args []ast.Expression) (Value, error) {
+	staticArgs := splitStaticArgs(typeArg)
+	if len(staticArgs) != 2 {
+		return Value{}, fmt.Errorf("ir error: `%s` expects 2 static arguments",
+			stdmeta.Construct)
+	}
+	owner := l.resolveType(staticArgs[0])
+	fields, err := l.publicFields(owner)
+	if err != nil {
+		return Value{}, err
+	}
+	expansion := make([]ast.ConstructField, 0, len(fields))
+	for _, field := range fields {
+		expansion = append(expansion, ast.ConstructField{Name: field.name, Type: field.typ})
+	}
+	statements, literal := ast.ConstructExpansion(
+		owner, staticArgs[1], expansion, args, l.deinitOwners)
+	l.deferFrames = append(l.deferFrames, nil)
+	defer func() { l.deferFrames = l.deferFrames[:len(l.deferFrames)-1] }()
+	for _, stmt := range statements {
+		// The expansion registers cleanups the way a block does, which is the
+		// one place `errdefer` is accepted; the statements are a block in
+		// everything but the braces.
+		if errDefer, ok := stmt.(*ast.ErrDeferStmt); ok {
+			if err := l.recordCleanup(errDefer.Expr, true); err != nil {
+				return Value{}, err
+			}
+			continue
+		}
+		if err := l.lowerStmt(stmt); err != nil {
+			return Value{}, err
+		}
+	}
+	built, err := l.lowerExpr(literal)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("error.ok", "!"+owner, []Value{built}, ""), nil
+}
+
+// resolveMetaTypeDeep resolves the forms inside a wrapped spelling. A worker
+// returns `!std::meta::field_type<T, f>`, so the form sits under the error
+// union rather than at the top, and the wrapper is rebuilt around what the
+// form resolved to.
+func (l *lowerer) resolveMetaTypeDeep(text string) string {
+	if resolved := l.resolveMetaTypeText(text); resolved != text {
+		return resolved
+	}
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return text
+	}
+	switch node := parsed.(type) {
+	case *typ.ErrorUnion:
+		inner := l.resolveMetaTypeDeep(node.Ok.String())
+		return (&typ.ErrorUnion{Err: node.Err, Ok: &typ.Name{Path: []string{inner}}}).String()
+	case *typ.Optional:
+		return "?" + l.resolveMetaTypeDeep(node.Elem.String())
+	case *typ.Slice:
+		return "[]" + l.resolveMetaTypeDeep(node.Elem.String())
+	default:
+		return text
+	}
 }
 
 // metaPredicate answers a compile-time predicate about a type.
