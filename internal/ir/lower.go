@@ -67,6 +67,9 @@ type lowerer struct {
 	// nextErrorCode is the next global code for an error set the program
 	// declares itself; std members keep the codes std assigns.
 	nextErrorCode int
+	// deinitOwners names the types that carry a deinit contract, seeded from
+	// ast.DeinitOwners so lowering reads the same owner-ness the checkers do.
+	deinitOwners map[string]bool
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -131,6 +134,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		genericDecls:  generics,
 		structDecls:   structs,
 		metaFields:    map[string]metaField{},
+		deinitOwners:  ast.DeinitOwners(program),
 	}
 }
 
@@ -1879,7 +1883,8 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
 		}
-		return l.emit("box.new", "!"+boxTypeName+"<"+elem+">", args, elem), nil
+		return l.releaseOwnerOnFailure(
+			l.emit("box.new", "!"+boxTypeName+"<"+elem+">", args, elem), args[1])
 	case "borrow":
 		// A returned borrow travels under the same rule any borrow return
 		// does: unions stay behind a pointer, everything else as a copy.
@@ -1939,7 +1944,11 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 // fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
 	if result, ok := arrayMethodResultType(name); ok {
-		return l.emit("array."+name, result, args, elem), nil
+		value := l.emit("array."+name, result, args, elem)
+		if name == "append" {
+			return l.releaseOwnerOnFailure(value, args[1])
+		}
+		return value, nil
 	}
 	switch name {
 	case "pop":
@@ -1980,6 +1989,35 @@ func arrayMethodResultType(name string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// releaseOwnerOnFailure gives a fallible runtime primitive the cleanup it
+// cannot run itself. The primitive takes an owner by value and stores it only
+// after the allocation succeeds, so a failure leaves the value written nowhere
+// while the caller has already moved it. The obligation is the callee's, and
+// this is where the callee can meet it: the wrapper is generic and `T` is bound
+// here, so the element's own cleanup resolves, while the runtime sees only
+// bytes and a size and could never call it.
+//
+// The wrap is `try` plus a re-wrap, so the primitive keeps the `!T` its wrapper
+// returns and the error still leaves the wrapper as an error.
+func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error) {
+	if !ast.OwnerType(l.deinitOwners, owner.Type) {
+		return result, nil
+	}
+	cleanup, err := l.cleanupFromMethod(owner, ast.CleanupMethodName(owner.Type, l.deinitOwners))
+	if err != nil {
+		return Value{}, err
+	}
+	cleanup.OnError = true
+	success := errorUnionElementType(result.Type)
+	value := l.emit("error.try", success, []Value{result}, "")
+	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = []Cleanup{cleanup}
+	args := []Value{value}
+	if success == "void" {
+		args = nil
+	}
+	return l.emit("error.ok", result.Type, args, ""), nil
 }
 
 // lowerStructLiteralExpr lowers struct construction.
