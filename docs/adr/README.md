@@ -128,3 +128,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0112: json encoder が出力を所有し、API 誤用は trap にする](0112-json-encoder-owns-output-and-traps-misuse.md)
 - [ADR-0113: structural reflection は comptime 専用型ではなく組み込みの式の形にする](0113-comptime-structural-reflection-as-builtin-forms.md)
 - [ADR-0114: errdefer は receiver が move された時点で退役する](0114-errdefer-retires-at-move.md)
+- [ADR-0115: decode は partial 型を持たず、comptime construct で組み立てる](0115-decode-constructs-without-partial-type.md)
