@@ -1,0 +1,118 @@
+import std::json;
+import std::mem;
+import std::string;
+import std::testing;
+
+// A scalar is a complete JSON document; `finish_into` appends the encoded
+// bytes into a String the caller owns.
+test "json encoder writes a scalar document" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.write_i64(42);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("42", bytes);
+}
+
+test "json encoder writes bool and null documents" {
+    let allocator = mem::page_allocator();
+    var yes = json::encoder(allocator);
+    defer yes.deinit();
+    try yes.write_bool(true);
+    var yes_out = string::new(allocator);
+    defer yes_out.deinit();
+    try yes.finish_into(yes_out);
+    let yes_bytes = yes_out.as_bytes();
+    testing::expect_equal<[]u8>("true", yes_bytes);
+
+    var nothing = json::encoder(allocator);
+    defer nothing.deinit();
+    try nothing.write_null();
+    var nothing_out = string::new(allocator);
+    defer nothing_out.deinit();
+    try nothing.finish_into(nothing_out);
+    let nothing_bytes = nothing_out.as_bytes();
+    testing::expect_equal<[]u8>("null", nothing_bytes);
+}
+
+// The comma sits between elements only, so the document closes with every
+// element separated and none trailing.
+test "json encoder separates array elements" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_array();
+    try encoder.write_i64(3);
+    try encoder.write_i64(5);
+    try encoder.write_null();
+    try encoder.end_array();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("[3,5,null]", bytes);
+}
+
+// Each nesting level tracks its own element count: the inner arrays place
+// commas independently of the outer one.
+test "json encoder nests arrays with independent commas" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_array();
+    try encoder.begin_array();
+    try encoder.end_array();
+    try encoder.begin_array();
+    try encoder.write_i64(1);
+    try encoder.write_i64(2);
+    try encoder.end_array();
+    try encoder.write_i64(9);
+    try encoder.end_array();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("[[],[1,2],9]", bytes);
+}
+
+test "json encoder writes an empty object document" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_object();
+    try encoder.end_object();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("{}", bytes);
+}
+
+// A String's bytes reach the encoder as a lent view. The encoder holds no
+// view field and returns none, so the lend ends with the call and the source
+// String stays the owner of those bytes.
+test "json encoder writes a borrowed String view" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("alice");
+    let name_bytes = name.as_bytes();
+
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_object();
+    try encoder.write_bytes_field("name", name_bytes);
+    try encoder.end_object();
+
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}

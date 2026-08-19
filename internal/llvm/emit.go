@@ -151,6 +151,7 @@ var panicEntries = map[string]panicEntry{
 	"arena_handle": {entry: "kizu_panic_arena_handle"},
 	"arena_add":    {entry: "kizu_panic_arena_add"},
 	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
+	"panic_fail":   {entry: "kizu_panic_fail", params: []string{"ptr", "i64"}},
 	"expect_int":   {entry: "kizu_panic_expect_equal_int", params: []string{"i64", "i64"}},
 	"expect_bool":  {entry: "kizu_panic_expect_equal_bool", params: []string{"i1", "i1"}},
 	"expect_bytes": {
@@ -304,6 +305,8 @@ func instrPanicEntries(instr *ir.Instr) []string {
 		return []string{"arena_add"}
 	case "test.fail":
 		return []string{"test_fail"}
+	case "panic.fail":
+		return []string{"panic_fail"}
 	case "test.expect_equal":
 		return []string{expectEntryKey(instr)}
 	default:
@@ -953,6 +956,8 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 		return e.writeUnionInstr(instr)
 	case strings.HasPrefix(instr.Op, "test."):
 		return e.writeTestInstr(instr)
+	case instr.Op == "panic.fail":
+		return e.writePanicFail(instr)
 	case strings.HasPrefix(instr.Op, "slice."):
 		return e.writeSliceInstr(instr)
 	case strings.HasPrefix(instr.Op, "error."):
@@ -1926,6 +1931,20 @@ func (e *emitter) writeCondFail(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  call void @%s(%s)\n", spec.entry, strings.Join(args, ", "))
 	e.out.WriteString("  unreachable\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	return nil
+}
+
+// writePanicFail reports an unconditional runtime failure with a message and stops.
+func (e *emitter) writePanicFail(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" {
+		return fmt.Errorf("llvm error: panic.fail expects one []u8 message")
+	}
+	ptr, length := e.writeSliceParts(localName(instr.Result.Name)+".msg",
+		e.value(instr.Args[0]).operand)
+	fmt.Fprintf(&e.out, "  call void @kizu_panic_fail(ptr %s, i64 %s, %s)\n",
+		ptr, length, strings.Join(panicPosition(instr.Span), ", "))
+	e.out.WriteString("  unreachable\n")
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
 

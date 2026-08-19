@@ -1,0 +1,241 @@
+// std::json encode v1 is an explicit streaming encoder. The caller spells
+// every begin/end and field write, and the encoder owns its output buffer.
+// API misuse (a field outside an object, an unbalanced end, a second
+// top-level value) is a bug, so it traps instead of returning a recoverable
+// error; the `!void` results only propagate allocation failures from the
+// owned output. `write_*_field` pairs the key and the value in one call, so
+// a key can never be left without a value.
+pub struct Encoder {
+    out: std::string::String,
+    // The nesting state exists to detect misuse, not to drive output. Each
+    // open container holds one bit in two i64 stacks: `kinds` records object
+    // (1) or array (0), `nonempty` records whether the container has written
+    // an element yet (comma placement). Push is *2, pop is /2, so the check
+    // area holds 62 levels; deeper nesting traps.
+    depth: i64,
+    kinds: i64,
+    nonempty: i64,
+    top_written: bool,
+}
+
+pub fn encoder(allocator: Allocator) -> Encoder {
+    return Encoder {
+        out: std::string::new(allocator),
+        depth: 0,
+        kinds: 0,
+        nonempty: 0,
+        top_written: false,
+    };
+}
+
+fn (self: &var Encoder) begin_object() -> !void {
+    try self.begin_value();
+    try self.push(1, cast<u8>(123));
+    return;
+}
+
+fn (self: &var Encoder) end_object() -> !void {
+    if self.depth == 0 or self.kinds % 2 == 0 {
+        std::internal::builtin::panic("json encoder: end_object without an open object");
+    }
+    try self.pop(cast<u8>(125));
+    return;
+}
+
+fn (self: &var Encoder) begin_array() -> !void {
+    try self.begin_value();
+    try self.push(0, cast<u8>(91));
+    return;
+}
+
+fn (self: &var Encoder) end_array() -> !void {
+    if self.depth == 0 or self.kinds % 2 == 1 {
+        std::internal::builtin::panic("json encoder: end_array without an open array");
+    }
+    try self.pop(cast<u8>(93));
+    return;
+}
+
+fn (self: &var Encoder) begin_object_field(name: []u8) -> !void {
+    try self.begin_field(name);
+    try self.push(1, cast<u8>(123));
+    return;
+}
+
+fn (self: &var Encoder) begin_array_field(name: []u8) -> !void {
+    try self.begin_field(name);
+    try self.push(0, cast<u8>(91));
+    return;
+}
+
+fn (self: &var Encoder) write_i64(value: i64) -> !void {
+    try self.begin_value();
+    try std::fmt::append_i64(self.out, value);
+    return;
+}
+
+fn (self: &var Encoder) write_bool(value: bool) -> !void {
+    try self.begin_value();
+    try std::fmt::append_bool(self.out, value);
+    return;
+}
+
+fn (self: &var Encoder) write_null() -> !void {
+    try self.begin_value();
+    try self.out.append_bytes("null");
+    return;
+}
+
+fn (self: &var Encoder) write_bytes(value: []u8) -> !void {
+    try self.begin_value();
+    try self.append_string(value);
+    return;
+}
+
+fn (self: &var Encoder) write_i64_field(name: []u8, value: i64) -> !void {
+    try self.begin_field(name);
+    try std::fmt::append_i64(self.out, value);
+    return;
+}
+
+fn (self: &var Encoder) write_bool_field(name: []u8, value: bool) -> !void {
+    try self.begin_field(name);
+    try std::fmt::append_bool(self.out, value);
+    return;
+}
+
+fn (self: &var Encoder) write_null_field(name: []u8) -> !void {
+    try self.begin_field(name);
+    try self.out.append_bytes("null");
+    return;
+}
+
+fn (self: &var Encoder) write_bytes_field(name: []u8, value: []u8) -> !void {
+    try self.begin_field(name);
+    try self.append_string(value);
+    return;
+}
+
+// finish_into checks the document is complete and appends the encoded bytes
+// into `out`. The encoder keeps its own buffer; `deinit` releases it. The
+// checker cannot yet lend a field's bytes out of a method, so v1 copies into
+// a caller buffer instead of returning a view.
+fn (self: Encoder) finish_into(out: &var std::string::String) -> !void {
+    if self.depth != 0 {
+        std::internal::builtin::panic("json encoder: finish with an open container");
+    }
+    if !self.top_written {
+        std::internal::builtin::panic("json encoder: finish before any value");
+    }
+    try out.append_string(self.out);
+    return;
+}
+
+fn (self: Encoder) deinit() -> void {
+    self.out.deinit();
+}
+
+// begin_value checks that a bare value may start here: the single top-level
+// slot or an array element. Inside an object a value needs a field name, so
+// a bare value there is misuse.
+fn (self: &var Encoder) begin_value() -> !void {
+    if self.depth == 0 {
+        if self.top_written {
+            std::internal::builtin::panic("json encoder: second top-level value");
+        }
+        self.top_written = true;
+        return;
+    }
+    if self.kinds % 2 == 1 {
+        std::internal::builtin::panic("json encoder: bare value inside an object");
+    }
+    try self.mark_element();
+    return;
+}
+
+// begin_field checks that a named field may start here (inside an object)
+// and writes the separator, the escaped name, and the colon.
+fn (self: &var Encoder) begin_field(name: []u8) -> !void {
+    if self.depth == 0 or self.kinds % 2 == 0 {
+        std::internal::builtin::panic("json encoder: field outside an object");
+    }
+    try self.mark_element();
+    try self.append_string(name);
+    try self.out.append_byte(cast<u8>(58));
+    return;
+}
+
+fn (self: &var Encoder) mark_element() -> !void {
+    if self.nonempty % 2 == 1 {
+        try self.out.append_byte(cast<u8>(44));
+    } else {
+        self.nonempty = self.nonempty + 1;
+    }
+    return;
+}
+
+fn (self: &var Encoder) push(kind: i64, open: u8) -> !void {
+    if self.depth == 62 {
+        std::internal::builtin::panic("json encoder: nesting deeper than 62 levels");
+    }
+    self.depth = self.depth + 1;
+    self.kinds = self.kinds * 2 + kind;
+    self.nonempty = self.nonempty * 2;
+    try self.out.append_byte(open);
+    return;
+}
+
+fn (self: &var Encoder) pop(close: u8) -> !void {
+    self.depth = self.depth - 1;
+    self.kinds = self.kinds / 2;
+    self.nonempty = self.nonempty / 2;
+    try self.out.append_byte(close);
+    return;
+}
+
+// append_string writes one JSON string: quoted, with the two-character JSON
+// escapes for quote, backslash, newline, carriage return, and tab, and
+// \u00XX for the remaining control bytes. Bytes are escaped
+// deterministically; encode v1 does not validate UTF-8.
+fn (self: &var Encoder) append_string(bytes: []u8) -> !void {
+    try self.out.append_byte(cast<u8>(34));
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length {
+        let byte = bytes[index];
+        if byte == cast<u8>(34) or byte == cast<u8>(92) {
+            try self.out.append_byte(cast<u8>(92));
+            try self.out.append_byte(byte);
+        } else {
+            if byte == cast<u8>(10) {
+                try self.out.append_bytes("\n");
+            } else {
+                if byte == cast<u8>(13) {
+                    try self.out.append_bytes("\r");
+                } else {
+                    if byte == cast<u8>(9) {
+                        try self.out.append_bytes("\t");
+                    } else {
+                        if byte < cast<u8>(32) {
+                            try self.out.append_bytes("\u00");
+                            try self.out.append_byte(hex_digit(byte / cast<u8>(16)));
+                            try self.out.append_byte(hex_digit(byte % cast<u8>(16)));
+                        } else {
+                            try self.out.append_byte(byte);
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    try self.out.append_byte(cast<u8>(34));
+    return;
+}
+
+fn hex_digit(value: u8) -> u8 {
+    if value < cast<u8>(10) {
+        return cast<u8>(48) + value;
+    }
+    return cast<u8>(87) + value;
+}

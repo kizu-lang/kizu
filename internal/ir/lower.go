@@ -1432,6 +1432,9 @@ func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Val
 	if name == "std::internal::builtin::test_fail" {
 		return l.emit("test.fail", "void", args, ""), nil
 	}
+	if name == "std::internal::builtin::panic" {
+		return l.emit("panic.fail", "void", args, ""), nil
+	}
 	ret := "void"
 	if sig, ok := l.signatures[name]; ok {
 		ret = sig.Return
