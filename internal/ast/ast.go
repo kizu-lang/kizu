@@ -495,6 +495,10 @@ func (s *AssignStmt) String() string {
 // ReturnStmt represents an explicit return statement.
 type ReturnStmt struct {
 	Value Expression
+	// RetiredErrDefers names the errdefer receivers this error return must not
+	// clean up because they were moved before it (ADR-0114). The ownership
+	// checker is the only writer; lowering reads it to drop those cleanups.
+	RetiredErrDefers []string
 }
 
 // statementNode marks ReturnStmt as a statement node.
@@ -996,6 +1000,10 @@ func (e *CastExpr) String() string {
 // TryExpr unwraps a !T value or returns the error from the current function.
 type TryExpr struct {
 	Value Expression
+	// RetiredErrDefers names the errdefer receivers this try's error path must
+	// not clean up because they were moved before it (ADR-0114). The ownership
+	// checker is the only writer; lowering reads it to drop those cleanups.
+	RetiredErrDefers []string
 }
 
 // expressionNode marks TryExpr as an expression node.

@@ -968,7 +968,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		}
 	}
 	if errorReturn {
-		l.emitErrorCleanups()
+		l.emitErrorCleanups(stmt.RetiredErrDefers)
 	} else {
 		l.emitNormalCleanups()
 	}
@@ -1600,7 +1600,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	// The attached cleanups run at this same program point, so a slot-backed
 	// receiver is loaded here: Cleanup args are always values, never `&var`
 	// slots, and no backend has to re-derive that rule.
-	cleanups := l.errorCleanups()
+	cleanups := retireCleanups(l.errorCleanups(), expr.RetiredErrDefers)
 	for index := range cleanups {
 		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
 	}

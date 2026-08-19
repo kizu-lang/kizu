@@ -663,10 +663,17 @@ func (c *Checker) restoreErrDefers(mark int) {
 	c.liveErrDefers = c.liveErrDefers[:mark]
 }
 
-// validateErrDeferReceivers rejects active errdefer cleanups whose receiver has
-// become invalid on an error-return path: moved, explicitly deinitialized, or
-// borrowed. This runs at every error path (try) that could trigger the cleanup.
-func (c *Checker) validateErrDeferReceivers(env *scope) error {
+// validateErrDeferReceivers reports the active errdefer cleanups that this
+// error-return path must skip, and rejects the ones it cannot run.
+//
+// A moved receiver retires its cleanup (ADR-0114): the move handed the cleanup
+// obligation to a new owner, so running the old cleanup here would free a value
+// this frame no longer holds. An explicitly deinitialized receiver is the same
+// obligation discharged twice in source, and a borrowed one cannot be consumed
+// at all; both stay errors. This runs at every error path that could trigger
+// the cleanup.
+func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
+	var retired []string
 	for _, entry := range c.liveErrDefers {
 		if entry.name == "" {
 			continue
@@ -676,22 +683,21 @@ func (c *Checker) validateErrDeferReceivers(env *scope) error {
 			continue
 		}
 		if value.deinitialized {
-			return errorf(
+			return nil, errorf(
 				"move error: errdefer cleanup receiver `%s` was deinitialized before an error path",
 				entry.name)
 		}
 		if value.moved {
-			return errorf(
-				"move error: errdefer cleanup receiver `%s` was moved before an error path",
-				entry.name)
+			retired = append(retired, entry.name)
+			continue
 		}
 		if value.activeBorrows > 0 || value.activeMutBorrows > 0 {
-			return errorf(
+			return nil, errorf(
 				"borrow error: errdefer cleanup receiver `%s` is borrowed on an error path",
 				entry.name)
 		}
 	}
-	return nil
+	return retired, nil
 }
 
 // valueTypeNeedsConsume reports whether typeName carries a deinit contract, the
@@ -853,9 +859,11 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	// the owner instead and must not be blocked by the cleanup it skips.
 	errorPath := c.returnTakesErrorPath(stmt.Value, env)
 	if errorPath {
-		if err := c.validateErrDeferReceivers(env); err != nil {
+		retired, err := c.validateErrDeferReceivers(env)
+		if err != nil {
 			return err
 		}
+		stmt.RetiredErrDefers = retired
 	}
 	saved := c.borrowReturn
 	if c.currentFunction != nil {
@@ -4405,10 +4413,13 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 		return "", errorf("move error: try expects !T, got %s", got)
 	}
 	// A try can return early through the error path, which runs any active
-	// errdefer cleanups. Their receivers must still be valid at this point.
-	if err := c.validateErrDeferReceivers(env); err != nil {
+	// errdefer cleanups. Their receivers must still be valid at this point,
+	// except the ones a move has retired.
+	retired, err := c.validateErrDeferReceivers(env)
+	if err != nil {
 		return "", err
 	}
+	expr.RetiredErrDefers = retired
 	// The same early exit must not leak a live owner: every owner must be
 	// consumed or covered by a defer / errdefer cleanup before the try.
 	if err := c.checkOwnersConsumed(env, 0,

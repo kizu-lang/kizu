@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/project"
 )
 
@@ -1358,20 +1359,6 @@ func TestCheckRejectsErrDeferReceiverInvalidOnErrorPath(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "moved before error path",
-			source: `struct User { name: []u8 }
-fn step() -> !void { return; }
-fn build() -> !std::arena::Arena<User> {
-    let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
-    let moved = users;
-    try step();
-    return moved;
-}`,
-			want: "errdefer cleanup receiver `users` was moved before an error path",
-		},
-		{
 			name: "deinitialized before error path",
 			source: `struct User { name: []u8 }
 fn step() -> !void { return; }
@@ -1414,6 +1401,82 @@ fn build() -> !std::arena::Arena<User> {
 			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
 		},
 	})
+}
+
+// TestCheckErrDeferRetiresAtMove checks a moved receiver retires its cleanup
+// instead of failing the error paths that follow (ADR-0114). The move hands the
+// obligation to a new owner, and that owner carries its own cleanup.
+func TestCheckErrDeferRetiresAtMove(t *testing.T) {
+	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
+    let parent = std::array::new<std::string::String>(allocator);
+    errdefer parent.deinit_all();
+    let child = std::string::new(allocator);
+    errdefer child.deinit();
+    try child.append_byte(cast<u8>(97));
+    try parent.append(child);
+    try parent.reserve(1);
+    return parent;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckErrDeferRetirementIsRecorded checks the retired receivers reach the
+// error exits from the move onward, since lowering reads them to drop the
+// cleanups it would otherwise emit there. The try that performs the move
+// retires it too: by the time that call can fail, the callee holds the value.
+func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
+	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
+    let parent = std::array::new<std::string::String>(allocator);
+    errdefer parent.deinit_all();
+    let child = std::string::new(allocator);
+    errdefer child.deinit();
+    try child.append_byte(cast<u8>(97));
+    try parent.append(child);
+    try parent.reserve(1);
+    return parent;
+}`
+	program, err := project.LoadSource("", withStdImport(source))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := New().Check(program); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	retired := retiredErrDefersOf(t, program, "build")
+	want := [][]string{nil, {"child"}, {"child"}}
+	if len(retired) != len(want) {
+		t.Fatalf("got %d try exits, want %d", len(retired), len(want))
+	}
+	for index, names := range want {
+		if strings.Join(retired[index], ",") != strings.Join(names, ",") {
+			t.Fatalf("try %d retired %v, want %v", index, retired[index], names)
+		}
+	}
+}
+
+// retiredErrDefersOf lists, in source order, what each try in the named
+// function retires.
+func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]string {
+	t.Helper()
+	var retired [][]string
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok || fn.Name != name {
+			continue
+		}
+		for _, stmt := range fn.Body.Statements {
+			expr, ok := stmt.(*ast.ExprStmt)
+			if !ok {
+				continue
+			}
+			if try, ok := expr.Expr.(*ast.TryExpr); ok {
+				retired = append(retired, try.RetiredErrDefers)
+			}
+		}
+	}
+	return retired
 }
 
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
