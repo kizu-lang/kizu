@@ -1635,10 +1635,12 @@ func (l *lowerer) lowerMethodCallExpr(
 		return Value{}, err
 	}
 	// A method that declares `&var self` receives the receiver's storage; every
-	// other method receives the value, so a receiver arriving as storage is
-	// loaded for it.
+	// other method receives the value, so a receiver arriving as a borrow is
+	// loaded for it. `&T` reaches here from a borrow optional's capture
+	// (`array.at(i) |elem|`), which holds a real address; a `&T` parameter is
+	// already erased to its value by the time it is a receiver.
 	wantsStorage := l.methodTakesSelfStorage(receiver.Type, field.Name)
-	if isMutableReferenceType(receiver.Type) && !wantsStorage {
+	if isReferenceType(receiver.Type) && !wantsStorage {
 		receiver = l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, "")
 	}
 	if wantsStorage && !isMutableReferenceType(receiver.Type) {
