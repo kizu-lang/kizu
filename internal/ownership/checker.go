@@ -666,12 +666,12 @@ func (c *Checker) restoreErrDefers(mark int) {
 // validateErrDeferReceivers reports the active errdefer cleanups that this
 // error-return path must skip, and rejects the ones it cannot run.
 //
-// A moved receiver retires its cleanup (ADR-0114): the move handed the cleanup
-// obligation to a new owner, so running the old cleanup here would free a value
-// this frame no longer holds. An explicitly deinitialized receiver is the same
-// obligation discharged twice in source, and a borrowed one cannot be consumed
-// at all; both stay errors. This runs at every error path that could trigger
-// the cleanup.
+// A consumed receiver retires its cleanup (ADR-0116). A move hands the
+// obligation to a new owner and an explicit `deinit` discharges it outright;
+// either way the value is gone, so running the cleanup here would release what
+// this frame no longer holds. A borrowed receiver is different: it is still
+// live and cannot be consumed at all, so it stays an error. This runs at every
+// error path that could trigger the cleanup.
 func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
 	var retired []string
 	for _, entry := range c.liveErrDefers {
@@ -682,12 +682,7 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
 		if !exists {
 			continue
 		}
-		if value.deinitialized {
-			return nil, errorf(
-				"move error: errdefer cleanup receiver `%s` was deinitialized before an error path",
-				entry.name)
-		}
-		if value.moved {
+		if bindingConsumed(value) {
 			retired = append(retired, entry.name)
 			continue
 		}
@@ -1873,6 +1868,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	if root, field, ok := directFieldRoot(stmt.Target, env); ok && field != "" {
+		if err := c.checkOwnerFieldOverwrite(root, field, stmt); err != nil {
+			return err
+		}
 		root.clearFieldDeinit(field)
 	}
 	if _, ok := assignmentRoot(stmt.Target, env); !ok {
@@ -1880,6 +1878,26 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	return nil
+}
+
+// checkOwnerFieldOverwrite rejects assigning over a live owner field. The
+// assignment releases nothing, so the value the field held leaks -- the wound
+// the local rule already names one line up. A field the owner's own deinit has
+// consumed is not live, so re-filling it stays allowed.
+func (c *Checker) checkOwnerFieldOverwrite(
+	root *binding,
+	field string,
+	stmt *ast.AssignStmt,
+) error {
+	if root == nil || root.fieldDeinit[field] {
+		return nil
+	}
+	fieldType, ok := c.fieldPathType(root.typeName, field)
+	if !ok || !c.valueTypeNeedsConsume(fieldType) {
+		return nil
+	}
+	return errorAt(expressionSpan(stmt.Value),
+		"move error: owner field `%s.%s` is overwritten before cleanup", root.name, field)
 }
 
 // checkExprStmt reads standalone expressions, except normal calls handle argument moves.
@@ -1936,13 +1954,63 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 		}
 	}
 	// A branch that always returns cannot affect the code after the if.
-	if !blockTerminates(stmt.Consequence) {
+	leftLive := !blockTerminates(stmt.Consequence)
+	rightLive := stmt.Alternative == nil || !blockTerminates(stmt.Alternative)
+	if err := c.checkBranchConsumeAgreement(env, left, right, leftLive, rightLive); err != nil {
+		return err
+	}
+	if leftLive {
 		env.mergeMovedFrom(left)
 	}
-	if stmt.Alternative == nil || !blockTerminates(stmt.Alternative) {
+	if rightLive {
 		env.mergeMovedFrom(right)
 	}
 	return nil
+}
+
+// checkBranchConsumeAgreement rejects an owner only one surviving branch
+// consumes. After the merge the value is unusable, so the branch that did not
+// consume it can neither release it nor hand it on, and cleaning up after the
+// if would double-free the branch that already did. Both paths must agree.
+func (c *Checker) checkBranchConsumeAgreement(
+	env, left, right *scope,
+	leftLive, rightLive bool,
+) error {
+	// A branch that always returns had its own obligations checked at that
+	// return, so it puts nothing on the path that continues past the if.
+	if !leftLive || !rightLive {
+		return nil
+	}
+	leftByID := map[int]*binding{}
+	left.collectBindings(leftByID)
+	rightByID := map[int]*binding{}
+	right.collectBindings(rightByID)
+	var split *binding
+	env.walkBindings(func(value *binding) {
+		if !c.bindingNeedsConsume(value) {
+			return
+		}
+		inLeft, okLeft := leftByID[value.id]
+		inRight, okRight := rightByID[value.id]
+		if !okLeft || !okRight || bindingConsumed(inLeft) == bindingConsumed(inRight) {
+			return
+		}
+		if split == nil || value.id > split.id {
+			split = value
+		}
+	})
+	if split == nil {
+		return nil
+	}
+	return errorAt(split.declSpan,
+		"move error: owned value `%s` is consumed on one branch only;"+
+			" consume it on both branches or on neither", split.name)
+}
+
+// bindingConsumed reports whether a path has handed the value's cleanup
+// obligation on, by move or by explicit cleanup.
+func bindingConsumed(value *binding) bool {
+	return value.moved || value.deinitialized
 }
 
 // checkWhileStmt treats moves in the body as possible after the loop.
@@ -1986,8 +2054,38 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	if err := c.checkBlock(stmt.Body, child); err != nil {
 		return err
 	}
+	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
+		return err
+	}
 	env.mergeMovedFrom(body)
 	return nil
+}
+
+// checkLoopConsumesNothingOutside rejects a loop body that consumes a binding
+// declared outside it. The body runs an unknown number of times: zero leaves
+// the value unreleased, two release it twice. A value consumed in a loop is one
+// the loop itself produced, which is what the `|name|` capture binds.
+func (c *Checker) checkLoopConsumesNothingOutside(env *scope, body *scope) error {
+	inBody := map[int]*binding{}
+	body.collectBindings(inBody)
+	var consumed *binding
+	env.walkBindings(func(value *binding) {
+		if !c.bindingNeedsConsume(value) {
+			return
+		}
+		if inside, ok := inBody[value.id]; !ok || !bindingConsumed(inside) {
+			return
+		}
+		if consumed == nil || value.id > consumed.id {
+			consumed = value
+		}
+	})
+	if consumed == nil {
+		return nil
+	}
+	return errorAt(consumed.declSpan,
+		"move error: owned value `%s` is consumed inside a loop;"+
+			" the body runs an unknown number of times", consumed.name)
 }
 
 // optionalPayloadName returns T for a `?T` condition type, or the type itself

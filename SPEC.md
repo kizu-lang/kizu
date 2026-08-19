@@ -447,10 +447,10 @@ cleanup 対象は自動探索しません。Drop / RAII / implicit destructor �
 deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
 登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
 receiver が move 済み、deinit 済み、borrow 中なら拒否します。
-`errdefer` の receiver を move すると、その `errdefer` は退役します。move 以降の
-error exit path では実行しません。move を行う呼び出し自身が失敗する path も含みます。
-move は cleanup 義務を新しい owner へ渡すので、古い receiver をそこで解放すると
-同じ値を 2 回解放することになります。退役した receiver に別の値を入れ直しても
+`errdefer` の receiver を consume すると、その `errdefer` は退役します。consume 以降の
+error exit path では実行しません。move でも明示 `deinit` でも同じで、move を行う
+呼び出し自身が失敗する path も含みます。consume 済みの値をそこで解放すると、
+同じ値を 2 回解放することになるためです。退役した receiver に別の値を入れ直しても
 `errdefer` は復活しません。
 
 ```kizu
@@ -461,9 +461,18 @@ try parent.append(child);             // ここから先は parent が child を
 try parent.reserve(1);                // 失敗しても child は解放しない
 ```
 
+```kizu
+var name = string::new(allocator);
+errdefer name.deinit();
+if !ok {
+    name.deinit();                    // 先に手放してから
+    return PlaceError::Rejected;      // error を返す。errdefer は走らない
+}
+```
+
 退役していない `errdefer` receiver は、その `errdefer` が実行され得る各 error exit path で
-同じ rule を満たす必要があります。成功 path で owner を move / return することは
-`errdefer` の実行を要求しません。
+borrow されていてはいけません。借用中の値は consume できないためです。
+成功 path で owner を move / return することは `errdefer` の実行を要求しません。
 
 ### 6.4 struct
 
@@ -1270,6 +1279,16 @@ compile error です(ADR-0091)。
 * 別の owner aggregate / container への move
 * owned return value として caller への move
 * `std::mem::leak(value)` による明示 leak
+
+consume は path ごとに決まります。分岐の一方でだけ consume する owner は
+compile error です。consume しなかった path はその値を解放できず、合流後に
+解放すると consume 済みの path で二重解放になるためです。同じ理由で、loop 本体は
+外側で宣言された owner を consume できません。body の実行回数は不定で、0 回なら
+未解放、2 回以上なら二重解放です。loop が consume してよいのは loop 自身が
+作った値、つまり `|name|` capture が束縛する値です。
+
+owner field への代入も compile error です。代入は置き換え前の値を解放しないので
+leak します(owner 要素の `set` と同じ理由)。
 
 owner aggregate を値引数として受け取る関数は、その値を consume する義務を負います。
 読み取りだけを行う関数は `&T` で受け取ります。

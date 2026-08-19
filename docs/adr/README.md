@@ -127,5 +127,6 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0111: field path の borrow / method receiver を N 段に広げる](0111-nested-field-paths.md) (0067 の 1 段上限を拡張、cleanup 境界は維持)
 - [ADR-0112: json encoder が出力を所有し、API 誤用は trap にする](0112-json-encoder-owns-output-and-traps-misuse.md)
 - [ADR-0113: structural reflection は comptime 専用型ではなく組み込みの式の形にする](0113-comptime-structural-reflection-as-builtin-forms.md)
-- [ADR-0114: errdefer は receiver が move された時点で退役する](0114-errdefer-retires-at-move.md)
+- [ADR-0114: errdefer は receiver が move された時点で退役する](0114-errdefer-retires-at-move.md) (決定 3 は 0116 が訂正)
 - [ADR-0115: decode は partial 型を持たず、comptime construct で組み立てる](0115-decode-constructs-without-partial-type.md)
+- [ADR-0116: errdefer は consume 全般で退役する](0116-errdefer-retires-at-any-consume.md) (0114 の決定 3 を訂正)

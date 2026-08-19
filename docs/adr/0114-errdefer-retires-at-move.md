@@ -1,6 +1,6 @@
 # ADR-0114: errdefer は receiver が move された時点で退役する
 
-Status: 採用
+Status: 採用(決定 3 は ADR-0116 が訂正)
 
 Issue: #1634(decode の設計検証で見つかった前提。#1626)
 
@@ -70,6 +70,9 @@ exit path では実行しない。
    move は義務の**移転**で、新しい owner が続きを持つ。`errdefer x.deinit()`
    の隣に `x.deinit()` を書くのは義務の**二重履行**で、ほぼ確実に書き手の
    誤りである。診断を残す方が原理 1 に合う。
+   —— **この決定は誤りだった。ADR-0116 が explicit `deinit` の部分を
+   取り消す。**「先に手放してから error を返す」は正しい形で、そこで errdefer
+   を走らせると二重解放になる。borrow の部分は 0116 でもそのまま残る。
 4. **退役した receiver への再代入で errdefer は復活しない。** 新しい owner は
    新しい義務を持つので、必要なら errdefer を書き直す。書き直さなければ
    既存の leak 検査(`would leak on this try's error exit`)が捕まえる。

@@ -334,6 +334,36 @@ func tryCleanupReceivers(module *Module, name string) [][]string {
 	return receivers
 }
 
+// TestLowerElementBorrowMethodReceiver checks a read method called through a
+// borrow optional's capture reads the receiver out of the element's storage.
+// `array.at(i)` hands over a real address, and a method declaring `self: T`
+// takes the value, so the load has to be there.
+func TestLowerElementBorrowMethodReceiver(t *testing.T) {
+	module := lowerSource(t, `
+struct Point { pub x: i64 }
+fn (self: Point) sum() -> i64 { return self.x; }
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var points = std::array::new<Point>(allocator);
+    defer points.deinit();
+    try points.append(Point { x: 7 });
+    if points.at(0) |p| {
+        print(p.sum());
+    }
+    return;
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"  %9: &Point = opt.value %8: ?&Point\n",
+		"  %11: Point = ref.load %9: &Point\n",
+		"  %12: i64 = call.Point.sum %11: Point\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+}
+
 // TestLowerByteSliceAccess emits explicit checked slice operations.
 func TestLowerByteSliceAccess(t *testing.T) {
 	module := lowerSource(t, `fn main() {
