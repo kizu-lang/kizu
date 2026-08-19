@@ -112,7 +112,8 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 | 言語仕様 | SPEC.md |
 | 開発ルール・禁止事項 | AGENTS.md |
 | メモリ安全モデル | docs/memory-safety.md |
-| stdlib の設計 | docs/stdlib.md |
+| std の API リファレンス | docs/std/ |
+| stdlib の移行計画と builtin registry | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
 | なぜ実装が 1 つなのか | docs/adr/0082-single-go-implementation.md |
 | self-host を作り直すときの制約 | docs/adr/0081-remove-self-compiling-backend.md |

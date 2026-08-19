@@ -28,6 +28,11 @@ package doc にあります。
 - ユーザー判断で仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
 - `SPEC.md` には今の言語の定義だけを書く。延期・取り下げ・判断の経緯は
   `docs/adr/` に書き、SPEC に「〜は延期します」の類を残さない。
+- std の API は `docs/std/` に書く。SPEC が std について持つのは compiler が
+  知っている契約だけ —— capability としての `Allocator`、storage 型に対する
+  borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
+  書けるか」で決まる。`std::json` は書けるので `docs/std/`、`Array.at` が
+  capture 条件でしか消費できないのは書けないので SPEC。
 - 実装は Go 一本(ADR-0082)。selfhost は削除済みで、言語が固まるまで作り直さない。
 
 ## 禁止事項
