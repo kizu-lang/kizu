@@ -1,0 +1,38 @@
+import std::array;
+import std::mem;
+import std::string;
+
+error PlaceError {
+    Rejected,
+}
+
+// Releasing the string early and then returning an error is a normal shape.
+// The `errdefer` must not run there: the cleanup already happened in source,
+// and running it again would release the same buffer twice (ADR-0116).
+fn place(allocator: Allocator, parent: &var array::Array<string::String>, ok: bool) -> !void {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    if !ok {
+        name.deinit();
+        return PlaceError::Rejected;
+    }
+    try parent.append(name);
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var parent = array::new<string::String>(allocator);
+    defer parent.deinit_all();
+
+    try place(allocator, &var parent, true);
+    print(parent.len());
+    try place(allocator, &var parent, false);
+    print("unreachable");
+    return;
+}
+
+// run-fails
+// features: errdefer deinit error-set std-array std-string move
+// error: runtime error: PlaceError::Rejected

@@ -447,10 +447,10 @@ cleanup 対象は自動探索しません。Drop / RAII / implicit destructor �
 deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
 登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
 receiver が move 済み、deinit 済み、borrow 中なら拒否します。
-`errdefer` の receiver を move すると、その `errdefer` は退役します。move 以降の
-error exit path では実行しません。move を行う呼び出し自身が失敗する path も含みます。
-move は cleanup 義務を新しい owner へ渡すので、古い receiver をそこで解放すると
-同じ値を 2 回解放することになります。退役した receiver に別の値を入れ直しても
+`errdefer` の receiver を consume すると、その `errdefer` は退役します。consume 以降の
+error exit path では実行しません。move でも明示 `deinit` でも同じで、move を行う
+呼び出し自身が失敗する path も含みます。consume 済みの値をそこで解放すると、
+同じ値を 2 回解放することになるためです。退役した receiver に別の値を入れ直しても
 `errdefer` は復活しません。
 
 ```kizu
@@ -461,9 +461,18 @@ try parent.append(child);             // ここから先は parent が child を
 try parent.reserve(1);                // 失敗しても child は解放しない
 ```
 
+```kizu
+var name = string::new(allocator);
+errdefer name.deinit();
+if !ok {
+    name.deinit();                    // 先に手放してから
+    return PlaceError::Rejected;      // error を返す。errdefer は走らない
+}
+```
+
 退役していない `errdefer` receiver は、その `errdefer` が実行され得る各 error exit path で
-同じ rule を満たす必要があります。成功 path で owner を move / return することは
-`errdefer` の実行を要求しません。
+borrow されていてはいけません。借用中の値は consume できないためです。
+成功 path で owner を move / return することは `errdefer` の実行を要求しません。
 
 ### 6.4 struct
 

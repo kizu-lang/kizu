@@ -1359,20 +1359,6 @@ func TestCheckRejectsErrDeferReceiverInvalidOnErrorPath(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "deinitialized before error path",
-			source: `struct User { name: []u8 }
-fn step() -> !void { return; }
-fn build() -> !std::arena::Arena<User> {
-    let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
-    errdefer users.deinit();
-    users.deinit();
-    try step();
-    return users;
-}`,
-			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
-		},
-		{
 			name: "borrowed on error path",
 			source: `struct User { name: []u8 }
 fn step() -> !void { return; }
@@ -1387,9 +1373,14 @@ fn build() -> !std::arena::Arena<User> {
 }`,
 			want: "errdefer cleanup receiver `users` is borrowed on an error path",
 		},
-		{
-			name: "deinitialized before explicit error return",
-			source: `error BuildError { Boom }
+	})
+}
+
+// TestCheckErrDeferRetiresAtExplicitDeinit checks releasing the receiver early
+// and then returning an error is accepted (ADR-0116). The cleanup already ran
+// in source; running the errdefer as well would release the same value twice.
+func TestCheckErrDeferRetiresAtExplicitDeinit(t *testing.T) {
+	source := `error BuildError { Boom }
 struct User { name: []u8 }
 fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
@@ -1397,10 +1388,10 @@ fn build() -> !std::arena::Arena<User> {
     errdefer users.deinit();
     users.deinit();
     return BuildError::Boom;
-}`,
-			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
-		},
-	})
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // TestCheckErrDeferRetiresAtMove checks a moved receiver retires its cleanup

@@ -666,12 +666,12 @@ func (c *Checker) restoreErrDefers(mark int) {
 // validateErrDeferReceivers reports the active errdefer cleanups that this
 // error-return path must skip, and rejects the ones it cannot run.
 //
-// A moved receiver retires its cleanup (ADR-0114): the move handed the cleanup
-// obligation to a new owner, so running the old cleanup here would free a value
-// this frame no longer holds. An explicitly deinitialized receiver is the same
-// obligation discharged twice in source, and a borrowed one cannot be consumed
-// at all; both stay errors. This runs at every error path that could trigger
-// the cleanup.
+// A consumed receiver retires its cleanup (ADR-0116). A move hands the
+// obligation to a new owner and an explicit `deinit` discharges it outright;
+// either way the value is gone, so running the cleanup here would release what
+// this frame no longer holds. A borrowed receiver is different: it is still
+// live and cannot be consumed at all, so it stays an error. This runs at every
+// error path that could trigger the cleanup.
 func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
 	var retired []string
 	for _, entry := range c.liveErrDefers {
@@ -682,12 +682,7 @@ func (c *Checker) validateErrDeferReceivers(env *scope) ([]string, error) {
 		if !exists {
 			continue
 		}
-		if value.deinitialized {
-			return nil, errorf(
-				"move error: errdefer cleanup receiver `%s` was deinitialized before an error path",
-				entry.name)
-		}
-		if value.moved {
+		if bindingConsumed(value) {
 			retired = append(retired, entry.name)
 			continue
 		}
