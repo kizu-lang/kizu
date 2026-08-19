@@ -1408,8 +1408,9 @@ exclusive borrow)、および `&var []u8` 引数の
 view binding(shared / writable どちらも)は、**callee が view を statement を
 越えて保持できない**関数の plain `[]u8` 引数に貸せます: 戻り値の型が view を
 運べず(scalar / void / view を持てない struct)、かつ view を保持できる型の
-`&var` parameter が無いこと(`&var []u8` は差し替え不可のため除外)。貸与は
-呼び出し statement の終了で終わります。view を捕捉し得る struct を返す
+`&var` parameter が無いこと(`&var []u8` は差し替え不可のため除外)。method
+でも同じ規則で、`&var self` の receiver も「view を保持できる型の `&var`
+parameter」として数えます。貸与は呼び出し statement の終了で終わります。view を捕捉し得る struct を返す
 関数へは、tie を記録できる `let` / `var` 初期化の位置でだけ渡せます。
 それ以外の位置では borrow の追跡が失われるため escape として拒否します。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
