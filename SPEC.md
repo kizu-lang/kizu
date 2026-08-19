@@ -1984,7 +1984,9 @@ fn sized<n: i64>() -> i64 {
 
 compile-time 値として書けるのは整数、`true` / `false`、および `Function`
 (top-level function 名)です。型引数推論、generic methods、bounds、
-associated types、higher-kinded types、specialization、reflection は実装しません。
+associated types、higher-kinded types、specialization は実装しません。
+reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
+runtime reflection と AST 書き換えは持ちません。
 
 通常の function / method 名は、generic かどうかに関係なく snake_case にします。
 `<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
@@ -2053,8 +2055,9 @@ comptime if 1 + 1 == 2 {
 ```
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
-単項演算、二項演算だけを評価します。`type<i64>` のような `type<T>` literal と、
-instantiated generic body 内の static type parameter identifier は `type` 値です。
+単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+`type<i64>` のような `type<T>` literal と、instantiated generic body 内の
+static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
 
 Kizu の canonical spelling は `type<T>` です。`T == i64` のように bare
@@ -2081,6 +2084,79 @@ top-level function name.
 
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。
+
+### 13.1 comptime for と structural reflection
+
+`comptime for` は compile-time list の反復です。綴りは runtime の `for`
+(§6.11)と同じ capture 構文です。
+
+```kizu
+comptime for std::meta::public_fields<T>() |f| {
+    print(std::meta::field_name<T, f>());
+}
+```
+
+`comptime if` と同じく、これは token stream や AST を書き換える macro では
+ありません。展開された各反復を、その束縛のもとで型・所有権・borrow 検査します。
+
+反復できるのは `std::meta::public_fields<T>()` だけです。整数 range は
+runtime の `for` が持ちます。
+
+`std::meta` は、struct の構造をコンパイル時に読むための組み込みの式の形です。
+comptime 専用の**型**は持ちません(ADR-0113)。
+
+```text
+std::meta::is_struct<T>()          -> bool    comptime-only
+std::meta::is_optional<T>()        -> bool    comptime-only
+std::meta::element<T>                         comptime-only、型の位置に書く
+std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
+std::meta::field_name<T, f>()      -> []u8    comptime-only
+std::meta::field_type<T, f>                   comptime-only、型の位置に書く
+std::meta::field<T, f>(value: &T)  -> &F
+```
+
+`is_struct` と `is_optional` は `comptime if` の条件に書けます。
+`comptime` expression はこの 2 つの組み込み形も評価します。
+
+`field_name` の値は source の field 名を持つ `[]u8` literal です。static
+storage を指し、確保は起きません。
+
+`element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
+返します。`field_type<T, f>` はその field の型を返します。どちらも型の位置に
+書けるので、static 引数として渡して再帰できます。
+
+```kizu
+fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime if std::meta::is_struct<T>() {
+        try encoder.begin_object();
+        comptime for std::meta::public_fields<T>() |f| {
+            try encoder.write_key(std::meta::field_name<T, f>());
+            try encode_value<std::meta::field_type<T, f>>(
+                encoder,
+                std::meta::field<T, f>(value),
+            );
+        }
+        try encoder.end_object();
+    }
+    return;
+}
+```
+
+`std::meta::field<T, f>(value)` は `&value.<f の名前>` と同じもの、つまり §9 の
+field path borrow です。借用の追跡、衝突判定、`&var` の排他は field path borrow の
+規則がそのまま適用されます。provenance は署名から構造導出します(§9)。
+
+capture 束縛(上の `f`)は値ではありません。書ける位置は `std::meta::*` の
+static 引数だけです。
+
+* `let g = f;` のように binding へ束縛できません
+* 関数や method の引数として渡せません
+* 比較・演算の対象にできません
+* runtime local、field、union payload、collection element、return value として
+  保持できません
+
+列挙するのは struct の `pub` field だけで、順序は source の宣言順です。
+enum tag と union variant の列挙は持ちません。
 
 ## 14. 標準ライブラリ方針
 
