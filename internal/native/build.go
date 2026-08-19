@@ -819,6 +819,14 @@ void kizu_panic_test_fail(const unsigned char *s, int64_t len,
     abort();
 }
 
+void kizu_panic_fail(const unsigned char *s, int64_t len,
+                     int64_t line, int64_t column) {
+    fputs("runtime error: ", stderr);
+    fwrite(s, 1, (size_t)len, stderr);
+    kizu_panic_at(line, column);
+    abort();
+}
+
 void kizu_panic_expect_equal_int(int64_t expected, int64_t actual,
                                  int64_t line, int64_t column) {
     fprintf(stderr, "runtime error: expected %lld, got %lld",

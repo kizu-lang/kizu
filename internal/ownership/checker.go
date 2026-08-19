@@ -5137,7 +5137,8 @@ var containerAccessTables = map[string]containerAccessTable{
 	}},
 	"std::string::String": {kind: "string", label: "String", methods: map[string]containerAccess{
 		"append_bytes": accessMutate, "append_byte": accessMutate,
-		"reserve": accessMutate, "truncate": accessMutate, "clear": accessMutate,
+		"append_string": accessMutate,
+		"reserve":       accessMutate, "truncate": accessMutate, "clear": accessMutate,
 		"len": accessRead, "capacity": accessRead,
 		"as_bytes": accessView, "as_mut_bytes": accessView,
 		"deinit": accessCleanup,
@@ -5216,6 +5217,8 @@ func (c *Checker) checkStringMethod(
 	switch name {
 	case "append_bytes", "append_byte", "reserve", "truncate":
 		return c.checkStringAppendOrReserve(name, args, env)
+	case "append_string":
+		return c.checkStringSourceArg(name, args, env)
 	case "len", "capacity":
 		if err := checkStringNoArgs(name, args); err != nil {
 			return "", err
@@ -5266,7 +5269,8 @@ func checkStringNoArgs(name string, args []ast.Expression) error {
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "reserve", "truncate", "clear", "deinit":
+	case "append_bytes", "append_byte", "append_string", "reserve", "truncate",
+		"clear", "deinit":
 		return true
 	default:
 		return false
@@ -5288,6 +5292,26 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if !sameOwnershipType(got, "[]u8") {
 		return "", errorf("string error: `String.%s` expects []u8, got %s", name, got)
+	}
+	return "!void", nil
+}
+
+// checkStringSourceArg validates append_string reading its source String
+// without moving it.
+func (c *Checker) checkStringSourceArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if !sameOwnershipType(got, "std::string::String") {
+		return "", errorf("string error: `String.%s` expects String, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -5830,7 +5854,10 @@ func (c *Checker) checkImplMethodArgs(
 	return err
 }
 
-// checkImplMethodArg mirrors user-call argument ownership for one method parameter.
+// checkImplMethodArg mirrors user-call argument ownership for one method
+// parameter. A view lends to a method under the same condition as to a plain
+// function, with the receiver counted among the parameters that could retain
+// it: a `&var self` whose type carries a view could store the lend in a field.
 func (c *Checker) checkImplMethodArg(
 	method *functionInfo,
 	paramIndex int,
@@ -5842,6 +5869,10 @@ func (c *Checker) checkImplMethodArg(
 		if param.mutBorrow {
 			return nil
 		}
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	if c.viewArgLend(method, paramIndex, arg, env) {
 		_, err := c.readExpr(arg, env)
 		return err
 	}

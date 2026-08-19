@@ -1408,8 +1408,9 @@ exclusive borrow)、および `&var []u8` 引数の
 view binding(shared / writable どちらも)は、**callee が view を statement を
 越えて保持できない**関数の plain `[]u8` 引数に貸せます: 戻り値の型が view を
 運べず(scalar / void / view を持てない struct)、かつ view を保持できる型の
-`&var` parameter が無いこと(`&var []u8` は差し替え不可のため除外)。貸与は
-呼び出し statement の終了で終わります。view を捕捉し得る struct を返す
+`&var` parameter が無いこと(`&var []u8` は差し替え不可のため除外)。method
+でも同じ規則で、`&var self` の receiver も「view を保持できる型の `&var`
+parameter」として数えます。貸与は呼び出し statement の終了で終わります。view を捕捉し得る struct を返す
 関数へは、tie を記録できる `let` / `var` 初期化の位置でだけ渡せます。
 それ以外の位置では borrow の追跡が失われるため escape として拒否します。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
@@ -2119,6 +2120,7 @@ std::mem
 std::slice
 std::array
 std::map
+std::json
 ```
 
 文字列 literal は `[]u8` として扱います。
@@ -2178,6 +2180,7 @@ owned byte buffer です。
 std::string::new(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []u8) -> !void
 string.append_byte(byte: u8) -> !void
+string.append_string(other: &std::string::String) -> !void
 string.reserve(additional: i64) -> !void
 string.truncate(length: i64) -> !void
 string.len() -> i64
@@ -2193,6 +2196,8 @@ string.deinit() -> void
 `std::string::String` は non-copy / move-only です。
 `append_bytes` は source の `[]u8` を move せず、owned buffer に copy します。
 `append_byte` は 1 byte を追加します。
+`append_string` は borrow した別の `String` の bytes を copy します。source は
+move されません。
 `reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
 `truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
 `capacity` は現在の capacity を `i64` で返します。
@@ -2245,6 +2250,57 @@ printable ASCII byte のうち `"` と `\` 以外はそのまま出します。
 `"`、`\`、newline、carriage return、tab はそれぞれ `\"`、`\\`、`\n`、`\r`、`\t`
 として escape します。
 その他の byte は uppercase hex の `\xNN` として escape します。
+
+`std::json` の encode は、明示 streaming encoder です。derive、hidden hook、
+method discovery は持ちません。caller が begin / end と field 書き込みを
+すべて綴ります。
+
+```text
+std::json::encoder(allocator: Allocator) -> std::json::Encoder
+encoder.begin_object() -> !void
+encoder.end_object() -> !void
+encoder.begin_array() -> !void
+encoder.end_array() -> !void
+encoder.begin_object_field(name: []u8) -> !void
+encoder.begin_array_field(name: []u8) -> !void
+encoder.write_i64(value: i64) -> !void
+encoder.write_bool(value: bool) -> !void
+encoder.write_null() -> !void
+encoder.write_bytes(value: []u8) -> !void
+encoder.write_i64_field(name: []u8, value: i64) -> !void
+encoder.write_bool_field(name: []u8, value: bool) -> !void
+encoder.write_null_field(name: []u8) -> !void
+encoder.write_bytes_field(name: []u8, value: []u8) -> !void
+encoder.finish_into(out: &var std::string::String) -> !void
+encoder.deinit() -> void
+```
+
+`Encoder` は出力 buffer を所有する owner です。`std::json` は error set を
+宣言しません。`!void` は所有 buffer の allocation 失敗だけを伝播します。
+
+`write_*_field` は key と value を 1 呼び出しで書きます。key だけを書く
+low-level API は持たないので、value のない key を残せません。
+
+API の誤用は error ではなく **trap** です(ADR-0112)。次は回復可能な失敗
+ではなく bug として、`runtime error:` を出して停止します。
+
+* object の外で field を書く
+* object を `end_array` で、array を `end_object` で閉じる
+* 開いた container が無いのに `end_object` / `end_array` を呼ぶ
+* object の中に field 名なしで値を書く
+* top-level 値を 2 つ書く
+* container が開いたまま、あるいは値を 1 つも書かずに `finish_into` を呼ぶ
+* 62 段より深く入れ子にする
+
+`finish_into` は完成した document を caller の `String` に append します。
+`Encoder` は自分の buffer を持ち続け、`deinit` で解放します。
+
+byte 列は決定的に escape します。`"`、`\`、newline、carriage return、tab は
+`\"`、`\\`、`\n`、`\r`、`\t`、その他の control byte は lowercase hex の
+`\u00XX` です。encode は UTF-8 validation をしません。
+
+`encode<T>` / `decode<T>` と `std::json::Value` は、comptime structural
+reflection の仕様が決まるまで実装しません。
 
 collection は次の順で実装します。
 

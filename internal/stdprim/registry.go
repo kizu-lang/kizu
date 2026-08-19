@@ -69,6 +69,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "std::process::Error!i64",
 	},
 	"std::internal::builtin::test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std::internal::builtin::panic":     {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.
@@ -135,6 +136,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::mem_fixed_buffer":         true,
 	"std::internal::builtin::mem_len":                  true,
 	"std::internal::builtin::mem_page_allocator":       true,
+	"std::internal::builtin::panic":                    true,
 	"std::internal::builtin::process_arg":              true,
 	"std::internal::builtin::process_arg_count":        true,
 	"std::internal::builtin::process_env":              true,

@@ -5414,18 +5414,8 @@ func (c *Checker) checkStringMethod(
 	unsafe unsafeMark,
 ) (Type, error) {
 	switch name {
-	case "append_bytes":
-		if err := c.checkStringBytesArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		return "!void", nil
-	case "append_byte":
-		if err := c.checkStringByteArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		return "!void", nil
-	case "reserve":
-		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
+	case "append_bytes", "append_byte", "append_string", "reserve", "truncate":
+		if err := c.checkStringMutatorArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
 		return "!void", nil
@@ -5437,11 +5427,6 @@ func (c *Checker) checkStringMethod(
 	case "as_bytes", "as_mut_bytes":
 		return "", errorf(
 			"type error: `String.%s` must be bound with `let name = string.%s()`", name, name)
-	case "truncate":
-		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		return "!void", nil
 	case "clear", "deinit":
 		if len(args) != 0 {
 			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
@@ -5452,10 +5437,30 @@ func (c *Checker) checkStringMethod(
 	}
 }
 
+// checkStringMutatorArg validates the single argument each String mutator takes.
+func (c *Checker) checkStringMutatorArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	switch name {
+	case "append_bytes":
+		return c.checkStringBytesArg(name, args, env, unsafe)
+	case "append_byte":
+		return c.checkStringByteArg(name, args, env, unsafe)
+	case "append_string":
+		return c.checkStringStringArg(name, args, env, unsafe)
+	default:
+		return c.checkStringReserveArg(name, args, env, unsafe)
+	}
+}
+
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "reserve", "truncate", "clear", "deinit":
+	case "append_bytes", "append_byte", "append_string", "reserve", "truncate",
+		"clear", "deinit":
 		return true
 	default:
 		return false
@@ -5478,6 +5483,26 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if !sameType(got, typeByteString) {
 		return errorf("type error: `String.%s` expects []u8, got %s", name, got)
+	}
+	return nil
+}
+
+// checkStringStringArg validates a borrowed String source argument.
+func (c *Checker) checkStringStringArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if len(args) != 1 {
+		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != "std::string::String" {
+		return errorf("type error: `String.%s` expects String, got %s", name, got)
 	}
 	return nil
 }
