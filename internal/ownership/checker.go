@@ -800,6 +800,26 @@ func leakError(value *binding, exit leakExit) error {
 		value.name)
 }
 
+// checkCleanupReceiverOverwrite rejects assigning over a binding that a `defer`
+// or `errdefer` names. A registered cleanup releases the value that was live
+// when it was written, not whatever the name later stands for, so an overwrite
+// would leave the cleanup holding a value the name no longer means. Giving the
+// new owner its own name keeps one name to one value to one cleanup.
+func (c *Checker) checkCleanupReceiverOverwrite(target *binding, stmt *ast.AssignStmt) error {
+	keyword := ""
+	switch {
+	case target.deferCleanup:
+		keyword = "defer"
+	case c.errDeferCovers(target.name):
+		keyword = "errdefer"
+	default:
+		return nil
+	}
+	return errorAt(expressionSpan(stmt.Value),
+		"move error: `%s` cleanup receiver `%s` cannot be assigned over;"+
+			" bind the new value to its own name", keyword, target.name)
+}
+
 // errDeferCovers reports whether an active errdefer cleans up the named owner.
 func (c *Checker) errDeferCovers(name string) bool {
 	if name == "" {
@@ -1871,6 +1891,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 			(target.isMutBorrowParam() && c.valueTypeNeedsConsume(target.typeName)) {
 			return errorAt(expressionSpan(stmt.Value),
 				"move error: owned value `%s` is overwritten before cleanup", target.name)
+		}
+		if err := c.checkCleanupReceiverOverwrite(target, stmt); err != nil {
+			return err
 		}
 		target.typeName = typeName
 		target.moved = false

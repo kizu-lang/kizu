@@ -1,6 +1,6 @@
 # ADR-0114: errdefer は receiver が move された時点で退役する
 
-Status: 採用(決定 3 は ADR-0116 が訂正)
+Status: 採用(決定 3 は ADR-0116 が訂正、決定 4 は ADR-0118 が置換)
 
 Issue: #1634(decode の設計検証で見つかった前提。#1626)
 
@@ -76,6 +76,9 @@ exit path では実行しない。
 4. **退役した receiver への再代入で errdefer は復活しない。** 新しい owner は
    新しい義務を持つので、必要なら errdefer を書き直す。書き直さなければ
    既存の leak 検査(`would leak on this try's error exit`)が捕まえる。
+   —— **ADR-0118 がこれを置き換える。** 復活させないのではなく、cleanup
+   receiver への代入自体を compile error にする。同じ 1 行が 2 か所で違う値を
+   指す形が残るのを避けるため。
 
 ## 却下した案
 

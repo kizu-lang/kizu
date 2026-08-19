@@ -1448,6 +1448,70 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	}
 }
 
+// TestCheckRejectsCleanupReceiverOverwrite pins one name to one value to one
+// cleanup. A registered cleanup releases the value that was live when it was
+// written, so assigning over the name would leave it holding something the name
+// no longer means.
+func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "errdefer receiver after its value moved out",
+			source: `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
+    var parent = std::array::new<std::string::String>(allocator);
+    errdefer parent.deinit_all();
+    var name = std::string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    try parent.append(name);
+    name = std::string::new(allocator);
+    try parent.append(name);
+    return parent;
+}`,
+			want: "`errdefer` cleanup receiver `name` cannot be assigned over",
+		},
+		{
+			name: "defer receiver",
+			source: `fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var name = std::string::new(allocator);
+    defer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    name = std::string::new(allocator);
+    print(name.len());
+    return;
+}`,
+			want: "`defer` cleanup receiver `name` cannot be assigned over",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckAllowsSecondOwnerUnderItsOwnName keeps the builder writable: a new
+// owner takes a new name and registers its own cleanup.
+func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
+	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
+    var parent = std::array::new<std::string::String>(allocator);
+    errdefer parent.deinit_all();
+    var first = std::string::new(allocator);
+    errdefer first.deinit();
+    try first.append_byte(cast<u8>(97));
+    try parent.append(first);
+    var second = std::string::new(allocator);
+    errdefer second.deinit();
+    try second.append_byte(cast<u8>(98));
+    try parent.reserve(1);
+    try parent.append(second);
+    return parent;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // retiredErrDefersOf lists, in source order, what each try in the named
 // function retires.
 func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]string {
