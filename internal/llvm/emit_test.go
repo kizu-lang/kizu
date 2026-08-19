@@ -70,6 +70,45 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 }
 
+// TestEmitMatchMergeForwardedValues lowers the shapes #1622 reported: a value
+// that never becomes an LLVM instruction (an enum constant, a no-op cast)
+// reaching a match merge phi, which is written before the arms that feed it.
+// Emit verifies its own output, so success here means every register the phi
+// reads is defined.
+func TestEmitMatchMergeForwardedValues(t *testing.T) {
+	sources := map[string]string{
+		"enum result": `enum Mode { Idle, Busy }
+enum Kind { X, Y }
+fn mode_of(k: Kind) -> Mode {
+    return match k { X => Mode::Busy, Y => Mode::Idle };
+}
+fn main() { let _ = mode_of(Kind::X); }`,
+		"enum assigned to outer var": `enum Mode { Idle, Busy }
+enum Kind { X, Y }
+fn mode_of(k: Kind) -> Mode {
+    var m = Mode::Idle;
+    match k {
+        X => { m = Mode::Busy; },
+        Y => { m = Mode::Idle; },
+    }
+    return m;
+}
+fn main() { let _ = mode_of(Kind::X); }`,
+		"no-op cast": `enum Kind { X, Y }
+fn to_u(k: Kind, n: i64) -> u64 {
+    return match k { X => cast<u64>(n), Y => cast<u64>(0) };
+}
+fn main() { let _ = to_u(Kind::X, 3); }`,
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Emit(lowerSource(t, source)); err != nil {
+				t.Fatalf("emit failed: %v", err)
+			}
+		})
+	}
+}
+
 // TestEmitArrayPopOrPanicReportsBeforeMoving fixes the native lowering sequence.
 func TestEmitArrayPopOrPanicReportsBeforeMoving(t *testing.T) {
 	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
