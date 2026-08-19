@@ -22,7 +22,11 @@ func Emit(module *ir.Module) (string, error) {
 	if err := e.emit(); err != nil {
 		return "", err
 	}
-	return strings.TrimRight(e.out.String(), "\n"), nil
+	text := strings.TrimRight(e.out.String(), "\n")
+	if err := verifyEmittedText(text); err != nil {
+		return "", err
+	}
+	return text, nil
 }
 
 type emitter struct {
@@ -754,7 +758,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 			e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
 		}
 	}
-	e.registerFunctionConstants(fn)
+	e.registerForwardedValues(fn)
 	fmt.Fprintf(&e.out,
 		"define %s @%s(%s) {\n",
 		returnType,
@@ -791,29 +795,59 @@ func (e *emitter) functionParamABI(param ir.Param) string {
 	return fmt.Sprintf("ptr byval(%s) %s", paramType, addrName)
 }
 
-// registerFunctionConstants makes scalar constants available to phi nodes even
-// when a merge block is emitted before its predecessor block.
-func (e *emitter) registerFunctionConstants(fn *ir.Function) {
+// registerForwardedValues resolves every result that never becomes an LLVM
+// instruction — scalar constants, no-op casts, borrow-shaped box reads —
+// before any block is written. A match merge block is written before the arms
+// that feed it, and a phi that reads a forwarded value would otherwise name a
+// register nothing ever defines.
+func (e *emitter) registerForwardedValues(fn *ir.Function) {
+	defs := map[string]*ir.Instr{}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if instr.Op != "const" {
-				continue
-			}
-			if _, ok := integerBitWidth(instr.Result.Type); ok {
-				e.values[instr.Result.Name] = valueInfo{
-					typ:     instr.Result.Type,
-					operand: instr.Immediate,
-				}
-				continue
-			}
-			if instr.Result.Type == "bool" {
-				e.values[instr.Result.Name] = valueInfo{
-					typ:     "bool",
-					operand: llvmBool(instr.Immediate),
-				}
+			if instr.Result.Name != "" {
+				defs[instr.Result.Name] = instr
 			}
 		}
 	}
+	var operandOf func(value ir.Value) string
+	operandOf = func(value ir.Value) string {
+		instr, ok := defs[value.Name]
+		if !ok || !e.forwardsOperand(instr) {
+			return localName(value.Name)
+		}
+		if instr.Op == "const" {
+			operand, _ := e.scalarConstOperand(instr)
+			return operand
+		}
+		return operandOf(instr.Args[0])
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if !e.forwardsOperand(instr) {
+				continue
+			}
+			e.values[instr.Result.Name] = valueInfo{
+				typ:     instr.Result.Type,
+				operand: operandOf(instr.Result),
+			}
+		}
+	}
+}
+
+// forwardsOperand reports whether an instruction emits no LLVM instruction and
+// instead hands an operand through under a new name. Its cases must stay the
+// exact set of writes that register a value without printing a definition.
+func (e *emitter) forwardsOperand(instr *ir.Instr) bool {
+	switch instr.Op {
+	case "const":
+		_, ok := e.scalarConstOperand(instr)
+		return ok
+	case "cast":
+		return len(instr.Args) == 1 && castForwardsOperand(instr)
+	case "box.borrow", "box.borrow_mut":
+		return len(instr.Args) == 1 && strings.HasPrefix(instr.Result.Type, "&")
+	}
+	return false
 }
 
 // validateFunctionTypes rejects ABI shapes this backend cannot lower faithfully.
@@ -1084,25 +1118,33 @@ func (e *emitter) writeSliceStore(instr *ir.Instr) error {
 	return nil
 }
 
+// scalarConstOperand returns the LLVM immediate for a constant whose value is
+// a bare scalar: integers at whatever width the type says, bool, enums, and
+// error set members.
+func (e *emitter) scalarConstOperand(instr *ir.Instr) (string, bool) {
+	typ := instr.Result.Type
+	if _, ok := e.module.Enums[typ]; ok {
+		return instr.Immediate, true
+	}
+	if _, ok := e.module.ErrorSets[typ]; ok {
+		return instr.Immediate, true
+	}
+	if _, ok := integerBitWidth(typ); ok {
+		return instr.Immediate, true
+	}
+	if typ == "bool" {
+		return llvmBool(instr.Immediate), true
+	}
+	return "", false
+}
+
 // writeConst writes scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
-	if _, ok := e.module.Enums[instr.Result.Type]; ok {
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
-		return nil
-	}
-	if _, ok := e.module.ErrorSets[instr.Result.Type]; ok {
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
-		return nil
-	}
-	if _, ok := integerBitWidth(instr.Result.Type); ok {
-		// An integer constant is written as its digits at whatever width the
-		// type says, so every scalar integer shares one case here.
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
+	if operand, ok := e.scalarConstOperand(instr); ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: operand}
 		return nil
 	}
 	switch instr.Result.Type {
-	case "bool":
-		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
 	case "[]u8":
 		unquoted, _ := strconv.Unquote(instr.Immediate)
 		global := e.strings[instr.Immediate]
@@ -1345,22 +1387,38 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 			instr.Result.Type,
 		)
 	}
+	if castForwardsOperand(instr) {
+		value := e.value(source)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+		return nil
+	}
 	if _, ok := integerBitWidth(source.Type); ok {
 		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
 			return e.writeIntegerCast(instr)
 		}
-		if isRawPointerType(instr.Result.Type) {
-			return e.writePointerIntegerCast(instr, "inttoptr")
-		}
+		return e.writePointerIntegerCast(instr, "inttoptr")
 	}
-	if isRawPointerType(source.Type) {
-		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
-			return e.writePointerIntegerCast(instr, "ptrtoint")
-		}
+	return e.writePointerIntegerCast(instr, "ptrtoint")
+}
+
+// castForwardsOperand reports whether a cast only changes the Kizu type — a
+// same-width integer cast, or a cast whose LLVM representation is already the
+// target's — so writeCast forwards the operand instead of emitting anything.
+func castForwardsOperand(instr *ir.Instr) bool {
+	source := instr.Args[0].Type
+	target := instr.Result.Type
+	sourceWidth, sourceInt := integerBitWidth(source)
+	targetWidth, targetInt := integerBitWidth(target)
+	if sourceInt && targetInt {
+		return sourceWidth == targetWidth
 	}
-	value := e.value(instr.Args[0])
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
-	return nil
+	if sourceInt {
+		return !isRawPointerType(target)
+	}
+	if isRawPointerType(source) {
+		return !targetInt
+	}
+	return true
 }
 
 // writePointerIntegerCast emits the address conversion between a raw pointer
@@ -1380,16 +1438,13 @@ func (e *emitter) writePointerIntegerCast(instr *ir.Instr, op string) error {
 	return nil
 }
 
-// writeIntegerCast emits explicit truncate/extend casts between scalar integer widths.
+// writeIntegerCast emits explicit truncate/extend casts between scalar integer
+// widths. Same-width casts never reach here: castForwardsOperand claims them.
 func (e *emitter) writeIntegerCast(instr *ir.Instr) error {
 	source := instr.Args[0]
 	sourceWidth, _ := integerBitWidth(source.Type)
 	targetWidth, _ := integerBitWidth(instr.Result.Type)
 	value := e.value(source)
-	if sourceWidth == targetWidth {
-		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
-		return nil
-	}
 	name := localName(instr.Result.Name)
 	sourceType := e.llvmType(source.Type)
 	targetType := e.llvmType(instr.Result.Type)
