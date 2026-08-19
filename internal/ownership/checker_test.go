@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/project"
 )
 
@@ -1876,6 +1877,106 @@ fn main() {
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsDiscardedOwnerExpression covers the values that reach a
+// caller without a binding. Cleanup obligations are tracked per binding, so an
+// unbound owner is never tracked at all; `?T` and `E!T` wrappers do not change
+// whose obligation it is.
+func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "constructor result",
+			source: `fn main() {
+    let allocator = std::mem::page_allocator();
+    std::string::new(allocator);
+}`,
+			want: "produces owned `std::string::String` and discards it",
+		},
+		{
+			name: "optional element moved out of its container",
+			source: `fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    let parent = std::array::new<std::string::String>(allocator);
+    defer parent.deinit_all();
+    let name = std::string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    try parent.append(name);
+    parent.pop();
+    return;
+}`,
+			want: "produces owned `?std::string::String` and discards it",
+		},
+		{
+			name: "error union unwrapped by try",
+			source: `fn make(allocator: Allocator) -> !std::string::String {
+    let name = std::string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    return name;
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    try make(allocator);
+    return;
+}`,
+			want: "produces owned `std::string::String` and discards it",
+		},
+		{
+			name: "error union left wrapped",
+			source: `fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    std::mem::box<i64>(allocator, 1);
+    return;
+}`,
+			want: "produces owned `!std::mem::Box<i64>` and discards it",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckDiscardedOwnerPointsAtTheCall pins the callee span through name
+// qualification: qualifying rewrites the callee node, and a rewrite that drops
+// the span leaves this diagnostic with nowhere to point.
+func TestCheckDiscardedOwnerPointsAtTheCall(t *testing.T) {
+	source := `import std;
+fn main() {
+    let allocator = std::mem::page_allocator();
+    std::string::new(allocator);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	diagnostic, ok := err.(*diag.Diagnostic)
+	if !ok {
+		t.Fatalf("got %T, want *diagnostic.Diagnostic", err)
+	}
+	if got := diagnostic.SourceSpan().Start.Line; got != 4 {
+		t.Fatalf("got line %d, want 4", got)
+	}
+}
+
+// TestCheckAllowsDiscardedNonOwnerExpression keeps the rule type-directed: a
+// value with no cleanup contract may be produced and dropped as before.
+func TestCheckAllowsDiscardedNonOwnerExpression(t *testing.T) {
+	source := `fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    let values = std::array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(1);
+    values.pop();
+    values.len();
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // TestCheckRejectsGenericMoveCallWithoutTypeArgs keeps generic calls explicit.

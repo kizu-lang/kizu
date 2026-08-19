@@ -623,8 +623,10 @@ func (c *graphChecker) qualifyCallee(
 	module *moduleUnit,
 	expr ast.Expression,
 ) (ast.Expression, error) {
+	// Qualifying rewrites the callee node, so the span has to be carried over:
+	// it is what anchors every later diagnostic that points at a call.
 	if ident, ok := expr.(*ast.IdentExpr); ok && c.declaresFunction(module, ident.Name) {
-		return &ast.IdentExpr{Name: module.qualify(ident.Name)}, nil
+		return &ast.IdentExpr{Name: module.qualify(ident.Name), Span: ident.Span}, nil
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok && field.Namespace {
 		if _, ok := c.resolveTypeNamespaceReceiver(module, field); ok {
@@ -635,7 +637,7 @@ func (c *graphChecker) qualifyCallee(
 			return nil, err
 		}
 		if ok {
-			return &ast.IdentExpr{Name: name}, nil
+			return &ast.IdentExpr{Name: name, Span: field.Span}, nil
 		}
 	}
 	return c.qualifyExpr(module, expr)

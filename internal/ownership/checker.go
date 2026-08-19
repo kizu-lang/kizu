@@ -707,6 +707,25 @@ func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
 	return needs
 }
 
+// resultTypeNeedsConsume reports whether a produced value owes cleanup once it
+// is unwrapped. `?T` and `E!T` are the two ways an owner reaches a caller
+// without being the type itself: `pop` hands back `?String`, `box` hands back
+// `!Box<T>`. Both are consumed the moment the value is bound, so the obligation
+// is the element's.
+func (c *Checker) resultTypeNeedsConsume(typeName string) bool {
+	for {
+		if _, success, isUnion := typ.ErrorUnionParts(typeName); isUnion {
+			typeName = success
+			continue
+		}
+		if elem, ok := typ.OptionalElem(typeName); ok {
+			typeName = elem
+			continue
+		}
+		return c.valueTypeNeedsConsume(typeName)
+	}
+}
+
 // bindingNeedsConsume reports whether a binding still owes its cleanup: an
 // owned deinit-carrying value that no move, deinit, or registered defer has
 // discharged yet.
@@ -1902,8 +1921,26 @@ func (c *Checker) checkOwnerFieldOverwrite(
 
 // checkExprStmt reads standalone expressions, except normal calls handle argument moves.
 func (c *Checker) checkExprStmt(stmt *ast.ExprStmt, env *scope) error {
-	_, err := c.readExpr(stmt.Expr, env)
-	return err
+	produced, err := c.readExpr(stmt.Expr, env)
+	if err != nil {
+		return err
+	}
+	return c.checkDiscardedOwner(stmt.Expr, produced)
+}
+
+// checkDiscardedOwner rejects an expression statement that produces an owner.
+// Cleanup obligations are tracked per binding, so a value that is never bound
+// is never tracked: `parent.pop();` moves an element out of the array and drops
+// it where nothing can reach it. Binding the value is what makes the obligation
+// visible, and `let _ = ...` is the spelling for discarding on purpose — it
+// still has to name the cleanup.
+func (c *Checker) checkDiscardedOwner(expr ast.Expression, produced string) error {
+	if !c.resultTypeNeedsConsume(produced) {
+		return nil
+	}
+	return errorAt(expressionSpan(expr),
+		"move error: this expression produces owned `%s` and discards it;"+
+			" bind the value and consume it", produced)
 }
 
 // checkIfStmt merges possible moves from either branch into the outer scope.
