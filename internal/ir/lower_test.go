@@ -900,6 +900,32 @@ fn main() -> !void {
 	}
 }
 
+// TestLowerFieldStaticParamIsOneInstancePerField pins the symbol a `Field`
+// argument produces. Each bound field is its own instance, so the two calls
+// lower to two functions and each reads its own field name.
+func TestLowerFieldStaticParamIsOneInstancePerField(t *testing.T) {
+	module := lowerSource(t, `
+struct User { pub name: []u8, pub age: i64 }
+fn label<T, f: Field>() -> []u8 {
+    return std::meta::field_name<T, f>();
+}
+fn main() -> void {
+    print(label<User, name>());
+    print(label<User, age>());
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"fn label.User.name() -> []u8 {",
+		"fn label.User.age() -> []u8 {",
+		`%1: []u8 = const "name"`,
+		`%1: []u8 = const "age"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+}
+
 // withStdImport gives a snippet the root import a file needs to spell full std
 // paths. The snippets are about what the checker does with std types, not about
 // import lines, and a file that writes `std::mem::page_allocator` has to bring

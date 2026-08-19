@@ -11,6 +11,72 @@ import (
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
+// TestCheckFieldStaticParamInstantiatesPerField pins a `Field` argument as an
+// instantiation key, not a plain compile-time value: the body reads the field
+// through the forms written against the parameter, so one bound field is one
+// instance.
+func TestCheckFieldStaticParamInstantiatesPerField(t *testing.T) {
+	source := `struct User { pub name: []u8, pub age: i64 }
+fn label<T, f: Field>() -> []u8 {
+    return std::meta::field_name<T, f>();
+}
+fn main() -> void {
+    print(label<User, name>());
+    print(label<User, age>());
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsFieldStaticArg covers what a field token may name.
+func TestCheckRejectsFieldStaticArg(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "field the struct does not declare",
+			source: `struct User { pub name: []u8 }
+fn label<T, f: Field>() -> []u8 { return std::meta::field_name<T, f>(); }
+fn main() -> void { print(label<User, nope>()); }`,
+			want: "`User` has no public field `nope`",
+		},
+		{
+			name: "private field",
+			source: `struct User { pub name: []u8, age: i64 }
+fn label<T, f: Field>() -> []u8 { return std::meta::field_name<T, f>(); }
+fn main() -> void { print(label<User, age>()); }`,
+			want: "`User` has no public field `age`",
+		},
+		{
+			name: "runtime parameter",
+			source: `fn label(f: Field) -> []u8 { return "x"; }
+fn main() -> void { print("x"); }`,
+			want: "Field parameter `f` belongs in `<...>`, not `(...)`",
+		},
+		{
+			name: "no type parameter before it",
+			source: `struct User { pub name: []u8 }
+fn label<f: Field>() -> []u8 { return "x"; }
+fn main() -> void { print(label<name>()); }`,
+			want: "has no type parameter before it",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckValidPhase2Programs checks programs that the interpreter can run.
 func TestCheckValidPhase2Programs(t *testing.T) {
 	cases := []string{

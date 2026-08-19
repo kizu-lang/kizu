@@ -66,6 +66,11 @@ func ownerUnionIdentName(expr ast.Expression) string {
 // is a function-name token a std wrapper forwards to a trusted primitive, not a
 // value a body can call, so declaring one outside std is rejected where it is
 // written rather than where the name fails to resolve.
+//
+// `Field` is not restricted. It is what a `std::meta::construct` worker takes,
+// and a decoder anyone can write is the test of whether construct belongs in
+// the language at all: a form only std can use would make std privileged over
+// the thing its own users need to write.
 func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	for _, param := range fn.StaticParams {
 		if Type(typ.Text(param.Type)) != typeFunction || fn.Std {
@@ -77,14 +82,15 @@ func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	return nil
 }
 
-// checkFunctionParamPolicy keeps Function out of the runtime argument list. A
-// function name is a compile-time value, so it is a static argument.
+// checkFunctionParamPolicy keeps the compile-time-only tokens out of the
+// runtime argument list. A function name and a field token are both known only
+// at compile time, so they are static arguments.
 func checkFunctionParamPolicy(param ast.Param, typ Type) error {
-	if typ != typeFunction {
+	if typ != typeFunction && typ != typeField {
 		return nil
 	}
 	return errorf(
-		"type error: Function parameter `%s` belongs in `<...>`, not `(...)`", param.Name)
+		"type error: %s parameter `%s` belongs in `<...>`, not `(...)`", typ, param.Name)
 }
 
 // checkStructFieldBorrowPolicy rejects borrow fields until a non-lifetime model exists.

@@ -277,7 +277,16 @@ func (l *lowerer) lowerPendingGenerics() error {
 		l.pending = l.pending[1:]
 		l.typeBindings = next.bindings
 		l.staticValues = next.values
+		// A `Field` static argument names a field of the type bound alongside
+		// it, and the body reads it through the `std::meta` forms written
+		// against the parameter. Binding it here is what makes each field its
+		// own instance rather than one generic body.
+		restore, err := l.bindInstanceFields(next.decl, next.bindings, next.values)
+		if err != nil {
+			return err
+		}
 		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
+		restore()
 		l.typeBindings = map[string]string{}
 		l.staticValues = map[string]staticValue{}
 		if err != nil {
@@ -286,6 +295,58 @@ func (l *lowerer) lowerPendingGenerics() error {
 		l.module.Functions = append(l.module.Functions, lowered)
 	}
 	return nil
+}
+
+// bindInstanceFields binds the `Field` static arguments of one instance to the
+// fields they name, and returns the call that unbinds them. The owner is the
+// type argument declared before the parameter, the pairing
+// `std::meta::field_type<T, f>` is written with.
+func (l *lowerer) bindInstanceFields(
+	decl *ast.FunctionDecl,
+	bindings map[string]string,
+	values map[string]staticValue,
+) (func(), error) {
+	bound := map[string]metaField{}
+	owner := ""
+	for _, param := range decl.StaticParams {
+		if param.IsType() {
+			owner = bindings[param.Name]
+			continue
+		}
+		if typ.Text(param.Type) != "Field" {
+			continue
+		}
+		fields, err := l.publicFields(owner)
+		if err != nil {
+			return nil, err
+		}
+		name := values[param.Name].text
+		found := false
+		for _, field := range fields {
+			if field.name == name {
+				bound[param.Name] = field
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("ir error: `%s` has no public field `%s`", owner, name)
+		}
+	}
+	previous := make(map[string]metaField, len(bound))
+	had := make(map[string]bool, len(bound))
+	for name, field := range bound {
+		previous[name], had[name] = l.metaFields[name]
+		l.metaFields[name] = field
+	}
+	return func() {
+		for name := range bound {
+			if had[name] {
+				l.metaFields[name] = previous[name]
+				continue
+			}
+			delete(l.metaFields, name)
+		}
+	}, nil
 }
 
 // genericDecl returns the generic function declaration with this IR name.

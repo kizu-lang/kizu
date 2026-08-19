@@ -2038,8 +2038,8 @@ fn sized<n: i64>() -> i64 {
 呼び出しはどちらも `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
 `std::testing::expect_equal<i64>(expected, actual)`。
 
-compile-time 値として書けるのは整数、`true` / `false`、および `Function`
-(top-level function 名)です。型引数推論、generic methods、bounds、
+compile-time 値として書けるのは整数、`true` / `false`、`Function`
+(top-level function 名)、および `Field`(struct の public field 名)です。型引数推論、generic methods、bounds、
 associated types、higher-kinded types、specialization は実装しません。
 reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
 runtime reflection と AST 書き換えは持ちません。
@@ -2139,6 +2139,13 @@ wrappers that must forward a named function to a trusted primitive. It is not a
 closure, cannot capture locals, and cannot be stored in runtime data. It is
 declared in `<...>` as `<worker: Function>`, and the argument must be a
 top-level function name.
+
+A `Field` static parameter is one public field of a struct. It is declared in
+`<...>` as `<f: Field>`, and the argument must be the source name of a public
+field of the type argument written before it. The body reads the field through
+the `std::meta` forms (`field_name<T, f>`, `field_type<T, f>`, `field<T, f>`),
+so the function is checked and lowered once per field, the way a `comptime for`
+expansion is. A field token has no runtime existence and cannot be stored.
 
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。

@@ -294,7 +294,7 @@ func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 func isPrimitiveType(name string) bool {
 	switch name {
 	case "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function",
+		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function", "Field",
 		"type":
 		return true
 	default:
