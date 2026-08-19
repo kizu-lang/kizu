@@ -5,6 +5,9 @@ path toward a Kizu-written `std`.
 
 Active migration work is tracked by #95.
 
+各 module の API リファレンスは [docs/std/](std/README.md) です。この文書は
+移行計画と builtin registry を持ちます。
+
 The goal is to avoid letting `std::...` behavior remain an implicit collection
 of hard-coded Go branches. Every public `std` API should have a specification,
 examples, conformance coverage, and a clear migration path from Go builtin code

@@ -1039,7 +1039,7 @@ borrow payload(`?&T` / `?&var T`)は最も強い階級で、`Array.at` /
 間 container は borrow されます。receiver は local binding のほか、owner からの
 field path(`owner.field.at_mut(...)`)を書けます: このとき borrow は owner の
 該当 path に付き、owner の move とその path に重なる操作が capture の最終使用
-まで待ちます。保存と `orelse` は拒否します(§std array、§std map、§10)。
+まで待ちます。保存と `orelse` は拒否します(§14.4、§10)。
 
 関数は bare の `?&T` / `?&var T` を戻り値型として宣言できます。契約は
 署名から構造的に導出され(ADR-0098)、呼び出し側の capture は borrow を
@@ -2172,9 +2172,17 @@ static 引数だけです。
 列挙するのは struct の `pub` field だけで、順序は source の宣言順です。
 enum tag と union variant の列挙は持ちません。
 
-## 14. 標準ライブラリ方針
+## 14. std とのインターフェース
 
-Kizu は将来的に厚めの標準ライブラリを持ちます。
+言語が std について持つ契約です。**compiler が知っていること**だけを書きます:
+capability としての `Allocator`、std storage 型に対する borrow / ownership の
+検査規則、`test` 宣言。各 module が公開する API とその振る舞いは
+`docs/std/` にあります。
+
+境界は 1 問で決まります —— 利用者が自分で同じものを書けるか。書けるなら
+`docs/std/`、書けないならここです。
+
+### 14.1 print
 
 最小 builtin は `print` です。
 
@@ -2200,24 +2208,18 @@ try io::write_stdout(handle, bytes);
 
 `print` が受け取れない型は診断になります。黙って何も出さないことはありません。
 
-stdlib module は lowercase namespace names にします。
+### 14.2 module 名と文字列
 
-```text
-std::string
-std::io
-std::fs
-std::mem
-std::slice
-std::array
-std::map
-std::json
-```
+stdlib module は lowercase namespace names にします(`std::string`、
+`std::array`、`std::json`)。
 
-文字列 literal は `[]u8` として扱います。
-owned string は primitive ではなく、将来 `std::string::String` で扱います。
+文字列 literal は `[]u8` として扱います。owned string は primitive ではなく
+`std::string::String` です。
 
-C ABI へ `std::string::String` を暗黙に渡してはいけません。
-C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
+C ABI へ `std::string::String` を暗黙に渡してはいけません。C へ渡す場合は、
+将来 `std::string::as_c_string` のような明示 API を使います。
+
+### 14.3 Allocator capability
 
 安定 allocator factory は `std::mem::page_allocator()` と
 `std::mem::fixed_buffer(bytes)` の 2 つです。
@@ -2263,373 +2265,75 @@ hidden default allocator、implicit global allocator、missing allocator argumen
 safe `std::mem` は raw pointer、allocation method、mutable backing slice、
 allocator metadata、deallocation primitive を公開しません。
 
-`std::string::String` は、明示 allocator capability を受け取る
-owned byte buffer です。
+危険な選択は禁止ではなく明示語にします。`std::mem::leak<T>(value)` は owner を
+consume して解放しません —— leak-on-exit(短命 process が解放を OS に任せる)を
+source に残す唯一の手段です。`std::mem::Limit` は確保上限の union で、上限を
+設けない選択も `Unlimited` と綴ります。
 
-```text
-std::string::new(allocator: Allocator) -> std::string::String
-string.append_bytes(bytes: []u8) -> !void
-string.append_byte(byte: u8) -> !void
-string.append_string(other: &std::string::String) -> !void
-string.reserve(additional: i64) -> !void
-string.truncate(length: i64) -> !void
-string.len() -> i64
-string.capacity() -> i64
-string.as_bytes() -> []u8
-string.as_mut_bytes() -> &var []u8
-string.clear() -> void
-string.deinit() -> void
-```
+### 14.4 std storage 型に対する検査規則
 
-`string` primitive は追加しません。
-`std::string::new()` のような hidden default allocator は使いません。
-`std::string::String` は non-copy / move-only です。
-`append_bytes` は source の `[]u8` を move せず、owned buffer に copy します。
-`append_byte` は 1 byte を追加します。
-`append_string` は borrow した別の `String` の bytes を copy します。source は
-move されません。
-`reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
-`truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
-`capacity` は現在の capacity を `i64` で返します。
-capacity の増加戦略は実装が決めます。保証するのは `capacity() >= len()` だけであり、
-特定の値に依存するコードは実装を固定してしまうため書けません。
-`as_bytes` は owned buffer への local read-only view です。
-`as_bytes` の戻り値は local binding に束縛する必要があります。
-view が生きている間は `append_bytes`、`append_byte`、`truncate`、`clear`、`deinit` を禁止します。
-`as_mut_bytes` は owned buffer への local writable view(`&var []u8`)です。
-mutable binding の String からだけ作れ、戻り値は local binding に束縛する
-必要があります。view が生きている間、String は exclusive borrow です:
-すべての method 呼び出し、`deinit`、共有 view を禁止します。
-書き込みは既存 bytes の上書きだけで、length と capacity は変わりません。
-`append_bytes`、`append_byte`、`reserve`、`truncate`、`clear` は owned local `String` または
-`&var std::string::String` から呼べます。
-`clear` は length を 0 にしますが、capacity は保持します。
-`deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
-例外として、owner 型自身の `deinit(self: Owner) -> void` method 内では
-`self.field.deinit()` の direct field cleanup を許可します。
-UTF-8 validation、C ABI string 変換、raw pointer exposure、
-owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
-`std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
-private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
-raw pointer は公開しません。mutable backing は `as_mut_bytes` の
-exclusive borrow 経由でだけ公開します(ADR-0096)。public
-`std::mem::OwnedBytes` または `std::bytes::Buffer` は、raw storage
-provenance の仕様後に検討します。
+これらは API の説明ではなく、checker が持つ規則です。利用者が自分の型に
+同じものを書くことはできません。
 
-`std::fmt` は、diagnostic construction 用の最小 formatting API です。
-format string、locale、generic display trait、reflection は持ちません。
-caller が明示 allocator 付きの `std::string::String` を用意し、
-formatting API はその buffer に bytes を append します。
+**view を返す accessor.** `String.as_bytes` は owned buffer への local
+read-only view、`as_mut_bytes` は writable view(`&var []u8`)です。
+どちらも戻り値を local binding に束縛する必要があります。read-only view が
+生きている間は `append_bytes` / `append_byte` / `truncate` / `clear` /
+`deinit` を禁止します。writable view は mutable binding の String からだけ
+作れ、生きている間 String は exclusive borrow です —— すべての method 呼び出し、
+`deinit`、共有 view を禁止します。書き込みは既存 bytes の上書きだけで、
+length と capacity は変わりません。
 
-```text
-std::fmt::append_i64(out: &var std::string::String, value: i64) -> !void
-std::fmt::append_bool(out: &var std::string::String, value: bool) -> !void
-std::fmt::append_bytes_literal(
-    out: &var std::string::String,
-    bytes: []u8,
-) -> !void
-```
+**mutator の receiver.** `String` の `append_bytes` / `append_byte` /
+`reserve` / `truncate` / `clear` は owned local `String` または
+`&var std::string::String` から呼べます。method receiver は by-value の
+parameter として書きますが、consuming transfer ではありません。
 
-hidden global allocator は使いません。
-allocation failure は `String` の allocator から `!void` error として伝播します。
-output は conformance test 向けに deterministic ASCII とします。
-`append_i64` は 10 進表記で、負数には `-` を付け、`+` と不要な leading zero は出しません。
-`append_bool` は `true` または `false` を出します。
-`append_bytes_literal` は diagnostic 用の quoted byte string を出します。
-printable ASCII byte のうち `"` と `\` 以外はそのまま出します。
-`"`、`\`、newline、carriage return、tab はそれぞれ `\"`、`\\`、`\n`、`\r`、`\t`
-として escape します。
-その他の byte は uppercase hex の `\xNN` として escape します。
+**element / value borrow.** `Array.get` / `get_or_panic` は copy element
+限定です。non-copy element は `at` / `at_mut` で local borrow として読み書き
+します。`Array.at` / `at_mut` は borrow optional
+`?&T` / `?&var T` を、`Map.at` / `at_mut` は `?&V` / `?&var V` を返します。
+これを消費できるのは **capture 条件だけ**です(`if array.at(i) |elem|` /
+`while m.at(key) |v|`)。binding への保存も `orelse` も拒否します。element
+borrow が container の変更や解放より長生きする経路を positional に閉じる
+ためで、`as_bytes` の let 限定と同じ整理です。`at_mut` は mutable な受け手
+(`var` binding または `&var` 借用)を要求します。capture の scope の間
+container は borrow され、shared borrow 中は `insert` / `deinit` が、
+mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
+`Map.key_at` が返す key も map storage への view なので capture 限定です。
 
-`std::json` の encode は、明示 streaming encoder です。derive、hidden hook、
-method discovery は持ちません。caller が begin / end と field 書き込みを
-すべて綴ります。
+**cleanup の義務.** `Array.deinit` は残っている initialized element を
+cleanup してから storage を解放します。element cleanup は explicit
+`deinit(self: T) -> void` があればそれを使います。`T` が owner aggregate で
+callable な `deinit` を持たない場合、`array.deinit()` の内部に限って
+field / payload 内の既知 owner を再帰的に cleanup します。これは explicit な
+`array.deinit()` の一部であり、implicit destructor でも `T.deinit()` の
+合成でもありません。`Array.set` は置換前の element を cleanup してから
+新しい value を move します。
 
-```text
-std::json::encoder(allocator: Allocator) -> std::json::Encoder
-std::json::encoder_with_spaces(allocator: Allocator, width: i64) -> std::json::Encoder
-std::json::encoder_with_tabs(allocator: Allocator, width: i64) -> std::json::Encoder
-encoder.begin_object() -> !void
-encoder.end_object() -> !void
-encoder.begin_array() -> !void
-encoder.end_array() -> !void
-encoder.begin_object_field(name: []u8) -> !void
-encoder.begin_array_field(name: []u8) -> !void
-encoder.write_i64(value: i64) -> !void
-encoder.write_bool(value: bool) -> !void
-encoder.write_null() -> !void
-encoder.write_bytes(value: []u8) -> !void
-encoder.write_i64_field(name: []u8, value: i64) -> !void
-encoder.write_bool_field(name: []u8, value: bool) -> !void
-encoder.write_null_field(name: []u8) -> !void
-encoder.write_bytes_field(name: []u8, value: []u8) -> !void
-encoder.finish_into(out: &var std::string::String) -> !void
-encoder.deinit() -> void
-```
+`String.deinit` / `Box.deinit` / `Map.deinit` は caller 側の binding を
+無効化する必要があるため、owned local receiver 限定です。例外として、
+owner 型自身の `deinit(self: Owner) -> void` method 内では
+`self.field.deinit()` の direct field cleanup を許可し、その field は
+同じ body 内で以後使用できません。`deinit` 後の container 使用は safe Kizu
+では禁止します。
 
-`Encoder` は出力 buffer を所有する owner です。`std::json` は error set を
-宣言しません。`!void` は所有 buffer の allocation 失敗だけを伝播します。
+**`Box<T>`.** struct / union payload に保存できます。`Box<T>` を含む
+struct / union は non-copy です。`borrow` / `borrow_mut` は local borrow
+source であり、戻り値は local binding に束縛します。戻り値の由来は署名から
+構造的に self に tied と導出されます(ADR-0098)。borrow field は許可しません。
+borrow が生きている間は対象 `Box<T>` の move / deinit を禁止します。
 
-`write_*_field` は key と value を 1 呼び出しで書きます。key だけを書く
-low-level API は持たないので、value のない key を残せません。
-
-API の誤用は error ではなく **trap** です(ADR-0112)。次は回復可能な失敗
-ではなく bug として、`runtime error:` を出して停止します。
-
-* object の外で field を書く
-* object を `end_array` で、array を `end_object` で閉じる
-* 開いた container が無いのに `end_object` / `end_array` を呼ぶ
-* object の中に field 名なしで値を書く
-* top-level 値を 2 つ書く
-* container が開いたまま、あるいは値を 1 つも書かずに `finish_into` を呼ぶ
-* 62 段より深く入れ子にする
-
-`finish_into` は完成した document を caller の `String` に append します。
-`Encoder` は自分の buffer を持ち続け、`deinit` で解放します。
-
-`encoder_with_spaces` と `encoder_with_tabs` は同じ document を行に分けて
-書きます。`width` は 1 段あたりの個数で、`0` は compact 形と同じです。負の
-width は trap です。要素の無い container は 1 行のままにします。整形は要素の
-間の空白だけを変え、key の順序も値も変えません。
-
-空白と tab を 1 つの関数の `[]u8` 引数にまとめません。`Encoder` が `[]u8`
-field を持つと view を運べる型になり、view を貸せなくなります(§9)。
-`write_bytes_field(name, string.as_bytes())` は文字列データを入れる主経路
-なので、これは失えません。option record も持ちません。knob が 3 つ目に
-なったときに、record が要るかを問い直します。
-
-byte 列は決定的に escape します。`"`、`\`、newline、carriage return、tab は
-`\"`、`\\`、`\n`、`\r`、`\t`、その他の control byte は lowercase hex の
-`\u00XX` です。encode は UTF-8 validation をしません。
-
-`encode<T>` は、値の形を §13.1 の comptime structural reflection で読み、
-JSON document を書きます。
-
-```text
-std::json::encode<T>(
-    allocator: Allocator,
-    value: &T,
-    out: &var std::string::String,
-) -> !void
-std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
-std::json::encode_with_spaces<T>(
-    allocator: Allocator,
-    width: i64,
-    value: &T,
-    out: &var std::string::String,
-) -> !void
-std::json::encode_with_tabs<T>(
-    allocator: Allocator,
-    width: i64,
-    value: &T,
-    out: &var std::string::String,
-) -> !void
-```
-
-encode できる型は次で閉じています。
-
-| 型 | JSON |
-| --- | --- |
-| `i64` | number |
-| `bool` | `true` / `false` |
-| `[]u8` | string |
-| `std::string::String` | string。所有する bytes を書きます |
-| struct | public field の object。順序は source の宣言順 |
-| `std::array::Array<T>` | array。順序は index 順 |
-| `std::map::Map<[]u8, V>` | object。順序は `key_at` の挿入順 |
-| `std::mem::Box<T>` | 中身そのもの。唯一所有は木なので形を足しません |
-| `?T`(struct field) | 値があれば中身、無ければ `null` |
-
-これ以外の型は **compile error** です(`std::meta::unsupported`)。黙って
-何も書かないと、encoder 自身のテストでは捕まらない壊れた document が出る
-ためです。public field を 1 つも持たない struct も同じ理由で拒否します。
-状態が全部 private な型を `{}` と書くと、値が黙って消えるためです。
-`std::arena::Handle<T>` は共有参照で、木である JSON と対応しないので
-encode しません。union と enum はまだ持ちません。
-
-`decode<T>` と `std::json::Value` はまだ持ちません。
-
-collection は次の順で実装します。
-
-```text
-std::array::Array<T>  先に検討する owned contiguous collection
-[]T                   contiguous slice value
-&[]T                  shared borrowed slice
-&var []T              mutable borrowed slice
-std::map::Map<K, V>   owned symbol table
-std::set::Set<T>      後続 phase
-```
-
-`std::mem` は allocation-free な read-only byte helper から始めます。
-
-```text
-std::mem::page_allocator() -> Allocator
-std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
-std::mem::leak<T>(value: T) -> void
-box.borrow() -> &T
-box.borrow_mut() -> &var T
-box.deinit() -> void
-std::mem::len(bytes: []u8) -> i64
-std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
-std::mem::equal_bytes(left: []u8, right: []u8) -> bool
-std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
-std::mem::slice(bytes: []u8, start: i64, end: i64) -> ?[]u8
-std::mem::trim_ascii(bytes: []u8) -> []u8
-std::mem::bytes_iter(bytes: []u8) -> std::mem::BytesIter
-bytes_iter.next() -> ?u8
-```
-
-`std::mem::bytes_iter` は iterator protocol(§6.10)の std 綴りです。
-`next() -> ?u8` が `while it.next() |byte|` を終端まで駆動し、終端は
-失敗ではなく `null` です。cursor は view を capture する struct なので、
-歩いている bytes より長生きできません(ADR-0100)。
-
-`std::mem::page_allocator()` は安定 allocator capability factory です。
-返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
-再利用できます。allocator を受け取る constructor は capability を読み取るだけで、
-allocator binding を move しません。
-
-`std::mem::leak<T>(value)` は owner 値を consume しますが解放しません。
-leak-on-exit(短命 process が解放を OS に任せる)を source 上に明示する
-唯一の手段です。
-
-`std::mem::Limit` は確保上限を明示する union で、`Bytes(i64)` と `Unlimited` を
-持ちます。上限を設けない選択も `Unlimited` と綴って source に残します。
-
-`std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
-non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
-`Box<T>` を含む struct / union は non-copy です。
-`borrow` / `borrow_mut` は local borrow source であり、戻り値は local binding に束縛する
-必要があります。戻り値の由来は署名から構造的に self に tied と導出されます
-(ADR-0098)。borrow field は許可しません。borrow が生きている間は対象
-`Box<T>` の move / deinit を禁止します。
-`deinit` は owned local `Box<T>` receiver 限定です。
-safe API は raw pointer を公開しません。
-
-`std::mem` の safe API は raw pointer を返しません。
-`std::mem::slice` と `std::mem::byte_at` は境界外を `null` として返します
-(lookup の不在は失敗ではなく答えであるため。基準は `docs/style.md`)。
-checked index / slice syntax の実装後は、Kizu std source では
-trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途で使い分けます。
-allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
-mutable slice の仕様後に実装します。
-
-`std::array::Array<T>` は、明示 allocator capability を受け取る
-owned contiguous collection です。
-
-```text
-std::mem::page_allocator() -> Allocator
-std::array::new<T>(allocator: Allocator) -> std::array::Array<T>
-array.append(value: T) -> !void
-array.len() -> i64
-array.capacity() -> i64
-array.reserve(additional: i64) -> !void
-array.pop() -> ?T
-array.pop_or_panic() -> T
-array.get(index: i64) -> ?T
-array.get_or_panic(index: i64) -> T
-array.at(index: i64) -> ?&T
-array.at_mut(index: i64) -> ?&var T
-array.set(index: i64, value: T) -> !void
-array.deinit() -> void
-```
-
-`std::array::new<T>()` のような hidden default allocator は使いません。
-`array.get` は bounds check し、範囲外なら `null` を返します。
-`array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
-範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
-`get` / `get_or_panic` は copy element 限定です。
-non-copy element は `at` / `at_mut` で local borrow として読み書きします。
-`at` / `at_mut` は borrow optional `?&T` / `?&var T` を返し、範囲内なら
-element borrow、範囲外なら `null` です。borrow optional を消費できるのは
-capture 条件だけです(`if array.at(i) |elem|` / `while array.at(i) |elem|`)。
-capture が element borrow を bind し、その scope の間 array は
-borrow されたままです(`at` は shared、`at_mut` は mutable)。
-`?&T` を binding に保存する、`orelse` で受ける、のどちらも拒否します
-(戻り値型としての宣言は §7)。element borrow が array の変更や解放より
-長生きする経路を positional に閉じるためで、`as_bytes` の let-initializer
-限定と同じ整理です。`at_mut` は mutable な受け手(`var` binding または
-`&var` 借用)を要求します。
-`while array.at(i) |elem|` は §6.10 の optional 条件 capture そのままなので、
-non-copy element の iteration も `get` と同じ形になります。
-`pop` は最後の initialized element を array から move して `?T` を返し、
-empty array なら `null` を返します。
-`pop_or_panic` も最後の initialized element を move して `T` を返し、
-empty array なら runtime error で停止します。copy / non-copy のどちらにも使え、
-recoverable な empty case を扱う場合は `pop` を使います。
-`set` は置換前の element を cleanup してから新しい value を move します。
-`deinit` は残っている initialized element を cleanup してから array storage を解放します。
-element cleanup は explicit `deinit(self: T) -> void` があればそれを使います。
-`T` が owner aggregate で callable な `deinit` を持たない場合、`array.deinit()` の内部に限って
-field / payload 内の既知 owner を再帰的に cleanup できます。
-これは explicit `array.deinit()` の一部であり、implicit destructor や callable な
-`T.deinit()` 合成ではありません。
-element borrow が生きている間は `append`、`pop`、`pop_or_panic`、`set`、`deinit` を禁止します。
-mutable element borrow が生きている間は array 全体の read も禁止します。
-`deinit` 後の array 使用は safe Kizu では禁止します。
-`owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、
-その field は同じ body 内で以後使用できません。
-`Array<T>` element は arena、handle、nested array、`std::map::Map<K, V>` を
-含められます。raw pointer と dyn は入れられません。
+**element に置ける型.** `Array<T>` の element には arena、handle、nested
+array、`std::map::Map<K, V>` を置けます。raw pointer と dyn は置けません。
 この制限は struct field と union payload の中も再帰的に検査します。
-これらは provenance と dynamic dispatch の仕様を collection 向けに
-固めてから扱います。
+raw pointer と dyn は、provenance と dynamic dispatch の仕様を collection
+向けに固めてから扱います。
 
-`std::map::Map<K, V>` は、symbol table と scope lookup に必要な最小 owned map です。
+**`String` は non-copy / move-only** です。
 
-```text
-std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
-map.insert(key: []u8, value: V) -> !void
-map.get(key: []u8) -> ?V
-map.at(key: []u8) -> ?&V
-map.at_mut(key: []u8) -> ?&var V
-map.key_at(index: i64) -> ?[]u8
-map.contains(key: []u8) -> bool
-map.len() -> i64
-map.deinit() -> void
-```
+### 14.5 test 宣言
 
-key type は `[]u8` 限定です。
-`insert` は key bytes を owned map 内に copy するため、source key を move しません。
-`get` は missing key を `null` として返します(docs/style.md)。
-`at` / `at_mut` は value への borrow optional `?&V` / `?&var V` を返し、
-key があれば value borrow、なければ `null` です。消費は Array と同じく
-capture 条件だけです(`if m.at(key) |v|` / `while m.at(key) |v|`)。
-capture の scope の間 map は borrow され(`at` は shared、`at_mut` は
-mutable)、shared borrow 中は `insert` / `deinit` が、mutable borrow 中は
-すべての map 操作が capture の最終使用まで待ちます。`at_mut` は mutable な
-受け手(`var` binding または `&var` 借用)を要求します。in-place 更新は
-`if m.at_mut(key) |v| { v.* = ...; } else { try m.insert(key, ...); }`
-の形で 1 回の lookup になります(ADR-0104)。
-`insert` / `get` / `at` / `at_mut` / `contains` は amortized O(1) です。
-**map は挿入順で反復します。** 未定義の順序は露出しません。
-`key_at` は挿入位置 index の key を返し、末尾を越えたら `null` を返すので、
-`while m.key_at(i) |key|` が挿入順の iteration です。key は map storage への
-view なので capture 限定で、capture が生きている間 map は共有借用されます
-(§7)。
-value type は copy type 限定です。
-non-copy value、deletion、custom hash/equality は後続で扱います。
-`std::map::new<K, V>()` のような hidden default allocator は使いません。
-`deinit` 後の map 使用は safe Kizu では禁止します。
-
-`std::testing` は最小 assertion API です。
-
-```text
-std::testing::expect(condition: bool) -> void
-std::testing::expect_equal<T>(expected: T, actual: T) -> void
-std::testing::fail(message: []u8) -> !void
-```
-
-`expect` は test assertion 用の void helper です。
-condition failure は `std::internal::builtin::test_fail` 経由で runtime error として停止し、
-test source は assertion ごとの `try` を書きません。
-`fail` は caller-provided `[]u8` を通常の `!void` error として返します。
-unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
-`expect_equal<T>` は明示 static 引数付きの generic assertion です。
-failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
-static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
-期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
-導入しません。
 test は top-level declaration として書きます。
 
 ```kizu
@@ -2647,6 +2351,17 @@ test block は parameterless `!void` body として扱うため、helper が返�
 `test: ok` を表示します。
 filesystem-wide test discovery、test filter、test attribute、async test、location-aware
 diagnostics、message builder helper は後続で扱います。
+
+### 14.6 collection の実装順序
+
+```text
+std::array::Array<T>  先に検討する owned contiguous collection
+[]T                   contiguous slice value
+&[]T                  shared borrowed slice
+&var []T              mutable borrowed slice
+std::map::Map<K, V>   owned symbol table
+std::set::Set<T>      後続 phase
+```
 
 ## 15. concurrency / async 方針
 
