@@ -280,6 +280,60 @@ fn main() {}`)
 	}
 }
 
+// TestLowerErrDeferRetiresAtMove checks the error paths after a move stop
+// carrying the moved receiver's cleanup. From the move on the parent owns the
+// child, and emitting both cleanups would free the same buffer twice
+// (ADR-0114).
+func TestLowerErrDeferRetiresAtMove(t *testing.T) {
+	module := lowerSource(t, `
+fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
+    let parent = std::array::new<std::string::String>(allocator);
+    errdefer parent.deinit_all();
+    let child = std::string::new(allocator);
+    errdefer child.deinit();
+    try child.append_byte(cast<u8>(97));
+    try parent.append(child);
+    try parent.reserve(1);
+    return parent;
+}
+fn main() {}`)
+	got := tryCleanupReceivers(module, "build")
+	want := [][]string{{"child", "parent"}, {"parent"}, {"parent"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d try exits, want %d:\n%s", len(got), len(want), Dump(module))
+	}
+	for index, receivers := range want {
+		if strings.Join(got[index], ",") != strings.Join(receivers, ",") {
+			t.Fatalf("try %d cleans up %v, want %v:\n%s",
+				index, got[index], receivers, Dump(module))
+		}
+	}
+}
+
+// tryCleanupReceivers lists, in emission order, the receivers each try's error
+// path cleans up in the named function.
+func tryCleanupReceivers(module *Module, name string) [][]string {
+	var receivers [][]string
+	for _, fn := range module.Functions {
+		if fn.Name != name {
+			continue
+		}
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op != "error.try" {
+					continue
+				}
+				names := []string{}
+				for _, cleanup := range instr.Cleanups {
+					names = append(names, cleanup.Receiver)
+				}
+				receivers = append(receivers, names)
+			}
+		}
+	}
+	return receivers
+}
+
 // TestLowerByteSliceAccess emits explicit checked slice operations.
 func TestLowerByteSliceAccess(t *testing.T) {
 	module := lowerSource(t, `fn main() {

@@ -35,9 +35,28 @@ func (l *lowerer) recordCleanup(expr ast.Expression, onError bool) error {
 		return err
 	}
 	cleanup.OnError = onError
+	cleanup.Receiver = cleanupReceiverName(expr)
 	frame := len(l.deferFrames) - 1
 	l.deferFrames[frame] = append(l.deferFrames[frame], cleanup)
 	return nil
+}
+
+// cleanupReceiverName reads the local a cleanup call consumes. The shape is the
+// one cleanupFromExpr accepts, so anything else has already failed there.
+func cleanupReceiverName(expr ast.Expression) string {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok {
+		return ""
+	}
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return ""
+	}
+	return ident.Name
 }
 
 // cleanupFromExpr converts the narrow v0 defer expression into a void cleanup.
@@ -144,9 +163,31 @@ func (l *lowerer) emitNormalCleanups() {
 	l.emitCleanups(l.normalCleanups())
 }
 
-// emitErrorCleanups emits error-path cleanups before an error-return exit.
-func (l *lowerer) emitErrorCleanups() {
-	l.emitCleanups(l.errorCleanups())
+// emitErrorCleanups emits error-path cleanups before an error-return exit,
+// minus the ones a move retired before it.
+func (l *lowerer) emitErrorCleanups(retired []string) {
+	l.emitCleanups(retireCleanups(l.errorCleanups(), retired))
+}
+
+// retireCleanups drops the errdefer cleanups whose receiver was moved before
+// this error exit. The ownership checker decides which; lowering obeys, so the
+// move rule has one implementation (ADR-0114).
+func retireCleanups(cleanups []Cleanup, retired []string) []Cleanup {
+	if len(retired) == 0 {
+		return cleanups
+	}
+	moved := make(map[string]bool, len(retired))
+	for _, name := range retired {
+		moved[name] = true
+	}
+	kept := make([]Cleanup, 0, len(cleanups))
+	for _, cleanup := range cleanups {
+		if cleanup.OnError && cleanup.Receiver != "" && moved[cleanup.Receiver] {
+			continue
+		}
+		kept = append(kept, cleanup)
+	}
+	return kept
 }
 
 // emitCleanupFrame emits normal fallthrough cleanups for one lexical block.

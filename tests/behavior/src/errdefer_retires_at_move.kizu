@@ -1,0 +1,40 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+// A child is covered by its own errdefer until the parent takes it. From the
+// move on the parent's cleanup owns it, so the parent may keep doing fallible
+// work without the two cleanups colliding (ADR-0114).
+fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
+    var parent = array::new<string::String>(allocator);
+    errdefer parent.deinit_all();
+
+    var i = 0;
+    while i < count {
+        var child = string::new(allocator);
+        errdefer child.deinit();
+        try child.append_byte(cast<u8>(97) + cast<u8>(i));
+        try parent.append(child);
+        try parent.reserve(1);
+        i = i + 1;
+    }
+    return parent;
+}
+
+// The moved children stay intact: the parent holds the strings the loop built,
+// and nothing released them twice on the way.
+test "errdefer retires at move" {
+    let allocator = mem::page_allocator();
+    let names = try build(allocator, 3);
+    defer names.deinit_all();
+
+    testing::expect_equal<i64>(3, names.len());
+    var count = 0;
+    while names.pop() |name| {
+        testing::expect_equal<i64>(1, name.len());
+        name.deinit();
+        count = count + 1;
+    }
+    testing::expect_equal<i64>(3, count);
+}
