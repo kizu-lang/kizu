@@ -1,0 +1,161 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+pub struct Empty {
+    hidden: i64,
+}
+
+pub struct One {
+    pub only: i64,
+}
+
+pub struct Three {
+    pub first: i64,
+    pub second: i64,
+    pub third: i64,
+}
+
+pub struct Mixed {
+    pub visible: i64,
+    hidden: i64,
+    pub also_visible: i64,
+}
+
+fn field_count<T>() -> i64 {
+    var count = 0;
+    comptime for std::meta::public_fields<T>() |f| {
+        count = count + 1;
+    }
+    return count;
+}
+
+// A struct with no public field expands the body zero times, so the loop is a
+// statement that runs nothing rather than an error.
+test "comptime for over no public fields expands nothing" {
+    testing::expect_equal<i64>(0, field_count<Empty>());
+}
+
+test "comptime for expands once per public field" {
+    testing::expect_equal<i64>(1, field_count<One>());
+    testing::expect_equal<i64>(3, field_count<Three>());
+}
+
+// Only public fields are listed: a private field is not part of what another
+// module may read, so reflection does not hand it out either.
+test "comptime for lists public fields only" {
+    testing::expect_equal<i64>(2, field_count<Mixed>());
+}
+
+fn first_name<T>() -> []u8 {
+    var seen = 0;
+    var name = "";
+    comptime for std::meta::public_fields<T>() |f| {
+        if seen == 0 {
+            name = std::meta::field_name<T, f>();
+        }
+        seen = seen + 1;
+    }
+    return name;
+}
+
+fn last_name<T>() -> []u8 {
+    var name = "";
+    comptime for std::meta::public_fields<T>() |f| {
+        name = std::meta::field_name<T, f>();
+    }
+    return name;
+}
+
+// The order is the source declaration order, so what a program emits does not
+// depend on how the checker happens to store fields.
+test "comptime for walks fields in declaration order" {
+    testing::expect_equal<[]u8>("first", first_name<Three>());
+    testing::expect_equal<[]u8>("third", last_name<Three>());
+    testing::expect_equal<[]u8>("visible", first_name<Mixed>());
+    testing::expect_equal<[]u8>("also_visible", last_name<Mixed>());
+}
+
+fn sum_fields<T>(value: &T) -> i64 {
+    var total = 0;
+    comptime for std::meta::public_fields<T>() |f| {
+        total = total + read_scalar<std::meta::field_type<T, f>>(std::meta::field<T, f>(value));
+    }
+    return total;
+}
+
+fn read_scalar<T>(value: &T) -> i64 {
+    comptime if T == type<i64> {
+        return value.*;
+    } else {
+        return 0;
+    }
+}
+
+// `field<T, f>(value)` is the field path borrow of §9 written generically, so
+// the value read through it is the owner's own field.
+test "comptime for reads each field through a borrow" {
+    let three = Three { first: 1, second: 20, third: 300 };
+    testing::expect_equal<i64>(321, sum_fields<Three>(three));
+}
+
+// The predicates answer what a type is, which is what lets one function take a
+// different branch per field type.
+test "meta predicates classify types" {
+    testing::expect(is_struct_of<Three>());
+    testing::expect(!is_struct_of<i64>());
+    testing::expect(is_array_of<array::Array<i64>>());
+    testing::expect(!is_array_of<i64>());
+    testing::expect(is_box_of<mem::Box<i64>>());
+    testing::expect(!is_box_of<array::Array<i64>>());
+    testing::expect(!is_optional_of<i64>());
+}
+
+fn is_struct_of<T>() -> bool {
+    comptime if std::meta::is_struct<T>() {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn is_array_of<T>() -> bool {
+    comptime if std::meta::is_array<T>() {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn is_box_of<T>() -> bool {
+    comptime if std::meta::is_box<T>() {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn is_optional_of<T>() -> bool {
+    comptime if std::meta::is_optional<T>() {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn element_is_i64<T>() -> bool {
+    comptime if type<std::meta::element<T>> == type<i64> {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+// `element<T>` names what a container holds, which is how a walk descends
+// through a container. An optional cannot be a static argument yet
+// (ADR-0101), so `?T` is not among the types written here.
+test "element names what a container holds" {
+    testing::expect(element_is_i64<array::Array<i64>>());
+    testing::expect(element_is_i64<mem::Box<i64>>());
+    testing::expect(!element_is_i64<array::Array<bool>>());
+}

@@ -279,9 +279,26 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		return c.qualifyBlock(module, s)
 	case *ast.ComptimeIfStmt:
 		return c.qualifyComptimeIfStmt(module, s)
+	case *ast.ComptimeForStmt:
+		return c.qualifyComptimeForStmt(module, s)
 	default:
 		return stmt, nil
 	}
+}
+
+// qualifyComptimeForStmt rewrites the compile-time list and the loop body.
+func (c *graphChecker) qualifyComptimeForStmt(
+	module *moduleUnit,
+	stmt *ast.ComptimeForStmt,
+) (*ast.ComptimeForStmt, error) {
+	cp := *stmt
+	list, err := c.qualifyExpr(module, stmt.List)
+	if err != nil {
+		return nil, err
+	}
+	cp.List = list
+	cp.Body, err = c.qualifyBlock(module, stmt.Body)
+	return &cp, err
 }
 
 // qualifyDeferStmt rewrites type-bearing expressions in a deferred cleanup.

@@ -4,6 +4,8 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // checkComptimeIfStmt checks ownership effects for the selected compile-time branch.
@@ -123,8 +125,45 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 			return "", err
 		}
 		return left, nil
+	case *ast.CallExpr:
+		if _, ok := c.metaPredicateCall(e); ok {
+			return "bool", nil
+		}
+		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	default:
 		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
+	}
+}
+
+// metaPredicateCall answers a `std::meta` predicate written as a compile-time
+// condition, and reports whether the call was one.
+func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
+	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
+	if !ok {
+		return false, false
+	}
+	name, ok := qualifiedName(apply.Callee)
+	if !ok || !stdmeta.Predicate(name) || len(expr.Args) != 0 {
+		return false, false
+	}
+	subject := c.instantiateTypeArgText(apply.TypeArg)
+	switch stdmeta.Form(name) {
+	case stdmeta.IsStruct:
+		_, known := c.structs[subject]
+		return known, true
+	case stdmeta.IsOptional:
+		_, known := typ.OptionalElem(subject)
+		return known, true
+	case stdmeta.IsArray:
+		return metaGenericBase(subject) == "std::array::Array", true
+	case stdmeta.IsBox:
+		return metaGenericBase(subject) == "std::mem::Box", true
+	case stdmeta.IsMap:
+		return metaGenericBase(subject) == "std::map::Map", true
+	case stdmeta.HasPublicFields:
+		return len(c.structPublicOrder[subject]) > 0, true
+	default:
+		return false, false
 	}
 }
 
@@ -135,6 +174,8 @@ func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 		return c.comptimeBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
+	case *ast.CallExpr:
+		return c.metaPredicateCall(e)
 	case *ast.PrefixExpr:
 		value, ok := c.comptimeBool(e.Right)
 		return !value, ok && e.Operator == "!"
@@ -162,7 +203,8 @@ func (c *Checker) comptimeTypeValue(expr ast.Expression) (string, bool) {
 	case *ast.ComptimeExpr:
 		return c.comptimeTypeValue(e.Expr)
 	case *ast.TypeExpr:
-		return e.TypeName, e.TypeName != ""
+		name := c.instantiateTypeArgText(e.TypeName)
+		return name, name != ""
 	case *ast.IdentExpr:
 		value, ok := c.typeArgValues[e.Name]
 		return value, ok

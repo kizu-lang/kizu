@@ -1984,7 +1984,9 @@ fn sized<n: i64>() -> i64 {
 
 compile-time 値として書けるのは整数、`true` / `false`、および `Function`
 (top-level function 名)です。型引数推論、generic methods、bounds、
-associated types、higher-kinded types、specialization、reflection は実装しません。
+associated types、higher-kinded types、specialization は実装しません。
+reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
+runtime reflection と AST 書き換えは持ちません。
 
 通常の function / method 名は、generic かどうかに関係なく snake_case にします。
 `<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
@@ -2014,7 +2016,9 @@ format string など、type 以外の comptime value が必要になった場合
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
 明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /
-borrow check します。static 引数は type だけなので、`T` は instantiated body
+borrow check します。同じ関数と同じ static 引数の組は 1 回だけ検査します。
+instantiation の入れ子は 64 段までで、超えると診断になります。呼ぶたびに
+static 引数が育つ body は同じ組に戻らないため、上限がなければ検査が止まりません。static 引数は type だけなので、`T` は instantiated body
 内で comptime-only の `type` 値として扱います。`type` 値は runtime local、field、
 collection element、return value として保持できません。
 
@@ -2053,8 +2057,9 @@ comptime if 1 + 1 == 2 {
 ```
 
 `comptime` expression は、整数、真偽値、文字列、compile-time type value、
-単項演算、二項演算だけを評価します。`type<i64>` のような `type<T>` literal と、
-instantiated generic body 内の static type parameter identifier は `type` 値です。
+単項演算、二項演算、および §13.1 の `std::meta` 述語だけを評価します。
+`type<i64>` のような `type<T>` literal と、instantiated generic body 内の
+static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
 
 Kizu の canonical spelling は `type<T>` です。`T == i64` のように bare
@@ -2081,6 +2086,91 @@ top-level function name.
 
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。
+
+### 13.1 comptime for と structural reflection
+
+`comptime for` は compile-time list の反復です。綴りは runtime の `for`
+(§6.11)と同じ capture 構文です。
+
+```kizu
+comptime for std::meta::public_fields<T>() |f| {
+    print(std::meta::field_name<T, f>());
+}
+```
+
+`comptime if` と同じく、これは token stream や AST を書き換える macro では
+ありません。展開された各反復を、その束縛のもとで型・所有権・borrow 検査します。
+
+反復できるのは `std::meta::public_fields<T>()` だけです。整数 range は
+runtime の `for` が持ちます。
+
+`std::meta` は、struct の構造をコンパイル時に読むための組み込みの式の形です。
+comptime 専用の**型**は持ちません(ADR-0113)。
+
+```text
+std::meta::is_struct<T>()          -> bool    comptime-only
+std::meta::is_optional<T>()        -> bool    comptime-only
+std::meta::is_array<T>()           -> bool    comptime-only
+std::meta::is_box<T>()             -> bool    comptime-only
+std::meta::is_map<T>()             -> bool    comptime-only
+std::meta::element<T>                         comptime-only、型の位置に書く
+std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
+std::meta::field_name<T, f>()      -> []u8    comptime-only
+std::meta::field_type<T, f>                   comptime-only、型の位置に書く
+std::meta::field<T, f>(value: &T)  -> &F
+std::meta::unsupported<T>()                   compile error にする
+```
+
+`unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
+`comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、
+扱えない型が来たときにだけ error になります。診断は型と、拒否した関数を
+名指しします。閉じた集合を歩く walk が、集合の外を黙って通さないための形です。
+
+`is_*` は `comptime if` の条件に書けます。`comptime` expression はこれらの
+組み込み形も評価します。述語が答える型の種類は std が持つ container で
+閉じています。ユーザーは generic 型を宣言できない(§7)ので、この集合の外に
+新しい種類は現れません。
+
+`field_name` の値は source の field 名を持つ `[]u8` literal です。static
+storage を指し、確保は起きません。
+
+`element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
+返します。`field_type<T, f>` はその field の型を返します。どちらも型の位置に
+書くので、型値として比べるときは `type<std::meta::element<T>>` と綴ります。
+static 引数にも書けるので、そのまま再帰できます。
+
+```kizu
+fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime if std::meta::is_struct<T>() {
+        try encoder.begin_object();
+        comptime for std::meta::public_fields<T>() |f| {
+            try encoder.write_key(std::meta::field_name<T, f>());
+            try encode_value<std::meta::field_type<T, f>>(
+                encoder,
+                std::meta::field<T, f>(value),
+            );
+        }
+        try encoder.end_object();
+    }
+    return;
+}
+```
+
+`std::meta::field<T, f>(value)` は `&value.<f の名前>` と同じもの、つまり §9 の
+field path borrow です。借用の追跡、衝突判定、`&var` の排他は field path borrow の
+規則がそのまま適用されます。provenance は署名から構造導出します(§9)。
+
+capture 束縛(上の `f`)は値ではありません。書ける位置は `std::meta::*` の
+static 引数だけです。
+
+* `let g = f;` のように binding へ束縛できません
+* 関数や method の引数として渡せません
+* 比較・演算の対象にできません
+* runtime local、field、union payload、collection element、return value として
+  保持できません
+
+列挙するのは struct の `pub` field だけで、順序は source の宣言順です。
+enum tag と union variant の列挙は持ちません。
 
 ## 14. 標準ライブラリ方針
 
@@ -2257,6 +2347,8 @@ method discovery は持ちません。caller が begin / end と field 書き込
 
 ```text
 std::json::encoder(allocator: Allocator) -> std::json::Encoder
+std::json::encoder_with_spaces(allocator: Allocator, width: i64) -> std::json::Encoder
+std::json::encoder_with_tabs(allocator: Allocator, width: i64) -> std::json::Encoder
 encoder.begin_object() -> !void
 encoder.end_object() -> !void
 encoder.begin_array() -> !void
@@ -2295,12 +2387,67 @@ API の誤用は error ではなく **trap** です(ADR-0112)。次は回復可�
 `finish_into` は完成した document を caller の `String` に append します。
 `Encoder` は自分の buffer を持ち続け、`deinit` で解放します。
 
+`encoder_with_spaces` と `encoder_with_tabs` は同じ document を行に分けて
+書きます。`width` は 1 段あたりの個数で、`0` は compact 形と同じです。負の
+width は trap です。要素の無い container は 1 行のままにします。整形は要素の
+間の空白だけを変え、key の順序も値も変えません。
+
+空白と tab を 1 つの関数の `[]u8` 引数にまとめません。`Encoder` が `[]u8`
+field を持つと view を運べる型になり、view を貸せなくなります(§9)。
+`write_bytes_field(name, string.as_bytes())` は文字列データを入れる主経路
+なので、これは失えません。option record も持ちません。knob が 3 つ目に
+なったときに、record が要るかを問い直します。
+
 byte 列は決定的に escape します。`"`、`\`、newline、carriage return、tab は
 `\"`、`\\`、`\n`、`\r`、`\t`、その他の control byte は lowercase hex の
 `\u00XX` です。encode は UTF-8 validation をしません。
 
-`encode<T>` / `decode<T>` と `std::json::Value` は、comptime structural
-reflection の仕様が決まるまで実装しません。
+`encode<T>` は、値の形を §13.1 の comptime structural reflection で読み、
+JSON document を書きます。
+
+```text
+std::json::encode<T>(
+    allocator: Allocator,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
+std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
+std::json::encode_with_spaces<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
+std::json::encode_with_tabs<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
+```
+
+encode できる型は次で閉じています。
+
+| 型 | JSON |
+| --- | --- |
+| `i64` | number |
+| `bool` | `true` / `false` |
+| `[]u8` | string |
+| `std::string::String` | string。所有する bytes を書きます |
+| struct | public field の object。順序は source の宣言順 |
+| `std::array::Array<T>` | array。順序は index 順 |
+| `std::map::Map<[]u8, V>` | object。順序は `key_at` の挿入順 |
+| `std::mem::Box<T>` | 中身そのもの。唯一所有は木なので形を足しません |
+| `?T`(struct field) | 値があれば中身、無ければ `null` |
+
+これ以外の型は **compile error** です(`std::meta::unsupported`)。黙って
+何も書かないと、encoder 自身のテストでは捕まらない壊れた document が出る
+ためです。public field を 1 つも持たない struct も同じ理由で拒否します。
+状態が全部 private な型を `{}` と書くと、値が黙って消えるためです。
+`std::arena::Handle<T>` は共有参照で、木である JSON と対応しないので
+encode しません。union と enum はまだ持ちません。
+
+`decode<T>` と `std::json::Value` はまだ持ちません。
 
 collection は次の順で実装します。
 

@@ -1,4 +1,6 @@
+import std::array;
 import std::json;
+import std::map;
 import std::mem;
 import std::string;
 import std::testing;
@@ -113,6 +115,240 @@ test "json encoder writes a borrowed String view" {
     let bytes = out.as_bytes();
     let expected =
         \\{"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+pub struct Shape {
+    pub name: []u8,
+    pub origin: Point,
+    pub filled: bool,
+}
+
+// `encode<T>` writes a struct as an object of its public fields, in
+// declaration order, with a nested struct taking the same path.
+test "json encode writes a struct from its own shape" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let point = Point { x: 3, y: 4 };
+    try json::encode<Point>(allocator, point, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"x":3,"y":4}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+test "json encode nests structs and keeps declaration order" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let shape = Shape {
+        name: "box",
+        origin: Point { x: 1, y: 2 },
+        filled: true,
+    };
+    try json::encode<Shape>(allocator, shape, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"name":"box","origin":{"x":1,"y":2},"filled":true}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A scalar is a whole document, so encode is not limited to structs.
+test "json encode writes a scalar document" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let count = 42;
+    try json::encode<i64>(allocator, count, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("42", bytes);
+}
+
+pub struct Bag {
+    pub label: []u8,
+    pub items: array::Array<i64>,
+}
+
+fn (self: Bag) deinit() -> void {
+    self.items.deinit();
+}
+
+pub struct Counted {
+    pub counts: map::Map<[]u8, i64>,
+}
+
+fn (self: Counted) deinit() -> void {
+    self.counts.deinit();
+}
+
+pub struct Boxed {
+    pub held: mem::Box<i64>,
+}
+
+fn (self: Boxed) deinit() -> void {
+    self.held.deinit();
+}
+
+pub struct Maybe {
+    pub set: ?i64,
+    pub unset: ?i64,
+}
+
+// An array field becomes a JSON array, in index order.
+test "json encode writes an array field" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    try bag.items.append(5);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Bag>(allocator, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3,5]}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A map becomes an object keyed by its own keys. `key_at` walks insertion
+// order, so the same map encodes the same way every run.
+test "json encode writes a map field in insertion order" {
+    let allocator = mem::page_allocator();
+    var counted = Counted { counts: map::new<[]u8, i64>(allocator) };
+    defer counted.deinit();
+    try counted.counts.insert("x", 1);
+    try counted.counts.insert("y", 2);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Counted>(allocator, counted, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"counts":{"x":1,"y":2}}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A box is the value it holds: sole ownership is a tree, so it adds no shape
+// of its own to the document.
+test "json encode writes through a box" {
+    let allocator = mem::page_allocator();
+    var boxed = Boxed { held: try mem::box<i64>(allocator, 77) };
+    defer boxed.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Boxed>(allocator, boxed, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"held":77}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An optional field carries JSON's own absent value, so a field that is unset
+// is written as null rather than dropped.
+test "json encode writes an unset optional as null" {
+    let allocator = mem::page_allocator();
+    let maybe = Maybe { set: 42, unset: null };
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Maybe>(allocator, maybe, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"set":42,"unset":null}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+pub struct Named {
+    pub id: i64,
+    pub name: string::String,
+}
+
+fn (self: Named) deinit() -> void {
+    self.name.deinit();
+}
+
+// A String is a string, not an object. Its bytes are private, so a walk that
+// treated it as a struct would write `{}` and drop the text -- the shape of
+// silent wrongness `unsupported` exists to prevent.
+test "json encode writes a String field as a string" {
+    let allocator = mem::page_allocator();
+    var named = Named { id: 7, name: string::new(allocator) };
+    defer named.deinit();
+    try named.name.append_bytes("alice");
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Named>(allocator, named, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"id":7,"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// The indented form differs from the compact one only in the whitespace
+// between parts: the same keys, the same order, the same values.
+test "json encode indents nested containers" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "nums",
+        \\  "items": [
+        \\    3
+        \\  ]
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An empty container has nothing to indent, so it stays on one line rather
+// than becoming a pair of braces with a blank line between them.
+test "json encode keeps empty containers on one line" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "none", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "none",
+        \\  "items": []
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A width of zero is the compact form, so one encoder covers both.
+test "json encode with zero width is the compact form" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 0, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3]}
     ;
     testing::expect_equal<[]u8>(expected, bytes);
 }

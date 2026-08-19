@@ -4,6 +4,8 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 type comptimeValue struct {
@@ -87,9 +89,38 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 		return c.evalComptimePrefix(e)
 	case *ast.BinaryExpr:
 		return c.evalComptimeBinary(e)
+	case *ast.CallExpr:
+		return c.evalComptimeMetaCall(e)
 	default:
 		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	}
+}
+
+// evalComptimeMetaCall evaluates the `std::meta` predicates. They are the only
+// calls a compile-time expression has: everything else a call could name runs
+// at run time (SPEC §13.1).
+func (c *Checker) evalComptimeMetaCall(expr *ast.CallExpr) (comptimeValue, error) {
+	apply, ok := expr.Callee.(*ast.TypeApplyExpr)
+	if !ok {
+		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
+	}
+	name, ok := qualifiedName(apply.Callee)
+	if !ok || !stdmeta.Predicate(name) {
+		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
+	}
+	if len(expr.Args) != 0 {
+		return comptimeValue{}, errorf("comptime error: `%s` takes no arguments", name)
+	}
+	args, err := typ.SplitArgs(c.instantiateTypeArgText(apply.TypeArg))
+	if err != nil {
+		return comptimeValue{}, errorf(
+			"comptime error: `%s` has an unreadable static argument list", name)
+	}
+	value, err := c.metaPredicate(stdmeta.Form(name), args)
+	if err != nil {
+		return comptimeValue{}, err
+	}
+	return comptimeValue{typ: typeBool, b: value}, nil
 }
 
 // evalComptimePrefix evaluates compile-time unary operators.
