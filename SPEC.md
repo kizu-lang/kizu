@@ -1271,6 +1271,16 @@ compile error です(ADR-0091)。
 * owned return value として caller への move
 * `std::mem::leak(value)` による明示 leak
 
+consume は path ごとに決まります。分岐の一方でだけ consume する owner は
+compile error です。consume しなかった path はその値を解放できず、合流後に
+解放すると consume 済みの path で二重解放になるためです。同じ理由で、loop 本体は
+外側で宣言された owner を consume できません。body の実行回数は不定で、0 回なら
+未解放、2 回以上なら二重解放です。loop が consume してよいのは loop 自身が
+作った値、つまり `|name|` capture が束縛する値です。
+
+owner field への代入も compile error です。代入は置き換え前の値を解放しないので
+leak します(owner 要素の `set` と同じ理由)。
+
 owner aggregate を値引数として受け取る関数は、その値を consume する義務を負います。
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
