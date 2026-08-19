@@ -222,5 +222,8 @@ func metaElementType(container string) string {
 	if elem, ok := boxElementType(container); ok {
 		return elem
 	}
+	if elem, ok := mapValueType(container); ok {
+		return elem
+	}
 	return container
 }

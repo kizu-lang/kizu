@@ -123,9 +123,14 @@ func metaElementType(container string) string {
 	if elem, ok := typ.OptionalElem(container); ok {
 		return elem
 	}
-	if base, elem, ok := splitGenericType(container); ok &&
-		(base == "std::array::Array" || base == "std::mem::Box") {
+	base, elem, ok := splitGenericType(container)
+	if ok && (base == "std::array::Array" || base == "std::mem::Box") {
 		return elem
+	}
+	if ok && base == "std::map::Map" {
+		if args, err := typ.SplitArgs(elem); err == nil && len(args) == 2 {
+			return args[1]
+		}
 	}
 	return container
 }

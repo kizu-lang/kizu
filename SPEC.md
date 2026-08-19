@@ -2401,14 +2401,23 @@ std::json::encode<T>(
 std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
 ```
 
-struct は public field の object になり、順序は source の宣言順です。field の
-型が struct なら同じ規則で再帰します。`i64`、`bool`、`[]u8` はそれぞれ JSON の
-number、boolean、string です。
+encode できる型は次で閉じています。
 
-encode できる型は上記で閉じています。それ以外の型は **compile error** です。
-黙って何も書かないと、encoder 自身のテストでは捕まらない壊れた document が
-出るためです。`std::array::Array<T>`、`std::map::Map<K, V>`、`std::mem::Box<T>`、
-`?T`、union、enum の encode はまだ持ちません。
+| 型 | JSON |
+| --- | --- |
+| `i64` | number |
+| `bool` | `true` / `false` |
+| `[]u8` | string |
+| struct | public field の object。順序は source の宣言順 |
+| `std::array::Array<T>` | array。順序は index 順 |
+| `std::map::Map<[]u8, V>` | object。順序は `key_at` の挿入順 |
+| `std::mem::Box<T>` | 中身そのもの。唯一所有は木なので形を足しません |
+| `?T`(struct field) | 値があれば中身、無ければ `null` |
+
+これ以外の型は **compile error** です(`std::meta::unsupported`)。黙って
+何も書かないと、encoder 自身のテストでは捕まらない壊れた document が出る
+ためです。`std::arena::Handle<T>` は共有参照で、木である JSON と対応
+しないので encode しません。union と enum はまだ持ちません。
 
 `decode<T>` と `std::json::Value` はまだ持ちません。
 

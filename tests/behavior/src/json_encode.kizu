@@ -1,4 +1,6 @@
+import std::array;
 import std::json;
+import std::map;
 import std::mem;
 import std::string;
 import std::testing;
@@ -169,4 +171,100 @@ test "json encode writes a scalar document" {
     try json::encode<i64>(allocator, count, out);
     let bytes = out.as_bytes();
     testing::expect_equal<[]u8>("42", bytes);
+}
+
+pub struct Bag {
+    pub label: []u8,
+    pub items: array::Array<i64>,
+}
+
+fn (self: Bag) deinit() -> void {
+    self.items.deinit();
+}
+
+pub struct Counted {
+    pub counts: map::Map<[]u8, i64>,
+}
+
+fn (self: Counted) deinit() -> void {
+    self.counts.deinit();
+}
+
+pub struct Boxed {
+    pub held: mem::Box<i64>,
+}
+
+fn (self: Boxed) deinit() -> void {
+    self.held.deinit();
+}
+
+pub struct Maybe {
+    pub set: ?i64,
+    pub unset: ?i64,
+}
+
+// An array field becomes a JSON array, in index order.
+test "json encode writes an array field" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    try bag.items.append(5);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Bag>(allocator, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3,5]}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A map becomes an object keyed by its own keys. `key_at` walks insertion
+// order, so the same map encodes the same way every run.
+test "json encode writes a map field in insertion order" {
+    let allocator = mem::page_allocator();
+    var counted = Counted { counts: map::new<[]u8, i64>(allocator) };
+    defer counted.deinit();
+    try counted.counts.insert("x", 1);
+    try counted.counts.insert("y", 2);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Counted>(allocator, counted, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"counts":{"x":1,"y":2}}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A box is the value it holds: sole ownership is a tree, so it adds no shape
+// of its own to the document.
+test "json encode writes through a box" {
+    let allocator = mem::page_allocator();
+    var boxed = Boxed { held: try mem::box<i64>(allocator, 77) };
+    defer boxed.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Boxed>(allocator, boxed, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"held":77}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An optional field carries JSON's own absent value, so a field that is unset
+// is written as null rather than dropped.
+test "json encode writes an unset optional as null" {
+    let allocator = mem::page_allocator();
+    let maybe = Maybe { set: 42, unset: null };
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Maybe>(allocator, maybe, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"set":42,"unset":null}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
 }

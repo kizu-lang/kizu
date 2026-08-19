@@ -172,7 +172,17 @@ func (c *Checker) metaElement(args []string) (string, error) {
 	if ok && (base == "std::array::Array" || base == "std::mem::Box") {
 		return elem, nil
 	}
-	return "", errorf("comptime error: `%s` expects ?T, Array<T>, or Box<T>, got %s",
+	// A map holds two types. What it *contains* is the value: the key is how
+	// an entry is found, and every map key is `[]u8` today.
+	if ok && base == "std::map::Map" {
+		args, err := typ.SplitArgs(elem)
+		if err != nil || len(args) != 2 {
+			return "", errorf("comptime error: `%s` cannot read %s", stdmeta.Element, container)
+		}
+		return args[1], nil
+	}
+	return "", errorf(
+		"comptime error: `%s` expects ?T, Array<T>, Box<T>, or Map<K, V>, got %s",
 		stdmeta.Element, container)
 }
 

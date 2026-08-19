@@ -171,7 +171,7 @@ pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
                     try encode_fields<T>(encoder, value);
                     try encoder.end_object();
                 } else {
-                    std::meta::unsupported<T>();
+                    try encode_container_value<T>(encoder, value);
                 }
             }
         }
@@ -179,14 +179,82 @@ pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
     return;
 }
 
+// encode_container_value writes the containers, which carry their contents
+// rather than being one: an array becomes a JSON array, a map becomes an
+// object keyed by its own keys, and a box is the value it holds.
+fn encode_container_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime if std::meta::is_array<T>() {
+        try encoder.begin_array();
+        try encode_elements<T>(encoder, value);
+        try encoder.end_array();
+    } else {
+        comptime if std::meta::is_map<T>() {
+            try encoder.begin_object();
+            try encode_entries<T>(encoder, value);
+            try encoder.end_object();
+        } else {
+            comptime if std::meta::is_box<T>() {
+                let held = value.borrow();
+                try encode_value<std::meta::element<T>>(encoder, held);
+            } else {
+                std::meta::unsupported<T>();
+            }
+        }
+    }
+    return;
+}
+
+// encode_elements writes an array's elements into the array already open, in
+// index order.
+fn encode_elements<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    var index = 0;
+    while index < value.len() {
+        if value.at(index) |elem| {
+            try encode_value<std::meta::element<T>>(encoder, elem);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// encode_entries writes a map's entries into the object already open. The
+// order is `key_at`'s insertion order, so the same map encodes the same way
+// every run.
+fn encode_entries<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    var index = 0;
+    while value.key_at(index) |key| {
+        if value.at(key) |entry| {
+            try encode_field<std::meta::element<T>>(encoder, key, entry);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
 // encode_fields writes a struct's public fields into the object already open.
+//
+// An optional field is opened here rather than in encode_field: `?T` cannot be
+// a static argument (ADR-0101), so the optional is unwrapped at run time and
+// what recurses is the type it holds.
 fn encode_fields<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
     comptime for std::meta::public_fields<T>() |f| {
-        try encode_field<std::meta::field_type<T, f>>(
-            encoder,
-            std::meta::field_name<T, f>(),
-            std::meta::field<T, f>(value),
-        );
+        comptime if std::meta::is_optional<std::meta::field_type<T, f>>() {
+            if std::meta::field<T, f>(value) |held| {
+                try encode_field<std::meta::element<std::meta::field_type<T, f>>>(
+                    encoder,
+                    std::meta::field_name<T, f>(),
+                    held,
+                );
+            } else {
+                try encoder.write_null_field(std::meta::field_name<T, f>());
+            }
+        } else {
+            try encode_field<std::meta::field_type<T, f>>(
+                encoder,
+                std::meta::field_name<T, f>(),
+                std::meta::field<T, f>(value),
+            );
+        }
     }
     return;
 }
@@ -212,8 +280,36 @@ fn encode_field<T>(
                     try encode_fields<T>(encoder, value);
                     try encoder.end_object();
                 } else {
-                    std::meta::unsupported<T>();
+                    try encode_container_field<T>(encoder, name, value);
                 }
+            }
+        }
+    }
+    return;
+}
+
+// encode_container_field is encode_container_value with the key written by the
+// call that opens the container.
+fn encode_container_field<T>(
+    encoder: &var std::json::Encoder,
+    name: []u8,
+    value: &T,
+) -> !void {
+    comptime if std::meta::is_array<T>() {
+        try encoder.begin_array_field(name);
+        try encode_elements<T>(encoder, value);
+        try encoder.end_array();
+    } else {
+        comptime if std::meta::is_map<T>() {
+            try encoder.begin_object_field(name);
+            try encode_entries<T>(encoder, value);
+            try encoder.end_object();
+        } else {
+            comptime if std::meta::is_box<T>() {
+                let held = value.borrow();
+                try encode_field<std::meta::element<T>>(encoder, name, held);
+            } else {
+                std::meta::unsupported<T>();
             }
         }
     }
