@@ -67,7 +67,11 @@ type Checker struct {
 	// these, which is what separates forwarding a static value from reading a
 	// value that only exists at run time.
 	staticParams map[string]Type
-	loopLabels   []string
+	// metaFields binds the captures of the `comptime for` expansions currently
+	// open, by capture name. A capture is not a value, so it lives here rather
+	// than in a scope: the only thing that may read it is a `std::meta` form.
+	metaFields map[string]metaField
+	loopLabels []string
 	// stdMethods indexes the signatures std declares for its container methods,
 	// so this checker reads them instead of restating them.
 	stdMethods stdmethod.MethodIndex
@@ -112,6 +116,7 @@ func New() *Checker {
 		impls:            map[string]map[string]*functionType{},
 		declaredTypes:    map[string]bool{},
 		checkedStdBodies: map[string]bool{},
+		metaFields:       map[string]metaField{},
 	}
 }
 
@@ -984,9 +989,15 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 // happens to sit: the `!` in `Array<!i64>` belongs to the argument, not to this
 // type.
 func (c *Checker) parseType(name string) (Type, error) {
-	parsed, err := typ.Parse(name)
+	// A `std::meta` form written where a type goes names a type rather than
+	// being one, so it resolves before the spelling is read (ADR-0113).
+	resolved, err := c.resolveMetaTypeText(name)
 	if err != nil {
-		return "", errorf("type error: unknown type `%s`", name)
+		return "", err
+	}
+	parsed, err := typ.Parse(resolved)
+	if err != nil {
+		return "", errorf("type error: unknown type `%s`", resolved)
 	}
 	return c.parseTypeNode(parsed)
 }
@@ -1420,6 +1431,20 @@ func (c *Checker) checkStmt(
 	case *ast.ExprStmt:
 		_, err := c.checkExpr(s.Expr, env, unsafe)
 		return false, err
+	default:
+		return c.checkBodyStmt(stmt, env, wantReturn, unsafe)
+	}
+}
+
+// checkBodyStmt checks the statements that carry a body of their own, and the
+// branches that leave one.
+func (c *Checker) checkBodyStmt(
+	stmt ast.Statement,
+	env *scope,
+	wantReturn Type,
+	unsafe unsafeMark,
+) (bool, error) {
+	switch s := stmt.(type) {
 	case *ast.IfStmt:
 		return c.checkIfStmt(s, env, wantReturn, unsafe)
 	case *ast.WhileStmt:
@@ -1437,6 +1462,8 @@ func (c *Checker) checkStmt(
 		return c.checkBlock(s, env.child(), wantReturn, unsafe)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
+	case *ast.ComptimeForStmt:
+		return c.checkComptimeForStmt(s, env, wantReturn, unsafe)
 	default:
 		return false, errorf("type error: unsupported statement %T", stmt)
 	}
@@ -3891,6 +3918,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 	name, typeArg, err := c.typeApplyTarget(expr)
 	if err != nil {
 		return "", err
+	}
+	if typ, ok, err := c.checkMetaApply(name, typeArg, args, env, unsafe); ok || err != nil {
+		return typ, err
 	}
 	if name == "ptr_from_int" {
 		return c.checkPtrFromInt(typeArg, expressionSpan(expr.Callee), args, env, unsafe)

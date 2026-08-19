@@ -29,6 +29,8 @@ func (l *lowerer) constBool(expr ast.Expression) (bool, bool) {
 		return l.constBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
+	case *ast.CallExpr:
+		return l.metaPredicateCall(e)
 	case *ast.PrefixExpr:
 		value, ok := l.constBool(e.Right)
 		return !value, ok && e.Operator == "!"

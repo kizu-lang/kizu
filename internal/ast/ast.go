@@ -700,6 +700,22 @@ func (s *ComptimeIfStmt) String() string {
 	return out
 }
 
+// ComptimeForStmt repeats a body once per element of a compile-time list.
+// The list is a `std::meta` form, and Name binds one element per expansion.
+type ComptimeForStmt struct {
+	List Expression
+	Name string
+	Body *BlockStmt
+}
+
+// statementNode marks ComptimeForStmt as a statement node.
+func (*ComptimeForStmt) statementNode() {}
+
+// String returns a compact debug representation of the comptime loop.
+func (s *ComptimeForStmt) String() string {
+	return fmt.Sprintf("comptime for %s |%s| %s", s.List.String(), s.Name, s.Body.String())
+}
+
 // ExprStmt wraps an expression used as a statement.
 type ExprStmt struct {
 	Expr      Expression

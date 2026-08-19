@@ -754,6 +754,9 @@ func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
 		if p.peek.Type == token.If {
 			return p.parseComptimeIfStmt(), true
 		}
+		if p.peek.Type == token.For {
+			return p.parseComptimeForStmt(), true
+		}
 	}
 	return nil, false
 }
@@ -963,6 +966,31 @@ func (p *Parser) parseForStmt(label string) ast.Statement {
 	}
 	stmt.Name = p.cur.Literal
 	if !p.expectPeek(token.Pipe) || !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Body = p.parseBlockStmt()
+	return stmt
+}
+
+// parseComptimeForStmt parses a compile-time loop over a `std::meta` list.
+// The capture spelling is the one every other loop uses.
+func (p *Parser) parseComptimeForStmt() ast.Statement {
+	stmt := &ast.ComptimeForStmt{}
+	if !p.expectPeek(token.For) {
+		return stmt
+	}
+	p.nextToken()
+	stmt.List = p.parseExpression(lowest)
+	capture, ok := p.parsePayloadCapture()
+	if !ok {
+		return stmt
+	}
+	if capture == "" {
+		p.errorf("comptime for requires a capture, as in `comptime for list |field| { ... }`")
+		return stmt
+	}
+	stmt.Name = capture
+	if !p.expectPeek(token.LBrace) {
 		return stmt
 	}
 	stmt.Body = p.parseBlockStmt()

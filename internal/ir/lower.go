@@ -53,6 +53,13 @@ type lowerer struct {
 	// genericDecls indexes the program's generic function declarations by
 	// name, so every call site resolves in one lookup.
 	genericDecls map[string]*ast.FunctionDecl
+	// structDecls indexes struct declarations, which is what a `comptime for`
+	// walks. The lowered Struct carries no visibility, and the loop lists
+	// public fields only.
+	structDecls map[string]*ast.StructDecl
+	// metaFields binds the captures of the `comptime for` expansions currently
+	// being lowered.
+	metaFields map[string]metaField
 	// externSymbols maps a resolved extern "c" function name to its C symbol.
 	// Module resolution qualifies every declared name, but the linker knows the
 	// declaration's own identifier, so calls emit that instead.
@@ -99,9 +106,13 @@ type loopPhi struct {
 // newLowerer prepares lookup tables used during lowering.
 func newLowerer(program *ast.Program) *lowerer {
 	generics := map[string]*ast.FunctionDecl{}
+	structs := map[string]*ast.StructDecl{}
 	for _, decl := range program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok && len(fn.StaticParams) > 0 {
 			generics[fn.Name] = fn
+		}
+		if st, ok := decl.(*ast.StructDecl); ok {
+			structs[st.Name] = st
 		}
 	}
 	return &lowerer{
@@ -118,6 +129,8 @@ func newLowerer(program *ast.Program) *lowerer {
 		staticValues:  map[string]staticValue{},
 		externSymbols: map[string]string{},
 		genericDecls:  generics,
+		structDecls:   structs,
+		metaFields:    map[string]metaField{},
 	}
 }
 
@@ -126,6 +139,9 @@ func newLowerer(program *ast.Program) *lowerer {
 // receiver of every Array method, and lowering it as written would leave the
 // instance carrying the parameter it was instantiated away from.
 func (l *lowerer) resolveType(name string) string {
+	// A `std::meta` form written where a type goes resolves first: it names a
+	// type through the capture in force rather than being one (ADR-0113).
+	name = l.resolveMetaTypeText(name)
 	if bound, ok := l.typeBindings[name]; ok {
 		return bound
 	}
@@ -768,6 +784,15 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	case *ast.ExprStmt:
 		_, err := l.lowerExpr(s.Expr)
 		return err
+	default:
+		return l.lowerBodyStmt(stmt)
+	}
+}
+
+// lowerBodyStmt lowers the statements that carry a body of their own, and the
+// branches that leave one.
+func (l *lowerer) lowerBodyStmt(stmt ast.Statement) error {
+	switch s := stmt.(type) {
 	case *ast.IfStmt:
 		return l.lowerIfStmt(s)
 	case *ast.WhileStmt:
@@ -785,6 +810,8 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerBlock(s)
 	case *ast.ComptimeIfStmt:
 		return l.lowerComptimeIfStmt(s)
+	case *ast.ComptimeForStmt:
+		return l.lowerComptimeForStmt(s)
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}
@@ -1065,6 +1092,11 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerMapConstructor(typeApply.TypeArg, args)
 	case "ptr_from_int", "int_from_ptr":
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
+	}
+	if value, ok, err := l.lowerMetaApply(
+		typeApply.Callee.String(), typeApply.TypeArg, args,
+	); ok || err != nil {
+		return value, err
 	}
 	if name, ok := l.functionCalleeName(typeApply.Callee); ok {
 		return l.lowerTypedNamedCallExpr(name, typeApply.TypeArg, args)

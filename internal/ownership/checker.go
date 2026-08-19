@@ -13,16 +13,22 @@ import (
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
-	functions       map[string]*functionInfo
-	impls           map[string]map[string]*functionInfo
-	structs         map[string]map[string]string
-	enums           map[string]map[string]bool
-	errorSets       map[string]map[string]bool
-	unions          map[string]map[string]string
-	nextID          int
-	consumeNeeds    map[string]bool
-	deinitOwners    map[string]bool
-	structOrder     map[string][]string
+	functions    map[string]*functionInfo
+	impls        map[string]map[string]*functionInfo
+	structs      map[string]map[string]string
+	enums        map[string]map[string]bool
+	errorSets    map[string]map[string]bool
+	unions       map[string]map[string]string
+	nextID       int
+	consumeNeeds map[string]bool
+	deinitOwners map[string]bool
+	structOrder  map[string][]string
+	// structPublicOrder lists each struct's public fields in declaration order,
+	// which is what `std::meta::public_fields` walks.
+	structPublicOrder map[string][]string
+	// metaFields binds the captures of the `comptime for` expansions currently
+	// open. A capture is not a value, so it is not a scope binding.
+	metaFields      map[string]metaField
 	loopDepth       int
 	currentFunction *functionInfo
 	currentStd      bool
@@ -155,6 +161,9 @@ func New() *Checker {
 		unions:       map[string]map[string]string{},
 		consumeNeeds: map[string]bool{},
 		structOrder:  map[string][]string{},
+
+		structPublicOrder: map[string][]string{},
+		metaFields:        map[string]metaField{},
 	}
 }
 
@@ -282,6 +291,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		}
 		fields := map[string]string{}
 		order := make([]string, 0, len(st.Fields))
+		public := make([]string, 0, len(st.Fields))
 		for _, field := range st.Fields {
 			if field.Borrow {
 				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
@@ -289,9 +299,13 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 			}
 			fields[field.Name] = fieldOwnershipType(field)
 			order = append(order, field.Name)
+			if field.Public {
+				public = append(public, field.Name)
+			}
 		}
 		c.structs[st.Name] = fields
 		c.structOrder[st.Name] = order
+		c.structPublicOrder[st.Name] = public
 	}
 	return nil
 }
@@ -559,6 +573,15 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return errorf("move error: errdefer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		return c.checkExprStmt(s, env)
+	default:
+		return c.checkBodyStmt(stmt, env)
+	}
+}
+
+// checkBodyStmt checks the statements that carry a body of their own, and the
+// branches that leave one.
+func (c *Checker) checkBodyStmt(stmt ast.Statement, env *scope) error {
+	switch s := stmt.(type) {
 	case *ast.IfStmt:
 		return c.checkIfStmt(s, env)
 	case *ast.WhileStmt:
@@ -576,6 +599,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkBlock(s, env)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env)
+	case *ast.ComptimeForStmt:
+		return c.checkComptimeForStmt(s, env)
 	default:
 		return errorf("move error: unsupported statement %T", stmt)
 	}
@@ -3723,6 +3748,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if err != nil {
 		return "", err
 	}
+	if typ, ok, err := c.checkMetaApply(name, typeArg, args, env); ok || err != nil {
+		return typ, err
+	}
 	if name == "ptr_from_int" || name == "int_from_ptr" {
 		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
 	}
@@ -6564,15 +6592,12 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 
 // instantiateTypeArgText replaces in-scope generic type parameters in a static list.
 func (c *Checker) instantiateTypeArgText(typeArg string) string {
-	if len(c.typeArgValues) == 0 {
-		return typeArg
-	}
 	args, err := typ.SplitArgs(typeArg)
 	if err != nil {
-		return substituteOwnershipType(typeArg, c.typeArgValues)
+		return c.resolveMetaTypeText(substituteOwnershipType(typeArg, c.typeArgValues))
 	}
 	for idx, arg := range args {
-		args[idx] = substituteOwnershipType(arg, c.typeArgValues)
+		args[idx] = c.resolveMetaTypeText(substituteOwnershipType(arg, c.typeArgValues))
 	}
 	return strings.Join(args, ", ")
 }
