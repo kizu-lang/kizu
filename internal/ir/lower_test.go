@@ -848,6 +848,58 @@ func TestLowerBlockScopedLetDominatesItsMerge(t *testing.T) {
 	lowerSource(t, blockScopedLetSource)
 }
 
+// TestLowerFalliblePrimitiveReleasesOwnerArgument pins the cleanup a fallible
+// runtime primitive cannot run itself. The primitive stores its by-value owner
+// only after the allocation succeeds, so its failure path has to release what
+// the caller already moved. The wrapper is where `T` is bound, which is the
+// whole reason the release can be spelled at all.
+func TestLowerFalliblePrimitiveReleasesOwnerArgument(t *testing.T) {
+	module := lowerSource(t, `
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var parent = std::array::new<std::string::String>(allocator);
+    defer parent.deinit_all();
+    var name = std::string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    try parent.append(name);
+    let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
+    defer boxed.deinit_all();
+    return;
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"  error.try %1: !void, cleanup call.std::string::String.deinit" +
+			" %value: std::string::String\n",
+		"  %2: std::mem::Box<std::string::String> = error.try" +
+			" %1: !std::mem::Box<std::string::String>," +
+			" cleanup call.std::string::String.deinit %value: std::string::String\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+}
+
+// TestLowerFalliblePrimitiveLeavesCopyArgumentAlone keeps the release
+// type-directed: an element with no deinit contract needs no failure path.
+func TestLowerFalliblePrimitiveLeavesCopyArgumentAlone(t *testing.T) {
+	module := lowerSource(t, `
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var values = std::array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(1);
+    return;
+}`)
+	got := Dump(module)
+	want := "  %1: !void = array.append %self: std::array::Array<i64>, %value: i64, i64\n" +
+		"  return %1: !void\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+	}
+}
+
 // withStdImport gives a snippet the root import a file needs to spell full std
 // paths. The snippets are about what the checker does with std types, not about
 // import lines, and a file that writes `std::mem::page_allocator` has to bring

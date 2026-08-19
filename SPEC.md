@@ -1309,6 +1309,10 @@ consume の義務は束縛に付くので、束縛しない値は義務を負う
 上の consume のいずれかを書きます。
 
 owner aggregate を値引数として受け取る関数は、その値を consume する義務を負います。
+これは失敗 path も含みます。error を返す path でも、受け取った以上はそこで
+consume しなければなりません。呼び出し側は move 済みで、その値にもう触れない
+ためです。`std::array::Array.append` と `std::mem::box` は確保に失敗すると値を
+格納しませんが、格納しなかった値をその場で解放してから error を返します。
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
 
