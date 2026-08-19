@@ -229,6 +229,8 @@ func (c *Checker) checkMetaForm(
 			return "", err
 		}
 		return typeBool, nil
+	case stdmeta.Unsupported:
+		return "", c.metaUnsupported(staticArgs)
 	case stdmeta.PublicFields:
 		return "", errorf("comptime error: `%s` is only written as a comptime for list", form)
 	default:
@@ -257,6 +259,23 @@ func (c *Checker) checkMetaFieldBorrow(
 		return "", errorf("comptime error: `%s` expects &%s, got %s", form, field.owner, got)
 	}
 	return field.typ, nil
+}
+
+// metaUnsupported fails compilation for the type that reached it, naming the
+// function that refused it so the message says who has no case for it.
+func (c *Checker) metaUnsupported(staticArgs []string) error {
+	if len(staticArgs) != 1 {
+		return errorf("comptime error: `%s` expects 1 static argument", stdmeta.Unsupported)
+	}
+	subject, err := c.parseType(staticArgs[0])
+	if err != nil {
+		return err
+	}
+	if c.currentFunction == nil {
+		return errorf("comptime error: type `%s` is not supported here", subject)
+	}
+	return errorf("comptime error: `%s` does not support type `%s`",
+		c.currentFunction.name, subject)
 }
 
 // metaPredicate answers a compile-time predicate about a type.

@@ -135,6 +135,91 @@ fn (self: Encoder) deinit() -> void {
     self.out.deinit();
 }
 
+// encode writes one value as a JSON document into `out`.
+//
+// The walk is the value's own shape read at compile time (SPEC §13.1): a
+// struct becomes an object of its public fields in declaration order, and a
+// field whose type is itself a struct recurses. A type this encoder has no
+// case for is a compile error, not a runtime one, and not silence.
+pub fn encode<T>(
+    allocator: Allocator,
+    value: &T,
+    out: &var std::string::String,
+) -> !void {
+    var encoder = std::json::encoder(allocator);
+    defer encoder.deinit();
+    try encode_value<T>(encoder, value);
+    try encoder.finish_into(out);
+    return;
+}
+
+// encode_value writes one bare value: the document's top level, or an array
+// element. A named field goes through encode_field, so a key is never written
+// without the value that belongs to it.
+pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime if T == type<i64> {
+        try encoder.write_i64(value.*);
+    } else {
+        comptime if T == type<bool> {
+            try encoder.write_bool(value.*);
+        } else {
+            comptime if T == type<[]u8> {
+                try encoder.write_bytes(value.*);
+            } else {
+                comptime if std::meta::is_struct<T>() {
+                    try encoder.begin_object();
+                    try encode_fields<T>(encoder, value);
+                    try encoder.end_object();
+                } else {
+                    std::meta::unsupported<T>();
+                }
+            }
+        }
+    }
+    return;
+}
+
+// encode_fields writes a struct's public fields into the object already open.
+fn encode_fields<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime for std::meta::public_fields<T>() |f| {
+        try encode_field<std::meta::field_type<T, f>>(
+            encoder,
+            std::meta::field_name<T, f>(),
+            std::meta::field<T, f>(value),
+        );
+    }
+    return;
+}
+
+// encode_field writes one named field. Each case enters through a call that
+// carries the key, so the key and its value are written together.
+fn encode_field<T>(
+    encoder: &var std::json::Encoder,
+    name: []u8,
+    value: &T,
+) -> !void {
+    comptime if T == type<i64> {
+        try encoder.write_i64_field(name, value.*);
+    } else {
+        comptime if T == type<bool> {
+            try encoder.write_bool_field(name, value.*);
+        } else {
+            comptime if T == type<[]u8> {
+                try encoder.write_bytes_field(name, value.*);
+            } else {
+                comptime if std::meta::is_struct<T>() {
+                    try encoder.begin_object_field(name);
+                    try encode_fields<T>(encoder, value);
+                    try encoder.end_object();
+                } else {
+                    std::meta::unsupported<T>();
+                }
+            }
+        }
+    }
+    return;
+}
+
 // begin_value checks that a bare value may start here: the single top-level
 // slot or an array element. Inside an object a value needs a field name, so
 // a bare value there is misuse.

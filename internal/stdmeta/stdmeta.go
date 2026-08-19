@@ -39,6 +39,12 @@ const (
 	FieldType Form = "std::meta::field_type"
 	// Field borrows one field out of a borrowed struct.
 	Field Form = "std::meta::field"
+	// Unsupported fails compilation, naming the type that reached it. It is
+	// how a walk over a closed set of types refuses the one it has no case
+	// for: only the selected `comptime if` branch is checked, so writing this
+	// in the last else makes the refusal a compile error rather than output
+	// that is silently wrong.
+	Unsupported Form = "std::meta::unsupported"
 )
 
 // Shape is how one form is written: how many static arguments it takes,
@@ -62,6 +68,7 @@ var forms = map[Form]Shape{
 	FieldName:    {StaticArgs: 2, Capture: true},
 	FieldType:    {StaticArgs: 2, Capture: true, Type: true},
 	Field:        {StaticArgs: 2, Capture: true, Args: 1},
+	Unsupported:  {StaticArgs: 1},
 }
 
 // Lookup reports the shape of a form, and whether name is one at all.

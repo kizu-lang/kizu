@@ -89,6 +89,7 @@ std::meta::public_fields<T>()                      comptime-only list(comptime f
 std::meta::field_name<T, f>()           -> []u8     comptime-only
 std::meta::field_type<T, f>                        comptime-only 型の位置
 std::meta::field<T, f>(value: &T)       -> &F
+std::meta::unsupported<T>()                        compile error にする
 ```
 
 - `is_*` は `comptime if` の条件に書ける。そのため comptime expression の
@@ -146,20 +147,25 @@ collection element / return value として保持できない」は**そのま�
   `Box`・`Array`・`?T`・`Map`)で、`Handle<T>` は共有参照のため compile error
 - `partial<T>` と `decode<T>` は本 ADR の対象外(#1626)
 
-## 実装が示した制約
+## 実装が示したこと
 
-- **optional field は今のところ walk できない。** `?T` は static 引数に
-  書けない(ADR-0101)ので、`field_type<T, f>` が `?i64` に解決した瞬間、
-  それを次の generic に渡せない。`is_optional` と `element<?T>` は実装
-  してあるが、ADR-0101 が開くまで struct の optional field は列挙の先で
-  止まる
+- **扱えない型を compile error にする形が要る。** 閉じた集合を歩く walk は
+  最後の else に落ちた型を拒否できなければならない。黙って何も書かないと、
+  encoder 自身のテストでは捕まらない壊れた出力になる(原理 1)。
+  `std::meta::unsupported<T>()` を足した。`comptime if` が選ばれた branch
+  しか検査しないので、最後の else に書けば扱えない型のときだけ error になる
+- **optional field は static 引数を経由せずに walk できる。** `?T` は static
+  引数に書けない(ADR-0101)が、optional は既存の capture 条件
+  (`if field<T, f>(value) |inner|`)で実行時に開き、再帰へ渡すのは
+  `element<field_type<T, f>>` である。static 引数に `?T` が現れないので
+  ADR-0101 に触れない
 - **再帰的な所有データ構造は今のところ作れない。** `Array<Box<Node>>` は
   Box の owner payload cleanup 規則で、`?Box<Node>` は optional owner field
   の規則で、それぞれ宣言時に拒否される。したがって reflection の再帰が
   循環することも今はない
-- **型が無限に育つ generic 呼び出しはコンパイラが停止しない**(#1627)。
-  本 ADR の前からある instantiation の穴で、`comptime for` は新たな経路を
-  作っていない。ただし型を辿る generic を書く機会は増える
+- **型が無限に育つ generic 呼び出しでコンパイラが停止しなかった**(#1627)。
+  本 ADR の前からある instantiation の穴だが、型を辿る generic を書く機会が
+  増えるため先に塞いだ。instance の memo と深さ上限 64 で診断に変えている
 
 ## 再評価条件
 

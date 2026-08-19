@@ -2118,7 +2118,13 @@ std::meta::public_fields<T>()                 comptime-only list、comptime for 
 std::meta::field_name<T, f>()      -> []u8    comptime-only
 std::meta::field_type<T, f>                   comptime-only、型の位置に書く
 std::meta::field<T, f>(value: &T)  -> &F
+std::meta::unsupported<T>()                   compile error にする
 ```
+
+`unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
+`comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、
+扱えない型が来たときにだけ error になります。診断は型と、拒否した関数を
+名指しします。閉じた集合を歩く walk が、集合の外を黙って通さないための形です。
 
 `is_*` は `comptime if` の条件に書けます。`comptime` expression はこれらの
 組み込み形も評価します。述語が答える型の種類は std が持つ container で
@@ -2383,8 +2389,28 @@ byte 列は決定的に escape します。`"`、`\`、newline、carriage return
 `\"`、`\\`、`\n`、`\r`、`\t`、その他の control byte は lowercase hex の
 `\u00XX` です。encode は UTF-8 validation をしません。
 
-`encode<T>` / `decode<T>` と `std::json::Value` は、comptime structural
-reflection の仕様が決まるまで実装しません。
+`encode<T>` は、値の形を §13.1 の comptime structural reflection で読み、
+JSON document を書きます。
+
+```text
+std::json::encode<T>(
+    allocator: Allocator,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
+std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
+```
+
+struct は public field の object になり、順序は source の宣言順です。field の
+型が struct なら同じ規則で再帰します。`i64`、`bool`、`[]u8` はそれぞれ JSON の
+number、boolean、string です。
+
+encode できる型は上記で閉じています。それ以外の型は **compile error** です。
+黙って何も書かないと、encoder 自身のテストでは捕まらない壊れた document が
+出るためです。`std::array::Array<T>`、`std::map::Map<K, V>`、`std::mem::Box<T>`、
+`?T`、union、enum の encode はまだ持ちません。
+
+`decode<T>` と `std::json::Value` はまだ持ちません。
 
 collection は次の順で実装します。
 
