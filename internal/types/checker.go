@@ -625,9 +625,9 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err := checkRawPointerFieldPolicy(decl, field, typ); err != nil {
 			return err
 		}
-		if typ == typeFunction {
-			return errorf("type error: struct field `%s.%s` cannot store Function",
-				decl.Name, field.Name)
+		if compileTimeOnlyType(typ) {
+			return errorf("type error: struct field `%s.%s` cannot store %s",
+				decl.Name, field.Name, typ)
 		}
 		if containsTypeValue(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
@@ -887,8 +887,8 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 			return nil, err
 		}
 	}
-	if ret == typeFunction {
-		return nil, errorf("type error: function `%s` cannot return Function", fn.Name)
+	if compileTimeOnlyType(ret) {
+		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
 	}
 	if containsBufferType(ret) {
 		return nil, errorf(

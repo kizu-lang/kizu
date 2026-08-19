@@ -82,11 +82,22 @@ func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	return nil
 }
 
+// compileTimeOnlyType reports whether a spelling holds a compile-time token
+// rather than a type values can have. `Function` names a function and `Field`
+// names one field of a struct; both are read where they are written and have
+// no runtime representation, so neither can be stored, returned, or passed --
+// nor wrapped, since `?Function` is a value of a type that has no values.
+func compileTimeOnlyType(typ Type) bool {
+	return containsWrappedType(typ, func(typ Type) bool {
+		return typ == typeFunction || typ == typeField
+	})
+}
+
 // checkFunctionParamPolicy keeps the compile-time-only tokens out of the
 // runtime argument list. A function name and a field token are both known only
 // at compile time, so they are static arguments.
 func checkFunctionParamPolicy(param ast.Param, typ Type) error {
-	if typ != typeFunction && typ != typeField {
+	if !compileTimeOnlyType(typ) {
 		return nil
 	}
 	return errorf(

@@ -47,6 +47,49 @@ fn main() -> void {
 	}
 }
 
+// TestCheckRejectsCompileTimeOnlyTypeAsValue pins `Function` and `Field` as
+// tokens rather than types: neither has a runtime representation, so no value
+// position accepts one, wrapped or not.
+func TestCheckRejectsCompileTimeOnlyTypeAsValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "field static param in a struct field",
+			source: `struct Holder { pub f: Field }` + "\nfn main() -> void { print(1); }",
+			want:   "struct field `Holder.f` cannot store Field",
+		},
+		{
+			name:   "field static param as a result",
+			source: "fn w<T, f: Field>() -> Field { return 1; }\nfn main() -> void { print(1); }",
+			want:   "function `w` cannot return Field",
+		},
+		{
+			name:   "field static param wrapped in an optional",
+			source: "fn take(x: ?Field) -> void { return; }\nfn main() -> void { print(1); }",
+			want:   "?Field parameter `x` belongs in `<...>`, not `(...)`",
+		},
+		{
+			name:   "function static param wrapped in an optional",
+			source: "fn take(x: ?Function) -> void { return; }\nfn main() -> void { print(1); }",
+			want:   "?Function parameter `x` belongs in `<...>`, not `(...)`",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckRejectsFieldStaticArg covers what a field token may name.
 func TestCheckRejectsFieldStaticArg(t *testing.T) {
 	cases := []struct {

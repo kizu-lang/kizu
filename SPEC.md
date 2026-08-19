@@ -2145,7 +2145,11 @@ A `Field` static parameter is one public field of a struct. It is declared in
 field of the type argument written before it. The body reads the field through
 the `std::meta` forms (`field_name<T, f>`, `field_type<T, f>`, `field<T, f>`),
 so the function is checked and lowered once per field, the way a `comptime for`
-expansion is. A field token has no runtime existence and cannot be stored.
+expansion is.
+
+`Function` and `Field` name compile-time tokens, not types values can have.
+Neither can be stored in a struct field, returned, or written in `(...)`, and
+wrapping one (`?Field`, `[]Function`) does not change that.
 
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。
