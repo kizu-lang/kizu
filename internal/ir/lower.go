@@ -188,7 +188,15 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 			decl: decl, bindings: instance.bindings, values: instance.values, symbol: symbol,
 		})
 	}
-	return symbol, l.instanceSignature(decl.FunctionSignature, instance.bindings), nil
+	// The signature the caller sees resolves the forms the declaration wrote,
+	// so a `-> std::meta::field_type<T, f>` result arrives as the field's type.
+	restore, err := l.bindInstanceFields(decl, instance.bindings, instance.values)
+	if err != nil {
+		return "", Signature{}, err
+	}
+	signature := l.instanceSignature(decl.FunctionSignature, instance.bindings)
+	restore()
+	return symbol, signature, nil
 }
 
 // genericArguments is what one generic declaration's static parameters are bound

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -1107,6 +1108,9 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 	if err := rejectOptionalArgs(args); err != nil {
 		return "", err
 	}
+	if shape, ok := stdmeta.Lookup(base); ok {
+		return c.parseMetaTypeForm(name, stdmeta.Form(base), shape, args)
+	}
 	switch base {
 	case "std::mem::Box":
 		arg, err := singleGenericArg(base, args)
@@ -1145,6 +1149,31 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 		return "", err
 	}
 	return Type(name), nil
+}
+
+// parseMetaTypeForm validates a `std::meta` form written where a type goes but
+// not yet resolvable: a declaration writes `std::meta::field_type<T, f>` before
+// either name is bound, exactly as it writes `T`. The spelling stands for
+// itself here and resolves at each instantiation, where the capture is bound.
+func (c *Checker) parseMetaTypeForm(
+	name string,
+	form stdmeta.Form,
+	shape stdmeta.Shape,
+	args []string,
+) (Type, error) {
+	if !shape.Type {
+		return "", errorf("comptime error: `%s` does not name a type", form)
+	}
+	if len(args) != shape.StaticArgs {
+		return "", errorf("comptime error: `%s` expects %d static arguments, got %d",
+			form, shape.StaticArgs, len(args))
+	}
+	resolved, err := c.resolveMetaTypeText(name)
+	if err != nil || resolved == name {
+		// An unbound capture is what a declaration looks like.
+		return Type(name), nil
+	}
+	return c.parseType(resolved)
 }
 
 // parseUserGenericType validates static type arguments for user declarations.
@@ -4506,7 +4535,16 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err := c.checkGenericInstantiation(fn, subst, fieldArgs); err != nil {
 		return "", true, err
 	}
-	return substituteTypeParams(fn.returnType, subst), true, nil
+	// The result the caller sees is the declaration's type with this call's
+	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a
+	// concrete type here even though it is not one where it was written.
+	restore := c.bindMetaFields(fieldArgs)
+	result, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	restore()
+	if err != nil {
+		return "", true, err
+	}
+	return result, true, nil
 }
 
 // checkStaticArgs validates each `<...>` argument against what its parameter
@@ -4681,7 +4719,10 @@ func (c *Checker) checkGenericInstantiation(
 			return err
 		}
 	}
-	returnType := substituteTypeParams(fn.returnType, subst)
+	returnType, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	if err != nil {
+		return err
+	}
 	for idx := range fn.params {
 		if err := c.revalidateSubstituted(substituteTypeParams(fn.params[idx], subst)); err != nil {
 			return err
@@ -4699,6 +4740,21 @@ func (c *Checker) checkGenericInstantiation(
 		return errorf("type error: function `%s` must return %s", fn.name, returnType)
 	}
 	return nil
+}
+
+// resolveInstanceType rewrites the `std::meta` forms a declaration wrote into
+// the types they name, now that this instantiation has bound what they read.
+// A declaration writes `std::meta::field_type<T, f>` because neither name is
+// bound where it is written; the instance is where both are.
+func (c *Checker) resolveInstanceType(declared Type) (Type, error) {
+	resolved, err := c.resolveMetaTypeText(string(declared))
+	if err != nil {
+		return "", err
+	}
+	if resolved == string(declared) {
+		return declared, nil
+	}
+	return c.parseType(resolved)
 }
 
 // enterInstanceContext makes one instantiation the body being checked, and

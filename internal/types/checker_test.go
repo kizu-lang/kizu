@@ -29,6 +29,24 @@ fn main() -> void {
 	}
 }
 
+// TestCheckFieldTypeInSignature pins the declared result type of a worker. The
+// form stands for itself where it is written, because neither name is bound
+// there, and resolves at each instantiation to that field's type.
+func TestCheckFieldTypeInSignature(t *testing.T) {
+	source := `struct User { pub name: []u8, pub age: i64 }
+fn pick<T, f: Field>(value: T) -> std::meta::field_type<T, f> {
+    return std::meta::field<T, f>(value);
+}
+fn main() -> void {
+    let user = User { name: "alice", age: 30 };
+    print(pick<User, name>(user));
+    print(pick<User, age>(user));
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // TestCheckRejectsFieldStaticArg covers what a field token may name.
 func TestCheckRejectsFieldStaticArg(t *testing.T) {
 	cases := []struct {
