@@ -450,8 +450,10 @@ receiver が move 済み、deinit 済み、borrow 中なら拒否します。
 `errdefer` の receiver を consume すると、その `errdefer` は退役します。consume 以降の
 error exit path では実行しません。move でも明示 `deinit` でも同じで、move を行う
 呼び出し自身が失敗する path も含みます。consume 済みの値をそこで解放すると、
-同じ値を 2 回解放することになるためです。退役した receiver に別の値を入れ直しても
-`errdefer` は復活しません。
+同じ値を 2 回解放することになるためです。`defer` / `errdefer` の receiver に別の値を代入することは compile error です。
+cleanup は登録時に live だった値を解放するので、名前が別の値を指すようになると、
+cleanup は名前が意味しなくなった値を持つことになります。新しい owner は
+新しい名前に束縛します。
 
 ```kizu
 var child = string::new(allocator);
@@ -459,6 +461,16 @@ errdefer child.deinit();
 try child.append_byte(cast<u8>(97));  // 失敗したら child を解放する
 try parent.append(child);             // ここから先は parent が child を持つ
 try parent.reserve(1);                // 失敗しても child は解放しない
+```
+
+```kizu
+var first = string::new(allocator);
+errdefer first.deinit();              // first だけを覆う
+try parent.append(first);             // 退役
+
+var second = string::new(allocator);  // 新しい owner は新しい名前へ
+errdefer second.deinit();             // second だけを覆う
+try parent.reserve(1);                // 失敗したら second を解放する
 ```
 
 ```kizu
