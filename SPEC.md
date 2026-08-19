@@ -2038,8 +2038,8 @@ fn sized<n: i64>() -> i64 {
 呼び出しはどちらも `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
 `std::testing::expect_equal<i64>(expected, actual)`。
 
-compile-time 値として書けるのは整数、`true` / `false`、および `Function`
-(top-level function 名)です。型引数推論、generic methods、bounds、
+compile-time 値として書けるのは整数、`true` / `false`、`Function`
+(top-level function 名)、および `Field`(struct の public field 名)です。型引数推論、generic methods、bounds、
 associated types、higher-kinded types、specialization は実装しません。
 reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
 runtime reflection と AST 書き換えは持ちません。
@@ -2140,6 +2140,17 @@ closure, cannot capture locals, and cannot be stored in runtime data. It is
 declared in `<...>` as `<worker: Function>`, and the argument must be a
 top-level function name.
 
+A `Field` static parameter is one public field of a struct. It is declared in
+`<...>` as `<f: Field>`, and the argument must be the source name of a public
+field of the type argument written before it. The body reads the field through
+the `std::meta` forms (`field_name<T, f>`, `field_type<T, f>`, `field<T, f>`),
+so the function is checked and lowered once per field, the way a `comptime for`
+expansion is.
+
+`Function` and `Field` name compile-time tokens, not types values can have.
+Neither can be stored in a struct field, returned, or written in `(...)`, and
+wrapping one (`?Field`, `[]Function`) does not change that.
+
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。
 
@@ -2174,8 +2185,27 @@ std::meta::public_fields<T>()                 comptime-only list、comptime for 
 std::meta::field_name<T, f>()      -> []u8    comptime-only
 std::meta::field_type<T, f>                   comptime-only、型の位置に書く
 std::meta::field<T, f>(value: &T)  -> &F
+std::meta::construct<T, worker>(args...) -> !T
 std::meta::unsupported<T>()                   compile error にする
 ```
+
+`construct<T, worker>(args...)` は `T` の public field を宣言順に組み立てて
+`T` を返します。各 field の値は `worker<T, f>(args...)` の戻り値で、runtime 引数は
+全 field に同じものが渡ります。field ごとの違いは worker が `field_name<T, f>` と
+`field_type<T, f>` から読みます。
+
+```kizu
+// construct<Names, make_field>(allocator) が表すコード
+let first = try make_field<Names, first>(allocator);
+errdefer first.deinit();
+let second = try make_field<Names, second>(allocator);
+Names { first: first, second: second }
+```
+
+`errdefer` は owner field にだけ並びます。値は struct literal が一度に取るまで
+別々の binding なので、半端に組んだ `T` が置かれる場所はありません。worker の
+戻り値型はその field の型でなければならず、public field を 1 つも持たない型は
+compile error です(値の行き先が無いため)。
 
 `unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
 `comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、

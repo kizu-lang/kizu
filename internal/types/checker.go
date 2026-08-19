@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -624,9 +625,9 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err := checkRawPointerFieldPolicy(decl, field, typ); err != nil {
 			return err
 		}
-		if typ == typeFunction {
-			return errorf("type error: struct field `%s.%s` cannot store Function",
-				decl.Name, field.Name)
+		if compileTimeOnlyType(typ) {
+			return errorf("type error: struct field `%s.%s` cannot store %s",
+				decl.Name, field.Name, typ)
 		}
 		if containsTypeValue(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
@@ -886,8 +887,8 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 			return nil, err
 		}
 	}
-	if ret == typeFunction {
-		return nil, errorf("type error: function `%s` cannot return Function", fn.Name)
+	if compileTimeOnlyType(ret) {
+		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
 	}
 	if containsBufferType(ret) {
 		return nil, errorf(
@@ -999,10 +1000,12 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 // type.
 func (c *Checker) parseType(name string) (Type, error) {
 	// A `std::meta` form written where a type goes names a type rather than
-	// being one, so it resolves before the spelling is read (ADR-0113).
-	resolved, err := c.resolveMetaTypeText(name)
-	if err != nil {
-		return "", err
+	// being one, so it resolves before the spelling is read (ADR-0113). A form
+	// whose capture is not bound here keeps its spelling: that is a declaration,
+	// and parseMetaTypeForm is the one place that decides what to do with it.
+	resolved := name
+	if rewritten, err := c.resolveMetaTypeText(name); err == nil {
+		resolved = rewritten
 	}
 	parsed, err := typ.Parse(resolved)
 	if err != nil {
@@ -1107,6 +1110,9 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 	if err := rejectOptionalArgs(args); err != nil {
 		return "", err
 	}
+	if shape, ok := stdmeta.Lookup(base); ok {
+		return c.parseMetaTypeForm(name, stdmeta.Form(base), shape, args)
+	}
 	switch base {
 	case "std::mem::Box":
 		arg, err := singleGenericArg(base, args)
@@ -1145,6 +1151,31 @@ func (c *Checker) parseGenericType(name string, base string, args []string) (Typ
 		return "", err
 	}
 	return Type(name), nil
+}
+
+// parseMetaTypeForm validates a `std::meta` form written where a type goes but
+// not yet resolvable: a declaration writes `std::meta::field_type<T, f>` before
+// either name is bound, exactly as it writes `T`. The spelling stands for
+// itself here and resolves at each instantiation, where the capture is bound.
+func (c *Checker) parseMetaTypeForm(
+	name string,
+	form stdmeta.Form,
+	shape stdmeta.Shape,
+	args []string,
+) (Type, error) {
+	if !shape.Type {
+		return "", errorf("comptime error: `%s` does not name a type", form)
+	}
+	if len(args) != shape.StaticArgs {
+		return "", errorf("comptime error: `%s` expects %d static arguments, got %d",
+			form, shape.StaticArgs, len(args))
+	}
+	resolved, err := c.resolveMetaTypeText(name)
+	if err != nil || resolved == name {
+		// An unbound capture is what a declaration looks like.
+		return Type(name), nil
+	}
+	return c.parseType(resolved)
 }
 
 // parseUserGenericType validates static type arguments for user declarations.
@@ -4480,7 +4511,7 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.sig.StaticParams))
 	}
-	typeArgsText, err := c.checkStaticArgs(name, fn, argsText)
+	typeArgsText, fieldArgs, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
 		return "", true, err
 	}
@@ -4503,10 +4534,19 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
-	if err := c.checkGenericInstantiation(fn, subst); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, fieldArgs); err != nil {
 		return "", true, err
 	}
-	return substituteTypeParams(fn.returnType, subst), true, nil
+	// The result the caller sees is the declaration's type with this call's
+	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a
+	// concrete type here even though it is not one where it was written.
+	restore := c.bindMetaFields(fieldArgs)
+	result, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	restore()
+	if err != nil {
+		return "", true, err
+	}
+	return result, true, nil
 }
 
 // checkStaticArgs validates each `<...>` argument against what its parameter
@@ -4515,30 +4555,51 @@ func (c *Checker) checkStaticArgs(
 	name string,
 	fn *functionType,
 	argsText []string,
-) ([]string, error) {
+) ([]string, map[string]metaField, error) {
 	typeArgs := []string{}
+	fieldArgs := map[string]metaField{}
 	for idx, param := range fn.sig.StaticParams {
 		arg := strings.TrimSpace(argsText[idx])
 		if param.IsType() {
 			typeArgs = append(typeArgs, arg)
 			continue
 		}
-		if err := c.checkStaticValueArg(name, param, arg); err != nil {
-			return nil, err
+		if Type(typ.Text(param.Type)) == typeField {
+			field, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
+			if err != nil {
+				return nil, nil, err
+			}
+			if field.name != "" {
+				fieldArgs[param.Name] = field
+			}
+			continue
+		}
+		if err := c.checkStaticValueArg(name, param, arg, idx, argsText, fn); err != nil {
+			return nil, nil, err
 		}
 	}
-	return typeArgs, nil
+	return typeArgs, fieldArgs, nil
 }
 
 // checkStaticValueArg validates one compile-time value argument. The value is a
 // literal or, for a `Function` parameter, a top-level function name. A generic
 // may also pass on a static parameter of its own, which is how one wrapper
 // forwards to another; the caller of the outer generic checked the real value.
-func (c *Checker) checkStaticValueArg(name string, param ast.StaticParam, arg string) error {
+func (c *Checker) checkStaticValueArg(
+	name string,
+	param ast.StaticParam,
+	arg string,
+	idx int,
+	argsText []string,
+	fn *functionType,
+) error {
 	if param.Type != nil && c.staticParams[arg] == Type(typ.Text(param.Type)) {
 		return nil
 	}
 	switch Type(typ.Text(param.Type)) {
+	case typeField:
+		_, err := c.fieldStaticArg(name, param, arg, idx, argsText, fn)
+		return err
 	case typeFunction:
 		if !isIdentifierText(arg) {
 			return errorf("type error: `%s` static argument `%s` expects a function name, got `%s`",
@@ -4560,6 +4621,62 @@ func (c *Checker) checkStaticValueArg(name string, param ast.StaticParam, arg st
 	}
 }
 
+// fieldStaticArg resolves a `Field` static argument to the field it names. The
+// owner is the type argument written just before it: `worker<T, f>` pairs the
+// two the way `std::meta::field_type<T, f>` does, so a worker reads its field
+// out of the type it was instantiated for. A live `comptime for` capture
+// resolves the same way, which is how a loop forwards its capture on.
+func (c *Checker) fieldStaticArg(
+	name string,
+	param ast.StaticParam,
+	arg string,
+	idx int,
+	argsText []string,
+	fn *functionType,
+) (metaField, error) {
+	if field, ok := c.metaFields[arg]; ok {
+		return field, nil
+	}
+	if !isIdentifierText(arg) {
+		return metaField{}, errorf(
+			"type error: `%s` static argument `%s` expects a field name, got `%s`",
+			name, param.Name, arg)
+	}
+	owner, ok := precedingTypeArg(fn.sig.StaticParams, argsText, idx)
+	if !ok {
+		return metaField{}, errorf(
+			"type error: `%s` static argument `%s` has no type parameter before it",
+			name, param.Name)
+	}
+	if c.typeParams[owner] {
+		// The owner is the enclosing generic's own parameter, so which fields
+		// exist is not known here. The instantiation of that generic checks
+		// this call again with the type bound.
+		return metaField{}, nil
+	}
+	fields, err := c.publicFields(owner)
+	if err != nil {
+		return metaField{}, err
+	}
+	for _, field := range fields {
+		if field.name == arg {
+			return field, nil
+		}
+	}
+	return metaField{}, errorf("type error: `%s` has no public field `%s`", owner, arg)
+}
+
+// precedingTypeArg returns the type argument written just before the static
+// parameter at idx.
+func precedingTypeArg(params []ast.StaticParam, argsText []string, idx int) (string, bool) {
+	for back := idx - 1; back >= 0; back-- {
+		if params[back].IsType() {
+			return strings.TrimSpace(argsText[back]), true
+		}
+	}
+	return "", false
+}
+
 // isIdentifierText reports whether text is a bare identifier.
 func isIdentifierText(text string) bool {
 	if text == "" {
@@ -4577,13 +4694,22 @@ func isIdentifierText(text string) bool {
 	return true
 }
 
-// checkGenericInstantiation checks a generic function body for one static type set.
-func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
-	done, err := c.enterInstantiation(fn, subst)
+// checkGenericInstantiation checks a generic function body for one static type
+// set. A `Field` static argument instantiates like a type argument rather than
+// like the other compile-time values: the body reads it through
+// `std::meta::field_name<T, f>` and its return type through
+// `std::meta::field_type<T, f>`, so each bound field is its own instance.
+func (c *Checker) checkGenericInstantiation(
+	fn *functionType,
+	subst map[string]Type,
+	fieldArgs map[string]metaField,
+) error {
+	done, err := c.enterInstantiation(fn, subst, fieldArgs)
 	if err != nil || done {
 		return err
 	}
 	defer func() { c.instantiationDepth-- }()
+	defer c.bindMetaFields(fieldArgs)()
 	env := newScope(nil)
 	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
@@ -4595,7 +4721,10 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 			return err
 		}
 	}
-	returnType := substituteTypeParams(fn.returnType, subst)
+	returnType, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	if err != nil {
+		return err
+	}
 	for idx := range fn.params {
 		if err := c.revalidateSubstituted(substituteTypeParams(fn.params[idx], subst)); err != nil {
 			return err
@@ -4613,6 +4742,21 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		return errorf("type error: function `%s` must return %s", fn.name, returnType)
 	}
 	return nil
+}
+
+// resolveInstanceType rewrites the `std::meta` forms a declaration wrote into
+// the types they name, now that this instantiation has bound what they read.
+// A declaration writes `std::meta::field_type<T, f>` because neither name is
+// bound where it is written; the instance is where both are.
+func (c *Checker) resolveInstanceType(declared Type) (Type, error) {
+	resolved, err := c.resolveMetaTypeDeep(string(declared))
+	if err != nil {
+		return "", err
+	}
+	if resolved == string(declared) {
+		return declared, nil
+	}
+	return c.parseType(resolved)
 }
 
 // enterInstanceContext makes one instantiation the body being checked, and
@@ -4659,8 +4803,12 @@ const maxInstantiationDepth = 64
 // already been checked. An instance is one body with one set of static
 // arguments, so the second visit can only reach the same answer -- which is
 // also what stops a body that reaches itself.
-func (c *Checker) enterInstantiation(fn *functionType, subst map[string]Type) (bool, error) {
-	key := instanceKey(fn, subst)
+func (c *Checker) enterInstantiation(
+	fn *functionType,
+	subst map[string]Type,
+	fieldArgs map[string]metaField,
+) (bool, error) {
+	key := instanceKey(fn, subst, fieldArgs)
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -4688,12 +4836,41 @@ func elideTypeText(text string) string {
 
 // instanceKey names one instantiation: the body, and what its static
 // parameters were bound to, in declaration order.
-func instanceKey(fn *functionType, subst map[string]Type) string {
+func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]metaField) string {
 	args := make([]Type, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
 	}
-	return fn.name + "<" + joinTypes(args) + ">"
+	key := fn.name + "<" + joinTypes(args) + ">"
+	for _, param := range fn.sig.StaticParams {
+		if field, ok := fieldArgs[param.Name]; ok {
+			key += "." + string(field.owner) + "." + field.name
+		}
+	}
+	return key
+}
+
+// bindMetaFields makes the `Field` arguments of one instantiation readable by
+// the forms written against them, and returns the call that unbinds them.
+func (c *Checker) bindMetaFields(fieldArgs map[string]metaField) func() {
+	if len(fieldArgs) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]metaField, len(fieldArgs))
+	had := make(map[string]bool, len(fieldArgs))
+	for name, field := range fieldArgs {
+		previous[name], had[name] = c.metaFields[name]
+		c.metaFields[name] = field
+	}
+	return func() {
+		for name := range fieldArgs {
+			if had[name] {
+				c.metaFields[name] = previous[name]
+				continue
+			}
+			delete(c.metaFields, name)
+		}
+	}
 }
 
 // parseGenericWrapperTypeArgs validates static type arguments for wrappers.
@@ -5847,7 +6024,7 @@ func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) e
 	for idx, param := range method.TypeParams {
 		subst[param] = typeArgs[idx]
 	}
-	return c.checkGenericInstantiation(fn, subst)
+	return c.checkGenericInstantiation(fn, subst, nil)
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.

@@ -1,0 +1,73 @@
+package ast
+
+// ConstructField is one field a `std::meta::construct` expansion fills: the
+// source name it is written under and the type its value has.
+type ConstructField struct {
+	Name string
+	Type string
+}
+
+// ConstructExpansion is the code `std::meta::construct<T, worker>(args...)`
+// stands for: one call to the worker per public field, an `errdefer` for each
+// field that owns something, and the struct literal that consumes them all
+// (ADR-0115).
+//
+//	let f1 = try worker<T, f1>(args...);
+//	errdefer f1.deinit();
+//	let f2 = try worker<T, f2>(args...);
+//	T { f1: f1, f2: f2 }
+//
+// There is no place a half-built `T` could sit: the values are separate
+// bindings until the literal takes all of them at once. Every phase expands
+// through here, so the code the type checker reads, the code the ownership
+// checker reads, and the code lowering emits cannot disagree.
+//
+// The returned statements run before the returned expression, whose type is
+// `T`. Wrapping that in the form's `!T` result is the caller's job, because
+// only the caller knows whether it is checking a type or emitting one.
+func ConstructExpansion(
+	owner string,
+	worker string,
+	fields []ConstructField,
+	args []Expression,
+	owners map[string]bool,
+) ([]Statement, Expression) {
+	statements := make([]Statement, 0, len(fields)*2)
+	values := make([]FieldValue, 0, len(fields))
+	for _, field := range fields {
+		binding := constructBinding(field.Name)
+		statements = append(statements, &LetStmt{
+			Name: binding,
+			Value: &TryExpr{Value: &CallExpr{
+				Callee: &TypeApplyExpr{
+					Callee:  &IdentExpr{Name: worker},
+					TypeArg: owner + ", " + field.Name,
+				},
+				Args: args,
+			}},
+		})
+		// A value with no cleanup contract has nothing to release, and the
+		// fields already built are what an `errdefer` protects: a later worker
+		// that fails leaves them owned by nobody else.
+		if OwnerType(owners, field.Type) {
+			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{
+				Callee: &FieldExpr{
+					Receiver: &IdentExpr{Name: binding},
+					Name:     CleanupMethodName(field.Type, owners),
+				},
+			}})
+		}
+		values = append(values, FieldValue{
+			Name:  field.Name,
+			Value: &IdentExpr{Name: binding},
+		})
+	}
+	return statements, &StructLiteralExpr{TypeName: owner, Fields: values}
+}
+
+// constructBinding names the local one expanded field is bound to. The `$`
+// keeps it out of reach of source, so an expansion cannot shadow or be
+// shadowed by a name the caller wrote.
+func constructBinding(field string) string {
+	return "construct$" + field
+}

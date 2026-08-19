@@ -531,3 +531,726 @@ fn hex_digit(value: u8) -> u8 {
     }
     return cast<u8>(87) + value;
 }
+
+// --- decode ------------------------------------------------------------
+//
+// decode reads bytes straight into `T`. There is no document object between
+// them: a DOM would need its own place to live, would have to defend against
+// untrusted input on its own, and would leave two routes to a value -- one
+// through the DOM and one into a type (ADR-0115, #1626).
+//
+// Parse state is two arguments, `bytes: []u8` and `index: &var i64`, rather
+// than a cursor struct. A struct holding a view cannot be passed as `&var`
+// (ADR-0100), so splitting the state keeps `decode<T>` an ordinary generic
+// free function.
+
+pub error Error {
+    // The bytes are not JSON at this point.
+    UnexpectedToken,
+    // The document is JSON, but does not describe a `T`: a field of `T` is
+    // absent, the document names one `T` does not have, or one key appears
+    // twice. The caller recovers by decoding into a different type or by
+    // asking for the variant that ignores unknown keys.
+    MissingField,
+    UnknownField,
+    DuplicateField,
+    // A number that JSON allows and `i64` cannot hold. std::json v1 has no
+    // float: SPEC §7 reserves `f64` but the language has no float arithmetic.
+    InvalidNumber,
+    // The escape is well-formed JSON that names no character: a lone
+    // surrogate half, or a `\` before something that is not an escape.
+    InvalidEscape,
+    // Input-dependent, so it is recoverable rather than a trap: the caller
+    // rejects the document, the way it rejects any other malformed input.
+    DepthExceeded,
+}
+
+// max_depth bounds nesting so a deep document cannot exhaust the stack. There
+// is no input size limit: the caller already holds the bytes and decides how
+// many there are.
+fn max_depth() -> i64 {
+    return 128;
+}
+
+fn is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9)
+        or byte == cast<u8>(10) or byte == cast<u8>(13);
+}
+
+// skip_space advances past whitespace and leaves index on the next byte, or on
+// the end of input.
+fn skip_space(bytes: []u8, index: &var i64) -> void {
+    while std::mem::byte_at(bytes, index.*) |byte| {
+        if !is_space(byte) {
+            return;
+        }
+        index.* = index.* + 1;
+    }
+    return;
+}
+
+// peek_byte reads the next non-space byte without consuming it.
+fn peek_byte(bytes: []u8, index: &var i64) -> ?u8 {
+    skip_space(bytes, index);
+    return std::mem::byte_at(bytes, index.*);
+}
+
+// expect_byte consumes one specific byte, and fails when the document has
+// something else there.
+fn expect_byte(bytes: []u8, index: &var i64, want: u8) -> Error!void {
+    if peek_byte(bytes, index) |byte| {
+        if byte == want {
+            index.* = index.* + 1;
+            return;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// expect_literal consumes one of the three bare words JSON has.
+fn expect_literal(bytes: []u8, index: &var i64, word: []u8) -> Error!void {
+    skip_space(bytes, index);
+    if std::mem::slice(bytes, index.*, index.* + std::mem::len(word)) |seen| {
+        if std::mem::equal_bytes(seen, word) {
+            index.* = index.* + std::mem::len(word);
+            return;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// decode_bool reads `true` or `false`.
+fn decode_bool(bytes: []u8, index: &var i64) -> Error!bool {
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(116) {
+            try expect_literal(bytes, index, "true");
+            return true;
+        }
+        if byte == cast<u8>(102) {
+            try expect_literal(bytes, index, "false");
+            return false;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// decode_null reads `null`.
+fn decode_null(bytes: []u8, index: &var i64) -> Error!void {
+    try expect_literal(bytes, index, "null");
+    return;
+}
+
+fn is_digit(byte: u8) -> bool {
+    return byte >= cast<u8>(48) and byte <= cast<u8>(57);
+}
+
+// decode_i64 reads an integer. JSON allows a fraction and an exponent; std::json
+// v1 has neither, because the language has no float arithmetic (SPEC §7
+// reserves `f64` and no more), so a number that is not an integer is an error
+// rather than a silently truncated value.
+fn decode_i64(bytes: []u8, index: &var i64) -> Error!i64 {
+    skip_space(bytes, index);
+    var negative = false;
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        if byte == cast<u8>(45) {
+            negative = true;
+            index.* = index.* + 1;
+        }
+    }
+    var digits = 0;
+    var value = 0;
+    while std::mem::byte_at(bytes, index.*) |byte| {
+        if !is_digit(byte) {
+            break;
+        }
+        // The bound keeps the multiply below from overflowing before the
+        // digit is added; a number this long is out of range either way.
+        if value > 922337203685477580 {
+            return Error::InvalidNumber;
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        digits = digits + 1;
+        index.* = index.* + 1;
+    }
+    if digits == 0 {
+        return Error::UnexpectedToken;
+    }
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        if byte == cast<u8>(46) or byte == cast<u8>(101) or byte == cast<u8>(69) {
+            return Error::InvalidNumber;
+        }
+    }
+    if negative {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn hex_value(byte: u8) -> ?i64 {
+    if is_digit(byte) {
+        return cast<i64>(byte - cast<u8>(48));
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return cast<i64>(byte - cast<u8>(87));
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return cast<i64>(byte - cast<u8>(55));
+    }
+    return null;
+}
+
+// read_hex4 reads the four hex digits of a `\uXXXX` escape.
+fn read_hex4(bytes: []u8, index: &var i64) -> Error!i64 {
+    var value = 0;
+    var count = 0;
+    while count < 4 {
+        if std::mem::byte_at(bytes, index.*) |byte| {
+            if hex_value(byte) |digit| {
+                value = value * 16 + digit;
+                index.* = index.* + 1;
+                count = count + 1;
+            } else {
+                return Error::InvalidEscape;
+            }
+        } else {
+            return Error::InvalidEscape;
+        }
+    }
+    return value;
+}
+
+// append_utf8 writes one code point as UTF-8.
+fn append_utf8(out: &var std::string::String, code: i64) -> !void {
+    if code < 128 {
+        try out.append_byte(cast<u8>(code));
+        return;
+    }
+    if code < 2048 {
+        try out.append_byte(cast<u8>(192 + code / 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    if code < 65536 {
+        try out.append_byte(cast<u8>(224 + code / 4096));
+        try out.append_byte(cast<u8>(128 + code / 64 % 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    try out.append_byte(cast<u8>(240 + code / 262144));
+    try out.append_byte(cast<u8>(128 + code / 4096 % 64));
+    try out.append_byte(cast<u8>(128 + code / 64 % 64));
+    try out.append_byte(cast<u8>(128 + code % 64));
+    return;
+}
+
+// decode_escape reads what follows a `\` and appends the character it names.
+// A `\uXXXX` above the basic plane arrives as a surrogate pair, so the high
+// half consumes its low half here; a half on its own names no character.
+fn decode_escape(bytes: []u8, index: &var i64, out: &var std::string::String) -> !void {
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        index.* = index.* + 1;
+        if byte == cast<u8>(34) or byte == cast<u8>(92) or byte == cast<u8>(47) {
+            try out.append_byte(byte);
+            return;
+        }
+        if byte == cast<u8>(110) {
+            try out.append_byte(cast<u8>(10));
+            return;
+        }
+        if byte == cast<u8>(114) {
+            try out.append_byte(cast<u8>(13));
+            return;
+        }
+        if byte == cast<u8>(116) {
+            try out.append_byte(cast<u8>(9));
+            return;
+        }
+        if byte == cast<u8>(98) {
+            try out.append_byte(cast<u8>(8));
+            return;
+        }
+        if byte == cast<u8>(102) {
+            try out.append_byte(cast<u8>(12));
+            return;
+        }
+        if byte == cast<u8>(117) {
+            let code = try read_hex4(bytes, index);
+            try append_utf8(out, try pair_surrogate(bytes, index, code));
+            return;
+        }
+    }
+    return Error::InvalidEscape;
+}
+
+// pair_surrogate joins a high surrogate with the low half that must follow it,
+// and returns any other code point unchanged.
+fn pair_surrogate(bytes: []u8, index: &var i64, code: i64) -> Error!i64 {
+    if code < 55296 or code > 57343 {
+        return code;
+    }
+    if code > 56319 {
+        return Error::InvalidEscape;
+    }
+    try expect_byte(bytes, index, cast<u8>(92));
+    try expect_byte(bytes, index, cast<u8>(117));
+    let low = try read_hex4(bytes, index);
+    if low < 56320 or low > 57343 {
+        return Error::InvalidEscape;
+    }
+    return 65536 + (code - 55296) * 1024 + (low - 56320);
+}
+
+// decode_string reads a JSON string into an owned buffer, undoing escapes.
+fn decode_string(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+) -> !std::string::String {
+    try expect_byte(bytes, index, cast<u8>(34));
+    var out = std::string::new(allocator);
+    errdefer out.deinit();
+    while std::mem::byte_at(bytes, index.*) |byte| {
+        index.* = index.* + 1;
+        if byte == cast<u8>(34) {
+            return out;
+        }
+        if byte == cast<u8>(92) {
+            try decode_escape(bytes, index, &var out);
+        } else {
+            try out.append_byte(byte);
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// skip_value advances past one complete value without building it. Scanning an
+// object records where each value starts and comes back for the ones the type
+// asks for, so the values in between are only measured, never decoded.
+fn skip_value(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
+    if depth > max_depth() {
+        return Error::DepthExceeded;
+    }
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(123) {
+            return skip_object(bytes, index, depth);
+        }
+        if byte == cast<u8>(91) {
+            return skip_array(bytes, index, depth);
+        }
+        if byte == cast<u8>(34) {
+            return skip_string(bytes, index);
+        }
+        if byte == cast<u8>(116) or byte == cast<u8>(102) {
+            let _ = try decode_bool(bytes, index);
+            return;
+        }
+        if byte == cast<u8>(110) {
+            return decode_null(bytes, index);
+        }
+        let _ = try decode_i64(bytes, index);
+        return;
+    }
+    return Error::UnexpectedToken;
+}
+
+// skip_string advances past a string. Escapes are not undone here, only
+// stepped over, so that a `\"` does not end the string.
+fn skip_string(bytes: []u8, index: &var i64) -> Error!void {
+    try expect_byte(bytes, index, cast<u8>(34));
+    while std::mem::byte_at(bytes, index.*) |byte| {
+        index.* = index.* + 1;
+        if byte == cast<u8>(34) {
+            return;
+        }
+        if byte == cast<u8>(92) {
+            index.* = index.* + 1;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+fn skip_object(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
+    try expect_byte(bytes, index, cast<u8>(123));
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(125) {
+            index.* = index.* + 1;
+            return;
+        }
+    }
+    var more = true;
+    while more {
+        try skip_string(bytes, index);
+        try expect_byte(bytes, index, cast<u8>(58));
+        try skip_value(bytes, index, depth + 1);
+        more = try comma_or_close(bytes, index, cast<u8>(125));
+    }
+    return;
+}
+
+fn skip_array(bytes: []u8, index: &var i64, depth: i64) -> Error!void {
+    try expect_byte(bytes, index, cast<u8>(91));
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(93) {
+            index.* = index.* + 1;
+            return;
+        }
+    }
+    var more = true;
+    while more {
+        try skip_value(bytes, index, depth + 1);
+        more = try comma_or_close(bytes, index, cast<u8>(93));
+    }
+    return;
+}
+
+// comma_or_close consumes the byte that separates or ends a sequence, and
+// reports whether another element follows.
+fn comma_or_close(bytes: []u8, index: &var i64, close: u8) -> Error!bool {
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(44) {
+            index.* = index.* + 1;
+            return true;
+        }
+        if byte == close {
+            index.* = index.* + 1;
+            return false;
+        }
+    }
+    return Error::UnexpectedToken;
+}
+
+// A Member is one key of an object with the offsets it and its value start at.
+// The key stays where it is: comparing it against a field name undoes escapes
+// as it walks, so a key costs no allocation and an escaped key still matches
+// the field it names.
+pub struct Member {
+    pub key_at: i64,
+    pub value_at: i64,
+}
+
+// A Scan is what one object looked like: its members in document order. The
+// fields of `T` are filled from it in declaration order, so a document may
+// name them in any order.
+pub struct Scan {
+    pub members: std::array::Array<Member>,
+}
+
+fn (self: Scan) deinit() -> void {
+    self.members.deinit();
+    return;
+}
+
+// scan_object records every key of one object and where its value begins.
+// Duplicate keys are an error: keeping one of the two would silently drop a
+// value the document meant to carry.
+fn scan_object(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    depth: i64,
+) -> !Scan {
+    if depth > max_depth() {
+        return Error::DepthExceeded;
+    }
+    try expect_byte(bytes, index, cast<u8>(123));
+    var members = std::array::new<Member>(allocator);
+    errdefer members.deinit();
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(125) {
+            index.* = index.* + 1;
+            return Scan { members: members };
+        }
+    }
+    var more = true;
+    while more {
+        skip_space(bytes, index);
+        let key_at = index.*;
+        try skip_string(bytes, index);
+        try expect_byte(bytes, index, cast<u8>(58));
+        skip_space(bytes, index);
+        let member = Member { key_at: key_at, value_at: index.* };
+        if member_at(&members, bytes, key_at) |_| {
+            return Error::DuplicateField;
+        }
+        try members.append(member);
+        try skip_value(bytes, index, depth + 1);
+        more = try comma_or_close(bytes, index, cast<u8>(125));
+    }
+    return Scan { members: members };
+}
+
+// member_at finds where the value of the key spelled at key_at begins.
+fn member_at(
+    members: &std::array::Array<Member>,
+    bytes: []u8,
+    key_at: i64,
+) -> ?i64 {
+    var index = 0;
+    while members.at(index) |member| {
+        if same_key(bytes, member.key_at, key_at) {
+            return member.value_at;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// member_named finds where the value of one field's key begins.
+fn member_named(
+    members: &std::array::Array<Member>,
+    bytes: []u8,
+    name: []u8,
+) -> ?i64 {
+    var index = 0;
+    while members.at(index) |member| {
+        if key_equals(bytes, member.key_at, name) {
+            return member.value_at;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// key_equals compares the string spelled at key_at with a field name, undoing
+// escapes as it walks so that `"\u0061"` matches `a`.
+fn key_equals(bytes: []u8, key_at: i64, name: []u8) -> bool {
+    var index = key_at + 1;
+    var seen = 0;
+    let length = std::mem::len(name);
+    while std::mem::byte_at(bytes, index) |byte| {
+        if byte == cast<u8>(34) {
+            return seen == length;
+        }
+        if byte == cast<u8>(92) {
+            index = index + 1;
+            if escape_byte(bytes, &var index) |decoded| {
+                if seen >= length or name[seen] != decoded {
+                    return false;
+                }
+                seen = seen + 1;
+            } else {
+                return false;
+            }
+        } else {
+            if seen >= length or name[seen] != byte {
+                return false;
+            }
+            seen = seen + 1;
+            index = index + 1;
+        }
+    }
+    return false;
+}
+
+// same_key compares two keys of the same document.
+fn same_key(bytes: []u8, left_at: i64, right_at: i64) -> bool {
+    var left = left_at;
+    var right = right_at;
+    while std::mem::byte_at(bytes, left) |byte| {
+        if std::mem::byte_at(bytes, right) |other| {
+            if byte != other {
+                return false;
+            }
+            if byte == cast<u8>(34) and left > left_at {
+                return true;
+            }
+            if byte == cast<u8>(92) {
+                left = left + 1;
+                right = right + 1;
+            }
+            left = left + 1;
+            right = right + 1;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+// escape_byte reads one escape that names a single byte, which is what a key
+// matching a Kizu field name can hold. A multi-byte escape names no field, so
+// it stops the comparison rather than being decoded.
+fn escape_byte(bytes: []u8, index: &var i64) -> ?u8 {
+    if std::mem::byte_at(bytes, index.*) |byte| {
+        index.* = index.* + 1;
+        if byte == cast<u8>(34) or byte == cast<u8>(92) or byte == cast<u8>(47) {
+            return byte;
+        }
+        if byte == cast<u8>(110) {
+            return cast<u8>(10);
+        }
+        if byte == cast<u8>(114) {
+            return cast<u8>(13);
+        }
+        if byte == cast<u8>(116) {
+            return cast<u8>(9);
+        }
+        if byte == cast<u8>(98) {
+            return cast<u8>(8);
+        }
+        if byte == cast<u8>(102) {
+            return cast<u8>(12);
+        }
+        if byte == cast<u8>(117) {
+            if hex4_value(bytes, index) |code| {
+                if code < 128 {
+                    return cast<u8>(code);
+                }
+            }
+            return null;
+        }
+    }
+    return null;
+}
+
+// hex4_value reads four hex digits without failing the whole parse: a key that
+// does not match is not an error, it is a different key.
+fn hex4_value(bytes: []u8, index: &var i64) -> ?i64 {
+    var value = 0;
+    var count = 0;
+    while count < 4 {
+        if std::mem::byte_at(bytes, index.*) |byte| {
+            if hex_value(byte) |digit| {
+                value = value * 16 + digit;
+                index.* = index.* + 1;
+                count = count + 1;
+            } else {
+                return null;
+            }
+        } else {
+            return null;
+        }
+    }
+    return value;
+}
+
+// decode reads one JSON document as a `T`.
+//
+// The document must name every public field of `T`, and may name nothing else:
+// a key `T` has no field for is an error rather than a value quietly dropped.
+// `decode_ignore_unknown` is the spelling that drops them, named so that a
+// reader sees which one a call chose (原理 3).
+pub fn decode<T>(allocator: Allocator, bytes: []u8) -> !T {
+    try check_one_document(bytes);
+    var index = 0;
+    return decode_value<T>(allocator, bytes, &var index, false);
+}
+
+// decode_ignore_unknown reads one JSON document as a `T`, dropping the keys
+// `T` has no field for.
+pub fn decode_ignore_unknown<T>(allocator: Allocator, bytes: []u8) -> !T {
+    try check_one_document(bytes);
+    var index = 0;
+    return decode_value<T>(allocator, bytes, &var index, true);
+}
+
+// check_one_document walks the bytes once before anything is built, so that a
+// malformed document is refused before it has allocated. It is also what lets
+// `decode` return its value directly: nothing can fail after the value exists,
+// so there is no error path that would have to release it.
+fn check_one_document(bytes: []u8) -> Error!void {
+    var index = 0;
+    try skip_value(bytes, &var index, 0);
+    try expect_end(bytes, &var index);
+    return;
+}
+
+// expect_end refuses trailing bytes: a second document after the first is not
+// one document, and accepting it would hide half the input.
+fn expect_end(bytes: []u8, index: &var i64) -> Error!void {
+    skip_space(bytes, index);
+    if std::mem::byte_at(bytes, index.*) |_| {
+        return Error::UnexpectedToken;
+    }
+    return;
+}
+
+// decode_value reads one value as a `T`, dispatching on what `T` is. The set
+// of types is the one `encode_value` writes, so a document this produces is
+// one that produced it (原理 9).
+fn decode_value<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    comptime if T == type<i64> {
+        return decode_i64(bytes, index);
+    } else {
+        comptime if T == type<bool> {
+            return decode_bool(bytes, index);
+        } else {
+            comptime if T == type<std::string::String> {
+                return decode_string(allocator, bytes, index);
+            } else {
+                comptime if std::meta::has_public_fields<T>() {
+                    return decode_struct<T>(allocator, bytes, index, ignore_unknown);
+                } else {
+                    return std::meta::unsupported<T>();
+                }
+            }
+        }
+    }
+}
+
+// decode_struct fills every public field of `T` from one object. The keys
+// arrive in document order and the fields are filled in declaration order, so
+// the object is scanned once into the offsets of its values, and each field
+// comes back for the one it names.
+fn decode_struct<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    var scan = try scan_object(allocator, bytes, index, 0);
+    defer scan.deinit();
+    if !ignore_unknown {
+        // Checked before anything is built: a document `T` cannot hold is
+        // refused while there is still nothing to release.
+        try reject_unknown<T>(bytes, &scan);
+    }
+    return std::meta::construct<T, decode_field>(allocator, bytes, &scan, ignore_unknown);
+}
+
+// reject_unknown refuses a key `T` has no field for. Dropping it silently
+// would lose data the document carried, so the caller has to say which it
+// wants by calling `decode_ignore_unknown` instead (原理 3).
+fn reject_unknown<T>(bytes: []u8, scan: &std::json::Scan) -> Error!void {
+    var index = 0;
+    while scan.members.at(index) |member| {
+        if !names_field<T>(bytes, member.key_at) {
+            return Error::UnknownField;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// names_field reports whether one key names a public field of `T`.
+fn names_field<T>(bytes: []u8, key_at: i64) -> bool {
+    comptime for std::meta::public_fields<T>() |f| {
+        if key_equals(bytes, key_at, std::meta::field_name<T, f>()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// decode_field reads the value one field names out of a scanned object. It is
+// the worker `construct` calls once per field: `f` is bound to that field, so
+// the name it looks up and the type it returns both come from `f`.
+fn decode_field<T, f: Field>(
+    allocator: Allocator,
+    bytes: []u8,
+    scan: &std::json::Scan,
+    ignore_unknown: bool,
+) -> !std::meta::field_type<T, f> {
+    let name = std::meta::field_name<T, f>();
+    if member_named(&scan.members, bytes, name) |value_at| {
+        var index = value_at;
+        return decode_value<std::meta::field_type<T, f>>(
+            allocator, bytes, &var index, ignore_unknown);
+    }
+    return Error::MissingField;
+}

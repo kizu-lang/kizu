@@ -13,6 +13,7 @@ type Type string
 
 const (
 	typeBool       Type = "bool"
+	typeField      Type = "Field"
 	typeFunction   Type = "Function"
 	typeI64        Type = "i64"
 	typeU8         Type = "u8"
@@ -37,6 +38,7 @@ var knownTypes = map[Type]bool{
 	"isize":               true,
 	"f32":                 true,
 	"f64":                 true,
+	typeField:             true,
 	typeFunction:          true,
 	typeType:              true,
 	"Io":                  true,

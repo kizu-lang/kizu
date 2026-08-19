@@ -1,0 +1,115 @@
+import std::json;
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Counts {
+    pub visits: i64,
+    pub errors: i64,
+}
+
+pub struct Profile {
+    pub name: string::String,
+    pub active: bool,
+}
+
+fn (self: Profile) deinit() -> void {
+    self.name.deinit();
+    return;
+}
+
+pub struct Wrapper {
+    pub head: Profile,
+    pub count: i64,
+}
+
+fn (self: Wrapper) deinit() -> void {
+    self.head.deinit();
+    return;
+}
+
+// The document names the fields in whatever order it likes: the object is
+// scanned once into where each value begins, and every field comes back for
+// the one it names.
+test "json decode fills fields in any key order" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"errors": 2, "visits": 41}
+    ;
+    let counts = try json::decode<Counts>(allocator, document);
+    testing::expect_equal<i64>(41, counts.visits);
+    testing::expect_equal<i64>(2, counts.errors);
+}
+
+// A String field owns its bytes, and the escapes are undone on the way in.
+test "json decode undoes string escapes" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "a\tbAé", "active": true}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    testing::expect(profile.active);
+    // a, TAB, b, A, and the two bytes é is in UTF-8.
+    testing::expect_equal<i64>(6, profile.name.len());
+}
+
+// A surrogate pair names one code point, so the two escapes decode to the four
+// bytes of that character rather than to two halves.
+test "json decode joins a surrogate pair" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "😀", "active": false}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    testing::expect_equal<i64>(4, profile.name.len());
+}
+
+test "json decode reads a nested struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"count": 7, "head": {"active": true, "name": "abc"}}
+    ;
+    var wrapper = try json::decode<Wrapper>(allocator, document);
+    defer wrapper.deinit();
+    testing::expect_equal<i64>(7, wrapper.count);
+    testing::expect_equal<i64>(3, wrapper.head.name.len());
+}
+
+// decode and encode read the same set of types, so a value survives the round
+// trip unchanged.
+test "json decode round trips through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name":"alice","active":true}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Profile>(allocator, profile, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(document, bytes);
+}
+
+// decode_ignore_unknown is the spelling that drops the keys the type has no
+// field for, at any depth.
+test "json decode_ignore_unknown drops the keys the type lacks" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"visits": 1, "extra": [1, {"deep": 2}], "errors": 0}
+    ;
+    let counts = try json::decode_ignore_unknown<Counts>(allocator, document);
+    testing::expect_equal<i64>(1, counts.visits);
+    testing::expect_equal<i64>(0, counts.errors);
+}
+
+test "json decode reads a negative number" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"visits": -12, "errors": 0}
+    ;
+    let counts = try json::decode<Counts>(allocator, document);
+    testing::expect_equal<i64>(-12, counts.visits);
+}

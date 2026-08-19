@@ -44,6 +44,11 @@ const (
 	FieldType Form = "std::meta::field_type"
 	// Field borrows one field out of a borrowed struct.
 	Field Form = "std::meta::field"
+	// Construct builds a struct from its public fields, taking each field's
+	// value from a worker it calls once per field (ADR-0115). It is how a
+	// walk that means to *produce* a `T` avoids a place to accumulate one:
+	// there is no half-built value, only the arguments of one struct literal.
+	Construct Form = "std::meta::construct"
 	// Unsupported fails compilation, naming the type that reached it. It is
 	// how a walk over a closed set of types refuses the one it has no case
 	// for: only the selected `comptime if` branch is checked, so writing this
@@ -55,11 +60,17 @@ const (
 // Shape is how one form is written: how many static arguments it takes,
 // whether the last of them is a `comptime for` capture, how many runtime
 // arguments follow, and whether the form names a type rather than a value.
+// A variadic form takes any number of runtime arguments and passes them on
+// unchanged, so Args says nothing about it.
 type Shape struct {
 	StaticArgs int
 	Capture    bool
 	Args       int
 	Type       bool
+	Variadic   bool
+	// Worker marks the static argument that names a function this form calls.
+	// It is 0 when the form calls nothing.
+	Worker int
 }
 
 var forms = map[Form]Shape{
@@ -74,6 +85,7 @@ var forms = map[Form]Shape{
 	FieldName:       {StaticArgs: 2, Capture: true},
 	FieldType:       {StaticArgs: 2, Capture: true, Type: true},
 	Field:           {StaticArgs: 2, Capture: true, Args: 1},
+	Construct:       {StaticArgs: 2, Variadic: true, Worker: 2},
 	Unsupported:     {StaticArgs: 1},
 }
 

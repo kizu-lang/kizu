@@ -4392,7 +4392,10 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
-	if err := c.checkGenericInstantiation(fn, subst); err != nil {
+	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
+	err = c.checkGenericInstantiation(fn, subst)
+	restore()
+	if err != nil {
 		return "", true, err
 	}
 	ret := substituteOwnershipType(returnTypeName(fn), subst)
@@ -4433,6 +4436,69 @@ func (c *Checker) genericCallSubst(
 		subst[param] = typeArgs[idx]
 	}
 	return subst, nil
+}
+
+// genericCallFields reads the `Field` static arguments of one call. A field
+// token instantiates like a type argument, not like the other compile-time
+// values: the body reads it through the `std::meta` forms written against it,
+// so each bound field is its own instance.
+func (c *Checker) genericCallFields(fn *functionInfo, typeArg string) map[string]metaField {
+	staticArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+		return nil
+	}
+	fields := map[string]metaField{}
+	owner := ""
+	for idx, param := range fn.sig.StaticParams {
+		if param.IsType() {
+			owner = strings.TrimSpace(staticArgs[idx])
+			continue
+		}
+		if typ.Text(param.Type) != "Field" {
+			continue
+		}
+		name := strings.TrimSpace(staticArgs[idx])
+		if bound, ok := c.metaFields[name]; ok {
+			fields[param.Name] = bound
+			continue
+		}
+		owned, err := c.publicFields(owner)
+		if err != nil {
+			continue
+		}
+		for _, field := range owned {
+			if field.name == name {
+				fields[param.Name] = field
+			}
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// bindMetaFields makes the `Field` arguments of one instantiation readable by
+// the forms written against them, and returns the call that unbinds them.
+func (c *Checker) bindMetaFields(fields map[string]metaField) func() {
+	if len(fields) == 0 {
+		return func() {}
+	}
+	previous := make(map[string]metaField, len(fields))
+	had := make(map[string]bool, len(fields))
+	for name, field := range fields {
+		previous[name], had[name] = c.metaFields[name]
+		c.metaFields[name] = field
+	}
+	return func() {
+		for name := range fields {
+			if had[name] {
+				c.metaFields[name] = previous[name]
+				continue
+			}
+			delete(c.metaFields, name)
+		}
+	}
 }
 
 // checkGenericInstantiation checks a generic function body for one static type set.

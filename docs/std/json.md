@@ -1,6 +1,6 @@
 # std::json
 
-JSON の encode です。decode はまだ持ちません(#1626)。
+JSON の encode と decode です。
 
 encode は明示 streaming encoder です。derive、hidden hook、method discovery は
 持ちません。caller が begin / end と field 書き込みをすべて綴ります。
@@ -107,7 +107,63 @@ encode できる型は次で閉じています。
 `std::arena::Handle<T>` は共有参照で、木である JSON と対応しないので
 encode しません。union と enum はまだ持ちません。
 
-`decode<T>` と `std::json::Value` はまだ持ちません。
+## decode
+
+```text
+std::json::decode<T>(allocator: Allocator, bytes: []u8) -> !T
+std::json::decode_ignore_unknown<T>(allocator: Allocator, bytes: []u8) -> !T
+```
+
+bytes から直接 `T` を組み立てます。document object を挟みません。DOM を持つと
+それ自身の置き場を決める必要があり、untrusted 入力への防御を DOM が引き受け、
+値への経路が「DOM を見る」と「型に流し込む」の 2 本になるためです(ADR-0115)。
+
+key は宣言順で届く必要がありません。object を 1 回走査して各値の開始位置を
+記録し、field ごとにその位置へ戻ります。
+
+```kizu
+let visit = try json::decode<Visit>(allocator, document);
+```
+
+`T` に来られる型は encode が書ける型と同じです。struct、`i64`、`bool`、
+`std::string::String`。`[]u8` は decode できません —— 借用 view なので、
+decode した bytes の持ち主がいなくなります。所有する `String` を使います。
+
+### 型に無い key
+
+`decode` は error にします。捨てると document が運んでいたデータが黙って
+消えるためです。捨てることを選ぶ場合は名前でそう宣言します。
+
+```kizu
+try json::decode<User>(allocator, bytes);                 // 知らない key は error
+try json::decode_ignore_unknown<User>(allocator, bytes);  // 捨てると名前で言う
+```
+
+### error
+
+```text
+std::json::Error::UnexpectedToken   その位置の bytes が JSON ではない
+std::json::Error::MissingField      T の field を document が持たない
+std::json::Error::UnknownField      document の key に対応する field が無い
+std::json::Error::DuplicateField    同じ key が 2 回現れた
+std::json::Error::InvalidNumber     JSON では有効だが i64 に入らない
+std::json::Error::InvalidEscape     `\` の後が escape ではない、または孤立した surrogate
+std::json::Error::DepthExceeded     入れ子が 128 段を超えた
+```
+
+原因と回復が違うものを分けています(原理 7)。壊れた入力、型と document の
+食い違い、上限超過、確保失敗はそれぞれ別の error です。
+
+### 制限
+
+number は `i64` のみです。小数・指数は `InvalidNumber` にします。言語に float
+演算が無いためで(SPEC §7 は `f64` を予約するだけ)、黙って切り捨てるより
+error にします。
+
+入力サイズの上限は持ちません。`[]u8` を渡すのは caller で、何 byte あるかは
+既に caller が握っています。入れ子の深さだけ 128 段で止めます。
+
+`std::json::Value`(型を決めずに読む用途)はまだ持ちません(#1626)。
 
 設計の経緯は [ADR-0112](../adr/0112-json-encoder-owns-output-and-traps-misuse.md)
 (encoder が出力を所有し、誤用は trap)と

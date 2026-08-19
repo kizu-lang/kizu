@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -608,7 +609,15 @@ func (c *graphChecker) qualifyTypeApplyExpr(
 	if err != nil {
 		return nil, err
 	}
+	worker := workerArgIndex(expr.Callee)
 	for idx, arg := range args {
+		if idx == worker {
+			// This argument names a function the form calls, not a type, so it
+			// is qualified the way a callee is. Resolving it as a type would
+			// leave the name unqualified and the call would find nothing.
+			args[idx] = c.qualifyFunctionName(module, arg)
+			continue
+		}
 		args[idx], err = c.resolveType(module, arg)
 		if err != nil {
 			return nil, err
@@ -616,6 +625,27 @@ func (c *graphChecker) qualifyTypeApplyExpr(
 	}
 	cp.TypeArg = strings.Join(args, ", ")
 	return &cp, nil
+}
+
+// workerArgIndex returns the index of the static argument that names a function
+// the callee will call, or -1 when the callee calls none.
+func workerArgIndex(callee ast.Expression) int {
+	shape, ok := stdmeta.Lookup(callee.String())
+	if !ok || shape.Worker == 0 {
+		return -1
+	}
+	return shape.Worker - 1
+}
+
+// qualifyFunctionName resolves a bare function name against this module, the
+// way a callee written as a bare name is resolved. A name that is not this
+// module's stays as written, which is what an already-qualified spelling and a
+// forwarded static parameter both need.
+func (c *graphChecker) qualifyFunctionName(module *moduleUnit, name string) string {
+	if c.declaresFunction(module, name) {
+		return module.qualify(name)
+	}
+	return name
 }
 
 // qualifyCallee rewrites imported function calls to their package function name.

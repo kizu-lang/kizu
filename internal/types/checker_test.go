@@ -11,6 +11,193 @@ import (
 	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
+// TestCheckFieldStaticParamInstantiatesPerField pins a `Field` argument as an
+// instantiation key, not a plain compile-time value: the body reads the field
+// through the forms written against the parameter, so one bound field is one
+// instance.
+func TestCheckFieldStaticParamInstantiatesPerField(t *testing.T) {
+	source := `struct User { pub name: []u8, pub age: i64 }
+fn label<T, f: Field>() -> []u8 {
+    return std::meta::field_name<T, f>();
+}
+fn main() -> void {
+    print(label<User, name>());
+    print(label<User, age>());
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckFieldTypeInSignature pins the declared result type of a worker. The
+// form stands for itself where it is written, because neither name is bound
+// there, and resolves at each instantiation to that field's type.
+func TestCheckFieldTypeInSignature(t *testing.T) {
+	source := `struct User { pub name: []u8, pub age: i64 }
+fn pick<T, f: Field>(value: T) -> std::meta::field_type<T, f> {
+    return std::meta::field<T, f>(value);
+}
+fn main() -> void {
+    let user = User { name: "alice", age: 30 };
+    print(pick<User, name>(user));
+    print(pick<User, age>(user));
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsCompileTimeOnlyTypeAsValue pins `Function` and `Field` as
+// tokens rather than types: neither has a runtime representation, so no value
+// position accepts one, wrapped or not.
+func TestCheckRejectsCompileTimeOnlyTypeAsValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "field static param in a struct field",
+			source: `struct Holder { pub f: Field }` + "\nfn main() -> void { print(1); }",
+			want:   "struct field `Holder.f` cannot store Field",
+		},
+		{
+			name:   "field static param as a result",
+			source: "fn w<T, f: Field>() -> Field { return 1; }\nfn main() -> void { print(1); }",
+			want:   "function `w` cannot return Field",
+		},
+		{
+			name:   "field static param wrapped in an optional",
+			source: "fn take(x: ?Field) -> void { return; }\nfn main() -> void { print(1); }",
+			want:   "?Field parameter `x` belongs in `<...>`, not `(...)`",
+		},
+		{
+			name:   "function static param wrapped in an optional",
+			source: "fn take(x: ?Function) -> void { return; }\nfn main() -> void { print(1); }",
+			want:   "?Function parameter `x` belongs in `<...>`, not `(...)`",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckMetaConstruct types the form as the code it stands for: one worker
+// call per public field, then the struct literal that takes all of them.
+func TestCheckMetaConstruct(t *testing.T) {
+	source := `struct Counts { pub visits: i64, pub n: i64 }
+fn width<T, f: Field>(base: i64) -> !std::meta::field_type<T, f> {
+    return base + std::mem::len(std::meta::field_name<T, f>());
+}
+fn main() -> !void {
+    let c = try std::meta::construct<Counts, width>(100);
+    print(c.visits);
+    print(c.n);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsMetaConstruct covers what the form refuses.
+func TestCheckRejectsMetaConstruct(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "no public field",
+			source: `struct Opaque { count: i64 }
+fn make<T, f: Field>(base: i64) -> !std::meta::field_type<T, f> { return base; }
+fn main() -> !void {
+    let value = try std::meta::construct<Opaque, make>(1);
+    return;
+}`,
+			want: "has no public field to construct `Opaque` from",
+		},
+		{
+			name: "worker returns the wrong type for the field",
+			source: `struct Counts { pub visits: i64 }
+fn wrong<T, f: Field>(base: i64) -> ![]u8 { return std::meta::field_name<T, f>(); }
+fn main() -> !void {
+    let counts = try std::meta::construct<Counts, wrong>(1);
+    print(counts.visits);
+    return;
+}`,
+			want: "field `Counts.visits` expects i64",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckRejectsFieldStaticArg covers what a field token may name.
+func TestCheckRejectsFieldStaticArg(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "field the struct does not declare",
+			source: `struct User { pub name: []u8 }
+fn label<T, f: Field>() -> []u8 { return std::meta::field_name<T, f>(); }
+fn main() -> void { print(label<User, nope>()); }`,
+			want: "`User` has no public field `nope`",
+		},
+		{
+			name: "private field",
+			source: `struct User { pub name: []u8, age: i64 }
+fn label<T, f: Field>() -> []u8 { return std::meta::field_name<T, f>(); }
+fn main() -> void { print(label<User, age>()); }`,
+			want: "`User` has no public field `age`",
+		},
+		{
+			name: "runtime parameter",
+			source: `fn label(f: Field) -> []u8 { return "x"; }
+fn main() -> void { print("x"); }`,
+			want: "Field parameter `f` belongs in `<...>`, not `(...)`",
+		},
+		{
+			name: "no type parameter before it",
+			source: `struct User { pub name: []u8 }
+fn label<f: Field>() -> []u8 { return "x"; }
+fn main() -> void { print(label<name>()); }`,
+			want: "has no type parameter before it",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSource(tt.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckValidPhase2Programs checks programs that the interpreter can run.
 func TestCheckValidPhase2Programs(t *testing.T) {
 	cases := []string{

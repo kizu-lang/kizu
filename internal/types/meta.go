@@ -210,7 +210,7 @@ func (c *Checker) checkMetaApply(
 		return "", true, errorf("comptime error: `%s` expects %d static arguments, got %d",
 			name, shape.StaticArgs, len(staticArgs))
 	}
-	if len(args) != shape.Args {
+	if !shape.Variadic && len(args) != shape.Args {
 		return "", true, errorf("comptime error: `%s` expects %d arguments, got %d",
 			name, shape.Args, len(args))
 	}
@@ -234,6 +234,8 @@ func (c *Checker) checkMetaForm(
 		return typeByteString, nil
 	case stdmeta.Field:
 		return c.checkMetaFieldBorrow(form, staticArgs, args, env, unsafe)
+	case stdmeta.Construct:
+		return c.checkMetaConstruct(staticArgs, args, env, unsafe)
 	case stdmeta.IsStruct, stdmeta.IsOptional:
 		if _, err := c.metaPredicate(form, staticArgs); err != nil {
 			return "", err
@@ -245,6 +247,94 @@ func (c *Checker) checkMetaForm(
 		return "", errorf("comptime error: `%s` is only written as a comptime for list", form)
 	default:
 		return "", errorf("comptime error: unsupported form `%s`", form)
+	}
+}
+
+// checkMetaConstruct types `std::meta::construct<T, worker>(args...)` by
+// checking the code it stands for. The expansion is built in one place
+// (ast.ConstructExpansion) so this and the ownership checker and lowering all
+// read the same statements.
+func (c *Checker) checkMetaConstruct(
+	staticArgs []string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	owner, fields, err := c.constructFields(staticArgs[0])
+	if err != nil {
+		return "", err
+	}
+	statements, literal := ast.ConstructExpansion(
+		string(owner), staticArgs[1], fields, args, c.deinitOwners)
+	scope := env.child()
+	for _, stmt := range statements {
+		if _, err := c.checkStmt(stmt, scope, c.currentReturn, unsafe); err != nil {
+			return "", err
+		}
+	}
+	built, err := c.checkExpr(literal, scope, unsafe)
+	if err != nil {
+		return "", err
+	}
+	return Type("!" + string(built)), nil
+}
+
+// constructFields reads the public fields `construct` fills, and refuses a type
+// that has none: it would be built from nothing, and the values the caller
+// meant to put in it would go nowhere.
+func (c *Checker) constructFields(typeArg string) (Type, []ast.ConstructField, error) {
+	owner, err := c.parseType(typeArg)
+	if err != nil {
+		return "", nil, err
+	}
+	fields, err := c.publicFields(string(owner))
+	if err != nil {
+		return "", nil, err
+	}
+	if len(fields) == 0 {
+		return "", nil, errorf("comptime error: `%s` has no public field to construct `%s` from",
+			stdmeta.Construct, owner)
+	}
+	out := make([]ast.ConstructField, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, ast.ConstructField{Name: field.name, Type: string(field.typ)})
+	}
+	return owner, out, nil
+}
+
+// resolveMetaTypeDeep resolves the forms inside a wrapped spelling. A worker
+// returns `!std::meta::field_type<T, f>`, so the form sits under the error
+// union rather than at the top, and the wrapper has to be rebuilt around what
+// the form resolved to.
+func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
+	if resolved, err := c.resolveMetaTypeText(text); err == nil && resolved != text {
+		return resolved, nil
+	}
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return text, nil
+	}
+	switch node := parsed.(type) {
+	case *typ.ErrorUnion:
+		inner, err := c.resolveMetaTypeDeep(node.Ok.String())
+		if err != nil {
+			return "", err
+		}
+		return (&typ.ErrorUnion{Err: node.Err, Ok: &typ.Name{Path: []string{inner}}}).String(), nil
+	case *typ.Optional:
+		inner, err := c.resolveMetaTypeDeep(node.Elem.String())
+		if err != nil {
+			return "", err
+		}
+		return "?" + inner, nil
+	case *typ.Slice:
+		inner, err := c.resolveMetaTypeDeep(node.Elem.String())
+		if err != nil {
+			return "", err
+		}
+		return "[]" + inner, nil
+	default:
+		return text, nil
 	}
 }
 
