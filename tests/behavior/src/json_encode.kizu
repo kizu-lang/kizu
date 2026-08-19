@@ -268,3 +268,87 @@ test "json encode writes an unset optional as null" {
     ;
     testing::expect_equal<[]u8>(expected, bytes);
 }
+
+pub struct Named {
+    pub id: i64,
+    pub name: string::String,
+}
+
+fn (self: Named) deinit() -> void {
+    self.name.deinit();
+}
+
+// A String is a string, not an object. Its bytes are private, so a walk that
+// treated it as a struct would write `{}` and drop the text -- the shape of
+// silent wrongness `unsupported` exists to prevent.
+test "json encode writes a String field as a string" {
+    let allocator = mem::page_allocator();
+    var named = Named { id: 7, name: string::new(allocator) };
+    defer named.deinit();
+    try named.name.append_bytes("alice");
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Named>(allocator, named, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"id":7,"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// The indented form differs from the compact one only in the whitespace
+// between parts: the same keys, the same order, the same values.
+test "json encode indents nested containers" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "nums",
+        \\  "items": [
+        \\    3
+        \\  ]
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An empty container has nothing to indent, so it stays on one line rather
+// than becoming a pair of braces with a blank line between them.
+test "json encode keeps empty containers on one line" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "none", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "none",
+        \\  "items": []
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A width of zero is the compact form, so one encoder covers both.
+test "json encode with zero width is the compact form" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 0, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3]}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}

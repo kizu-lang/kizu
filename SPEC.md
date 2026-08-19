@@ -2347,6 +2347,8 @@ method discovery は持ちません。caller が begin / end と field 書き込
 
 ```text
 std::json::encoder(allocator: Allocator) -> std::json::Encoder
+std::json::encoder_with_spaces(allocator: Allocator, width: i64) -> std::json::Encoder
+std::json::encoder_with_tabs(allocator: Allocator, width: i64) -> std::json::Encoder
 encoder.begin_object() -> !void
 encoder.end_object() -> !void
 encoder.begin_array() -> !void
@@ -2385,6 +2387,17 @@ API の誤用は error ではなく **trap** です(ADR-0112)。次は回復可�
 `finish_into` は完成した document を caller の `String` に append します。
 `Encoder` は自分の buffer を持ち続け、`deinit` で解放します。
 
+`encoder_with_spaces` と `encoder_with_tabs` は同じ document を行に分けて
+書きます。`width` は 1 段あたりの個数で、`0` は compact 形と同じです。負の
+width は trap です。要素の無い container は 1 行のままにします。整形は要素の
+間の空白だけを変え、key の順序も値も変えません。
+
+空白と tab を 1 つの関数の `[]u8` 引数にまとめません。`Encoder` が `[]u8`
+field を持つと view を運べる型になり、view を貸せなくなります(§9)。
+`write_bytes_field(name, string.as_bytes())` は文字列データを入れる主経路
+なので、これは失えません。option record も持ちません。knob が 3 つ目に
+なったときに、record が要るかを問い直します。
+
 byte 列は決定的に escape します。`"`、`\`、newline、carriage return、tab は
 `\"`、`\\`、`\n`、`\r`、`\t`、その他の control byte は lowercase hex の
 `\u00XX` です。encode は UTF-8 validation をしません。
@@ -2399,6 +2412,18 @@ std::json::encode<T>(
     out: &var std::string::String,
 ) -> !void
 std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
+std::json::encode_with_spaces<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
+std::json::encode_with_tabs<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void
 ```
 
 encode できる型は次で閉じています。
@@ -2408,6 +2433,7 @@ encode できる型は次で閉じています。
 | `i64` | number |
 | `bool` | `true` / `false` |
 | `[]u8` | string |
+| `std::string::String` | string。所有する bytes を書きます |
 | struct | public field の object。順序は source の宣言順 |
 | `std::array::Array<T>` | array。順序は index 順 |
 | `std::map::Map<[]u8, V>` | object。順序は `key_at` の挿入順 |
@@ -2416,8 +2442,10 @@ encode できる型は次で閉じています。
 
 これ以外の型は **compile error** です(`std::meta::unsupported`)。黙って
 何も書かないと、encoder 自身のテストでは捕まらない壊れた document が出る
-ためです。`std::arena::Handle<T>` は共有参照で、木である JSON と対応
-しないので encode しません。union と enum はまだ持ちません。
+ためです。public field を 1 つも持たない struct も同じ理由で拒否します。
+状態が全部 private な型を `{}` と書くと、値が黙って消えるためです。
+`std::arena::Handle<T>` は共有参照で、木である JSON と対応しないので
+encode しません。union と enum はまだ持ちません。
 
 `decode<T>` と `std::json::Value` はまだ持ちません。
 

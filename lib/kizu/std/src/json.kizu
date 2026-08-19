@@ -16,6 +16,18 @@ pub struct Encoder {
     kinds: i64,
     nonempty: i64,
     top_written: bool,
+    // What one level of indent writes: `indent_width` copies of
+    // `indent_byte`. A width of zero writes the compact form, so the shape of
+    // the document does not depend on which encoder made it -- only the
+    // whitespace between its parts does.
+    //
+    // The unit is two scalars rather than the bytes themselves because a
+    // `[]u8` field would make this a view-carrying type, and a view-carrying
+    // type cannot be lent a view: `write_bytes_field(name, string.as_bytes())`
+    // would stop compiling (SPEC §9). Which is also why the choice of space or
+    // tab lives in the constructor's name instead.
+    indent_byte: u8,
+    indent_width: i64,
 }
 
 pub fn encoder(allocator: Allocator) -> Encoder {
@@ -25,6 +37,35 @@ pub fn encoder(allocator: Allocator) -> Encoder {
         kinds: 0,
         nonempty: 0,
         top_written: false,
+        indent_byte: cast<u8>(32),
+        indent_width: 0,
+    };
+}
+
+// encoder_with_spaces writes the same document broken across lines, with
+// `width` spaces per level. A negative width is a bug, not a request.
+pub fn encoder_with_spaces(allocator: Allocator, width: i64) -> Encoder {
+    return indented_encoder(allocator, cast<u8>(32), width);
+}
+
+// encoder_with_tabs writes the same document broken across lines, with `width`
+// tabs per level.
+pub fn encoder_with_tabs(allocator: Allocator, width: i64) -> Encoder {
+    return indented_encoder(allocator, cast<u8>(9), width);
+}
+
+fn indented_encoder(allocator: Allocator, byte: u8, width: i64) -> Encoder {
+    if width < 0 {
+        std::internal::builtin::panic("json encoder: indent width cannot be negative");
+    }
+    return Encoder {
+        out: std::string::new(allocator),
+        depth: 0,
+        kinds: 0,
+        nonempty: 0,
+        top_written: false,
+        indent_byte: byte,
+        indent_width: width,
     };
 }
 
@@ -147,6 +188,36 @@ pub fn encode<T>(
     out: &var std::string::String,
 ) -> !void {
     var encoder = std::json::encoder(allocator);
+    defer encoder.deinit();
+    try encode_value<T>(encoder, value);
+    try encoder.finish_into(out);
+    return;
+}
+
+// encode_with_spaces writes the same document broken across lines, with
+// `width` spaces per level. The document is the one `encode` writes; only the
+// whitespace between its parts differs.
+pub fn encode_with_spaces<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void {
+    var encoder = std::json::encoder_with_spaces(allocator, width);
+    defer encoder.deinit();
+    try encode_value<T>(encoder, value);
+    try encoder.finish_into(out);
+    return;
+}
+
+// encode_with_tabs writes the same document with `width` tabs per level.
+pub fn encode_with_tabs<T>(
+    allocator: Allocator,
+    width: i64,
+    value: &T,
+    out: &var std::string::String,
+) -> !void {
+    var encoder = std::json::encoder_with_tabs(allocator, width);
     defer encoder.deinit();
     try encode_value<T>(encoder, value);
     try encoder.finish_into(out);
@@ -357,6 +428,9 @@ fn (self: &var Encoder) begin_field(name: []u8) -> !void {
     try self.mark_element();
     try self.append_string(name);
     try self.out.append_byte(cast<u8>(58));
+    if self.indent_width > 0 {
+        try self.out.append_byte(cast<u8>(32));
+    }
     return;
 }
 
@@ -365,6 +439,23 @@ fn (self: &var Encoder) mark_element() -> !void {
         try self.out.append_byte(cast<u8>(44));
     } else {
         self.nonempty = self.nonempty + 1;
+    }
+    try self.break_line(self.depth);
+    return;
+}
+
+// break_line starts a new line indented for `level` open containers. It writes
+// nothing in the compact form, which is what keeps one separator path for both
+// forms instead of two writers.
+fn (self: &var Encoder) break_line(level: i64) -> !void {
+    if self.indent_width == 0 {
+        return;
+    }
+    try self.out.append_byte(cast<u8>(10));
+    var remaining = level * self.indent_width;
+    while remaining > 0 {
+        try self.out.append_byte(self.indent_byte);
+        remaining = remaining - 1;
     }
     return;
 }
@@ -381,9 +472,15 @@ fn (self: &var Encoder) push(kind: i64, open: u8) -> !void {
 }
 
 fn (self: &var Encoder) pop(close: u8) -> !void {
+    let had_element = self.nonempty % 2 == 1;
     self.depth = self.depth - 1;
     self.kinds = self.kinds / 2;
     self.nonempty = self.nonempty / 2;
+    // An empty container stays on one line: there is nothing to indent, and
+    // `{\n}` reads as a container whose contents went missing.
+    if had_element {
+        try self.break_line(self.depth);
+    }
     try self.out.append_byte(close);
     return;
 }
