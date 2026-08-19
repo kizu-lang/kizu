@@ -1290,6 +1290,12 @@ compile error です。consume しなかった path はその値を解放でき�
 owner field への代入も compile error です。代入は置き換え前の値を解放しないので
 leak します(owner 要素の `set` と同じ理由)。
 
+owner を produce する式を、値を束縛せずに文として書くことも compile error です。
+consume の義務は束縛に付くので、束縛しない値は義務を負う先を持ちません。
+`?T` / `E!T` に包まれていても同じです —— `array.pop();` は要素を container の外へ
+出したうえで捨てます。意図的に捨てる場合も `let _ = ...` で束縛し、
+上の consume のいずれかを書きます。
+
 owner aggregate を値引数として受け取る関数は、その値を consume する義務を負います。
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
