@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // pushDeferFrame opens a lexical cleanup frame for one block.
@@ -83,7 +84,7 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 // cleanupFromMethod resolves one receiver.method() cleanup into an IR instruction.
 func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, error) {
 	receiverType := derefType(receiver.Type)
-	if elem, ok := arrayElementType(receiverType); ok && method == "deinit" {
+	if elem, ok := arrayElementType(receiverType); ok && method == typ.CleanupMethod {
 		// A container whose elements own something releases them first, and
 		// that loop lives in the std wrapper rather than in a runtime op: the
 		// cleanup calls its instance exactly like a direct call would. Plain
@@ -97,10 +98,10 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 		}
 		return Cleanup{Op: op, Args: []Value{receiver}}, nil
 	}
-	if _, ok := mapValueType(receiverType); ok && method == "deinit" {
+	if _, ok := mapValueType(receiverType); ok && method == typ.CleanupMethod {
 		return Cleanup{Op: "map.deinit", Args: []Value{receiver}}, nil
 	}
-	if elem, ok := boxElementType(receiverType); ok && method == "deinit" {
+	if elem, ok := boxElementType(receiverType); ok && method == typ.CleanupMethod {
 		if !ast.OwnerType(l.deinitOwners, elem) {
 			return Cleanup{Op: "box.deinit", Args: []Value{receiver}}, nil
 		}
@@ -120,7 +121,7 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 		}
 		return Cleanup{Op: "call." + methodName, Args: []Value{receiver}}, nil
 	}
-	if method == "deinit" && arenaElementType(receiverType) != "unknown" {
+	if method == typ.CleanupMethod && arenaElementType(receiverType) != "unknown" {
 		return Cleanup{Op: "arena.deinit", Args: []Value{receiver}}, nil
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
