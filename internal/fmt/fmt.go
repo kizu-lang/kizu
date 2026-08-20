@@ -280,7 +280,10 @@ func (b *builder) emit(t token.Token, next token.Token) {
 		b.emitRBrace(t, next)
 		return
 	}
-	if t.Type == token.String && strings.ContainsRune(t.Literal, '\n') {
+	// Kizu single-line strings have no escape syntax. A literal containing a
+	// quote therefore has to stay in the multiline form even when its value
+	// contains no newline, or formatting would emit invalid source.
+	if t.Type == token.String && strings.ContainsAny(t.Literal, "\"\n") {
 		b.emitMultilineString(t)
 		return
 	}

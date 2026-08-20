@@ -287,6 +287,25 @@ func TestFormatMultilineStringPreservesNewlines(t *testing.T) {
 	}
 }
 
+// TestFormatMultilineStringPreservesQuotes keeps values that cannot be
+// represented by Kizu's escape-free single-line literal syntax parseable.
+func TestFormatMultilineStringPreservesQuotes(t *testing.T) {
+	src := "fn main() {\n" +
+		"    let input =\n" +
+		"        \\\\ \"quoted\" value\n" +
+		"    ;\n" +
+		"    print(input);\n" +
+		"}\n"
+	want := src
+	got := Format(src)
+	if got != want {
+		t.Fatalf("quoted multiline string changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got2 := Format(got); got2 != got {
+		t.Fatalf("non-idempotent quoted multiline string:\n--- got1 ---\n%s\n--- got2 ---\n%s", got, got2)
+	}
+}
+
 // TestFormatUnaryMinusHugsValue checks a sign hugs its value while
 // subtraction keeps its spaces.
 func TestFormatUnaryMinusHugsValue(t *testing.T) {
