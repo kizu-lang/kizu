@@ -53,6 +53,6 @@ The rules are:
 - Existing explicit `borrow.*.field` code remains valid, but examples should use
   direct safe-borrow field access unless demonstrating dereference itself.
 
-ADR-0034 is superseded for safe borrow field access. ADR-0069 defines raw
+ADR-0069 defines raw
 pointer dereference with the same postfix `.*` spelling inside
 `@unsafe(ptr_deref)`.

@@ -684,7 +684,7 @@ func (c *Checker) restoreErrDefers(mark int) {
 // validateErrDeferReceivers reports the active errdefer cleanups that this
 // error-return path must skip, and rejects the ones it cannot run.
 //
-// A consumed receiver retires its cleanup (ADR-0116). A move hands the
+// A consumed receiver retires its cleanup (ADR-0114). A move hands the
 // obligation to a new owner and an explicit `deinit` discharges it outright;
 // either way the value is gone, so running the cleanup here would release what
 // this frame no longer holds. A borrowed receiver is different: it is still

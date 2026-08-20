@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-ADR-0059 adopted named lifetime parameters for borrowed views, but that moves
+Named lifetime parameters for borrowed views were proposed and dropped: they move
 Kizu toward Rust-style lifetime programming. The project goal is the opposite:
 safe borrowed views must be explicit, while long-lived identity should be
 modeled with owned storage, arena/handle, IDs, or small unsafe wrappers.
@@ -53,4 +53,3 @@ needs a return tied to multiple sources or a first-class view aggregate, it must
 be added as a bounded follow-up with examples and checker coverage instead of
 reintroducing general lifetime programming.
 
-ADR-0059 is superseded by this decision.

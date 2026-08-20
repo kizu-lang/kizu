@@ -2,7 +2,6 @@
 
 Status: 採用
 
-Supersedes: ADR-0027(v0.1 は interpreter-first language core)
 
 ## 背景
 
@@ -10,8 +9,8 @@ Supersedes: ADR-0027(v0.1 は interpreter-first language core)
 typed SSA IR を経由して LLVM に落としていた。共通なのは parse と check だけで、
 その先は**同じ言語仕様を 2 回実装していた**。
 
-ADR-0027 は v0.1 を interpreter-first と決め、native executable generation と
-full LLVM backend を完了条件から外した。当時は正しい判断だった。今は backend が
+v0.1 は interpreter-first と決めて始まり、native executable generation と full
+LLVM backend を完了条件から外していた。当時は正しい判断だった。今は backend が
 `examples/` の 82 本中 66 本を lowering できるところまで来ている。
 
 二重実装が何を生んでいたかは、両経路を実際に突き合わせて分かった。link まで
@@ -31,7 +30,7 @@ conformance の 366 ケースはすべて interpreter 経路でしか走らな�
 **診断を一切出さずに落ちて**いた。interpreter は `index out of bounds` と言って
 止まる。同じ失敗が経路によって別の見え方をしていた。
 
-これは ADR-0081 / ADR-0082 が selfhost で踏んだ失敗と同型である。違いは、
+これは ADR-0082 が selfhost で踏んだ失敗と同型である。違いは、
 第二実装が Kizu で書かれていたか Go で書かれていたかだけで、構造は同じ。
 
 ## 決定

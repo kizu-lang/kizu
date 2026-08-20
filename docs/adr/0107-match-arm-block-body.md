@@ -57,8 +57,10 @@ let label = match color {
 };
 ```
 
-- arm の terminal comma は block でも必須のまま(SPEC §6「すべての arm は
-  terminal comma を必須」を維持)。
+- 最後の arm の `,` は書いても省いてもよい。区切りの省略可否は構文ごとでは
+  なく言語全体で 1 つの規則にする。arm の間の `;` は error のまま。
+  どちらに揃えるかより、揃っていることを優先した(原理 7 の逆写し:
+  意味が同じ「brace 内の comma 区切り list」に同じ規則を課す)。
 - AST は専用 node を作らず `*ast.BlockStmt` をそのまま arm body に置く。
   checker / lowering は if の分岐が使う既存の block 経路
   (checkBlock / checkBlockValue / lowerBlock / lowerBlockBody)に流す。
@@ -87,6 +89,8 @@ arm ごとの helper 関数という定型量産(原理 10)であり、if expres
 
 | 案 | 却下理由 |
 | --- | --- |
+| 最後の arm も `,` を必須のまま維持し、診断だけ改善 | 実害は減るが「同じ形の list に規則が 2 つ」が残る |
+| struct literal 側を comma 必須に揃える | 既存コードを壊す方向の統一。得るものがない |
 | 空の `{}` だけ許す(本 issue の当初案) | 罠は消えるが定型量産と if との非対称が残る。中途半端な特殊形 |
 | `B => (),`(unit 値) | SPEC §7「void は値ではない」を覆す |
 | `B => ,`(空 body) | 前例が Go の `case B:` のみ。Rust / Zig 由来の手は `{}` に伸びる |

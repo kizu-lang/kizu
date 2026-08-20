@@ -1378,7 +1378,7 @@ fn build() -> !std::arena::Arena<User> {
 }
 
 // TestCheckErrDeferRetiresAtExplicitDeinit checks releasing the receiver early
-// and then returning an error is accepted (ADR-0116). The cleanup already ran
+// and then returning an error is accepted (ADR-0114). The cleanup already ran
 // in source; running the errdefer as well would release the same value twice.
 func TestCheckErrDeferRetiresAtExplicitDeinit(t *testing.T) {
 	source := `error BuildError { Boom }

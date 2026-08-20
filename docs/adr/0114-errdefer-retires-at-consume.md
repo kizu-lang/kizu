@@ -1,6 +1,6 @@
-# ADR-0114: errdefer は receiver が move された時点で退役する
+# ADR-0114: errdefer は receiver が consume された時点で退役する
 
-Status: 採用(決定 3 は ADR-0116 が訂正、決定 4 は ADR-0118 が置換)
+Status: 採用
 
 Issue: #1634(decode の設計検証で見つかった前提。#1626)
 
@@ -56,8 +56,10 @@ SPEC §6.3.1 は既に move を義務の移転として扱っている。
 
 ## 決定
 
-**errdefer entry は receiver が move された時点で退役する。** 退役後の error
-exit path では実行しない。
+**errdefer entry は receiver が consume された時点で退役する。** move でも
+explicit `deinit` でも同じで、退役後の error exit path では実行しない。
+どちらも値はもう無く、cleanup を実行すればこの frame が持っていないものを
+解放することになる。
 
 1. **退役は静的に決まる。** cleanup は各 exit 地点に emit される
    (`internal/ir/defer.go` の `errorCleanups` / `emitCleanups`)。move 地点で
@@ -66,19 +68,13 @@ exit path では実行しない。
 2. **move state は既存の追跡をそのまま使う。** 分岐の片方でだけ move された
    値は、合流点で move 済みとして扱われる(既存の挙動)。errdefer の退役も
    同じ判定に従う。
-3. **explicit `deinit` と borrow は従来どおり error のままにする。**
-   move は義務の**移転**で、新しい owner が続きを持つ。`errdefer x.deinit()`
-   の隣に `x.deinit()` を書くのは義務の**二重履行**で、ほぼ確実に書き手の
-   誤りである。診断を残す方が原理 1 に合う。
-   —— **この決定は誤りだった。ADR-0116 が explicit `deinit` の部分を
-   取り消す。**「先に手放してから error を返す」は正しい形で、そこで errdefer
-   を走らせると二重解放になる。borrow の部分は 0116 でもそのまま残る。
-4. **退役した receiver への再代入で errdefer は復活しない。** 新しい owner は
-   新しい義務を持つので、必要なら errdefer を書き直す。書き直さなければ
-   既存の leak 検査(`would leak on this try's error exit`)が捕まえる。
-   —— **ADR-0118 がこれを置き換える。** 復活させないのではなく、cleanup
-   receiver への代入自体を compile error にする。同じ 1 行が 2 か所で違う値を
-   指す形が残るのを避けるため。
+3. **borrow 中の receiver は error のままにする。** 借りている値は手放して
+   いないので、退役する理由がない。
+4. **cleanup receiver への再代入は compile error にする。** cleanup は登録時に
+   live だった値を解放する。名前が別の値を指すようになると、cleanup は名前が
+   意味しなくなった値を持つ。1 つの名前に 1 つの値、1 つの cleanup にすれば、
+   この乖離が生まれる場所がなくなる(原理 7)。新しい owner は新しい名前に
+   束縛する。
 
 ## 却下した案
 
@@ -88,6 +84,11 @@ exit path では実行しない。
 | move の直後に errdefer を明示解除する綴りを足す | 解除語が move の数だけ増える(原理 10)。move は source に見えており、そこから導出できる(ADR-0098 の構造導出) |
 | inline 形(`try parent.append(try make_child(...))`)を推奨形にする | callee の失敗で子が漏れ、しかも検査もされない。傷を隠す(原理 1) |
 | move 後の try を error のままにし、builder は毎回 helper 関数に切り出させる | 切り出しても親へ move した瞬間に同じ壁が来る。関数境界は問題を移すだけで解かない |
+| explicit `deinit` は退役させず error のままにする | 「先に手放してから error を返す」という正しい形を拒否する。Arena では実際に拒否されていた |
+| 「全 path で explicit deinit されたときだけ error」にして lint を残す | 3 つ目の状態と分岐 merge の規則が要る。得られるのは安全性に関わらない冗長性の指摘 1 つ |
+| 再代入で errdefer を復活させない(代入自体は許す) | 動くが、同じ 1 行 `errdefer name.deinit();` が 2 か所で違う値を指す形を許す。退役を名前で IR へ伝える設計になり、書き直した errdefer まで巻き添えで落ちる二次バグが出た |
+| Rust のように代入の地点で古い値を解放する | 解放が source に現れない(原理 2)。明示 cleanup を選んだ前提と矛盾する |
+| `defer` は許し `errdefer` だけ再代入を禁止する | 同じ穴が `defer` にもある。理由が同じものを別扱いにする(原理 9) |
 
 ## 影響
 

@@ -4,9 +4,8 @@
 
 Accepted.
 
-Supersedes ADR-0037, and the decision after it that removed `if` expression
-(that ADR is deleted: the rule it describes is not in the language, and the
-reason it was removed is in Context below).
+Supersedes the earlier decisions on `if` expression, which this one restates in
+full.
 
 ## Context
 
