@@ -209,3 +209,98 @@ test "json decode reads arrays nested in structs" {
     defer grid.deinit();
     testing::expect_equal<i64>(2, grid.rows.len());
 }
+
+pub enum Level {
+    Low,
+    High,
+}
+
+pub union Cell {
+    Missing,
+    Number(i64),
+    Name(string::String),
+}
+
+fn (self: Cell) deinit() -> void {
+    match self {
+        Missing => return,
+        Number(_) => return,
+        Name(text) => text.deinit(),
+    }
+    return;
+}
+
+pub struct Record {
+    pub level: Level,
+    pub cell: Cell,
+}
+
+fn (self: Record) deinit() -> void {
+    self.cell.deinit();
+    return;
+}
+
+test "json decode reads an enum tag from a string" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\"High"
+    ;
+    let level = try json::decode<Level>(allocator, document);
+    let read = match level {
+        Low => 0,
+        High => 1,
+    };
+    testing::expect_equal<i64>(1, read);
+}
+
+test "json decode reads a payload-free union variant from a string" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\"Missing"
+    ;
+    var cell = try json::decode<Cell>(allocator, document);
+    defer cell.deinit();
+    let read = match &cell {
+        Missing => 0,
+        Number(_) => 1,
+        Name(_) => 2,
+    };
+    testing::expect_equal<i64>(0, read);
+}
+
+test "json decode reads a union payload from the object naming it" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"Name": "ab"}
+    ;
+    var cell = try json::decode<Cell>(allocator, document);
+    defer cell.deinit();
+    let read = match &cell {
+        Missing => 0,
+        Number(_) => 0,
+        Name(text) => text.len(),
+    };
+    testing::expect_equal<i64>(2, read);
+}
+
+// A struct with sum cells comes back through the same walk that wrote it, so
+// the round trip closes for every type `encode` accepts.
+test "json decode reads sum cells of a struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"level": "Low", "cell": {"Number": 5}}
+    ;
+    var record = try json::decode<Record>(allocator, document);
+    defer record.deinit();
+    let level = match record.level {
+        Low => 0,
+        High => 1,
+    };
+    testing::expect_equal<i64>(0, level);
+    let number = match &record.cell {
+        Missing => 0,
+        Number(value) => value,
+        Name(_) => 0,
+    };
+    testing::expect_equal<i64>(5, number);
+}

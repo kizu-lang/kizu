@@ -352,3 +352,116 @@ test "json encode with zero width is the compact form" {
     ;
     testing::expect_equal<[]u8>(expected, bytes);
 }
+
+pub enum Visibility {
+    Public,
+    Private,
+}
+
+pub union Slot {
+    Vacant,
+    Number(i64),
+    Label(string::String),
+}
+
+fn (self: Slot) deinit() -> void {
+    match self {
+        Vacant => return,
+        Number(_) => return,
+        Label(text) => text.deinit(),
+    }
+    return;
+}
+
+pub struct Entryish {
+    pub visibility: Visibility,
+    pub slot: Slot,
+}
+
+fn (self: Entryish) deinit() -> void {
+    self.slot.deinit();
+    return;
+}
+
+// An enum is a variant that carries nothing, so it writes as the string naming
+// the tag rather than as an object of its own.
+test "json encode writes an enum tag as a string" {
+    let allocator = mem::page_allocator();
+    let visibility = Visibility::Private;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Visibility>(allocator, visibility, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\"Private"
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A union variant that carries nothing follows the same rule an enum tag does:
+// there is one representation, not one per declaration kind.
+test "json encode writes a payload-free union variant as a string" {
+    let allocator = mem::page_allocator();
+    var slot = Slot::Vacant;
+    defer slot.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Slot>(allocator, slot, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\"Vacant"
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A variant that carries a payload names itself with the single key of an
+// object, so the payload keeps its own shape underneath.
+test "json encode writes a union payload under the variant name" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("hi");
+    var slot = Slot::Label(text);
+    defer slot.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Slot>(allocator, slot, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"Label":"hi"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A sum type inside a struct writes under its field name, so one union field
+// no longer takes the whole struct out of the generic path.
+test "json encode writes sum fields of a struct" {
+    let allocator = mem::page_allocator();
+    var entry = Entryish { visibility: Visibility::Public, slot: Slot::Number(7) };
+    defer entry.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Entryish>(allocator, entry, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"visibility":"Public","slot":{"Number":7}}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A `Value` writes back the document it was read from: its variants name
+// JSON's own shapes, so tagging them would wrap a document that already says
+// what it is.
+test "json encode writes a Value without tagging it" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"a":[1,true,null],"b":"x"}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<json::Value>(allocator, value, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(document, bytes);
+}
