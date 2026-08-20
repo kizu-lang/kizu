@@ -1,0 +1,193 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?string::String,
+}
+
+fn (self: Visitor) deinit() -> void {
+    self.name.deinit();
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+pub struct Bag {
+    pub items: ?array::Array<i64>,
+    pub counts: ?map::Map<[]u8, i64>,
+    pub held: ?mem::Box<i64>,
+}
+
+fn (self: Bag) deinit() -> void {
+    if self.items |items| {
+        items.deinit();
+    }
+    if self.counts |counts| {
+        counts.deinit();
+    }
+    if self.held |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return text;
+}
+
+// The capture borrows the visitor's storage, so a view taken from it cannot
+// escape this scope. The comparison happens where the borrow is live.
+fn expect_nick(visitor: &Visitor, expected: []u8) -> void {
+    if visitor.nick |held| {
+        let bytes = held.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::expect_equal<[]u8>(expected, "none");
+    }
+    return;
+}
+
+test "optional owner field holds a string" {
+    let allocator = mem::page_allocator();
+
+    var known = Visitor {
+        name: try owned(allocator, "alice"),
+        nick: try owned(allocator, "al"),
+    };
+    defer known.deinit();
+    expect_nick(&known, "al");
+
+    var plain = Visitor { name: try owned(allocator, "bob"), nick: null };
+    defer plain.deinit();
+    expect_nick(&plain, "none");
+}
+
+// Every owner shape reaches the field, not just String: what the rule reads is
+// whether the element owes cleanup.
+test "optional owner field holds containers" {
+    let allocator = mem::page_allocator();
+
+    var items = array::new<i64>(allocator);
+    errdefer items.deinit();
+    try items.append(7);
+    try items.append(9);
+
+    var counts = map::new<[]u8, i64>(allocator);
+    errdefer counts.deinit();
+    try counts.insert("hit", 3);
+
+    var bag = Bag {
+        items: items,
+        counts: counts,
+        held: try mem::box<i64>(allocator, 5),
+    };
+    defer bag.deinit();
+
+    if bag.items |held| {
+        testing::expect_equal<i64>(2, held.len());
+    } else {
+        testing::fail("items is missing");
+    }
+    if bag.counts |held| {
+        testing::expect_equal<i64>(3, held.get("hit") orelse 0);
+    } else {
+        testing::fail("counts is missing");
+    }
+    if bag.held |held| {
+        let number = held.borrow();
+        testing::expect_equal<i64>(5, number.*);
+    } else {
+        testing::fail("held is missing");
+    }
+}
+
+test "optional owner field is null when empty" {
+    var bag = Bag { items: null, counts: null, held: null };
+    defer bag.deinit();
+    if bag.items |_| {
+        testing::fail("items should be null");
+    }
+}
+
+fn maybe(allocator: Allocator, want: bool) -> !?string::String {
+    if want {
+        let text = try owned(allocator, "made");
+        return text;
+    }
+    return null;
+}
+
+// The borrow is the default answer for an owner payload, so the shapes that do
+// hand one over have to stay owned: `pop` moves the element out, and a call
+// that built one hands back what it built.
+test "optional owner produced by a call stays owned" {
+    let allocator = mem::page_allocator();
+
+    var items = array::new<string::String>(allocator);
+    errdefer items.deinit();
+    try items.append(try owned(allocator, "a"));
+    try items.append(try owned(allocator, "b"));
+
+    var drained = 0;
+    while items.pop() |item| {
+        item.deinit();
+        drained = drained + 1;
+    }
+    items.deinit();
+    testing::expect_equal<i64>(2, drained);
+
+    if try maybe(allocator, true) |made| {
+        made.deinit();
+    } else {
+        testing::fail("maybe should have made one");
+    }
+    if try maybe(allocator, false) |made| {
+        made.deinit();
+        testing::fail("maybe should have made nothing");
+    }
+}
+
+pub struct Held {
+    pub nick: ?string::String,
+}
+
+fn (self: Held) deinit() -> void {
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+// A container releases what its elements hold by calling their deinit, and a
+// `?Owner` field is released by that deinit like any other field.
+test "optional owner field inside containers" {
+    let allocator = mem::page_allocator();
+
+    var list = array::new<Held>(allocator);
+    defer list.deinit();
+    try list.append(Held { nick: try owned(allocator, "al") });
+    try list.append(Held { nick: null });
+    testing::expect_equal<i64>(2, list.len());
+
+    var table = map::new<[]u8, Held>(allocator);
+    defer table.deinit();
+    try table.insert("alice", Held { nick: try owned(allocator, "al") });
+    if table.at("alice") |entry| {
+        if entry.nick |nick| {
+            let bytes = nick.as_bytes();
+            testing::expect_equal<[]u8>("al", bytes);
+        } else {
+            testing::fail("nick is missing");
+        }
+    } else {
+        testing::fail("alice is missing");
+    }
+}

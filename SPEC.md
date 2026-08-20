@@ -1097,11 +1097,13 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
 * `??T` / `?!T` は書けない(optional を包めるのは error union だけ)。
   generic 実体化が作る綴り(`Array<!i64>` の `pop()` が返す `?!i64`)も
   同じ規則で拒否される
-* struct field に置けるのは plain copy data と arena handle の optional
-  (`?i64`、`?arena::Handle<T>` など)だけ。owner / view を包んだ optional
-  は field に置けない(field 型を読む消費・捕捉規則から義務が見えなく
-  なるため)。union payload・static argument(`Array<?u8>` など)・
-  borrow(`&?T`)の対象にはできない
+* struct field に置けるのは plain copy data、arena handle、owner の optional
+  (`?i64`、`?arena::Handle<T>`、`?std::string::String` など)。view を包んだ
+  optional(`?[]u8`)は field に置けない —— view の義務は借用で、それを開く
+  capture が field 型を読む規則から見えないため。union payload・static
+  argument(`Array<?u8>` など)・borrow(`&?T`)の対象にはできない
+* `?Owner` field の cleanup 契約は §14.4 にある。struct は explicit `deinit`
+  を持ち、その中で optional を開いて中身を解放する
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
   semantics の対象外(unsafe 世界の C ABI 用)
 
@@ -2471,6 +2473,36 @@ owner 型自身の `deinit(self: Owner) -> void` method 内では
 `self.field.deinit()` の direct field cleanup を許可し、その field は
 同じ body 内で以後使用できません。`deinit` 後の container 使用は safe Kizu
 では禁止します。
+
+**`?Owner` field.** field が optional な owner のときも義務は同じで、
+struct は explicit `deinit` を持ちます。開くのは capture です。
+
+```kizu
+fn (self: Visitor) deinit() -> void {
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+```
+
+capture が束縛する payload は、その型自身の `deinit` の中でだけ owner です。
+そこは receiver を値で受けて分解している場所で、`self.field.deinit()` に与えて
+いる例外と同じ位置です。それ以外の場所 —— 借用越しの読み、他の関数 ——
+では payload は borrow で、consume は拒否します。payload は field storage の
+中にあり、開いても渡されないためで、`match` が owner union payload に対して
+持つ分け方と同じです。
+
+開いた payload をその body で解放しないのは error です。field を開くことが
+その field の義務を果たす唯一の経路なので、開いて捨てると誰も解放しません。
+`deinit` が field を開かないのも error で、普通の owner field と同じく
+「`deinit` は receiver の owner field をすべて consume する」に数えます。
+live な field への代入も同じく error です(`Array.set` が owner element に
+対して出すのと同じ拒否)。
+
+開いて consume できるのは `if` の capture だけです。`while` の条件は毎回同じ
+storage を読むので、1 周目が解放した payload を 2 周目が解放することになり、
+拒否します。
 
 **`Box<T>`.** struct / union payload に保存できます。`Box<T>` を含む
 struct / union は non-copy です。`borrow` / `borrow_mut` は local borrow

@@ -645,8 +645,8 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		}
 		if elem, ok := optionalElem(typ); ok && !c.optionalFieldElemAllowed(elem) {
 			return errorf(
-				"type error: struct field `%s.%s` cannot store an optional owner yet;"+
-					" only plain copy data and arena handles can be optional fields",
+				"type error: struct field `%s.%s` cannot store an optional view;"+
+					" a capture would be hidden from the rules that read field types",
 				decl.Name, field.Name)
 		}
 	}
@@ -655,11 +655,16 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 
 // optionalFieldElemAllowed reports whether ?elem may be a struct field. Plain
 // copy data (arena handles included) carries no cleanup obligation, so the
-// presence tag is the whole story. An optional owner would hide a conditional
-// deinit obligation inside a field, and an optional view would hide a capture
-// from the rules that read field types, so both stay out until they can be seen.
+// presence tag is the whole story. An owner carries one on the path where the
+// value is there, and that is a contract the type states: the struct declares
+// a `deinit` that opens the optional, and the completeness check counts the
+// field like any other owner field.
+//
+// An optional view stays out. A view's obligation is a borrow that outlives
+// nothing visible, and a capture opening it would be hidden from the rules
+// that read field types.
 func (c *Checker) optionalFieldElemAllowed(elem Type) bool {
-	return c.isPlainDataType(string(elem), nil)
+	return c.isPlainDataType(string(elem), nil) || c.ownerType(elem)
 }
 
 // ownedContainerBases lists the inline-stored std containers that own heap

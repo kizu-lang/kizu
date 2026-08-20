@@ -529,6 +529,59 @@ fn (self: Page) deinit() -> void {
 
 // The rule is the field's, not the top level's: a nested struct may leave its
 // own optional out.
+pub struct Named {
+    pub name: string::String,
+    pub nick: ?string::String,
+}
+
+fn (self: Named) deinit() -> void {
+    self.name.deinit();
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn expect_nick(value: &Named, expected: []u8) -> void {
+    if value.nick |held| {
+        let bytes = held.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::expect_equal<[]u8>(expected, "none");
+    }
+    return;
+}
+
+// An optional field whose value owns its bytes: the three document shapes read
+// the same way a `?i64` field does, and the string is released with the struct.
+test "json decode reads an optional string field" {
+    let allocator = mem::page_allocator();
+
+    var given = try json::decode<Named>(allocator, \\{"name": "alice", "nick": "al"}
+    );
+    defer given.deinit();
+    expect_nick(&given, "al");
+
+    var written = try json::decode<Named>(allocator, \\{"name": "alice", "nick": null}
+    );
+    defer written.deinit();
+    expect_nick(&written, "none");
+
+    var omitted = try json::decode<Named>(allocator, \\{"name": "alice"}
+    );
+    defer omitted.deinit();
+    expect_nick(&omitted, "none");
+
+    let expected =
+        \\{"name":"alice","nick":"al"}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Named>(allocator, given, out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, text);
+}
+
 test "json decode reads an omitted optional field of a nested struct" {
     let allocator = mem::page_allocator();
     let document =
