@@ -1364,7 +1364,10 @@ fn expect_end(bytes: []u8, index: &var i64) -> Error!void {
 
 // decode_value reads one value as a `T`, dispatching on what `T` is. The set
 // of types is the one `encode_value` writes, so a document this produces is
-// one that produced it (原理 9).
+// one that produced it (原理 9). The one exception is `?T`: an optional cannot
+// be a static argument (ADR-0101), so it cannot reach here at all, and a
+// struct that holds one is refused with that language error rather than a
+// `std::json` one.
 fn decode_value<T>(
     allocator: Allocator,
     bytes: []u8,
@@ -1383,8 +1386,11 @@ fn decode_value<T>(
                 comptime if T == type<std::json::Value> {
                     return decode_any(allocator, bytes, index, 0);
                 } else {
-                    comptime if std::meta::is_array<T>() {
-                        return decode_array<T>(allocator, bytes, index, ignore_unknown);
+                    comptime if std::meta::is_array<T>()
+                        or std::meta::is_map<T>()
+                        or std::meta::is_box<T>() {
+                        return decode_container_value<T>(
+                            allocator, bytes, index, ignore_unknown);
                     } else {
                         comptime if std::meta::has_public_fields<T>() {
                             return decode_struct<T>(allocator, bytes, index, ignore_unknown);
@@ -1512,6 +1518,28 @@ fn reject_duplicate_entry(
     return;
 }
 
+// decode_container_value reads the containers, mirroring what
+// `encode_container_value` writes: a JSON array becomes an array, an object
+// becomes a map keyed by its own keys, and a box is the value it holds.
+fn decode_container_value<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    comptime if std::meta::is_array<T>() {
+        return decode_array<T>(allocator, bytes, index, ignore_unknown);
+    } else {
+        comptime if std::meta::is_map<T>() {
+            return decode_map<T>(allocator, bytes, index, ignore_unknown);
+        } else {
+            let held = try decode_value<std::meta::element<T>>(
+                allocator, bytes, index, ignore_unknown);
+            return std::mem::box<std::meta::element<T>>(allocator, held);
+        }
+    }
+}
+
 // decode_array reads a JSON array into an owned collection. Each element is
 // decoded as the array's element type, so an element the type cannot hold is
 // an error rather than a value quietly skipped.
@@ -1538,6 +1566,46 @@ fn decode_array<T>(
         more = try comma_or_close(bytes, index, cast<u8>(93));
     }
     return items;
+}
+
+// decode_map reads a JSON object into an owned map. Unlike a struct, a map has
+// no field list to check keys against, so every key of the document is one the
+// map holds and `ignore_unknown` has nothing to decide. The key is unescaped
+// into a String first, then copied into the map by `insert`, so no key points
+// back into the document.
+fn decode_map<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    try expect_byte(bytes, index, cast<u8>(123));
+    var entries = std::map::new<[]u8, std::meta::element<T>>(allocator);
+    errdefer entries.deinit();
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(125) {
+            index.* = index.* + 1;
+            return entries;
+        }
+    }
+    var more = true;
+    while more {
+        skip_space(bytes, index);
+        var key = try decode_string(allocator, bytes, index);
+        defer key.deinit();
+        let name = key.as_bytes();
+        // Refused before the value is built, the way `scan_object` refuses one:
+        // keeping either of the two would silently drop what the other carried.
+        if entries.contains(name) {
+            return Error::DuplicateField;
+        }
+        try expect_byte(bytes, index, cast<u8>(58));
+        let value = try decode_value<std::meta::element<T>>(
+            allocator, bytes, index, ignore_unknown);
+        try entries.insert(name, value);
+        more = try comma_or_close(bytes, index, cast<u8>(125));
+    }
+    return entries;
 }
 
 // decode_variant reads one variant of an enum or union. The two shapes are the

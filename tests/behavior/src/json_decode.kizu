@@ -1,5 +1,6 @@
 import std::array;
 import std::json;
+import std::map;
 import std::mem;
 import std::string;
 import std::testing;
@@ -303,4 +304,95 @@ test "json decode reads sum cells of a struct" {
         Name(_) => 0,
     };
     testing::expect_equal<i64>(5, number);
+}
+
+// key_order joins a map's keys in iteration order, so a test can assert the
+// order itself rather than one key at a time.
+fn key_order(
+    allocator: Allocator,
+    counts: &map::Map<[]u8, i64>,
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while counts.key_at(index) |key| {
+        try out.append_bytes(key);
+        try out.append_byte(cast<u8>(44));
+        index = index + 1;
+    }
+    return out;
+}
+
+// A map reads an object whose keys are its own, so unlike a struct there is no
+// field list to check them against and every key is one the map holds.
+test "json decode reads an object into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"alice": 2, "bob": 1}
+    ;
+    var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
+    defer counts.deinit();
+    testing::expect_equal<i64>(2, counts.len());
+    testing::expect_equal<i64>(2, counts.get("alice") orelse 0);
+    testing::expect_equal<i64>(1, counts.get("bob") orelse 0);
+    // The map keeps the document's order, so the keys come back in it.
+    var order = try key_order(allocator, &counts);
+    defer order.deinit();
+    let joined = order.as_bytes();
+    testing::expect_equal<[]u8>("alice,bob,", joined);
+}
+
+// The key is unescaped on the way in and copied into the map, so what the map
+// holds is a key of its own rather than a view of the document.
+test "json decode undoes escapes in a map key" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"c\u0061rol": 4}
+    ;
+    var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
+    defer counts.deinit();
+    var order = try key_order(allocator, &counts);
+    defer order.deinit();
+    let joined = order.as_bytes();
+    testing::expect_equal<[]u8>("carol,", joined);
+    testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
+}
+
+// A box holds one value and adds no shape of its own, so what it reads is the
+// value the document holds where the box sits.
+test "json decode reads a box as the value it holds" {
+    let allocator = mem::page_allocator();
+    var total = try json::decode<mem::Box<i64>>(allocator, "7");
+    defer total.deinit();
+    let held = total.borrow();
+    testing::expect_equal<i64>(7, held.*);
+}
+
+pub struct Report {
+    pub counts: map::Map<[]u8, i64>,
+    pub total: mem::Box<i64>,
+}
+
+fn (self: Report) deinit() -> void {
+    self.counts.deinit();
+    self.total.deinit();
+    return;
+}
+
+// A map and a box nested in a struct come back through the same walk that wrote
+// them, so the round trip closes for the containers too.
+test "json decode round trips a map and a box through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"counts": {"alice": 2, "bob": 1}, "total": 3}
+    ;
+    var report = try json::decode<Report>(allocator, document);
+    defer report.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Report>(allocator, &report, &var out);
+    let written = out.as_bytes();
+    testing::expect_equal<[]u8>(
+        \\{"counts":{"alice":2,"bob":1},"total":3}
+    , written);
 }

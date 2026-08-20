@@ -150,9 +150,15 @@ key は宣言順で届く必要がありません。object を 1 回走査して
 let visit = try json::decode<Visit>(allocator, document);
 ```
 
-`T` に来られる型は struct、enum、union、`i64`、`bool`、`std::string::String`、
-`std::array::Array<T>`、`std::json::Value` です。`[]u8` は decode できません —— 借用 view なので、
-decode した bytes の持ち主がいなくなります。所有する `String` を使います。
+`T` に来られる型は encode が書ける型から `[]u8` と `?T` を除いたものです ——
+struct、enum、union、`i64`、`bool`、`std::string::String`、`std::array::Array<T>`、
+`std::map::Map<[]u8, V>`、`std::mem::Box<T>`、`std::json::Value`。
+
+`[]u8` は借用 view なので decode した bytes の持ち主がいなくなります。所有する
+`String` を使います。`?T` は static argument になれないため(ADR-0101)、
+`?T` field を持つ struct の decode は `std::json` の error ではなく、その言語
+error になります。encode は `?T` field を runtime で開いて中身の型に降りる
+ので、この非対称は今のところ encode 側だけが越えられます。
 
 enum と union は encode が書く 2 つの形をそのまま読みます。document を始める
 byte が `"` なら payload を持たない variant、`{` なら `{"名前": payload}` です。
@@ -235,6 +241,26 @@ defer value.deinit();
 ```kizu
 var numbers = try json::decode<array::Array<i64>>(allocator, "[1, 2, 3]");
 defer numbers.deinit();
+```
+
+### map と box
+
+`std::map::Map<[]u8, V>` は object を読みます。struct と違って照合する field の
+一覧が無いので、document の key はすべて map が持つ key です。`decode` と
+`decode_ignore_unknown` の違いは map 自身には現れず、value の中の struct にだけ
+効きます。key は escape を戻してから map に copy されるので、`{"carol": 4}`
+は `carol` になり、map の中に document への view は残りません。同じ key が
+2 回現れたら `DuplicateField` です。挿入順は document の順です。
+
+`std::mem::Box<T>` は形を足しません。box のある位置の値をそのまま `T` として
+読み、box に入れます。
+
+```kizu
+let document =
+    \\{"alice": 2, "bob": 1}
+;
+var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
+defer counts.deinit();
 ```
 
 設計の経緯は [ADR-0112](../adr/0112-json-encoder-owns-output-and-traps-misuse.md)
