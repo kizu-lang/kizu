@@ -4,12 +4,14 @@
 
 Accepted.
 
-Supersedes ADR-0037 and ADR-0038-remove-if-expression.
+Supersedes ADR-0037, and the decision after it that removed `if` expression
+(that ADR is deleted: the rule it describes is not in the language, and the
+reason it was removed is in Context below).
 
 ## Context
 
-ADR-0036 made simple statement semicolons required. ADR-0038 then removed
-`if` expression to avoid making semicolon presence affect expression values.
+ADR-0036 made simple statement semicolons required. `if` expression was then
+removed, to avoid making semicolon presence affect expression values.
 
 Selfhost compiler work still needs ordinary value selection in expression
 position. Requiring callers to introduce a mutable temporary for every

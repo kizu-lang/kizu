@@ -81,31 +81,42 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 	return l.cleanupFromMethod(receiver, field.Name)
 }
 
+// containerCleanup names what one std container's cleanup needs: the std type
+// its wrapper is declared on, the runtime op a shallow cleanup lowers to, and
+// the type argument that decides which of the two runs.
+type containerCleanup struct {
+	name      string
+	shallowOp string
+	typeArg   string
+}
+
+// stdContainerCleanup reports the cleanup shape of a std container type, and
+// false for anything else.
+func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
+	if elem, ok := arrayElementType(receiverType); ok {
+		return containerCleanup{arrayTypeName, "array.deinit", elem}, true
+	}
+	if value, ok := mapValueType(receiverType); ok {
+		return containerCleanup{mapTypeName, "map.deinit", value}, true
+	}
+	if elem, ok := boxElementType(receiverType); ok {
+		return containerCleanup{boxTypeName, "box.deinit", elem}, true
+	}
+	return containerCleanup{}, false
+}
+
 // cleanupFromMethod resolves one receiver.method() cleanup into an IR instruction.
 func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, error) {
 	receiverType := derefType(receiver.Type)
-	if elem, ok := arrayElementType(receiverType); ok && method == typ.CleanupMethod {
-		// A container whose elements own something releases them first, and
+	if container, ok := stdContainerCleanup(receiverType); ok && method == typ.CleanupMethod {
+		// A container whose contents own something releases them first, and
 		// that loop lives in the std wrapper rather than in a runtime op: the
 		// cleanup calls its instance exactly like a direct call would. Plain
-		// elements have no loop to run, so they keep the runtime op.
-		if !ast.OwnerType(l.deinitOwners, elem) {
-			return Cleanup{Op: "array.deinit", Args: []Value{receiver}}, nil
+		// contents have no loop to run, so they keep the runtime op.
+		if !ast.OwnerType(l.deinitOwners, container.typeArg) {
+			return Cleanup{Op: container.shallowOp, Args: []Value{receiver}}, nil
 		}
-		op, _, err := l.stdContainerCallOp(arrayTypeName, method, elem)
-		if err != nil {
-			return Cleanup{}, err
-		}
-		return Cleanup{Op: op, Args: []Value{receiver}}, nil
-	}
-	if _, ok := mapValueType(receiverType); ok && method == typ.CleanupMethod {
-		return Cleanup{Op: "map.deinit", Args: []Value{receiver}}, nil
-	}
-	if elem, ok := boxElementType(receiverType); ok && method == typ.CleanupMethod {
-		if !ast.OwnerType(l.deinitOwners, elem) {
-			return Cleanup{Op: "box.deinit", Args: []Value{receiver}}, nil
-		}
-		op, _, err := l.stdContainerCallOp(boxTypeName, method, elem)
+		op, _, err := l.stdContainerCallOp(container.name, method, container.typeArg)
 		if err != nil {
 			return Cleanup{}, err
 		}

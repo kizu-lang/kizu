@@ -140,6 +140,36 @@ fn value_size(value: &json::Value) -> i64 {
     };
 }
 
+// `Obj` is a map, so a key is found by name rather than by walking the whole
+// object. The value is borrowed out: a `Value` owns its contents.
+fn value_at_key(value: &json::Value, key: []u8) -> []u8 {
+    match value {
+        Obj(entries) => {
+            if entries.at(key) |held| {
+                return value_kind(held);
+            }
+            return "missing";
+        },
+        Null => return "null",
+        Bool(_) => return "bool",
+        I64(_) => return "i64",
+        Str(_) => return "str",
+        Arr(_) => return "arr",
+    }
+}
+
+test "json decode finds a Value object member by key" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"user": "alice", "visits": [1, 2]}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("str", value_at_key(&value, "user"));
+    testing::expect_equal<[]u8>("arr", value_at_key(&value, "visits"));
+    testing::expect_equal<[]u8>("missing", value_at_key(&value, "absent"));
+}
+
 test "json decode reads a document as a Value" {
     let allocator = mem::page_allocator();
     let document =
@@ -356,6 +386,53 @@ test "json decode undoes escapes in a map key" {
     let joined = order.as_bytes();
     testing::expect_equal<[]u8>("carol,", joined);
     testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
+}
+
+// An object whose values are strings is the common JSON shape, and it needs a
+// map value that owns its bytes: what the string carries is not a run of the
+// document once its escapes are gone (ADR-0123).
+test "json decode reads an object of strings into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"first": "alice", "last": "carol"}
+    ;
+    var names = try json::decode<map::Map<[]u8, string::String>>(allocator, document);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("alice", bytes);
+    } else {
+        testing::fail("first is missing");
+    }
+
+    // encode reads the same map through the value borrow, so the document
+    // round trips without the map ever handing a value out by copy.
+    let expected =
+        \\{"first":"alice","last":"carol"}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<map::Map<[]u8, string::String>>(allocator, names, out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, text);
+}
+
+test "json decode reads an object of objects into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"alice": {"hit": 2}, "bob": {"hit": 1, "miss": 3}}
+    ;
+    var counts =
+        try json::decode<map::Map<[]u8, map::Map<[]u8, i64>>>(allocator, document);
+    defer counts.deinit();
+    testing::expect_equal<i64>(2, counts.len());
+    if counts.at("bob") |held| {
+        testing::expect_equal<i64>(2, held.len());
+        testing::expect_equal<i64>(3, held.get("miss") orelse 0);
+    } else {
+        testing::fail("bob is missing");
+    }
 }
 
 // A box holds one value and adds no shape of its own, so what it reads is the

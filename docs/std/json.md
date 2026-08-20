@@ -237,12 +237,7 @@ pub union Value {
     I64(i64),
     Str(std::string::String),
     Arr(std::array::Array<Value>),
-    Obj(std::array::Array<Entry>),
-}
-
-pub struct Entry {
-    pub key: std::string::String,
-    pub value: Value,
+    Obj(std::map::Map<[]u8, Value>),
 }
 ```
 
@@ -255,8 +250,9 @@ var value = try json::decode<json::Value>(allocator, document);
 defer value.deinit();
 ```
 
-`Obj` が map でなく `Array<Entry>` なのは、map の value type が copy 限定で
-`Value` が中身を所有するためです。配列は key を document の順で保ちます。
+`Obj` は key を document の順で保ちます(ADR-0088)。同じ key が 2 回現れたら
+`DuplicateField` です。値は `get` ではなく `at` で借りて読みます —— `Value` は
+中身を所有しているので、copy で取り出せません。
 
 ### 配列
 
@@ -277,6 +273,10 @@ defer numbers.deinit();
 効きます。key は escape を戻してから map に copy されるので、`{"carol": 4}`
 は `carol` になり、map の中に document への view は残りません。同じ key が
 2 回現れたら `DuplicateField` です。挿入順は document の順です。
+
+value は所有していてかまわないので、`Map<[]u8, std::string::String>` や
+`Map<[]u8, Map<[]u8, i64>>` が読めます。map の中の owner value を取り出すのは
+`get` ではなく `at` / `at_mut` です(`docs/std/map.md`)。
 
 `std::mem::Box<T>` は形を足しません。box のある位置の値をそのまま `T` として
 読み、box に入れます。

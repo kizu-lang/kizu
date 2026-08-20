@@ -4323,6 +4323,13 @@ func (c *Checker) checkMapPrimitiveMethod(
 			return "", err
 		}
 		return "?&var " + valueType, nil
+	case "take_value_at":
+		// Reserved to Map.deinit's cascade, so it is answered here and never
+		// reaches checkMapMethod: a caller outside std spells no name for it.
+		if err := c.checkMapIndexArg(name, args, env); err != nil {
+			return "", err
+		}
+		return valueType, nil
 	}
 	if !isGenericParamName(keyType) && !isGenericParamName(valueType) {
 		argsText := mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]
@@ -4351,7 +4358,7 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 		} else if got != keyType {
 			return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.readContextualExpr(args[1], valueType, env)
+		got, err := c.moveContextualExpr(args[1], valueType, env)
 		if err != nil {
 			return "", err
 		}
@@ -5981,17 +5988,15 @@ func (c *Checker) checkMapMethod(
 		if err := c.checkMapKeyArg(name, args, env); err != nil {
 			return "", err
 		}
+		if !c.isCopyType(valueType) {
+			return "", errorf("map error: `Map.get` requires copy value")
+		}
 		return "?" + valueType, nil
 	case "at", "at_mut":
 		return c.checkMapAtCondition(mapValue, valueType, name, args, env)
 	case "key_at":
-		if len(args) != 1 {
-			return "", errorf("map error: `Map.key_at` expects 1 arg, got %d", len(args))
-		}
-		if got, err := c.readExpr(args[0], env); err != nil {
+		if err := c.checkMapIndexArg(name, args, env); err != nil {
 			return "", err
-		} else if !sameOwnershipType(got, "i64") {
-			return "", errorf("map error: `Map.key_at` expects i64 index, got %s", got)
 		}
 		return "?[]u8", nil
 	case "contains":
@@ -6058,7 +6063,7 @@ func (c *Checker) checkMapInsert(
 	} else if !sameOwnershipType(got, "[]u8") {
 		return "", errorf("map error: `Map.insert` expects []u8 key, got %s", got)
 	}
-	got, err := c.readContextualExpr(args[1], valueType, env)
+	got, err := c.moveContextualExpr(args[1], valueType, env)
 	if err != nil {
 		return "", err
 	}
@@ -6066,6 +6071,25 @@ func (c *Checker) checkMapInsert(
 		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "!void", nil
+}
+
+// checkMapIndexArg validates one i64 insertion-position argument.
+func (c *Checker) checkMapIndexArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 1 {
+		return errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	if !sameOwnershipType(got, "i64") {
+		return errorf("map error: `Map.%s` expects i64 index, got %s", name, got)
+	}
+	return nil
 }
 
 // checkMapKeyArg validates one []u8 lookup key.
@@ -7114,12 +7138,6 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	}
 	if !sameOwnershipType(args[0], "[]u8") {
 		return nil, errorf("map error: std::map::Map key type must be []u8")
-	}
-	if isGenericParamName(args[1]) {
-		return args, nil
-	}
-	if !c.isCopyType(args[1]) {
-		return nil, errorf("map error: std::map::Map value type must be copy")
 	}
 	return args, nil
 }
