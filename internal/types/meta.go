@@ -236,7 +236,7 @@ func (c *Checker) checkMetaForm(
 		return c.checkMetaFieldBorrow(form, staticArgs, args, env, unsafe)
 	case stdmeta.Construct:
 		return c.checkMetaConstruct(staticArgs, args, env, unsafe)
-	case stdmeta.IsStruct, stdmeta.IsOptional:
+	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
 		if _, err := c.metaPredicate(form, staticArgs); err != nil {
 			return "", err
 		}
@@ -333,6 +333,19 @@ func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
 			return "", err
 		}
 		return "[]" + inner, nil
+	case *typ.Name:
+		if len(node.Args) == 0 {
+			return text, nil
+		}
+		args := make([]typ.Type, 0, len(node.Args))
+		for _, arg := range node.Args {
+			inner, err := c.resolveMetaTypeDeep(arg.String())
+			if err != nil {
+				return "", err
+			}
+			args = append(args, &typ.Name{Path: []string{inner}})
+		}
+		return (&typ.Name{Path: node.Path, Args: args}).String(), nil
 	default:
 		return text, nil
 	}
@@ -400,6 +413,8 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 		return metaGenericBase(string(subject)) == "std::mem::Box", nil
 	case stdmeta.IsMap:
 		return metaGenericBase(string(subject)) == "std::map::Map", nil
+	case stdmeta.IsOwner:
+		return c.ownerType(subject), nil
 	case stdmeta.HasPublicFields:
 		fields, err := c.publicFields(string(subject))
 		return err == nil && len(fields) > 0, nil

@@ -38,15 +38,7 @@ func baseTypeName(name string) string {
 	return name
 }
 
-// CleanupMethodName picks the one cleanup call a type accepts (ADR-0091):
-// `deinit_all` for an owner-element container, `deinit` for every other owner.
-func CleanupMethodName(typeText string, owners map[string]bool) string {
-	base, arg, ok := typ.SplitApply(typeText)
-	if !ok || (base != "std::array::Array" && base != "std::mem::Box") {
-		return "deinit"
-	}
-	if owners[baseTypeName(arg)] {
-		return "deinit_all"
-	}
-	return "deinit"
-}
+// CleanupMethod is the cleanup call every owner accepts. There is one:
+// `deinit` releases the value and whatever it holds, so a container needs no
+// second name for the case where its elements own something (ADR-0119).
+const CleanupMethod = "deinit"

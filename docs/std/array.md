@@ -31,6 +31,11 @@ empty array なら `null` を返します。
 empty array なら runtime error で停止します。copy / non-copy のどちらにも使え、
 recoverable な empty case を扱う場合は `pop` を使います。
 
+`deinit` は全要素を consume してから buffer を解放します。要素が何も持たない
+場合は consume が空になるだけで、生成されるのは buffer の解放 1 命令です。
+cleanup の名前はこれ 1 つなので、要素型が決まっていない generic code も同じ
+ものを書け、`Array<Array<String>>` のような入れ子もそのまま解放できます。
+
 element borrow(`at` / `at_mut`)の消費規則、borrow が生きている間の禁止事項、
 `deinit` の element cleanup 義務、element 型に置ける型の制限は checker が持つ
 規則なので SPEC §14.4 にあります。

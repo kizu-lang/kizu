@@ -288,7 +288,7 @@ func TestLowerErrDeferRetiresAtMove(t *testing.T) {
 	module := lowerSource(t, `
 fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
@@ -858,13 +858,13 @@ func TestLowerFalliblePrimitiveReleasesOwnerArgument(t *testing.T) {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var parent = std::array::new<std::string::String>(allocator);
-    defer parent.deinit_all();
+    defer parent.deinit();
     var name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
     try parent.append(name);
     let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
-    defer boxed.deinit_all();
+    defer boxed.deinit();
     return;
 }`)
 	got := Dump(module)
@@ -962,6 +962,44 @@ fn main() -> !void {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
 		}
+	}
+}
+
+// TestLowerContainerConstructorResolvesElementType pins the immediate the
+// container constructors carry. It is what every backend measures the element
+// by, so a spelling that still names a type parameter or a `std::meta` form
+// measures the wrong thing -- and silently, since most types are pointer-sized
+// and only a wider element strides wrong.
+func TestLowerContainerConstructorResolvesElementType(t *testing.T) {
+	module := lowerSource(t, `
+struct Wide { pub left: std::string::String, pub right: std::string::String }
+fn (self: Wide) deinit() -> void {
+    self.left.deinit();
+    self.right.deinit();
+    return;
+}
+fn collect<E>(allocator: Allocator) -> std::array::Array<E> {
+    return std::array::new<E>(allocator);
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var wide = collect<Wide>(allocator);
+    defer wide.deinit();
+    var numbers = collect<i64>(allocator);
+    defer numbers.deinit();
+    return;
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"array.new %allocator: Allocator, Wide\n",
+		"array.new %allocator: Allocator, i64\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+	if strings.Contains(got, "array.new %allocator: Allocator, E\n") {
+		t.Fatalf("element type reached the backend unresolved:\n%s", got)
 	}
 }
 

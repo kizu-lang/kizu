@@ -1157,12 +1157,16 @@ func (l *lowerer) lowerTypeApplyCall(
 	args []ast.Expression,
 ) (Value, error) {
 	switch typeApply.Callee.String() {
+	// The element type is resolved before it is handed over: it becomes the
+	// instruction's immediate, which is what every backend measures the
+	// element by, and a spelling that still names a type parameter or a
+	// `std::meta` form measures the wrong thing.
 	case "std::arena::new":
-		return l.lowerArenaConstructor(typeApply.TypeArg, args)
+		return l.lowerArenaConstructor(l.resolveType(typeApply.TypeArg), args)
 	case "std::array::new":
-		return l.lowerArrayConstructor(typeApply.TypeArg, args)
+		return l.lowerArrayConstructor(l.resolveType(typeApply.TypeArg), args)
 	case "std::map::new":
-		return l.lowerMapConstructor(typeApply.TypeArg, args)
+		return l.lowerMapConstructor(l.resolveTypeArgs(typeApply.TypeArg), args)
 	case "ptr_from_int", "int_from_ptr":
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
 	}
@@ -2074,7 +2078,7 @@ func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error
 	if !ast.OwnerType(l.deinitOwners, owner.Type) {
 		return result, nil
 	}
-	cleanup, err := l.cleanupFromMethod(owner, ast.CleanupMethodName(owner.Type, l.deinitOwners))
+	cleanup, err := l.cleanupFromMethod(owner, ast.CleanupMethod)
 	if err != nil {
 		return Value{}, err
 	}

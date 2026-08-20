@@ -51,17 +51,18 @@ fn (self: std::array::Array<T>) set<T>(index: i64, value: T) -> !void {
     return std::internal::builtin::array_set<T>(self, index, value);
 }
 
+// deinit consumes every element, then releases the backing buffer. An element
+// that owns nothing has nothing to consume, so the loop is not generated for
+// it and this is one runtime op; an element that owns something is released
+// with it, which is what keeps a container from leaking its contents
+// (ADR-0091). The call is in source either way, so nothing is hidden.
 fn (self: std::array::Array<T>) deinit<T>() -> void {
-    std::internal::builtin::array_deinit<T>(self);
-}
-
-// deinit_all consumes every element, then releases the backing buffer. It is
-// the one cleanup an owner-element Array accepts: shallow `deinit()` would
-// leak the elements, so the checker rejects it (ADR-0091).
-fn (self: std::array::Array<T>) deinit_all<T>() -> void {
-    while self.len() > 0 {
-        let item = self.pop_or_panic();
-        item.deinit();
+    comptime if std::meta::is_owner<T>() {
+        while self.len() > 0 {
+            let item = self.pop_or_panic();
+            item.deinit();
+        }
+    } else {
     }
     std::internal::builtin::array_deinit<T>(self);
 }

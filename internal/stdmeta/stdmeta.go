@@ -29,6 +29,11 @@ const (
 	IsBox Form = "std::meta::is_box"
 	// IsMap reports whether its type argument is `std::map::Map<K, V>`.
 	IsMap Form = "std::meta::is_map"
+	// IsOwner reports whether values of its type argument carry a deinit
+	// contract. Generic code that holds a `T` has to know whether releasing it
+	// means releasing something inside it, and the answer is the same one the
+	// checkers read (ast.OwnerType).
+	IsOwner Form = "std::meta::is_owner"
 	// HasPublicFields reports whether a struct has any public field. A type
 	// whose state is all private looks like an empty object to a walk, so a
 	// walk that means to carry data asks this before treating one as a
@@ -79,6 +84,7 @@ var forms = map[Form]Shape{
 	IsArray:         {StaticArgs: 1},
 	IsBox:           {StaticArgs: 1},
 	IsMap:           {StaticArgs: 1},
+	IsOwner:         {StaticArgs: 1},
 	HasPublicFields: {StaticArgs: 1},
 	Element:         {StaticArgs: 1, Type: true},
 	PublicFields:    {StaticArgs: 1},
@@ -100,7 +106,7 @@ func Lookup(name string) (Shape, bool) {
 // operators of SPEC §13.
 func Predicate(name string) bool {
 	switch Form(name) {
-	case IsStruct, IsOptional, IsArray, IsBox, IsMap, HasPublicFields:
+	case IsStruct, IsOptional, IsArray, IsBox, IsMap, IsOwner, HasPublicFields:
 		return true
 	default:
 		return false

@@ -31,7 +31,7 @@ allocator を受け取らない API が内部で確保するのは違反。globa
 ### 5. 型で閉じられる検査は compile 時に閉じる
 
 runtime 検出やテストの網羅性に頼る前に、型 error にできないかを先に問う。
-owner 要素 collection の `deinit_all` 強制がこの形。
+owner 要素 collection の cleanup 強制がこの形。
 
 ### 6. 型を増やして Kizu ユーザーに区別を課さない
 

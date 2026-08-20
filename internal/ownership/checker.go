@@ -5396,7 +5396,7 @@ func (c *Checker) checkBoxMethodForTarget(
 	case "borrow", "borrow_mut":
 		return "", errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
 			name, name)
-	case "deinit", "deinit_all":
+	case "deinit":
 		if target.hasAnyBorrow() {
 			return "", errorf("box error: `Box.%s` cannot run while box is borrowed", name)
 		}
@@ -5460,7 +5460,7 @@ var containerAccessTables = map[string]containerAccessTable{
 		// guarded where the binding forms.
 		"as_bytes": accessRead, "as_mut_bytes": accessRead,
 		"at": accessCapture, "at_mut": accessCapture,
-		"deinit": accessCleanup, "deinit_all": accessCleanup,
+		"deinit": accessCleanup,
 	}},
 	"std::map::Map": {kind: "map", label: "Map", methods: map[string]containerAccess{
 		"insert": accessMutate,
@@ -5722,7 +5722,7 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayAtCondition(array, elem, name, args, env)
 	case "set":
 		return c.checkArraySet(elem, args, env)
-	case "deinit", "deinit_all":
+	case "deinit":
 		if len(args) != 0 {
 			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}

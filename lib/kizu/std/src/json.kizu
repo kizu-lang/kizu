@@ -1124,6 +1124,49 @@ fn hex4_value(bytes: []u8, index: &var i64) -> ?i64 {
     return value;
 }
 
+// A Value is a JSON document read without deciding its type first. It is an
+// ordinary recursive union, not a document-object layer: `decode<Value>` goes
+// through the same parser every other type does, so the defenses against
+// untrusted input sit in one place and there is one route to a value
+// (ADR-0115).
+//
+// `Obj` is an `Array<Entry>` rather than a map: a map's value type is copy-only
+// and a `Value` owns its contents. The array also keeps the keys in the order
+// the document wrote them.
+pub union Value {
+    Null,
+    Bool(bool),
+    I64(i64),
+    Str(std::string::String),
+    Arr(std::array::Array<std::json::Value>),
+    Obj(std::array::Array<std::json::Entry>),
+}
+
+// An Entry is one key of an object with the value it names. Both are owned:
+// the key outlives the bytes it was read from.
+pub struct Entry {
+    pub key: std::string::String,
+    pub value: std::json::Value,
+}
+
+fn (self: Entry) deinit() -> void {
+    self.key.deinit();
+    self.value.deinit();
+    return;
+}
+
+fn (self: Value) deinit() -> void {
+    match self {
+        Null => return,
+        Bool(_) => return,
+        I64(_) => return,
+        Str(text) => text.deinit(),
+        Arr(items) => items.deinit(),
+        Obj(entries) => entries.deinit(),
+    }
+    return;
+}
+
 // decode reads one JSON document as a `T`.
 //
 // The document must name every public field of `T`, and may name nothing else:
@@ -1183,14 +1226,174 @@ fn decode_value<T>(
             comptime if T == type<std::string::String> {
                 return decode_string(allocator, bytes, index);
             } else {
-                comptime if std::meta::has_public_fields<T>() {
-                    return decode_struct<T>(allocator, bytes, index, ignore_unknown);
+                comptime if T == type<std::json::Value> {
+                    return decode_any(allocator, bytes, index, 0);
                 } else {
-                    return std::meta::unsupported<T>();
+                    comptime if std::meta::is_array<T>() {
+                        return decode_array<T>(allocator, bytes, index, ignore_unknown);
+                    } else {
+                        comptime if std::meta::has_public_fields<T>() {
+                            return decode_struct<T>(allocator, bytes, index, ignore_unknown);
+                        } else {
+                            return std::meta::unsupported<T>();
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+// decode_any reads one value as a `Value`, deciding what it is from the byte
+// that starts it. This is the route for documents whose shape is not known in
+// advance; it is the same parser the typed route uses, so both are behind the
+// same defenses.
+fn decode_any(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    depth: i64,
+) -> !std::json::Value {
+    if depth > max_depth() {
+        return Error::DepthExceeded;
+    }
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(123) {
+            return decode_any_object(allocator, bytes, index, depth);
+        }
+        if byte == cast<u8>(91) {
+            return decode_any_array(allocator, bytes, index, depth);
+        }
+        if byte == cast<u8>(34) {
+            return std::json::Value::Str(try decode_string(allocator, bytes, index));
+        }
+        if byte == cast<u8>(116) or byte == cast<u8>(102) {
+            return std::json::Value::Bool(try decode_bool(bytes, index));
+        }
+        if byte == cast<u8>(110) {
+            try decode_null(bytes, index);
+            return std::json::Value::Null;
+        }
+        return std::json::Value::I64(try decode_i64(bytes, index));
+    }
+    return Error::UnexpectedToken;
+}
+
+fn decode_any_array(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    depth: i64,
+) -> !std::json::Value {
+    try expect_byte(bytes, index, cast<u8>(91));
+    var items = std::array::new<std::json::Value>(allocator);
+    errdefer items.deinit();
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(93) {
+            index.* = index.* + 1;
+            return std::json::Value::Arr(items);
+        }
+    }
+    var more = true;
+    while more {
+        let item = try decode_any(allocator, bytes, index, depth + 1);
+        try items.append(item);
+        more = try comma_or_close(bytes, index, cast<u8>(93));
+    }
+    return std::json::Value::Arr(items);
+}
+
+// decode_any_object keeps the keys in document order. Duplicates are an error
+// here too: which of the two survived would otherwise depend on the reader.
+fn decode_any_object(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    depth: i64,
+) -> !std::json::Value {
+    try expect_byte(bytes, index, cast<u8>(123));
+    var entries = std::array::new<std::json::Entry>(allocator);
+    errdefer entries.deinit();
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(125) {
+            index.* = index.* + 1;
+            return std::json::Value::Obj(entries);
+        }
+    }
+    var more = true;
+    while more {
+        skip_space(bytes, index);
+        let key_at = index.*;
+        try reject_duplicate_entry(&entries, bytes, key_at);
+        var key = try decode_string(allocator, bytes, index);
+        errdefer key.deinit();
+        try expect_byte(bytes, index, cast<u8>(58));
+        let value = try decode_any(allocator, bytes, index, depth + 1);
+        try entries.append(std::json::Entry { key: key, value: value });
+        more = try comma_or_close(bytes, index, cast<u8>(125));
+    }
+    return std::json::Value::Obj(entries);
+}
+
+// reject_duplicate_entry refuses a key the object already carries.
+fn reject_duplicate_entry(
+    entries: &std::array::Array<std::json::Entry>,
+    bytes: []u8,
+    key_at: i64,
+) -> Error!void {
+    var index = 0;
+    while entries.at(index) |entry| {
+        let seen = entry.key.as_bytes();
+        if key_equals(bytes, key_at, seen) {
+            return Error::DuplicateField;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// decode_array reads a JSON array into an owned collection. Each element is
+// decoded as the array's element type, so an element the type cannot hold is
+// an error rather than a value quietly skipped.
+fn decode_array<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    try expect_byte(bytes, index, cast<u8>(91));
+    var items = std::array::new<std::meta::element<T>>(allocator);
+    errdefer items.deinit();
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(93) {
+            index.* = index.* + 1;
+            return items;
+        }
+    }
+    var more = true;
+    while more {
+        let item = try decode_value<std::meta::element<T>>(
+            allocator, bytes, index, ignore_unknown);
+        try items.append(item);
+        more = try comma_or_close(bytes, index, cast<u8>(93));
+    }
+    return items;
+}
+
+// deinit_elements releases a partly built array on an error path. The cleanup a
+// container accepts depends on whether its element owns anything (ADR-0091),
+// so the choice is made where the element type is bound to a name.
+fn deinit_elements<E>(items: std::array::Array<E>) -> void {
+    comptime if E == type<std::string::String> or E == type<std::json::Value> {
+        items.deinit();
+    } else {
+        comptime if std::meta::is_struct<E>() {
+            items.deinit();
+        } else {
+            items.deinit();
+        }
+    }
+    return;
 }
 
 // decode_struct fills every public field of `T` from one object. The keys

@@ -1,0 +1,65 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Wide {
+    pub left: string::String,
+    pub right: string::String,
+}
+
+fn (self: Wide) deinit() -> void {
+    self.left.deinit();
+    self.right.deinit();
+    return;
+}
+
+fn one(allocator: Allocator, byte: u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_byte(byte);
+    return text;
+}
+
+fn wide(allocator: Allocator, byte: u8) -> !Wide {
+    var left = try one(allocator, byte);
+    errdefer left.deinit();
+    let right = try one(allocator, byte);
+    return Wide { left: left, right: right };
+}
+
+// An element wider than a pointer strides by its own size. A container built
+// through a generic used to measure every element as one pointer, which was
+// invisible until an element held two of them and the second one landed inside
+// the first.
+test "array holds elements wider than a pointer" {
+    let allocator = mem::page_allocator();
+    var items = array::new<Wide>(allocator);
+    defer items.deinit();
+    try items.append(try wide(allocator, cast<u8>(97)));
+    try items.append(try wide(allocator, cast<u8>(98)));
+    try items.append(try wide(allocator, cast<u8>(99)));
+    testing::expect_equal<i64>(3, items.len());
+    if items.at(2) |third| {
+        testing::expect_equal<i64>(1, third.left.len());
+        testing::expect_equal<i64>(1, third.right.len());
+    }
+}
+
+fn collect<E>(allocator: Allocator) -> array::Array<E> {
+    return array::new<E>(allocator);
+}
+
+// The same through a generic constructor, which is where the element type was
+// reaching the backend unresolved.
+test "generic array constructor measures its element" {
+    let allocator = mem::page_allocator();
+    var items = collect<Wide>(allocator);
+    defer items.deinit();
+    try items.append(try wide(allocator, cast<u8>(120)));
+    try items.append(try wide(allocator, cast<u8>(121)));
+    testing::expect_equal<i64>(2, items.len());
+    if items.at(1) |second| {
+        testing::expect_equal<i64>(1, second.right.len());
+    }
+}

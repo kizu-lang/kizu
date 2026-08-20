@@ -1,3 +1,4 @@
+import std::array;
 import std::json;
 import std::mem;
 import std::string;
@@ -112,4 +113,99 @@ test "json decode reads a negative number" {
     ;
     let counts = try json::decode<Counts>(allocator, document);
     testing::expect_equal<i64>(-12, counts.visits);
+}
+
+// A Value is a document read without deciding its type first. It is an
+// ordinary recursive union, so a walk over it is an ordinary match.
+fn value_kind(value: &json::Value) -> []u8 {
+    return match value {
+        Null => "null",
+        Bool(_) => "bool",
+        I64(_) => "i64",
+        Str(_) => "str",
+        Arr(_) => "arr",
+        Obj(_) => "obj",
+    };
+}
+
+fn value_size(value: &json::Value) -> i64 {
+    return match value {
+        Null => 0,
+        Bool(_) => 0,
+        I64(number) => number,
+        Str(text) => text.len(),
+        Arr(items) => items.len(),
+        Obj(entries) => entries.len(),
+    };
+}
+
+test "json decode reads a document as a Value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"n": 1, "arr": [1, "two"], "z": null}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("obj", value_kind(value));
+    testing::expect_equal<i64>(3, value_size(value));
+}
+
+test "json decode reads a scalar as a Value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\42
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("i64", value_kind(value));
+    testing::expect_equal<i64>(42, value_size(value));
+}
+
+test "json decode reads an array of scalars" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\[1, 2, 3]
+    ;
+    var numbers = try json::decode<array::Array<i64>>(allocator, document);
+    defer numbers.deinit();
+    testing::expect_equal<i64>(3, numbers.len());
+    testing::expect_equal<i64>(3, numbers.get_or_panic(2));
+}
+
+test "json decode reads an array of owners" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\["ab", "cde"]
+    ;
+    var names = try json::decode<array::Array<string::String>>(allocator, document);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+}
+
+pub struct Row {
+    pub cells: array::Array<i64>,
+}
+
+fn (self: Row) deinit() -> void {
+    self.cells.deinit();
+    return;
+}
+
+pub struct Grid {
+    pub rows: array::Array<Row>,
+}
+
+fn (self: Grid) deinit() -> void {
+    self.rows.deinit();
+    return;
+}
+
+test "json decode reads arrays nested in structs" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"rows": [{"cells": [1, 2]}, {"cells": [3]}]}
+    ;
+    var grid = try json::decode<Grid>(allocator, document);
+    defer grid.deinit();
+    testing::expect_equal<i64>(2, grid.rows.len());
 }

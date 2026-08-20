@@ -125,8 +125,8 @@ key は宣言順で届く必要がありません。object を 1 回走査して
 let visit = try json::decode<Visit>(allocator, document);
 ```
 
-`T` に来られる型は encode が書ける型と同じです。struct、`i64`、`bool`、
-`std::string::String`。`[]u8` は decode できません —— 借用 view なので、
+`T` に来られる型は struct、`i64`、`bool`、`std::string::String`、
+`std::array::Array<T>`、`std::json::Value` です。`[]u8` は decode できません —— 借用 view なので、
 decode した bytes の持ち主がいなくなります。所有する `String` を使います。
 
 ### 型に無い key
@@ -163,7 +163,48 @@ error にします。
 入力サイズの上限は持ちません。`[]u8` を渡すのは caller で、何 byte あるかは
 既に caller が握っています。入れ子の深さだけ 128 段で止めます。
 
-`std::json::Value`(型を決めずに読む用途)はまだ持ちません(#1626)。
+### Value
+
+型を決めずに読む用途は `Value` が受けます。
+
+```kizu
+pub union Value {
+    Null,
+    Bool(bool),
+    I64(i64),
+    Str(std::string::String),
+    Arr(std::array::Array<Value>),
+    Obj(std::array::Array<Entry>),
+}
+
+pub struct Entry {
+    pub key: std::string::String,
+    pub value: Value,
+}
+```
+
+普通の再帰 union です。document object 層ではありません —— `decode<Value>` は
+他の型と同じ parser を通るので、untrusted 入力への防御は 1 箇所にあり、値への
+経路も 1 本です。歩くのは普通の `match` です。
+
+```kizu
+var value = try json::decode<json::Value>(allocator, document);
+defer value.deinit();
+```
+
+`Obj` が map でなく `Array<Entry>` なのは、map の value type が copy 限定で
+`Value` が中身を所有するためです。配列は key を document の順で保ちます。
+
+### 配列
+
+`std::array::Array<T>` も `T` に来られます。各要素は要素型として decode するので、
+入らない document は error です。要素自身が配列を持てるので、木全体が 1 呼び出しで
+組み上がります。
+
+```kizu
+var numbers = try json::decode<array::Array<i64>>(allocator, "[1, 2, 3]");
+defer numbers.deinit();
+```
 
 設計の経緯は [ADR-0112](../adr/0112-json-encoder-owns-output-and-traps-misuse.md)
 (encoder が出力を所有し、誤用は trap)と

@@ -1401,7 +1401,7 @@ fn build() -> !std::arena::Arena<User> {
 func TestCheckErrDeferRetiresAtMove(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
@@ -1421,7 +1421,7 @@ func TestCheckErrDeferRetiresAtMove(t *testing.T) {
 func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
@@ -1515,7 +1515,7 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
 			name: "errdefer receiver after its value moved out",
 			source: `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     var parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     var name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
@@ -1548,7 +1548,7 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
 func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
 	source := `fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     var parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     var first = std::string::new(allocator);
     errdefer first.deinit();
     try first.append_byte(cast<u8>(97));
@@ -2019,7 +2019,7 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
 			source: `fn main() -> !void {
     let allocator = std::mem::page_allocator();
     let parent = std::array::new<std::string::String>(allocator);
-    defer parent.deinit_all();
+    defer parent.deinit();
     let name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));

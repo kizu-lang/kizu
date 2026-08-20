@@ -1321,11 +1321,11 @@ cleanup contract を source 上に見えるようにします。
 `deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可し、
 body は self の owner field をすべての path で consume しなければなりません。
 `deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
-要素が owner 型の container は shallow な `deinit()` を型 error とし、要素ごと
-consume する `deinit_all()` だけを cleanup として認めます。空の container への
-`deinit_all()` は合法です。`deinit_all` は要素を要素自身の `deinit()` で consume
-するため、owner 要素の container を直接要素にする入れ子は構築時に型 error です。
-deinit を宣言した struct で包んで名前を与えます。owner 要素の `set` も、置き換え
+cleanup の名前は `deinit` 1 つです。`deinit` は値と、値が保持しているものを
+解放します。container なら要素を要素自身の `deinit()` で consume してから buffer を
+解放し、何も保持しない要素ではその consume が空になるだけです。要素型が決まって
+いない generic code も同じ 1 つを書きます。名前が 1 つなので任意の深さに合成でき、
+owner 要素の container を要素にする入れ子も書けます。owner 要素の `set` は、置き換え
 前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
 owner 型を要素にできません。
 
@@ -2180,6 +2180,7 @@ std::meta::is_optional<T>()        -> bool    comptime-only
 std::meta::is_array<T>()           -> bool    comptime-only
 std::meta::is_box<T>()             -> bool    comptime-only
 std::meta::is_map<T>()             -> bool    comptime-only
+std::meta::is_owner<T>()           -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
 std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
 std::meta::field_name<T, f>()      -> []u8    comptime-only
@@ -2206,6 +2207,10 @@ Names { first: first, second: second }
 別々の binding なので、半端に組んだ `T` が置かれる場所はありません。worker の
 戻り値型はその field の型でなければならず、public field を 1 つも持たない型は
 compile error です(値の行き先が無いため)。
+
+`is_owner<T>()` は、その型の値が deinit 契約を持つかを答えます。`T` を保持する
+generic code が「解放するとは中身も解放することか」を問う唯一の手段で、答えは
+checker が使うものと同じです。
 
 `unsupported<T>()` は、その型を扱う case が無いことを compile error にします。
 `comptime if` は選ばれた branch だけを検査するので、最後の else に書けば、
