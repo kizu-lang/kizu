@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -8,13 +9,16 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
-// metaField is one field a `comptime for` capture is bound to for the length
-// of one expansion. It carries what every form written against the capture
-// needs: the struct it came from, the source name, and the field's type.
+// metaField is one field or variant a comptime capture is bound to for the
+// length of one expansion. It carries what every form written against the
+// capture needs: the type it came from, the source name, and the type of the
+// value it holds. A variant that carries no payload has none, so typ is empty
+// for it -- which is the question `has_payload` answers.
 type metaField struct {
-	owner Type
-	name  string
-	typ   Type
+	owner   Type
+	name    string
+	typ     Type
+	variant bool
 }
 
 // checkComptimeForStmt expands a compile-time loop and checks each expansion.
@@ -51,25 +55,72 @@ func (c *Checker) checkComptimeForStmt(
 	return returns && len(fields) > 0, nil
 }
 
-// comptimeForFields reads the list a `comptime for` walks. Only the field list
-// is iterable: an integer range is what the runtime `for` is for.
+// comptimeForFields reads the list a `comptime for` walks. Only the two
+// declared lists are iterable: an integer range is what the runtime `for` is
+// for.
 func (c *Checker) comptimeForFields(list ast.Expression) ([]metaField, error) {
 	call, ok := list.(*ast.CallExpr)
 	if !ok {
-		return nil, errorf("comptime error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
 	apply, ok := call.Callee.(*ast.TypeApplyExpr)
 	if !ok {
-		return nil, errorf("comptime error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
 	name, ok := qualifiedName(apply.Callee)
-	if !ok || name != string(stdmeta.PublicFields) {
-		return nil, errorf("comptime error: comptime for expects `std::meta::public_fields<T>()`")
+	if !ok {
+		return nil, errComptimeForList
 	}
 	if len(call.Args) != 0 {
 		return nil, errorf("comptime error: `%s` takes no arguments", name)
 	}
-	return c.publicFields(c.instantiateTypeArgText(apply.TypeArg))
+	switch stdmeta.Form(name) {
+	case stdmeta.PublicFields:
+		return c.publicFields(c.instantiateTypeArgText(apply.TypeArg))
+	case stdmeta.Variants:
+		return c.variants(c.instantiateTypeArgText(apply.TypeArg))
+	default:
+		return nil, errComptimeForList
+	}
+}
+
+// errComptimeForList names the lists a `comptime for` accepts.
+var errComptimeForList = errorf(
+	"comptime error: comptime for expects `std::meta::public_fields<T>()` or " +
+		"`std::meta::variants<T>()`")
+
+// variants lists an enum's tags or a union's variants in declaration order.
+func (c *Checker) variants(typeArg string) ([]metaField, error) {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil || len(args) != 1 {
+		return nil, errorf("comptime error: `%s` expects 1 static argument", stdmeta.Variants)
+	}
+	owner, err := c.parseType(args[0])
+	if err != nil {
+		return nil, err
+	}
+	if enum := c.enums[string(owner)]; enum != nil {
+		out := make([]metaField, 0, len(enum.order))
+		for _, tag := range enum.order {
+			out = append(out, metaField{owner: owner, name: tag, variant: true})
+		}
+		return out, nil
+	}
+	union := c.unions[string(owner)]
+	if union == nil {
+		return nil, errorf("comptime error: `%s` expects an enum or union, got %s",
+			stdmeta.Variants, owner)
+	}
+	out := make([]metaField, 0, len(union.order))
+	for _, name := range union.order {
+		out = append(out, metaField{
+			owner:   owner,
+			name:    name,
+			typ:     Type(union.variants[name]),
+			variant: true,
+		})
+	}
+	return out, nil
 }
 
 // publicFields lists a struct's public fields in declaration order. The order
@@ -112,7 +163,11 @@ func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, erro
 	field, ok := c.metaFields[args[1]]
 	if !ok {
 		return metaField{}, errorf(
-			"comptime error: `%s` is not a comptime for capture", args[1])
+			"comptime error: `%s` is not a comptime capture", args[1])
+	}
+	if field.variant != stdmeta.VariantForm(form) {
+		return metaField{}, errorf("comptime error: `%s` expects a %s capture, got `%s`",
+			form, metaCaptureKind(stdmeta.VariantForm(form)), args[1])
 	}
 	owner, err := c.parseType(args[0])
 	if err != nil {
@@ -123,6 +178,86 @@ func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, erro
 			args[1], field.owner, owner)
 	}
 	return field, nil
+}
+
+// metaFormError is the failure of a form that resolved its capture and still
+// names no type. It is separated from every other failure because the two mean
+// opposite things: a capture that is simply not bound here is what a
+// declaration looks like before instantiation and keeps its spelling, while
+// this is the program's mistake and has to be reported where it is written.
+type metaFormError struct {
+	err error
+}
+
+// Error returns the wrapped diagnostic.
+func (e metaFormError) Error() string {
+	return e.err.Error()
+}
+
+// isMetaFormError reports whether a failure is the program's mistake rather
+// than a capture that is not bound yet.
+func isMetaFormError(err error) bool {
+	var formErr metaFormError
+	return errors.As(err, &formErr)
+}
+
+// metaCaptureKind names a capture kind for a diagnostic.
+func metaCaptureKind(variant bool) string {
+	if variant {
+		return "variant"
+	}
+	return "field"
+}
+
+// checkComptimeMatchStmt checks the match a `comptime match` stands for, with
+// the capture bound to the arm's own variant while its body is checked. The
+// dispatch itself is an ordinary match (ast.ComptimeMatchExpansion), so
+// exhaustiveness and payload binding are checked by the rules match already
+// has.
+func (c *Checker) checkComptimeMatchStmt(
+	stmt *ast.ComptimeMatchStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe unsafeMark,
+) (bool, error) {
+	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
+	if err != nil {
+		return false, err
+	}
+	owner := borrowElem(valueType)
+	variants, err := c.variants(string(owner))
+	if err != nil {
+		return false, errorf("comptime error: comptime match expects an enum or union, got %s",
+			valueType)
+	}
+	if stmt.Binding == "" && metaFieldsCarryPayload(variants) {
+		return false, errorf(
+			"comptime error: comptime match on `%s` needs a payload capture, as in "+
+				"`comptime match value |variant, payload| { ... }`", owner)
+	}
+	return c.checkStmt(ast.ComptimeMatchExpansion(stmt, string(owner), metaVariantList(variants)),
+		env, wantReturn, unsafe)
+}
+
+// metaFieldsCarryPayload reports whether any variant holds a payload, which is
+// what makes the second capture necessary.
+func metaFieldsCarryPayload(variants []metaField) bool {
+	for _, variant := range variants {
+		if variant.typ != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// metaVariantList converts resolved variants into the shape the expansion
+// reads, so the arms every phase builds come from one description.
+func metaVariantList(variants []metaField) []ast.MetaVariant {
+	out := make([]ast.MetaVariant, 0, len(variants))
+	for _, variant := range variants {
+		out = append(out, ast.MetaVariant{Name: variant.name, Payload: string(variant.typ)})
+	}
+	return out
 }
 
 // resolveMetaTypeText rewrites the forms written where a type goes into the
@@ -149,6 +284,18 @@ func (c *Checker) resolveMetaTypeText(text string) (string, error) {
 			return "", err
 		}
 		return string(field.typ), nil
+	case stdmeta.VariantType:
+		variant, err := c.metaCapture(form, args)
+		if err != nil {
+			return "", err
+		}
+		if variant.typ == "" {
+			return "", metaFormError{errorf(
+				"comptime error: variant `%s::%s` carries no payload, so "+
+					"`%s` names nothing; ask `%s` first",
+				variant.owner, variant.name, stdmeta.VariantType, stdmeta.HasPayload)}
+		}
+		return string(variant.typ), nil
 	case stdmeta.Element:
 		return c.metaElement(args)
 	default:
@@ -227,27 +374,67 @@ func (c *Checker) checkMetaForm(
 	unsafe unsafeMark,
 ) (Type, error) {
 	switch form {
-	case stdmeta.FieldName:
+	case stdmeta.FieldName, stdmeta.VariantName:
 		if _, err := c.metaCapture(form, staticArgs); err != nil {
 			return "", err
 		}
 		return typeByteString, nil
 	case stdmeta.Field:
 		return c.checkMetaFieldBorrow(form, staticArgs, args, env, unsafe)
+	case stdmeta.Variant:
+		return c.checkMetaVariant(form, staticArgs, args, env, unsafe)
 	case stdmeta.Construct:
 		return c.checkMetaConstruct(staticArgs, args, env, unsafe)
-	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
+	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
+		stdmeta.IsOwner, stdmeta.HasPayload:
 		if _, err := c.metaPredicate(form, staticArgs); err != nil {
 			return "", err
 		}
 		return typeBool, nil
 	case stdmeta.Unsupported:
 		return "", c.metaUnsupported(staticArgs)
-	case stdmeta.PublicFields:
+	case stdmeta.PublicFields, stdmeta.Variants:
 		return "", errorf("comptime error: `%s` is only written as a comptime for list", form)
 	default:
 		return "", errorf("comptime error: unsupported form `%s`", form)
 	}
+}
+
+// checkMetaVariant types `std::meta::variant<T, v>(payload)` by checking the
+// `T::v(payload)` it stands for (ast.VariantExpansion). The arm a walk means
+// to produce is not a type the caller can name, so the form names it; what is
+// built is the ordinary union value, checked by the ordinary rules.
+func (c *Checker) checkMetaVariant(
+	form stdmeta.Form,
+	staticArgs []string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	variant, err := c.metaCapture(form, staticArgs)
+	if err != nil {
+		return "", err
+	}
+	if err := checkVariantArgs(form, variant, len(args)); err != nil {
+		return "", err
+	}
+	return c.checkExpr(
+		ast.VariantExpansion(string(variant.owner), variant.name, args), env, unsafe)
+}
+
+// checkVariantArgs refuses a payload for a tag and a missing one for a variant
+// that carries something. A variant holds at most one value (SPEC §6.8), so
+// the count is fixed by which variant the capture names.
+func checkVariantArgs(form stdmeta.Form, variant metaField, count int) error {
+	want := 0
+	if variant.typ != "" {
+		want = 1
+	}
+	if count != want {
+		return errorf("comptime error: `%s` builds `%s::%s` from %d arguments, got %d",
+			form, variant.owner, variant.name, want, count)
+	}
+	return nil
 }
 
 // checkMetaConstruct types `std::meta::construct<T, worker>(args...)` by
@@ -307,7 +494,11 @@ func (c *Checker) constructFields(typeArg string) (Type, []ast.ConstructField, e
 // union rather than at the top, and the wrapper has to be rebuilt around what
 // the form resolved to.
 func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
-	if resolved, err := c.resolveMetaTypeText(text); err == nil && resolved != text {
+	resolved, err := c.resolveMetaTypeText(text)
+	if isMetaFormError(err) {
+		return "", err
+	}
+	if err == nil && resolved != text {
 		return resolved, nil
 	}
 	parsed, err := typ.Parse(text)
@@ -391,8 +582,16 @@ func (c *Checker) metaUnsupported(staticArgs []string) error {
 		c.currentFunction.name, subject)
 }
 
-// metaPredicate answers a compile-time predicate about a type.
+// metaPredicate answers a compile-time predicate about a type, or about one
+// variant of one.
 func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, error) {
+	if form == stdmeta.HasPayload {
+		variant, err := c.metaCapture(form, staticArgs)
+		if err != nil {
+			return false, err
+		}
+		return variant.typ != "", nil
+	}
 	if len(staticArgs) != 1 {
 		return false, errorf("comptime error: `%s` expects 1 static argument", form)
 	}
@@ -404,6 +603,10 @@ func (c *Checker) metaPredicate(form stdmeta.Form, staticArgs []string) (bool, e
 	case stdmeta.IsStruct:
 		_, ok := c.structs[string(subject)]
 		return ok, nil
+	case stdmeta.IsEnum:
+		return c.enums[string(subject)] != nil, nil
+	case stdmeta.IsUnion:
+		return c.unions[string(subject)] != nil, nil
 	case stdmeta.IsOptional:
 		_, ok := optionalElem(subject)
 		return ok, nil

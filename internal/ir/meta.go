@@ -8,12 +8,14 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
-// metaField is the field a `comptime for` capture names for the length of one
-// expansion.
+// metaField is the field or variant a comptime capture names for the length of
+// one expansion. A variant that carries no payload has no type, so typ is
+// empty for it.
 type metaField struct {
-	owner string
-	name  string
-	typ   string
+	owner   string
+	name    string
+	typ     string
+	variant bool
 }
 
 // lowerComptimeForStmt lowers the body once per field. The loop itself has no
@@ -40,20 +42,55 @@ func (l *lowerer) lowerComptimeForStmt(stmt *ast.ComptimeForStmt) error {
 	return nil
 }
 
-// comptimeForFields reads the field list a `comptime for` walks.
+// comptimeForFields reads the list a `comptime for` walks.
 func (l *lowerer) comptimeForFields(list ast.Expression) ([]metaField, error) {
 	call, ok := list.(*ast.CallExpr)
 	if !ok {
-		return nil, fmt.Errorf("ir error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
 	apply, ok := call.Callee.(*ast.TypeApplyExpr)
 	if !ok {
-		return nil, fmt.Errorf("ir error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
-	if apply.Callee.String() != string(stdmeta.PublicFields) {
-		return nil, fmt.Errorf("ir error: comptime for expects `std::meta::public_fields<T>()`")
+	switch stdmeta.Form(apply.Callee.String()) {
+	case stdmeta.PublicFields:
+		return l.publicFields(l.resolveTypeArgs(apply.TypeArg))
+	case stdmeta.Variants:
+		return l.variants(l.resolveTypeArgs(apply.TypeArg))
+	default:
+		return nil, errComptimeForList
 	}
-	return l.publicFields(l.resolveTypeArgs(apply.TypeArg))
+}
+
+// errComptimeForList names the lists a `comptime for` accepts.
+var errComptimeForList = fmt.Errorf(
+	"ir error: comptime for expects `std::meta::public_fields<T>()` or " +
+		"`std::meta::variants<T>()`")
+
+// variants lists an enum's tags or a union's variants in declaration order.
+func (l *lowerer) variants(typeArg string) ([]metaField, error) {
+	if decl, ok := l.enumDecls[typeArg]; ok {
+		out := make([]metaField, 0, len(decl.Tags))
+		for _, tag := range decl.Tags {
+			out = append(out, metaField{owner: typeArg, name: tag, variant: true})
+		}
+		return out, nil
+	}
+	decl, ok := l.unionDecls[typeArg]
+	if !ok {
+		return nil, fmt.Errorf("ir error: `%s` expects an enum or union, got %s",
+			stdmeta.Variants, typeArg)
+	}
+	out := make([]metaField, 0, len(decl.Variants))
+	for _, variant := range decl.Variants {
+		out = append(out, metaField{
+			owner:   typeArg,
+			name:    variant.Name,
+			typ:     typ.Text(variant.Payload),
+			variant: true,
+		})
+	}
+	return out, nil
 }
 
 // publicFields lists a struct's public fields in declaration order.
@@ -85,9 +122,71 @@ func (l *lowerer) metaCapture(form stdmeta.Form, typeArg string) (metaField, err
 	}
 	field, ok := l.metaFields[args[1]]
 	if !ok {
-		return metaField{}, fmt.Errorf("ir error: `%s` is not a comptime for capture", args[1])
+		return metaField{}, fmt.Errorf("ir error: `%s` is not a comptime capture", args[1])
+	}
+	if field.variant != stdmeta.VariantForm(form) {
+		return metaField{}, fmt.Errorf("ir error: `%s` is written against the wrong capture kind",
+			form)
 	}
 	return field, nil
+}
+
+// bindMetaField binds one capture for the length of one expansion, returning
+// the call that unbinds it. An empty name binds nothing.
+func (l *lowerer) bindMetaField(name string, field metaField) func() {
+	if name == "" {
+		return func() {}
+	}
+	previous, had := l.metaFields[name]
+	l.metaFields[name] = field
+	return func() {
+		if had {
+			l.metaFields[name] = previous
+			return
+		}
+		delete(l.metaFields, name)
+	}
+}
+
+// matchArmVariants indexes by tag the variants a `comptime match` arm body is
+// written against. A match written by hand carries no capture and gets nil.
+func (l *lowerer) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, error) {
+	if stmt.MetaCapture == "" {
+		return nil, nil
+	}
+	variants, err := l.variants(stmt.MetaOwner)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]metaField, len(variants))
+	for _, variant := range variants {
+		out[variant.name] = variant
+	}
+	return out, nil
+}
+
+// lowerComptimeMatchStmt lowers the match a `comptime match` stands for, with
+// the capture bound to the arm's own variant while its body is lowered. The
+// value is lowered first because it is what names the declaration the arms
+// come from, and lowering it twice would emit it twice.
+func (l *lowerer) lowerComptimeMatchStmt(stmt *ast.ComptimeMatchStmt) error {
+	subject, err := l.lowerMatchValue(stmt.Value)
+	if err != nil {
+		return err
+	}
+	owner := subject.union.Name
+	if owner == "" {
+		owner = subject.enum.Name
+	}
+	variants, err := l.variants(owner)
+	if err != nil {
+		return err
+	}
+	list := make([]ast.MetaVariant, 0, len(variants))
+	for _, variant := range variants {
+		list = append(list, ast.MetaVariant{Name: variant.name, Payload: variant.typ})
+	}
+	return l.lowerMatchBody(subject, ast.ComptimeMatchExpansion(stmt, owner, list))
 }
 
 // lowerMetaApply lowers one `std::meta` form. ok reports whether the callee was
@@ -102,7 +201,7 @@ func (l *lowerer) lowerMetaApply(
 		return Value{}, false, nil
 	}
 	switch form {
-	case stdmeta.FieldName:
+	case stdmeta.FieldName, stdmeta.VariantName:
 		field, err := l.metaCapture(form, typeArg)
 		if err != nil {
 			return Value{}, true, err
@@ -111,10 +210,14 @@ func (l *lowerer) lowerMetaApply(
 	case stdmeta.Field:
 		value, err := l.lowerMetaFieldBorrow(form, typeArg, args)
 		return value, true, err
+	case stdmeta.Variant:
+		value, err := l.lowerMetaVariant(form, typeArg, args)
+		return value, true, err
 	case stdmeta.Construct:
 		value, err := l.lowerMetaConstruct(typeArg, args)
 		return value, true, err
-	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
+	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
+		stdmeta.IsOwner, stdmeta.HasPayload:
 		known, err := l.metaPredicate(form, typeArg)
 		if err != nil {
 			return Value{}, true, err
@@ -140,6 +243,20 @@ func (l *lowerer) lowerMetaFieldBorrow(
 		return Value{}, fmt.Errorf("ir error: `%s` expects 1 argument, got %d", form, len(args))
 	}
 	return l.lowerFieldExpr(&ast.FieldExpr{Receiver: args[0], Name: field.name})
+}
+
+// lowerMetaVariant lowers `std::meta::variant<T, v>(payload)` as the
+// `T::v(payload)` it is defined to be (ast.VariantExpansion).
+func (l *lowerer) lowerMetaVariant(
+	form stdmeta.Form,
+	typeArg string,
+	args []ast.Expression,
+) (Value, error) {
+	variant, err := l.metaCapture(form, typeArg)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.lowerExpr(ast.VariantExpansion(variant.owner, variant.name, args))
 }
 
 // lowerMetaConstruct lowers `std::meta::construct<T, worker>(args...)` as the
@@ -226,10 +343,23 @@ func (l *lowerer) resolveMetaTypeDeep(text string) string {
 
 // metaPredicate answers a compile-time predicate about a type.
 func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error) {
+	if form == stdmeta.HasPayload {
+		variant, err := l.metaCapture(form, typeArg)
+		if err != nil {
+			return false, err
+		}
+		return variant.typ != "", nil
+	}
 	subject := l.resolveTypeArgs(typeArg)
 	switch form {
 	case stdmeta.IsStruct:
 		_, ok := l.structDecls[subject]
+		return ok, nil
+	case stdmeta.IsEnum:
+		_, ok := l.enumDecls[subject]
+		return ok, nil
+	case stdmeta.IsUnion:
+		_, ok := l.unionDecls[subject]
 		return ok, nil
 	case stdmeta.IsOptional:
 		_, ok := typ.OptionalElem(subject)
@@ -282,12 +412,12 @@ func (l *lowerer) resolveMetaTypeText(text string) string {
 		args[idx] = l.resolveMetaTypeText(arg)
 	}
 	switch form {
-	case stdmeta.FieldType:
+	case stdmeta.FieldType, stdmeta.VariantType:
 		if len(args) != 2 {
 			return text
 		}
 		field, ok := l.metaFields[args[1]]
-		if !ok {
+		if !ok || field.typ == "" {
 			return text
 		}
 		return field.typ

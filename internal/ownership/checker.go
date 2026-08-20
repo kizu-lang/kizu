@@ -26,6 +26,11 @@ type Checker struct {
 	// structPublicOrder lists each struct's public fields in declaration order,
 	// which is what `std::meta::public_fields` walks.
 	structPublicOrder map[string][]string
+	// enumOrder and unionOrder list each declaration's tags and variants in
+	// source order, which is what `std::meta::variants` walks and the order a
+	// `comptime match` builds its arms in.
+	enumOrder  map[string][]string
+	unionOrder map[string][]string
 	// checkedInstances records the generic instantiations already checked, and
 	// instantiationDepth counts those open above the current one (#1627).
 	checkedInstances   map[string]bool
@@ -167,6 +172,8 @@ func New() *Checker {
 		structOrder:  map[string][]string{},
 
 		structPublicOrder: map[string][]string{},
+		enumOrder:         map[string][]string{},
+		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
 		checkedInstances:  map[string]bool{},
 	}
@@ -253,6 +260,7 @@ func (c *Checker) collectEnums(program *ast.Program) {
 			tags[tag] = true
 		}
 		c.enums[enumDecl.Name] = tags
+		c.enumOrder[enumDecl.Name] = append([]string(nil), enumDecl.Tags...)
 	}
 }
 
@@ -280,10 +288,13 @@ func (c *Checker) collectUnions(program *ast.Program) {
 			continue
 		}
 		variants := map[string]string{}
+		order := make([]string, 0, len(unionDecl.Variants))
 		for _, variant := range unionDecl.Variants {
 			variants[variant.Name] = typ.Text(variant.Payload)
+			order = append(order, variant.Name)
 		}
 		c.unions[unionDecl.Name] = variants
+		c.unionOrder[unionDecl.Name] = order
 	}
 }
 
@@ -604,6 +615,8 @@ func (c *Checker) checkBodyStmt(stmt ast.Statement, env *scope) error {
 		return c.checkBlock(s, env)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env)
+	case *ast.ComptimeMatchStmt:
+		return c.checkComptimeMatchStmt(s, env)
 	case *ast.ComptimeForStmt:
 		return c.checkComptimeForStmt(s, env)
 	default:
@@ -2346,6 +2359,10 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	if !ok {
 		return errorf("move error: match expects enum or union, got %s", valueType)
 	}
+	armVariants, err := c.matchArmVariants(stmt)
+	if err != nil {
+		return err
+	}
 	ownerDeinitDispatch := c.matchesOwnerUnionDeinit(stmt.Value, valueType)
 	if ownerDeinitDispatch {
 		c.consumeOwnerUnionReceiver(stmt.Value, env)
@@ -2368,7 +2385,10 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		child := armEnv.child()
 		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, ownedMatch, child,
 			expressionSpan(stmt.Value))
-		if err := c.checkStmt(arm.Body, child); err != nil {
+		restore := c.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
+		err := c.checkStmt(arm.Body, child)
+		restore()
+		if err != nil {
 			return err
 		}
 		if err := c.checkArmPayloadConsumed(arm, child); err != nil {

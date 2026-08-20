@@ -751,14 +751,24 @@ func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
 	case token.Match:
 		return p.parseMatchStmt(), true
 	case token.Comptime:
-		if p.peek.Type == token.If {
-			return p.parseComptimeIfStmt(), true
-		}
-		if p.peek.Type == token.For {
-			return p.parseComptimeForStmt(), true
-		}
+		return p.parseComptimeStatement()
 	}
 	return nil, false
+}
+
+// parseComptimeStatement parses the statements `comptime` introduces, and
+// reports whether the keyword after it named one.
+func (p *Parser) parseComptimeStatement() (ast.Statement, bool) {
+	switch p.peek.Type {
+	case token.If:
+		return p.parseComptimeIfStmt(), true
+	case token.For:
+		return p.parseComptimeForStmt(), true
+	case token.Match:
+		return p.parseComptimeMatchStmt(), true
+	default:
+		return nil, false
+	}
 }
 
 // parseLabeledStmt parses a loop label followed by a loop statement.
@@ -995,6 +1005,59 @@ func (p *Parser) parseComptimeForStmt() ast.Statement {
 	}
 	stmt.Body = p.parseBlockStmt()
 	return stmt
+}
+
+// parseComptimeMatchStmt parses a compile-time dispatch over the variants of
+// an enum or union. The first capture names the variant an expansion is
+// written against; the second names its payload, exactly as a match arm does.
+func (p *Parser) parseComptimeMatchStmt() ast.Statement {
+	stmt := &ast.ComptimeMatchStmt{}
+	if !p.expectPeek(token.Match) {
+		return stmt
+	}
+	p.nextToken()
+	stmt.Value = p.parseExpression(lowest)
+	captures, ok := p.parseVariantCapture()
+	if !ok {
+		return stmt
+	}
+	if len(captures) == 0 {
+		p.errorf("comptime match requires a capture, as in " +
+			"`comptime match value |variant| { ... }`")
+		return stmt
+	}
+	stmt.Name = captures[0]
+	if len(captures) > 1 {
+		stmt.Binding = captures[1]
+	}
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Body = p.parseBlockStmt()
+	return stmt
+}
+
+// parseVariantCapture parses `|variant|` or `|variant, payload|`. A third name
+// has nothing to bind: a variant carries at most one payload (SPEC §6.8).
+func (p *Parser) parseVariantCapture() ([]string, bool) {
+	if p.peek.Type != token.Pipe {
+		return nil, true
+	}
+	if !p.expectPeek(token.Pipe) || !p.expectPeek(token.Ident) {
+		return nil, false
+	}
+	captures := []string{p.cur.Literal}
+	if p.peek.Type == token.Comma {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return nil, false
+		}
+		captures = append(captures, p.cur.Literal)
+	}
+	if !p.expectPeek(token.Pipe) {
+		return nil, false
+	}
+	return captures, true
 }
 
 // parseBreakStmt parses break with an optional target label.

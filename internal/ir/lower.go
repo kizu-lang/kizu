@@ -57,6 +57,12 @@ type lowerer struct {
 	// walks. The lowered Struct carries no visibility, and the loop lists
 	// public fields only.
 	structDecls map[string]*ast.StructDecl
+	// enumDecls and unionDecls index the sum declarations, which is what
+	// `std::meta::variants` walks and what a `comptime match` builds its arms
+	// from. The lowered Enum and Union key their members by name; only the
+	// declarations keep the source order a walk has to emit in.
+	enumDecls  map[string]*ast.EnumDecl
+	unionDecls map[string]*ast.UnionDecl
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// being lowered.
 	metaFields map[string]metaField
@@ -110,12 +116,19 @@ type loopPhi struct {
 func newLowerer(program *ast.Program) *lowerer {
 	generics := map[string]*ast.FunctionDecl{}
 	structs := map[string]*ast.StructDecl{}
+	enums := map[string]*ast.EnumDecl{}
+	unions := map[string]*ast.UnionDecl{}
 	for _, decl := range program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok && len(fn.StaticParams) > 0 {
 			generics[fn.Name] = fn
 		}
-		if st, ok := decl.(*ast.StructDecl); ok {
-			structs[st.Name] = st
+		switch typed := decl.(type) {
+		case *ast.StructDecl:
+			structs[typed.Name] = typed
+		case *ast.EnumDecl:
+			enums[typed.Name] = typed
+		case *ast.UnionDecl:
+			unions[typed.Name] = typed
 		}
 	}
 	return &lowerer{
@@ -133,6 +146,8 @@ func newLowerer(program *ast.Program) *lowerer {
 		externSymbols: map[string]string{},
 		genericDecls:  generics,
 		structDecls:   structs,
+		enumDecls:     enums,
+		unionDecls:    unions,
 		metaFields:    map[string]metaField{},
 		deinitOwners:  ast.DeinitOwners(program),
 	}
@@ -885,6 +900,8 @@ func (l *lowerer) lowerBodyStmt(stmt ast.Statement) error {
 		return l.lowerComptimeIfStmt(s)
 	case *ast.ComptimeForStmt:
 		return l.lowerComptimeForStmt(s)
+	case *ast.ComptimeMatchStmt:
+		return l.lowerComptimeMatchStmt(s)
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}

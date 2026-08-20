@@ -135,6 +135,24 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 	}
 }
 
+// declaredKindPredicate answers the predicates that ask which declaration a
+// type came from, and reports whether the form was one of them.
+func (c *Checker) declaredKindPredicate(form stdmeta.Form, subject string) (bool, bool) {
+	switch form {
+	case stdmeta.IsStruct:
+		_, known := c.structs[subject]
+		return known, true
+	case stdmeta.IsEnum:
+		_, known := c.enums[subject]
+		return known, true
+	case stdmeta.IsUnion:
+		_, known := c.unions[subject]
+		return known, true
+	default:
+		return false, false
+	}
+}
+
 // metaPredicateCall answers a `std::meta` predicate written as a compile-time
 // condition, and reports whether the call was one.
 func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
@@ -147,10 +165,22 @@ func (c *Checker) metaPredicateCall(expr *ast.CallExpr) (bool, bool) {
 		return false, false
 	}
 	subject := c.instantiateTypeArgText(apply.TypeArg)
-	switch stdmeta.Form(name) {
-	case stdmeta.IsStruct:
-		_, known := c.structs[subject]
+	form := stdmeta.Form(name)
+	if form == stdmeta.HasPayload {
+		args, err := typ.SplitArgs(subject)
+		if err != nil {
+			return false, false
+		}
+		variant, err := c.metaCapture(form, args)
+		if err != nil {
+			return false, false
+		}
+		return variant.typ != "", true
+	}
+	if known, ok := c.declaredKindPredicate(form, subject); ok {
 		return known, true
+	}
+	switch form {
 	case stdmeta.IsOptional:
 		_, known := typ.OptionalElem(subject)
 		return known, true

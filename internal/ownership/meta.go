@@ -8,12 +8,14 @@ import (
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
-// metaField is the field a `comptime for` capture names for the length of one
-// expansion.
+// metaField is the field or variant a comptime capture names for the length of
+// one expansion. A variant that carries no payload has no type, so typ is
+// empty for it.
 type metaField struct {
-	owner string
-	name  string
-	typ   string
+	owner   string
+	name    string
+	typ     string
+	variant bool
 }
 
 // checkComptimeForStmt checks ownership effects once per expansion. Each
@@ -42,21 +44,64 @@ func (c *Checker) checkComptimeForStmt(stmt *ast.ComptimeForStmt, env *scope) er
 	return nil
 }
 
-// comptimeForFields reads the field list a `comptime for` walks.
+// comptimeForFields reads the list a `comptime for` walks.
 func (c *Checker) comptimeForFields(list ast.Expression) ([]metaField, error) {
 	call, ok := list.(*ast.CallExpr)
 	if !ok {
-		return nil, errorf("move error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
 	apply, ok := call.Callee.(*ast.TypeApplyExpr)
 	if !ok {
-		return nil, errorf("move error: comptime for expects `std::meta::public_fields<T>()`")
+		return nil, errComptimeForList
 	}
 	name, ok := qualifiedName(apply.Callee)
-	if !ok || name != string(stdmeta.PublicFields) {
-		return nil, errorf("move error: comptime for expects `std::meta::public_fields<T>()`")
+	if !ok {
+		return nil, errComptimeForList
 	}
-	return c.publicFields(c.instantiateTypeArgText(apply.TypeArg))
+	switch stdmeta.Form(name) {
+	case stdmeta.PublicFields:
+		return c.publicFields(c.instantiateTypeArgText(apply.TypeArg))
+	case stdmeta.Variants:
+		return c.variants(c.instantiateTypeArgText(apply.TypeArg))
+	default:
+		return nil, errComptimeForList
+	}
+}
+
+// errComptimeForList names the lists a `comptime for` accepts.
+var errComptimeForList = errorf(
+	"move error: comptime for expects `std::meta::public_fields<T>()` or " +
+		"`std::meta::variants<T>()`")
+
+// variants lists an enum's tags or a union's variants in declaration order.
+func (c *Checker) variants(typeArg string) ([]metaField, error) {
+	args, err := typ.SplitArgs(typeArg)
+	if err != nil || len(args) != 1 {
+		return nil, errorf("move error: `%s` expects 1 static argument", stdmeta.Variants)
+	}
+	owner := args[0]
+	if order, ok := c.enumOrder[owner]; ok {
+		out := make([]metaField, 0, len(order))
+		for _, tag := range order {
+			out = append(out, metaField{owner: owner, name: tag, variant: true})
+		}
+		return out, nil
+	}
+	order, ok := c.unionOrder[owner]
+	if !ok {
+		return nil, errorf("move error: `%s` expects an enum or union, got %s",
+			stdmeta.Variants, owner)
+	}
+	out := make([]metaField, 0, len(order))
+	for _, name := range order {
+		out = append(out, metaField{
+			owner:   owner,
+			name:    name,
+			typ:     c.unions[owner][name],
+			variant: true,
+		})
+	}
+	return out, nil
 }
 
 // publicFields lists a struct's public fields in declaration order.
@@ -89,12 +134,12 @@ func (c *Checker) resolveMetaTypeText(text string) string {
 		args[idx] = c.resolveMetaTypeText(arg)
 	}
 	switch form {
-	case stdmeta.FieldType:
+	case stdmeta.FieldType, stdmeta.VariantType:
 		if len(args) != 2 {
 			return text
 		}
 		field, ok := c.metaFields[args[1]]
-		if !ok {
+		if !ok || field.typ == "" {
 			return text
 		}
 		return field.typ
@@ -142,7 +187,11 @@ func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, erro
 	}
 	field, ok := c.metaFields[args[1]]
 	if !ok {
-		return metaField{}, errorf("move error: `%s` is not a comptime for capture", args[1])
+		return metaField{}, errorf("move error: `%s` is not a comptime capture", args[1])
+	}
+	if field.variant != stdmeta.VariantForm(form) {
+		return metaField{}, errorf("move error: `%s` is written against the wrong capture kind",
+			form)
 	}
 	return field, nil
 }
@@ -164,15 +213,19 @@ func (c *Checker) checkMetaApply(
 		return "", true, errorf("move error: `%s` has an unreadable static argument list", name)
 	}
 	switch form {
-	case stdmeta.FieldName:
+	case stdmeta.FieldName, stdmeta.VariantName:
 		if _, err := c.metaCapture(form, staticArgs); err != nil {
 			return "", true, err
 		}
 		return "[]u8", true, nil
-	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
+	case stdmeta.IsStruct, stdmeta.IsEnum, stdmeta.IsUnion, stdmeta.IsOptional,
+		stdmeta.IsOwner, stdmeta.HasPayload:
 		return "bool", true, nil
 	case stdmeta.Field:
 		typeName, err := c.checkMetaFieldBorrow(form, staticArgs, args, env)
+		return typeName, true, err
+	case stdmeta.Variant:
+		typeName, err := c.checkMetaVariant(form, staticArgs, args, env)
 		return typeName, true, err
 	case stdmeta.Construct:
 		typeName, err := c.checkMetaConstruct(staticArgs, args, env)
@@ -230,6 +283,78 @@ func (c *Checker) checkMetaConstruct(
 		return "", err
 	}
 	return "!" + built, nil
+}
+
+// checkMetaVariant applies the ownership effect of
+// `std::meta::variant<T, v>(payload)`: the `T::v(payload)` it stands for
+// (ast.VariantExpansion). The payload moves into the value the same way it
+// does when a program writes the constructor itself.
+func (c *Checker) checkMetaVariant(
+	form stdmeta.Form,
+	staticArgs []string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	variant, err := c.metaCapture(form, staticArgs)
+	if err != nil {
+		return "", err
+	}
+	return c.readExpr(ast.VariantExpansion(variant.owner, variant.name, args), env)
+}
+
+// checkComptimeMatchStmt applies the ownership effect of the match a
+// `comptime match` stands for, with the capture bound to the arm's own variant
+// while its body is checked.
+func (c *Checker) checkComptimeMatchStmt(stmt *ast.ComptimeMatchStmt, env *scope) error {
+	valueType, err := c.readExpr(stmt.Value, env)
+	if err != nil {
+		return err
+	}
+	owner := strings.TrimPrefix(strings.TrimPrefix(valueType, "&var "), "&")
+	variants, err := c.variants(owner)
+	if err != nil {
+		return errorf("move error: comptime match expects an enum or union, got %s", valueType)
+	}
+	list := make([]ast.MetaVariant, 0, len(variants))
+	for _, variant := range variants {
+		list = append(list, ast.MetaVariant{Name: variant.name, Payload: variant.typ})
+	}
+	return c.checkStmt(ast.ComptimeMatchExpansion(stmt, owner, list), env)
+}
+
+// bindMetaField binds one capture for the length of one expansion, returning
+// the call that unbinds it. An empty name binds nothing, so a caller with no
+// capture in hand needs no branch of its own.
+func (c *Checker) bindMetaField(name string, field metaField) func() {
+	if name == "" {
+		return func() {}
+	}
+	previous, had := c.metaFields[name]
+	c.metaFields[name] = field
+	return func() {
+		if had {
+			c.metaFields[name] = previous
+			return
+		}
+		delete(c.metaFields, name)
+	}
+}
+
+// matchArmVariants indexes by tag the variants a `comptime match` arm body is
+// written against. A match written by hand carries no capture and gets nil.
+func (c *Checker) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, error) {
+	if stmt.MetaCapture == "" {
+		return nil, nil
+	}
+	variants, err := c.variants(stmt.MetaOwner)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]metaField, len(variants))
+	for _, variant := range variants {
+		out[variant.name] = variant
+	}
+	return out, nil
 }
 
 // checkMetaFieldBorrow borrows one field out of a borrowed struct. The borrow
