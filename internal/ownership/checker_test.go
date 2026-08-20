@@ -1448,6 +1448,59 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	}
 }
 
+// TestCheckStringViewThroughFieldPath pins the view a `String` field lends.
+// ADR-0111 made every borrow position take a field path; the view initializer
+// tracks its borrow on the root under that path, so a disjoint field stays
+// writable while an overlapping one does not.
+func TestCheckStringViewThroughFieldPath(t *testing.T) {
+	source := `struct Pair { pub left: std::string::String, pub right: std::string::String }
+fn (self: Pair) deinit() -> void {
+    self.left.deinit();
+    self.right.deinit();
+    return;
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var pair = Pair { left: std::string::new(allocator), right: std::string::new(allocator) };
+    defer pair.deinit();
+    let seen = pair.left.as_bytes();
+    try pair.right.append_bytes("other");
+    print(seen);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsStringViewFieldPathConflict keeps the view exclusive over the
+// path it names: growing the string can move its buffer, which would leave the
+// view pointing at the old one.
+func TestCheckRejectsStringViewFieldPathConflict(t *testing.T) {
+	source := `struct Holder { pub name: std::string::String }
+fn (self: Holder) deinit() -> void {
+    self.name.deinit();
+    return;
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var holder = Holder { name: std::string::new(allocator) };
+    defer holder.deinit();
+    let seen = holder.name.as_bytes();
+    try holder.name.append_bytes("grow");
+    print(seen);
+    return;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	want := "cannot run while string is borrowed"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %q, want substring %q", err.Error(), want)
+	}
+}
+
 // TestCheckRejectsCleanupReceiverOverwrite pins one name to one value to one
 // cleanup. A registered cleanup releases the value that was live when it was
 // written, so assigning over the name would leave it holding something the name

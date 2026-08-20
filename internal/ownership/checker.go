@@ -1074,8 +1074,8 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 		}
 		return c.checkBoxBorrowLetStmt(stmt, target, field, elem, mutable, env)
 	}
-	if target, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
-		return c.checkStringViewLetStmt(stmt, target, mutable, env)
+	if target, path, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
+		return c.checkStringViewLetStmt(stmt, target, path, mutable, env)
 	}
 	sources, elem, mutable, ok, err := c.returnedBorrowInitializer(stmt.Value, env)
 	if ok || err != nil {
@@ -1417,6 +1417,7 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 func (c *Checker) checkStringViewLetStmt(
 	stmt *ast.LetStmt,
 	target *binding,
+	path string,
 	mutable bool,
 	env *scope,
 ) error {
@@ -1430,14 +1431,14 @@ func (c *Checker) checkStringViewLetStmt(
 		}
 		return errorf("string error: `%s.as_mut_bytes` requires mutable %s binding", kind, kind)
 	}
-	if err := checkBorrowConflict(target, mutable); err != nil {
+	if err := checkBorrowConflictForField(target, path, mutable); err != nil {
 		return err
 	}
-	c.activateBorrow(target, "", mutable)
+	c.activateBorrow(target, path, mutable)
 	value := c.newBinding(stmt.Name, "[]u8")
 	value.borrowedParam = true
 	value.localBorrow = true
-	value.borrowTargets = []borrowSource{{target: target}}
+	value.borrowTargets = []borrowSource{{target: target, field: path}}
 	value.mutBorrow = mutable
 	env.define(value)
 	return nil
@@ -1462,31 +1463,55 @@ func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
 }
 
 // stringViewInitializer recognizes string.as_bytes() / as_mut_bytes() local
-// byte-view initializers.
+// byte-view initializers, and returns the binding the view borrows together
+// with the field path it names within it. A `String` reached through a field
+// lends its bytes the way any other field path is borrowed (ADR-0111): the
+// borrow is tracked on the root binding under that path, so the struct holding
+// it is what the borrow conflicts with.
 func (c *Checker) stringViewInitializer(
 	expr ast.Expression,
 	env *scope,
-) (*binding, bool, bool) {
+) (*binding, string, bool, bool) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return nil, false, false
+		return nil, "", false, false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || (field.Name != "as_bytes" && field.Name != "as_mut_bytes") {
-		return nil, false, false
+		return nil, "", false, false
 	}
-	ident, ok := field.Receiver.(*ast.IdentExpr)
+	root, path, ok := viewReceiverPath(field.Receiver)
 	if !ok {
-		return nil, false, false
+		return nil, "", false, false
 	}
-	target, exists := env.lookup(ident.Name)
+	target, exists := env.lookup(root)
 	if !exists || target.moved {
-		return nil, false, false
+		return nil, "", false, false
 	}
-	if target.typeName != "std::string::String" && !isBufferTypeName(target.typeName) {
-		return nil, false, false
+	viewed := target.typeName
+	if path != "" {
+		viewed, ok = c.fieldPathType(target.typeName, path)
+		if !ok {
+			return nil, "", false, false
+		}
 	}
-	return target, field.Name == "as_mut_bytes", true
+	if viewed != "std::string::String" && !isBufferTypeName(viewed) {
+		return nil, "", false, false
+	}
+	return target, path, field.Name == "as_mut_bytes", true
+}
+
+// viewReceiverPath reads the local a view initializer borrows from, and the
+// dotted field path within it. A bare name is the path-less case.
+func viewReceiverPath(receiver ast.Expression) (string, string, bool) {
+	if ident, ok := receiver.(*ast.IdentExpr); ok {
+		return ident.Name, "", true
+	}
+	root, path, ok := ast.FieldPathRoot(receiver)
+	if !ok {
+		return "", "", false
+	}
+	return root.Name, path, true
 }
 
 // isBufferTypeName reports whether a type spelling is a fixed-length stack
