@@ -2077,6 +2077,8 @@ func (c *Checker) exprBorrowSources(
 		return c.exprBorrowSources(e.Value, env, unsafe)
 	case *ast.UnsafeExpr:
 		return c.exprBorrowSources(e.Value, env, unsafe)
+	case *ast.MoveExpr:
+		return c.exprBorrowSources(e.Value, env, unsafe)
 	case *ast.CallExpr:
 		return c.callBorrowSources(e, env, unsafe)
 	case *ast.FieldExpr:
@@ -2781,18 +2783,36 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeMark) 
 		return c.checkTryExpr(e, env, unsafe)
 	case *ast.UnsafeExpr:
 		return c.checkUnsafeExpr(e, env, unsafe)
-	case *ast.IndexExpr:
-		return c.checkIndexExpr(e, env, unsafe)
+	case *ast.MoveExpr:
+		// The marker says the obligation leaves here; the value and its type
+		// are the ones it covers. Whether a move actually happens is an
+		// ownership question, checked there.
+		return c.checkExpr(e.Value, env, unsafe)
+	case *ast.IndexExpr, *ast.FieldExpr, *ast.DerefExpr:
+		return c.checkAccessExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.BufferLiteralExpr:
 		return Type(e.TypeText()), nil
-	case *ast.FieldExpr:
-		return c.checkFieldExpr(e, env, unsafe)
-	case *ast.DerefExpr:
-		return c.checkDerefExpr(e, env, unsafe)
 	default:
 		return c.checkControlExpr(expr, env, unsafe)
+	}
+}
+
+// checkAccessExpr types the forms that reach into a value: an element, a field,
+// and a dereference.
+func (c *Checker) checkAccessExpr(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	switch e := expr.(type) {
+	case *ast.IndexExpr:
+		return c.checkIndexExpr(e, env, unsafe)
+	case *ast.FieldExpr:
+		return c.checkFieldExpr(e, env, unsafe)
+	default:
+		return c.checkDerefExpr(expr.(*ast.DerefExpr), env, unsafe)
 	}
 }
 

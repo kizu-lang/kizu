@@ -1097,13 +1097,16 @@ func (l *lowerer) returnVoidValue() Value {
 
 // lowerExpr lowers an expression and returns its typed SSA value.
 func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
+	if inner, ok := ast.MarkerValue(expr); ok {
+		// A marker is a claim about the expression, not an operation, so it
+		// lowers to whatever it covers.
+		return l.lowerExpr(inner)
+	}
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.NullExpr:
 		return l.lowerLiteralExpr(e)
 	case *ast.TypeExpr:
 		return l.emitConst("type", e.TypeName), nil
-	case *ast.ComptimeExpr:
-		return l.lowerExpr(e.Expr)
 	case *ast.IdentExpr:
 		return l.lowerIdentExpr(e)
 	case *ast.PrefixExpr:
@@ -1116,10 +1119,6 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
-	case *ast.UnsafeExpr:
-		// The marker is a claim about who owns the obligation, not an
-		// operation, so it lowers to whatever it covers.
-		return l.lowerExpr(e.Value)
 	case *ast.IfStmt, *ast.MatchStmt, *ast.OrelseGuardExpr:
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:

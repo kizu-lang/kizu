@@ -188,6 +188,8 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 		return []ast.Expression{e.Value}, true
 	case *ast.UnsafeExpr:
 		return []ast.Expression{e.Value}, true
+	case *ast.MoveExpr:
+		return []ast.Expression{e.Value}, true
 	case *ast.ComptimeExpr:
 		return []ast.Expression{e.Expr}, true
 	case *ast.DerefExpr:

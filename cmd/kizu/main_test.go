@@ -87,6 +87,56 @@ func TestFmtWriteUpdatesFile(t *testing.T) {
 	}
 }
 
+// TestFmtWritesMoveMarkers checks fmt brings a file that predates the marker up
+// to date, at every hand-off and only there, and leaves an already marked file
+// alone.
+func TestFmtWritesMoveMarkers(t *testing.T) {
+	source := `import std::mem;
+import std::string;
+
+fn build(allocator: Allocator) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    return name;
+}
+
+fn keep(allocator: Allocator) -> !void {
+    var held = try build(allocator);
+    defer held.deinit();
+    print(held.len());
+    return;
+}
+
+fn main() -> !void {
+    try keep(mem::page_allocator());
+    return;
+}
+`
+	path := filepath.Join(t.TempDir(), "unmarked.kizu")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 2; round++ {
+		out, runErr := runDispatchCaptureStderr(t, "fmt", []string{"--write", path})
+		if runErr != nil {
+			t.Fatalf("round %d failed: %v\n%s", round, runErr, out)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(got), "return move name;") {
+			t.Fatalf("round %d: got %q, want the hand-off marked", round, got)
+		}
+		// `held` is consumed by its own deinit, not handed off, so the second
+		// round proves the pass is idempotent rather than additive.
+		if n := strings.Count(string(got), "move "); n != 1 {
+			t.Fatalf("round %d: got %d markers, want 1:\n%s", round, n, got)
+		}
+	}
+}
+
 // TestInitCommandCreatesRunnablePackage checks init scaffolds a minimal package.
 func TestInitCommandCreatesRunnablePackage(t *testing.T) {
 	root := t.TempDir()
@@ -381,7 +431,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
         print(name.value);
     }
@@ -409,7 +459,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
         print("kept");
     }
@@ -441,9 +491,9 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
-        take(name);
+        take(move name);
     }
     print(name.value);
 }
@@ -498,7 +548,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     while false {
-        take(name);
+        take(move name);
     }
     print(name.value);
 }
@@ -1498,7 +1548,7 @@ fn make_bag() -> !Bag {
     errdefer values.deinit();
     try values.append(10);
     try values.append(20);
-    return Bag { values: values };
+    return Bag { values: move values };
 }
 fn print_bag_len(bag: &Bag) -> void {
     print(bag.values.len());
@@ -1554,7 +1604,7 @@ fn make_bag() -> !Bag {
     errdefer stmts.deinit();
     try stmts.append(Stmt::Add(10));
     try stmts.append(Stmt::Done(20));
-    return Bag { stmts: stmts };
+    return Bag { stmts: move stmts };
 }
 fn print_stmt(stmt: &Stmt) -> void {
     match stmt {

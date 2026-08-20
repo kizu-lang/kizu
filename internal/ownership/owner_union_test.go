@@ -30,7 +30,7 @@ func TestCheckAcceptsOwnerUnionActiveVariantCleanup(t *testing.T) {
 // consumes it through the union deinit.
 func TestCheckAcceptsOwnerUnionMoveAndDeinit(t *testing.T) {
 	source := ownerUnionPrelude + `fn consume(s: std::string::String) -> void {
-    let n = Node::Left(s);
+    let n = Node::Left(move s);
     n.deinit();
 }`
 	if err := checkSource(source); err != nil {
@@ -42,11 +42,11 @@ func TestCheckAcceptsOwnerUnionMoveAndDeinit(t *testing.T) {
 func TestCheckRejectsOwnerUnionUseAfterMove(t *testing.T) {
 	source := ownerUnionPrelude + `fn show(n: &Node) -> void { return; }
 fn consume(s: std::string::String) -> void {
-    let n = Node::Left(s);
+    let n = Node::Left(move s);
     show(n);
-    let m = n;
+    let m = move n;
     show(m);
-    let other = n;
+    let other = move n;
 }`
 	assertMoveError(t, source, "moved value `n` was used")
 }
@@ -54,7 +54,7 @@ fn consume(s: std::string::String) -> void {
 // TestCheckRejectsOwnerUnionDoubleCleanup rejects calling deinit twice.
 func TestCheckRejectsOwnerUnionDoubleCleanup(t *testing.T) {
 	source := ownerUnionPrelude + `fn consume(s: std::string::String) -> void {
-    let n = Node::Left(s);
+    let n = Node::Left(move s);
     n.deinit();
     n.deinit();
 }`
@@ -65,7 +65,7 @@ func TestCheckRejectsOwnerUnionDoubleCleanup(t *testing.T) {
 func TestCheckRejectsOwnerUnionUseAfterDeinit(t *testing.T) {
 	source := ownerUnionPrelude + `fn show(n: &Node) -> void { return; }
 fn consume(s: std::string::String) -> void {
-    let n = Node::Left(s);
+    let n = Node::Left(move s);
     n.deinit();
     show(n);
 }`

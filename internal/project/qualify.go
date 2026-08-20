@@ -461,6 +461,8 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyTryExpr(module, e)
 	case *ast.UnsafeExpr:
 		return c.qualifyUnsafeExpr(module, e)
+	case *ast.MoveExpr:
+		return c.qualifyMoveExpr(module, e)
 	case *ast.OrelseGuardExpr:
 		return c.qualifyOrelseGuardExpr(module, e)
 	default:
@@ -592,6 +594,17 @@ func (c *graphChecker) qualifyUnsafeExpr(
 	module *moduleUnit,
 	expr *ast.UnsafeExpr,
 ) (*ast.UnsafeExpr, error) {
+	cp := *expr
+	value, err := c.qualifyExpr(module, expr.Value)
+	cp.Value = value
+	return &cp, err
+}
+
+// qualifyMoveExpr rewrites the place a move marker covers.
+func (c *graphChecker) qualifyMoveExpr(
+	module *moduleUnit,
+	expr *ast.MoveExpr,
+) (*ast.MoveExpr, error) {
 	cp := *expr
 	value, err := c.qualifyExpr(module, expr.Value)
 	cp.Value = value

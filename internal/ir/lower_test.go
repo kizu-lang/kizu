@@ -272,7 +272,7 @@ fn make() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
-    return users;
+    return move users;
 }
 fn main() {}`)
 	if got := Dump(successReturn); strings.Contains(got, "arena.deinit") {
@@ -292,9 +292,9 @@ fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
-    try parent.append(child);
+    try parent.append(move child);
     try parent.reserve(1);
-    return parent;
+    return move parent;
 }
 fn main() {}`)
 	got := tryCleanupReceivers(module, "build")
@@ -862,7 +862,7 @@ fn main() -> !void {
     var name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
-    try parent.append(name);
+    try parent.append(move name);
     let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
     defer boxed.deinit();
     return;
@@ -942,7 +942,7 @@ fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<
     var out = std::string::new(allocator);
     errdefer out.deinit();
     try out.append_bytes(std::meta::field_name<T, f>());
-    return out;
+    return move out;
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();

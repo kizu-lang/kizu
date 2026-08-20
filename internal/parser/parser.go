@@ -1329,7 +1329,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return p.parseIfStmt()
 	case token.Match:
 		return p.parseMatchStmt()
-	case token.Comptime, token.Try, token.Unsafe:
+	case token.Comptime, token.Try, token.Move, token.Unsafe:
 		return p.parseMarkerExpression()
 	case token.Amp:
 		p.nextToken()
@@ -1380,8 +1380,8 @@ func (p *Parser) parseBufferLiteralExpr() ast.Expression {
 }
 
 // parseMarkerExpression parses the keywords that sit in front of an expression
-// and say something about it without changing its value: `comptime`, `try` and
-// `unsafe`.
+// and say something about it without changing its value: `comptime`, `try`,
+// `move` and `unsafe`.
 func (p *Parser) parseMarkerExpression() ast.Expression {
 	marker := p.cur
 	p.nextToken()
@@ -1390,6 +1390,11 @@ func (p *Parser) parseMarkerExpression() ast.Expression {
 		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
 	case token.Try:
 		return &ast.TryExpr{Value: p.parseExpression(prefix)}
+	case token.Move:
+		return &ast.MoveExpr{
+			Value: p.parseExpression(prefix),
+			Span:  tokenSpan(marker),
+		}
 	default:
 		return &ast.UnsafeExpr{
 			Value:  p.parseExpression(prefix),

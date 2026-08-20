@@ -278,7 +278,10 @@ func (c *Checker) checkMetaConstruct(
 			return "", err
 		}
 	}
-	built, err := c.readExpr(literal, scope)
+	// The literal consumes the bindings the statements produced, so it is
+	// checked as the move it is. Reading it left the expansion trusted: a
+	// binding taken twice was not a double move, because reading moved nothing.
+	built, err := c.moveExpr(literal, scope)
 	if err != nil {
 		return "", err
 	}

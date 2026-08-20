@@ -29,7 +29,7 @@ func TestCheckRejectsMoveErrorsInTestDecl(t *testing.T) {
 	source := `struct Name { value: []u8 }
 test "move error" {
     let a = Name { value: "hello" };
-    let b = a;
+    let b = move a;
     print(a.value);
     print(b.value);
 }`
@@ -54,7 +54,7 @@ func TestCheckRejectsMoveErrors(t *testing.T) {
 			source: `struct Name { value: []u8 }
 fn main() {
     let a = Name { value: "hello" };
-    let b = a;
+    let b = move a;
     print(a.value);
     print(b.value);
 }`,
@@ -66,7 +66,7 @@ fn main() {
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
-    take(name);
+    take(move name);
     print(name.value);
 }`,
 			want: "moved value `name` was used",
@@ -77,7 +77,7 @@ fn main() {
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
-    take(name);
+    take(move name);
     take(name);
 }`,
 			want: "moved value `name` was used",
@@ -128,7 +128,7 @@ func TestCheckAcceptsFixedBufferAllocator(t *testing.T) {
     var values = std::array::new<i64>(allocator);
     errdefer values.deinit();
     try values.append(7);
-    return values;
+    return move values;
 }
 fn main() -> !void {
     var buf = [512]u8{};
@@ -419,7 +419,7 @@ fn (self: Pair) deinit() -> void { }
 fn touch(left: &var i64) { print(left); }
 fn main() {
     var pair = Pair { left: 1, right: 2 };
-    let moved = pair;
+    let moved = move pair;
     touch(&var pair.left);
     print(moved.left);
 }`,
@@ -568,7 +568,7 @@ fn write_tag(node: ptr<Node>, tag: i64) -> void {
     unsafe node.*.tag = tag;
     return;}
 fn replace(node: ptr<Node>, value: Node) -> void {
-    unsafe node.* = value;
+    unsafe node.* = move value;
     return;}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1146,7 +1146,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     let user = User { name: "alice" };
-    let alice = users.add(user);
+    let alice = users.add(move user);
     print(user.name);
     print(users.at(alice).name);
 }`,
@@ -1300,7 +1300,7 @@ fn main() {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     defer users.deinit();
-    let moved = users;
+    let moved = move users;
     print(moved);
 }`,
 			want: "moved value `users` was used",
@@ -1330,7 +1330,7 @@ fn build() -> !std::arena::Arena<User> {
     let allocator = std::mem::page_allocator();
     let users = std::arena::new<User>(allocator);
     errdefer users.deinit();
-    return users;
+    return move users;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1405,9 +1405,9 @@ func TestCheckErrDeferRetiresAtMove(t *testing.T) {
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
-    try parent.append(child);
+    try parent.append(move child);
     try parent.reserve(1);
-    return parent;
+    return move parent;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1425,9 +1425,9 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
-    try parent.append(child);
+    try parent.append(move child);
     try parent.reserve(1);
-    return parent;
+    return move parent;
 }`
 	program, err := project.LoadSource("", withStdImport(source))
 	if err != nil {
@@ -1519,7 +1519,7 @@ func TestCheckRejectsCleanupReceiverOverwrite(t *testing.T) {
     var name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
-    try parent.append(name);
+    try parent.append(move name);
     name = std::string::new(allocator);
     try parent.append(name);
     return parent;
@@ -1552,13 +1552,13 @@ func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
     var first = std::string::new(allocator);
     errdefer first.deinit();
     try first.append_byte(cast<u8>(97));
-    try parent.append(first);
+    try parent.append(move first);
     var second = std::string::new(allocator);
     errdefer second.deinit();
     try second.append_byte(cast<u8>(98));
     try parent.reserve(1);
-    try parent.append(second);
-    return parent;
+    try parent.append(move second);
+    return move parent;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1594,7 +1594,7 @@ func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
-    if true { take(name); }
+    if true { take(move name); }
     print(name.value);
 }`
 	err := checkSource(source)
@@ -1610,13 +1610,13 @@ fn main() {
 func TestCheckControlExpressionMoveMarksOuterValueMoved(t *testing.T) {
 	source := `struct Name { value: []u8 }
 fn pick(left: Name, right: Name) -> Name {
-    let chosen = if true { left } else { right };
-    return chosen;
+    let chosen = if true { move left } else { move right };
+    return move chosen;
 }
 fn main() {
     let left = Name { value: "left" };
     let right = Name { value: "right" };
-    let chosen = pick(left, right);
+    let chosen = pick(move left, move right);
     print(left.value);
     print(chosen.value);
 }`
@@ -1642,7 +1642,7 @@ func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
-    take(name);
+    take(move name);
     print(name.value);}`,
 			want: "moved value `name` was used",
 		},
@@ -1720,7 +1720,7 @@ func TestCheckComptimeRejectsRuntimeBoundary(t *testing.T) {
 func TestCheckMinimalGenericInstantiation(t *testing.T) {
 	source := `struct Name { value: []u8 }
 fn pass<T>(value: T) -> T {
-    return value;
+    return move value;
 }
 fn main() {
     let name = Name { value: "alice" };
@@ -1893,7 +1893,7 @@ func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
 	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 fn (self: Registry) add(user: User) -> void {
-    let handle = self.users.add(user);
+    let handle = self.users.add(move user);
     print(self.users.at(handle).name);
     return;
 }
@@ -1927,7 +1927,7 @@ fn (self: Wrapper) deinit() -> void {
 fn main() {
     let allocator = std::mem::page_allocator();
     let registry = Registry { users: std::arena::new<User>(allocator) };
-    let wrapper = Wrapper { registry: registry };
+    let wrapper = Wrapper { registry: move registry };
     wrapper.registry.users.add(User { name: "alice" });
     wrapper.deinit();
 }`
@@ -2023,7 +2023,7 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
     let name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
-    try parent.append(name);
+    try parent.append(move name);
     parent.pop();
     return;
 }`,
@@ -2035,7 +2035,7 @@ func TestCheckRejectsDiscardedOwnerExpression(t *testing.T) {
     let name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
-    return name;
+    return move name;
 }
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
