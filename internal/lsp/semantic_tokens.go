@@ -145,7 +145,7 @@ func isKeywordToken(typ token.Type) bool {
 	case token.Function, token.Import, token.Public, token.Let, token.Var,
 		token.Return, token.Defer, token.ErrDefer, token.If, token.Else, token.While,
 		token.Break, token.Continue, token.Match, token.Struct, token.Enum,
-		token.Union, token.Contract, token.Dyn, token.For, token.Impl,
+		token.Union, token.Contract, token.For, token.Impl,
 		token.True, token.False, token.And, token.Or, token.Mut, token.Unsafe,
 		token.Extern, token.Comptime, token.Try:
 		return true

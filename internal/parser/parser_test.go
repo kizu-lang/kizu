@@ -453,22 +453,6 @@ impl Writer for File;`
 	}
 }
 
-// TestParseDynContractParam checks dyn contract object type syntax.
-func TestParseDynContractParam(t *testing.T) {
-	input := `fn save(writer: &dyn Writer) -> !void {
-    return;
-}`
-	p := New(lexer.New(input))
-	program := p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors: %v", p.Errors())
-	}
-	want := `fn save(writer: &dyn Writer) -> !void { return; }`
-	if got := program.String(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
 // TestParseImportsAndPublicDeclarations checks module imports and visibility syntax.
 func TestParseImportsAndPublicDeclarations(t *testing.T) {
 	input := `import app::lexer;

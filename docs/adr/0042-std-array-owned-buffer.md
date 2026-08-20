@@ -66,10 +66,9 @@ safety without exposing lifetime annotations.
 
 Safe `Array<T>` can store resource-owning values, including
 `std::arena::Arena<T>`, `std::arena::Handle<T>`, nested arrays, and maps. It
-still rejects raw pointers, `dyn`, and concurrency capability types. The
-rejection is recursive through struct fields and union payloads. These
-exclusions avoid storing values whose provenance, dynamic dispatch, or
-thread-boundary rules are not yet fully specified for owned collections.
+still rejects raw pointers and stack buffers. The rejection is recursive
+through struct fields and union payloads. These exclusions avoid storing values
+whose provenance or stack lifetime cannot be preserved by owned collections.
 
 `deinit` invalidates the array binding in the ownership checker. Using an array
 after `deinit` is a move/use-after-free style error in safe Kizu.

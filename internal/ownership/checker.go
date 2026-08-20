@@ -2932,7 +2932,7 @@ func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
 	}
 	name, ok := parsed.(*typ.Name)
 	if !ok {
-		// []T, &T, ?T, dyn T, E!T: views and wrappers keep borrow handling.
+		// []T, &T, ?T, E!T: views and wrappers keep borrow handling.
 		return payloadBorrows
 	}
 	if isRawPointerType(typeName) {
@@ -3911,7 +3911,7 @@ func viewCarrierPayload(typeName string) string {
 // viewCarryingTypeSeen is viewCarryingType with a cycle guard over named types.
 func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bool {
 	typeName = viewCarrierPayload(typeName)
-	if typeName == "[]u8" || strings.HasPrefix(typeName, "&") || isDynType(typeName) {
+	if typeName == "[]u8" || strings.HasPrefix(typeName, "&") {
 		return true
 	}
 	if seen[typeName] {
@@ -4339,9 +4339,6 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 	seen[typeName] = true
 	if isRawPointerType(typeName) {
 		return errorf("array error: Array element cannot be raw pointer")
-	}
-	if isDynType(typeName) {
-		return errorf("array error: Array element cannot be dyn")
 	}
 	if base, arg, ok := splitGenericType(typeName); ok && base == "option" {
 		if err := c.rejectArrayStorageType(arg, seen); err != nil {
@@ -7642,11 +7639,6 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 func isRawPointerType(typeName string) bool {
 	_, ok := rawPointerElement(typeName)
 	return ok
-}
-
-// isDynType reports whether typeName is a dynamic contract object spelling.
-func isDynType(typeName string) bool {
-	return strings.HasPrefix(typeName, "dyn ")
 }
 
 // rawPointerElement extracts the element spelling from ptr<T> or ?ptr<T>.

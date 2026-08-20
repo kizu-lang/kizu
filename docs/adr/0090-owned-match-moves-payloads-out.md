@@ -68,7 +68,7 @@ dispatch の既存規則(事実 3)はそのまま維持する。
 
 ### 3. view 型 payload は常に escape 禁止のまま
 
-`[]T` / `ptr<>` / `&` / `?` / `dyn` / 型パラメータ / 未分類の型は、scrutinee の
+`[]T` / `ptr<>` / `&` / `?` / 型パラメータ / 未分類の型は、scrutinee の
 所有に関わらず borrow binding のまま(arm 内で読むのは今まで通り自由)。
 
 事実 1 により今日の union 内の `[]T` は provenance-free で、copy out しても

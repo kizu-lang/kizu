@@ -51,7 +51,7 @@ kizu-check file="examples/hello.kizu":
 kizu-fmt file="examples/hello.kizu":
     go run ./cmd/kizu fmt {{file}}
 
-# Run a Kizu file through the interpreter.
+# Run a Kizu file through the native build path.
 run file="examples/hello.kizu":
     go run ./cmd/kizu run {{file}}
 

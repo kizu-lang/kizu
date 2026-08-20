@@ -1443,6 +1443,59 @@ fn main() -> !void {
 	}
 }
 
+// TestBuildTargetNativeStdoutWriteFailure checks hosted writes report a closed
+// output pipe through std::io instead of terminating on SIGPIPE or returning ok.
+func TestBuildTargetNativeStdoutWriteFailure(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "stdout_write_failure.kizu")
+	code := []byte(`import std;
+
+fn main() -> !void {
+    let io = std::io::blocking();
+    try std::io::write_stdout(io, "hello");
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "stdout_write_failure")
+	build := kizuCommand(
+		"build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	if buildOut, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("native write failure build failed: %v\n%s", err, buildOut)
+	}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+
+	var stderr strings.Builder
+	run := exec.Command(output)
+	run.Stdout = writer
+	run.Stderr = &stderr
+	err = run.Run()
+	if err == nil {
+		t.Fatal("expected native executable to report stdout write failure")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("got err=%v stderr=%q, want exit 1", err, stderr.String())
+	}
+	if got, want := stderr.String(), "runtime error: std::io::Error::WriteFailed\n"; got != want {
+		t.Fatalf("got stderr %q, want %q", got, want)
+	}
+}
+
 // TestBuildTargetNativeProcessSpawnCommandSmoke checks the hosted native runtime spawn shim.
 func TestBuildTargetNativeProcessSpawnCommandSmoke(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {

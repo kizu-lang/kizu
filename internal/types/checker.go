@@ -594,10 +594,6 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
-			if containsDynType(parsed) {
-				return errorf("type error: union variant `%s::%s` cannot store dyn value",
-					decl.Name, variant.Name)
-			}
 		}
 		union.variants[variant.Name] = typ.Text(variant.Payload)
 		union.order = append(union.order, variant.Name)
@@ -638,10 +634,6 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		}
 		if containsTypeValue(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
-				decl.Name, field.Name)
-		}
-		if containsDynType(typ) {
-			return errorf("type error: struct field `%s.%s` cannot store dyn value",
 				decl.Name, field.Name)
 		}
 		if containsBufferType(typ) {
@@ -911,9 +903,6 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
-	if containsDynType(ret) {
-		return nil, errorf("type error: function `%s` cannot return dyn", fn.Name)
-	}
 	if !fn.Std && containsBorrowOptional(ret) {
 		if _, _, bare := typ.BorrowOptionalElem(string(ret)); !bare {
 			return nil, errorf(
@@ -979,16 +968,6 @@ func (c *Checker) checkFunctionParam(
 		return errorf(
 			"type error: parameter `%s` cannot borrow an optional yet", param.Name)
 	}
-	if _, ok := dynContract(paramType); ok {
-		if !param.Borrow {
-			return errorf("type error: dyn parameter `%s` must be borrowed", param.Name)
-		}
-		if param.MutBorrow {
-			return errorf("type error: dyn parameter `%s` must use immutable borrow in v0", param.Name)
-		}
-	} else if containsDynType(paramType) {
-		return errorf("type error: dyn parameter `%s` must use &dyn Contract", param.Name)
-	}
 	return nil
 }
 
@@ -1050,8 +1029,6 @@ func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
 		return c.parseWrappingType(name, node.Elem)
 	case *typ.Optional:
 		return c.parseNullableType(name, node.Elem)
-	case *typ.Dyn:
-		return c.parseDynType(name, node.Contract)
 	case *typ.Name:
 		if len(node.Args) == 0 {
 			return c.parseNamedType(name)
@@ -1213,15 +1190,6 @@ func (c *Checker) parseUserGenericType(
 		if _, err := c.parseType(arg); err != nil {
 			return "", err
 		}
-	}
-	return Type(name), nil
-}
-
-// parseDynType validates dynamic contract object type spellings.
-func (c *Checker) parseDynType(name string, contract typ.Type) (Type, error) {
-	contractName := contract.String()
-	if c.contracts[contractName] == nil {
-		return "", errorf("type error: unknown contract `%s`", contractName)
 	}
 	return Type(name), nil
 }
@@ -3922,9 +3890,6 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return errorf("type error: Array element cannot be raw pointer")
 	}
-	if _, ok := dynContract(typ); ok {
-		return errorf("type error: Array element cannot be dyn")
-	}
 	if containsBufferType(typ) {
 		return errorf("type error: Array element cannot be stack buffer")
 	}
@@ -5099,12 +5064,6 @@ func (c *Checker) checkUserCallArg(
 	if err != nil {
 		return err
 	}
-	if contractName, ok := dynContract(fn.params[idx]); ok {
-		if !c.satisfies(contractName, got) {
-			return errorf("type error: %s does not satisfy `%s`", got, contractName)
-		}
-		return nil
-	}
 	if !sameType(got, fn.params[idx]) {
 		return userCallArgError(name, fn, idx, fn.params[idx], got)
 	}
@@ -5635,17 +5594,6 @@ func (c *Checker) checkKnownReceiverMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	if contractName, ok := dynContract(receiver); ok {
-		typ, err := c.checkDynMethodCall(
-			contractName,
-			field.Name,
-			expressionSpan(field),
-			args,
-			env,
-			unsafe,
-		)
-		return typ, true, err
-	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if ok && base == "std::array::Array" {
 		typ, err := c.checkArrayReceiverMethod(field, Type(arg), args, env, unsafe)
@@ -6356,23 +6304,6 @@ func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	return nil
 }
 
-// checkDynMethodCall validates a method call through &dyn Contract.
-func (c *Checker) checkDynMethodCall(
-	contractName string,
-	name string,
-	span ast.Span,
-	args []ast.Expression,
-	env *scope,
-	unsafe unsafeMark,
-) (Type, error) {
-	contract := c.contracts[contractName]
-	if contract == nil || contract.methods[name] == nil {
-		return "", errorf("type error: `dyn %s` has no method `%s`", contractName, name)
-	}
-	// A contract writes no receiver, so every parameter it declares is an argument.
-	return c.checkCallableArgs(contract.methods[name], 0, span, args, env, unsafe)
-}
-
 // checkMethodArgs validates method-call arguments after the implicit self receiver.
 func (c *Checker) checkMethodArgs(
 	method *functionType,
@@ -6943,13 +6874,6 @@ func (c *Checker) implMethod(typeName string, method string) *functionType {
 		return nil
 	}
 	return methods[method]
-}
-
-// satisfies reports whether a type has the methods a contract asks for. Nothing
-// has to be declared: a contract names a shape, and a type either has it or does
-// not, which is what lets one be satisfied by a type its author never saw.
-func (c *Checker) satisfies(contractName string, typ Type) bool {
-	return c.checkSatisfies(contractName, typ) == nil
 }
 
 // checkPrintCall validates the print builtin.

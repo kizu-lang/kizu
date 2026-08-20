@@ -14,6 +14,7 @@
 
 | module | 内容 |
 | --- | --- |
+| [io](io.md) | explicit stdout / stderr / stdin |
 | [mem](mem.md) | allocator capability、byte helper、`Box<T>`、`leak`、`Limit` |
 | [string](string.md) | owned byte buffer |
 | [array](array.md) | owned contiguous collection |

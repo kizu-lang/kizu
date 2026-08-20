@@ -29,28 +29,28 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 24 | ✅ | ✅ | ✅ | 9/24 |
-| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | 2/3 |
-| while / break / continue / for / label | 7 | ✅ | ✅ | ✅ | 5/7 |
-| if / match | 9 | ✅ | ✅ | ✅ | 1/9 |
-| enum / union | 9 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 10 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 18 | ✅ | ✅ | ✅ | 2/18 |
-| deinit / defer | 5 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 5 | ✅ | ✅ | ✅ | ❌ |
-| comptime | 2 | ✅ | ✅ | ✅ | 1/2 |
-| cast / slice / raw pointer / box | 7 | ✅ | 6/7 | 6/7 | 1/7 |
-| contract / dyn / generics | 6 | ✅ | 5/6 | 5/6 | 1/6 |
-| std::array | 10 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 11 | ✅ | ✅ | ✅ | ❌ |
+| fn / let / struct / literals | 32 | ✅ | ✅ | ✅ | 11/32 |
+| arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
+| while / break / continue / for / label | 9 | ✅ | ✅ | ✅ | 8/9 |
+| if / match | 13 | ✅ | ✅ | ✅ | 2/13 |
+| enum / union | 14 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 17 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 39 | ✅ | ✅ | ✅ | 2/39 |
+| deinit / defer | 17 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 8 | ✅ | ✅ | ✅ | ❌ |
+| comptime | 8 | ✅ | ✅ | ✅ | 1/8 |
+| cast / slice / raw pointer / box | 7 | ✅ | ✅ | ✅ | 1/7 |
+| contract / generics | 8 | ✅ | ✅ | ✅ | 1/8 |
+| std::array | 14 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 27 | ✅ | ✅ | ✅ | ❌ |
 | std::map | 9 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 8 | ✅ | 7/8 | 7/8 | ❌ |
-| std::testing | 9 | ✅ | ✅ | ✅ | ❌ |
-| std::fmt | 3 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
+| std::mem / allocator | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
+| std::fmt | 5 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 5 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 74 runnable examples, measured on 2026-08-14 with
+`❌` means none do. 120 runnable examples, measured on 2026-08-20 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -58,21 +58,13 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 74/74 |
-| `kizu run` | 72/74 |
-| `kizu build --emit-llvm` | 72/74 |
-| `kizu build --target wasm32-wasi` | 16/74 |
+| `kizu check` | 120/120 |
+| `kizu run` | 120/120 |
+| `kizu build --emit-llvm` | 120/120 |
+| `kizu build --target wasm32-wasi` | 19/120 |
 
-The 2 programs `run` cannot reproduce are registered in the manifests with a
-`pending` reason. A pending case is tested for *still failing*, so closing a gap
-forces its entry to be removed in the same change.
-
-What is missing:
-
-1. **Two cases have no lowering yet.** A `dyn` contract method and a `Box`
-   borrow method.
-
-No case answers wrong. Every remaining one fails, and says so.
+The native route has no pending runnable example. WASI remains a target subset;
+`just backend-matrix` reports both unsupported lowering and output mismatches.
 
 Tooling around the language core:
 

@@ -4,9 +4,11 @@ Status: 採用
 
 ## Context
 
-The self-host compiler CLI needs stdout, stderr, argv, environment lookup, and
+Command-line programs need stdout, stderr, argv, environment lookup, and
 exit-code handling. Kizu should keep I/O explicit and avoid hidden process
-globals where an `Io` capability is the correct boundary.
+globals where an `Io` capability is the correct boundary. Most command output
+is line-oriented, but callers should not need a formatting abstraction merely
+to append a newline.
 
 ## Decision
 
@@ -14,9 +16,14 @@ Stdio helpers require explicit `Io`.
 
 ```text
 std::io::write_stdout(io: Io, bytes: &[]u8) -> !void
+std::io::write_stdout_line(io: Io, bytes: &[]u8) -> !void
 std::io::write_stderr(io: Io, bytes: &[]u8) -> !void
-std::io::read_stdin(io: Io) -> ![]u8
+std::io::write_stderr_line(io: Io, bytes: &[]u8) -> !void
 ```
+
+The line helpers compose byte writes with a newline. They do not introduce
+format strings, implicit allocation, a generic `Writer`, or a display contract.
+The concrete API belongs to `docs/std/io.md`.
 
 Process helpers expose CLI state without filesystem or stdio side effects.
 
@@ -37,5 +44,13 @@ turns this value into an actual host exit status.
 ## Consequences
 
 - CLI examples can distinguish stdout and stderr while preserving explicit I/O.
-- Self-host compiler argument parsing can be prototyped in Kizu source.
+- Common line output does not fall back to the diagnostic-only `print` builtin.
 - Actual process termination remains a later runner concern.
+
+## Rejected alternatives
+
+| Alternative | Reason |
+| --- | --- |
+| Route ordinary output through builtin `print` | It is a diagnostic primitive, not an explicit fallible I/O API. |
+| Add a generic `Writer` or display contract | There is no concrete polymorphic output use yet, and it would expand the type and runtime surface. |
+| Add format strings to line output | `std::fmt` already supports explicit caller-owned diagnostic construction; line output only needs bytes plus a newline. |

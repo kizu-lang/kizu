@@ -67,7 +67,7 @@ go test ./...
 | raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `unsafe p.*.field` pointer access |
 | raw pointer field invariant | `unsafe_struct.kizu` | `unsafe struct` documents its invariant; reads are free, writes and construction are marked |
 | combined application | `user_registry.kizu` | exercises multiple features together |
-| `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
+| `contract`, `impl Contract for Type`, static generic dispatch | `contract_static_dispatch.kizu` | explicit contract assertion with concrete generic instantiations |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | pure path helpers | `std_path.kizu` | joins and cleans paths with explicit allocator-backed output |
 | path edge cases | `std_path_edges.kizu` | covers root, empty path, repeated slash, parent segment, and extension behavior |
@@ -201,8 +201,6 @@ single source file. Run them with `kizu check <package-root>`.
 | unsafe does not permit moved safe values | `negative/unsafe_moved_value.kizu` | `moved value` |
 | unsafe does not permit borrow escape | `negative/unsafe_borrow_escape.kizu` | `borrowed value` |
 | contract impl requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
-| `dyn Contract` requires explicit contract impl | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
-| owned `dyn Contract` is not | `negative/owned_dyn.kizu` | `must be borrowed` |
 | bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
 | evented Io is not implemented | `negative/io_evented_unimplemented.kizu` | `not implemented` |
 | array host primitives are reserved | `negative/std_array_builtin_direct_call.kizu` | `reserved; use std::array` |

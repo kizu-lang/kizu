@@ -64,7 +64,6 @@ const (
 	Enum     Type = "enum"
 	Union    Type = "union"
 	Contract Type = "contract"
-	Dyn      Type = "dyn"
 	For      Type = "for"
 	Impl     Type = "impl"
 	True     Type = "true"
@@ -116,7 +115,6 @@ var keywords = map[string]Type{
 	"enum":     Enum,
 	"union":    Union,
 	"contract": Contract,
-	"dyn":      Dyn,
 	"for":      For,
 	"impl":     Impl,
 	"true":     True,

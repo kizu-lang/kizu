@@ -82,13 +82,3 @@ entry が各 test を `try` で呼ぶ。test の診断も runtime に移った�
   120 秒の目標内に収まっている。
 - `kizu run` は clang を必要とする。native path が host clang と libc を使う
   という既存の build policy がそのまま run にも及ぶ。
-
-## 埋める順序
-
-1. lowering 未実装 2 本(dyn contract method、Box borrow method)
-2. `!u8` から返した整数 literal が `i64` になる 1 本
-
-範囲外 index と slice の診断は ADR-0084 で埋めた。
-並行 API 由来の未実装は ADR-0025 の撤回でなくなった。
-
-進捗は `just backend-matrix` が表にする。

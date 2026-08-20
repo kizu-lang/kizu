@@ -326,6 +326,7 @@ const runtimeSource = `
 #include <string.h>
 #include <dirent.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -552,6 +553,7 @@ static char **kizu_runtime_argv = NULL;
 void kizu_runtime_init_args(int32_t argc, char **argv) {
     kizu_runtime_argc = argc;
     kizu_runtime_argv = argv;
+    signal(SIGPIPE, SIG_IGN);
 }
 
 static KizuSliceU8 kizu_slice_from_cstr(const char *value) {
@@ -895,14 +897,25 @@ static int kizu_io_is_failing(void *io) {
     return io == KIZU_IO_FAILING;
 }
 
+static KizuErrorVoid kizu_std_builtin_io_write_result(FILE *stream, KizuSliceU8 bytes) {
+    if (bytes.len < 0 || (bytes.len > 0 && !bytes.ptr)) {
+        return kizu_err_void(KIZU_ERR_STD_IO_ERROR_WRITE_FAILED);
+    }
+    if (bytes.len == 0) {
+        return kizu_ok_void();
+    }
+    size_t len = (size_t)bytes.len;
+    if (fwrite(bytes.ptr, 1, len, stream) != len || fflush(stream) != 0) {
+        return kizu_err_void(KIZU_ERR_STD_IO_ERROR_WRITE_FAILED);
+    }
+    return kizu_ok_void();
+}
+
 static KizuErrorVoid kizu_std_builtin_io_write_stdout_result(void *io, KizuSliceU8 bytes) {
     if (kizu_io_is_failing(io)) {
         return kizu_err_void(KIZU_ERR_STD_IO_ERROR_IO_FAILING);
     }
-    if (bytes.len > 0 && bytes.ptr) {
-        fwrite(bytes.ptr, 1, (size_t)bytes.len, stdout);
-    }
-    return kizu_ok_void();
+    return kizu_std_builtin_io_write_result(stdout, bytes);
 }
 
 void std__internal__builtin__io_write_stdout(
@@ -914,10 +927,7 @@ static KizuErrorVoid kizu_std_builtin_io_write_stderr_result(void *io, KizuSlice
     if (kizu_io_is_failing(io)) {
         return kizu_err_void(KIZU_ERR_STD_IO_ERROR_IO_FAILING);
     }
-    if (bytes.len > 0 && bytes.ptr) {
-        fwrite(bytes.ptr, 1, (size_t)bytes.len, stderr);
-    }
-    return kizu_ok_void();
+    return kizu_std_builtin_io_write_result(stderr, bytes);
 }
 
 void std__internal__builtin__io_write_stderr(
@@ -1054,6 +1064,7 @@ static int kizu_run_child_process(char *const argv[]) {
         return 127;
     }
     if (pid == 0) {
+        signal(SIGPIPE, SIG_DFL);
         execvp(argv[0], argv);
         _exit(127);
     }

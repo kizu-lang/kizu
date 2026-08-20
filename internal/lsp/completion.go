@@ -919,7 +919,7 @@ func tokenText(tokens []token.Token) string {
 		}
 		currentWord := tok.Type == token.Ident || tok.Type == token.Function ||
 			tok.Type == token.Var ||
-			tok.Type == token.Dyn || tok.Type == token.Comptime
+			tok.Type == token.Comptime
 		if previousWord && currentWord {
 			out.WriteByte(' ')
 		}

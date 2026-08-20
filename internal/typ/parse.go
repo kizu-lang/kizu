@@ -58,12 +58,6 @@ func (p *parser) parsePrefix() (Type, error) {
 			return nil, err
 		}
 		return &Optional{Elem: elem}, nil
-	case p.accept("dyn "):
-		elem, err := p.parsePrefix()
-		if err != nil {
-			return nil, err
-		}
-		return &Dyn{Contract: elem}, nil
 	case p.accept("const "):
 		elem, err := p.parsePrefix()
 		if err != nil {
