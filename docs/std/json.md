@@ -160,7 +160,8 @@ struct として来ます。
 bytes はそこに無く(`"c\u0061rol"` という document の中に `carol` と
 いう並びは存在しない)、view では表せません。escape があるかは parse するまで
 分からず、型で決まる性質ではないので、「`[]u8` も decode できる」という規則は
-document 次第で壊れることになります。所有する `String` を使います。
+document 次第で壊れることになります。所有する `String` を使います。判断の
+経緯は [ADR-0122](../adr/0122-json-decode-returns-owned-values.md) にあります。
 
 enum と union は encode が書く 2 つの形をそのまま読みます。document を始める
 byte が `"` なら payload を持たない variant、`{` なら `{"名前": payload}` です。
