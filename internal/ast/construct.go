@@ -1,5 +1,9 @@
 package ast
 
+import (
+	"github.com/kizu-lang/kizu/internal/typ"
+)
+
 // ConstructField is one field a `std::meta::construct` expansion fills: the
 // source name it is written under and the type its value has.
 type ConstructField struct {
@@ -53,7 +57,7 @@ func ConstructExpansion(
 			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{
 				Callee: &FieldExpr{
 					Receiver: &IdentExpr{Name: binding},
-					Name:     CleanupMethod,
+					Name:     typ.CleanupMethod,
 				},
 			}})
 		}

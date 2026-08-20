@@ -440,13 +440,11 @@ func SplitMethodName(name string) (string, string, bool) {
 	return name[:idx], name[idx+1:], true
 }
 
-// CleanupMethod reports whether a method name discharges an owner's consume
-// obligation: `deinit` for plain owners, `deinit_all` for owner-element
-// containers (ADR-0091). Which of the two a given receiver accepts is the type
-// checker's rule; this is only the shared spelling of the pair.
-func CleanupMethod(name string) bool {
-	return name == "deinit" || name == "deinit_all"
-}
+// CleanupMethod is the method name that discharges an owner's consume
+// obligation (ADR-0091). There is one: `deinit` releases the value and whatever
+// it holds, so a container needs no second name for the case where its elements
+// own something (ADR-0119). This is the one spelling; every layer reads it here.
+const CleanupMethod = "deinit"
 
 // Substitute replaces every type parameter named in subst, wherever it appears
 // in the structure. A name is replaced only when the whole name matches, so a

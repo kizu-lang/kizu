@@ -15,7 +15,7 @@ func DeinitOwners(program *Program) map[string]bool {
 		if !ok || !fn.Receiver {
 			continue
 		}
-		if receiver, method, ok := typ.SplitMethodName(fn.Name); ok && method == "deinit" {
+		if receiver, method, ok := typ.SplitMethodName(fn.Name); ok && method == typ.CleanupMethod {
 			owners[baseTypeName(receiver)] = true
 		}
 	}
@@ -37,8 +37,3 @@ func baseTypeName(name string) string {
 	}
 	return name
 }
-
-// CleanupMethod is the cleanup call every owner accepts. There is one:
-// `deinit` releases the value and whatever it holds, so a container needs no
-// second name for the case where its elements own something (ADR-0119).
-const CleanupMethod = "deinit"

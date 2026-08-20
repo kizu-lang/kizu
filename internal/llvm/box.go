@@ -114,8 +114,8 @@ func (e *emitter) writeBoxDeinit(instr *ir.Instr) error {
 	return nil
 }
 
-// writeBoxTake lowers the box_take primitive deinit_all forwards to: the
-// payload moves out before the runtime releases the cell.
+// writeBoxTake lowers the box_take primitive `Box.deinit` forwards to when the
+// payload owns something: it moves out before the runtime releases the cell.
 func (e *emitter) writeBoxTake(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || !isBoxLLVMType(instr.Args[0].Type) {
 		return fmt.Errorf("llvm error: box.take expects Box<T> -> T")

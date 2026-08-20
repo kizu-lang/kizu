@@ -1557,8 +1557,14 @@ func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
 		return errorf("type error: %s expects cleanup method call", keyword)
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || !typ.CleanupMethod(field.Name) {
+	if !ok {
 		return errorf("type error: %s expects cleanup method call", keyword)
+	}
+	// The source already holds a method call, so naming the method it wanted
+	// beats repeating that one was expected. There is only one (ADR-0119).
+	if field.Name != typ.CleanupMethod {
+		return errorf("type error: %s cleanup must be `%s`, got `%s`",
+			keyword, typ.CleanupMethod, field.Name)
 	}
 	return nil
 }
@@ -4306,7 +4312,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		return c.checkArrayPrimitiveGet(elem, name, args, env, unsafe)
 	case "deinit":
 		// The raw primitive frees only the buffer, with no owner-element rule:
-		// it is the one escape `Array.deinit_all` uses after consuming the
+		// it is the one escape `Array.deinit` uses after consuming the
 		// elements, and only std source can name it.
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.deinit` expects 0 args, got %d", len(args))
@@ -5492,7 +5498,7 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 		return errorAt(receiver.Span,
 			"type error: field method receiver must be a field path on a local binding")
 	}
-	if !typ.CleanupMethod(field.Name) {
+	if field.Name != typ.CleanupMethod {
 		return nil
 	}
 	if _, direct := receiver.Receiver.(*ast.IdentExpr); !direct {

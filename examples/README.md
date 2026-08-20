@@ -48,7 +48,7 @@ go test ./...
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
 | handles are copy IDs | `arena_dag.kizu` | two parents share one child and the handle stays usable |
-| `std::mem::Box<T>` recursive payloads | `std_mem_box_ast.kizu` | builds a boxed AST, borrows a child, and closes owners with `deinit_all` |
+| `std::mem::Box<T>` recursive payloads | `std_mem_box_ast.kizu` | builds a boxed AST, borrows a child, and closes owners with `deinit` |
 | `at_mut` through a `&var` parameter | `std_map_at_mut_helper.kizu` | moves counter-update logic into a helper taking the map by `&var` |
 | `at_mut` on an owner's container field | `std_array_at_mut_field.kizu` | a `&var self` method captures `self.users.at_mut(id)` and writes in place |
 | borrow-optional return accessors | `borrow_accessor.kizu` | `fn (self: &var Registry) user(id) -> ?&var User` feeds the caller's capture |

@@ -48,7 +48,7 @@ func ownerUnionDeinitCall(expr ast.Expression, binding string) bool {
 		return false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || field.Namespace || !typ.CleanupMethod(field.Name) {
+	if !ok || field.Namespace || field.Name != typ.CleanupMethod {
 		return false
 	}
 	return ownerUnionIdentName(field.Receiver) == binding

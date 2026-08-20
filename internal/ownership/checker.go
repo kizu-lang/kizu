@@ -618,8 +618,12 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 		return errorf("move error: defer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || !typ.CleanupMethod(field.Name) {
+	if !ok {
 		return errorf("move error: defer expects cleanup method call")
+	}
+	if field.Name != typ.CleanupMethod {
+		return errorf("move error: defer cleanup must be `%s`, got `%s`",
+			typ.CleanupMethod, field.Name)
 	}
 	if _, err := c.readExpr(field.Receiver, env); err != nil {
 		return err
@@ -644,8 +648,12 @@ func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
 		return errorf("move error: errdefer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	if !ok || !typ.CleanupMethod(field.Name) {
+	if !ok {
 		return errorf("move error: errdefer expects cleanup method call")
+	}
+	if field.Name != typ.CleanupMethod {
+		return errorf("move error: errdefer cleanup must be `%s`, got `%s`",
+			typ.CleanupMethod, field.Name)
 	}
 	if _, err := c.readExpr(field.Receiver, env); err != nil {
 		return err
@@ -5202,7 +5210,7 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	if err != nil {
 		return "", true, err
 	}
-	if typ.CleanupMethod(field.Name) {
+	if field.Name == typ.CleanupMethod {
 		// Destructive cleanup stays on one direct field: a nested path would
 		// bypass the intermediate type's own deinit (ADR-0067).
 		if strings.Contains(receiver.field, ".") {
@@ -5223,7 +5231,7 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	if err != nil {
 		return "", true, err
 	}
-	if typ.CleanupMethod(field.Name) {
+	if field.Name == typ.CleanupMethod {
 		receiver.owner.markFieldDeinit(receiver.field)
 	}
 	return result, true, nil
@@ -5378,7 +5386,7 @@ func (c *Checker) checkBoxReceiverExpr(
 	if err != nil {
 		return "", true, err
 	}
-	if typ.CleanupMethod(field.Name) && borrowedField != "" {
+	if field.Name == typ.CleanupMethod && borrowedField != "" {
 		return "", true, errorf("box error: `Box.%s` requires local Box receiver", field.Name)
 	}
 	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
