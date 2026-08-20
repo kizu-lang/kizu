@@ -13,6 +13,7 @@ std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
 std::mem::leak<T>(value: T) -> void
 box.borrow() -> &T
 box.borrow_mut() -> &var T
+box.take() -> T
 box.deinit() -> void
 std::mem::len(bytes: []u8) -> i64
 std::mem::byte_at(bytes: []u8, index: i64) -> ?u8
@@ -36,6 +37,9 @@ allocator binding を move しません。
 
 `std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
 non-copy / move-only な indirection です。
+`box.take()` は Box とその allocation を consume し、payload の所有権を caller に
+戻します。receiver は local binding に限り、borrow 中は呼べません。payload を
+使い続けるときは `take`、Box と payload をまとめて解放するときは `deinit` を使います。
 `std::mem` の safe API は raw pointer を返しません。
 `std::mem::slice` と `std::mem::byte_at` は境界外を `null` として返します
 (lookup の不在は失敗ではなく答えであるため。基準は `docs/style.md`)。
@@ -44,5 +48,5 @@ trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途�
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
-`Box<T>` の borrow 規則(束縛位置、provenance、borrow 中の move / deinit 禁止)、
+`Box<T>` の borrow 規則(束縛位置、provenance、borrow 中の move / take / deinit 禁止)、
 `leak` と `Limit` が持つ「危険を明示語にする」役割は SPEC §14.3 と §14.4 にあります。

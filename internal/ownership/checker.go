@@ -4471,9 +4471,8 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if name == "std::internal::builtin::arena" {
-		typ, err := c.checkArenaTypeApply(typeArg, args, env)
-		return typ, true, err
+	if strings.HasPrefix(name, "std::internal::builtin::arena") {
+		return c.checkBuiltinArenaTypeApply(name, typeArg, args, env)
 	}
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, ok, err
@@ -4482,6 +4481,39 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 		return typ, ok, err
 	}
 	return c.checkBuiltinTestingTypeApply(name, typeArg, args, env)
+}
+
+// checkBuiltinArenaTypeApply validates the Arena constructor and the storage
+// primitives reserved to std::arena's owner-element cleanup wrapper.
+func (c *Checker) checkBuiltinArenaTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if name == "std::internal::builtin::arena" {
+		typ, err := c.checkArenaTypeApply(typeArg, args, env)
+		return typ, true, err
+	}
+	receiver := fmt.Sprintf("std::arena::Arena<%s>", typeArg)
+	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
+	return c.checkBuiltinReceiverMethod(name, receiver,
+		func(rest []ast.Expression) (string, error) {
+			if len(rest) != 0 {
+				return "", errorf("arena error: `Arena.%s` expects 0 args, got %d",
+					method, len(rest))
+			}
+			switch method {
+			case "len":
+				return "i64", nil
+			case "pop_or_panic":
+				return typeArg, nil
+			case "deinit":
+				return "void", nil
+			default:
+				return "", errorf("arena error: Arena has no storage primitive `%s`", method)
+			}
+		}, args, env)
 }
 
 // checkBuiltinTestingTypeApply validates typed std::testing primitives.
@@ -5728,6 +5760,10 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 	if err != nil {
 		return "", true, err
 	}
+	if base, _, ok := splitGenericType(receiver.typeName); ok &&
+		base == "std::mem::Box" && field.Name == "take" {
+		return "", true, errorf("box error: `Box.take` requires local Box receiver")
+	}
 	if field.Name == typ.CleanupMethod {
 		// Destructive cleanup stays on one direct field: a nested path would
 		// bypass the intermediate type's own deinit (ADR-0067).
@@ -5904,7 +5940,7 @@ func (c *Checker) checkBoxReceiverExpr(
 	if err != nil {
 		return "", true, err
 	}
-	if field.Name == typ.CleanupMethod && borrowedField != "" {
+	if (field.Name == "take" || field.Name == typ.CleanupMethod) && borrowedField != "" {
 		return "", true, errorf("box error: `Box.%s` requires local Box receiver", field.Name)
 	}
 	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
@@ -5922,7 +5958,7 @@ func (c *Checker) checkBoxMethodForTarget(
 	case "borrow", "borrow_mut":
 		return "", errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
 			name, name)
-	case "deinit":
+	case "take", "deinit":
 		if target.hasAnyBorrow() {
 			return "", errorf("box error: `Box.%s` cannot run while box is borrowed", name)
 		}
@@ -5931,6 +5967,10 @@ func (c *Checker) checkBoxMethodForTarget(
 		}
 		if field == "" {
 			target.moved = true
+		}
+		if name == "take" {
+			_, elem, _ := splitGenericType(target.typeName)
+			return elem, nil
 		}
 		return "void", nil
 	default:

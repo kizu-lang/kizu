@@ -803,6 +803,11 @@ void kizu_panic_array_empty(int64_t line, int64_t column) {
     abort();
 }
 
+void kizu_panic_arena_empty(int64_t line, int64_t column) {
+    kizu_panic_summary("arena pop from empty", line, column);
+    abort();
+}
+
 void kizu_panic_arena_handle(int64_t line, int64_t column) {
     kizu_panic_summary("invalid arena handle", line, column);
     abort();
@@ -1474,6 +1479,20 @@ void *kizu_arena_get(void *handle, int64_t index) {
         return NULL;
     }
     return arena->data + index * arena->elem_size;
+}
+
+int64_t kizu_arena_len(void *handle) {
+    KizuArena *arena = (KizuArena *)handle;
+    return arena ? arena->len : 0;
+}
+
+void *kizu_arena_pop(void *handle) {
+    KizuArena *arena = (KizuArena *)handle;
+    if (!arena || arena->len <= 0) {
+        return NULL;
+    }
+    arena->len -= 1;
+    return arena->data + arena->len * arena->elem_size;
 }
 
 void kizu_arena_deinit(void *handle) {

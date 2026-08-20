@@ -48,7 +48,9 @@ go test ./...
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `arena.at_mut` writes elements in place | `arena_at_mut.kizu` | bumps a struct field behind a handle through a capture borrow |
 | handles are copy IDs | `arena_dag.kizu` | two parents share one child and the handle stays usable |
+| arena owner-element cleanup | `arena_owner_elements.kizu` | borrows an owned element, then deinitializes it before arena storage |
 | `std::mem::Box<T>` recursive payloads | `std_mem_box_ast.kizu` | builds a boxed AST, borrows a child, and closes owners with `deinit` |
+| `Box.take` payload transfer | `std_mem_box_take.kizu` | consumes the box cell and continues with its owned payload |
 | `at_mut` through a `&var` parameter | `std_map_at_mut_helper.kizu` | moves counter-update logic into a helper taking the map by `&var` |
 | `at_mut` on an owner's container field | `std_array_at_mut_field.kizu` | a `&var self` method captures `self.users.at_mut(id)` and writes in place |
 | borrow-optional return accessors | `borrow_accessor.kizu` | `fn (self: &var Registry) user(id) -> ?&var User` feeds the caller's capture |
@@ -235,6 +237,7 @@ single source file. Run them with `kizu check <package-root>`.
 | array get is copy-only | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
 | array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
 | box allocation failure is a recoverable error | `negative/std_mem_box_oom.kizu` | `runtime error: std::mem::Error::OutOfMemory` |
+| `Box.take` consumes the box and waits for borrows | `negative/std_mem_box_take_after_take.kizu`, `negative/std_mem_box_take_while_borrowed.kizu` | `moved value` / `cannot run while box is borrowed` |
 | array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |
 | borrowed array blocks append | `negative/std_array_append_while_borrowed.kizu` | `cannot run while array is borrowed` |
 | borrowed array blocks deinit | `negative/std_array_deinit_while_borrowed.kizu` | `cannot run while array is borrowed` |

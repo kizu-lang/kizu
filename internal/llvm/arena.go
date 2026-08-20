@@ -15,6 +15,8 @@ func (e *emitter) writeArenaRuntimeDecls() {
 	e.out.WriteString("declare ptr @kizu_arena_new(ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_arena_add(ptr, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_arena_get(ptr, i64)\n")
+	e.out.WriteString("declare i64 @kizu_arena_len(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_arena_pop(ptr)\n")
 	e.out.WriteString("declare void @kizu_arena_deinit(ptr)\n\n")
 }
 
@@ -43,11 +45,44 @@ func (e *emitter) writeArenaInstr(instr *ir.Instr) error {
 		return e.writeArenaAt(instr)
 	case "arena.at_mut":
 		return e.writeArenaAtMut(instr)
+	case "arena.len":
+		return e.writeArenaLen(instr)
+	case "arena.pop_or_panic":
+		return e.writeArenaPopOrPanic(instr)
 	case "arena.deinit":
 		return e.writeArenaDeinit(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported arena instruction `%s`", instr.Op)
 	}
+}
+
+// writeArenaLen returns the number of initialized elements still owned by the arena.
+func (e *emitter) writeArenaLen(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
+		return fmt.Errorf("llvm error: arena.len expects Arena<T> -> i64")
+	}
+	arena := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_arena_len(ptr %s)\n",
+		resultName, arena.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeArenaPopOrPanic moves the last element out for Arena.deinit's cleanup cascade.
+func (e *emitter) writeArenaPopOrPanic(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: arena.pop_or_panic expects Arena<T> -> T")
+	}
+	arena := e.value(instr.Args[0])
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_pop(ptr %s)\n", ptrName, arena.operand)
+	e.writeNullFailure(instr, ptrName, "arena.pop.panic", "arena_empty")
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+		resultName, e.llvmType(instr.Result.Type), ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeArenaNew lowers std::arena::new<T>(allocator).

@@ -97,7 +97,9 @@ policy.
 - `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.
 - `std::arena::Handle<T>` is an opaque ID, not a raw pointer.
 - `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a local borrow-like value.
-- `std::arena::Arena<T>.deinit()` explicitly releases the arena and invalidates the binding.
+- `std::arena::Arena<T>` may own elements that themselves own resources.
+- `std::arena::Arena<T>.deinit()` consumes every initialized owner element before
+  releasing arena storage and invalidating the binding.
 - Values read through `arena.at` cannot be moved out.
 - A handle can only be used with the arena that produced it.
 - A handle cannot outlive its arena.
@@ -239,6 +241,8 @@ memory-safety invariants to representative examples.
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena at is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_at_move.kizu` |
 | arena cleanup invalidates arena and handles | `examples/arena.kizu` | `examples/negative/arena_double_deinit.kizu`, `examples/negative/arena_add_after_deinit.kizu`, `examples/negative/arena_at_after_deinit.kizu`, `examples/negative/arena_deinit_while_borrowed.kizu`, `examples/negative/arena_deinit_wrong_receiver.kizu`, `examples/negative/arena_deinit_borrowed_receiver.kizu`, `examples/negative/arena_deinit_temporary_receiver.kizu`, `examples/negative/arena_deinit_moved_receiver.kizu`, `examples/negative/arena_handle_after_deinit.kizu` |
+| arena cleanup consumes owner elements before storage | `examples/arena_owner_elements.kizu` | |
+| Box take transfers its payload and consumes the cell | `examples/std_mem_box_take.kizu` | `examples/negative/std_mem_box_take_after_take.kizu`, `examples/negative/std_mem_box_take_while_borrowed.kizu` |
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | fixed-buffer allocator ties owners to the buffer frame | `examples/fixed_buffer.kizu`, `tests/behavior/src/fixed_buffer_allocator.kizu` | `examples/negative/fixed_buffer_owner_escape.kizu`, `examples/negative/fixed_buffer_allocator_escape.kizu`, `examples/negative/fixed_buffer_alias.kizu`, `examples/negative/fixed_buffer_reborrow.kizu`, `examples/negative/fixed_buffer_unbound_result.kizu`, `examples/negative/fixed_buffer_inline_factory.kizu`, `examples/negative/fixed_buffer_struct_capture.kizu` |

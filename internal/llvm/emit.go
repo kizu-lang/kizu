@@ -148,6 +148,7 @@ var panicEntries = map[string]panicEntry{
 	"bounds":       {entry: "kizu_panic_bounds", params: []string{"i64", "i64"}},
 	"range":        {entry: "kizu_panic_range", params: []string{"i64", "i64", "i64"}},
 	"array_empty":  {entry: "kizu_panic_array_empty"},
+	"arena_empty":  {entry: "kizu_panic_arena_empty"},
 	"arena_handle": {entry: "kizu_panic_arena_handle"},
 	"arena_add":    {entry: "kizu_panic_arena_add"},
 	"test_fail":    {entry: "kizu_panic_test_fail", params: []string{"ptr", "i64"}},
@@ -299,6 +300,8 @@ func instrPanicEntries(instr *ir.Instr) []string {
 		return []string{"bounds"}
 	case "array.pop_or_panic":
 		return []string{"array_empty"}
+	case "arena.pop_or_panic":
+		return []string{"arena_empty"}
 	case "arena.at":
 		return []string{"arena_handle"}
 	case "arena.add":
@@ -2312,7 +2315,7 @@ func continuationLabel(instr *ir.Instr) (string, bool) {
 		return helperLabel(instr.Args[0].Name, "pass"), true
 	case "array.pop", "array.get", "map.get":
 		return helperLabel(instr.Result.Name, "array.join"), true
-	case "array.get_or_panic", "map.take_value_at", "arena.at":
+	case "array.get_or_panic", "map.take_value_at", "arena.at", "arena.pop_or_panic":
 		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true
 	case "arena.add":
 		return helperLabel(localName(instr.Result.Name)+".bad", "ok"), true

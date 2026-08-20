@@ -1539,6 +1539,9 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if _, ok := boxPrimitives[qualified]; ok {
 		return qualified, true
 	}
+	if _, ok := arenaPrimitives[qualified]; ok {
+		return qualified, true
+	}
 	return "", false
 }
 
@@ -1580,28 +1583,9 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	typeArg string,
 	rawArgs []ast.Expression,
 ) (Value, error) {
-	// An array or map primitive carries its element type as an immediate the
-	// backend reads, so the call itself declares no parameter types to hand over.
-	if method, ok := arrayPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerArrayMethod(method, l.resolveType(typeArg), args)
-	}
-	if method, ok := mapPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
-	}
-	if method, ok := boxPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerBoxMethod(method, l.resolveType(typeArg), args)
+	value, handled, err := l.lowerTypedContainerPrimitive(name, typeArg, rawArgs)
+	if handled || err != nil {
+		return value, err
 	}
 	// expect_equal lowers to its own instruction, so its std wrapper body is
 	// never called. Its arguments still arrive at the types that wrapper
@@ -1636,6 +1620,51 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		return Value{}, err
 	}
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
+}
+
+// lowerTypedContainerPrimitive lowers private storage operations whose static
+// element type is carried as an instruction immediate.
+func (l *lowerer) lowerTypedContainerPrimitive(
+	name string,
+	typeArg string,
+	rawArgs []ast.Expression,
+) (Value, bool, error) {
+	// A container primitive carries its element type as an immediate the backend
+	// reads, so the call itself declares no parameter types to hand over.
+	if method, ok := arrayPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerArrayMethod(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	if method, ok := mapPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerMapMethod(
+			method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
+		return value, true, err
+	}
+	if method, ok := boxPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerBoxMethod(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	if method, ok := arenaPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerArenaPrimitive(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	return Value{}, false, nil
 }
 
 // lowerArenaConstructor lowers std::arena::new<T>(allocator).
@@ -1718,7 +1747,7 @@ func (l *lowerer) lowerMethodReceiver(field *ast.FieldExpr) (Value, error) {
 	return l.lowerReceiverAddress(field.Receiver)
 }
 
-// lowerMethodCallExpr lowers arena method calls.
+// lowerMethodCallExpr lowers receiver method calls.
 func (l *lowerer) lowerMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
@@ -1753,19 +1782,35 @@ func (l *lowerer) lowerMethodCallExpr(
 		return Value{}, err
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
-	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(arrayTypeName, field.Name, elem, allArgs)
+	return l.lowerResolvedMethod(receiver.Type, field.Name, allArgs)
+}
+
+// lowerResolvedMethod dispatches a checked receiver to its std wrapper,
+// declared implementation, or compiler-known arena operation.
+func (l *lowerer) lowerResolvedMethod(
+	receiverType string,
+	method string,
+	allArgs []Value,
+) (Value, error) {
+	if elem, ok := arrayElementType(receiverType); ok {
+		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
 	}
-	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(mapTypeName, field.Name, valueType, allArgs)
+	if valueType, ok := mapValueType(receiverType); ok {
+		return l.lowerStdContainerMethod(mapTypeName, method, valueType, allArgs)
 	}
-	if elem, ok := boxElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(boxTypeName, field.Name, elem, allArgs)
+	if elem, ok := boxElementType(receiverType); ok {
+		return l.lowerStdContainerMethod(boxTypeName, method, elem, allArgs)
 	}
-	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
+	if elem := arenaElementType(receiverType); elem != "unknown" && method == typ.CleanupMethod {
+		if ast.OwnerType(l.deinitOwners, elem) {
+			return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
+		}
+		return l.lowerArenaMethod(method, receiverType, allArgs)
+	}
+	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
 	}
-	return l.lowerArenaMethod(field.Name, receiver.Type, allArgs)
+	return l.lowerArenaMethod(method, receiverType, allArgs)
 }
 
 // lowerArenaMethod lowers the compiler-known arena methods.
@@ -1964,6 +2009,29 @@ var boxPrimitives = map[string]string{
 	"std::internal::builtin::box_borrow_mut": "borrow_mut",
 	"std::internal::builtin::box_deinit":     "deinit",
 	"std::internal::builtin::box_take":       "take",
+}
+
+// arenaPrimitives maps the storage operations used only by std::arena's
+// owner-element cleanup wrapper to their IR instruction names.
+var arenaPrimitives = map[string]string{
+	"std::internal::builtin::arena_len":          "len",
+	"std::internal::builtin::arena_pop_or_panic": "pop_or_panic",
+	"std::internal::builtin::arena_deinit":       "deinit",
+}
+
+// lowerArenaPrimitive lowers the private storage operations std::arena uses to
+// consume owner elements before releasing the arena itself.
+func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
+	switch name {
+	case "len":
+		return l.emit("arena.len", "i64", args, elem), nil
+	case "pop_or_panic":
+		return l.emit("arena.pop_or_panic", elem, args, elem), nil
+	case "deinit":
+		return l.emit("arena.deinit", "void", args, elem), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown arena primitive `%s`", name)
+	}
 }
 
 // lowerBoxMethod lowers the runtime primitive one std::mem::Box<T> wrapper

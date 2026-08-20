@@ -1405,8 +1405,8 @@ cleanup の名前は `deinit` 1 つです。`deinit` は値と、値が保持し
 解放し、何も保持しない要素ではその consume が空になるだけです。要素型が決まって
 いない generic code も同じ 1 つを書きます。名前が 1 つなので任意の深さに合成でき、
 owner 要素の container を要素にする入れ子も書けます。owner 要素の `set` は、置き換え
-前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
-owner 型を要素にできません。
+前の要素を leak するため型 error です。Arena も owner 要素を持てて、arena の
+storage を解放する前に各 initialized element を consume します。
 
 owner payload を持つ `union` も owner aggregate です。宣言しなければ、active variant の
 payload を consume する `match` が導出されます。その `deinit` は active variant の
@@ -1648,7 +1648,8 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
 * `std::arena::Arena<T>.at(handle)` はローカル borrow を返す
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
-* `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
+* `std::arena::Arena<T>.deinit()` は initialized element を各要素の `deinit()` で
+  consume してから arena storage を解放し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * `owner.field.deinit()` は値を保持している場所の direct field だけ許可する(§8)
 * handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
@@ -2533,7 +2534,7 @@ container は borrow され、shared borrow 中は `insert` / `deinit` が、
 mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
 `Map.key_at` が返す key も map storage への view なので capture 限定です。
 
-**cleanup の義務.** `Array.deinit` は残っている initialized element を、
+**cleanup の義務.** `Array.deinit` と `Arena.deinit` は残っている initialized element を、
 `Map.deinit` は保持している value を cleanup してから storage を解放します。
 element / value cleanup は `T` の `deinit(self: T) -> void` を呼びます。
 owner はすべてそれを持つので(§8)、場合分けはありません。
@@ -2543,7 +2544,7 @@ owner はすべてそれを持つので(§8)、場合分けはありません。
 `Map.insert` は owner value に対して trap です(占有しているかは実行時に
 しか分からないため)。置き換えは `at_mut` で in-place に行います。
 
-`String.deinit` / `Box.deinit` / `Map.deinit` は caller 側の binding を
+`String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している
 場所では `owner.field.deinit()` の direct field cleanup も同じで、その field は
 以後使用できません(§8)。`deinit` 後の container 使用は safe Kizu では
@@ -2582,7 +2583,8 @@ storage を読むので、1 周目が解放した payload を 2 周目が解放�
 struct / union は non-copy です。`borrow` / `borrow_mut` は local borrow
 source であり、戻り値は local binding に束縛します。戻り値の由来は署名から
 構造的に self に tied と導出されます(ADR-0098)。borrow field は許可しません。
-borrow が生きている間は対象 `Box<T>` の move / deinit を禁止します。
+`take()` は local な Box を consume し、cell を解放して payload `T` を返します。
+borrow が生きている間は対象 `Box<T>` の move / `take` / `deinit` を禁止します。
 
 **element に置ける型.** `Array<T>` の element には arena、handle、nested
 array、`std::map::Map<K, V>` を置けます。raw pointer と stack buffer は

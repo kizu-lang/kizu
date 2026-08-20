@@ -4052,11 +4052,6 @@ func (c *Checker) checkArenaTypeApply(
 	if err != nil {
 		return "", err
 	}
-	if c.ownerType(elem) {
-		return "", errorf(
-			"type error: Arena cannot hold owner values; `%s` needs a deinit Arena never runs",
-			elem)
-	}
 	if len(args) != 1 {
 		return "", errorf(
 			"type error: `std::arena::new<%s>` expects exactly one allocator argument",
@@ -4081,9 +4076,8 @@ func (c *Checker) checkBuiltinTypeApply(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	if name == "std::internal::builtin::arena" {
-		typ, err := c.checkArenaTypeApply(typeArg, args, env, unsafe)
-		return typ, true, err
+	if strings.HasPrefix(name, "std::internal::builtin::arena") {
+		return c.checkBuiltinArenaTypeApply(name, typeArg, args, env, unsafe)
 	}
 	if typ, ok, err := c.checkBuiltinBoxTypeApply(
 		name, typeArg, args, env, unsafe,
@@ -4096,6 +4090,44 @@ func (c *Checker) checkBuiltinTypeApply(
 		return typ, ok, err
 	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
+}
+
+// checkBuiltinArenaTypeApply validates the Arena constructor and the storage
+// primitives used only by std::arena's owner-element cleanup wrapper.
+func (c *Checker) checkBuiltinArenaTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, bool, error) {
+	if name == "std::internal::builtin::arena" {
+		typ, err := c.checkArenaTypeApply(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	receiver := Type(fmt.Sprintf("std::arena::Arena<%s>", elem))
+	method := strings.TrimPrefix(name, "std::internal::builtin::arena_")
+	return c.checkBuiltinReceiverMethod(name, receiver,
+		func(rest []ast.Expression) (Type, error) {
+			if len(rest) != 0 {
+				return "", errorf("type error: `Arena.%s` expects 0 args, got %d",
+					method, len(rest))
+			}
+			switch method {
+			case "len":
+				return typeI64, nil
+			case "pop_or_panic":
+				return elem, nil
+			case "deinit":
+				return typeVoid, nil
+			default:
+				return "", errorf("type error: Arena has no storage primitive `%s`", method)
+			}
+		}, args, env, unsafe)
 }
 
 // checkBuiltinTestingTypeApply validates typed std::testing primitives.
@@ -5629,6 +5661,12 @@ func (c *Checker) checkBoxReceiverMethod(
 	case "borrow_mut":
 		return "", errorf(
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
+	case "take":
+		if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+			return "", errorf("type error: `Box.take` requires local Box receiver")
+		}
+		return c.checkStdMethod("std::mem::Box", []Type{elem}, "Box", field.Name,
+			args, env, unsafe)
 	case "deinit":
 		if _, ok := field.Receiver.(*ast.IdentExpr); !ok &&
 			!c.directFieldCleanupReceiver(field.Receiver, env) {

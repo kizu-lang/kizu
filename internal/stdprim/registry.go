@@ -87,6 +87,9 @@ var TypedCoreBuiltins = map[string]string{
 // nothing.
 var primitives = map[string]bool{
 	"std::internal::builtin::arena":                    true,
+	"std::internal::builtin::arena_deinit":             true,
+	"std::internal::builtin::arena_len":                true,
+	"std::internal::builtin::arena_pop_or_panic":       true,
 	"std::internal::builtin::array":                    true,
 	"std::internal::builtin::array_append":             true,
 	"std::internal::builtin::array_at":                 true,
