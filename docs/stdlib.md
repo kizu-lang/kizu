@@ -205,8 +205,9 @@ manifest lists no exports.
 The compiler still reserves the root namespace `std`. User packages cannot be
 named `std`.
 
-Do not create a separate Kizu compiler tree until the Go implementation is ready
-to be ported.
+The non-shipping compiler port lives under `compiler/`. It uses these public std
+wrappers and explicit runtime primitives; it must not add a second std surface
+or reach around them into Go helpers.
 
 ## Acceptance Rules For New Std APIs
 

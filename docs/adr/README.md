@@ -81,7 +81,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0074: control expressions and statement semicolons](0074-control-expressions-and-statement-semicolons.md)
 - [ADR-0075: owner aggregate cleanup and errdefer](0075-owner-aggregate-cleanup-and-errdefer.md)
 - [ADR-0079: struct literal field initializers name each field once](0079-struct-literal-field-initializers.md)
-- [ADR-0082: 実装は Go 一本にし、selfhost は言語が固まってから作り直す](0082-single-go-implementation.md) (0080 / 0081 を置換)
+- [ADR-0082: selfhost は Go 実装を機械移植し、shipping 経路を一つに保つ](0082-selfhost-mechanical-port.md) (0080 / 0081 を置換)
 - [ADR-0083: `run` は `build` した成果物を実行する](0083-run-executes-the-build.md)
 - [ADR-0084: 境界検査は IR に置き、backend は `cond_fail` を実装するだけにする](0084-bounds-checks-live-in-the-ir.md)
 - [ADR-0085: `main` は値を返さず、容量の増加戦略は実装が決める](0085-main-returns-void-and-growth-is-implementation-defined.md)

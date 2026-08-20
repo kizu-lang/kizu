@@ -33,7 +33,9 @@ package doc にあります。
   borrow / ownership の検査規則、`test` 宣言。境界は「利用者が自分で同じものを
   書けるか」で決まる。`std::json` は書けるので `docs/std/`、`Array.at` が
   capture 条件でしか消費できないのは書けないので SPEC。
-- 実装は Go 一本(ADR-0082)。selfhost は削除済みで、言語が固まるまで作り直さない。
+- shipping 実装は Go 一本で、`compiler/` は CLI から呼ばない selfhost 移植先
+  (ADR-0082)。`compiler/` を変更する前に `docs/selfhost-porting.md` を読む。
+  言語機能を移植先だけで追加しない。
 - Go の comment は英語で書く。package comment と `package main` の command
   comment は必須(pre-commit の `go comments` が見ている)。
 
@@ -68,7 +70,9 @@ ADR が持つのは **なぜそうしたか** と **却下した案とその理�
 - テストを pass させるだけの場当たり的変更やハードコードを入れない。
 - LLVM を文字列リテラルで書き下ろさない。ソースの形ごとの payload 型・
   関数名分岐・形状 template を作らない(ADR-0082)。
-- 第二実装を作らない。言語機能は Go 実装 1 つで完成させる(ADR-0082)。
+- shipping する第二実装を作らない。`compiler/` は移行中だけ置く non-shipping
+  target で、cutover まで CLI、fallback、user-facing command に接続しない
+  (ADR-0082)。
 - hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
 - 関数の内部形状や生成テキスト断片を grep で固定する**構造 pin を新規に追加しない**
   (ADR-0082)。検証は `examples/` と `tests/behavior/` の実行結果で行う。
