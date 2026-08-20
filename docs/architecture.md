@@ -49,6 +49,12 @@ source.kizu
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。挙動の正は例そのものが末尾に書いた case が持ちます。
 
+`internal/llvm` は出した text を自分で検査します(`verify.go`)。読む register が
+その関数の中で定義されていること、`alloca` が entry block にあることの 2 つで、
+どちらも壊れると診断の無い実行時の失敗になります —— 前者は clang が SSA 名だけを
+言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
+命令の形は固定しません(ADR-0080)。
+
 その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime object・
 toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
 入りません。front end は数 ms なので毎回通り、そこから先の link を飛ばします

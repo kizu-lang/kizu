@@ -12,17 +12,27 @@ import (
 // source position. This scan reports the same defect as an error that names
 // the function, before the text leaves the package.
 //
-// The scan checks existence only. It pins no instruction shape: any text where
-// read names are defined somewhere in the function passes.
+// It also checks that every `alloca` sits in its function's entry block. An
+// alloca anywhere else allocates on every execution and is reclaimed only when
+// the function returns, so one inside a loop grows the stack a slot per turn
+// until the program dies on the guard page — a failure with nothing in source
+// to point at. hoistAllocasToEntry is what holds this; the scan is what says so
+// if it ever stops.
+//
+// The scan checks existence and placement only. It pins no instruction shape:
+// any text where read names are defined somewhere in the function, and every
+// alloca is in the entry block, passes.
 func verifyEmittedText(text string) error {
 	types := map[string]bool{}
 	function := ""
+	blocks := 0
 	var defs map[string]bool
 	var uses []string
 	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case function == "" && strings.HasPrefix(line, "define "):
 			function = defineName(line)
+			blocks = 0
 			defs = map[string]bool{}
 			uses = nil
 			for _, name := range percentTokens(line) {
@@ -44,7 +54,14 @@ func verifyEmittedText(text string) error {
 		default:
 			if label, ok := labelDefName(line); ok {
 				defs[label] = true
+				blocks++
 				continue
+			}
+			if blocks > 1 && isAllocaLine(line) {
+				return fmt.Errorf(
+					"llvm error: emitter bug: function `%s` allocates outside its entry"+
+						" block, which grows the stack on every execution: %s",
+					function, strings.TrimSpace(line))
 			}
 			names := percentTokens(line)
 			if def, ok := instructionDef(line); ok {

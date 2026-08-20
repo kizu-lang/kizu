@@ -64,3 +64,72 @@ func TestVerifyEmittedTextIgnoresModuleLevelText(t *testing.T) {
 		t.Fatalf("valid text rejected: %v", err)
 	}
 }
+
+// TestVerifyEmittedTextReportsAllocaOutsideEntry catches the shape that grew the
+// stack a slot per loop turn: an alloca in a block the loop runs again.
+func TestVerifyEmittedTextReportsAllocaOutsideEntry(t *testing.T) {
+	text := strings.Join([]string{
+		"define void @drain(ptr %kizu.p) {",
+		"entry:",
+		"  br label %loop",
+		"loop:",
+		"  %kizu.1 = alloca i64",
+		"  store i64 0, ptr %kizu.1",
+		"  br label %loop",
+		"}",
+	}, "\n")
+	err := verifyEmittedText(text)
+	if err == nil {
+		t.Fatal("expected an alloca outside the entry block to be reported")
+	}
+	if !strings.Contains(err.Error(), "`drain`") || !strings.Contains(err.Error(), "alloca") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestVerifyEmittedTextAcceptsEntryAllocas accepts what hoistAllocasToEntry
+// produces: every alloca in the entry block, used from the blocks after it.
+func TestVerifyEmittedTextAcceptsEntryAllocas(t *testing.T) {
+	text := strings.Join([]string{
+		"define void @drain(ptr %kizu.p) {",
+		"entry:",
+		"  %kizu.1 = alloca i64",
+		"  br label %loop",
+		"loop:",
+		"  store i64 0, ptr %kizu.1",
+		"  br label %loop",
+		"}",
+	}, "\n")
+	if err := verifyEmittedText(text); err != nil {
+		t.Fatalf("expected entry-block allocas to pass, got %v", err)
+	}
+}
+
+// TestHoistAllocasToEntryMovesLoopSlots is the transform the invariant relies
+// on: the alloca moves, the store that fills it stays where it was written.
+func TestHoistAllocasToEntryMovesLoopSlots(t *testing.T) {
+	body := strings.Join([]string{
+		"entry:",
+		"  %kizu.1 = call ptr @f()",
+		"  br label %loop",
+		"loop:",
+		"  %kizu.2 = alloca i64",
+		"  store i64 0, ptr %kizu.2",
+		"  br label %loop",
+		"",
+	}, "\n")
+	hoisted := hoistAllocasToEntry(body)
+	lines := strings.Split(hoisted, "\n")
+	if lines[0] != "entry:" || lines[1] != "  %kizu.2 = alloca i64" {
+		t.Fatalf("alloca did not move to the entry block:\n%s", hoisted)
+	}
+	if strings.Count(hoisted, "= alloca") != 1 {
+		t.Fatalf("alloca was copied rather than moved:\n%s", hoisted)
+	}
+	if !strings.Contains(hoisted, "loop:\n  store i64 0, ptr %kizu.2") {
+		t.Fatalf("the store left the block it was written in:\n%s", hoisted)
+	}
+	if second := hoistAllocasToEntry(hoisted); second != hoisted {
+		t.Fatalf("hoisting is not idempotent:\n%s", second)
+	}
+}
