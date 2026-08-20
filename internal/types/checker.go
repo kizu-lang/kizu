@@ -50,14 +50,17 @@ func (c *Checker) underMark(
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
-	functions       map[string]*functionType
-	structs         map[string]*ast.StructDecl
-	enums           map[string]*enumType
-	errorSets       map[string]*errorSetType
-	unions          map[string]*unionType
-	contracts       map[string]*contractType
-	impls           map[string]map[string]*functionType
-	declaredTypes   map[string]bool
+	functions     map[string]*functionType
+	structs       map[string]*ast.StructDecl
+	enums         map[string]*enumType
+	errorSets     map[string]*errorSetType
+	unions        map[string]*unionType
+	contracts     map[string]*contractType
+	impls         map[string]map[string]*functionType
+	declaredTypes map[string]bool
+	// declaredDeinits names the types whose cleanup an author wrote. They hold
+	// an obligation of their own, so their fields are not taken one at a time.
+	declaredDeinits map[string]bool
 	currentReturn   Type
 	currentFunction *functionType
 	currentStd      bool
@@ -134,6 +137,7 @@ func New() *Checker {
 func (c *Checker) Check(program *ast.Program) error {
 	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -168,6 +172,7 @@ func (c *Checker) Check(program *ast.Program) error {
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
 		return []error{err}
 	}
@@ -763,9 +768,10 @@ func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
 	}
 	method := c.implMethod(decl.Name, "deinit")
 	if method == nil {
-		return errorf(
-			"type error: owner-payload union `%s` requires explicit `deinit(self: %s) -> void`",
-			decl.Name, decl.Name)
+		// The union holds an owner and declares nothing, so its cleanup is the
+		// derived one (ast.DeriveDeinit) and there is no author's body to
+		// validate. What that body does is fixed by the generator.
+		return nil
 	}
 	if err := c.checkOwnerUnionDeinitSignature(decl, method); err != nil {
 		return err
@@ -5580,7 +5586,7 @@ func (c *Checker) checkMethodCallExpr(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	if err := c.checkMethodReceiverPath(field, env); err != nil {
+	if err := checkMethodReceiverPath(field); err != nil {
 		return "", err
 	}
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
@@ -5597,7 +5603,7 @@ func (c *Checker) checkMethodCallExpr(
 // checkMethodReceiverPath enforces the field receiver boundary: any field path
 // rooted in a local binding may receive a method, but destructive cleanup stays
 // on one direct field so every type cleans its own fields.
-func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) error {
+func checkMethodReceiverPath(field *ast.FieldExpr) error {
 	receiver, ok := field.Receiver.(*ast.FieldExpr)
 	if !ok || receiver.Namespace {
 		return nil
@@ -5615,30 +5621,10 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 			receiver.String(), field.Name,
 		)
 	}
-	if c.allowsDirectFieldCleanup(receiver, env) {
-		return nil
-	}
-	return errorf(
-		"type error: field cleanup `%s.%s` is only allowed inside owner deinit",
-		receiver.String(), field.Name,
-	)
-}
-
-// allowsDirectFieldCleanup reports whether owner.field.deinit is in owner deinit.
-func (c *Checker) allowsDirectFieldCleanup(field *ast.FieldExpr, env *scope) bool {
-	fn := c.currentFunction
-	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || fn.returnType != typeVoid {
-		return false
-	}
-	owner, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok || len(fn.params) == 0 || len(fn.sig.Params) == 0 {
-		return false
-	}
-	ownerType, ok := env.lookup(owner.Name)
-	if !ok || fn.sig.Params[0].Name != owner.Name {
-		return false
-	}
-	return sameType(fn.params[0], ownerType)
+	// Who may consume a field is an ownership question -- whether the value is
+	// held or borrowed, and whether its type declares a cleanup of its own --
+	// and the ownership checker answers it. This one keeps the shape rule.
+	return nil
 }
 
 // checkKnownReceiverMethod validates non-arena builtin receiver families.
@@ -6644,10 +6630,20 @@ func (c *Checker) checkArenaDeinit(
 	return typeVoid, nil
 }
 
-// directFieldCleanupReceiver reports whether expr is an allowed field cleanup target.
+// directFieldCleanupReceiver reports whether expr names one direct field, the
+// shape a field cleanup takes. Whether that field may be consumed here is an
+// ownership question, answered there.
 func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bool {
 	field, ok := expr.(*ast.FieldExpr)
-	return ok && c.allowsDirectFieldCleanup(field, env)
+	if !ok {
+		return false
+	}
+	owner, direct := field.Receiver.(*ast.IdentExpr)
+	if !direct {
+		return false
+	}
+	_, found := env.lookup(owner.Name)
+	return found
 }
 
 // checkPtrRead validates unsafe raw pointer reads.

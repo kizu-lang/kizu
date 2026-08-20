@@ -549,8 +549,8 @@ self.a.b.len();        // ok: nested field receiver
 
 field receiver は root owner の ownership state に従います。read-only method は
 owner / path が読めるときだけ、mutating method は owner と重なる path が borrow 中で
-ないときだけ呼べます。`field.deinit()` のような destructive cleanup は、owner 型自身の
-`deinit(self: Owner) -> void` method body の中の direct field 1 段だけ許可します。
+ないときだけ呼べます。`field.deinit()` のような destructive cleanup は、値を保持して
+いる場所の direct field 1 段だけ許可します(§8)。borrow の field は拒否します。
 `self.a.b.deinit()` のような nested cleanup は、中間型 `a` 自身の deinit を迂回する
 ため拒否します。
 
@@ -1105,8 +1105,8 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
   optional(`?[]u8`)は field に置けない —— view の義務は借用で、それを開く
   capture が field 型を読む規則から見えないため。union payload・static
   argument(`Array<?u8>` など)・borrow(`&?T`)の対象にはできない
-* `?Owner` field の cleanup 契約は §14.4 にある。struct は explicit `deinit`
-  を持ち、その中で optional を開いて中身を解放する
+* `?Owner` field の cleanup 契約は §14.4 にある。`deinit` の中で optional を開いて
+  中身を解放する。宣言しなければ、それを行う body が導出される
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
   semantics の対象外(unsafe 世界の C ABI 用)
 
@@ -1353,11 +1353,53 @@ consume しなければなりません。呼び出し側は move 済みで、そ
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
 
-owner field または owner payload を含む型は `deinit(self: T) -> void` を必須とし、
-cleanup contract を source 上に見えるようにします。
-`deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可し、
-body は self の owner field をすべての path で consume しなければなりません。
-`deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
+owner field または owner payload を含む型は、それを持つことによって owner です。
+`deinit(self: T) -> void` を宣言しなければ、保持しているものを宣言順に consume する
+body が導出されます。
+
+```kizu
+struct Visitor {
+    name: string::String,
+    nick: ?string::String,
+}
+// 導出される body:
+//   self.name.deinit();
+//   if self.nick |held| { held.deinit(); }
+```
+
+義務が field の義務だけである型に、書ける body は 1 つしかありません。「`deinit` は
+receiver の owner field をすべての path で consume する」がそれを固定しており、
+field は互いに alias しないので順序も効きません。手で書いても書けるのは導出結果
+だけで、それは原理 10 が畳めと言う定型です。cleanup contract は field の型に既に
+見えており、呼び出し `value.deinit()` は source に残るので、原理 2 の hidden control
+flow にも当たりません。
+
+自分で確保したものを解放する型 —— allocator から取ったメモリ、descriptor ——
+は `deinit` を宣言します。その義務は型のものであり、どの field のものでもないため、
+導出できません。宣言した型はその body を使います。
+
+owner field は、値を保持している場所で 1 つずつ consume できます。値で受けた
+parameter の呼び出し側は既に手放しており、local は frame 自身のものなので、
+分解しても二重解放になりません。義務が aggregate から field へ移るだけで、
+どの field も block を出るまでに consume されなければなりません。
+
+```kizu
+fn finish(partial: Partial) -> Full {
+    return Full { first: move partial.first, last: move partial.last };
+}
+```
+
+`deinit` を宣言した型は丸ごと consume します。その義務は型のものであり、
+どの field の consume でも果たされないため、分解すると出口の無い値が残ります。
+例外はその型自身の `deinit` body で、そこは宣言義務を果たしている最中です。
+
+field を 1 つ取り出した値は、もう自分の型と一致しません。丸ごと move すること、
+borrow すること、`deinit()` を呼ぶことは compile error です。いずれも既に無い
+field に手を伸ばします。残りも取り出すか、1 つも取り出さないかです。
+
+borrow から field を取り出すことはできません。貸し手がまだ持っているものを
+解放することになります。
+
 cleanup の名前は `deinit` 1 つです。`deinit` は値と、値が保持しているものを
 解放します。container なら要素を要素自身の `deinit()` で consume してから buffer を
 解放し、何も保持しない要素ではその consume が空になるだけです。要素型が決まって
@@ -1366,7 +1408,8 @@ owner 要素の container を要素にする入れ子も書けます。owner 要
 前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
 owner 型を要素にできません。
 
-owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
+owner payload を持つ `union` も owner aggregate です。宣言しなければ、active variant の
+payload を consume する `match` が導出されます。その `deinit` は active variant の
 payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の
 payload storage は cleanup しません。tag が初期化済みと示す payload だけを処理します。
 inline payload の size と alignment は compile time に確定している必要があります。
@@ -1606,7 +1649,7 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
 * `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
-* `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可する
+* `owner.field.deinit()` は値を保持している場所の direct field だけ許可する(§8)
 * handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
   複製は元と同じ arena 由来を引き継ぎ、以下の規則は複製にも適用される
 * handle は borrow より長生きしてよい
@@ -2503,14 +2546,13 @@ implicit destructor でも `T.deinit()` の合成でもありません。
 しか分からないため)。置き換えは `at_mut` で in-place に行います。
 
 `String.deinit` / `Box.deinit` / `Map.deinit` は caller 側の binding を
-無効化する必要があるため、owned local receiver 限定です。例外として、
-owner 型自身の `deinit(self: Owner) -> void` method 内では
-`self.field.deinit()` の direct field cleanup を許可し、その field は
-同じ body 内で以後使用できません。`deinit` 後の container 使用は safe Kizu
-では禁止します。
+無効化する必要があるため、owned local receiver 限定です。値を保持している
+場所では `owner.field.deinit()` の direct field cleanup も同じで、その field は
+以後使用できません(§8)。`deinit` 後の container 使用は safe Kizu では
+禁止します。
 
-**`?Owner` field.** field が optional な owner のときも義務は同じで、
-struct は explicit `deinit` を持ちます。開くのは capture です。
+**`?Owner` field.** field が optional な owner のときも義務は同じです。
+開くのは capture です。
 
 ```kizu
 fn (self: Visitor) deinit() -> void {
@@ -2521,12 +2563,11 @@ fn (self: Visitor) deinit() -> void {
 }
 ```
 
-capture が束縛する payload は、その型自身の `deinit` の中でだけ owner です。
-そこは receiver を値で受けて分解している場所で、`self.field.deinit()` に与えて
-いる例外と同じ位置です。それ以外の場所 —— 借用越しの読み、他の関数 ——
-では payload は borrow で、consume は拒否します。payload は field storage の
-中にあり、開いても渡されないためで、`match` が owner union payload に対して
-持つ分け方と同じです。
+capture が束縛する payload は、値を保持している場所でだけ owner です。
+そこは `self.field.deinit()` に与えているのと同じ判定で、分解できる場所と
+同じです(§8)。借用越しの読みでは payload は borrow で、consume は拒否します。
+payload は field storage の中にあり、借りた値では開いても渡されないためで、
+`match` が owner union payload に対して持つ分け方と同じです。
 
 開いた payload をその body で解放しないのは error です。field を開くことが
 その field の義務を果たす唯一の経路なので、開いて捨てると誰も解放しません。

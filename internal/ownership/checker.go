@@ -23,7 +23,10 @@ type Checker struct {
 	nextID       int
 	consumeNeeds map[string]bool
 	deinitOwners map[string]bool
-	structOrder  map[string][]string
+	// declaredDeinits names the types whose cleanup an author wrote. Those hold
+	// an obligation of their own, so their fields cannot be taken one at a time.
+	declaredDeinits map[string]bool
+	structOrder     map[string][]string
 	// structPublicOrder lists each struct's public fields in declaration order,
 	// which is what `std::meta::public_fields` walks.
 	structPublicOrder map[string][]string
@@ -187,6 +190,7 @@ func New() *Checker {
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return err
 	}
@@ -194,9 +198,6 @@ func (c *Checker) Check(program *ast.Program) error {
 	c.collectErrorSets(program)
 	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
-		return err
-	}
-	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
 		return err
 	}
 	for _, decl := range program.Decls {
@@ -251,6 +252,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 // every independent move error at once. Setup phases still fail fast.
 func (c *Checker) CheckAll(program *ast.Program) []error {
 	c.deinitOwners = ast.DeinitOwners(program)
+	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
 		return []error{err}
 	}
@@ -261,9 +263,6 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 		return []error{err}
 	}
 	var errs []error
-	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
-		errs = append(errs, err)
-	}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -446,42 +445,6 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return err
 	}
 	return c.checkDeinitCompleteness(fn, env)
-}
-
-// checkOwnerAggregatesDeclareDeinit enforces ADR-0091: a struct or union that
-// holds owner fields or payloads is itself an owner and must declare deinit,
-// so its cleanup contract is visible in source. Generic declarations wait for
-// instantiation, where their spellings become concrete.
-func (c *Checker) checkOwnerAggregatesDeclareDeinit(program *ast.Program) error {
-	for _, decl := range program.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
-				continue
-			}
-			for _, field := range d.Fields {
-				if !c.fieldTypeNeedsConsume(typ.Text(field.TypeName)) {
-					continue
-				}
-				return errorf(
-					"move error: struct `%s` holds owner field `%s` and must declare deinit",
-					d.Name, field.Name)
-			}
-		case *ast.UnionDecl:
-			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
-				continue
-			}
-			for _, variant := range d.Variants {
-				if variant.Payload == nil || !c.valueTypeNeedsConsume(typ.Text(variant.Payload)) {
-					continue
-				}
-				return errorf(
-					"move error: union `%s` holds owner payload `%s` and must declare deinit",
-					d.Name, variant.Name)
-			}
-		}
-	}
-	return nil
 }
 
 // checkDeinitCompleteness enforces ADR-0091: a struct deinit must consume every
@@ -805,7 +768,42 @@ func (c *Checker) bindingNeedsConsume(value *binding) bool {
 	if value.handleArenaID != 0 {
 		return false
 	}
+	if c.allOwnerFieldsConsumed(value) {
+		return false
+	}
 	return c.valueTypeNeedsConsume(value.typeName)
+}
+
+// partiallyConsumedField names one field already taken out of a value that
+// still holds others. Such a value no longer matches its own type: handing it
+// on whole, lending it, or running its cleanup would all reach a field that is
+// gone, so it stays where it is until the rest are taken too.
+func partiallyConsumedField(value *binding) (string, bool) {
+	for name := range value.fieldDeinit {
+		return name, true
+	}
+	return "", false
+}
+
+// allOwnerFieldsConsumed reports whether a value taken apart field by field has
+// nothing left to consume. A type whose obligation is its fields' obligations
+// is discharged once each of them is, which is the same thing its derived
+// deinit does in one call. A type that declares its own deinit holds one more
+// obligation that no field consume reaches, so it never reads as done here.
+func (c *Checker) allOwnerFieldsConsumed(value *binding) bool {
+	if len(value.fieldDeinit) == 0 || ast.OwnerType(c.declaredDeinits, value.typeName) {
+		return false
+	}
+	fields := c.structs[value.typeName]
+	if fields == nil {
+		return false
+	}
+	for name, typeName := range fields {
+		if c.fieldTypeNeedsConsume(typeName) && !value.fieldDeinit[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // leakExit names the exit a leak check guards. An early error exit points its
@@ -3294,6 +3292,15 @@ func splitMoveMarker(expr ast.Expression) (*ast.MoveExpr, ast.Expression) {
 // movePlaceExpr consumes a non-copy identifier when present and reports whether
 // the value was handed off from a named place.
 func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, error) {
+	if field, ok := expr.(*ast.FieldExpr); ok && !field.Namespace {
+		// A field of a value the frame holds is a place too: taking it out
+		// hands the obligation on, so it is marked like any other hand-off.
+		typeName, err := c.moveFieldExpr(field, env)
+		if err != nil {
+			return "", false, err
+		}
+		return typeName, !c.isCopyType(typeName), nil
+	}
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		typeName, err := c.moveNonIdentExpr(expr, env)
@@ -3324,6 +3331,11 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
 		return "", false, errorAt(ident.Span,
 			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
+	}
+	if field, ok := partiallyConsumedField(value); ok {
+		return "", false, errorAt(ident.Span,
+			"move error: field `%s.%s` is already consumed, so `%s` cannot be handed on whole",
+			ident.Name, field, ident.Name)
 	}
 	if c.isCopyType(value.typeName) {
 		return value.typeName, false, nil
@@ -5361,8 +5373,54 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			"arena error: arena.at returns a local borrow and its fields cannot be moved",
 		)
 	}
-	return "", errorAt(expr.Span, "move error: field `%s` cannot be moved out of aggregate",
-		expr.String())
+	if err := c.consumeOwnerField(expr, env); err != nil {
+		return "", err
+	}
+	return typeName, nil
+}
+
+// consumeOwnerField takes one owner field out of a value the frame holds. The
+// caller of a value parameter has already let go, and a local is the frame's
+// own, so taking a field apart cannot free anything twice: the obligation moves
+// from the aggregate to the field, and every field still has to be consumed
+// before the block ends.
+//
+// A type that declares its own `deinit` is taken whole. Its obligation is the
+// type's -- memory it took from an allocator, a descriptor -- and no sequence
+// of field consumes discharges it, so taking it apart would leave a value with
+// no way out (#1633).
+func (c *Checker) consumeOwnerField(expr *ast.FieldExpr, env *scope) error {
+	root, path, ok := directFieldRoot(expr, env)
+	if !ok || root == nil || path == "" {
+		return errorAt(expr.Span, "move error: field `%s` cannot be moved out of aggregate",
+			expr.String())
+	}
+	if strings.Contains(path, ".") {
+		// A nested field belongs to the value in between, which is still whole
+		// here. Take that one out first and the field comes with it.
+		return errorAt(expr.Span,
+			"move error: field `%s` belongs to `%s`; move that one out first",
+			expr.String(), path[:strings.LastIndexByte(path, '.')])
+	}
+	if ast.OwnerType(c.declaredDeinits, root.typeName) {
+		return errorAt(expr.Span,
+			"move error: `%s` declares its own deinit and is consumed whole, "+
+				"so field `%s` cannot be moved out",
+			root.typeName, expr.String())
+	}
+	if root.moved || root.deinitialized {
+		return errorAt(expr.Span, "move error: moved value `%s` was used", root.name)
+	}
+	if root.hasAnyBorrow() {
+		return errorAt(expr.Span,
+			"borrow error: field `%s` cannot be moved while `%s` is borrowed",
+			expr.String(), root.name)
+	}
+	if root.fieldDeinit[path] {
+		return errorAt(expr.Span, "move error: field `%s` was already consumed", expr.String())
+	}
+	root.markFieldDeinit(path)
+	return nil
 }
 
 // checkAssignmentBorrowConflict rejects writes that overlap active borrows.
@@ -6630,6 +6688,14 @@ func (c *Checker) checkImplMethodCall(
 			return "", true, errorf(
 				"borrow error: value `%s` cannot be moved while borrowed", value.name)
 		}
+		// Inside the type's own deinit the fields are what the body consumes,
+		// and consuming them is how it finishes; anywhere else a value missing
+		// a field cannot run a cleanup that reaches for it.
+		if field, ok := partiallyConsumedField(value); ok && !c.insideDeinitOf(value) {
+			return "", true, errorf(
+				"move error: field `%s.%s` is already consumed, so `%s.deinit()` "+
+					"would release it twice", value.name, field, value.name)
+		}
 		value.moved = true
 	}
 	return returnTypeName(method), true, nil
@@ -7005,36 +7071,56 @@ func checkBorrowConflict(value *binding, mutable bool) error {
 // containing it, so `a.b` collides with `a.b.c` while `a.b` and `a.c` stay
 // disjoint.
 func checkBorrowConflictForField(value *binding, field string, mutable bool) error {
-	if field != "" {
-		if value.activeMutBorrows > 0 {
-			return errorf(
-				"borrow error: value `%s` cannot be borrowed while mutably borrowed",
-				value.name,
-			)
-		}
-		if mutable && value.activeBorrows > 0 {
-			return errorf(
-				"borrow error: field `%s.%s` cannot be mutably borrowed while value is borrowed",
-				value.name,
-				field,
-			)
-		}
-		if mutable && overlappingFieldCount(value.fieldBorrows, field) > 0 {
-			return errorf(
-				"borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
-				value.name,
-				field,
-			)
-		}
-		if overlappingFieldCount(value.fieldMutBorrows, field) > 0 {
-			return errorf(
-				"borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
-				value.name,
-				field,
-			)
-		}
-		return nil
+	// A value one of whose fields has been taken out no longer matches its own
+	// type, and a borrow hands the whole of it to someone who will read the
+	// field that is gone.
+	if consumed, ok := partiallyConsumedField(value); ok && consumed != field {
+		return errorf(
+			"borrow error: field `%s.%s` is already consumed, so `%s` cannot be borrowed",
+			value.name, consumed, value.name,
+		)
 	}
+	if field != "" {
+		return checkFieldBorrowConflict(value, field, mutable)
+	}
+	return checkValueBorrowConflict(value, mutable)
+}
+
+// checkFieldBorrowConflict rejects a field borrow that overlaps a live one.
+func checkFieldBorrowConflict(value *binding, field string, mutable bool) error {
+	if value.activeMutBorrows > 0 {
+		return errorf(
+			"borrow error: value `%s` cannot be borrowed while mutably borrowed",
+			value.name,
+		)
+	}
+	if mutable && value.activeBorrows > 0 {
+		return errorf(
+			"borrow error: field `%s.%s` cannot be mutably borrowed while value is borrowed",
+			value.name,
+			field,
+		)
+	}
+	if mutable && overlappingFieldCount(value.fieldBorrows, field) > 0 {
+		return errorf(
+			"borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
+			value.name,
+			field,
+		)
+	}
+	if overlappingFieldCount(value.fieldMutBorrows, field) > 0 {
+		return errorf(
+			"borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
+			value.name,
+			field,
+		)
+	}
+	return nil
+}
+
+// checkValueBorrowConflict rejects a whole-value borrow that overlaps a live
+// one, including a borrow of any of its fields.
+func checkValueBorrowConflict(value *binding, mutable bool) error {
 	if mutable && value.activeBorrows > 0 {
 		return errorf(
 			"borrow error: value `%s` cannot be mutably borrowed while borrowed",
@@ -7196,10 +7282,25 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 	return c.allowsOwnerFieldCleanup(receiver.owner)
 }
 
-// allowsOwnerFieldCleanup reports whether the current function is the owner
-// deinit of this binding: the one place a field of it may be consumed, because
-// the receiver arrived by value and is being taken apart.
+// allowsOwnerFieldCleanup reports whether a field of this binding may be
+// consumed here. The value has to be one the frame holds -- a borrow is
+// someone else's and taking it apart would free what the lender still has --
+// and its type has to be one whose obligation is its fields' obligations.
+// A type that declares its own deinit is taken whole everywhere but inside
+// that deinit, which is where the declared obligation is being discharged.
 func (c *Checker) allowsOwnerFieldCleanup(owner *binding) bool {
+	if owner == nil || owner.borrowedParam || owner.localBorrow {
+		return false
+	}
+	if !ast.OwnerType(c.declaredDeinits, owner.typeName) {
+		return true
+	}
+	return c.insideDeinitOf(owner)
+}
+
+// insideDeinitOf reports whether the current function is this binding's own
+// declared deinit.
+func (c *Checker) insideDeinitOf(owner *binding) bool {
 	fn := c.currentFunction
 	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false

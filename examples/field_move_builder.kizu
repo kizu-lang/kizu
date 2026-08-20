@@ -1,0 +1,44 @@
+import std::mem;
+import std::string;
+
+// Neither type declares a `deinit`, so what each owes is what its fields owe.
+// That makes `finish` writable: the caller of a value parameter has already let
+// go, so taking a field out of `partial` frees nothing twice -- the obligation
+// moves from the aggregate to the field, and the literal takes it from there.
+struct Partial {
+    first: string::String,
+    last: string::String,
+}
+
+struct Full {
+    first: string::String,
+    last: string::String,
+}
+
+fn finish(partial: Partial) -> Full {
+    return Full { first: move partial.first, last: move partial.last };
+}
+
+fn build(allocator: Allocator, byte: u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_byte(byte);
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let partial = Partial {
+        first: try build(allocator, cast<u8>(97)),
+        last: try build(allocator, cast<u8>(98)),
+    };
+    let full = finish(move partial);
+    defer full.deinit();
+    print(full.first.len() + full.last.len());
+    return;
+}
+
+// run
+// features: ownership move field-move derived deinit std-string errdefer
+// output:
+// 2

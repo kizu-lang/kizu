@@ -341,6 +341,10 @@ func (c *graphChecker) program() (*ast.Program, error) {
 		}
 		merged.Decls = append(merged.Decls, qualified.Decls...)
 	}
+	// Owner-ness is a whole-program question -- holding an owner makes a type
+	// one -- so the derived cleanups are filled in once the modules are merged,
+	// before any phase reads the program.
+	ast.AddDerivedDeinits(merged)
 	return merged, nil
 }
 
