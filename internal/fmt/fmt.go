@@ -147,8 +147,11 @@ func commentStart(line string) int {
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
 		case '\\':
-			if inString {
-				i++
+			// Two backslashes outside a quoted string open a multiline
+			// literal segment. Everything after them is payload, including
+			// `//`; Kizu strings have no escape syntax inside quotes.
+			if !inString && i+1 < len(line) && line[i+1] == '\\' {
+				return -1
 			}
 		case '"':
 			inString = !inString

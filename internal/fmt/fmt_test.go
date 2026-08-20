@@ -306,6 +306,26 @@ func TestFormatMultilineStringPreservesQuotes(t *testing.T) {
 	}
 }
 
+// TestFormatMultilineStringPreservesCommentText keeps `//` in multiline
+// payloads out of the formatter's independent line-comment stream.
+func TestFormatMultilineStringPreservesCommentText(t *testing.T) {
+	src := "fn main() {\n" +
+		"    let input =\n" +
+		"        \\\\// SAFETY: payload, not a source comment\n" +
+		"        \\\\/// docs are payload here too\n" +
+		"    ;\n" +
+		"    print(input);\n" +
+		"}\n"
+	got := Format(src)
+	if got != src {
+		t.Fatalf("comment-like multiline text changed:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+	if got2 := Format(got); got2 != got {
+		t.Fatalf("non-idempotent comment-like multiline text:"+
+			"\n--- got1 ---\n%s\n--- got2 ---\n%s", got, got2)
+	}
+}
+
 // TestFormatUnaryMinusHugsValue checks a sign hugs its value while
 // subtraction keeps its spaces.
 func TestFormatUnaryMinusHugsValue(t *testing.T) {
