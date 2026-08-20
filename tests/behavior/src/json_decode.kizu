@@ -396,3 +396,69 @@ test "json decode round trips a map and a box through encode" {
         \\{"counts":{"alice":2,"bob":1},"total":3}
     , written);
 }
+
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?i64,
+}
+
+fn (self: Visitor) deinit() -> void {
+    self.name.deinit();
+    return;
+}
+
+test "json decode reads an optional field that has a value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice", "nick": 7}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(7, visitor.nick orelse 0);
+}
+
+// `?T` cannot hold the difference between the two ways a document says there is
+// no value, so both read as null (ADR-0121).
+test "json decode reads a null optional field" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice", "nick": null}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(-1, visitor.nick orelse -1);
+}
+
+test "json decode reads an omitted optional field as null" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice"}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(-1, visitor.nick orelse -1);
+    testing::expect_equal<i64>(5, visitor.name.len());
+}
+
+pub struct Page {
+    pub head: Visitor,
+    pub count: i64,
+}
+
+fn (self: Page) deinit() -> void {
+    self.head.deinit();
+    return;
+}
+
+// The rule is the field's, not the top level's: a nested struct may leave its
+// own optional out.
+test "json decode reads an omitted optional field of a nested struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"count": 2, "head": {"name": "alice"}}
+    ;
+    var page = try json::decode<Page>(allocator, document);
+    defer page.deinit();
+    testing::expect_equal<i64>(2, page.count);
+    testing::expect_equal<i64>(-1, page.head.nick orelse -1);
+}

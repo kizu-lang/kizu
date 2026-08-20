@@ -134,3 +134,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0118: cleanup receiver に再代入できない](0118-cleanup-receivers-cannot-be-reassigned.md) (0114 の決定 4 を置換)
 - [ADR-0119: cleanup の名前は `deinit` 1 つ](0119-one-cleanup-name.md) (0091 の決定 3 を置換)
 - [ADR-0120: variant の reflection と `comptime match`](0120-variant-reflection-and-comptime-match.md) (0113 が別 issue にした enum tag / union variant を履行)
+- [ADR-0121: `?T` field は document が省略できる](0121-json-optional-fields-may-be-omitted.md) (原理 8 の既定より実需を採る)

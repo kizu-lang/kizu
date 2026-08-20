@@ -1,0 +1,62 @@
+import std::json;
+import std::mem;
+import std::string;
+
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?i64,
+}
+
+fn (self: Visitor) deinit() -> void {
+    self.name.deinit();
+    return;
+}
+
+fn show(visitor: &Visitor) -> void {
+    if visitor.nick |value| {
+        print(value);
+    } else {
+        print("no nick");
+    }
+    return;
+}
+
+// A `?T` field is the one field a document may leave out. A producer that omits
+// its null fields and one that writes them are both read, because `?T` cannot
+// hold the difference between the two: `"nick": null` and no `nick` key at all
+// are the same value.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+
+    var given = try json::decode<Visitor>(allocator, \\{"name": "alice", "nick": 7}
+    );
+    defer given.deinit();
+    show(&given);
+
+    var written = try json::decode<Visitor>(allocator, \\{"name": "alice", "nick": null}
+    );
+    defer written.deinit();
+    show(&written);
+
+    var omitted = try json::decode<Visitor>(allocator, \\{"name": "alice"}
+    );
+    defer omitted.deinit();
+    show(&omitted);
+
+    // encode always writes the key, so what it produces is read back the same
+    // way whichever shape it came from.
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Visitor>(allocator, &omitted, &var out);
+    let text = out.as_bytes();
+    print(text);
+    return;
+}
+
+// run
+// features: std-json decode encode optional null std-string
+// output:
+// 7
+// no nick
+// no nick
+// {"name":"alice","nick":null}
