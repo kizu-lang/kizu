@@ -41,9 +41,13 @@ type Checker struct {
 	metaFields      map[string]metaField
 	loopDepth       int
 	currentFunction *functionInfo
-	currentStd      bool
-	typeArgValues   map[string]string
-	liveErrDefers   []errDeferEntry
+	// collectMissingMarkers switches the missing `move` diagnostic from an
+	// error into a recorded site, so MissingMoveMarkers can report every one.
+	collectMissingMarkers bool
+	missingMarkers        []MissingMarker
+	currentStd            bool
+	typeArgValues         map[string]string
+	liveErrDefers         []errDeferEntry
 	// pendingAllocTaints holds tied allocators read as call arguments whose
 	// call result has not yet reached a `let`. The let attaches them to the new
 	// binding; a statement ending with entries left over used the result some
@@ -211,6 +215,35 @@ func (c *Checker) Check(program *ast.Program) error {
 		}
 	}
 	return nil
+}
+
+// MissingMarker names a place that hands a value off without the `move`
+// marker. One span can be reached by several generic instantiations, so the
+// list is deduplicated by position.
+type MissingMarker struct {
+	Span ast.Span
+}
+
+// MissingMoveMarkers reports every place that needs a `move` marker. Check
+// stops at the first one because it is an error there; the formatter writes
+// them all, so this records them and keeps checking. Recording does not change
+// what the checker knows: the hand-off happens whether or not it is marked.
+// Every other rule still fails fast, and a program that breaks one is returned
+// with its error so callers do not rewrite source the checker rejects.
+func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, error) {
+	c.collectMissingMarkers = true
+	defer func() { c.collectMissingMarkers = false }()
+	err := c.Check(program)
+	seen := map[ast.Position]bool{}
+	markers := make([]MissingMarker, 0, len(c.missingMarkers))
+	for _, marker := range c.missingMarkers {
+		if seen[marker.Span.Start] {
+			continue
+		}
+		seen[marker.Span.Start] = true
+		markers = append(markers, marker)
+	}
+	return markers, err
 }
 
 // CheckAll validates ownership like Check but accumulates one error per
@@ -3218,9 +3251,13 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 		}
 	}
 	if marker == nil && handedOff {
-		return "", errorAt(expressionSpan(place),
-			"move error: `%s` is handed off here; write `move %s`",
-			place.String(), place.String())
+		span := expressionSpan(place)
+		if !c.collectMissingMarkers {
+			return "", errorAt(span,
+				"move error: `%s` is handed off here; write `move %s`",
+				place.String(), place.String())
+		}
+		c.missingMarkers = append(c.missingMarkers, MissingMarker{Span: span})
 	}
 	return typeName, nil
 }
