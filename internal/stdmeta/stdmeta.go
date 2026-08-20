@@ -21,6 +21,10 @@ type Form string
 const (
 	// IsStruct reports whether its type argument is a declared struct.
 	IsStruct Form = "std::meta::is_struct"
+	// IsEnum reports whether its type argument is a declared tag enum.
+	IsEnum Form = "std::meta::is_enum"
+	// IsUnion reports whether its type argument is a declared tagged union.
+	IsUnion Form = "std::meta::is_union"
 	// IsOptional reports whether its type argument is `?T`.
 	IsOptional Form = "std::meta::is_optional"
 	// IsArray reports whether its type argument is `std::array::Array<T>`.
@@ -49,6 +53,22 @@ const (
 	FieldType Form = "std::meta::field_type"
 	// Field borrows one field out of a borrowed struct.
 	Field Form = "std::meta::field"
+	// Variants lists an enum's tags or a union's variants in declaration
+	// order. It is the variant side of PublicFields, and walks the same way.
+	Variants Form = "std::meta::variants"
+	// VariantName is one variant's source name as a `[]u8`.
+	VariantName Form = "std::meta::variant_name"
+	// VariantType names one variant's payload type.
+	VariantType Form = "std::meta::variant_type"
+	// HasPayload reports whether one variant carries a payload. A walk asks
+	// before reading a payload type or binding one, because a tag carries no
+	// value and an enum tag never does.
+	HasPayload Form = "std::meta::has_payload"
+	// Variant builds one variant's value: `T::v(payload)`, or `T::v` for a
+	// variant that carries none. It is how a walk that means to *produce* a
+	// sum value names the arm it produces, since the arm is not a type the
+	// caller can write for itself.
+	Variant Form = "std::meta::variant"
 	// Construct builds a struct from its public fields, taking each field's
 	// value from a worker it calls once per field (ADR-0115). It is how a
 	// walk that means to *produce* a `T` avoids a place to accumulate one:
@@ -80,6 +100,8 @@ type Shape struct {
 
 var forms = map[Form]Shape{
 	IsStruct:        {StaticArgs: 1},
+	IsEnum:          {StaticArgs: 1},
+	IsUnion:         {StaticArgs: 1},
 	IsOptional:      {StaticArgs: 1},
 	IsArray:         {StaticArgs: 1},
 	IsBox:           {StaticArgs: 1},
@@ -91,6 +113,11 @@ var forms = map[Form]Shape{
 	FieldName:       {StaticArgs: 2, Capture: true},
 	FieldType:       {StaticArgs: 2, Capture: true, Type: true},
 	Field:           {StaticArgs: 2, Capture: true, Args: 1},
+	Variants:        {StaticArgs: 1},
+	VariantName:     {StaticArgs: 2, Capture: true},
+	VariantType:     {StaticArgs: 2, Capture: true, Type: true},
+	HasPayload:      {StaticArgs: 2, Capture: true},
+	Variant:         {StaticArgs: 2, Capture: true, Variadic: true},
 	Construct:       {StaticArgs: 2, Variadic: true, Worker: 2},
 	Unsupported:     {StaticArgs: 1},
 }
@@ -106,7 +133,21 @@ func Lookup(name string) (Shape, bool) {
 // operators of SPEC §13.
 func Predicate(name string) bool {
 	switch Form(name) {
-	case IsStruct, IsOptional, IsArray, IsBox, IsMap, IsOwner, HasPublicFields:
+	case IsStruct, IsEnum, IsUnion, IsOptional, IsArray, IsBox, IsMap, IsOwner,
+		HasPublicFields, HasPayload:
+		return true
+	default:
+		return false
+	}
+}
+
+// VariantForm reports whether a form reads a variant capture rather than a
+// field capture. A field and a variant are answers to different questions
+// about different declarations (SPEC §6.7, §6.8), so a form written against
+// the wrong capture is an error rather than a silent read of the other one.
+func VariantForm(form Form) bool {
+	switch form {
+	case VariantName, VariantType, HasPayload, Variant:
 		return true
 	default:
 		return false

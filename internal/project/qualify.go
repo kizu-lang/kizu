@@ -278,13 +278,43 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 	case *ast.BlockStmt:
 		// Only a match arm body is a bare block statement (SPEC §6.12).
 		return c.qualifyBlock(module, s)
+	default:
+		return c.qualifyComptimeStmt(module, stmt)
+	}
+}
+
+// qualifyComptimeStmt rewrites the statements that are resolved at compile
+// time. A statement that is none of them carries nothing to qualify.
+func (c *graphChecker) qualifyComptimeStmt(
+	module *moduleUnit,
+	stmt ast.Statement,
+) (ast.Statement, error) {
+	switch s := stmt.(type) {
 	case *ast.ComptimeIfStmt:
 		return c.qualifyComptimeIfStmt(module, s)
 	case *ast.ComptimeForStmt:
 		return c.qualifyComptimeForStmt(module, s)
+	case *ast.ComptimeMatchStmt:
+		return c.qualifyComptimeMatchStmt(module, s)
 	default:
 		return stmt, nil
 	}
+}
+
+// qualifyComptimeMatchStmt rewrites the dispatched value and the body every
+// variant expands.
+func (c *graphChecker) qualifyComptimeMatchStmt(
+	module *moduleUnit,
+	stmt *ast.ComptimeMatchStmt,
+) (*ast.ComptimeMatchStmt, error) {
+	cp := *stmt
+	value, err := c.qualifyExpr(module, stmt.Value)
+	if err != nil {
+		return nil, err
+	}
+	cp.Value = value
+	cp.Body, err = c.qualifyBlock(module, stmt.Body)
+	return &cp, err
 }
 
 // qualifyComptimeForStmt rewrites the compile-time list and the loop body.

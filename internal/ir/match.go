@@ -27,9 +27,16 @@ func (l *lowerer) lowerMatchStmt(stmt *ast.MatchStmt) error {
 	if err != nil {
 		return err
 	}
+	return l.lowerMatchBody(subject, stmt)
+}
+
+// lowerMatchBody lowers the arms of a match whose value is already lowered. A
+// `comptime match` enters here because the value is what names the variants
+// its arms are built from, so it is lowered before the arms exist.
+func (l *lowerer) lowerMatchBody(subject matchSubject, stmt *ast.MatchStmt) error {
 	saved := l.env
 	end := l.newBlock(l.nextBlockName("match.end"))
-	results, err := l.lowerMatchArms(subject, stmt.Arms, end.Name, saved, false)
+	results, err := l.lowerMatchArms(subject, stmt, end.Name, saved, false)
 	if err != nil {
 		return err
 	}
@@ -49,7 +56,7 @@ func (l *lowerer) lowerMatchExpr(stmt *ast.MatchStmt) (Value, error) {
 	}
 	saved := l.env
 	end := l.newBlock(l.nextBlockName("match.end"))
-	results, err := l.lowerMatchArms(subject, stmt.Arms, end.Name, saved, true)
+	results, err := l.lowerMatchArms(subject, stmt, end.Name, saved, true)
 	if err != nil {
 		return Value{}, err
 	}
@@ -105,11 +112,16 @@ func (l *lowerer) lowerMatchValue(expr ast.Expression) (matchSubject, error) {
 // lowerMatchArms emits check and arm blocks for one enum match.
 func (l *lowerer) lowerMatchArms(
 	subject matchSubject,
-	arms []ast.MatchArm,
+	stmt *ast.MatchStmt,
 	endLabel string,
 	saved *env,
 	wantValue bool,
 ) ([]matchArmResult, error) {
+	arms := stmt.Arms
+	armVariants, err := l.matchArmVariants(stmt)
+	if err != nil {
+		return nil, err
+	}
 	results := []matchArmResult{}
 	check := l.newBlock(l.nextBlockName("match.check"))
 	l.block.Terminator = Terminator{Op: "jump", Target: check.Name}
@@ -123,7 +135,9 @@ func (l *lowerer) lowerMatchArms(
 		if err := l.lowerMatchCheck(subject, arm, armBlock, nextCheck); err != nil {
 			return nil, err
 		}
+		restore := l.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
 		result, err := l.lowerMatchArmBody(subject, arm, armBlock, endLabel, saved, wantValue)
+		restore()
 		if err != nil {
 			return nil, err
 		}

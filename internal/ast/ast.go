@@ -641,9 +641,17 @@ func (s *ContinueStmt) String() string {
 }
 
 // MatchStmt represents a simple enum tag match statement.
+//
+// MetaCapture and MetaOwner are set only on the match a `comptime match`
+// expands to (ComptimeMatchExpansion). They name the capture each arm binds
+// its own variant to, and the type the variants come from, so a phase walking
+// the arms can bind the capture the arm body is written against. A match
+// written by hand carries neither.
 type MatchStmt struct {
-	Value Expression
-	Arms  []MatchArm
+	Value       Expression
+	Arms        []MatchArm
+	MetaCapture string
+	MetaOwner   string
 }
 
 // statementNode marks MatchStmt as a statement node.
@@ -718,6 +726,28 @@ func (*ComptimeForStmt) statementNode() {}
 // String returns a compact debug representation of the comptime loop.
 func (s *ComptimeForStmt) String() string {
 	return fmt.Sprintf("comptime for %s |%s| %s", s.List.String(), s.Name, s.Body.String())
+}
+
+// ComptimeMatchStmt runs a body against whichever variant a value holds, with
+// the body written once for every variant. Name binds the variant of the arm
+// being expanded, and Binding names the payload the way a match arm does.
+type ComptimeMatchStmt struct {
+	Value   Expression
+	Name    string
+	Binding string
+	Body    *BlockStmt
+}
+
+// statementNode marks ComptimeMatchStmt as a statement node.
+func (*ComptimeMatchStmt) statementNode() {}
+
+// String returns a compact debug representation of the comptime match.
+func (s *ComptimeMatchStmt) String() string {
+	capture := s.Name
+	if s.Binding != "" {
+		capture += ", " + s.Binding
+	}
+	return fmt.Sprintf("comptime match %s |%s| %s", s.Value.String(), capture, s.Body.String())
 }
 
 // ExprStmt wraps an expression used as a statement.

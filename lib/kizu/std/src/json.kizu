@@ -251,7 +251,12 @@ pub fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
                             or std::meta::is_box<T>() {
                             try encode_container_value<T>(encoder, value);
                         } else {
-                            std::meta::unsupported<T>();
+                            comptime if std::meta::is_enum<T>()
+                                or std::meta::is_union<T>() {
+                                try encode_variant_value<T>(encoder, value);
+                            } else {
+                                std::meta::unsupported<T>();
+                            }
                         }
                     }
                 }
@@ -367,7 +372,12 @@ fn encode_field<T>(
                             or std::meta::is_box<T>() {
                             try encode_container_field<T>(encoder, name, value);
                         } else {
-                            std::meta::unsupported<T>();
+                            comptime if std::meta::is_enum<T>()
+                                or std::meta::is_union<T>() {
+                                try encode_variant_field<T>(encoder, name, value);
+                            } else {
+                                std::meta::unsupported<T>();
+                            }
                         }
                     }
                 }
@@ -397,6 +407,150 @@ fn encode_container_field<T>(
             let held = value.borrow();
             try encode_field<std::meta::element<T>>(encoder, name, held);
         }
+    }
+    return;
+}
+
+// encode_variant_value writes one variant of an enum or union. A variant that
+// carries nothing is the string naming it; one that carries a payload is the
+// single-key object `{"Name": payload}`. An enum is the case where no variant
+// carries anything, so it needs no rule of its own: `Color::Red` is `"Red"`
+// because that is what a payload-free variant is.
+//
+// `Value` is the exception, and takes the first branch: its variants name
+// JSON's own shapes rather than a program's, so tagging them would wrap a
+// document that already says what it is.
+fn encode_variant_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {
+    comptime if T == type<std::json::Value> {
+        try encode_any_value(encoder, value);
+    } else {
+        comptime match value |v, payload| {
+            comptime if std::meta::has_payload<T, v>() {
+                try encoder.begin_object();
+                try encode_field<std::meta::variant_type<T, v>>(
+                    encoder,
+                    std::meta::variant_name<T, v>(),
+                    payload,
+                );
+                try encoder.end_object();
+            } else {
+                try encoder.write_bytes(std::meta::variant_name<T, v>());
+            }
+        }
+    }
+    return;
+}
+
+// encode_variant_field is encode_variant_value with the key written by the
+// call that opens the value.
+fn encode_variant_field<T>(
+    encoder: &var std::json::Encoder,
+    name: []u8,
+    value: &T,
+) -> !void {
+    comptime if T == type<std::json::Value> {
+        try encode_any_field(encoder, name, value);
+    } else {
+        comptime match value |v, payload| {
+            comptime if std::meta::has_payload<T, v>() {
+                try encoder.begin_object_field(name);
+                try encode_field<std::meta::variant_type<T, v>>(
+                    encoder,
+                    std::meta::variant_name<T, v>(),
+                    payload,
+                );
+                try encoder.end_object();
+            } else {
+                try encoder.write_bytes_field(name, std::meta::variant_name<T, v>());
+            }
+        }
+    }
+    return;
+}
+
+// encode_any_value writes a `Value` as the document it was read from, so a
+// document that came in through `decode<Value>` goes back out unchanged apart
+// from whitespace.
+fn encode_any_value(
+    encoder: &var std::json::Encoder,
+    value: &std::json::Value,
+) -> !void {
+    match value {
+        Null => try encoder.write_null(),
+        Bool(flag) => try encoder.write_bool(flag),
+        I64(number) => try encoder.write_i64(number),
+        Str(text) => {
+            let bytes = text.as_bytes();
+            try encoder.write_bytes(bytes);
+        },
+        Arr(items) => {
+            try encoder.begin_array();
+            try encode_any_elements(encoder, items);
+            try encoder.end_array();
+        },
+        Obj(entries) => {
+            try encoder.begin_object();
+            try encode_any_entries(encoder, entries);
+            try encoder.end_object();
+        },
+    }
+    return;
+}
+
+// encode_any_field is encode_any_value with the key written by the call that
+// opens the value.
+fn encode_any_field(
+    encoder: &var std::json::Encoder,
+    name: []u8,
+    value: &std::json::Value,
+) -> !void {
+    match value {
+        Null => try encoder.write_null_field(name),
+        Bool(flag) => try encoder.write_bool_field(name, flag),
+        I64(number) => try encoder.write_i64_field(name, number),
+        Str(text) => {
+            let bytes = text.as_bytes();
+            try encoder.write_bytes_field(name, bytes);
+        },
+        Arr(items) => {
+            try encoder.begin_array_field(name);
+            try encode_any_elements(encoder, items);
+            try encoder.end_array();
+        },
+        Obj(entries) => {
+            try encoder.begin_object_field(name);
+            try encode_any_entries(encoder, entries);
+            try encoder.end_object();
+        },
+    }
+    return;
+}
+
+// encode_any_elements writes a `Value` array's elements into the array already
+// open, in index order.
+fn encode_any_elements(
+    encoder: &var std::json::Encoder,
+    items: &std::array::Array<std::json::Value>,
+) -> !void {
+    var index = 0;
+    while items.at(index) |elem| {
+        try encode_any_value(encoder, elem);
+        index = index + 1;
+    }
+    return;
+}
+
+// encode_any_entries writes a `Value` object's entries into the object already
+// open, in the order the document wrote them.
+fn encode_any_entries(
+    encoder: &var std::json::Encoder,
+    entries: &std::array::Array<std::json::Entry>,
+) -> !void {
+    var index = 0;
+    while entries.at(index) |entry| {
+        let key = entry.key.as_bytes();
+        try encode_any_field(encoder, key, &entry.value);
+        index = index + 1;
     }
     return;
 }
@@ -1235,7 +1389,13 @@ fn decode_value<T>(
                         comptime if std::meta::has_public_fields<T>() {
                             return decode_struct<T>(allocator, bytes, index, ignore_unknown);
                         } else {
-                            return std::meta::unsupported<T>();
+                            comptime if std::meta::is_enum<T>()
+                                or std::meta::is_union<T>() {
+                                return decode_variant<T>(
+                                    allocator, bytes, index, ignore_unknown);
+                            } else {
+                                return std::meta::unsupported<T>();
+                            }
                         }
                     }
                 }
@@ -1378,6 +1538,75 @@ fn decode_array<T>(
         more = try comma_or_close(bytes, index, cast<u8>(93));
     }
     return items;
+}
+
+// decode_variant reads one variant of an enum or union. The two shapes are the
+// two `encode_variant_value` writes: a variant that carries nothing is the
+// string naming it, and one that carries a payload is the single-key object
+// `{"Name": payload}`. Which one a document holds is read from the byte that
+// starts it, so a tag and a payload variant cannot be confused for each other.
+fn decode_variant<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    skip_space(bytes, index);
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(34) {
+            return decode_variant_tag<T>(bytes, index);
+        }
+    }
+    return decode_variant_payload<T>(allocator, bytes, index, ignore_unknown);
+}
+
+// decode_variant_tag reads the string naming a variant that carries nothing.
+// The name is compared where it lies, so a tag costs no allocation and an
+// escaped spelling still names the variant it spells.
+fn decode_variant_tag<T>(bytes: []u8, index: &var i64) -> !T {
+    let name_at = index.*;
+    try skip_string(bytes, index);
+    comptime for std::meta::variants<T>() |v| {
+        comptime if std::meta::has_payload<T, v>() {
+            // A variant carrying a payload is never written as a bare string.
+        } else {
+            if key_equals(bytes, name_at, std::meta::variant_name<T, v>()) {
+                return std::meta::variant<T, v>();
+            }
+        }
+    }
+    return Error::UnknownField;
+}
+
+// decode_variant_payload reads the single-key object naming a variant and the
+// value it carries. A second key would name a second variant, and a value can
+// only be one of them, so anything but one key is refused.
+fn decode_variant_payload<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    var scan = try scan_object(allocator, bytes, index, 0);
+    defer scan.deinit();
+    if scan.members.len() != 1 {
+        return Error::UnexpectedToken;
+    }
+    if scan.members.at(0) |member| {
+        comptime for std::meta::variants<T>() |v| {
+            comptime if std::meta::has_payload<T, v>() {
+                if key_equals(bytes, member.key_at, std::meta::variant_name<T, v>()) {
+                    var at = member.value_at;
+                    let payload = try decode_value<std::meta::variant_type<T, v>>(
+                        allocator, bytes, &var at, ignore_unknown);
+                    return std::meta::variant<T, v>(payload);
+                }
+            } else {
+                // A variant carrying nothing is written as a bare string.
+            }
+        }
+    }
+    return Error::UnknownField;
 }
 
 // deinit_elements releases a partly built array on an error path. The cleanup a

@@ -109,8 +109,12 @@ var integerTypes = map[Type]bool{
 }
 
 type enumType struct {
-	name   string
-	tags   map[string]bool
+	name string
+	tags map[string]bool
+	// order lists the tags as they were declared, which is what
+	// `std::meta::variants` walks. A map answers membership; only the source
+	// order keeps what a walk emits from depending on how tags are stored.
+	order  []string
 	public bool
 }
 
@@ -130,7 +134,10 @@ type unionType struct {
 	name       string
 	typeParams []string
 	variants   map[string]string
-	public     bool
+	// order lists the variants as they were declared, for the same reason an
+	// enum keeps one.
+	order  []string
+	public bool
 }
 
 // A functionType is what a call site sees, plus the body the passes that check

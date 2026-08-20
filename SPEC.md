@@ -2168,25 +2168,33 @@ comptime for std::meta::public_fields<T>() |f| {
 `comptime if` と同じく、これは token stream や AST を書き換える macro では
 ありません。展開された各反復を、その束縛のもとで型・所有権・borrow 検査します。
 
-反復できるのは `std::meta::public_fields<T>()` だけです。整数 range は
-runtime の `for` が持ちます。
+反復できるのは `std::meta::public_fields<T>()` と `std::meta::variants<T>()`
+だけです。整数 range は runtime の `for` が持ちます。
 
-`std::meta` は、struct の構造をコンパイル時に読むための組み込みの式の形です。
-comptime 専用の**型**は持ちません(ADR-0113)。
+`std::meta` は、struct と sum type の構造をコンパイル時に読むための組み込みの
+式の形です。comptime 専用の**型**は持ちません(ADR-0113)。
 
 ```text
 std::meta::is_struct<T>()          -> bool    comptime-only
+std::meta::is_enum<T>()            -> bool    comptime-only
+std::meta::is_union<T>()           -> bool    comptime-only
 std::meta::is_optional<T>()        -> bool    comptime-only
 std::meta::is_array<T>()           -> bool    comptime-only
 std::meta::is_box<T>()             -> bool    comptime-only
 std::meta::is_map<T>()             -> bool    comptime-only
 std::meta::is_owner<T>()           -> bool    comptime-only
+std::meta::has_public_fields<T>()  -> bool    comptime-only
 std::meta::element<T>                         comptime-only、型の位置に書く
 std::meta::public_fields<T>()                 comptime-only list、comptime for 専用
 std::meta::field_name<T, f>()      -> []u8    comptime-only
 std::meta::field_type<T, f>                   comptime-only、型の位置に書く
 std::meta::field<T, f>(value: &T)  -> &F
 std::meta::construct<T, worker>(args...) -> !T
+std::meta::variants<T>()                      comptime-only list、comptime for 専用
+std::meta::variant_name<T, v>()    -> []u8    comptime-only
+std::meta::variant_type<T, v>                 comptime-only、型の位置に書く
+std::meta::has_payload<T, v>()     -> bool    comptime-only
+std::meta::variant<T, v>(payload)  -> T
 std::meta::unsupported<T>()                   compile error にする
 ```
 
@@ -2260,8 +2268,54 @@ static 引数だけです。
 * runtime local、field、union payload、collection element、return value として
   保持できません
 
-列挙するのは struct の `pub` field だけで、順序は source の宣言順です。
-enum tag と union variant の列挙は持ちません。
+列挙するのは struct の `pub` field、enum の tag、union の variant で、順序は
+どれも source の宣言順です。
+
+### 13.2 comptime match
+
+`comptime match` は、値が今どの variant かで分岐する compile-time 展開です。
+`comptime for` が field を歩くのに対し、これは variant を歩きます。
+
+```kizu
+comptime match value |v, payload| {
+    comptime if std::meta::has_payload<T, v>() {
+        print(std::meta::variant_name<T, v>());
+        print(payload);
+    } else {
+        print(std::meta::variant_name<T, v>());
+    }
+}
+```
+
+展開されるのは `match` そのものです —— variant ごとに 1 arm、宣言順、payload を
+持つ variant では第 2 capture がその arm の payload binding になります。
+exhaustiveness も payload の借用も所有権も、§6.12 の `match` の規則がそのまま
+適用されます。新しい分岐機構ではありません。
+
+```kizu
+// 上が表すコード(union Shape { Point, Circle(i64) } の場合)
+match value {
+    Point => { ... },
+    Circle(payload) => { ... },
+}
+```
+
+第 1 capture(上の `v`)は `comptime for` の capture と同じ compile-time
+token で、書ける位置は `std::meta::*` の static 引数だけです。第 2 capture は
+payload を持つ variant の展開でだけ束縛されます。payload を持たない variant の
+展開でそれを書くと未定義の名前になるので、`has_payload<T, v>()` で分けます。
+
+payload を 1 つも持たない型 —— つまり enum —— では第 2 capture を省けます。
+
+```kizu
+comptime match color |v| {
+    print(std::meta::variant_name<T, v>());
+}
+```
+
+`std::meta::variant<T, v>(payload)` は `T::<v の名前>(payload)` と同じもので、
+payload を持たない variant では `T::<v の名前>` です。walk が値を**作る**側で
+arm を名指しする唯一の手段で、arm は呼び出し側が型として書けないためです。
 
 ## 14. std とのインターフェース
 

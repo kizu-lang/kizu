@@ -99,13 +99,38 @@ encode できる型は次で閉じています。
 | `std::map::Map<[]u8, V>` | object。順序は `key_at` の挿入順 |
 | `std::mem::Box<T>` | 中身そのもの。唯一所有は木なので形を足しません |
 | `?T`(struct field) | 値があれば中身、無ければ `null` |
+| enum | tag の名前の string。`Color::Red` は `"Red"` |
+| union | payload の無い variant は名前の string、持つ variant は `{"名前": payload}` |
+| `std::json::Value` | 読んだ document そのもの。tag を付けません |
 
 これ以外の型は **compile error** です(`std::meta::unsupported`)。黙って
 何も書かないと、encoder 自身のテストでは捕まらない壊れた document が出る
 ためです。public field を 1 つも持たない struct も同じ理由で拒否します。
 状態が全部 private な型を `{}` と書くと、値が黙って消えるためです。
 `std::arena::Handle<T>` は共有参照で、木である JSON と対応しないので
-encode しません。union と enum はまだ持ちません。
+encode しません。
+
+union と enum は同じ規則です。enum は「全 variant が payload を持たない union」
+として同じ経路に落ちるので、`enum` 専用の形はありません。
+
+```kizu
+pub union Note {
+    Empty,
+    Count(i64),
+    Text(std::string::String),
+}
+```
+
+| 値 | JSON |
+| --- | --- |
+| `Note::Empty` | `"Empty"` |
+| `Note::Count(3)` | `{"Count":3}` |
+| `Note::Text(text)` | `{"Text":"hello"}` |
+
+`std::json::Value` は例外で、tag を付けずに書きます。`Value` の variant は
+program の型ではなく JSON 自身の形を名指しているので、tag で包むと自分が何かを
+既に言っている document を二重に包むことになります。`decode<Value>` して
+`encode<Value>` した document は、空白を除いて元のままです。
 
 ## decode
 
@@ -125,9 +150,15 @@ key は宣言順で届く必要がありません。object を 1 回走査して
 let visit = try json::decode<Visit>(allocator, document);
 ```
 
-`T` に来られる型は struct、`i64`、`bool`、`std::string::String`、
+`T` に来られる型は struct、enum、union、`i64`、`bool`、`std::string::String`、
 `std::array::Array<T>`、`std::json::Value` です。`[]u8` は decode できません —— 借用 view なので、
 decode した bytes の持ち主がいなくなります。所有する `String` を使います。
+
+enum と union は encode が書く 2 つの形をそのまま読みます。document を始める
+byte が `"` なら payload を持たない variant、`{` なら `{"名前": payload}` です。
+key を 2 つ持つ object は `UnexpectedToken` —— key が 2 つあれば variant も
+2 つ名指すことになり、値はそのうち 1 つにしかなれないためです。variant を
+1 つも名指さない key は `UnknownField` です。
 
 ### 型に無い key
 

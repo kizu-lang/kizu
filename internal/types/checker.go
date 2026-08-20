@@ -510,6 +510,7 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 			return errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
 		}
 		enum.tags[tag] = true
+		enum.order = append(enum.order, tag)
 	}
 	c.enums[decl.Name] = enum
 	return nil
@@ -594,6 +595,7 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			}
 		}
 		union.variants[variant.Name] = typ.Text(variant.Payload)
+		union.order = append(union.order, variant.Name)
 	}
 	c.unions[decl.Name] = union
 	return nil
@@ -1004,7 +1006,11 @@ func (c *Checker) parseType(name string) (Type, error) {
 	// whose capture is not bound here keeps its spelling: that is a declaration,
 	// and parseMetaTypeForm is the one place that decides what to do with it.
 	resolved := name
-	if rewritten, err := c.resolveMetaTypeText(name); err == nil {
+	rewritten, err := c.resolveMetaTypeText(name)
+	if isMetaFormError(err) {
+		return "", err
+	}
+	if err == nil {
 		resolved = rewritten
 	}
 	parsed, err := typ.Parse(resolved)
@@ -1171,6 +1177,9 @@ func (c *Checker) parseMetaTypeForm(
 			form, shape.StaticArgs, len(args))
 	}
 	resolved, err := c.resolveMetaTypeText(name)
+	if isMetaFormError(err) {
+		return "", err
+	}
 	if err != nil || resolved == name {
 		// An unbound capture is what a declaration looks like.
 		return Type(name), nil
@@ -1504,6 +1513,8 @@ func (c *Checker) checkBodyStmt(
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	case *ast.ComptimeForStmt:
 		return c.checkComptimeForStmt(s, env, wantReturn, unsafe)
+	case *ast.ComptimeMatchStmt:
+		return c.checkComptimeMatchStmt(s, env, wantReturn, unsafe)
 	default:
 		return false, errorf("type error: unsupported statement %T", stmt)
 	}
@@ -2564,24 +2575,29 @@ func (c *Checker) checkMatchStmt(
 		return false, err
 	}
 	if tagged := c.taggedType(valueType); tagged != nil {
-		return c.checkMatchArms(stmt.Arms, tagged, nil, env, wantReturn, unsafe)
+		return c.checkMatchArms(stmt, tagged, nil, env, wantReturn, unsafe)
 	}
 	unionType := c.unions[string(valueType)]
 	if unionType != nil {
-		return c.checkMatchArms(stmt.Arms, nil, unionType, env, wantReturn, unsafe)
+		return c.checkMatchArms(stmt, nil, unionType, env, wantReturn, unsafe)
 	}
 	return false, errorf("type error: match expects enum or union, got %s", valueType)
 }
 
 // checkMatchArms validates tag patterns and return flow for match arms.
 func (c *Checker) checkMatchArms(
-	arms []ast.MatchArm,
+	stmt *ast.MatchStmt,
 	enumType *enumType,
 	unionType *unionType,
 	env *scope,
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
+	arms := stmt.Arms
+	armVariants, err := c.matchArmVariants(stmt)
+	if err != nil {
+		return false, err
+	}
 	seen := map[string]bool{}
 	wildcard := false
 	allReturn := len(arms) > 0
@@ -2614,7 +2630,9 @@ func (c *Checker) checkMatchArms(
 				return false, err
 			}
 		}
+		restore := c.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
 		returns, err := c.checkStmt(arm.Body, armEnv, wantReturn, unsafe)
+		restore()
 		if err != nil {
 			return false, err
 		}
@@ -2626,6 +2644,42 @@ func (c *Checker) checkMatchArms(
 			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
 	}
 	return allReturn, nil
+}
+
+// matchArmVariants indexes by tag the variants a `comptime match` arm body is
+// written against. A match written by hand carries no capture and gets nil,
+// which binds nothing.
+func (c *Checker) matchArmVariants(stmt *ast.MatchStmt) (map[string]metaField, error) {
+	if stmt.MetaCapture == "" {
+		return nil, nil
+	}
+	variants, err := c.variants(stmt.MetaOwner)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]metaField, len(variants))
+	for _, variant := range variants {
+		out[variant.name] = variant
+	}
+	return out, nil
+}
+
+// bindMetaField binds one capture for the length of one expansion, returning
+// the call that unbinds it. An empty name binds nothing, so a caller that has
+// no capture in hand needs no branch of its own.
+func (c *Checker) bindMetaField(name string, field metaField) func() {
+	if name == "" {
+		return func() {}
+	}
+	previous, had := c.metaFields[name]
+	c.metaFields[name] = field
+	return func() {
+		if had {
+			c.metaFields[name] = previous
+			return
+		}
+		delete(c.metaFields, name)
+	}
 }
 
 // validateWildcardMatchArm checks the restricted fallback pattern shape.
