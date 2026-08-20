@@ -7828,6 +7828,30 @@ func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 }
 
 // clone copies a scope chain so branch checks do not interfere with each other.
+//
+// A binding's scalar facts copy with the struct. Its map and slice facts do
+// not, so each is copied here by name: sharing one would let a branch write
+// into the state the other branches and the code after them read, which is a
+// union merge nobody declared.
+//
+// Copying is only half of a fact's story. The other half is what happens where
+// the branches meet, and that differs per fact:
+//
+//   - fieldDeinit is a cleanup obligation, so it has both a merge
+//     (mergeMovedFrom) and an agreement check that refuses a field only some
+//     surviving paths released.
+//   - fieldBorrows and fieldMutBorrows are counters a capture or `let` raises
+//     and drops inside one scope, so a branch always leaves them as it found
+//     them and there is nothing to carry out.
+//   - fieldArenaIDs hands a field arena a stable identity on first use. A
+//     branch-local identity that is lost costs a fresh number later, and a
+//     handle can only leave a branch through a binding that already had one,
+//     which means the identity was fixed outside.
+//   - borrowTargets is rebuilt where a borrow is tied, never read across a
+//     branch boundary.
+//
+// TestBindingFactsAreCopiedByClone fails when a new map or slice appears on
+// binding, so the next fact has to answer both halves before it compiles.
 func (s *scope) clone() *scope {
 	if s == nil {
 		return nil
