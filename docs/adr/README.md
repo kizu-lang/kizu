@@ -141,3 +141,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0122: `decode<T>` は所有する値だけを返す](0122-json-decode-returns-owned-values.md) (`Cow` 相当の型を却下)
 - [ADR-0123: `Map` の owner value は `Array` の owner element と同じ規則で扱う](0123-map-owned-values-mirror-array.md) (旧 0031 を採番し直し、既存 key への insert の決定を訂正)
 - [ADR-0124: 複製は常に明示。owner の複製は per-type の copy 関数で書く](0124-owned-container-clone-policy.md) (旧 0032 を採番し直し)
+- [ADR-0125: `?Owner` を struct field に置く](0125-optional-owner-struct-fields.md) (#1632)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -426,7 +427,7 @@ func (c *Checker) checkOwnerAggregatesDeclareDeinit(program *ast.Program) error 
 				continue
 			}
 			for _, field := range d.Fields {
-				if !c.valueTypeNeedsConsume(typ.Text(field.TypeName)) {
+				if !c.fieldTypeNeedsConsume(typ.Text(field.TypeName)) {
 					continue
 				}
 				return errorf(
@@ -467,7 +468,7 @@ func (c *Checker) checkDeinitCompleteness(fn *functionInfo, env *scope) error {
 		return nil
 	}
 	for _, name := range c.structOrder[receiver] {
-		if !c.valueTypeNeedsConsume(fields[name]) || self.fieldDeinit[name] {
+		if !c.fieldTypeNeedsConsume(fields[name]) || self.fieldDeinit[name] {
 			continue
 		}
 		return errorf("move error: deinit of `%s` must consume owner field `%s`",
@@ -726,6 +727,17 @@ func (c *Checker) valueTypeNeedsConsume(typeName string) bool {
 	needs := ast.OwnerType(c.deinitOwners, typeName)
 	c.consumeNeeds[typeName] = needs
 	return needs
+}
+
+// fieldTypeNeedsConsume reports whether a struct field owes cleanup. A `?Owner`
+// field owes it on the path where the value is there, so the field carries the
+// obligation the same way a plain owner field does; the deinit that discharges
+// it opens the optional first.
+func (c *Checker) fieldTypeNeedsConsume(typeName string) bool {
+	if elem, ok := typ.OptionalElem(typeName); ok {
+		return c.valueTypeNeedsConsume(elem)
+	}
+	return c.valueTypeNeedsConsume(typeName)
 }
 
 // resultTypeNeedsConsume reports whether a produced value owes cleanup once it
@@ -1981,7 +1993,7 @@ func (c *Checker) checkOwnerFieldOverwrite(
 		return nil
 	}
 	fieldType, ok := c.fieldPathType(root.typeName, field)
-	if !ok || !c.valueTypeNeedsConsume(fieldType) {
+	if !ok || !c.fieldTypeNeedsConsume(fieldType) {
 		return nil
 	}
 	return errorAt(expressionSpan(stmt.Value),
@@ -2033,24 +2045,17 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	}
 	left := env.clone()
 	leftScope := left.child()
-	if stmt.Capture != "" {
-		// The tie borrows the branch's clone of each container: the branch
-		// body is checked against that clone, so only its bindings make the
-		// body's mutations wait.
-		var capture *binding
-		var err error
-		if isBorrowCond {
-			capture, err = c.tieContainerBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, leftScope)
-		} else {
-			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
-			err = c.tieViewCapture(capture, condType, stmt.Condition, leftScope)
-		}
-		if err != nil {
-			return err
-		}
-		leftScope.define(capture)
+	// The tie borrows the branch's clone of each container: the branch body is
+	// checked against that clone, so only its bindings make its mutations wait.
+	consumesField, err := c.defineCapture(
+		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, false, env, leftScope)
+	if err != nil {
+		return err
 	}
 	if err := c.checkBlock(stmt.Consequence, leftScope); err != nil {
+		return err
+	}
+	if err := c.checkCapturePayloadConsumed(stmt.Capture, consumesField, leftScope); err != nil {
 		return err
 	}
 	right := env.clone()
@@ -2140,24 +2145,18 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	}
 	body := env.clone()
 	child := body.child()
-	if stmt.Capture != "" {
-		// Borrow the loop's clone of each container, as in checkIfStmt.
-		var capture *binding
-		var err error
-		if isBorrowCond {
-			capture, err = c.tieContainerBorrowCapture(stmt.Capture, borrowCond, stmt.Condition, child)
-		} else {
-			capture = c.newCaptureBinding(stmt.Capture, condType, stmt.Condition)
-			err = c.tieViewCapture(capture, condType, stmt.Condition, child)
-		}
-		if err != nil {
-			return err
-		}
-		child.define(capture)
+	// Borrow the loop's clone of each container, as in checkIfStmt.
+	consumesField, err := c.defineCapture(
+		stmt.Capture, stmt.Condition, condType, borrowCond, isBorrowCond, true, env, child)
+	if err != nil {
+		return err
 	}
 	c.loopDepth++
 	defer func() { c.loopDepth-- }()
 	if err := c.checkBlock(stmt.Body, child); err != nil {
+		return err
+	}
+	if err := c.checkCapturePayloadConsumed(stmt.Capture, consumesField, child); err != nil {
 		return err
 	}
 	if err := c.checkLoopConsumesNothingOutside(env, body); err != nil {
@@ -2215,6 +2214,161 @@ func (c *Checker) newCaptureBinding(
 	value := c.newBinding(name, optionalPayloadName(condType))
 	value.declSpan = expressionSpan(cond)
 	return value
+}
+
+// optionalOwnerFieldCapture classifies a capture condition whose payload owns
+// memory, and reports the field's root binding, the field name, and whether the
+// payload may be consumed there. The last result is false for a condition that
+// hands the payload over, which the caller leaves alone.
+//
+// A read of storage does not hand the payload over, so the capture borrows —
+// the way a container accessor's `?&V` does (ADR-0104). The one place a field
+// is owned is its type's own deinit, where the receiver arrived by value and
+// direct field cleanup is already allowed: the same split `match` makes for an
+// owner union payload.
+//
+// Reading storage is the default answer, not the recognized one. An owner
+// payload becomes owned only where something positively hands it over, so a
+// shape this does not know about stays closed (原理 8).
+func (c *Checker) optionalOwnerFieldCapture(
+	cond ast.Expression,
+	condType string,
+	env *scope,
+) (*binding, string, bool, bool) {
+	elem, ok := typ.OptionalElem(condType)
+	if !ok || !c.valueTypeNeedsConsume(elem) {
+		return nil, "", false, false
+	}
+	if c.handsOverOptionalPayload(cond) {
+		return nil, "", false, false
+	}
+	root, path, ok := directFieldRoot(cond, env)
+	if !ok || root == nil || strings.Contains(path, ".") {
+		// A nested path reads storage the same way a direct one does, and
+		// cleanup through one is refused anyway (ADR-0067), so it borrows
+		// with no field to attribute the obligation to.
+		return nil, "", false, true
+	}
+	return root, path, c.allowsOwnerFieldCleanup(root), true
+}
+
+// handsOverOptionalPayload reports whether the condition produces the payload
+// rather than reading it out of storage. A call produces one — `Array.pop`
+// moves the element out, a function returning `?T` hands back what it built.
+// The comptime field form is the exception: it is spelled as a call but reads
+// one field of a borrowed struct (ADR-0113).
+func (c *Checker) handsOverOptionalPayload(cond ast.Expression) bool {
+	call, ok := unwrapExpressionMarkers(cond).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	apply, isApply := call.Callee.(*ast.TypeApplyExpr)
+	if !isApply {
+		return true
+	}
+	name, _, err := c.typeApplyTarget(apply)
+	return err != nil || stdmeta.Form(name) != stdmeta.Field
+}
+
+// unwrapExpressionMarkers strips the markers that wrap an expression without
+// changing where its value came from: `try` forwards a call's success value,
+// and `unsafe` only records who owns the obligation.
+func unwrapExpressionMarkers(expr ast.Expression) ast.Expression {
+	for {
+		switch marked := expr.(type) {
+		case *ast.TryExpr:
+			expr = marked.Value
+		case *ast.UnsafeExpr:
+			expr = marked.Value
+		default:
+			return expr
+		}
+	}
+}
+
+// tieOptionalOwnerFieldCapture applies that split to one capture binding: a
+// borrow everywhere but the owner's deinit, and there a consumable payload
+// whose cleanup counts toward the field's obligation.
+func (c *Checker) tieOptionalOwnerFieldCapture(
+	capture *binding,
+	cond ast.Expression,
+	condType string,
+	inLoop bool,
+	env *scope,
+) (bool, bool, error) {
+	root, field, consumable, ok := c.optionalOwnerFieldCapture(cond, condType, env)
+	if !ok {
+		return false, false, nil
+	}
+	if !consumable {
+		capture.borrowedParam = true
+		return true, false, nil
+	}
+	if inLoop {
+		// The condition reads the same storage every turn, so the payload the
+		// first turn released would be released again by the second.
+		return true, false, errorf(
+			"move error: `while` cannot consume owner field `%s.%s`;"+
+				" the condition reads the same storage every turn, so use `if`",
+			root.name, field)
+	}
+	root.markFieldDeinit(field)
+	return true, true, nil
+}
+
+// defineCapture builds the binding a `|name|` capture introduces, ties it to
+// what it borrows, and defines it in the body's scope. It reports whether the
+// payload is one the body has to consume — true only for an owner field opened
+// inside that field's own type deinit.
+func (c *Checker) defineCapture(
+	name string,
+	cond ast.Expression,
+	condType string,
+	borrowCond containerBorrowCondition,
+	isBorrowCond bool,
+	inLoop bool,
+	env *scope,
+	body *scope,
+) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	if isBorrowCond {
+		capture, err := c.tieContainerBorrowCapture(name, borrowCond, cond, body)
+		if err != nil {
+			return false, err
+		}
+		body.define(capture)
+		return false, nil
+	}
+	capture := c.newCaptureBinding(name, condType, cond)
+	isFieldCapture, consumes, err := c.tieOptionalOwnerFieldCapture(
+		capture, cond, condType, inLoop, env)
+	if err != nil {
+		return false, err
+	}
+	if !isFieldCapture {
+		if err := c.tieViewCapture(capture, condType, cond, body); err != nil {
+			return false, err
+		}
+	}
+	body.define(capture)
+	return consumes, nil
+}
+
+// checkCapturePayloadConsumed rejects a capture body that opened an owner field
+// and dropped what it found. The field's obligation was recorded when the
+// capture bound, so leaving the payload here would discharge the field's
+// cleanup without releasing anything (ADR-0091).
+func (c *Checker) checkCapturePayloadConsumed(name string, consumable bool, scope *scope) error {
+	if !consumable || name == "" {
+		return nil
+	}
+	value, ok := scope.values[name]
+	if !ok || !c.bindingNeedsConsume(value) {
+		return nil
+	}
+	return leakError(value, leakExit{})
 }
 
 // tieViewCapture ties a view-carrying capture to the containers its condition
@@ -6745,6 +6899,13 @@ func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
 
 // allowsDirectFieldCleanup reports whether field.deinit is inside owner deinit.
 func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
+	return c.allowsOwnerFieldCleanup(receiver.owner)
+}
+
+// allowsOwnerFieldCleanup reports whether the current function is the owner
+// deinit of this binding: the one place a field of it may be consumed, because
+// the receiver arrived by value and is being taken apart.
+func (c *Checker) allowsOwnerFieldCleanup(owner *binding) bool {
 	fn := c.currentFunction
 	if fn == nil || stdmethod.CallName(fn.sig.Name) != "deinit" || returnTypeName(fn) != "void" {
 		return false
@@ -6752,10 +6913,13 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 	if len(fn.params) == 0 || len(fn.sig.Params) == 0 {
 		return false
 	}
-	if fn.sig.Params[0].Name != receiver.owner.name {
+	if owner == nil || fn.sig.Params[0].Name != owner.name {
 		return false
 	}
-	return sameOwnershipType(fn.params[0].typeName, receiver.owner.typeName)
+	if fn.params[0].borrow || fn.params[0].mutBorrow {
+		return false
+	}
+	return sameOwnershipType(fn.params[0].typeName, owner.typeName)
 }
 
 // matchesOwnerUnionDeinit reports whether a `match` consumes the active variant

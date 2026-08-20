@@ -183,6 +183,10 @@ key を 2 つ持つ object は `UnexpectedToken` —— key が 2 つあれば v
 下 2 つが同じなのは、`?T` がその差を持てないためです。どちらも「値が無い」に
 なります。null field を省略する producer と書く producer の両方を読みます。
 
+`?T` の `T` は所有していてかまいません。`pub nick: ?std::string::String` は
+上の 3 行と同じように読み、文字列は struct と一緒に解放されます。その struct
+は optional を開いて解放する `deinit` を持ちます(SPEC §14.4)。
+
 encode は省略しません。`?T` field は必ず key を書き、値が無ければ `null` です。
 だから `encode` が作った document は上の 2 行目として読み戻ります。
 

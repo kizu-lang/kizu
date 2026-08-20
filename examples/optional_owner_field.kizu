@@ -1,0 +1,61 @@
+import std::mem;
+import std::string;
+
+// A field may be an optional owner. The obligation it carries is the one a
+// plain owner field carries, on the path where the value is there, so the
+// struct states it the same way: an explicit `deinit` that opens the optional
+// and releases what it finds.
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?string::String,
+}
+
+fn (self: Visitor) deinit() -> void {
+    self.name.deinit();
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return text;
+}
+
+// Reading the field through a borrow binds a borrow: the payload lives in the
+// visitor's storage, so opening it does not hand it over. Consuming it here
+// would be a compile error.
+fn show(visitor: &Visitor) -> void {
+    if visitor.nick |held| {
+        let bytes = held.as_bytes();
+        print(bytes);
+    } else {
+        print("no nick");
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+
+    var known = Visitor {
+        name: try owned(allocator, "alice"),
+        nick: try owned(allocator, "al"),
+    };
+    defer known.deinit();
+    show(&known);
+
+    var plain = Visitor { name: try owned(allocator, "bob"), nick: null };
+    defer plain.deinit();
+    show(&plain);
+    return;
+}
+
+// run
+// features: optional owner std-string capture
+// output:
+// al
+// no nick
