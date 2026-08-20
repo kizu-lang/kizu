@@ -1,4 +1,5 @@
 import compiler::lexer;
+import compiler::source;
 import compiler::token;
 import std::array;
 import std::mem;
@@ -80,9 +81,12 @@ test "lexer scans representative syntax" {
     try expect_next(&var scanner, token::Kind::Eof, "");
 }
 
-test "lexer keeps multiple tokens and their file names alive" {
+test "lexer keeps one source ID on multiple live tokens" {
     let allocator = mem::page_allocator();
-    var scanner = lexer::new_file(allocator, "sample.kizu", "first second third");
+    let source_id = source::SourceId {
+        index: 7
+    };
+    var scanner = lexer::new_source(allocator, source_id, "first second third");
     defer scanner.deinit();
     let first = try scanner.next_token();
     defer first.deinit();
@@ -96,12 +100,21 @@ test "lexer keeps multiple tokens and their file names alive" {
     testing::expect(mem::equal_bytes(second_literal, "second"));
     let third_literal = third.literal.as_bytes();
     testing::expect(mem::equal_bytes(third_literal, "third"));
-    let first_file = first.file.as_bytes();
-    testing::expect(mem::equal_bytes(first_file, "sample.kizu"));
-    let second_file = second.file.as_bytes();
-    testing::expect(mem::equal_bytes(second_file, "sample.kizu"));
-    let third_file = third.file.as_bytes();
-    testing::expect(mem::equal_bytes(third_file, "sample.kizu"));
+    if first.source |id| {
+        testing::expect_equal<i64>(7, id.index);
+    } else {
+        testing::fail("first token lost source ID");
+    }
+    if second.source |id| {
+        testing::expect_equal<i64>(7, id.index);
+    } else {
+        testing::fail("second token lost source ID");
+    }
+    if third.source |id| {
+        testing::expect_equal<i64>(7, id.index);
+    } else {
+        testing::fail("third token lost source ID");
+    }
 }
 
 test "lexer attaches doc and safety comments separately" {

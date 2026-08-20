@@ -3,6 +3,7 @@ package lexer
 import (
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -15,7 +16,7 @@ type Lexer struct {
 	line         int
 	column       int
 	pending      comments
-	file         string
+	source       source.ID
 }
 
 // comments are the comment lines the lexer keeps for the next real token: the
@@ -73,7 +74,13 @@ func New(input string) *Lexer {
 // NewFile creates a lexer that stamps file onto every token it produces, so a
 // diagnostic built from one can name the source it came from.
 func NewFile(file string, input string) *Lexer {
-	l := &Lexer{input: []rune(input), line: 1, file: file}
+	sources := source.NewMap()
+	return NewSource(sources.Add(file, input))
+}
+
+// NewSource creates a lexer over one record already owned by a source map.
+func NewSource(input source.ID) *Lexer {
+	l := &Lexer{input: []rune(input.Text()), line: 1, source: input}
 	l.readChar()
 	return l
 }
@@ -94,7 +101,7 @@ func (l *Lexer) NextToken() token.Token {
 
 // scanToken reads the token at the current position.
 func (l *Lexer) scanToken() token.Token {
-	tok := token.Token{File: l.file, Line: l.line, Column: l.column}
+	tok := token.Token{Source: l.source, Line: l.line, Column: l.column}
 
 	switch l.ch {
 	case '=':
@@ -156,7 +163,7 @@ func (l *Lexer) oneCharToken(t token.Type) token.Token {
 	return token.Token{
 		Type:    t,
 		Literal: string(l.ch),
-		File:    l.file,
+		Source:  l.source,
 		Line:    l.line,
 		Column:  l.column,
 	}
@@ -171,7 +178,7 @@ func (l *Lexer) twoCharToken(t token.Type) token.Token {
 	return token.Token{
 		Type:    t,
 		Literal: string([]rune{ch, l.ch}),
-		File:    l.file,
+		Source:  l.source,
 		Line:    line,
 		Column:  column,
 	}

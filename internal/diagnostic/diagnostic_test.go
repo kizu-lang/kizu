@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/source"
 )
 
 // TestFromTextKeepsADRPartsStructured keeps category, note, and help split for renderers.
@@ -41,6 +42,21 @@ func TestFromTextKeepsADRPartsStructured(t *testing.T) {
 	}
 	if diag.CLIError() != "error: "+want {
 		t.Fatalf("got %q, want %q", diag.CLIError(), "error: "+want)
+	}
+}
+
+// TestDiagnosticResolvesSourcePath checks rendering resolves an ID at the output boundary.
+func TestDiagnosticResolvesSourcePath(t *testing.T) {
+	sources := source.NewMap()
+	id := sources.Add("src/main.kizu", "fn main( {}")
+	diag := New(SeverityError, "", ast.Span{
+		Source: id,
+		Start:  ast.Position{Line: 1, Column: 9},
+		End:    ast.Position{Line: 1, Column: 10},
+	}, "expected parameter")
+	want := "expected parameter at src/main.kizu:1:9"
+	if got := diag.Error(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

@@ -75,7 +75,7 @@ func insertMoveMarkers(path, source string) (string, error) {
 	for _, marker := range markers {
 		// Loading a file resolves the std it imports, whose markers belong to
 		// their own files and are already written.
-		if marker.Span.File != path {
+		if marker.Span.Source.Path() != path {
 			continue
 		}
 		offset, ok := lineColumnOffset(source, marker.Span.Start.Line, marker.Span.Start.Column)

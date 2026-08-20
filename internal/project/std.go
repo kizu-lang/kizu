@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/manifest"
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/token"
 )
@@ -225,10 +226,11 @@ func readStdErrorSets() (map[string]map[string]int, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	parser := &graphChecker{sources: source.NewMap()}
 	sets := map[string]map[string]int{}
 	code := 1
 	for _, module := range graph.Modules {
-		program, err := parseModuleFile(module)
+		program, err := parser.parseModuleFile(module)
 		if err != nil {
 			return nil, 0, err
 		}

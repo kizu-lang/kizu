@@ -19,5 +19,9 @@ func diagnosticAtToken(tok token.Token, message string) Diagnostic {
 	}
 	start := ast.Position{Line: tok.Line, Column: tok.Column}
 	end := ast.Position{Line: tok.Line, Column: tok.Column + width}
-	return *diag.New(diag.SeverityError, "", ast.Span{Start: start, End: end}, message)
+	return *diag.New(diag.SeverityError, "", ast.Span{
+		Source: tok.Source,
+		Start:  start,
+		End:    end,
+	}, message)
 }

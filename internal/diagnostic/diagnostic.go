@@ -81,8 +81,8 @@ func (d *Diagnostic) Error() string {
 		first = "warning: " + d.Message
 	}
 	if !d.Span.IsZero() {
-		if d.Span.File != "" {
-			first += fmt.Sprintf(" at %s:%d:%d", d.Span.File, d.Span.Start.Line, d.Span.Start.Column)
+		if path := d.Span.Source.Path(); path != "" {
+			first += fmt.Sprintf(" at %s:%d:%d", path, d.Span.Start.Line, d.Span.Start.Column)
 		} else {
 			first += fmt.Sprintf(" at %d:%d", d.Span.Start.Line, d.Span.Start.Column)
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 )
 
@@ -30,6 +31,7 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 		types:           map[string]typeExport{},
 		functions:       map[string]functionExport{},
 		sourceOverrides: cleanSourceOverrides(sources),
+		sources:         source.NewMap(),
 	}
 	if err := checker.loadPackage(graph); err != nil {
 		return nil, err
@@ -66,6 +68,8 @@ type graphChecker struct {
 	types           map[string]typeExport
 	functions       map[string]functionExport
 	sourceOverrides map[string]string
+	// sources owns each module path and input once while syntax records carry IDs.
+	sources *source.Map
 }
 
 type moduleUnit struct {
@@ -213,23 +217,24 @@ func (c *graphChecker) stdImportPaths() []string {
 // parseModule parses one graph module from an override or its source file.
 func (c *graphChecker) parseModule(module Module) (*ast.Program, error) {
 	if source, ok := c.sourceOverrides[filepath.Clean(module.File)]; ok {
-		return parseModuleSource(module.File, source)
+		return c.parseModuleSource(module.File, source)
 	}
-	return parseModuleFile(module)
+	return c.parseModuleFile(module)
 }
 
 // parseModuleFile parses one graph module source.
-func parseModuleFile(module Module) (*ast.Program, error) {
+func (c *graphChecker) parseModuleFile(module Module) (*ast.Program, error) {
 	source, err := os.ReadFile(module.File)
 	if err != nil {
 		return nil, err
 	}
-	return parseModuleSource(module.File, string(source))
+	return c.parseModuleSource(module.File, string(source))
 }
 
 // parseModuleSource parses one graph module source string.
-func parseModuleSource(file string, source string) (*ast.Program, error) {
-	p := parser.New(lexer.NewFile(file, source))
+func (c *graphChecker) parseModuleSource(file string, text string) (*ast.Program, error) {
+	input := c.sources.Add(file, text)
+	p := parser.New(lexer.NewSource(input))
 	program := p.ParseProgram()
 	if diagnostics := p.Diagnostics(); len(diagnostics) > 0 {
 		return nil, &diagnostics[0]

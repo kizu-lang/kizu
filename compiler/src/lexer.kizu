@@ -1,11 +1,12 @@
+import compiler::source;
 import compiler::token;
 import std::array;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/lexer/lexer.go. Input and file are borrowed
-// from the compilation source record. Token text is copied through the
-// explicit allocator passed to new/new_file.
+// Mechanical port of internal/lexer/lexer.go. Input is borrowed from the
+// compilation source record. Token text is copied through the explicit
+// allocator passed to new/new_source.
 
 struct Span {
     start: i64,
@@ -35,16 +36,28 @@ pub struct Lexer {
     column: i64,
     pending_doc: array::Array<Span>,
     pending_safety: array::Array<Span>,
-    file: []u8
+    source: ?source::SourceId
 }
 
 /// Creates a lexer for input.
 pub fn new(allocator: Allocator, input: []u8) -> Lexer {
-    return new_file(allocator, "", input);
+    return make(allocator, null, input);
 }
 
-/// Creates a lexer that stamps file onto every token it produces.
-pub fn new_file(allocator: Allocator, file: []u8, input: []u8) -> Lexer {
+/// Creates a lexer that stamps source ID onto every token it produces.
+pub fn new_source(
+allocator: Allocator,
+source_id: source::SourceId,
+input: []u8
+) -> Lexer {
+    return make(allocator, source_id, input);
+}
+
+fn make(
+allocator: Allocator,
+source_id: ?source::SourceId,
+input: []u8
+) -> Lexer {
     var out = Lexer {
         allocator: allocator,
         input: input,
@@ -55,7 +68,7 @@ pub fn new_file(allocator: Allocator, file: []u8, input: []u8) -> Lexer {
         column: 0,
         pending_doc: array::new<Span>(allocator),
         pending_safety: array::new<Span>(allocator),
-        file: file
+        source: source_id
     };
     out.read_char();
     return move out;
@@ -175,10 +188,8 @@ column: i64
         column: column,
         doc_comments: array::new<string::String>(self.allocator),
         safety: array::new<string::String>(self.allocator),
-        file: string::new(self.allocator)
+        source: self.source
     };
-    errdefer out.deinit();
-    try out.file.append_bytes(self.file);
     return move out;
 }
 

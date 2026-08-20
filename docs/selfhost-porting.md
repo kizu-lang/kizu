@@ -86,6 +86,7 @@ Kizu の通常の snake_case と module namespace へ機械的に変換します
 
 | Go | Kizu |
 | --- | --- |
+| `internal/source` | `compiler::source` |
 | `internal/token` | `compiler::token` |
 | `internal/lexer` | `compiler::lexer` |
 | `internal/parser` | `compiler::parser` |
