@@ -381,7 +381,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
         print(name.value);
     }
@@ -409,7 +409,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
         print("kept");
     }
@@ -441,9 +441,9 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     if true {
-        take(name);
+        take(move name);
     } else {
-        take(name);
+        take(move name);
     }
     print(name.value);
 }
@@ -498,7 +498,7 @@ fn take(name: Name) {
 fn main() {
     let name = Name { value: "alice" };
     while false {
-        take(name);
+        take(move name);
     }
     print(name.value);
 }
@@ -1498,7 +1498,7 @@ fn make_bag() -> !Bag {
     errdefer values.deinit();
     try values.append(10);
     try values.append(20);
-    return Bag { values: values };
+    return Bag { values: move values };
 }
 fn print_bag_len(bag: &Bag) -> void {
     print(bag.values.len());
@@ -1554,7 +1554,7 @@ fn make_bag() -> !Bag {
     errdefer stmts.deinit();
     try stmts.append(Stmt::Add(10));
     try stmts.append(Stmt::Done(20));
-    return Bag { stmts: stmts };
+    return Bag { stmts: move stmts };
 }
 fn print_stmt(stmt: &Stmt) -> void {
     match stmt {

@@ -76,6 +76,7 @@ const (
 	Extern   Type = "extern"
 	Comptime Type = "comptime"
 	Try      Type = "try"
+	Move     Type = "move"
 	Null     Type = "null"
 	Orelse   Type = "orelse"
 )
@@ -127,6 +128,7 @@ var keywords = map[string]Type{
 	"extern":   Extern,
 	"comptime": Comptime,
 	"try":      Try,
+	"move":     Move,
 	"null":     Null,
 	"orelse":   Orelse,
 }

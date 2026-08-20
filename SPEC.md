@@ -427,7 +427,7 @@ fn make_values(allocator: mem::Allocator) -> !array::Array<i64> {
     errdefer values.deinit();
 
     try values.append(1);
-    return values;
+    return move values;
 }
 ```
 
@@ -459,14 +459,17 @@ cleanup は名前が意味しなくなった値を持つことになります。
 var child = string::new(allocator);
 errdefer child.deinit();
 try child.append_byte(cast<u8>(97));  // 失敗したら child を解放する
-try parent.append(child);             // ここから先は parent が child を持つ
+try parent.append(move child);        // ここから先は parent が child を持つ
 try parent.reserve(1);                // 失敗しても child は解放しない
 ```
+
+`move` marker(§8)が退役する行を指します。義務が place を離れる行と、その
+`errdefer` が効かなくなる行は同じ 1 行です。
 
 ```kizu
 var first = string::new(allocator);
 errdefer first.deinit();              // first だけを覆う
-try parent.append(first);             // 退役
+try parent.append(move first);        // 退役
 
 var second = string::new(allocator);  // 新しい owner は新しい名前へ
 errdefer second.deinit();             // second だけを覆う
@@ -1293,6 +1296,27 @@ compile error です(ADR-0091)。
 * 別の owner aggregate / container への move
 * owned return value として caller への move
 * `std::mem::leak(value)` による明示 leak
+
+名前の付いた place から owner が出る move には `move` marker を書きます。
+
+```kizu
+try parent.append(move child);        // 引数
+return Bag { values: move values };   // struct / union literal の field
+return move name;                     // return
+let held = move name;                 // 束縛
+```
+
+marker が付くのは place から値が出る位置だけです。call の結果や literal のような
+temporary は壊す place を持たないので付けません。method の receiver にも付けません
+—— receiver を consume するのは `deinit` の契約で、その語が既に見えています。
+copy 型の place に書くのは compile error です。手放していないためです。
+
+marker は義務が place を離れる行を指します。そこは `errdefer` が退役する行でも
+あり(§6.3)、退役が source に現れる唯一の場所です。
+
+generic な body は instantiation ごとに同じ 1 行を持ちます。owner の instantiation
+が手放す以上 marker は必要なので、copy の instantiation はそれを受け入れます。
+片方を満たす綴りがもう片方を破ると、その関数が書けなくなるためです。
 
 consume は path ごとに決まります。分岐の一方でだけ consume する owner は
 compile error です。consume しなかった path はその値を解放できず、合流後に
@@ -2221,7 +2245,7 @@ std::meta::unsupported<T>()                   compile error にする
 let first = try make_field<Names, first>(allocator);
 errdefer first.deinit();
 let second = try make_field<Names, second>(allocator);
-Names { first: first, second: second }
+Names { first: move first, second: move second }
 ```
 
 `errdefer` は owner field にだけ並びます。値は struct literal が一度に取るまで

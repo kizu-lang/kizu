@@ -3007,6 +3007,10 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 		return c.readMatchExpr(e, env)
 	case *ast.OrelseGuardExpr:
 		return c.readOrelseGuardExpr(e, env)
+	case *ast.MoveExpr:
+		return "", errorAt(e.Span,
+			"move error: `move` marks a hand-off, and `%s` is only read here",
+			e.Value.String())
 	default:
 		return "", errorf("move error: unsupported expression %T", expr)
 	}
@@ -3189,41 +3193,102 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 	return typ.Text(expr.TargetType), nil
 }
 
-// moveExpr checks an expression and consumes a non-copy identifier when present.
+// moveExpr checks an expression in a move context and enforces the `move`
+// marker. A hand-off from a named place carries the marker: that is where the
+// obligation leaves the place, and where an errdefer covering it retires
+// (ADR-0114). A temporary has no place to leave, so it carries no marker.
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
+	marker, place := splitMoveMarker(expr)
+	typeName, handedOff, err := c.movePlaceExpr(place, env)
+	if err != nil {
+		return "", err
+	}
+	if marker != nil && !handedOff {
+		if !c.isCopyPlace(place, env) {
+			return "", errorAt(marker.Span,
+				"move error: `move` marks a hand-off from a named place, and `%s` is not one",
+				place.String())
+		}
+		// A generic body is one source line per instantiation. The owner one
+		// hands off and needs the marker, so the copy one accepts it rather
+		// than making the function unwritable.
+		if !c.inGenericFunction() {
+			return "", errorAt(marker.Span,
+				"move error: `%s` is copy data and hands nothing off", place.String())
+		}
+	}
+	if marker == nil && handedOff {
+		return "", errorAt(expressionSpan(place),
+			"move error: `%s` is handed off here; write `move %s`",
+			place.String(), place.String())
+	}
+	return typeName, nil
+}
+
+// inGenericFunction reports whether the body being checked defers a type to its
+// instantiation, so whether a place hands off is not fixed by this source.
+func (c *Checker) inGenericFunction() bool {
+	return c.currentFunction != nil && len(c.currentFunction.sig.StaticParams) > 0
+}
+
+// isCopyPlace reports whether expr names a binding whose type copies, so a
+// `move` marker on it can say that rather than that it found no place.
+func (c *Checker) isCopyPlace(expr ast.Expression, env *scope) bool {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
-		return c.moveNonIdentExpr(expr, env)
+		return false
+	}
+	value, ok := env.lookup(ident.Name)
+	return ok && c.isCopyType(value.typeName)
+}
+
+// splitMoveMarker separates a `move` marker from the place it covers.
+func splitMoveMarker(expr ast.Expression) (*ast.MoveExpr, ast.Expression) {
+	if marker, ok := expr.(*ast.MoveExpr); ok {
+		return marker, marker.Value
+	}
+	return nil, expr
+}
+
+// movePlaceExpr consumes a non-copy identifier when present and reports whether
+// the value was handed off from a named place.
+func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, error) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		typeName, err := c.moveNonIdentExpr(expr, env)
+		return typeName, false, err
 	}
 	value, ok := env.lookup(ident.Name)
 	if !ok {
 		if ident.Name == "void" {
-			return "", errorAt(ident.Span, "move error: void is not a value")
+			return "", false, errorAt(ident.Span, "move error: void is not a value")
 		}
-		return "", errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
+		return "", false, errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
 	}
 	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if value.moved {
-		return "", errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
+		return "", false, errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
 	}
 	if value.borrowedParam {
-		return "", errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape", ident.Name)
+		return "", false, errorAt(ident.Span,
+			"borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
 	if value.allocTied() {
-		return "", errorAt(ident.Span,
+		return "", false, errorAt(ident.Span,
 			"borrow error: value `%s` is allocated from a tied allocator and cannot escape its frame",
 			ident.Name)
 	}
 	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
-		return "", errorAt(ident.Span,
+		return "", false, errorAt(ident.Span,
 			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
-	if !c.isCopyType(value.typeName) {
-		value.moved = true
+	if c.isCopyType(value.typeName) {
+		return value.typeName, false, nil
 	}
-	return value.typeName, nil
+	value.moved = true
+	return value.typeName, true, nil
 }
 
 // moveNonIdentExpr handles move contexts for compound expressions.

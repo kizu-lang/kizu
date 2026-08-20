@@ -1044,6 +1044,43 @@ func (e *TryExpr) String() string {
 	return "try " + e.Value.String()
 }
 
+// MarkerValue returns the expression a value-transparent marker covers.
+// `comptime`, `unsafe` and `move` each say something about an expression —
+// that it ran at compile time, who owns an unproven operation, where an
+// obligation leaves — without changing its value, so a pass that reads only
+// the value reads through them. `try` is not one: it unwraps.
+func MarkerValue(expr Expression) (Expression, bool) {
+	switch e := expr.(type) {
+	case *ComptimeExpr:
+		return e.Expr, true
+	case *UnsafeExpr:
+		return e.Value, true
+	case *MoveExpr:
+		return e.Value, true
+	}
+	return nil, false
+}
+
+// MoveExpr marks the place an owner is handed off from. It carries no value of
+// its own: the marker says the obligation on Value leaves here, which is also
+// where an errdefer covering it retires (ADR-0114). Consume through `deinit`
+// and `leak` already names itself, so the marker covers the other consume
+// forms — argument, literal field, return, binding.
+type MoveExpr struct {
+	Value Expression
+	// Span points at the `move` keyword, so a marker on a place that does not
+	// move can be reported where it was written.
+	Span Span
+}
+
+// expressionNode marks MoveExpr as an expression node.
+func (*MoveExpr) expressionNode() {}
+
+// String returns a compact debug representation of the move expression.
+func (e *MoveExpr) String() string {
+	return "move " + e.Value.String()
+}
+
 // UnsafeExpr marks an expression whose memory safety the compiler does not
 // prove. It carries no value of its own: the marker says the author owns the
 // obligation for every unproven operation inside Value.
