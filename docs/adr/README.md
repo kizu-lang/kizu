@@ -132,3 +132,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0116: errdefer は consume 全般で退役する](0116-errdefer-retires-at-any-consume.md) (0114 の決定 3 を訂正)
 - [ADR-0117: 値で受けた owner は、失敗した callee が解放する](0117-fallible-callee-releases-the-owner-it-took.md) (0114 が前提にした契約を実装する)
 - [ADR-0118: cleanup receiver に再代入できない](0118-cleanup-receivers-cannot-be-reassigned.md) (0114 の決定 4 を置換)
+- [ADR-0119: cleanup の名前は `deinit` 1 つ](0119-one-cleanup-name.md) (0091 の決定 3 を置換)

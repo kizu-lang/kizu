@@ -829,8 +829,8 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		if !matchArmCleansPayload(arm.Body, arm.Binding) {
 			return errorf(
 				"type error: owner-payload union variant `%s::%s` must clean its payload "+
-					"via `%s.deinit()` or `%s.deinit_all()`",
-				decl.Name, variant.Name, arm.Binding, arm.Binding)
+					"via `%s.deinit()`",
+				decl.Name, variant.Name, arm.Binding)
 		}
 	}
 	return nil
@@ -3819,11 +3819,6 @@ func (c *Checker) checkArrayConstructor(
 
 // rejectArrayElementType rejects element types that need unresolved lifetime rules.
 func (c *Checker) rejectArrayElementType(elem Type) error {
-	if c.ownerElemContainer(elem) {
-		return errorf(
-			"type error: Array element `%s` is an owner-element container; wrap it in a struct with deinit",
-			elem)
-	}
 	if err := c.rejectArrayStorageType(elem, map[Type]bool{}); err != nil {
 		return errorf("type error: Array element is not safe: %w", err)
 	}
@@ -4145,11 +4140,6 @@ func (c *Checker) checkBoxConstructor(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	if c.ownerElemContainer(elem) {
-		return "", true, errorf(
-			"type error: Box payload `%s` is an owner-element container; wrap it in a struct with deinit",
-			elem)
-	}
 	if len(args) != 2 {
 		return "", true, errorf("type error: `std::mem::Box<%s>` expects allocator and value",
 			elem)
@@ -5591,13 +5581,10 @@ func (c *Checker) checkBoxReceiverMethod(
 	case "borrow_mut":
 		return "", errorf(
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
-	case "deinit", "deinit_all":
+	case "deinit":
 		if _, ok := field.Receiver.(*ast.IdentExpr); !ok &&
 			!c.directFieldCleanupReceiver(field.Receiver, env) {
 			return "", errorf("type error: `Box.%s` requires local Box receiver", field.Name)
-		}
-		if err := c.cleanupChoiceError("Box", "payload", field.Name, elem); err != nil {
-			return "", err
 		}
 		return c.checkStdMethod("std::mem::Box", []Type{elem}, "Box", field.Name,
 			args, env, unsafe)
@@ -5912,7 +5899,8 @@ func (c *Checker) checkArrayMethod(
 	}
 	// Rules the declaration cannot state: `at`/`at_mut` hand out a borrow,
 	// `get` copies out of the array, and owner elements make shallow cleanup a
-	// leak (ADR-0091), so the element type picks between deinit and deinit_all.
+	// leak (ADR-0091). One cleanup name covers both: `deinit` releases what the
+	// container holds along with the container (ADR-0119).
 	switch name {
 	case "at", "at_mut":
 		// In a capture condition the std declaration answers everything:
@@ -5933,10 +5921,6 @@ func (c *Checker) checkArrayMethod(
 	case "get", "get_or_panic":
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
-		}
-	case "deinit", "deinit_all":
-		if err := c.cleanupChoiceError("Array", "elements", name, elem); err != nil {
-			return "", err
 		}
 	case "set":
 		if c.ownerType(elem) {
@@ -6738,41 +6722,6 @@ func (c *Checker) checkVolatileWrite(
 // ownerType reports whether values of typ carry a deinit contract (ADR-0091).
 func (c *Checker) ownerType(typ Type) bool {
 	return ast.OwnerType(c.deinitOwners, string(typ))
-}
-
-// ownerElemContainer reports whether typ is a container of owner elements,
-// the class whose only cleanup is `deinit_all()`. Such a container cannot
-// itself be a container element: `deinit_all` consumes each element through the
-// element's own `deinit()`, which owner-element containers reject. The class
-// has one definition, ast.CleanupMethodName.
-func (c *Checker) ownerElemContainer(typ Type) bool {
-	return ast.CleanupMethodName(string(typ), c.deinitOwners) == "deinit_all"
-}
-
-// cleanupChoiceError rejects the cleanup name an element type does not accept
-// (ADR-0091): shallow `deinit` leaks owner contents, `deinit_all` requires
-// them. contents names what the container holds ("elements" or "payload").
-func (c *Checker) cleanupChoiceError(
-	container string,
-	contents string,
-	name string,
-	elem Type,
-) error {
-	switch name {
-	case "deinit":
-		if c.ownerType(elem) {
-			return errorf(
-				"type error: `%s.deinit` would leak the owner %s `%s`; use `%s.deinit_all`",
-				container, contents, elem, container)
-		}
-	case "deinit_all":
-		if !c.ownerType(elem) {
-			return errorf(
-				"type error: `%s.deinit_all` is for owner %s; `%s` needs no cleanup, use `%s.deinit`",
-				container, contents, elem, container)
-		}
-	}
-	return nil
 }
 
 // isCopyType reports whether values of typ can be duplicated safe code.

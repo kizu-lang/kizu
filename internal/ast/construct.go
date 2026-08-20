@@ -53,7 +53,7 @@ func ConstructExpansion(
 			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{
 				Callee: &FieldExpr{
 					Receiver: &IdentExpr{Name: binding},
-					Name:     CleanupMethodName(field.Type, owners),
+					Name:     CleanupMethod,
 				},
 			}})
 		}

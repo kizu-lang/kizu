@@ -288,7 +288,7 @@ func TestLowerErrDeferRetiresAtMove(t *testing.T) {
 	module := lowerSource(t, `
 fn build(allocator: Allocator) -> !std::array::Array<std::string::String> {
     let parent = std::array::new<std::string::String>(allocator);
-    errdefer parent.deinit_all();
+    errdefer parent.deinit();
     let child = std::string::new(allocator);
     errdefer child.deinit();
     try child.append_byte(cast<u8>(97));
@@ -858,13 +858,13 @@ func TestLowerFalliblePrimitiveReleasesOwnerArgument(t *testing.T) {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var parent = std::array::new<std::string::String>(allocator);
-    defer parent.deinit_all();
+    defer parent.deinit();
     var name = std::string::new(allocator);
     errdefer name.deinit();
     try name.append_byte(cast<u8>(97));
     try parent.append(name);
     let boxed = try std::mem::box<std::string::String>(allocator, std::string::new(allocator));
-    defer boxed.deinit_all();
+    defer boxed.deinit();
     return;
 }`)
 	got := Dump(module)
@@ -984,7 +984,7 @@ fn collect<E>(allocator: Allocator) -> std::array::Array<E> {
 fn main() -> !void {
     let allocator = std::mem::page_allocator();
     var wide = collect<Wide>(allocator);
-    defer wide.deinit_all();
+    defer wide.deinit();
     var numbers = collect<i64>(allocator);
     defer numbers.deinit();
     return;

@@ -83,36 +83,32 @@ func (l *lowerer) cleanupFromExpr(expr ast.Expression) (Cleanup, error) {
 // cleanupFromMethod resolves one receiver.method() cleanup into an IR instruction.
 func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, error) {
 	receiverType := derefType(receiver.Type)
-	if elem, ok := arrayElementType(receiverType); ok {
-		if method == "deinit" {
+	if elem, ok := arrayElementType(receiverType); ok && method == "deinit" {
+		// A container whose elements own something releases them first, and
+		// that loop lives in the std wrapper rather than in a runtime op: the
+		// cleanup calls its instance exactly like a direct call would. Plain
+		// elements have no loop to run, so they keep the runtime op.
+		if !ast.OwnerType(l.deinitOwners, elem) {
 			return Cleanup{Op: "array.deinit", Args: []Value{receiver}}, nil
 		}
-		if method == "deinit_all" {
-			// deinit_all is the std wrapper's body, not a runtime op: the
-			// cleanup calls its instance exactly like a direct call would.
-			op, _, err := l.stdContainerCallOp(arrayTypeName, method, elem)
-			if err != nil {
-				return Cleanup{}, err
-			}
-			return Cleanup{Op: op, Args: []Value{receiver}}, nil
+		op, _, err := l.stdContainerCallOp(arrayTypeName, method, elem)
+		if err != nil {
+			return Cleanup{}, err
 		}
+		return Cleanup{Op: op, Args: []Value{receiver}}, nil
 	}
 	if _, ok := mapValueType(receiverType); ok && method == "deinit" {
 		return Cleanup{Op: "map.deinit", Args: []Value{receiver}}, nil
 	}
-	if elem, ok := boxElementType(receiverType); ok {
-		if method == "deinit" {
+	if elem, ok := boxElementType(receiverType); ok && method == "deinit" {
+		if !ast.OwnerType(l.deinitOwners, elem) {
 			return Cleanup{Op: "box.deinit", Args: []Value{receiver}}, nil
 		}
-		if method == "deinit_all" {
-			// deinit_all is the std wrapper's body, not a runtime op: the
-			// cleanup calls its instance exactly like a direct call would.
-			op, _, err := l.stdContainerCallOp(boxTypeName, method, elem)
-			if err != nil {
-				return Cleanup{}, err
-			}
-			return Cleanup{Op: op, Args: []Value{receiver}}, nil
+		op, _, err := l.stdContainerCallOp(boxTypeName, method, elem)
+		if err != nil {
+			return Cleanup{}, err
 		}
+		return Cleanup{Op: op, Args: []Value{receiver}}, nil
 	}
 	if methodName, ok := l.implMethodCalleeName(receiver.Type, method); ok {
 		sig := l.signatures[methodName]

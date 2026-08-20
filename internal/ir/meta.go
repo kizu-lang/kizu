@@ -114,7 +114,7 @@ func (l *lowerer) lowerMetaApply(
 	case stdmeta.Construct:
 		value, err := l.lowerMetaConstruct(typeArg, args)
 		return value, true, err
-	case stdmeta.IsStruct, stdmeta.IsOptional:
+	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
 		known, err := l.metaPredicate(form, typeArg)
 		if err != nil {
 			return Value{}, true, err
@@ -210,6 +210,15 @@ func (l *lowerer) resolveMetaTypeDeep(text string) string {
 		return "?" + l.resolveMetaTypeDeep(node.Elem.String())
 	case *typ.Slice:
 		return "[]" + l.resolveMetaTypeDeep(node.Elem.String())
+	case *typ.Name:
+		if len(node.Args) == 0 {
+			return text
+		}
+		args := make([]typ.Type, 0, len(node.Args))
+		for _, arg := range node.Args {
+			args = append(args, &typ.Name{Path: []string{l.resolveMetaTypeDeep(arg.String())}})
+		}
+		return (&typ.Name{Path: node.Path, Args: args}).String()
 	default:
 		return text
 	}
@@ -234,6 +243,8 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 	case stdmeta.IsMap:
 		_, ok := mapValueType(subject)
 		return ok, nil
+	case stdmeta.IsOwner:
+		return ast.OwnerType(l.deinitOwners, subject), nil
 	case stdmeta.HasPublicFields:
 		fields, err := l.publicFields(subject)
 		return err == nil && len(fields) > 0, nil

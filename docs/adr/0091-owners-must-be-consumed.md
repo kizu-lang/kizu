@@ -25,6 +25,10 @@ allocation として公理にも違反している。
 3. **owner 要素の collection は compile 時に閉じる。** shallow `deinit()` を
    型 error にし、要素ごと consume する操作(`deinit_all()`)だけを consume と
    認める。要素数は runtime 値だが、正しい始末操作の強制は型で決まる。
+   —— **ADR-0119 がこれを置き換える。** cleanup の名前は `deinit` 1 つにし、
+   `deinit_all` を廃止する。`deinit` が値と値が保持するものを解放するので、
+   漏れる操作そのものが無くなり、別名で気づかせる必要が消えた。目的
+   (要素の leak を compile 時に閉じる)は保たれる。
 4. **明示 leak を追加する。** `mem::leak(x)` を consume として認め、
    leak-on-exit(短命 process が解放を OS に任せる)を合法に書けるようにする。
 5. **fs / io の確保 API を直す。** 確保版(allocator と確保上限を明示。

@@ -2078,7 +2078,7 @@ func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error
 	if !ast.OwnerType(l.deinitOwners, owner.Type) {
 		return result, nil
 	}
-	cleanup, err := l.cleanupFromMethod(owner, ast.CleanupMethodName(owner.Type, l.deinitOwners))
+	cleanup, err := l.cleanupFromMethod(owner, ast.CleanupMethod)
 	if err != nil {
 		return Value{}, err
 	}

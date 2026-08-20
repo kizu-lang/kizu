@@ -40,7 +40,7 @@ func matchArmCleansPayload(body ast.Statement, binding string) bool {
 }
 
 // ownerUnionDeinitCall reports whether expr is the cleanup call
-// `binding.deinit()` or `binding.deinit_all()`. Which of the two the payload
+// `binding.deinit()`, which releases the payload with it. Which the payload
 // type accepts is enforced where the arm body is checked.
 func ownerUnionDeinitCall(expr ast.Expression, binding string) bool {
 	call, ok := expr.(*ast.CallExpr)

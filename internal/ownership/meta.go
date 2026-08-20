@@ -169,7 +169,7 @@ func (c *Checker) checkMetaApply(
 			return "", true, err
 		}
 		return "[]u8", true, nil
-	case stdmeta.IsStruct, stdmeta.IsOptional:
+	case stdmeta.IsStruct, stdmeta.IsOptional, stdmeta.IsOwner:
 		return "bool", true, nil
 	case stdmeta.Field:
 		typeName, err := c.checkMetaFieldBorrow(form, staticArgs, args, env)

@@ -1567,7 +1567,7 @@ fn check(values: std::array::Array<Parsed>) -> !void {
     if values.pop() |item| {
         item.deinit();
     }
-    values.deinit_all();
+    values.deinit();
     return;
 }
 fn main() {}`
@@ -1586,7 +1586,7 @@ fn check(values: std::array::Array<Parsed>) -> void {
     let value = values.pop_or_panic();
     value.deinit();
     print(values.len());
-    values.deinit_all();
+    values.deinit();
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
