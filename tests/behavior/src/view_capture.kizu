@@ -1,3 +1,4 @@
+import std::array;
 import std::mem;
 import std::testing;
 
@@ -120,4 +121,39 @@ test "a view lends to a method whose receiver cannot keep it" {
     sink.take(view);
     testing::expect_equal<i64>(6, sink.total);
     testing::expect_equal<i64>(9, sink.weigh(view));
+}
+
+struct BufferedIter {
+    pub bytes: []u8,
+    pub index: i64,
+    pub seen: array::Array<i64>,
+}
+
+fn buffered_iter(allocator: Allocator, bytes: []u8) -> BufferedIter {
+    return BufferedIter {
+        bytes: bytes,
+        index: 0,
+        seen: array::new<i64>(allocator),
+    };
+}
+
+// An aggregate can owe cleanup and still retain a source view. Its binding
+// keeps both facts: deinit remains mandatory, and the backing stays borrowed
+// until that explicit cleanup is the aggregate's final use.
+test "owner aggregate captures a runtime view" {
+    let allocator = mem::page_allocator();
+    var buf = [3]u8{};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 60);
+    let view = buf.as_bytes();
+    var it = buffered_iter(allocator, view);
+    errdefer it.deinit();
+    try it.seen.append(cast<i64>(it.bytes[0]));
+    testing::expect_equal<i64>(60, it.seen.get_or_panic(0));
+    it.deinit();
+
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(90);
+    let check = buf.as_bytes();
+    testing::expect_equal<i64>(90, cast<i64>(check[0]));
 }

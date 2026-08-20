@@ -20,11 +20,11 @@ Allocator に対してやったことを、view を持てる struct に適用す
 
 ## 決定
 
-1. **view を持てる struct**(全 field が copy 値・view・そのような struct
-   で、transitively `[]u8` field を含む型)は、`let` / `var` 初期化位置で
-   だけ local view を捕捉できる。struct literal の直接捕捉と、その型を
-   返す関数呼び出しの両方が対象。binding は borrow class に入り、source
-   は field 初期化子/view 引数の borrow-class root の保守的統合。
+1. **view を持てる struct**(field を transitively 辿って `[]u8` を含む型)
+   は、`let` / `var` 初期化位置でだけ local view を捕捉できる。struct
+   literal の直接捕捉と、その型を返す関数呼び出しの両方が対象。binding
+   は source tie を持ち、source は field 初期化子/view 引数の borrow-class
+   root の保守的統合。別の field が owner でも対象から外さない。
 2. **let 以外の文脈は従来どおり拒否する。** 代入形・inline 引数・return
    での捕捉は tie を記録する binding が無いため escape のまま。allocator
    の pend protocol は再利用しない(let 限定なら不要)。
@@ -33,9 +33,12 @@ Allocator に対してやったことを、view を持てる struct に適用す
    同時に「view を保持できる型の `&var` parameter が無い」を追加する。
    後者が out-parameter smuggle hole を塞ぐ。`&var []u8` は差し替え
    不可(ADR-0096)のため除外。
-4. **owner field を持つ struct は捕捉できない。** borrow class は deinit
-   義務を運ばず、義務を落とすと leak になるため。owner + view の混在
-   struct は既存の拒否のまま。
+4. **owner field と view field は同じ struct に置ける。** owner-free な
+   値は borrow class を使い、owner obligation を持つ値は通常の owner
+   binding に source tie を追加する。後者は明示 `deinit` 義務を保ち、
+   cleanup まで source を借用する。tied allocator 由来の owner が既に使う
+   「owner obligation + borrow targets」と同じ表現なので、別の lifetime
+   機構を増やさない。
 5. **borrow-class 値の `[]u8` field 読みは tie を継ぐ。** let では同じ
    source への tie として認識し、move 文脈では escape として拒否する。
    parameter root の捕捉は自由な値のまま(parameter は frame より
@@ -50,6 +53,9 @@ Allocator に対してやったことを、view を持てる struct に適用す
   call site で塞ぐのが正しい altitude。
 - **非 let 文脈への pend protocol 拡張**: allocator と違い、view 引数の
   lend 自体が let 外では不要なので、機構を増やさず拒否で足りる。
+- **owner + view aggregate を拒否する**: lexer / parser のように source view
+  と作業用 owner container を同時に持つ型を分割するか、source 全体を複製
+  させる。型が既に持つ 2 つの義務を checker が追えるため却下。
 - **error union 戻り値・nested literal・method 戻り値の捕捉**: 認識器の
   対象を広げるだけの逐次拡張が可能だが、初版は最小に保つ。
 
@@ -57,7 +63,5 @@ Allocator に対してやったことを、view を持てる struct に適用す
 
 - error union(`!BytesIter`)を返す factory、nested struct literal、
   receiver method からの捕捉が必要になったとき(認識器の対象拡張)。
-- owner field を持つ struct の捕捉が必要になったとき(borrow class への
-  deinit 義務の載せ方を設計してから)。
 - 汎用 `[]u8` 戻り値(`fn f(v: []u8) -> []u8` の error union 版など)の
   tie 導出が必要になったとき。

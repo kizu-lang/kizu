@@ -1492,9 +1492,9 @@ fn pick(a: []u8, b: []u8, f: bool) -> []u8   // 戻り値は a と b の両方�
 * `Allocator` も tie を運びます。tied な `Allocator` 引数(§15.3)を受けて
   scalar 以外を返す関数の戻り値は、その allocator の tie を継承します。
   tie のない allocator からは何も継承せず、既存コードの意味は変わりません
-* **view を持てる struct** も tie を運びます(ADR-0100)。全 field が
-  copy 値・view・そのような struct で、transitively `[]u8` field を含む
-  型がこれに当たります。この型を返す関数の戻り値は、borrow-class な
+* **view を持てる struct** も tie を運びます(ADR-0100)。field を
+  transitively 辿って `[]u8` を含む型がこれに当たり、別の field が owner
+  でも同じです。この型を返す関数の戻り値は、borrow-class な
   view 引数(local view binding、または捕捉済み struct の view field)の
   保守的統合に tied です。source が無ければ通常の値で、既存コードの
   意味は変わりません
@@ -1508,14 +1508,15 @@ let it = BytesIter { bytes: view, index: 0 };   // it は view の source に ti
 var it2 = iter(view);                            // 関数経由でも同じ
 ```
 
-捕捉した binding は borrow class に入ります: frame から escape できず
-(return、move、struct への再格納は拒否)、source が生きている間
-source は borrow 中で、binding は最後の使用で終了します。owner field を
-持つ struct は捕捉できません(borrow class は deinit 義務を運ばない
-ため)。borrow-class 値の `[]u8` field 読みは let では同じ tie を継ぎ、
-move 文脈では escape として拒否します。source が関数 parameter だけの
-捕捉は自由な値のままです: parameter は frame より長生きし、呼び出し側が
-署名から tie を再導出します。
+owner field を持たない捕捉 binding は borrow class に入ります。owner field
+を持つ捕捉 binding は通常の owner のまま source への tie も持ち、明示
+`deinit` 義務を失いません。どちらも frame から escape できず(return、move、
+struct への再格納は拒否)、source は binding の最後の使用まで borrow 中です。
+owner の通常の最後の使用は、その義務を消費する `deinit` です。
+borrow-class 値の `[]u8` field 読みは let では同じ tie を継ぎ、move 文脈では
+escape として拒否します。source が関数 parameter だけの捕捉は自由な値の
+ままです: parameter は frame より長生きし、呼び出し側が署名から tie を
+再導出します。
 
 契約は署名だけから導出され、body は参照されません。
 名前付き lifetime parameter、lifetime bounds、anonymous lifetime は

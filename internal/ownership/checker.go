@@ -1307,7 +1307,10 @@ func (c *Checker) bindBorrowSources(
 	return nil
 }
 
-// checkReturnedBorrowLetStmt binds a function-returned borrow to its source owner.
+// checkReturnedBorrowLetStmt binds a returned view carrier to its source owner.
+// A view-only value lives in the borrow class. A value that also owes deinit
+// stays an ordinary owner binding with borrow targets, like an owner allocated
+// from a tied allocator: it must be consumed and cannot leave its sources.
 func (c *Checker) checkReturnedBorrowLetStmt(
 	stmt *ast.LetStmt,
 	sources []borrowSource,
@@ -1316,10 +1319,17 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	env *scope,
 ) error {
 	value := c.newBinding(stmt.Name, elem)
-	value.borrowedParam = true
-	value.localBorrow = true
-	value.mutBorrow = mutable
+	value.mutable = stmt.Mutable
+	value.declSpan = expressionSpan(stmt.Value)
+	if !c.valueTypeNeedsConsume(elem) {
+		value.borrowedParam = true
+		value.localBorrow = true
+		value.mutBorrow = mutable
+	}
 	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
+		return err
+	}
+	if err := c.attachAllocProvenance(value); err != nil {
 		return err
 	}
 	env.define(value)
@@ -3945,8 +3955,8 @@ func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bo
 }
 
 // viewCaptureStructType reports a struct type a let binding may capture views
-// into: a declared struct that can hold a view and owes no deinit, so the
-// whole value rides the borrow class without dropping an owner obligation.
+// into. View-only values ride the borrow class; owner values keep both their
+// explicit deinit obligation and their borrow targets.
 func (c *Checker) viewCaptureStructType(typeName string) bool {
 	if strings.Contains(typeName, "!") {
 		return false
@@ -3954,29 +3964,7 @@ func (c *Checker) viewCaptureStructType(typeName string) bool {
 	if c.structs[typeName] == nil {
 		return false
 	}
-	return c.viewCarryingType(typeName) && c.ownerFreeStruct(typeName, map[string]bool{})
-}
-
-// ownerFreeStruct reports a declared struct none of whose fields carry an
-// owner obligation: every field is a copy value, a view, or such a struct.
-func (c *Checker) ownerFreeStruct(typeName string, seen map[string]bool) bool {
-	if seen[typeName] {
-		return true
-	}
-	seen[typeName] = true
-	fields := c.structs[typeName]
-	if fields == nil {
-		return false
-	}
-	for _, fieldType := range fields {
-		if c.isCopyType(fieldType) || isRawPointerType(fieldType) {
-			continue
-		}
-		if !c.ownerFreeStruct(fieldType, seen) {
-			return false
-		}
-	}
-	return true
+	return c.viewCarryingType(typeName)
 }
 
 // borrowClassViewRoot resolves expr to the borrow-class binding backing a view

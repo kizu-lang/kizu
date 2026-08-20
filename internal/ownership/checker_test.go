@@ -236,6 +236,89 @@ fn main() -> !void {
 	}
 }
 
+// TestCheckAcceptsOwnerViewCapture keeps a view tie and an explicit deinit
+// obligation on the same binding. The source becomes writable again after
+// the owner is consumed.
+func TestCheckAcceptsOwnerViewCapture(t *testing.T) {
+	source := `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader {
+        input: input,
+        pending: std::array::new<i64>(allocator),
+    };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    var value = reader(allocator, view);
+    print(value.pending.len());
+    value.deinit();
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(1);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsOwnerViewCaptureMisuse checks that supporting a mixed
+// aggregate neither drops its cleanup nor releases its source tie early.
+func TestCheckRejectsOwnerViewCaptureMisuse(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "missing cleanup",
+			source: `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader { input: input, pending: std::array::new<i64>(allocator) };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let value = reader(allocator, view);
+    print(value.pending.len());
+    return;
+}`,
+			want: "owned value `value` is never deinitialized",
+		},
+		{
+			name: "source mutation while owner lives",
+			source: `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader { input: input, pending: std::array::new<i64>(allocator) };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let value = reader(allocator, view);
+    defer value.deinit();
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(1);
+    print(value.pending.len());
+    return;
+}`,
+			want: "value `buf` cannot be mutably borrowed while borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsViewCaptureEscapes pins the view-capture escape rules
 // (ADR-0100): a struct tied to a local view stays in the frame, and views
 // cannot smuggle out through `&var` parameters.
