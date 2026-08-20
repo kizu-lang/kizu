@@ -73,5 +73,11 @@ take がそれを返してもらう必要がある。そのための
 `Map<[]u8, String>`、`Map<[]u8, Map<[]u8, V>>`、`Map<[]u8, Array<T>>` が通る。
 copy 制約がそれらを masking していただけで、撤廃の副作用として通った。
 
-`std::json` は変更なしで受け取った。`encode_entries` は既に `get` ではなく
-`at` を使い、`decode_map` は `contains` で guard していた。
+`std::json` の generic 経路は変更なしで受け取った。`encode_entries` は既に
+`get` ではなく `at` を使い、`decode_map` は `contains` で guard していた。
+
+`std::json::Value` の `Obj` は copy 制約を避けるために `Array<Entry>` だった。
+制約が消えたので map にした。`Entry` 型が 1 つ減り、重複 key の検査が線形走査
+から `contains` になり、key lookup が O(1) になる。key の順序は map が挿入順で
+反復するので変わらない(ADR-0088)。`Obj(entries) => entries.len()` のような
+walk はそのまま通る。

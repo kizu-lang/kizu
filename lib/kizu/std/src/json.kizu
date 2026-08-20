@@ -541,15 +541,17 @@ fn encode_any_elements(
 }
 
 // encode_any_entries writes a `Value` object's entries into the object already
-// open, in the order the document wrote them.
+// open, in the order the document wrote them. The value is reached by a borrow
+// rather than by `get`, the way any owner value leaves a map.
 fn encode_any_entries(
     encoder: &var std::json::Encoder,
-    entries: &std::array::Array<std::json::Entry>,
+    entries: &std::map::Map<[]u8, std::json::Value>,
 ) -> !void {
     var index = 0;
-    while entries.at(index) |entry| {
-        let key = entry.key.as_bytes();
-        try encode_any_field(encoder, key, &entry.value);
+    while entries.key_at(index) |key| {
+        if entries.at(key) |value| {
+            try encode_any_field(encoder, key, value);
+        }
         index = index + 1;
     }
     return;
@@ -1284,29 +1286,16 @@ fn hex4_value(bytes: []u8, index: &var i64) -> ?i64 {
 // untrusted input sit in one place and there is one route to a value
 // (ADR-0115).
 //
-// `Obj` is an `Array<Entry>` rather than a map: a map's value type is copy-only
-// and a `Value` owns its contents. The array also keeps the keys in the order
-// the document wrote them.
+// `Obj` is the map a JSON object is: keys with the values they name, in the
+// order the document wrote them (ADR-0088). It owns both, so the keys outlive
+// the bytes they were read from.
 pub union Value {
     Null,
     Bool(bool),
     I64(i64),
     Str(std::string::String),
     Arr(std::array::Array<std::json::Value>),
-    Obj(std::array::Array<std::json::Entry>),
-}
-
-// An Entry is one key of an object with the value it names. Both are owned:
-// the key outlives the bytes it was read from.
-pub struct Entry {
-    pub key: std::string::String,
-    pub value: std::json::Value,
-}
-
-fn (self: Entry) deinit() -> void {
-    self.key.deinit();
-    self.value.deinit();
-    return;
+    Obj(std::map::Map<[]u8, std::json::Value>),
 }
 
 fn (self: Value) deinit() -> void {
@@ -1483,7 +1472,7 @@ fn decode_any_object(
     depth: i64,
 ) -> !std::json::Value {
     try expect_byte(bytes, index, cast<u8>(123));
-    var entries = std::array::new<std::json::Entry>(allocator);
+    var entries = std::map::new<[]u8, std::json::Value>(allocator);
     errdefer entries.deinit();
     if peek_byte(bytes, index) |byte| {
         if byte == cast<u8>(125) {
@@ -1494,33 +1483,20 @@ fn decode_any_object(
     var more = true;
     while more {
         skip_space(bytes, index);
-        let key_at = index.*;
-        try reject_duplicate_entry(&entries, bytes, key_at);
         var key = try decode_string(allocator, bytes, index);
-        errdefer key.deinit();
+        defer key.deinit();
+        let name = key.as_bytes();
+        // Refused before the value is built, the way `scan_object` refuses one:
+        // keeping either of the two would silently drop what the other carried.
+        if entries.contains(name) {
+            return Error::DuplicateField;
+        }
         try expect_byte(bytes, index, cast<u8>(58));
         let value = try decode_any(allocator, bytes, index, depth + 1);
-        try entries.append(std::json::Entry { key: key, value: value });
+        try entries.insert(name, value);
         more = try comma_or_close(bytes, index, cast<u8>(125));
     }
     return std::json::Value::Obj(entries);
-}
-
-// reject_duplicate_entry refuses a key the object already carries.
-fn reject_duplicate_entry(
-    entries: &std::array::Array<std::json::Entry>,
-    bytes: []u8,
-    key_at: i64,
-) -> Error!void {
-    var index = 0;
-    while entries.at(index) |entry| {
-        let seen = entry.key.as_bytes();
-        if key_equals(bytes, key_at, seen) {
-            return Error::DuplicateField;
-        }
-        index = index + 1;
-    }
-    return;
 }
 
 // decode_container_value reads the containers, mirroring what

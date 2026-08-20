@@ -237,12 +237,7 @@ pub union Value {
     I64(i64),
     Str(std::string::String),
     Arr(std::array::Array<Value>),
-    Obj(std::array::Array<Entry>),
-}
-
-pub struct Entry {
-    pub key: std::string::String,
-    pub value: Value,
+    Obj(std::map::Map<[]u8, Value>),
 }
 ```
 
@@ -255,9 +250,9 @@ var value = try json::decode<json::Value>(allocator, document);
 defer value.deinit();
 ```
 
-`Obj` は key を document の順で保ちます。配列であって map でないのは、map の
-value type が copy 限定だった名残です。その制約は無くなったので(ADR-0123)、
-どちらで持つかは今は開いています。
+`Obj` は key を document の順で保ちます(ADR-0088)。同じ key が 2 回現れたら
+`DuplicateField` です。値は `get` ではなく `at` で借りて読みます —— `Value` は
+中身を所有しているので、copy で取り出せません。
 
 ### 配列
 
