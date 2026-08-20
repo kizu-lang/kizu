@@ -3250,8 +3250,12 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 				"move error: `%s` is copy data and hands nothing off", place.String())
 		}
 	}
-	if marker == nil && handedOff {
-		span := expressionSpan(place)
+	// A compile-time expansion has no source line for an author to write on,
+	// so the marker is required only where source exists. The generator writes
+	// it on the fields it knows own something (ast.ConstructExpansion); the
+	// rest of the expansion is checked like any other move.
+	span := expressionSpan(place)
+	if marker == nil && handedOff && !span.IsZero() {
 		if !c.collectMissingMarkers {
 			return "", errorAt(span,
 				"move error: `%s` is handed off here; write `move %s`",

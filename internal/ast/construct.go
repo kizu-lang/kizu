@@ -19,7 +19,7 @@ type ConstructField struct {
 //	let f1 = try worker<T, f1>(args...);
 //	errdefer f1.deinit();
 //	let f2 = try worker<T, f2>(args...);
-//	T { f1: f1, f2: f2 }
+//	T { f1: move f1, f2: f2 }
 //
 // There is no place a half-built `T` could sit: the values are separate
 // bindings until the literal takes all of them at once. Every phase expands
@@ -53,6 +53,7 @@ func ConstructExpansion(
 		// A value with no cleanup contract has nothing to release, and the
 		// fields already built are what an `errdefer` protects: a later worker
 		// that fails leaves them owned by nobody else.
+		value := Expression(&IdentExpr{Name: binding})
 		if OwnerType(owners, field.Type) {
 			statements = append(statements, &ErrDeferStmt{Expr: &CallExpr{
 				Callee: &FieldExpr{
@@ -60,10 +61,15 @@ func ConstructExpansion(
 					Name:     typ.CleanupMethod,
 				},
 			}})
+			// The literal takes the value out of its binding, which is the
+			// same hand-off a program spells `move`. Writing the marker here
+			// is what lets the ownership checker read the expansion as a move
+			// rather than trust it.
+			value = &MoveExpr{Value: value}
 		}
 		values = append(values, FieldValue{
 			Name:  field.Name,
-			Value: &IdentExpr{Name: binding},
+			Value: value,
 		})
 	}
 	return statements, &StructLiteralExpr{TypeName: owner, Fields: values}
