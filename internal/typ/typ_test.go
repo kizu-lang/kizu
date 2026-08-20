@@ -11,7 +11,6 @@ var roundTrip = []string{
 	"[]u8", "[][]u8", "[]Point",
 	"&i64", "&var i64", "&[]u8", "&var Point",
 	"?ptr<u8>", "?i64",
-	"dyn Writer", "&dyn Writer",
 	"!void", "!i64", "![]u8", "!&i64", "!&var i64",
 	"Error!i64", "std::fs::Error![]u8",
 	"ptr<u8>", "ptr<const u8>",

@@ -262,7 +262,7 @@ fn (self: &File) write(bytes: &Bytes) -> !i64 {
     return 1;
 }
 impl Writer for File;
-fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
+fn save<W>(writer: &W, bytes: &Bytes) -> !void {
     let n = try writer.write(bytes);
     print(n);
     return;
@@ -270,85 +270,11 @@ fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
 fn main() -> !void {
     let file = File { name: "out" };
     let bytes = Bytes { text: "hello" };
-    try save(file, bytes);
+    try save<File>(file, bytes);
     return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
-	}
-}
-
-// TestCheckRejectsOwnedDynParam keeps dynamic dispatch behind a borrow.
-func TestCheckRejectsOwnedDynParam(t *testing.T) {
-	cases := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name: "owned",
-			source: `struct File { name: []u8 }
-contract Writer {
-    fn write() -> !i64;
-}
-fn save(writer: dyn Writer) -> !void {
-    return;
-}
-fn main() {}`,
-			want: "dyn parameter `writer` must be borrowed",
-		},
-		{
-			name: "mutable borrow",
-			source: `contract Writer {
-    fn write() -> !i64;
-}
-fn save(writer: &var dyn Writer) -> !void {
-    return;
-}
-fn main() {}`,
-			want: "dyn parameter `writer` must use immutable borrow in v0",
-		},
-		{
-			name: "nullable",
-			source: `contract Writer {
-    fn write() -> !i64;
-}
-fn save(writer: ?dyn Writer) -> !void {
-    return;
-}
-fn main() {}`,
-			want: "dyn parameter `writer` must use &dyn Contract",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := checkSource(tc.source)
-			if err == nil {
-				t.Fatalf("expected error")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("got %q, want substring %q", err.Error(), tc.want)
-			}
-		})
-	}
-}
-
-// TestCheckRejectsLegacyDynWrapper keeps the dyn keyword as the only spelling.
-func TestCheckRejectsLegacyDynWrapper(t *testing.T) {
-	source := `struct File { name: []u8 }
-contract Writer {
-    fn write() -> !i64;
-}
-fn save(writer: &Dyn<Writer>) -> !void {
-    return;
-}
-fn main() {}`
-	err := checkSource(source)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "unknown generic type `Dyn`") {
-		t.Fatalf("got %q", err.Error())
 	}
 }
 
@@ -2635,7 +2561,6 @@ func TestReferencedTypeNamesSeesThroughEveryWrapper(t *testing.T) {
 		{"[]&Secret", []string{"Secret"}},
 		{"!&[]Secret", []string{"Secret"}},
 		{"?ptr<const Secret>", []string{"ptr", "Secret"}},
-		{"dyn Secret", []string{"Secret"}},
 		{"Error!Secret", []string{"Error", "Secret"}},
 		{"std::array::Array<&[]Secret>", []string{"std::array::Array", "Secret"}},
 		{"std::map::Map<[]u8, &Secret>", []string{"std::map::Map", "u8", "Secret"}},

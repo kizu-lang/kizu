@@ -42,7 +42,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0023: low-level type conversion は明示 cast に限定する](0023-low-level-type-conversion.md)
 - [ADR-0024: C ABI layout と native linking は明示指定に限定する](0024-c-abi-layout-and-linking.md)
 - [ADR-0025: 並行 API を撤回し、thread は実行系を先に作ってから入れる](0025-async-io-taskgroup-policy.md)
-- [ADR-0026: contract / impl / dyn は明示的な抽象化として扱う](0026-contract-satisfy-dyn-policy.md)
+- [ADR-0026: contract / impl は静的な適合表明に限定する](0026-contract-static-abstraction.md)
 - [ADR-0028: enum は Zig/C 寄りの tag enum にする](0028-zig-style-enum-and-tagged-union.md)
 - [ADR-0030: エラー処理は Zig 風の !T に寄せる](0030-zig-style-error-union.md)
 - [ADR-0031: 幅が曖昧な int を廃止する](0031-remove-ambiguous-int.md)

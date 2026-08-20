@@ -381,21 +381,6 @@ func isPointerType(typ Type) bool {
 	return ok
 }
 
-// dynContract extracts C from dyn C.
-func dynContract(typ Type) (string, bool) {
-	text := string(typ)
-	if !strings.HasPrefix(text, "dyn ") {
-		return "", false
-	}
-	contractName := strings.TrimPrefix(text, "dyn ")
-	return contractName, contractName != ""
-}
-
-// containsDynType reports whether a type spelling contains a dynamic object.
-func containsDynType(typ Type) bool {
-	return containsWrappedType(typ, dynTypeMatch)
-}
-
 // containsRawPointer reports whether a type spelling mentions ptr<T> anywhere,
 // including behind `?`, `[]`, and static type arguments.
 func containsRawPointer(typ Type) bool {
@@ -407,12 +392,6 @@ func containsTypeValue(typ Type) bool {
 	return containsWrappedType(typ, func(typ Type) bool {
 		return typ == typeType
 	})
-}
-
-// dynTypeMatch reports whether typ is a direct dynamic contract object spelling.
-func dynTypeMatch(typ Type) bool {
-	_, ok := dynContract(typ)
-	return ok
 }
 
 // containsWrappedType recursively checks prefixes and static type arguments.

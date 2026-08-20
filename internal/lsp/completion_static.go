@@ -26,7 +26,6 @@ var keywordCompletionItems = []completionItem{
 	{Label: "extern", Kind: completionItemKindKeyword},
 	{Label: "comptime", Kind: completionItemKindKeyword},
 	{Label: "try", Kind: completionItemKindKeyword},
-	{Label: "dyn", Kind: completionItemKindKeyword},
 	{Label: "true", Kind: completionItemKindValue},
 	{Label: "false", Kind: completionItemKindValue},
 	{Label: "and", Kind: completionItemKindKeyword},

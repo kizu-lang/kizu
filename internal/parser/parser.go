@@ -1459,8 +1459,6 @@ func (p *Parser) parseTypeName() typ.Type {
 		return p.parseErrorUnionTypeName()
 	case token.Amp:
 		return p.parseBorrowTypeName()
-	case token.Dyn:
-		return p.parseDynTypeName()
 	case token.LBracket:
 		return p.parseSliceTypeName()
 	case token.Question:
@@ -1527,21 +1525,6 @@ func (p *Parser) parseTypeArgNodes(allowConst bool) []typ.Type {
 		p.nextToken()
 	}
 	return args
-}
-
-// parseDynTypeName parses dyn Contract type spellings.
-func (p *Parser) parseDynTypeName() typ.Type {
-	p.nextToken()
-	if p.cur.Type != token.Ident {
-		p.errorf("expected contract after dyn, got %s", tokenDescription(p.cur))
-		return nil
-	}
-	name := p.parseTypeBaseName()
-	if p.peek.Type == token.LT {
-		p.errorf("dyn expects a contract name")
-		return nil
-	}
-	return &typ.Dyn{Contract: &typ.Name{Path: name}}
 }
 
 // parseErrorUnionTypeName parses !T type spellings.
@@ -1700,7 +1683,7 @@ func (p *Parser) expectTypeClose() bool {
 // type, or a compile-time value for a parameter that declared one.
 func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
-	case token.Ident, token.Bang, token.Amp, token.Dyn, token.LBracket, token.Question:
+	case token.Ident, token.Bang, token.Amp, token.LBracket, token.Question:
 		return typ.Text(p.parseTypeArg(allowConst))
 	case token.Int:
 		return p.cur.Literal

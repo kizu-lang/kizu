@@ -2584,10 +2584,9 @@ source であり、戻り値は local binding に束縛します。戻り値の�
 borrow が生きている間は対象 `Box<T>` の move / deinit を禁止します。
 
 **element に置ける型.** `Array<T>` の element には arena、handle、nested
-array、`std::map::Map<K, V>` を置けます。raw pointer と dyn は置けません。
-この制限は struct field と union payload の中も再帰的に検査します。
-raw pointer と dyn は、provenance と dynamic dispatch の仕様を collection
-向けに固めてから扱います。
+array、`std::map::Map<K, V>` を置けます。raw pointer と stack buffer は
+置けません。この制限は struct field と union payload の中も再帰的に検査します。
+owned collection が provenance または stack lifetime を保持できない型は拒否します。
 
 **`String` は non-copy / move-only** です。
 
@@ -2718,14 +2717,12 @@ runtime selection の方針は ADR-0039 に従います。
 * `join` と `clean` は owned buffer を構築するため、allocator を明示し、allocation
   failure を `!T` error として返す
 
-`std::io` / `std::process`:
+`std::io` の具体的な API は `docs/std/io.md` が持ちます。compiler が持つ契約は、
+stdio operation が `Io` capability を必ず要求し、I/O failure を error union で
+返すことです。
 
-* `std::io::write_stdout(io, bytes)` は `!void` を返す
-* `std::io::write_stderr(io, bytes)` は `!void` を返す
-* `std::io::read_stdin(io, allocator, limit)` は `!std::string::String` を返す。
-  limit 超過は `std::io::Error::LimitExceeded`
-* `std::io::read_stdin_into(io, out: &var std::string::String)` は `!void` を返す
-* stdio helper は `Io` capability を必ず要求する
+`std::process`:
+
 * `std::process::arg_count()` は `i64` を返す
 * `std::process::arg(index)` は `![]u8` を返す
 * `std::process::env(name)` は `?[]u8` を返し、未設定なら `null` を返す
@@ -2736,15 +2733,14 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process` helper は hidden I/O を持たない
 
-## 16. contract / impl / dyn 方針
+## 16. contract / impl 方針
 
 Kizu では、Rust trait clone ではない明示的な抽象化として、
-`contract`、`impl Contract for Type;`、`dyn` を実装対象にします。
+`contract` と `impl Contract for Type;` を持ちます。
 
 ```text
 contract                型が満たすべき要求
 impl Contract for Type; 型が contract を満たすことの表明(任意)
-dyn                     runtime dynamic dispatch を見せる型
 ```
 
 型は method を持っていれば contract を満たします。宣言は要りません。
@@ -2789,17 +2785,23 @@ structural を採ったので、型の作者が知らない contract を後か�
 `Self` はありません。contract が receiver を書かないので、返り値に自分の型が要る
 場合は generic で表します。
 
-`dyn Contract` は dynamic dispatch を型に見せます。
+polymorphic な呼び出しは static generic の concrete type argument を明示します。
+method call は concrete type ごとに monomorphize され、通常の method lowering と
+同じ経路を使います。
 
 ```kizu
-fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
-    let n = writer.write(bytes);
+fn save<W>(writer: &W, bytes: &Bytes) -> !i64 {
+    return try writer.write(bytes);
+}
+
+fn main() -> !void {
+    let file = File { name: "out" };
+    print(try save<File>(file, Bytes { text: "hello" }));
     return;
 }
 ```
 
-`dyn` は `&dyn Contract` の動的 dispatch に限定します。
-owned dynamic object、generic bounds、最適化された vtable layout は後続 phase で扱います。
+runtime dynamic dispatch の専用型や暗黙 interface conversion はありません。
 
 ## 17. ビルドとキャッシュ
 

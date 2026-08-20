@@ -5,10 +5,9 @@
 //
 //	go run ./scripts/backend-matrix
 //
-// The interpreter column is the oracle: every listed example is a passing
-// conformance case, so a failure there means the example and what it says
-// about itself disagree. The backend columns are the ones that carry
-// information.
+// Each example's trailing conformance block is the oracle. Every route is
+// checked against the command and output declared there, so a failure means a
+// backend and the example's promise disagree.
 package main
 
 import (
@@ -58,8 +57,8 @@ var groups = []featureGroup{
 	{"cast / slice / raw pointer / box", []string{
 		"cast", "deref", "slice", "slice-syntax", "index-slice", "[]u8", "box",
 		"capacity", "recursive-ast"}},
-	{"contract / dyn / generics", []string{
-		"contract", "dyn", "impl", "generics", "type-apply", "static-arguments"}},
+	{"contract / generics", []string{
+		"contract", "impl", "generics", "type-apply", "static-arguments"}},
 	{"std::array", []string{"std-array", "token-list"}},
 	{"std::string", []string{"std-string"}},
 	{"std::map", []string{"std-map", "symbol-table", "resolver"}},

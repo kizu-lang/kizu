@@ -49,9 +49,6 @@ type Borrow struct {
 // Optional is `?T`.
 type Optional struct{ Elem Type }
 
-// Dyn is `dyn Contract`.
-type Dyn struct{ Contract Type }
-
 // Const is `const T`, which only a static argument list writes.
 type Const struct{ Elem Type }
 
@@ -75,9 +72,6 @@ func (*Borrow) typeNode() {}
 
 // typeNode marks Optional as a type.
 func (*Optional) typeNode() {}
-
-// typeNode marks Dyn as a type.
-func (*Dyn) typeNode() {}
 
 // typeNode marks Const as a type.
 func (*Const) typeNode() {}
@@ -116,9 +110,6 @@ func (t *Borrow) String() string {
 
 // String returns the spelling of a nullable type.
 func (t *Optional) String() string { return "?" + t.Elem.String() }
-
-// String returns the spelling of a dyn contract type.
-func (t *Dyn) String() string { return "dyn " + t.Contract.String() }
 
 // String returns the spelling of a const type argument.
 func (t *Const) String() string { return "const " + t.Elem.String() }
@@ -238,12 +229,6 @@ func (t *Optional) equal(other Type) bool {
 	return ok && Equal(t.Elem, b.Elem)
 }
 
-// equal reports whether other is a dyn of the same contract.
-func (t *Dyn) equal(other Type) bool {
-	b, ok := other.(*Dyn)
-	return ok && Equal(t.Contract, b.Contract)
-}
-
 // equal reports whether other is a const of the same element.
 func (t *Const) equal(other Type) bool {
 	b, ok := other.(*Const)
@@ -287,9 +272,6 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 	case *Optional:
 		elem, err := MapNames(node.Elem, rename)
 		return &Optional{Elem: elem}, err
-	case *Dyn:
-		contract, err := MapNames(node.Contract, rename)
-		return &Dyn{Contract: contract}, err
 	case *Const:
 		elem, err := MapNames(node.Elem, rename)
 		return &Const{Elem: elem}, err
@@ -344,8 +326,6 @@ func Walk(t Type, visit func(Type)) {
 		Walk(node.Elem, visit)
 	case *Optional:
 		Walk(node.Elem, visit)
-	case *Dyn:
-		Walk(node.Contract, visit)
 	case *Const:
 		Walk(node.Elem, visit)
 	case *ErrorUnion:
@@ -474,8 +454,6 @@ func Substitute(t Type, subst map[string]Type) Type {
 		return &Borrow{Elem: Substitute(node.Elem, subst), Mut: node.Mut}
 	case *Optional:
 		return &Optional{Elem: Substitute(node.Elem, subst)}
-	case *Dyn:
-		return &Dyn{Contract: Substitute(node.Contract, subst)}
 	case *Const:
 		return &Const{Elem: Substitute(node.Elem, subst)}
 	case *ErrorUnion:

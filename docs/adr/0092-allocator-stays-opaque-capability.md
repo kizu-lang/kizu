@@ -27,7 +27,7 @@ opaque capability のまま保つ。理由は可逆性の非対称にある。
 
 - 閉 → 開は additive(contract 化して開けば既存コードは全部通る)
 - 開 → 閉は breaking(container が user state を参照する形が既成事実になり、
-  owned dyn / field borrow の将来設計を先取りで縛る)
+  field borrow と user state lifetime の将来設計を先取りで縛る)
 
 「自作 allocator でなければ満たせない実需」(特殊メモリ、workload 特化戦略)は
 現ユーザーに存在しない。pool 系は `std::arena` が、heap のない環境は
@@ -68,7 +68,7 @@ freestanding build(SPEC §17)の設計に属する別機構として扱う。
 
 | 案 | 却下理由 |
 | --- | --- |
-| `contract Allocator`(Zig 式全面開放) | borrow field 禁止と衝突。owned dyn 未実装。user state の寿命を誰も追跡せず dangling allocator を許すことになる |
+| `contract Allocator`(Zig 式全面開放) | borrow field 禁止と衝突し、user state の寿命を誰も追跡しないまま dangling allocator を許すことになる |
 | handle 実体化 + `testing_allocator()`(本 ADR 初稿) | 前提「leak は runtime でしか検出できない」が ADR-0091 で消えた。静的保証の runtime 二重検査であり、page 1 種のままの handle は観測点として機能しない |
 | hidden default / global allocator | 明示 allocator の公理(SPEC §15.3)と矛盾 |
 
@@ -80,7 +80,7 @@ freestanding build(SPEC §17)の設計に属する別機構として扱う。
 
 ## 再評価条件
 
-- owned dyn または field borrow 追跡が入った時、決定 1(contract 化)を再検討
+- field borrow または別の user state lifetime model が入った時、決定 1(contract 化)を再検討
 - 第二の allocator 種(fixed_buffer、freestanding 供給)を入れる変更が、
   handle 実体化(決定 2 の延期分)を伴って行う
 - mutable slice / buffer provenance の仕様化後、決定 3(fixed_buffer)を設計
