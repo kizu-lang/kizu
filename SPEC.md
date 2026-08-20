@@ -1301,6 +1301,17 @@ compile error です。consume しなかった path はその値を解放でき�
 未解放、2 回以上なら二重解放です。loop が consume してよいのは loop 自身が
 作った値、つまり `|name|` capture が束縛する値です。
 
+**同じ規則が owner field にも適用されます。**`deinit` が field を解放するのは
+1 つの path で起きる出来事なので、値と同じ 3 つの制約を受けます。
+
+* 分岐の一方でだけ、あるいは match の一部の arm でだけ field を解放するのは
+  compile error です(`match` は、その先へ続く arm すべてで揃える必要が
+  あります)
+* loop 本体で外側の値の field を解放するのは compile error です
+* `deinit` は receiver の owner field をすべて consume します。これは関数の
+  末尾だけでなく、**関数を離れるすべての path** で成り立ちます。早期 `return`
+  も同じです
+
 owner field への代入も compile error です。代入は置き換え前の値を解放しないので
 leak します(owner 要素の `set` と同じ理由)。
 
