@@ -139,6 +139,7 @@ func deriveDecl(owner string, typeParams []string, body []Statement) *FunctionDe
 	receiver.Args = args
 	body = append(body, &ReturnStmt{})
 	return &FunctionDecl{
+		Derived: true,
 		FunctionSignature: FunctionSignature{
 			Receiver:     true,
 			Name:         owner + "." + typ.CleanupMethod,

@@ -39,6 +39,24 @@ func DeinitOwners(program *Program) map[string]bool {
 	return owners
 }
 
+// DeclaredDeinits returns the base type names whose cleanup an author wrote.
+// Those types have an obligation of their own -- memory they took from an
+// allocator, a descriptor -- which is not any field's, so consuming their
+// fields one at a time does not discharge it and they are taken whole.
+func DeclaredDeinits(program *Program) map[string]bool {
+	declared := map[string]bool{"std::arena::Arena": true}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*FunctionDecl)
+		if !ok || !fn.Receiver || fn.Derived {
+			continue
+		}
+		if receiver, method, ok := typ.SplitMethodName(fn.Name); ok && method == typ.CleanupMethod {
+			declared[baseTypeName(receiver)] = true
+		}
+	}
+	return declared
+}
+
 // declaredHolder names the type a declaration declares and reports whether it
 // holds something that owes cleanup.
 func declaredHolder(owners map[string]bool, decl Decl) (string, bool) {

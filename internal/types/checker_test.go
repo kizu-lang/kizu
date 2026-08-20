@@ -1670,18 +1670,6 @@ fn main() {
 }`,
 			want: "`arena.deinit` expects 0 args",
 		},
-		{
-			name: "field receiver",
-			source: `struct User { name: []u8 }
-struct Registry { users: std::arena::Arena<User> }
-fn main() {
-    let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
-    let registry = Registry { users: users };
-    registry.users.deinit();
-}`,
-			want: "field cleanup `registry.users.deinit` is only allowed inside owner deinit",
-		},
 	}
 	runErrorCases(t, cases)
 }

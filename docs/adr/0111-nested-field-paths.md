@@ -35,17 +35,17 @@ local binding を root とする任意の深さに広げる。
   - disjoint な path への assignment は従来の disjoint field と同じく許可
 - `&var` receiver の two-phase 予約(ADR-0106)は path をそのまま運ぶ。
   引数が receiver と重なる path を borrow すれば従来どおり衝突する。
-- destructive cleanup(`deinit` / `deinit_all`)だけは direct field 1 段の
-  まま残す。`self.a.b.deinit()` は中間型 `a` 自身の deinit を迂回し、
-  部分破壊された値を safe code に見せるため拒否する(ADR-0067 の境界を維持)。
-  各型は自分の field を自分の deinit で閉じる。
+- destructive cleanup(`deinit`)だけは direct field 1 段のまま残す。
+  `self.a.b.deinit()` は中間型 `a` 自身の cleanup を迂回するため拒否し、
+  `a` を先に取り出すことを求める(ADR-0067 の境界を維持)。各型は自分の
+  field を自分の cleanup で閉じる。
 
 ## 却下した案
 
 | 案 | 却下理由 |
 | --- | --- |
 | 1 段上限を維持し SPEC に理由を明記するだけ | wrapper method の量産と struct の平坦化圧が残る(原理 10) |
-| cleanup も N 段に広げる | owner の部分破壊を safe code に露出する。型ごとの deinit という既存の境界を壊す |
+| cleanup も N 段に広げる | 中間型の cleanup を迂回する。型ごとの deinit という既存の境界を壊す |
 | path を型で表現し borrow checker を place ベースに全面改修 | 得る精度が同じで改修範囲だけ大きい。dotted path key + 重なり判定で同じ安全性が出る |
 
 ## 影響

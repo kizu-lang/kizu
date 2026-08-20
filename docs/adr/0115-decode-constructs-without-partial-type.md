@@ -19,7 +19,7 @@ JSON の key は宣言順で届かない。`{"age":30,"name":"a"}` も
 
 | 置き場 | 塞がり方 |
 | --- | --- |
-| partial struct に貯める | `?String` は struct field に置けない。同義の `union Slot { Kept(String), Vacant }` は置けるので綴りの不一致がある(#1632)。直しても足りない。owner field は aggregate から move out できず、field の match payload は borrow なので、貯めた値を取り出せない(#1633) |
+| partial struct に貯める | 当時 `?String` は struct field に置けず(#1632)、owner field は aggregate から move out できなかった(#1633)。どちらも入った今も、最後に `T` を作るところで literal の生成が要る点は変わらない |
 | 呼び出し側の `T` を in-place で埋める | 初期化済み owner field への代入が黙って漏れる(#1630)。field の明示 `deinit` は owner の `deinit` 内でしか許されない |
 | struct literal を comptime で生成する | `comptime for` は文であり、literal を作れない |
 
@@ -142,7 +142,7 @@ pub union Value {
 
 | 案 | 却下理由 |
 | --- | --- |
-| `std::meta::partial<T>` に貯めて `finish<T>` で組み替える | #1632 / #1633 の 2 つを直しても、最後の `T` の literal 生成に construct と同じ form が要る。導出 struct とその `deinit` の導出が丸ごと余る(原理 6) |
+| `std::meta::partial<T>` に貯めて `finish<T>` で組み替える | 最後の `T` の literal 生成に construct と同じ form が要る。導出 struct が丸ごと余る(原理 6) |
 | `decode_into<T>(..., out: &var T)` で呼び出し側の `T` を埋める | 初期値を用意する定型が call site の数だけ増える(原理 10)。owner field の入れ替えが漏れる(#1630)。失敗すると値が半分書き換わって残る(原理 1) |
 | `Value` を経由して `from_value<T>` に詰め替える | 構築の壁は動かない。同じ壁の手前に経路が 2 本になる(原理 9) |
 | `comptime construct<T> \|f\| { yield ... }` の文形 | `yield` という新しい制御が要る。`Function` static parameter は既にある(原理 6) |
@@ -170,5 +170,5 @@ pub union Value {
 - union / enum の decode が要るとき。`construct` は struct 専用で、variant の
   選択は別の形になる
 - worker に field ごとの追加 static 引数が要るとき
-- #1632 / #1633 が別途入ったとき、partial 経路が construct より単純になるかを
-  問い直す
+- partial 経路が construct より単純になるかを問い直す。field の move out は
+  入ったので、残る差は `T` の literal を誰が作るかだけである

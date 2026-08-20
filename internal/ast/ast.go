@@ -113,8 +113,12 @@ type FunctionSignature struct {
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
 	FunctionSignature
-	Doc  string
-	Body *BlockStmt
+	Doc string
+	// Derived marks a body the compiler wrote rather than an author. Only a
+	// declared cleanup says the type has an obligation of its own, so the two
+	// have to be told apart after the derived ones are added (DeriveDeinit).
+	Derived bool
+	Body    *BlockStmt
 }
 
 // StaticParam is one entry of a `<...>` static argument list.

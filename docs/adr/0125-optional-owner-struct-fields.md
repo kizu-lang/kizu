@@ -23,10 +23,9 @@ pub union Slot {
 }
 ```
 
-`Slot` は `?String` そのもので、条件付き義務も同じだけある。違うのは owner
-payload union が explicit `deinit` を要求されること(ADR-0075)だけだった。
-原理 7 の裏は「意味が同じなら畳む」で、同じ意味の 2 つの綴りの片方だけが
-通っている状態だった。
+`Slot` は `?String` そのもので、条件付き義務も同じだけある。原理 7 の裏は
+「意味が同じなら畳む」で、同じ意味の 2 つの綴りの片方だけが通っている
+状態だった。
 
 ## 制限が実際に止めていたもの
 
@@ -54,13 +53,12 @@ borrow optional を返す(ADR-0104)。field 読みだけがその区別を持っ
 
 | 読む場所 | capture が束縛するもの |
 | --- | --- |
-| その型自身の `deinit(self: T)` | owner。consume できる |
-| それ以外(借用越し、他の関数、値で受けた local) | borrow。consume は拒否 |
+| 値を保持している場所(値で受けた parameter、local) | owner。consume できる |
+| 借用越しの読み | borrow。consume は拒否 |
 
-例外が `deinit` だけなのは、そこが receiver を値で受けて分解している場所
-だからで、`self.field.deinit()` に既に与えている direct field cleanup の例外と
-同じ位置である。`match` が owner union payload に対して持つ分け方とも同じで、
-新しい機構は増やしていない(原理 6、原理 9)。
+判定は `self.field.deinit()` に与えている direct field cleanup と同じで、
+分解できる場所と同じである。`match` が owner union payload に対して持つ分け方
+とも同じで、新しい機構は増やしていない(原理 6、原理 9)。
 
 判定の既定は **borrow** である。所有になるのは、payload を positively 渡す形
 —— `Array.pop()` のような call —— のときだけで、それ以外は読みとして閉じる。
@@ -72,7 +70,7 @@ borrow optional を返す(ADR-0104)。field 読みだけがその区別を持っ
 義務は既存の検査に載せる。`?Owner` field は普通の owner field と同じに数える。
 
 - `deinit` が field を開かない → `deinit of X must consume owner field Y`
-- `deinit` が開いて payload を捨てる → `owned value held is never deinitialized`。
+- 開いて payload を捨てる → `owned value held is never deinitialized`。
   開くことがその field の義務を果たす唯一の経路なので、捨てると誰も解放しない
 - live な field への代入 → `owner field x.f is overwritten before cleanup`。
   `Array.set` が owner element に対して出すのと同じ拒否である
@@ -96,5 +94,5 @@ view の optional(`?[]u8`)は引き続き field に置けない。view の義務
 その capture も borrow を束縛する。`encode_fields` はこの形で optional field を
 開いている。
 
-#1633(値で受けた aggregate から owner field を取り出せない)はこの ADR では
-解いていない。`?Owner` field も他の owner field と同じくその制限を受ける。
+`?Owner` field は他の owner field と同じく、値を保持している場所で 1 つずつ
+consume できる(ADR-0091 決定 2)。
