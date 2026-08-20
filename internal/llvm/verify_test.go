@@ -118,7 +118,10 @@ func TestHoistAllocasToEntryMovesLoopSlots(t *testing.T) {
 		"  br label %loop",
 		"",
 	}, "\n")
-	hoisted := hoistAllocasToEntry(body)
+	hoisted, err := hoistAllocasToEntry(body)
+	if err != nil {
+		t.Fatalf("expected a fixed-size alloca to hoist, got %v", err)
+	}
 	lines := strings.Split(hoisted, "\n")
 	if lines[0] != "entry:" || lines[1] != "  %kizu.2 = alloca i64" {
 		t.Fatalf("alloca did not move to the entry block:\n%s", hoisted)
@@ -129,7 +132,49 @@ func TestHoistAllocasToEntryMovesLoopSlots(t *testing.T) {
 	if !strings.Contains(hoisted, "loop:\n  store i64 0, ptr %kizu.2") {
 		t.Fatalf("the store left the block it was written in:\n%s", hoisted)
 	}
-	if second := hoistAllocasToEntry(hoisted); second != hoisted {
+	second, err := hoistAllocasToEntry(hoisted)
+	if err != nil {
+		t.Fatalf("expected hoisting to stay stable, got %v", err)
+	}
+	if second != hoisted {
 		t.Fatalf("hoisting is not idempotent:\n%s", second)
+	}
+}
+
+// TestHoistAllocasToEntryRefusesElementCount keeps the transform honest about
+// what it can move: a slot whose size is a register cannot go where that
+// register is not defined yet, and a fresh slot per turn is why one is written.
+func TestHoistAllocasToEntryRefusesElementCount(t *testing.T) {
+	body := strings.Join([]string{
+		"entry:",
+		"  br label %loop",
+		"loop:",
+		"  %kizu.1 = call i64 @count()",
+		"  %kizu.2 = alloca i8, i64 %kizu.1",
+		"  br label %loop",
+		"",
+	}, "\n")
+	if _, err := hoistAllocasToEntry(body); err == nil {
+		t.Fatal("expected a counted alloca to be refused")
+	}
+}
+
+// TestHoistAllocasToEntryKeepsAggregateTypes accepts a type spelled with commas
+// of its own: those separate the fields, not the operands.
+func TestHoistAllocasToEntryKeepsAggregateTypes(t *testing.T) {
+	body := strings.Join([]string{
+		"entry:",
+		"  br label %loop",
+		"loop:",
+		"  %kizu.1 = alloca { ptr, i64 }, align 8",
+		"  br label %loop",
+		"",
+	}, "\n")
+	hoisted, err := hoistAllocasToEntry(body)
+	if err != nil {
+		t.Fatalf("expected an aggregate-typed alloca to hoist, got %v", err)
+	}
+	if !strings.HasPrefix(hoisted, "entry:\n  %kizu.1 = alloca { ptr, i64 }, align 8") {
+		t.Fatalf("aggregate-typed alloca did not move:\n%s", hoisted)
 	}
 }

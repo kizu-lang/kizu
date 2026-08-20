@@ -776,8 +776,12 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 		}
 	}
 	body := e.out.String()[bodyStart:]
+	hoisted, err := hoistAllocasToEntry(body)
+	if err != nil {
+		return fmt.Errorf("llvm error: function `%s`: %w", fn.Name, err)
+	}
 	e.out.Truncate(bodyStart)
-	e.out.WriteString(hoistAllocasToEntry(body))
+	e.out.WriteString(hoisted)
 	e.out.WriteString("}\n\n")
 	e.mainReturnsInt = false
 	e.currentReturn = ""
