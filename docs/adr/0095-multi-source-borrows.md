@@ -23,7 +23,7 @@ fn pick(a: []u8, b: []u8, take_first: bool) -> []u8 borrows a {
 原理から導かれた線ではなく、複数 source の意味論を決めていなかっただけの
 恣意的な線である。systems programming language の制約として違和感が残る。
 
-lifetime 変数(ADR-0059 で採用 → ADR-0060 で破棄)を持たない言語での
+lifetime 変数(ADR-0060 が持たないと決めた)を持たない言語での
 複数 source には、実は形が 1 つしかない。他言語の同型物が示している:
 
 | 言語 | 形 |

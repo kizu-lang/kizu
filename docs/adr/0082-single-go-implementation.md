@@ -2,11 +2,11 @@
 
 Status: 採用
 
-Supersedes: ADR-0080(フル Kizu selfhost)、ADR-0081(自己コンパイル backend の撤去)
+Supersedes: selfhost をフル Kizu で書く判断と、自己コンパイル backend の撤去
 
 ## 背景
 
-ADR-0081 で自己コンパイル backend を削除し、selfhost は 164,011 行から 73,260 行に
+自己コンパイル backend を削除し、selfhost は 164,011 行から 73,260 行に
 なった。それでもなお、次の状態が残っていた。
 
 | | 行数 |
@@ -58,10 +58,21 @@ Kizu は SPEC がまだ動いている。動く仕様を 2 つの実装で追い
 
 ### 4. self-host は言語が固まってから、Go の構造に沿って作り直す
 
-再開の条件は、SPEC が安定し、Go 実装が仕様を満たしていること。作り直すときは
-ADR-0081 の結論に従う: op を持つ汎用命令 1 種、AST を歩く lowering、命令 1:1 の
-renderer。ソースの形ごとの payload 型・関数名分岐・形状 template・手書き LLVM は
-作らない。
+再開の条件は、SPEC が安定し、Go 実装が仕様を満たしていること。
+
+## selfhost が残した規則
+
+削除した実装から、実装一般に効く判断だけを引き継ぐ。selfhost の backend 境界と
+bootstrap を記述した 3 本の ADR は、この 3 つ以外が消えた subsystem の記述だった
+ので、畳んで削除した。
+
+- **LLVM を文字列リテラルで書き下ろさない。** backend は命令 1:1 の renderer で
+  作る。手書きテキストは形が増えるたびに増え、検証できる単位が無くなる。
+- **ソースの形ごとの payload 型・関数名分岐・形状 template を作らない。**
+  op を持つ汎用命令 1 種と、AST を歩く lowering で足りる。形ごとの分岐は
+  selfhost backend が 76,608 行まで育った直接の原因だった。
+- **関数の内部形状や生成テキスト断片を grep で固定しない。** そうした構造 pin は
+  実装を変えるたびに嘘になり、直すコストだけが残る。検証は実行結果で行う。
 
 ## 影響
 

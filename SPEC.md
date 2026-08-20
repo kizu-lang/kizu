@@ -894,7 +894,7 @@ guard と多段 destructuring は扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
 arm は `,` で区切ります。最後の arm の `,` は、他の comma-separated list と
-同じく省略できます(ADR-0110)。
+同じく省略できます(ADR-0107)。
 wildcard pattern `_` を fallback arm として許可します。
 `_` arm は最後に 1 つだけ書けます。payload binding はできません。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
@@ -2534,11 +2534,8 @@ mutable borrow 中はすべての操作が capture の最終使用まで待ち�
 
 **cleanup の義務.** `Array.deinit` は残っている initialized element を、
 `Map.deinit` は保持している value を cleanup してから storage を解放します。
-element / value cleanup は explicit `deinit(self: T) -> void` があればそれを
-使います。`T` が owner aggregate で callable な `deinit` を持たない場合、
-`array.deinit()` / `map.deinit()` の内部に限って field / payload 内の既知
-owner を再帰的に cleanup します。これは explicit な `deinit()` の一部であり、
-implicit destructor でも `T.deinit()` の合成でもありません。
+element / value cleanup は `T` の `deinit(self: T) -> void` を呼びます。
+owner はすべてそれを持つので(§8)、場合分けはありません。
 
 既にある owner を置き換える操作は、落ちる側の持ち主が他にいないので拒否
 します。`Array.set` は owner element に対して compile error、既存 key への

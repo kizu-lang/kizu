@@ -2,11 +2,11 @@
 
 Status: 採用
 
-Supersedes: ADR-0071(unsafe capability blocks)
+Supersedes: `@unsafe(capability, ...) { ... }` を block として持つ設計
 
 ## 背景
 
-ADR-0071 は `unsafe { ... }` を退け、`@unsafe(capability, ...) { ... }` を採用した。
+先行する判断は `unsafe { ... }` を退け、`@unsafe(capability, ...) { ... }` を採用していた。
 理由はこうだった。
 
 > 従来の `unsafe { ... }` は境界を明示できますが、block 内でどの種類の unsafe
@@ -77,7 +77,7 @@ Kizu がコンパイラ予約名を書く場所は 5 つあり、4 つは string
 | 操作 | `ptr_read` `ptr_write` `ptr_deref` `ptr_cast` `ptr_int_cast` `volatile` | ○ |
 | 契約 | `extern_call` `unsafe_call` | ✗ 呼び先の宣言が持つ |
 
-操作は自分を名乗れるが、契約は呼び先にあるから名乗れない。ADR-0071 は
+操作は自分を名乗れるが、契約は呼び先にあるから名乗れない。先行する判断は
 この 2 種類を 1 つのリストに混ぜていた。Rust が RFC 2585 で分離したのと同じ兼務
 である。
 
@@ -127,9 +127,9 @@ unsafe fn raw_write(p: ptr<u8>, v: u8) -> void { unsafe ptr_write(p, v); }
 fn caller(p: ptr<u8>) -> void { unsafe raw_write(p, 1); }
 ```
 
-ADR-0007 が `unsafe fn` を採り、ADR-0071 が退けた。退けた根拠は「`unsafe fn` は
-本体を丸ごと unsafe block にしてしまう」であり、それは Rust の実装の性質で
-あって語の意味ではない。Rust 自身が RFC 2585 でその実装を捨てた。
+`unsafe fn` は一度採り、一度退けた。退けた根拠は「本体を丸ごと unsafe block に
+してしまう」であり、それは Rust の実装の性質であって語の意味ではない。Rust 自身が
+RFC 2585 でその実装を捨てた。
 
 `unsafe fn` の本体は通常の関数本体である。本体の危険な式には、それぞれ
 `unsafe` が要る。

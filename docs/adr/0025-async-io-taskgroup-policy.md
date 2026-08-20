@@ -30,7 +30,7 @@ gate をすべて通過したまま残っていた。
   （`KIZU_IO_WORKING`）を返す。runtime の区別は存在しなかった。
 - `TaskGroup` / `Queue` / `Partition` / `LocalBuffer` は unqualified な予約名で、
   ユーザーが `fn TaskGroup(...)` を定義して呼ぶと
-  `type error: use std::task::Group(io)` になった。ADR-0080 が禁じた種類の衝突。
+  `type error: use std::task::Group(io)` になった。
 - ADR-0025 は「Rust の `Send` trait は採用しない」と書きながら、同じ規則を
   `rejectThreadBoundary*` 7 関数と `rejectConcurrencyBoundary*` 7 関数として
   2 つの checker に手書きで二重実装していた。ユーザーは書けず、拡張もできない。
@@ -118,5 +118,4 @@ checker rule より先に IR lowering と runtime を作り、実行できる状
 - `kizu check` が通った program は `kizu run` でも並行を理由に落ちなくなる
 - pending（XFAIL）は 19 件から 3 件になる
 - 予約名 `TaskGroup` / `Queue` / `Partition` / `LocalBuffer` が解放される
-- ADR-0040 は前提ごと撤回する
 - ADR-0039 の `Io` interface 方針は残る。`TaskGroup` を前提にした記述だけ外す
