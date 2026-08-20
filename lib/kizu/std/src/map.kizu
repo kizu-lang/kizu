@@ -6,10 +6,24 @@ pub fn new<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
     return std::internal::builtin::map<K, V>(allocator);
 }
 
+// insert moves the value into the map. An owner value the map already holds
+// under that key would be dropped by the overwrite, so an occupied key traps
+// rather than leaking it — the same answer `Array.set` gives, decided at run
+// time because occupancy is not knowable earlier (ADR-0123). Replacing one is
+// `at_mut` in place. A copy value carries no such obligation and overwrites.
 fn (self: std::map::Map<[]u8, V>) insert<V>(key: []u8, value: V) -> !void {
+    comptime if std::meta::is_owner<V>() {
+        if self.contains(key) {
+            std::internal::builtin::panic(
+                "std::map::Map: insert would drop the owner value already stored for this key");
+        }
+    } else {
+    }
     return std::internal::builtin::map_insert<[]u8, V>(self, key, value);
 }
 
+// get copies the value out, so it is the copy-value read. An owner value
+// leaves through the at/at_mut borrows instead.
 fn (self: std::map::Map<[]u8, V>) get<V>(key: []u8) -> ?V {
     return std::internal::builtin::map_get<[]u8, V>(self, key);
 }
@@ -42,6 +56,25 @@ fn (self: std::map::Map<[]u8, V>) len<V>() -> i64 {
     return std::internal::builtin::map_len<[]u8, V>(self);
 }
 
+// deinit consumes every value, then releases the keys and the table. A value
+// that owns nothing has nothing to consume, so the loop is not generated for
+// it and this is one runtime op; a value that owns something is released with
+// it, which is what keeps a container from leaking its contents (ADR-0091).
+// The call is in source either way, so nothing is hidden.
+//
+// The walk takes values by insertion position rather than by key: a key read
+// borrows the map, and the take that follows needs it back. `take_value_at`
+// is reserved to this loop, so no key lookup runs against the entries it has
+// already emptied.
 fn (self: std::map::Map<[]u8, V>) deinit<V>() -> void {
+    comptime if std::meta::is_owner<V>() {
+        var index = 0;
+        while index < self.len() {
+            let value = std::internal::builtin::map_take_value_at<[]u8, V>(self, index);
+            value.deinit();
+            index = index + 1;
+        }
+    } else {
+    }
     std::internal::builtin::map_deinit<[]u8, V>(self);
 }

@@ -15,6 +15,7 @@ func (e *emitter) writeMapRuntimeDecls() {
 	e.out.WriteString("declare ptr @kizu_map_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_map_get(ptr, ptr, i64)\n")
+	e.out.WriteString("declare ptr @kizu_map_value_at(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_map_key_at(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_map_contains(ptr, ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_map_len(ptr)\n")
@@ -46,6 +47,8 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 		return e.writeMapGet(instr)
 	case "map.at", "map.at_mut":
 		return e.writeMapAt(instr)
+	case "map.take_value_at":
+		return e.writeMapTakeValueAt(instr)
 	case "map.key_at":
 		return e.writeMapKeyAt(instr)
 	case "map.contains":
@@ -118,6 +121,29 @@ func (e *emitter) writeMapAt(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
 	return e.writeBorrowOptionalResult(instr, ptrName)
+}
+
+// writeMapTakeValueAt moves the value at insertion position index out of the
+// map, or traps past the end. Only Map.deinit's cascade reaches it, and it
+// walks 0..len, so the trap stands for a broken runtime rather than a
+// reachable state.
+func (e *emitter) writeMapTakeValueAt(instr *ir.Instr) error {
+	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
+		return fmt.Errorf("llvm error: map.take_value_at expects Map, i64 -> V")
+	}
+	mapValue := e.value(instr.Args[0])
+	index := e.value(instr.Args[1])
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	lenName := "%" + e.nextSyntheticValue("map.take.panic.len")
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_map_len(ptr %s)\n", lenName, mapValue.operand)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s)\n",
+		ptrName, mapValue.operand, index.operand)
+	e.writeNullFailure(instr, ptrName, "map.take.panic", "bounds", index.operand, lenName)
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+		resultName, e.llvmType(instr.Result.Type), ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
 }
 
 // writeMapKeyAt lowers Map.key_at(index). The runtime fills a `?[]u8` slot

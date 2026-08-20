@@ -358,6 +358,53 @@ test "json decode undoes escapes in a map key" {
     testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
 }
 
+// An object whose values are strings is the common JSON shape, and it needs a
+// map value that owns its bytes: what the string carries is not a run of the
+// document once its escapes are gone (ADR-0123).
+test "json decode reads an object of strings into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"first": "alice", "last": "carol"}
+    ;
+    var names = try json::decode<map::Map<[]u8, string::String>>(allocator, document);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("alice", bytes);
+    } else {
+        testing::fail("first is missing");
+    }
+
+    // encode reads the same map through the value borrow, so the document
+    // round trips without the map ever handing a value out by copy.
+    let expected =
+        \\{"first":"alice","last":"carol"}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<map::Map<[]u8, string::String>>(allocator, names, out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, text);
+}
+
+test "json decode reads an object of objects into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"alice": {"hit": 2}, "bob": {"hit": 1, "miss": 3}}
+    ;
+    var counts =
+        try json::decode<map::Map<[]u8, map::Map<[]u8, i64>>>(allocator, document);
+    defer counts.deinit();
+    testing::expect_equal<i64>(2, counts.len());
+    if counts.at("bob") |held| {
+        testing::expect_equal<i64>(2, held.len());
+        testing::expect_equal<i64>(3, held.get("miss") orelse 0);
+    } else {
+        testing::fail("bob is missing");
+    }
+}
+
 // A box holds one value and adds no shape of its own, so what it reads is the
 // value the document holds where the box sits.
 test "json decode reads a box as the value it holds" {

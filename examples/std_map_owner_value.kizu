@@ -1,0 +1,54 @@
+import std::map;
+import std::mem;
+import std::string;
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return text;
+}
+
+// A map value may own what it holds. The rules are the ones Array already has
+// for owner elements: `insert` moves the value in, `at` / `at_mut` borrow it
+// where `get` would copy it, and `deinit` releases every value before the
+// table.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("first", try owned(allocator, "alice"));
+    try names.insert("last", try owned(allocator, "smith"));
+
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        print(bytes);
+    }
+
+    // at_mut borrows the value in place, which is how a stored owner grows
+    // without leaving the map.
+    if names.at_mut("last") |name| {
+        try name.append_bytes("son");
+    }
+
+    var index = 0;
+    while names.key_at(index) |key| {
+        print(key);
+        index = index + 1;
+    }
+
+    if names.at("last") |name| {
+        let bytes = name.as_bytes();
+        print(bytes);
+    }
+    return;
+}
+
+// run
+// features: std-map owner std-string borrow capture
+// output:
+// alice
+// first
+// last
+// smithson

@@ -255,8 +255,9 @@ var value = try json::decode<json::Value>(allocator, document);
 defer value.deinit();
 ```
 
-`Obj` が map でなく `Array<Entry>` なのは、map の value type が copy 限定で
-`Value` が中身を所有するためです。配列は key を document の順で保ちます。
+`Obj` は key を document の順で保ちます。配列であって map でないのは、map の
+value type が copy 限定だった名残です。その制約は無くなったので(ADR-0123)、
+どちらで持つかは今は開いています。
 
 ### 配列
 
@@ -277,6 +278,10 @@ defer numbers.deinit();
 効きます。key は escape を戻してから map に copy されるので、`{"carol": 4}`
 は `carol` になり、map の中に document への view は残りません。同じ key が
 2 回現れたら `DuplicateField` です。挿入順は document の順です。
+
+value は所有していてかまわないので、`Map<[]u8, std::string::String>` や
+`Map<[]u8, Map<[]u8, i64>>` が読めます。map の中の owner value を取り出すのは
+`get` ではなく `at` / `at_mut` です(`docs/std/map.md`)。
 
 `std::mem::Box<T>` は形を足しません。box のある位置の値をそのまま `T` として
 読み、box に入れます。

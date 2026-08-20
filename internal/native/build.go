@@ -1778,6 +1778,17 @@ void *kizu_map_get(void *handle, const unsigned char *key, int64_t key_len) {
     return map->entries[found].value;
 }
 
+/* kizu_map_value_at returns the value stored at insertion position index, or
+ * NULL past the end. Only Map.deinit's cascade reads it, so the entry is left
+ * as it is: the map is released right after and no lookup runs in between. */
+void *kizu_map_value_at(void *handle, int64_t index) {
+    KizuMap *map = (KizuMap *)handle;
+    if (!map || index < 0 || index >= map->len) {
+        return NULL;
+    }
+    return map->entries[index].value;
+}
+
 void kizu_map_key_at(KizuOptSliceU8 *out, void *handle, int64_t index) {
     KizuMap *map = (KizuMap *)handle;
     if (!map || index < 0 || index >= map->len) {

@@ -136,3 +136,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0120: variant の reflection と `comptime match`](0120-variant-reflection-and-comptime-match.md) (0113 が別 issue にした enum tag / union variant を履行)
 - [ADR-0121: `?T` field は document が省略できる](0121-json-optional-fields-may-be-omitted.md) (原理 8 の既定より実需を採る)
 - [ADR-0122: `decode<T>` は所有する値だけを返す](0122-json-decode-returns-owned-values.md) (`Cow` 相当の型を却下)
+- [ADR-0123: `Map` の owner value は `Array` の owner element と同じ規則で扱う](0123-map-owned-values-mirror-array.md) (旧 0031 を採番し直し、既存 key への insert の決定を訂正)

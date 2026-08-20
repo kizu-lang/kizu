@@ -1,0 +1,92 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return text;
+}
+
+test "std map owner value borrow and grow" {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("first", try owned(allocator, "alice"));
+    try names.insert("last", try owned(allocator, "smith"));
+    testing::expect_equal<i64>(2, names.len());
+
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("alice", bytes);
+    } else {
+        testing::fail("first is missing");
+    }
+
+    // at_mut borrows in place, which is how a stored owner changes without
+    // leaving the map.
+    if names.at_mut("last") |name| {
+        try name.append_bytes("son");
+    } else {
+        testing::fail("last is missing");
+    }
+    if names.at("last") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("smithson", bytes);
+    } else {
+        testing::fail("last is missing");
+    }
+}
+
+test "std map owner value keeps insertion order" {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("b", try owned(allocator, "one"));
+    try names.insert("a", try owned(allocator, "two"));
+
+    var joined = string::new(allocator);
+    defer joined.deinit();
+    var index = 0;
+    while names.key_at(index) |key| {
+        try joined.append_bytes(key);
+        index = index + 1;
+    }
+    let order = joined.as_bytes();
+    testing::expect_equal<[]u8>("ba", order);
+}
+
+test "std map holds containers as values" {
+    let allocator = mem::page_allocator();
+
+    // A map value that is itself a container was refused only because the
+    // copy constraint masked it; nothing about nesting needed its own rule.
+    var counts = map::new<[]u8, map::Map<[]u8, i64>>(allocator);
+    defer counts.deinit();
+    var inner = map::new<[]u8, i64>(allocator);
+    errdefer inner.deinit();
+    try inner.insert("hit", 2);
+    try counts.insert("alice", inner);
+    if counts.at("alice") |held| {
+        testing::expect_equal<i64>(1, held.len());
+    } else {
+        testing::fail("alice is missing");
+    }
+
+    var lists = map::new<[]u8, array::Array<i64>>(allocator);
+    defer lists.deinit();
+    var items = array::new<i64>(allocator);
+    errdefer items.deinit();
+    try items.append(7);
+    try lists.insert("alice", items);
+    if lists.at("alice") |held| {
+        testing::expect_equal<i64>(1, held.len());
+    } else {
+        testing::fail("alice is missing");
+    }
+}

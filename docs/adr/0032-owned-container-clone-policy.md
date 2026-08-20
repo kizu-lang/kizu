@@ -53,7 +53,7 @@ per-type copy 関数**である（例: `selfhost/src/backend/compiled_mir.kizu` 
 
 3. **Copy 要素 / 値コンテナ**（`Array<i64>`、`Array<NodeId>`、`Array<[]u8>`、
    `Map<[]u8, i64>` 等）: 必要なら `clone()` を **Copy 要素限定の builtin** として足してよい
-   （バッファのビット複製＝安全・安価）。checker は ADR-0031 と同じ Copy 判定で
+   （バッファのビット複製＝安全・安価）。checker は ADR-0123 と同じ Copy 判定で
    「要素 / 値型が Copy のときだけ」と縛る。これは任意の利便機能であり、明示 rebuild でも代替可。
 
    ```kizu
@@ -79,12 +79,12 @@ per-type copy 関数**である（例: `selfhost/src/backend/compiled_mir.kizu` 
   per-type copy 関数で書ける）。今すぐ既存パターンとして使える。
 - Copy 要素 `clone()` builtin を足す場合のみ runtime / checker 変更が要る
   （`array_clone` / `map_clone` builtin + Copy 要素制約）。これは任意で、必要になった時点・
-  かつ #1157（go 依存撤去）の後で構わない。Map 側は ADR-0031 の owned 値対応と同じ Copy 判定を再利用。
+  かつ #1157（go 依存撤去）の後で構わない。Map 側は ADR-0123 の owned 値対応と同じ Copy 判定を再利用。
 
 ## 影響
 
 - ADR-0018（明示 return / 暗黙を避ける）と整合: 複製は常に明示呼び出し、暗黙 clone は無い。
 - ADR-0017（safe Kizu メモリ安全性）を支える: owned 値の暗黙ビット複製による double-free を排除。
-- ADR-0031（Map owned 値対応）と一対: Map が owned 値を持てる一方、その複製は per-type 明示。
+- ADR-0123（Map owned 値対応）と一対: Map が owned 値を持てる一方、その複製は per-type 明示。
 - copy / move モデルと一致: Copy → 複製可 / owned → move か明示 rebuild。clone も同じ二分。
 - 「賢いコードより単純なコードを優先」（AGENTS.md）: 新概念ゼロ。既存 `copy_*` イディオムの追認。

@@ -1952,6 +1952,8 @@ var mapPrimitives = map[string]string{
 	"std::internal::builtin::map_insert":   "insert",
 	"std::internal::builtin::map_key_at":   "key_at",
 	"std::internal::builtin::map_len":      "len",
+
+	"std::internal::builtin::map_take_value_at": "take_value_at",
 }
 
 // boxPrimitives maps a std::internal::builtin Box primitive to the operation it
@@ -2015,6 +2017,8 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 		return l.emit("map.at", "?&"+valueType, args, valueType), nil
 	case "at_mut":
 		return l.emit("map.at_mut", "?&var "+valueType, args, valueType), nil
+	case "take_value_at":
+		return l.emit("map.take_value_at", valueType, args, valueType), nil
 	case "key_at":
 		return l.emit("map.key_at", "?[]u8", args, valueType), nil
 	case "contains":

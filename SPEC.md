@@ -2438,8 +2438,9 @@ length と capacity は変わりません。
 `&var std::string::String` から呼べます。method receiver は by-value の
 parameter として書きますが、consuming transfer ではありません。
 
-**element / value borrow.** `Array.get` / `get_or_panic` は copy element
-限定です。non-copy element は `at` / `at_mut` で local borrow として読み書き
+**element / value borrow.** `Array.get` / `get_or_panic` と `Map.get` は
+copy element / copy value 限定です。owner を copy すると持ち主が 2 つに
+なるためで、owner は `at` / `at_mut` で local borrow として読み書き
 します。`Array.at` / `at_mut` は borrow optional
 `?&T` / `?&var T` を、`Map.at` / `at_mut` は `?&V` / `?&var V` を返します。
 これを消費できるのは **capture 条件だけ**です(`if array.at(i) |elem|` /
@@ -2451,14 +2452,18 @@ container は borrow され、shared borrow 中は `insert` / `deinit` が、
 mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
 `Map.key_at` が返す key も map storage への view なので capture 限定です。
 
-**cleanup の義務.** `Array.deinit` は残っている initialized element を
-cleanup してから storage を解放します。element cleanup は explicit
-`deinit(self: T) -> void` があればそれを使います。`T` が owner aggregate で
-callable な `deinit` を持たない場合、`array.deinit()` の内部に限って
-field / payload 内の既知 owner を再帰的に cleanup します。これは explicit な
-`array.deinit()` の一部であり、implicit destructor でも `T.deinit()` の
-合成でもありません。`Array.set` は置換前の element を cleanup してから
-新しい value を move します。
+**cleanup の義務.** `Array.deinit` は残っている initialized element を、
+`Map.deinit` は保持している value を cleanup してから storage を解放します。
+element / value cleanup は explicit `deinit(self: T) -> void` があればそれを
+使います。`T` が owner aggregate で callable な `deinit` を持たない場合、
+`array.deinit()` / `map.deinit()` の内部に限って field / payload 内の既知
+owner を再帰的に cleanup します。これは explicit な `deinit()` の一部であり、
+implicit destructor でも `T.deinit()` の合成でもありません。
+
+既にある owner を置き換える操作は、落ちる側の持ち主が他にいないので拒否
+します。`Array.set` は owner element に対して compile error、既存 key への
+`Map.insert` は owner value に対して trap です(占有しているかは実行時に
+しか分からないため)。置き換えは `at_mut` で in-place に行います。
 
 `String.deinit` / `Box.deinit` / `Map.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。例外として、

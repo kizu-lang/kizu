@@ -1226,9 +1226,6 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
 	}
-	if !c.typeParams[args[1]] && !c.isCopyType(Type(args[1])) {
-		return "", errorf("type error: std::map::Map value type must be copy")
-	}
 	return Type(name), nil
 }
 
@@ -4475,6 +4472,13 @@ func (c *Checker) checkMapPrimitiveMethod(
 			return "", err
 		}
 		return Type("?&var " + string(valueType)), nil
+	case "take_value_at":
+		// Reserved to Map.deinit's cascade, so it is answered here and never
+		// reaches checkMapMethod: a caller outside std spells no name for it.
+		if err := c.checkMapIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return valueType, nil
 	}
 	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
 		return c.checkMapMethod(valueType, name, args, env, unsafe)
@@ -4516,6 +4520,11 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 			return "", err
 		}
 		return Type("?" + string(valueType)), nil
+	case "take_value_at":
+		if err := c.checkMapIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return valueType, nil
 	case "contains":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
 			return "", err
@@ -4543,6 +4552,26 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	}
 	if !sameType(got, Type(keyType)) {
 		return errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
+	}
+	return nil
+}
+
+// checkMapIndexArg validates one i64 insertion-position argument.
+func (c *Checker) checkMapIndexArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if len(args) != 1 {
+		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return errorf("type error: `Map.%s` expects i64 index, got %s", name, got)
 	}
 	return nil
 }
@@ -6177,6 +6206,10 @@ func (c *Checker) checkMapMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	// Rules the declaration cannot state: `get` copies the value out, so an
+	// owner value has to leave through the `at`/`at_mut` borrows instead, and
+	// owner values make shallow cleanup a leak (ADR-0091). Both mirror what
+	// Array already answers for owner elements (ADR-0123).
 	switch name {
 	case "insert":
 		return c.checkMapInsert(valueType, args, env, unsafe)
@@ -6184,19 +6217,15 @@ func (c *Checker) checkMapMethod(
 		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
+		if !isGenericParamType(valueType) && !c.isCopyType(valueType) {
+			return "", errorf("type error: `Map.get` requires copy value")
+		}
 		return Type("?" + string(valueType)), nil
 	case "at", "at_mut":
 		return c.checkMapAtCondition(valueType, name, args, env, unsafe)
 	case "key_at":
-		if len(args) != 1 {
-			return "", errorf("type error: `Map.key_at` expects 1 arg, got %d", len(args))
-		}
-		got, err := c.checkExpr(args[0], env, unsafe)
-		if err != nil {
+		if err := c.checkMapIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
-		}
-		if got != typeI64 {
-			return "", errorf("type error: `Map.key_at` expects i64 index, got %s", got)
 		}
 		return Type("?[]u8"), nil
 	case "contains":
@@ -6248,7 +6277,7 @@ func (c *Checker) checkMapAtCondition(
 	return Type("?&" + string(valueType)), nil
 }
 
-// checkMapInsert validates copy-only Map.insert arguments.
+// checkMapInsert validates Map.insert arguments.
 func (c *Checker) checkMapInsert(
 	valueType Type,
 	args []ast.Expression,
@@ -6312,9 +6341,6 @@ func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	}
 	if !sameType(args[0], typeByteString) {
 		return errorf("type error: std::map::Map key type must be []u8")
-	}
-	if !c.isCopyType(args[1]) {
-		return errorf("type error: std::map::Map value type must be copy")
 	}
 	return nil
 }

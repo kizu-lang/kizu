@@ -33,8 +33,24 @@ if m.at_mut(key) |v| {
 `while m.key_at(i) |key|` が挿入順の iteration です。key は map storage への
 view なので capture 限定で、capture が生きている間 map は共有借用されます
 (§7)。
-value type は copy type 限定です。
-non-copy value、deletion、custom hash/equality は後続で扱います。
+value type は owner でもかまいません(`Map<[]u8, std::string::String>`、
+`Map<[]u8, Map<[]u8, i64>>`)。規則は `Array<T>` が owner 要素に対して持つもの
+と同じで、map 専用の規則はありません(ADR-0123)。
+
+| 操作 | copy value | owner value |
+| --- | --- | --- |
+| `get` | 値を copy して返す | **compile error**。copy すると持ち主が 2 つになる |
+| `at` / `at_mut` | 借用 | 同じ |
+| `insert`(新しい key) | 値を書く | 値を map へ move する |
+| `insert`(既存の key) | 上書き | **trap**。上書きは既にある値を落とすため |
+| `deinit` | table と key を解放 | 値を 1 つずつ解放してから table と key |
+
+既存の key への `insert` が trap なのは、map がその値の唯一の持ち主だからです。
+上書きすると誰も知らないまま消えます。置き換えは `at_mut` で in-place に行うか、
+`contains` で先に分岐します。占有しているかは実行時にしか分からないので、
+`Array.set` が同じ状況を compile error にするのに対してこちらは trap です。
+
+deletion、custom hash/equality は後続で扱います。
 `std::map::new<K, V>()` のような hidden default allocator は使いません。
 
 value borrow(`at` / `at_mut`)の消費規則、borrow 中に待つ操作、`key_at` が
