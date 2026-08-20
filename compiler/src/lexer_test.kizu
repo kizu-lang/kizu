@@ -1,0 +1,415 @@
+import compiler::lexer;
+import compiler::token;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn expect_next(
+scanner: &var lexer::Lexer,
+expected_kind: token::Kind,
+expected_literal: []u8
+) -> !void {
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect(actual.kind == expected_kind);
+    let literal = actual.literal.as_bytes();
+    testing::expect(mem::equal_bytes(literal, expected_literal));
+    return;
+}
+
+fn expect_comment(
+comments: &array::Array<string::String>,
+index: i64,
+expected: []u8
+) -> void {
+    if comments.at(index) |comment| {
+        let bytes = comment.as_bytes();
+        testing::expect(mem::equal_bytes(bytes, expected));
+    } else {
+        testing::fail("missing lexer comment");
+    }
+    return;
+}
+
+fn expect_no_comments(actual: &token::Token) -> void {
+    testing::expect_equal<i64>(0, actual.doc_comments.len());
+    testing::expect_equal<i64>(0, actual.safety.len());
+    return;
+}
+
+test "lexer scans representative syntax" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\fn main() { let name = "alice"; age = age + 1;
+        \\match Color::Red { Red => return age >= 20;,} }
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Function, "fn");
+    try expect_next(&var scanner, token::Kind::Ident, "main");
+    try expect_next(&var scanner, token::Kind::LParen, "(");
+    try expect_next(&var scanner, token::Kind::RParen, ")");
+    try expect_next(&var scanner, token::Kind::LBrace, "{");
+    try expect_next(&var scanner, token::Kind::Let, "let");
+    try expect_next(&var scanner, token::Kind::Ident, "name");
+    try expect_next(&var scanner, token::Kind::Assign, "=");
+    try expect_next(&var scanner, token::Kind::String, "alice");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Ident, "age");
+    try expect_next(&var scanner, token::Kind::Assign, "=");
+    try expect_next(&var scanner, token::Kind::Ident, "age");
+    try expect_next(&var scanner, token::Kind::Plus, "+");
+    try expect_next(&var scanner, token::Kind::Int, "1");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Match, "match");
+    try expect_next(&var scanner, token::Kind::Ident, "Color");
+    try expect_next(&var scanner, token::Kind::DoubleColon, "::");
+    try expect_next(&var scanner, token::Kind::Ident, "Red");
+    try expect_next(&var scanner, token::Kind::LBrace, "{");
+    try expect_next(&var scanner, token::Kind::Ident, "Red");
+    try expect_next(&var scanner, token::Kind::FatArrow, "=>");
+    try expect_next(&var scanner, token::Kind::Return, "return");
+    try expect_next(&var scanner, token::Kind::Ident, "age");
+    try expect_next(&var scanner, token::Kind::Gte, ">=");
+    try expect_next(&var scanner, token::Kind::Int, "20");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Comma, ",");
+    try expect_next(&var scanner, token::Kind::RBrace, "}");
+    try expect_next(&var scanner, token::Kind::RBrace, "}");
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer keeps multiple tokens and their file names alive" {
+    let allocator = mem::page_allocator();
+    var scanner = lexer::new_file(allocator, "sample.kizu", "first second third");
+    defer scanner.deinit();
+    let first = try scanner.next_token();
+    defer first.deinit();
+    let second = try scanner.next_token();
+    defer second.deinit();
+    let third = try scanner.next_token();
+    defer third.deinit();
+    let first_literal = first.literal.as_bytes();
+    testing::expect(mem::equal_bytes(first_literal, "first"));
+    let second_literal = second.literal.as_bytes();
+    testing::expect(mem::equal_bytes(second_literal, "second"));
+    let third_literal = third.literal.as_bytes();
+    testing::expect(mem::equal_bytes(third_literal, "third"));
+    let first_file = first.file.as_bytes();
+    testing::expect(mem::equal_bytes(first_file, "sample.kizu"));
+    let second_file = second.file.as_bytes();
+    testing::expect(mem::equal_bytes(second_file, "sample.kizu"));
+    let third_file = third.file.as_bytes();
+    testing::expect(mem::equal_bytes(third_file, "sample.kizu"));
+}
+
+test "lexer attaches doc and safety comments separately" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// what it promises
+        \\/// what it returns
+        \\// SAFETY: why it holds
+        \\unsafe fn poke() {}
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect(actual.kind == token::Kind::Unsafe);
+    testing::expect_equal<i64>(2, actual.doc_comments.len());
+    testing::expect_equal<i64>(1, actual.safety.len());
+    expect_comment(&actual.doc_comments, 0, "what it promises");
+    expect_comment(&actual.doc_comments, 1, "what it returns");
+    expect_comment(&actual.safety, 0, "why it holds");
+}
+
+test "lexer requires exact adjacent doc comments" {
+    let allocator = mem::page_allocator();
+    let four_input =
+        \\//// ordinary
+        \\fn main() {}
+    ;
+    var four = lexer::new(allocator, four_input);
+    defer four.deinit();
+    let after_four = try four.next_token();
+    defer after_four.deinit();
+    testing::expect(after_four.kind == token::Kind::Function);
+    expect_no_comments(&after_four);
+    let blank_input =
+        \\/// doc
+        \\
+        \\fn main() {}
+    ;
+    var blank = lexer::new(allocator, blank_input);
+    defer blank.deinit();
+    let after_blank = try blank.next_token();
+    defer after_blank.deinit();
+    testing::expect(after_blank.kind == token::Kind::Function);
+    expect_no_comments(&after_blank);
+    let ordinary_input =
+        \\/// doc
+        \\// ordinary
+        \\fn main() {}
+    ;
+    var ordinary = lexer::new(allocator, ordinary_input);
+    defer ordinary.deinit();
+    let after_ordinary = try ordinary.next_token();
+    defer after_ordinary.deinit();
+    testing::expect(after_ordinary.kind == token::Kind::Function);
+    expect_no_comments(&after_ordinary);
+}
+
+test "lexer attaches exact safety comments and trims Unicode space" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\// SAFETY: the caller checked the bound
+        \\//	SAFETY:	 tabs and spacing　
+        \\unsafe ptr_write(p, 1);
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect(actual.kind == token::Kind::Unsafe);
+    testing::expect_equal<i64>(2, actual.safety.len());
+    expect_comment(&actual.safety, 0, "the caller checked the bound");
+    expect_comment(&actual.safety, 1, "tabs and spacing");
+}
+
+test "lexer rejects inexact or detached safety comments" {
+    let allocator = mem::page_allocator();
+    let lower_input =
+        \\// safety: lowercase
+        \\unsafe ptr_write(p, 1);
+    ;
+    var lower = lexer::new(allocator, lower_input);
+    defer lower.deinit();
+    let after_lower = try lower.next_token();
+    defer after_lower.deinit();
+    testing::expect(after_lower.kind == token::Kind::Unsafe);
+    expect_no_comments(&after_lower);
+    let colon_input =
+        \\// SAFETY missing colon
+        \\unsafe ptr_write(p, 1);
+    ;
+    var colon = lexer::new(allocator, colon_input);
+    defer colon.deinit();
+    let after_colon = try colon.next_token();
+    defer after_colon.deinit();
+    testing::expect(after_colon.kind == token::Kind::Unsafe);
+    expect_no_comments(&after_colon);
+    let blank_input =
+        \\// SAFETY: held off
+        \\
+        \\unsafe ptr_write(p, 1);
+    ;
+    var blank = lexer::new(allocator, blank_input);
+    defer blank.deinit();
+    let after_blank = try blank.next_token();
+    defer after_blank.deinit();
+    testing::expect(after_blank.kind == token::Kind::Unsafe);
+    expect_no_comments(&after_blank);
+    let ordinary_input =
+        \\// SAFETY: dropped
+        \\// ordinary
+        \\unsafe ptr_write(p, 1);
+    ;
+    var ordinary = lexer::new(allocator, ordinary_input);
+    defer ordinary.deinit();
+    let after_ordinary = try ordinary.next_token();
+    defer after_ordinary.deinit();
+    testing::expect(after_ordinary.kind == token::Kind::Unsafe);
+    expect_no_comments(&after_ordinary);
+}
+
+test "lexer scans directives cleanup logic and loop control" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\@unsafe defer values.deinit(); age >= 20 and age < 130 or false
+        \\for 0..3 |i| { continue; } break :outer;
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::At, "@");
+    try expect_next(&var scanner, token::Kind::Unsafe, "unsafe");
+    try expect_next(&var scanner, token::Kind::Defer, "defer");
+    try expect_next(&var scanner, token::Kind::Ident, "values");
+    try expect_next(&var scanner, token::Kind::Dot, ".");
+    try expect_next(&var scanner, token::Kind::Ident, "deinit");
+    try expect_next(&var scanner, token::Kind::LParen, "(");
+    try expect_next(&var scanner, token::Kind::RParen, ")");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Ident, "age");
+    try expect_next(&var scanner, token::Kind::Gte, ">=");
+    try expect_next(&var scanner, token::Kind::Int, "20");
+    try expect_next(&var scanner, token::Kind::And, "and");
+    try expect_next(&var scanner, token::Kind::Ident, "age");
+    try expect_next(&var scanner, token::Kind::Lt, "<");
+    try expect_next(&var scanner, token::Kind::Int, "130");
+    try expect_next(&var scanner, token::Kind::Or, "or");
+    try expect_next(&var scanner, token::Kind::False, "false");
+    try expect_next(&var scanner, token::Kind::For, "for");
+    try expect_next(&var scanner, token::Kind::Int, "0");
+    try expect_next(&var scanner, token::Kind::Range, "..");
+    try expect_next(&var scanner, token::Kind::Int, "3");
+    try expect_next(&var scanner, token::Kind::Pipe, "|");
+    try expect_next(&var scanner, token::Kind::Ident, "i");
+    try expect_next(&var scanner, token::Kind::Pipe, "|");
+    try expect_next(&var scanner, token::Kind::LBrace, "{");
+    try expect_next(&var scanner, token::Kind::Continue, "continue");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::RBrace, "}");
+    try expect_next(&var scanner, token::Kind::Break, "break");
+    try expect_next(&var scanner, token::Kind::Colon, ":");
+    try expect_next(&var scanner, token::Kind::Ident, "outer");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer scans every punctuation and compound operator" {
+    let allocator = mem::page_allocator();
+    let input =
+    "+ / & * % @ ? | , : ; ( ) { } [ ] = == => - -> ! != < <= > >= . .. :: \"
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Plus, "+");
+    try expect_next(&var scanner, token::Kind::Slash, "/");
+    try expect_next(&var scanner, token::Kind::Amp, "&");
+    try expect_next(&var scanner, token::Kind::Asterisk, "*");
+    try expect_next(&var scanner, token::Kind::Percent, "%");
+    try expect_next(&var scanner, token::Kind::At, "@");
+    try expect_next(&var scanner, token::Kind::Question, "?");
+    try expect_next(&var scanner, token::Kind::Pipe, "|");
+    try expect_next(&var scanner, token::Kind::Comma, ",");
+    try expect_next(&var scanner, token::Kind::Colon, ":");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::LParen, "(");
+    try expect_next(&var scanner, token::Kind::RParen, ")");
+    try expect_next(&var scanner, token::Kind::LBrace, "{");
+    try expect_next(&var scanner, token::Kind::RBrace, "}");
+    try expect_next(&var scanner, token::Kind::LBracket, "[");
+    try expect_next(&var scanner, token::Kind::RBracket, "]");
+    try expect_next(&var scanner, token::Kind::Assign, "=");
+    try expect_next(&var scanner, token::Kind::Eq, "==");
+    try expect_next(&var scanner, token::Kind::FatArrow, "=>");
+    try expect_next(&var scanner, token::Kind::Minus, "-");
+    try expect_next(&var scanner, token::Kind::Arrow, "->");
+    try expect_next(&var scanner, token::Kind::Bang, "!");
+    try expect_next(&var scanner, token::Kind::NotEq, "!=");
+    try expect_next(&var scanner, token::Kind::Lt, "<");
+    try expect_next(&var scanner, token::Kind::Lte, "<=");
+    try expect_next(&var scanner, token::Kind::Gt, ">");
+    try expect_next(&var scanner, token::Kind::Gte, ">=");
+    try expect_next(&var scanner, token::Kind::Dot, ".");
+    try expect_next(&var scanner, token::Kind::Range, "..");
+    try expect_next(&var scanner, token::Kind::DoubleColon, "::");
+    try expect_next(&var scanner, token::Kind::Illegal, "\");
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer keeps loop as an identifier" {
+    let allocator = mem::page_allocator();
+    var scanner = lexer::new(allocator, "loop");
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Ident, "loop");
+}
+
+test "lexer joins multiline strings and resumes after them" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\let text =
+        \\    \\hello
+        \\    \\world
+        \\;
+        \\print(text);
+    ;
+    let expected =
+        \\hello
+        \\world
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Let, "let");
+    try expect_next(&var scanner, token::Kind::Ident, "text");
+    try expect_next(&var scanner, token::Kind::Assign, "=");
+    try expect_next(&var scanner, token::Kind::String, expected);
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Ident, "print");
+    try expect_next(&var scanner, token::Kind::LParen, "(");
+    try expect_next(&var scanner, token::Kind::Ident, "text");
+    try expect_next(&var scanner, token::Kind::RParen, ")");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer preserves blank multiline segments" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\\\Usage: kizu <command>
+        \\\\
+        \\\\Commands:
+        \\\\  build    Build the project
+    ;
+    let expected =
+        \\Usage: kizu <command>
+        \\
+        \\Commands:
+        \\  build    Build the project
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::String, expected);
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer scans module visibility" {
+    let allocator = mem::page_allocator();
+    var scanner = lexer::new(allocator,
+    "import app::lexer; pub struct Token {}");
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Import, "import");
+    try expect_next(&var scanner, token::Kind::Ident, "app");
+    try expect_next(&var scanner, token::Kind::DoubleColon, "::");
+    try expect_next(&var scanner, token::Kind::Ident, "lexer");
+    try expect_next(&var scanner, token::Kind::Semicolon, ";");
+    try expect_next(&var scanner, token::Kind::Public, "pub");
+    try expect_next(&var scanner, token::Kind::Struct, "struct");
+    try expect_next(&var scanner, token::Kind::Ident, "Token");
+    try expect_next(&var scanner, token::Kind::LBrace, "{");
+    try expect_next(&var scanner, token::Kind::RBrace, "}");
+    try expect_next(&var scanner, token::Kind::Eof, "");
+}
+
+test "lexer counts UTF-8 scalars in token columns" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\"あ" name
+    ;
+    var scanner = lexer::new(allocator, input);
+    defer scanner.deinit();
+    let text = try scanner.next_token();
+    defer text.deinit();
+    let name = try scanner.next_token();
+    defer name.deinit();
+    testing::expect(text.kind == token::Kind::String);
+    let literal = text.literal.as_bytes();
+    testing::expect(mem::equal_bytes(literal, "あ"));
+    testing::expect_equal<i64>(1, text.column);
+    testing::expect(name.kind == token::Kind::Ident);
+    testing::expect_equal<i64>(5, name.column);
+}
+
+test "lexer normalizes invalid UTF-8 like Go rune conversion" {
+    let allocator = mem::page_allocator();
+    var input = [2]u8 {};
+    let bytes = input.as_mut_bytes();
+    bytes [0] = cast<u8>(255);
+    bytes [1] = cast<u8>(120);
+    let read = input.as_bytes();
+    var scanner = lexer::new(allocator, read);
+    defer scanner.deinit();
+    try expect_next(&var scanner, token::Kind::Illegal, "�");
+    try expect_next(&var scanner, token::Kind::Ident, "x");
+}
