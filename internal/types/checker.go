@@ -763,9 +763,10 @@ func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
 	}
 	method := c.implMethod(decl.Name, "deinit")
 	if method == nil {
-		return errorf(
-			"type error: owner-payload union `%s` requires explicit `deinit(self: %s) -> void`",
-			decl.Name, decl.Name)
+		// The union holds an owner and declares nothing, so its cleanup is the
+		// derived one (ast.DeriveDeinit) and there is no author's body to
+		// validate. What that body does is fixed by the generator.
+		return nil
 	}
 	if err := c.checkOwnerUnionDeinitSignature(decl, method); err != nil {
 		return err

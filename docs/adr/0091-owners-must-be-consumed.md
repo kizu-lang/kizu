@@ -17,11 +17,17 @@ allocation として公理にも違反している。
    move / `x.deinit()` / `defer x.deinit();` のいずれか。owner を値で受け取る
    param も同じ義務を負う。`deinit(self)` body 内の owner field にも同規則を
    適用する(完全性検査)。
-2. **owner 性は推移する。** owner field を持つ struct / union は自身も owner で、
-   deinit を必須とする。転送だけの deinit body は宣言 1 行で生成できる
-   (構文は SPEC で定める)。公理の定義を明文化する: hidden control flow とは
-   **呼び出しが source に見えないこと**。`defer x.deinit()` が見える限り、
-   宣言された生成 body は公理内である。
+2. **owner 性は推移する。** owner field / payload を持つ struct / union は自身も
+   owner である。`deinit` を宣言しなければ、保持しているものを宣言順に consume
+   する body が導出される。義務が field の義務だけである型に書ける body は 1 つ
+   しかなく —— 決定 1 の完全性検査がそれを固定し、field は互いに alias しない
+   ので順序も効かない —— 手で書いても導出結果になる。それは field の型が既に
+   言っていることの写しで、原理 10 が畳めと言う定型である。自分で確保したもの
+   を解放する型(allocator から取ったメモリ、descriptor)は `deinit` を宣言し、
+   その body を使う。その義務は型のものであり、どの field のものでもない。
+   公理の定義を明文化する: hidden control flow とは**呼び出しが source に
+   見えないこと**。`value.deinit()` が source にある限り、導出された body は
+   公理内である。
 3. **owner 要素の collection は compile 時に閉じる。** shallow `deinit()` を
    型 error にし、要素ごと consume する操作(`deinit_all()`)だけを consume と
    認める。要素数は runtime 値だが、正しい始末操作の強制は型で決まる。
@@ -40,7 +46,8 @@ allocation として公理にも違反している。
 | 案 | 却下理由 |
 | --- | --- |
 | 自動 Drop(Rust) | 呼び出しが source から消える。公理違反 |
-| 転送 deinit の全手書き(Zig) | 集約の数だけ定型が量産される。宣言 1 行と情報量が同じ |
+| 転送 deinit の全手書き(Zig) | field の型が既に言っていることの写しで、情報量が同じ(原理 10) |
+| `= fields;` のような生成宣言構文 | RHS が式でも値でもない位置専用の marker になり、`fields` の定義がどこにもない儀式。union では嘘(consume するのは field ではなく active payload)。宣言そのものを無くせば綴りの問題が消える |
 | collection leak を runtime 検出に任せる | 検出が test の網羅性に依存する。型で閉じられる |
 | 分解 consume(Austral) | 量産が定義側から全 call site へ移り悪化する |
 | `OwnedBytes` 新設 | 型を増やしてユーザーに区別を課す(ADR-0090 と同じ却下理由) |
@@ -55,4 +62,3 @@ allocation として公理にも違反している。
 ## 再評価条件
 
 - 上限なし明示語が形骸化したら、確保上限の要求水準を見直す
-- field 単位の move out が入ったら、deinit 必須の代替として分解 consume を再検討

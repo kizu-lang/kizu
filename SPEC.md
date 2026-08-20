@@ -1105,8 +1105,8 @@ if registry.user(id) |u| { u.visits = u.visits + 1; }
   optional(`?[]u8`)は field に置けない —— view の義務は借用で、それを開く
   capture が field 型を読む規則から見えないため。union payload・static
   argument(`Array<?u8>` など)・borrow(`&?T`)の対象にはできない
-* `?Owner` field の cleanup 契約は §14.4 にある。struct は explicit `deinit`
-  を持ち、その中で optional を開いて中身を解放する
+* `?Owner` field の cleanup 契約は §14.4 にある。`deinit` の中で optional を開いて
+  中身を解放する。宣言しなければ、それを行う body が導出される
 * `?ptr<T>` は raw pointer の nullable 綴りのままで、この optional
   semantics の対象外(unsafe 世界の C ABI 用)
 
@@ -1353,8 +1353,31 @@ consume しなければなりません。呼び出し側は move 済みで、そ
 読み取りだけを行う関数は `&T` で受け取ります。
 mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
 
-owner field または owner payload を含む型は `deinit(self: T) -> void` を必須とし、
-cleanup contract を source 上に見えるようにします。
+owner field または owner payload を含む型は、それを持つことによって owner です。
+`deinit(self: T) -> void` を宣言しなければ、保持しているものを宣言順に consume する
+body が導出されます。
+
+```kizu
+struct Visitor {
+    name: string::String,
+    nick: ?string::String,
+}
+// 導出される body:
+//   self.name.deinit();
+//   if self.nick |held| { held.deinit(); }
+```
+
+義務が field の義務だけである型に、書ける body は 1 つしかありません。「`deinit` は
+receiver の owner field をすべての path で consume する」がそれを固定しており、
+field は互いに alias しないので順序も効きません。手で書いても書けるのは導出結果
+だけで、それは原理 10 が畳めと言う定型です。cleanup contract は field の型に既に
+見えており、呼び出し `value.deinit()` は source に残るので、原理 2 の hidden control
+flow にも当たりません。
+
+自分で確保したものを解放する型 —— allocator から取ったメモリ、descriptor ——
+は `deinit` を宣言します。その義務は型のものであり、どの field のものでもないため、
+導出できません。宣言した型はその body を使います。
+
 `deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可し、
 body は self の owner field をすべての path で consume しなければなりません。
 `deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
@@ -1366,7 +1389,8 @@ owner 要素の container を要素にする入れ子も書けます。owner 要
 前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
 owner 型を要素にできません。
 
-owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
+owner payload を持つ `union` も owner aggregate です。宣言しなければ、active variant の
+payload を consume する `match` が導出されます。その `deinit` は active variant の
 payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の
 payload storage は cleanup しません。tag が初期化済みと示す payload だけを処理します。
 inline payload の size と alignment は compile time に確定している必要があります。

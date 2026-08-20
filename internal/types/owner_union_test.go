@@ -79,14 +79,17 @@ fn (self: Outer) deinit() -> void {
 	}
 }
 
-// TestCheckRejectsOwnerUnionMissingDeinit names the union missing cleanup.
-func TestCheckRejectsOwnerUnionMissingDeinit(t *testing.T) {
+// TestCheckAcceptsOwnerUnionWithoutDeclaredDeinit checks a union that declares
+// no cleanup is accepted: its body is the derived one, and there is no author's
+// body to validate.
+func TestCheckAcceptsOwnerUnionWithoutDeclaredDeinit(t *testing.T) {
 	source := `union Node {
     Left(std::string::String),
     Right(i64),
 }`
-	assertCheckError(t, source,
-		"owner-payload union `Node` requires explicit `deinit(self: Node) -> void`")
+	if err := checkSource(source); err != nil {
+		t.Fatalf("owner union without a declared deinit should check: %v", err)
+	}
 }
 
 // TestCheckRejectsOwnerUnionMissingVariantCleanup names the leaking variant.

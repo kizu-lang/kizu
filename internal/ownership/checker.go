@@ -196,9 +196,6 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
-	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
-		return err
-	}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -261,9 +258,6 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 		return []error{err}
 	}
 	var errs []error
-	if err := c.checkOwnerAggregatesDeclareDeinit(program); err != nil {
-		errs = append(errs, err)
-	}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -446,42 +440,6 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		return err
 	}
 	return c.checkDeinitCompleteness(fn, env)
-}
-
-// checkOwnerAggregatesDeclareDeinit enforces ADR-0091: a struct or union that
-// holds owner fields or payloads is itself an owner and must declare deinit,
-// so its cleanup contract is visible in source. Generic declarations wait for
-// instantiation, where their spellings become concrete.
-func (c *Checker) checkOwnerAggregatesDeclareDeinit(program *ast.Program) error {
-	for _, decl := range program.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
-				continue
-			}
-			for _, field := range d.Fields {
-				if !c.fieldTypeNeedsConsume(typ.Text(field.TypeName)) {
-					continue
-				}
-				return errorf(
-					"move error: struct `%s` holds owner field `%s` and must declare deinit",
-					d.Name, field.Name)
-			}
-		case *ast.UnionDecl:
-			if len(d.TypeParams) > 0 || c.implMethod(d.Name, "deinit") != nil {
-				continue
-			}
-			for _, variant := range d.Variants {
-				if variant.Payload == nil || !c.valueTypeNeedsConsume(typ.Text(variant.Payload)) {
-					continue
-				}
-				return errorf(
-					"move error: union `%s` holds owner payload `%s` and must declare deinit",
-					d.Name, variant.Name)
-			}
-		}
-	}
-	return nil
 }
 
 // checkDeinitCompleteness enforces ADR-0091: a struct deinit must consume every
