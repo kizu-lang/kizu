@@ -150,21 +150,43 @@ key は宣言順で届く必要がありません。object を 1 回走査して
 let visit = try json::decode<Visit>(allocator, document);
 ```
 
-`T` に来られる型は encode が書ける型から `[]u8` と `?T` を除いたものです ——
-struct、enum、union、`i64`、`bool`、`std::string::String`、`std::array::Array<T>`、
-`std::map::Map<[]u8, V>`、`std::mem::Box<T>`、`std::json::Value`。
+`T` に来られる型は encode が書ける型から `[]u8` を除いたものです —— struct、
+enum、union、`i64`、`bool`、`std::string::String`、`std::array::Array<T>`、
+`std::map::Map<[]u8, V>`、`std::mem::Box<T>`、`std::json::Value`。`?T` は
+struct field としてだけ書けるので、`decode<?T>` ではなく `?T` field を持つ
+struct として来ます。
 
 `[]u8` は借用 view なので decode した bytes の持ち主がいなくなります。所有する
-`String` を使います。`?T` は static argument になれないため(ADR-0101)、
-`?T` field を持つ struct の decode は `std::json` の error ではなく、その言語
-error になります。encode は `?T` field を runtime で開いて中身の型に降りる
-ので、この非対称は今のところ encode 側だけが越えられます。
+`String` を使います。
 
 enum と union は encode が書く 2 つの形をそのまま読みます。document を始める
 byte が `"` なら payload を持たない variant、`{` なら `{"名前": payload}` です。
 key を 2 つ持つ object は `UnexpectedToken` —— key が 2 つあれば variant も
 2 つ名指すことになり、値はそのうち 1 つにしかなれないためです。variant を
 1 つも名指さない key は `UnknownField` です。
+
+### 省略できる key
+
+`?T` field は document が省略できる唯一の field です。他の field は key が
+無ければ `MissingField` です。
+
+| document | `pub nick: ?i64` |
+| --- | --- |
+| `{"name":"alice","nick":7}` | `7` |
+| `{"name":"alice","nick":null}` | `null` |
+| `{"name":"alice"}` | `null` |
+
+下 2 つが同じなのは、`?T` がその差を持てないためです。どちらも「値が無い」に
+なります。null field を省略する producer と書く producer の両方を読みます。
+
+encode は省略しません。`?T` field は必ず key を書き、値が無ければ `null` です。
+だから `encode` が作った document は上の 2 行目として読み戻ります。
+
+key が消えた原因が producer 側の rename なら、この規則では素通りしません。
+`decode` は型に無い key を拒否するので、`{"name":"alice","nickname":7}` は
+`UnknownField` です。省略として通るのは、対応する未知の key が 1 つも無い
+document だけです。判断の経緯は
+[ADR-0121](../adr/0121-json-optional-fields-may-be-omitted.md) にあります。
 
 ### 型に無い key
 

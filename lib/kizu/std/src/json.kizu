@@ -1740,6 +1740,10 @@ fn names_field<T>(bytes: []u8, key_at: i64) -> bool {
 // decode_field reads the value one field names out of a scanned object. It is
 // the worker `construct` calls once per field: `f` is bound to that field, so
 // the name it looks up and the type it returns both come from `f`.
+//
+// An optional field is the one field a document may leave out (ADR-0121). Both
+// ways of saying so read the same, because `?T` cannot hold the difference:
+// `"nick": null` and no `nick` key at all are `null`.
 fn decode_field<T, f: Field>(
     allocator: Allocator,
     bytes: []u8,
@@ -1747,10 +1751,42 @@ fn decode_field<T, f: Field>(
     ignore_unknown: bool,
 ) -> !std::meta::field_type<T, f> {
     let name = std::meta::field_name<T, f>();
-    if member_named(&scan.members, bytes, name) |value_at| {
-        var index = value_at;
-        return decode_value<std::meta::field_type<T, f>>(
-            allocator, bytes, &var index, ignore_unknown);
+    comptime if std::meta::is_optional<std::meta::field_type<T, f>>() {
+        if member_named(&scan.members, bytes, name) |value_at| {
+            var index = value_at;
+            return decode_optional<std::meta::field_type<T, f>>(
+                allocator, bytes, &var index, ignore_unknown);
+        }
+        return null;
+    } else {
+        if member_named(&scan.members, bytes, name) |value_at| {
+            var index = value_at;
+            return decode_value<std::meta::field_type<T, f>>(
+                allocator, bytes, &var index, ignore_unknown);
+        }
+        return Error::MissingField;
     }
-    return Error::MissingField;
+}
+
+// decode_optional reads one value as an `?E`. The optional is opened here
+// rather than in decode_value for the reason encode_fields opens one: `?E`
+// cannot be a static argument (ADR-0101), so `null` is answered first and what
+// recurses is the type the optional holds.
+fn decode_optional<T>(
+    allocator: Allocator,
+    bytes: []u8,
+    index: &var i64,
+    ignore_unknown: bool,
+) -> !T {
+    if peek_byte(bytes, index) |byte| {
+        if byte == cast<u8>(110) {
+            try decode_null(bytes, index);
+            return null;
+        }
+    }
+    // Bound, not returned directly: the implicit wrap into `?E` reaches a value
+    // of type `E`, not the `!E` a call to a fallible function is.
+    let held = try decode_value<std::meta::element<T>>(
+        allocator, bytes, index, ignore_unknown);
+    return held;
 }
