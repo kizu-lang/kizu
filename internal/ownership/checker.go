@@ -915,6 +915,11 @@ func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) err
 
 // checkReturnStmt rejects borrowed values before applying normal move rules.
 func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
+	// A deinit owes its receiver's owner fields on every path that leaves it,
+	// not only on the one that falls off the end.
+	if err := c.checkDeinitCompleteness(c.currentFunction, env); err != nil {
+		return err
+	}
 	if stmt.Value == nil {
 		return c.checkOwnersConsumed(env, 0, leakExit{})
 	}
@@ -2045,6 +2050,12 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	}
 	left := env.clone()
 	leftScope := left.child()
+	// Both clones come first, so what the capture records about a field lands
+	// on the binding the branches were cloned from rather than on one of them.
+	// Opening a `?Owner` field discharges its cleanup on both paths — the
+	// value is released where it is there and there is nothing to release
+	// where it is not — so it is not a branch that consumed it.
+	right := env.clone()
 	// The tie borrows the branch's clone of each container: the branch body is
 	// checked against that clone, so only its bindings make its mutations wait.
 	consumesField, err := c.defineCapture(
@@ -2058,7 +2069,6 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 	if err := c.checkCapturePayloadConsumed(stmt.Capture, consumesField, leftScope); err != nil {
 		return err
 	}
-	right := env.clone()
 	if stmt.Alternative != nil {
 		if err := c.checkBlock(stmt.Alternative, right.child()); err != nil {
 			return err
@@ -2111,11 +2121,50 @@ func (c *Checker) checkBranchConsumeAgreement(
 		}
 	})
 	if split == nil {
-		return nil
+		return c.checkBranchFieldConsumeAgreement(env, left, right)
 	}
 	return errorAt(split.declSpan,
 		"move error: owned value `%s` is consumed on one branch only;"+
 			" consume it on both branches or on neither", split.name)
+}
+
+// checkBranchFieldConsumeAgreement rejects an owner field only one surviving
+// branch cleaned. The reasoning is the one whole values already follow: past
+// the merge the branch that left it alone can no longer release it, and
+// releasing it after the if would release twice what the other branch already
+// did. Both paths must agree.
+func (c *Checker) checkBranchFieldConsumeAgreement(env, left, right *scope) error {
+	leftByID := map[int]*binding{}
+	left.collectBindings(leftByID)
+	rightByID := map[int]*binding{}
+	right.collectBindings(rightByID)
+	var splitValue *binding
+	splitField := ""
+	env.walkBindings(func(value *binding) {
+		fields := c.structs[value.typeName]
+		inLeft, okLeft := leftByID[value.id]
+		inRight, okRight := rightByID[value.id]
+		if fields == nil || !okLeft || !okRight {
+			return
+		}
+		for _, name := range c.structOrder[value.typeName] {
+			if !c.fieldTypeNeedsConsume(fields[name]) {
+				continue
+			}
+			if inLeft.fieldDeinit[name] == inRight.fieldDeinit[name] {
+				continue
+			}
+			if splitValue == nil || value.id > splitValue.id {
+				splitValue, splitField = value, name
+			}
+		}
+	})
+	if splitValue == nil {
+		return nil
+	}
+	return errorAt(splitValue.declSpan,
+		"move error: owner field `%s.%s` is consumed on one branch only;"+
+			" consume it on both branches or on neither", splitValue.name, splitField)
 }
 
 // bindingConsumed reports whether a path has handed the value's cleanup
@@ -2186,11 +2235,44 @@ func (c *Checker) checkLoopConsumesNothingOutside(env *scope, body *scope) error
 		}
 	})
 	if consumed == nil {
-		return nil
+		return c.checkLoopCleansNoOuterField(env, inBody)
 	}
 	return errorAt(consumed.declSpan,
 		"move error: owned value `%s` is consumed inside a loop;"+
 			" the body runs an unknown number of times", consumed.name)
+}
+
+// checkLoopCleansNoOuterField rejects a loop body that releases a field of a
+// value declared outside it. It is the rule whole values already follow, read
+// one level down: zero turns leave the field unreleased, two release it twice.
+func (c *Checker) checkLoopCleansNoOuterField(env *scope, inBody map[int]*binding) error {
+	var cleanedValue *binding
+	cleanedField := ""
+	env.walkBindings(func(value *binding) {
+		fields := c.structs[value.typeName]
+		inside, ok := inBody[value.id]
+		if fields == nil || !ok {
+			return
+		}
+		for _, name := range c.structOrder[value.typeName] {
+			if !c.fieldTypeNeedsConsume(fields[name]) {
+				continue
+			}
+			if value.fieldDeinit[name] || !inside.fieldDeinit[name] {
+				continue
+			}
+			if cleanedValue == nil || value.id > cleanedValue.id {
+				cleanedValue, cleanedField = value, name
+			}
+		}
+	})
+	if cleanedValue == nil {
+		return nil
+	}
+	return errorAt(cleanedValue.declSpan,
+		"move error: owner field `%s.%s` is released inside a loop;"+
+			" the body runs an unknown number of times",
+		cleanedValue.name, cleanedField)
 }
 
 // optionalPayloadName returns T for a `?T` condition type, or the type itself
@@ -2527,32 +2609,138 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 			return err
 		}
 	}
+	// Every arm starts from the state the match was reached in. Cloning inside
+	// the loop would start each arm from what the arms before it merged back,
+	// so an arm would inherit a cleanup only one other arm ran.
+	live, err := c.checkMatchArms(stmt, env, matchArmContext{
+		valueType:           valueType,
+		tags:                tags,
+		unionPayloads:       unionPayloads,
+		armVariants:         armVariants,
+		ownerDeinitDispatch: ownerDeinitDispatch,
+		ownedMatch:          ownedMatch,
+	})
+	if err != nil {
+		return err
+	}
+	if err := c.checkArmFieldConsumeAgreement(env, live); err != nil {
+		return err
+	}
+	for _, armEnv := range live {
+		env.mergeMovedFrom(armEnv)
+	}
+	return nil
+}
+
+// matchArmContext carries what every arm of one match is checked against.
+type matchArmContext struct {
+	valueType           string
+	tags                map[string]bool
+	unionPayloads       map[string]string
+	armVariants         map[string]metaField
+	ownerDeinitDispatch bool
+	ownedMatch          bool
+}
+
+// checkMatchArms checks each arm against the state the match was reached in and
+// returns the scopes of the arms that continue past it. Cloning inside the loop
+// would start each arm from what the arms before it merged back, so an arm
+// would inherit a cleanup only one other arm ran.
+func (c *Checker) checkMatchArms(
+	stmt *ast.MatchStmt,
+	env *scope,
+	ctx matchArmContext,
+) ([]*scope, error) {
+	base := env.clone()
+	live := make([]*scope, 0, len(stmt.Arms))
 	for _, arm := range stmt.Arms {
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
-				return errorf("move error: wildcard match arm cannot bind payload")
+				return nil, errorf("move error: wildcard match arm cannot bind payload")
 			}
-		} else if !tags[arm.Tag] {
-			return errorf("move error: unknown match tag `%s::%s`", valueType, arm.Tag)
+		} else if !ctx.tags[arm.Tag] {
+			return nil, errorf("move error: unknown match tag `%s::%s`", ctx.valueType, arm.Tag)
 		}
-		armEnv := env.clone()
+		armEnv := base.clone()
 		child := armEnv.child()
-		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, ownedMatch, child,
-			expressionSpan(stmt.Value))
-		restore := c.bindMetaField(stmt.MetaCapture, armVariants[arm.Tag])
+		c.defineMatchArmPayload(arm, ctx.unionPayloads, ctx.ownerDeinitDispatch,
+			ctx.ownedMatch, child, expressionSpan(stmt.Value))
+		restore := c.bindMetaField(stmt.MetaCapture, ctx.armVariants[arm.Tag])
 		err := c.checkStmt(arm.Body, child)
 		restore()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := c.checkArmPayloadConsumed(arm, child); err != nil {
-			return err
+			return nil, err
 		}
 		if !stmtTerminates(arm.Body) {
-			env.mergeMovedFrom(armEnv)
+			live = append(live, armEnv)
 		}
 	}
-	return nil
+	return live, nil
+}
+
+// checkArmFieldConsumeAgreement rejects an owner field only some of the arms
+// that continue past the match cleaned. It is the branch rule an if already
+// follows, read across every surviving arm rather than two.
+func (c *Checker) checkArmFieldConsumeAgreement(env *scope, live []*scope) error {
+	if len(live) < 2 {
+		return nil
+	}
+	armsByID := make([]map[int]*binding, 0, len(live))
+	for _, armEnv := range live {
+		byID := map[int]*binding{}
+		armEnv.collectBindings(byID)
+		armsByID = append(armsByID, byID)
+	}
+	var splitValue *binding
+	splitField := ""
+	env.walkBindings(func(value *binding) {
+		fields := c.structs[value.typeName]
+		if fields == nil {
+			return
+		}
+		for _, name := range c.structOrder[value.typeName] {
+			if !c.fieldTypeNeedsConsume(fields[name]) {
+				continue
+			}
+			if fieldCleanupAgrees(armsByID, value.id, name) {
+				continue
+			}
+			if splitValue == nil || value.id > splitValue.id {
+				splitValue, splitField = value, name
+			}
+		}
+	})
+	if splitValue == nil {
+		return nil
+	}
+	return errorAt(splitValue.declSpan,
+		"move error: owner field `%s.%s` is consumed on some match arms only;"+
+			" consume it on every arm that continues past the match or on none",
+		splitValue.name, splitField)
+}
+
+// fieldCleanupAgrees reports whether every arm that carries this binding made
+// the same decision about one of its fields.
+func fieldCleanupAgrees(armsByID []map[int]*binding, id int, field string) bool {
+	seen := false
+	cleaned := false
+	for _, byID := range armsByID {
+		value, ok := byID[id]
+		if !ok {
+			continue
+		}
+		if !seen {
+			seen, cleaned = true, value.fieldDeinit[field]
+			continue
+		}
+		if value.fieldDeinit[field] != cleaned {
+			return false
+		}
+	}
+	return true
 }
 
 // checkArmPayloadConsumed rejects a match arm that drops an owned payload it
@@ -7648,24 +7836,62 @@ func (s *scope) clone() *scope {
 	cloned.parent = s.parent.clone()
 	for name, value := range s.values {
 		copyValue := *value
+		copyValue.fieldBorrows = copyIntMap(value.fieldBorrows)
+		copyValue.fieldMutBorrows = copyIntMap(value.fieldMutBorrows)
+		copyValue.fieldDeinit = copyBoolMap(value.fieldDeinit)
+		copyValue.fieldArenaIDs = copyIntMap(value.fieldArenaIDs)
+		copyValue.borrowTargets = append([]borrowSource(nil), value.borrowTargets...)
 		cloned.values[name] = &copyValue
 	}
 	return cloned
 }
 
-// mergeMovedFrom marks bindings moved when a checked branch may have moved them.
+// copyIntMap copies a per-field counter map so a clone counts on its own.
+func copyIntMap(source map[string]int) map[string]int {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]int, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+// copyBoolMap copies a per-field flag map so a clone marks on its own.
+func copyBoolMap(source map[string]bool) map[string]bool {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+// mergeMovedFrom carries what a checked branch did to a binding out past the
+// branch: that it moved it, that it released it, and which of its fields it
+// cleaned. A field cleaned on one surviving branch only never reaches here —
+// checkBranchConsumeAgreement refuses that first — so carrying the marks over
+// says the same thing for a field that `moved` says for the whole value.
 func (s *scope) mergeMovedFrom(other *scope) {
 	byID := map[int]*binding{}
 	s.collectBindings(byID)
 	other.walkBindings(func(value *binding) {
+		target, ok := byID[value.id]
+		if !ok {
+			return
+		}
 		if value.moved {
-			if target, ok := byID[value.id]; ok {
-				target.moved = true
-			}
+			target.moved = true
 		}
 		if value.deinitialized {
-			if target, ok := byID[value.id]; ok {
-				target.deinitialized = true
+			target.deinitialized = true
+		}
+		for field, cleaned := range value.fieldDeinit {
+			if cleaned {
+				target.markFieldDeinit(field)
 			}
 		}
 	})
