@@ -156,8 +156,11 @@ enum、union、`i64`、`bool`、`std::string::String`、`std::array::Array<T>`�
 struct field としてだけ書けるので、`decode<?T>` ではなく `?T` field を持つ
 struct として来ます。
 
-`[]u8` は借用 view なので decode した bytes の持ち主がいなくなります。所有する
-`String` を使います。
+`[]u8` は view なので、document の連続した一部しか指せません。escape を戻した
+bytes はそこに無く(`"c\u0061rol"` という document の中に `carol` と
+いう並びは存在しない)、view では表せません。escape があるかは parse するまで
+分からず、型で決まる性質ではないので、「`[]u8` も decode できる」という規則は
+document 次第で壊れることになります。所有する `String` を使います。
 
 enum と union は encode が書く 2 つの形をそのまま読みます。document を始める
 byte が `"` なら payload を持たない variant、`{` なら `{"名前": payload}` です。
