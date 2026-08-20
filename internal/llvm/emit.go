@@ -768,12 +768,16 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 		llvmFunctionName(fn.Name),
 		strings.Join(params, ", "),
 	)
+	bodyStart := e.out.Len()
 	for _, block := range fn.Blocks {
 		if err := e.writeBlock(block); err != nil {
 			return fmt.Errorf("llvm error: function `%s` block `%s`: %w",
 				fn.Name, block.Name, err)
 		}
 	}
+	body := e.out.String()[bodyStart:]
+	e.out.Truncate(bodyStart)
+	e.out.WriteString(hoistAllocasToEntry(body))
 	e.out.WriteString("}\n\n")
 	e.mainReturnsInt = false
 	e.currentReturn = ""
