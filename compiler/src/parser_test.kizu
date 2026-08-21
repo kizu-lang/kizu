@@ -4,6 +4,7 @@ import compiler::parser;
 import compiler::source;
 import compiler::token;
 import compiler::typ;
+import std::array;
 import std::mem;
 import std::string;
 import std::testing;
@@ -241,6 +242,25 @@ fn expect_empty_import_path(
         _ => testing::fail("parser did not retain an import declaration"),
     }
     return;
+}
+
+fn new_function_signature(
+    allocator: Allocator,
+    tree: &var ast::Ast
+) -> !ast::FunctionSignature {
+    let name = try tree.add_text_from_bytes(allocator, "");
+    let extern_abi = try tree.add_text_from_bytes(allocator, "");
+    return ast::FunctionSignature {
+        receiver: false,
+        name: name,
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: array::new<ast::Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: extern_abi,
+        public: false,
+        std: false
+    };
 }
 
 fn expect_type_expression(
@@ -613,6 +633,78 @@ test "parser keeps partial imports after syntax errors" {
     );
     terminator.deinit();
     expect_import_path(&tree, terminator_decl, "app", "", "");
+}
+
+test "parser retains function return type graphs" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var signature = try new_function_signature(allocator, &var tree);
+    defer signature.deinit();
+    let scanner = lexer::new(allocator, "fn -> !i64");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    testing::expect(try value.parse_return_clause(&var types, &var signature));
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    if signature.return_type |return_type| {
+        let rendered = try typ::render(allocator, &types, return_type);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "!i64");
+    } else {
+        testing::fail("parser did not retain a return type");
+    }
+}
+
+test "parser return clause absence and failure preserve Go cursor behavior" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var absent_signature = try new_function_signature(allocator, &var tree);
+    defer absent_signature.deinit();
+    absent_signature.return_type = try types.parse("i64");
+    let absent_scanner = lexer::new(allocator, "fn body");
+    var absent = try parser::new(allocator, move absent_scanner);
+    defer absent.deinit();
+    testing::expect(try absent.parse_return_clause(
+        &var types,
+        &var absent_signature
+    ));
+    testing::expect(absent.current_kind() == token::Kind::Function);
+    testing::expect(absent.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, absent.diagnostics_len());
+    if absent_signature.return_type |_| {} else {
+        testing::fail("absent return clause cleared the existing type");
+    }
+    var failed_signature = try new_function_signature(allocator, &var tree);
+    defer failed_signature.deinit();
+    failed_signature.return_type = try types.parse("i64");
+    let failed_scanner = lexer::new(allocator, "fn -> ;");
+    var failed = try parser::new(allocator, move failed_scanner);
+    defer failed.deinit();
+    testing::expect(!try failed.parse_return_clause(
+        &var types,
+        &var failed_signature
+    ));
+    testing::expect(failed.current_kind() == token::Kind::Semicolon);
+    testing::expect(failed.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(1, failed.diagnostics_len());
+    if failed_signature.return_type |_| {
+        testing::fail("invalid return clause retained a type");
+    }
+    expect_parser_diagnostic(
+        &failed,
+        0,
+        "expected type, got `;`",
+        7,
+        8
+    );
 }
 
 test "type apply lookahead rewinds cached tokens" {
