@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -53,7 +54,7 @@ func TestLentLocalGetsStorage(t *testing.T) {
 // pairing exists to prevent: the slot analysis reads the passing, so a parameter
 // lent without saying so leaves the caller with nothing to lend.
 func TestLowerParamAgreesWithItself(t *testing.T) {
-	l := newLowerer(&ast.Program{})
+	l := newLowerer(&ast.Program{}, ownership.Result{})
 	l.module.Unions["Shape"] = Union{Name: "Shape"}
 	for _, tc := range []struct {
 		param   ast.Param

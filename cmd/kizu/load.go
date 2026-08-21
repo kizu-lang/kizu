@@ -77,10 +77,11 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProgram(program); err != nil {
+	ownershipResult, err := checkProgram(program)
+	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program)
+	module, err := ir.Lower(program, ownershipResult)
 	if err != nil {
 		return nil, err
 	}
@@ -98,10 +99,11 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProgram(program); err != nil {
+	ownershipResult, err := checkProgram(program)
+	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program)
+	module, err := ir.Lower(program, ownershipResult)
 	if err != nil {
 		return nil, err
 	}
@@ -155,14 +157,15 @@ func moduleFunction(module *ir.Module, name string) *ir.Function {
 }
 
 // checkProgram runs static checks required before compilation or execution.
-func checkProgram(program *ast.Program) error {
+func checkProgram(program *ast.Program) (ownership.Result, error) {
 	if err := types.New().Check(program); err != nil {
-		return err
+		return ownership.Result{}, err
 	}
-	if err := ownership.New().Check(program); err != nil {
-		return err
+	checker := ownership.New()
+	if err := checker.Check(program); err != nil {
+		return ownership.Result{}, err
 	}
-	return nil
+	return checker.Result(), nil
 }
 
 // parsePath reads and parses a source file.

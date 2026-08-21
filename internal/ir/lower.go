@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -12,8 +13,8 @@ import (
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
-func Lower(program *ast.Program) (*Module, error) {
-	l := newLowerer(program)
+func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, error) {
+	l := newLowerer(program, ownershipResult)
 	module, err := l.lower()
 	if err != nil {
 		return nil, err
@@ -77,6 +78,9 @@ type lowerer struct {
 	// deinitOwners names the types that carry a deinit contract, seeded from
 	// ast.DeinitOwners so lowering reads the same owner-ness the checkers do.
 	deinitOwners map[string]bool
+	// ownership is the preceding phase's output. Keeping it beside the syntax
+	// tree makes the phase boundary explicit and leaves AST nodes immutable.
+	ownership ownership.Result
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -114,7 +118,7 @@ type loopPhi struct {
 }
 
 // newLowerer prepares lookup tables used during lowering.
-func newLowerer(program *ast.Program) *lowerer {
+func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer {
 	generics := map[string]*ast.FunctionDecl{}
 	structs := map[string]*ast.StructDecl{}
 	enums := map[string]*ast.EnumDecl{}
@@ -152,6 +156,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		unionDecls:    unions,
 		metaFields:    map[string]metaField{},
 		deinitOwners:  ast.DeinitOwners(program),
+		ownership:     ownershipResult,
 	}
 }
 
@@ -1060,7 +1065,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		}
 	}
 	if errorReturn {
-		l.emitErrorCleanups(stmt.RetiredErrDefers)
+		l.emitErrorCleanups(l.ownership.RetiredErrDefersForReturn(stmt))
 	} else {
 		l.emitNormalCleanups()
 	}
@@ -1724,7 +1729,10 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	// The attached cleanups run at this same program point, so a slot-backed
 	// receiver is loaded here: Cleanup args are always values, never `&var`
 	// slots, and no backend has to re-derive that rule.
-	cleanups := retireCleanups(l.errorCleanups(), expr.RetiredErrDefers)
+	cleanups := retireCleanups(
+		l.errorCleanups(),
+		l.ownership.RetiredErrDefersForTry(expr),
+	)
 	for index := range cleanups {
 		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
 	}

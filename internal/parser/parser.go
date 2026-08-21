@@ -1315,12 +1315,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Ident:
 		return p.parseIdentPrefixExpression()
 	case token.Int:
-		expr := &ast.IntExpr{Value: p.cur.Literal}
-		if v, err := strconv.ParseInt(expr.Value, 10, 64); err == nil {
-			expr.Parsed = v
-			expr.ParseOK = true
-		}
-		return expr
+		return &ast.IntExpr{Value: p.cur.Literal}
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
 	case token.True, token.False, token.Null:
@@ -1755,7 +1750,6 @@ func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 		Left:         left,
 		Operator:     p.cur.Literal,
 		OperatorSpan: tokenSpan(p.cur),
-		Op:           ast.ClassifyBinaryOp(p.cur.Literal),
 	}
 	precedence := p.curPrecedence()
 	p.nextToken()

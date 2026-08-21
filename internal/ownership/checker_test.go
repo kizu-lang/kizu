@@ -1516,10 +1516,11 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if err := New().Check(program); err != nil {
+	checker := New()
+	if err := checker.Check(program); err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	retired := retiredErrDefersOf(t, program, "build")
+	retired := retiredErrDefersOf(t, program, checker.Result(), "build")
 	want := [][]string{nil, {"child"}, {"child"}}
 	if len(retired) != len(want) {
 		t.Fatalf("got %d try exits, want %d", len(retired), len(want))
@@ -1650,7 +1651,12 @@ func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
 
 // retiredErrDefersOf lists, in source order, what each try in the named
 // function retires.
-func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]string {
+func retiredErrDefersOf(
+	t *testing.T,
+	program *ast.Program,
+	result Result,
+	name string,
+) [][]string {
 	t.Helper()
 	var retired [][]string
 	for _, decl := range program.Decls {
@@ -1664,7 +1670,7 @@ func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]str
 				continue
 			}
 			if try, ok := expr.Expr.(*ast.TryExpr); ok {
-				retired = append(retired, try.RetiredErrDefers)
+				retired = append(retired, result.RetiredErrDefersForTry(try))
 			}
 		}
 	}

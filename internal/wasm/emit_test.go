@@ -60,10 +60,11 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 	if err := types.New().Check(program); err != nil {
 		t.Fatalf("type check failed: %v", err)
 	}
-	if err := ownership.New().Check(program); err != nil {
+	checker := ownership.New()
+	if err := checker.Check(program); err != nil {
 		t.Fatalf("ownership check failed: %v", err)
 	}
-	module, err := ir.Lower(program)
+	module, err := ir.Lower(program, checker.Result())
 	if err != nil {
 		t.Fatalf("lower failed: %v", err)
 	}

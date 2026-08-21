@@ -63,6 +63,7 @@ type Checker struct {
 	// and refuse everywhere else.
 	captureCondition bool
 	borrowReturn     bool
+	result           Result
 }
 
 // allocTaint is one tied allocator a call consumed while its result has not
@@ -186,11 +187,19 @@ func New() *Checker {
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
 		checkedInstances:  map[string]bool{},
+		result:            newResult(),
 	}
+}
+
+// Result returns the phase output produced by Check. Callers use it only after
+// Check succeeds, so lowering never consumes partial ownership facts.
+func (c *Checker) Result() Result {
+	return c.result
 }
 
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
+	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
@@ -253,6 +262,7 @@ func (c *Checker) MissingMoveMarkers(program *ast.Program) ([]MissingMarker, err
 // top-level declaration instead of stopping at the first, so editors can show
 // every independent move error at once. Setup phases still fail fast.
 func (c *Checker) CheckAll(program *ast.Program) []error {
+	c.result = newResult()
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.checkStructs(program); err != nil {
@@ -968,7 +978,7 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 		if err != nil {
 			return err
 		}
-		stmt.RetiredErrDefers = retired
+		c.result.returnRetiredErrDefers[stmt] = retired
 	}
 	saved := c.borrowReturn
 	if c.currentFunction != nil {
@@ -5197,7 +5207,7 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	expr.RetiredErrDefers = retired
+	c.result.tryRetiredErrDefers[expr] = retired
 	// The same early exit must not leak a live owner: every owner must be
 	// consumed or covered by a defer / errdefer cleanup before the try.
 	if err := c.checkOwnersConsumed(env, 0,
