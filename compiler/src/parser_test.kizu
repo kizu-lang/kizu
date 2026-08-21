@@ -122,6 +122,51 @@ fn expect_peek_error(
     return;
 }
 
+fn expect_retained_bytes(value: &string::String, expected: []u8) -> void {
+    let bytes = value.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_break_label(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Break(value) => {
+            expect_retained_bytes(tree.texts.at(value.label.node), expected);
+        },
+        _ => testing::fail("parser did not retain a break statement"),
+    }
+    return;
+}
+
+fn expect_continue_label(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Continue(value) => {
+            expect_retained_bytes(tree.texts.at(value.label.node), expected);
+        },
+        _ => testing::fail("parser did not retain a continue statement"),
+    }
+    return;
+}
+
+fn parse_break_then_deinit(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8
+) -> !ast::Statement {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_break_stmt(tree);
+}
+
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
     var sources = source::new(allocator);
@@ -347,6 +392,65 @@ test "parser list delimiters accept comma, brace, and end of file" {
     expect_parser_diagnostic(&mismatch, 0, expected, 1, 4);
     testing::expect(mismatch.current_kind() == token::Kind::Ident);
     testing::expect(mismatch.peek_kind() == token::Kind::Semicolon);
+}
+
+test "parser retains break and continue labels in the AST" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let break_scanner = lexer::new(allocator, "break :outer;");
+    var break_parser = try parser::new(allocator, move break_scanner);
+    defer break_parser.deinit();
+    let break_statement = try break_parser.parse_break_stmt(&var tree);
+    expect_break_label(&tree, break_statement, "outer");
+    testing::expect(break_parser.current_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(0, break_parser.diagnostics_len());
+    let continue_scanner = lexer::new(allocator, "continue;");
+    var continue_parser = try parser::new(allocator, move continue_scanner);
+    defer continue_parser.deinit();
+    let continue_statement = try continue_parser.parse_continue_stmt(&var tree);
+    expect_continue_label(&tree, continue_statement, "");
+    testing::expect(
+        continue_parser.current_kind() == token::Kind::Semicolon
+    );
+    testing::expect_equal<i64>(0, continue_parser.diagnostics_len());
+    let retained = try parse_break_then_deinit(
+        allocator,
+        &var tree,
+        "break :retained;"
+    );
+    expect_break_label(&tree, retained, "retained");
+}
+
+test "parser retains branch nodes while reporting label and terminator errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let label_scanner = lexer::new(allocator, "break :;");
+    var label_parser = try parser::new(allocator, move label_scanner);
+    defer label_parser.deinit();
+    let break_statement = try label_parser.parse_break_stmt(&var tree);
+    expect_break_label(&tree, break_statement, "");
+    let expected_label = "expected next token identifier, got `;`";
+    expect_parser_diagnostic(&label_parser, 0, expected_label, 7, 8);
+    testing::expect(label_parser.current_kind() == token::Kind::Semicolon);
+    let terminator_scanner = lexer::new(allocator, "continue :outer");
+    var terminator_parser = try parser::new(allocator, move terminator_scanner);
+    defer terminator_parser.deinit();
+    let continue_statement = try terminator_parser.parse_continue_stmt(
+        &var tree
+    );
+    expect_continue_label(&tree, continue_statement, "outer");
+    let expected_terminator = "expected `;` after continue statement";
+    expect_parser_diagnostic(
+        &terminator_parser,
+        0,
+        expected_terminator,
+        11,
+        16
+    );
+    testing::expect(terminator_parser.current_kind() == token::Kind::Ident);
+    testing::expect(terminator_parser.peek_kind() == token::Kind::Eof);
 }
 
 test "parser token diagnostics preserve every description class" {
