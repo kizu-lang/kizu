@@ -1,0 +1,498 @@
+import std::arena;
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/typ's type representation, parser, renderer,
+// structural equality, and walk. One Type owns every Node in an arena; child
+// edges are copy handles into that arena rather than one allocation per edge.
+
+pub error Error {
+    ExpectedName,
+    TrailingText,
+    ExpectedBufferSize,
+    BufferSizeOverflow,
+    ExpectedBufferClose,
+    UnclosedArguments,
+}
+
+/// Owns one parsed type and all of its nodes.
+pub struct Type {
+    nodes: arena::Arena<Node>,
+    root: arena::Handle<Node>
+}
+
+/// Is one node in a parsed type.
+pub union Node {
+    Name(Name),
+    Slice(Slice),
+    Buffer(Buffer),
+    Borrow(Borrow),
+    Optional(Optional),
+    Const(Const),
+    ErrorUnion(ErrorUnion),
+}
+
+/// Is a primitive, declared type, type parameter, or generic application.
+pub struct Name {
+    pub path: array::Array<string::String>,
+    pub args: array::Array<arena::Handle<Node>>
+}
+
+/// Is `[]T`.
+pub struct Slice {
+    pub elem: arena::Handle<Node>
+}
+
+/// Is `[N]T`.
+pub struct Buffer {
+    pub size: i64,
+    pub elem: arena::Handle<Node>
+}
+
+/// Is `&T` or `&var T`.
+pub struct Borrow {
+    pub elem: arena::Handle<Node>,
+    pub mutable: bool
+}
+
+/// Is `?T`.
+pub struct Optional {
+    pub elem: arena::Handle<Node>
+}
+
+/// Is `const T` inside a static argument list.
+pub struct Const {
+    pub elem: arena::Handle<Node>
+}
+
+/// Is `!T`, or `E!T` when err is present.
+pub struct ErrorUnion {
+    pub err: ?arena::Handle<Node>,
+    pub ok: arena::Handle<Node>
+}
+
+/// Describes the structural callback Walk requires.
+pub contract TypeVisitor {
+    fn visit(value: &Node) -> void;
+}
+
+// parser reads one type spelling left to right while owning every node it has
+// accepted so an error can release the partial tree in one visible cleanup.
+struct Parser {
+    allocator: Allocator,
+    input: []u8,
+    position: i64,
+    nodes: arena::Arena<Node>
+}
+
+struct Span {
+    start: i64,
+    end: i64
+}
+
+/// Parses one canonical type spelling into an owned type tree.
+pub fn parse(allocator: Allocator, text: []u8) -> !Type {
+    var parser = Parser {
+        allocator: allocator,
+        input: text,
+        position: 0,
+        nodes: arena::new<Node>(allocator)
+    };
+    errdefer parser.deinit();
+    let root = try parser.parse_type();
+    if parser.position != mem::len(text) {
+        return Error::TrailingText;
+    }
+    return Type {
+        nodes: move parser.nodes,
+        root: root
+    };
+}
+
+// parse_type reads a type, including the `E!T` spelling whose error type sits
+// to the left of the `!`.
+fn (self: &var Parser) parse_type() -> !arena::Handle<Node> {
+    let left = try self.parse_prefix();
+    if !self.accept("!") {
+        return left;
+    }
+    let ok = try self.parse_prefix();
+    return self.nodes.add(Node::ErrorUnion(ErrorUnion {
+        err: left,
+        ok: ok
+    }));
+}
+
+// parse_prefix reads the spellings that wrap a type from the left.
+fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
+    if self.accept("!") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::ErrorUnion(ErrorUnion {
+            err: null,
+            ok: elem
+        }));
+    }
+    if self.peek(cast<u8>(91)) {
+        return self.parse_bracketed();
+    }
+    if self.accept("&var ") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::Borrow(Borrow {
+            elem: elem,
+            mutable: true
+        }));
+    }
+    if self.accept("&") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::Borrow(Borrow {
+            elem: elem,
+            mutable: false
+        }));
+    }
+    if self.accept("?") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::Optional(Optional { elem: elem }));
+    }
+    if self.accept("const ") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::Const(Const { elem: elem }));
+    }
+    return self.parse_name();
+}
+
+// parse_bracketed reads the `[]T` and `[N]T` spellings.
+fn (self: &var Parser) parse_bracketed() -> !arena::Handle<Node> {
+    if self.accept("[]") {
+        let elem = try self.parse_prefix();
+        return self.nodes.add(Node::Slice(Slice { elem: elem }));
+    }
+    self.position = self.position + 1;
+    let start = self.position;
+    var size = 0;
+    while self.position < mem::len(self.input) and
+        is_digit(self.input[self.position]) {
+        let digit = cast<i64>(self.input[self.position] - cast<u8>(48));
+        if size > (9223372036854775807 - digit) / 10 {
+            return Error::BufferSizeOverflow;
+        }
+        size = size * 10 + digit;
+        self.position = self.position + 1;
+    }
+    if start == self.position {
+        return Error::ExpectedBufferSize;
+    }
+    if !self.accept("]") {
+        return Error::ExpectedBufferClose;
+    }
+    let elem = try self.parse_prefix();
+    return self.nodes.add(Node::Buffer(Buffer {
+        size: size,
+        elem: elem
+    }));
+}
+
+// parse_name reads a `::` separated name and its static arguments.
+fn (self: &var Parser) parse_name() -> !arena::Handle<Node> {
+    var path = array::new<string::String>(self.allocator);
+    errdefer path.deinit();
+    while true {
+        let span = self.parse_ident();
+        if span.start == span.end {
+            return Error::ExpectedName;
+        }
+        try path.append(try owned_text(
+            self.allocator,
+            self.input[span.start..span.end]
+        ));
+        if !self.accept("::") {
+            break;
+        }
+    }
+    var args = array::new<arena::Handle<Node>>(self.allocator);
+    errdefer args.deinit();
+    if self.accept("<") {
+        while true {
+            try args.append(try self.parse_type());
+            if self.accept(",") {
+                let _ = self.accept(" ");
+            } else {
+                break;
+            }
+        }
+        if !self.accept(">") {
+            return Error::UnclosedArguments;
+        }
+    }
+    return self.nodes.add(Node::Name(Name {
+        path: move path,
+        args: move args
+    }));
+}
+
+fn (self: &var Parser) parse_ident() -> Span {
+    let start = self.position;
+    while self.position < mem::len(self.input) and
+        is_word(self.input[self.position]) {
+        self.position = self.position + 1;
+    }
+    return Span { start: start, end: self.position };
+}
+
+fn (self: &Parser) peek(want: u8) -> bool {
+    return self.position < mem::len(self.input) and self.input[self.position] == want;
+}
+
+fn (self: &var Parser) accept(text: []u8) -> bool {
+    if !starts_with_at(self.input, self.position, text) {
+        return false;
+    }
+    self.position = self.position + mem::len(text);
+    return true;
+}
+
+fn starts_with_at(bytes: []u8, at: i64, prefix: []u8) -> bool {
+    if at < 0 or at + mem::len(prefix) > mem::len(bytes) {
+        return false;
+    }
+    var index = 0;
+    while index < mem::len(prefix) {
+        if bytes[at + index] != prefix[index] {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn is_word(byte: u8) -> bool {
+    return byte == cast<u8>(95) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+        is_digit(byte);
+}
+
+fn is_digit(byte: u8) -> bool {
+    return byte >= cast<u8>(48) and byte <= cast<u8>(57);
+}
+
+fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(bytes);
+    return move out;
+}
+
+/// Renders one parsed type back to its canonical spelling.
+pub fn render(allocator: Allocator, value: &Type) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_node(&var out, value, value.root);
+    return move out;
+}
+
+fn (self: &Type) string(allocator: Allocator) -> !string::String {
+    return render(allocator, self);
+}
+
+fn append_node(
+out: &var string::String,
+value: &Type,
+handle: arena::Handle<Node>
+) -> !void {
+    match value.nodes.at(handle) {
+        Name(node) => try append_name(out, value, node),
+        Slice(node) => {
+            try out.append_bytes("[]");
+            try append_node(out, value, node.elem);
+        },
+        Buffer(node) => {
+            try out.append_byte(cast<u8>(91));
+            try fmt::append_i64(out, node.size);
+            try out.append_byte(cast<u8>(93));
+            try append_node(out, value, node.elem);
+        },
+        Borrow(node) => {
+            if node.mutable {
+                try out.append_bytes("&var ");
+            } else {
+                try out.append_byte(cast<u8>(38));
+            }
+            try append_node(out, value, node.elem);
+        },
+        Optional(node) => {
+            try out.append_byte(cast<u8>(63));
+            try append_node(out, value, node.elem);
+        },
+        Const(node) => {
+            try out.append_bytes("const ");
+            try append_node(out, value, node.elem);
+        },
+        ErrorUnion(node) => {
+            if node.err |err| {
+                try append_node(out, value, err);
+            }
+            try out.append_byte(cast<u8>(33));
+            try append_node(out, value, node.ok);
+        },
+    }
+    return;
+}
+
+fn append_name(out: &var string::String, value: &Type, node: &Name) -> !void {
+    var index = 0;
+    while node.path.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes("::");
+        }
+        let bytes = part.as_bytes();
+        try out.append_bytes(bytes);
+        index = index + 1;
+    }
+    if node.args.len() == 0 {
+        return;
+    }
+    try out.append_byte(cast<u8>(60));
+    index = 0;
+    while node.args.get(index) |arg| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_node(out, value, arg);
+        index = index + 1;
+    }
+    try out.append_byte(cast<u8>(62));
+    return;
+}
+
+/// Reports whether two type trees have the same structure.
+pub fn equal(left: &Type, right: &Type) -> bool {
+    return equal_node(left, left.root, right, right.root);
+}
+
+fn equal_node(
+left: &Type,
+left_handle: arena::Handle<Node>,
+right: &Type,
+right_handle: arena::Handle<Node>
+) -> bool {
+    return match left.nodes.at(left_handle) {
+        Name(a) => match right.nodes.at(right_handle) {
+            Name(b) => equal_name(left, a, right, b),
+            _ => false,
+        },
+        Slice(a) => match right.nodes.at(right_handle) {
+            Slice(b) => equal_node(left, a.elem, right, b.elem),
+            _ => false,
+        },
+        Buffer(a) => match right.nodes.at(right_handle) {
+            Buffer(b) => a.size == b.size and equal_node(left, a.elem, right, b.elem),
+            _ => false,
+        },
+        Borrow(a) => match right.nodes.at(right_handle) {
+            Borrow(b) => a.mutable == b.mutable and
+                equal_node(left, a.elem, right, b.elem),
+            _ => false,
+        },
+        Optional(a) => match right.nodes.at(right_handle) {
+            Optional(b) => equal_node(left, a.elem, right, b.elem),
+            _ => false,
+        },
+        Const(a) => match right.nodes.at(right_handle) {
+            Const(b) => equal_node(left, a.elem, right, b.elem),
+            _ => false,
+        },
+        ErrorUnion(a) => match right.nodes.at(right_handle) {
+            ErrorUnion(b) => equal_error_union(left, a, right, b),
+            _ => false,
+        },
+    };
+}
+
+fn equal_name(left: &Type, a: &Name, right: &Type, b: &Name) -> bool {
+    if a.path.len() != b.path.len() or a.args.len() != b.args.len() {
+        return false;
+    }
+    var index = 0;
+    while a.path.at(index) |left_part| {
+        if b.path.at(index) |right_part| {
+            let left_bytes = left_part.as_bytes();
+            let right_bytes = right_part.as_bytes();
+            if !mem::equal_bytes(left_bytes, right_bytes) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while a.args.get(index) |left_arg| {
+        if b.args.get(index) |right_arg| {
+            if !equal_node(left, left_arg, right, right_arg) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn equal_error_union(
+left: &Type,
+a: &ErrorUnion,
+right: &Type,
+b: &ErrorUnion
+) -> bool {
+    if a.err |left_err| {
+        if b.err |right_err| {
+            if !equal_node(left, left_err, right, right_err) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    } else {
+        if b.err |_| {
+            return false;
+        }
+    }
+    return equal_node(left, a.ok, right, b.ok);
+}
+
+/// Calls visitor for value and every nested type, outermost first.
+pub fn walk<V>(value: &Type, visitor: &var V) -> void {
+    walk_node<V>(value, value.root, visitor);
+}
+
+fn walk_node<V>(
+value: &Type,
+handle: arena::Handle<Node>,
+visitor: &var V
+) -> void {
+    visitor.visit(value.nodes.at(handle));
+    match value.nodes.at(handle) {
+        Name(node) => {
+            var index = 0;
+            while node.args.get(index) |arg| {
+                walk_node<V>(value, arg, visitor);
+                index = index + 1;
+            }
+        },
+        Slice(node) => walk_node<V>(value, node.elem, visitor),
+        Buffer(node) => walk_node<V>(value, node.elem, visitor),
+        Borrow(node) => walk_node<V>(value, node.elem, visitor),
+        Optional(node) => walk_node<V>(value, node.elem, visitor),
+        Const(node) => walk_node<V>(value, node.elem, visitor),
+        ErrorUnion(node) => {
+            if node.err |err| {
+                walk_node<V>(value, err, visitor);
+            }
+            walk_node<V>(value, node.ok, visitor);
+        },
+    }
+    return;
+}

@@ -1,0 +1,102 @@
+import compiler::typ;
+import std::mem;
+import std::testing;
+
+fn expect_round_trip(allocator: Allocator, text: []u8) -> !void {
+    let parsed = try typ::parse(allocator, text);
+    defer parsed.deinit();
+    let rendered = try typ::render(allocator, &parsed);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, text));
+    return;
+}
+
+test "type parse renders every compiler spelling back" {
+    let allocator = mem::page_allocator();
+    try expect_round_trip(allocator, "i64");
+    try expect_round_trip(allocator, "u8");
+    try expect_round_trip(allocator, "bool");
+    try expect_round_trip(allocator, "void");
+    try expect_round_trip(allocator, "f64");
+    try expect_round_trip(allocator, "usize");
+    try expect_round_trip(allocator, "Io");
+    try expect_round_trip(allocator, "Allocator");
+    try expect_round_trip(allocator, "Function");
+    try expect_round_trip(allocator, "Self");
+    try expect_round_trip(allocator, "T");
+    try expect_round_trip(allocator, "Point");
+    try expect_round_trip(allocator, "std::map::Map");
+    try expect_round_trip(allocator, "std::arena::Handle");
+    try expect_round_trip(allocator, "[]u8");
+    try expect_round_trip(allocator, "[][]u8");
+    try expect_round_trip(allocator, "[]Point");
+    try expect_round_trip(allocator, "[4]u8");
+    try expect_round_trip(allocator, "[32]Array<Point>");
+    try expect_round_trip(allocator, "&i64");
+    try expect_round_trip(allocator, "&var i64");
+    try expect_round_trip(allocator, "&[]u8");
+    try expect_round_trip(allocator, "&var Point");
+    try expect_round_trip(allocator, "?ptr<u8>");
+    try expect_round_trip(allocator, "?i64");
+    try expect_round_trip(allocator, "!void");
+    try expect_round_trip(allocator, "!i64");
+    try expect_round_trip(allocator, "![]u8");
+    try expect_round_trip(allocator, "!&i64");
+    try expect_round_trip(allocator, "!&var i64");
+    try expect_round_trip(allocator, "Error!i64");
+    try expect_round_trip(allocator, "std::fs::Error![]u8");
+    try expect_round_trip(allocator, "ptr<u8>");
+    try expect_round_trip(allocator, "ptr<const u8>");
+    try expect_round_trip(allocator, "Array<i64>");
+    try expect_round_trip(allocator, "Box<Point>");
+    try expect_round_trip(allocator, "Channel<[]u8>");
+    try expect_round_trip(allocator, "std::map::Map<[]u8, i64>");
+    try expect_round_trip(allocator, "std::map::Map<[]u8, Array<Point>>");
+    try expect_round_trip(allocator, "Pair<i64, bool>");
+    try expect_round_trip(allocator, "Pair<[]u8, &var Point>");
+    try expect_round_trip(allocator, "Result<!void, Error!i64>");
+}
+
+test "type equality compares structure across independent arenas" {
+    let allocator = mem::page_allocator();
+    let first = try typ::parse(allocator, "Pair<[]u8, [4]T>");
+    defer first.deinit();
+    let same = try typ::parse(allocator, "Pair<[]u8, [4]T>");
+    defer same.deinit();
+    let other = try typ::parse(allocator, "Pair<[]u8, [8]T>");
+    defer other.deinit();
+    testing::expect(typ::equal(&first, &same));
+    testing::expect(!typ::equal(&first, &other));
+}
+
+pub struct Counter {
+    pub total: i64,
+    pub names: i64,
+    pub buffers: i64
+}
+
+fn (self: &var Counter) visit(value: &typ::Node) -> void {
+    self.total = self.total + 1;
+    match value {
+        Name(_) => {
+            self.names = self.names + 1;
+        },
+        Buffer(_) => {
+            self.buffers = self.buffers + 1;
+        },
+        _ => return,
+    }
+    return;
+}
+
+test "walk visits buffer elements outermost first" {
+    let allocator = mem::page_allocator();
+    let parsed = try typ::parse(allocator, "[4]Pair<T, bool>");
+    defer parsed.deinit();
+    var counter = Counter { total: 0, names: 0, buffers: 0 };
+    typ::walk<Counter>(&parsed, &var counter);
+    testing::expect_equal<i64>(4, counter.total);
+    testing::expect_equal<i64>(3, counter.names);
+    testing::expect_equal<i64>(1, counter.buffers);
+}
