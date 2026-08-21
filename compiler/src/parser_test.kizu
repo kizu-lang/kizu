@@ -944,6 +944,110 @@ test "parser returns valid parameters before a malformed parameter" {
     );
 }
 
+test "parser returns one receiver parameter" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "fn (self: &var Parser) advance");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_receiver(&var tree, &var types) |params| {
+        defer params.deinit();
+        testing::expect_equal<i64>(1, params.len());
+        testing::expect(value.current_kind() == token::Kind::RParen);
+        testing::expect(value.peek_kind() == token::Kind::Ident);
+        testing::expect_equal<i64>(0, value.diagnostics_len());
+        value.deinit();
+        try expect_param(
+            allocator,
+            &tree,
+            &types,
+            &params,
+            0,
+            "self",
+            "Parser",
+            true,
+            true
+        );
+    } else {
+        value.deinit();
+        testing::fail("parser rejected one receiver parameter");
+    }
+}
+
+test "parser rejects receiver counts" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let empty_scanner = lexer::new(allocator, "fn () name");
+    var empty = try parser::new(allocator, move empty_scanner);
+    defer empty.deinit();
+    if try empty.parse_receiver(&var tree, &var types) |params| {
+        params.deinit();
+        testing::fail("parser accepted zero receivers");
+    }
+    testing::expect(empty.current_kind() == token::Kind::RParen);
+    testing::expect(empty.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, empty.diagnostics_len());
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected one receiver in `fn (...)`, got 0",
+        5,
+        6
+    );
+    let many_scanner = lexer::new(allocator, "fn (a: i64, b: i64) name");
+    var many = try parser::new(allocator, move many_scanner);
+    defer many.deinit();
+    if try many.parse_receiver(&var tree, &var types) |params| {
+        params.deinit();
+        testing::fail("parser accepted multiple receivers");
+    }
+    testing::expect(many.current_kind() == token::Kind::RParen);
+    testing::expect(many.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, many.diagnostics_len());
+    expect_parser_diagnostic(
+        &many,
+        0,
+        "expected one receiver in `fn (...)`, got 2",
+        19,
+        20
+    );
+}
+
+test "parser rejects an unterminated receiver" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "fn (self: Parser");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_receiver(&var tree, &var types) |params| {
+        params.deinit();
+        testing::fail("parser accepted an unterminated receiver");
+    }
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(2, value.diagnostics_len());
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token `)`, got end of file",
+        11,
+        17
+    );
+    let second =
+        \\expected `)`, got identifier "Parser"
+    ;
+    expect_parser_diagnostic(&value, 1, second, 11, 17);
+}
+
 test "type apply lookahead rewinds cached tokens" {
     let allocator = mem::page_allocator();
     try expect_type_apply_lookahead(allocator, "f<T>(x)", true);
