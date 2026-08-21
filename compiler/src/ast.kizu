@@ -2,17 +2,30 @@ import compiler::source;
 import compiler::typ;
 import std::arena;
 import std::array;
+import std::map;
 import std::string;
 
-// Mechanical port of internal/ast's statement and expression representation.
-// Ast owns every node for one parsed program; Expression and Statement are
-// copy handles whose types keep the two closed node categories distinct.
+// Mechanical port of internal/ast's declaration, statement, and expression
+// representation. Ast owns every node for one parsed program; Declaration,
+// Expression, and Statement are copy handles whose types keep the three closed
+// node categories distinct.
 
-/// Owns the statement and expression graphs for one parsed program.
+/// Owns the declaration, statement, and expression graphs for one program.
 pub struct Ast {
+    pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
     pub statements: arena::Arena<StatementNode>,
     pub blocks: arena::Arena<BlockStmt>
+}
+
+/// Is the root of one parsed Kizu source file.
+pub struct Program {
+    pub declarations: array::Array<Declaration>
+}
+
+/// Identifies one declaration retained by an Ast.
+pub struct Declaration {
+    pub node: arena::Handle<DeclarationNode>
 }
 
 /// Identifies one expression retained by an Ast.
@@ -41,6 +54,132 @@ pub struct Span {
     pub source: ?source::SourceId,
     pub start: Position,
     pub end: Position
+}
+
+/// Is one node that may appear as a top-level declaration.
+pub union DeclarationNode {
+    Import(ImportDecl),
+    Function(FunctionDecl),
+    Test(TestDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    ErrorSet(ErrorSetDecl),
+    Union(UnionDecl),
+    Contract(ContractDecl),
+    Impl(ImplDecl),
+}
+
+/// Represents one explicit top-level module import.
+pub struct ImportDecl {
+    pub path: array::Array<string::String>
+}
+
+/// Is the declaration information visible to a function caller.
+pub struct FunctionSignature {
+    pub receiver: bool,
+    pub name: string::String,
+    pub static_params: array::Array<StaticParam>,
+    pub params: array::Array<Param>,
+    pub return_type: ?typ::Type,
+    pub requires_unsafe: bool,
+    pub extern_abi: string::String,
+    pub public: bool,
+    pub std: bool
+}
+
+/// Represents a function declaration and its optional body.
+pub struct FunctionDecl {
+    pub signature: FunctionSignature,
+    pub doc: string::String,
+    pub derived: bool,
+    pub body: ?Block
+}
+
+/// Is one entry of a static argument declaration list.
+pub struct StaticParam {
+    pub name: string::String,
+    pub type_name: ?typ::Type
+}
+
+/// Represents a top-level test block.
+pub struct TestDecl {
+    pub name: string::String,
+    pub body: ?Block
+}
+
+/// Represents a top-level struct declaration.
+pub struct StructDecl {
+    pub name: string::String,
+    pub doc: string::String,
+    pub type_params: array::Array<string::String>,
+    pub fields: array::Array<Field>,
+    pub public: bool,
+    pub requires_unsafe: bool
+}
+
+/// Represents a top-level tag enum declaration.
+pub struct EnumDecl {
+    pub name: string::String,
+    pub doc: string::String,
+    pub tags: array::Array<string::String>,
+    pub tag_docs: ?map::Map<[]u8, string::String>,
+    pub public: bool
+}
+
+/// Represents a top-level error set declaration.
+pub struct ErrorSetDecl {
+    pub name: string::String,
+    pub doc: string::String,
+    pub members: array::Array<string::String>,
+    pub member_docs: ?map::Map<[]u8, string::String>,
+    pub public: bool
+}
+
+/// Represents a top-level tagged union declaration.
+pub struct UnionDecl {
+    pub name: string::String,
+    pub doc: string::String,
+    pub type_params: array::Array<string::String>,
+    pub variants: array::Array<UnionVariant>,
+    pub public: bool
+}
+
+/// Represents one tagged union variant.
+pub struct UnionVariant {
+    pub name: string::String,
+    pub doc: string::String,
+    pub payload: ?typ::Type
+}
+
+/// Represents required method signatures.
+pub struct ContractDecl {
+    pub name: string::String,
+    pub methods: array::Array<FunctionDecl>,
+    pub public: bool
+}
+
+/// Asserts that one concrete type satisfies one contract.
+pub struct ImplDecl {
+    pub contract_name: string::String,
+    pub type_name: string::String
+}
+
+/// Represents a named struct field.
+pub struct Field {
+    pub name: string::String,
+    pub doc: string::String,
+    pub type_name: typ::Type,
+    pub borrow: bool,
+    pub mut_borrow: bool,
+    pub public: bool
+}
+
+/// Represents one function parameter.
+pub struct Param {
+    pub name: string::String,
+    pub type_name: typ::Type,
+    pub borrow: bool,
+    pub mut_borrow: bool
 }
 
 /// Is one node that may appear as a statement.
@@ -341,10 +480,30 @@ pub struct DerefExpr {
 /// Creates empty storage for one parsed AST.
 pub fn new(allocator: Allocator) -> Ast {
     return Ast {
+        declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
         statements: arena::new<StatementNode>(allocator),
         blocks: arena::new<BlockStmt>(allocator)
     };
+}
+
+/// Creates an empty root declaration list.
+pub fn new_program(allocator: Allocator) -> Program {
+    return Program {
+        declarations: array::new<Declaration>(allocator)
+    };
+}
+
+/// Retains one declaration node and returns its typed handle.
+fn (self: &var Ast) add_declaration(node: DeclarationNode) -> Declaration {
+    return Declaration {
+        node: self.declarations.add(move node)
+    };
+}
+
+/// Appends one retained declaration to the source-file root.
+fn (self: &var Program) add_declaration(declaration: Declaration) -> !void {
+    return self.declarations.append(declaration);
 }
 
 /// Retains one expression node and returns its typed handle.
@@ -371,6 +530,15 @@ fn (self: &var Ast) add_block(block: BlockStmt) -> Block {
 /// Reports whether a span has no source position.
 fn (self: Span) is_zero() -> bool {
     return self.start.line == 0 or self.start.column == 0;
+}
+
+/// Reports whether this entry declares a type parameter.
+fn (self: &StaticParam) is_type() -> bool {
+    if self.type_name |_| {
+        return false;
+    } else {
+        return true;
+    }
 }
 
 /// Returns the expression covered by a value-transparent marker.

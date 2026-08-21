@@ -1,5 +1,7 @@
 import compiler::ast;
+import compiler::typ;
 import std::array;
+import std::map;
 import std::mem;
 import std::string;
 import std::testing;
@@ -16,6 +18,26 @@ fn zero_span() -> ast::Span {
         source: null,
         start: ast::Position { line: 0, column: 0 },
         end: ast::Position { line: 0, column: 0 }
+    };
+}
+
+fn empty_signature(
+    allocator: Allocator,
+    name: []u8
+) -> !ast::FunctionSignature {
+    let function_name = try owned_text(allocator, name);
+    errdefer function_name.deinit();
+    let extern_abi = try owned_text(allocator, "");
+    return ast::FunctionSignature {
+        receiver: false,
+        name: move function_name,
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: array::new<ast::Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: move extern_abi,
+        public: false,
+        std: false
     };
 }
 
@@ -51,6 +73,146 @@ test "span zero state follows its source position" {
         end: ast::Position { line: 2, column: 7 }
     };
     testing::expect(!present.is_zero());
+}
+
+test "program retains declaration handles and nested contract methods" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let integer = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var program = ast::new_program(allocator);
+    defer program.deinit();
+    var body_statements = array::new<ast::Statement>(allocator);
+    errdefer body_statements.deinit();
+    let body = tree.add_block(ast::BlockStmt {
+        statements: move body_statements
+    });
+    var signature = try empty_signature(allocator, "visit");
+    errdefer signature.deinit();
+    try signature.static_params.append(ast::StaticParam {
+        name: try owned_text(allocator, "T"),
+        type_name: null
+    });
+    try signature.static_params.append(ast::StaticParam {
+        name: try owned_text(allocator, "count"),
+        type_name: integer
+    });
+    let function_doc = try owned_text(allocator, "Visits one value.");
+    let function_decl = ast::FunctionDecl {
+        signature: move signature,
+        doc: move function_doc,
+        derived: false,
+        body: body
+    };
+    let function = tree.add_declaration(ast::DeclarationNode::Function(
+        move function_decl
+    ));
+    try program.add_declaration(function);
+    var methods = array::new<ast::FunctionDecl>(allocator);
+    errdefer methods.deinit();
+    let method_signature = try empty_signature(allocator, "visit");
+    errdefer method_signature.deinit();
+    let method_doc = try owned_text(allocator, "");
+    try methods.append(ast::FunctionDecl {
+        signature: move method_signature,
+        doc: move method_doc,
+        derived: false,
+        body: null
+    });
+    let contract_node = ast::ContractDecl {
+        name: try owned_text(allocator, "Visitor"),
+        methods: move methods,
+        public: true
+    };
+    let contract_decl = tree.add_declaration(ast::DeclarationNode::Contract(
+        move contract_node
+    ));
+    try program.add_declaration(contract_decl);
+    var tags = array::new<string::String>(allocator);
+    errdefer tags.deinit();
+    try tags.append(try owned_text(allocator, "Ready"));
+    var tag_docs = map::new<[]u8, string::String>(allocator);
+    errdefer tag_docs.deinit();
+    try tag_docs.insert(
+        "Ready",
+        try owned_text(allocator, "The visitor may run.")
+    );
+    let enum_name = try owned_text(allocator, "State");
+    errdefer enum_name.deinit();
+    let enum_doc = try owned_text(allocator, "Visitor state.");
+    let enum_node = ast::EnumDecl {
+        name: move enum_name,
+        doc: move enum_doc,
+        tags: move tags,
+        tag_docs: move tag_docs,
+        public: true
+    };
+    let enum_decl = tree.add_declaration(ast::DeclarationNode::Enum(move enum_node));
+    try program.add_declaration(enum_decl);
+    let error_name = try owned_text(allocator, "Failure");
+    errdefer error_name.deinit();
+    let error_doc = try owned_text(allocator, "");
+    let error_node = ast::ErrorSetDecl {
+        name: move error_name,
+        doc: move error_doc,
+        members: array::new<string::String>(allocator),
+        member_docs: null,
+        public: false
+    };
+    let error_decl = tree.add_declaration(ast::DeclarationNode::ErrorSet(
+        move error_node
+    ));
+    try program.add_declaration(error_decl);
+    testing::expect_equal<i64>(4, program.declarations.len());
+    match tree.declarations.at(function.node) {
+        Function(value) => {
+            let name = value.signature.name.as_bytes();
+            testing::expect_equal<[]u8>("visit", name);
+            if value.body |retained| {
+                expect_block_len(tree.blocks.at(retained.node), 0);
+            } else {
+                testing::fail("function body was not retained");
+            }
+            if value.signature.static_params.at(0) |param| {
+                testing::expect(param.is_type());
+            } else {
+                testing::fail("missing type parameter");
+            }
+            if value.signature.static_params.at(1) |param| {
+                testing::expect(!param.is_type());
+            } else {
+                testing::fail("missing value parameter");
+            }
+        },
+        _ => testing::fail("function handle changed node category"),
+    }
+    match tree.declarations.at(contract_decl.node) {
+        Contract(value) => {
+            testing::expect(value.public);
+            testing::expect_equal<i64>(1, value.methods.len());
+        },
+        _ => testing::fail("contract handle changed node category"),
+    }
+    match tree.declarations.at(enum_decl.node) {
+        Enum(value) => {
+            if value.tag_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+            } else {
+                testing::fail("enum tag docs were not retained");
+            }
+        },
+        _ => testing::fail("enum handle changed node category"),
+    }
+    match tree.declarations.at(error_decl.node) {
+        ErrorSet(value) => {
+            if value.member_docs |_| {
+                testing::fail("empty error docs did not remain compact");
+            }
+        },
+        _ => testing::fail("error set handle changed node category"),
+    }
 }
 
 test "typed handles retain a shared expression graph" {
