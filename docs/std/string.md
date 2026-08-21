@@ -4,6 +4,7 @@
 
 ```text
 std::string::new(allocator: Allocator) -> std::string::String
+std::string::from_bytes(allocator: Allocator, bytes: []u8) -> !std::string::String
 string.append_bytes(bytes: []u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.append_string(other: &std::string::String) -> !void
@@ -19,6 +20,8 @@ string.deinit() -> void
 
 `string` primitive は追加しません。
 `std::string::new()` のような hidden default allocator は使いません。
+`from_bytes` は source の `[]u8` を copy した owned `String` を返します。確保に失敗した
+途中のbufferは解放し、sourceはborrowしたままです。
 `append_bytes` は source の `[]u8` を move せず、owned buffer に copy します。
 `append_byte` は 1 byte を追加します。
 `append_string` は borrow した別の `String` の bytes を copy します。source は
