@@ -255,7 +255,7 @@ func metaFieldsCarryPayload(variants []metaField) bool {
 func metaVariantList(variants []metaField) []ast.MetaVariant {
 	out := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		out = append(out, ast.MetaVariant{Name: variant.name, Payload: string(variant.typ)})
+		out = append(out, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
 	}
 	return out
 }

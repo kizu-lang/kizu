@@ -1,12 +1,11 @@
 package ast
 
 // MetaVariant is one variant of an enum or union: the source name it is
-// written under, and the type of the payload it carries. Payload is empty for
-// a variant that carries none, which is every enum tag (SPEC §6.7) and the
-// tag-only variants a union is allowed (SPEC §6.8).
+// written under, and whether it carries a payload. Every enum tag and a
+// tag-only union variant has no payload (SPEC §6.7, §6.8).
 type MetaVariant struct {
-	Name    string
-	Payload string
+	Name       string
+	HasPayload bool
 }
 
 // ComptimeMatchExpansion is the code `comptime match value |v, p| { ... }`
@@ -32,7 +31,7 @@ func ComptimeMatchExpansion(
 	arms := make([]MatchArm, 0, len(variants))
 	for _, variant := range variants {
 		binding := ""
-		if variant.Payload != "" {
+		if variant.HasPayload {
 			binding = stmt.Binding
 		}
 		arms = append(arms, MatchArm{Tag: variant.Name, Binding: binding, Body: stmt.Body})

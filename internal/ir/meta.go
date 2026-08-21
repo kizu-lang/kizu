@@ -184,7 +184,7 @@ func (l *lowerer) lowerComptimeMatchStmt(stmt *ast.ComptimeMatchStmt) error {
 	}
 	list := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		list = append(list, ast.MetaVariant{Name: variant.name, Payload: variant.typ})
+		list = append(list, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
 	}
 	return l.lowerMatchBody(subject, ast.ComptimeMatchExpansion(stmt, owner, list))
 }

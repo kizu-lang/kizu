@@ -320,7 +320,7 @@ func (c *Checker) checkComptimeMatchStmt(stmt *ast.ComptimeMatchStmt, env *scope
 	}
 	list := make([]ast.MetaVariant, 0, len(variants))
 	for _, variant := range variants {
-		list = append(list, ast.MetaVariant{Name: variant.name, Payload: variant.typ})
+		list = append(list, ast.MetaVariant{Name: variant.name, HasPayload: variant.typ != ""})
 	}
 	return c.checkStmt(ast.ComptimeMatchExpansion(stmt, owner, list), env)
 }
