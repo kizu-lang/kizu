@@ -1,11 +1,85 @@
 import compiler::ast;
 import compiler::diagnostic;
+import compiler::lexer;
+import compiler::source;
 import compiler::token;
+import std::arena;
+import std::array;
 import std::mem;
+import std::string;
 
 // Partial mechanical port of internal/parser/parser.go. Expression handles
 // borrow their Ast explicitly because the Kizu graph owner replaces Go node
 // pointers retained by the runtime.
+
+/// Consumes tokens and builds one source file into a caller-owned AST graph.
+pub struct Parser {
+    allocator: Allocator,
+    scanner: lexer::Lexer,
+    tokens: arena::Arena<token::Token>,
+    stream: array::Array<arena::Handle<token::Token>>,
+    position: i64,
+    diagnostics_store: array::Array<diagnostic::Diagnostic>,
+    safety: string::String
+}
+
+/// Creates a parser and primes its current and lookahead tokens.
+pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
+    var input = move scanner;
+    errdefer input.deinit();
+    var tokens = arena::new<token::Token>(allocator);
+    errdefer tokens.deinit();
+    var stream = array::new<arena::Handle<token::Token>>(allocator);
+    errdefer stream.deinit();
+    try append_next_token(&var input, &var tokens, &var stream);
+    try append_next_token(&var input, &var tokens, &var stream);
+    return Parser {
+        allocator: allocator,
+        scanner: move input,
+        tokens: move tokens,
+        stream: move stream,
+        position: 0,
+        diagnostics_store: array::new<diagnostic::Diagnostic>(allocator),
+        safety: string::new(allocator)
+    };
+}
+
+/// Renders parse errors collected so far without CLI severity wrapping.
+fn (self: &Parser) errors(
+    allocator: Allocator,
+    sources: &source::SourceMap
+) -> !array::Array<string::String> {
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while self.diagnostics_store.at(index) |entry| {
+        let rendered = try entry.error(allocator, sources);
+        errdefer rendered.deinit();
+        try out.append(move rendered);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Returns the number of structured parse diagnostics collected so far.
+fn (self: &Parser) diagnostics_len() -> i64 {
+    return self.diagnostics_store.len();
+}
+
+/// Borrows one structured parse diagnostic by index.
+fn (self: &Parser) diagnostic(index: i64) -> ?&diagnostic::Diagnostic {
+    return self.diagnostics_store.at(index);
+}
+
+fn (self: &Parser) current_kind() -> token::Kind {
+    let handle = self.stream.get_or_panic(self.position);
+    return self.tokens.at(handle).kind;
+}
+
+fn (self: &Parser) peek_kind() -> token::Kind {
+    let handle = self.stream.get_or_panic(self.position + 1);
+    return self.tokens.at(handle).kind;
+}
 
 // Builds a half-open diagnostic span from the current parser token.
 fn diagnostic_at_token(
@@ -85,6 +159,34 @@ fn join_spans(first: ast::Span, last: ast::Span) -> ast::Span {
         start: first.start,
         end: last.end
     };
+}
+
+// Advances the current token while retaining every scanned token for parser
+// rewind and AST text copying.
+fn (self: &var Parser) next_token() -> !void {
+    let next_position = self.position + 1;
+    if next_position + 1 >= self.stream.len() {
+        try append_next_token(
+            &var self.scanner,
+            &var self.tokens,
+            &var self.stream
+        );
+    }
+    self.position = next_position;
+    return;
+}
+
+fn append_next_token(
+    scanner: &var lexer::Lexer,
+    tokens: &var arena::Arena<token::Token>,
+    stream: &var array::Array<arena::Handle<token::Token>>
+) -> !void {
+    // Reserve before scanning so recoverable allocation failure cannot leave
+    // the scanner frontier ahead of the ordered handle stream.
+    try stream.reserve(1);
+    let next = try scanner.next_token();
+    let handle = tokens.add(move next);
+    return stream.append(handle);
 }
 
 fn zero_span() -> ast::Span {

@@ -1,0 +1,44 @@
+import compiler::lexer;
+import compiler::parser;
+import compiler::source;
+import compiler::token;
+import std::mem;
+import std::string;
+import std::testing;
+
+test "parser lifecycle owns its token stream and diagnostics" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path = try string::from_bytes(allocator, "sample.kizu");
+    errdefer path.deinit();
+    let text = try string::from_bytes(allocator, "first 2");
+    errdefer text.deinit();
+    let id = try sources.add(move path, move text);
+    if sources.at(id) |file| {
+        let input = file.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, input);
+        var value = try parser::new(allocator, move scanner);
+        defer value.deinit();
+        testing::expect_equal<i64>(0, value.diagnostics_len());
+        if value.diagnostic(0) |_| {
+            testing::fail("new parser retained an unexpected diagnostic");
+        }
+        testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Int, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Int, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        let errors = try value.errors(allocator, &sources);
+        defer errors.deinit();
+        testing::expect_equal<i64>(0, errors.len());
+    } else {
+        testing::fail("parser source was not retained");
+    }
+}
