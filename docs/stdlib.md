@@ -160,7 +160,7 @@ for parallel work once a real execution path exists.
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `lib/kizu/std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `reserve`, `clone`, `pop`, `pop_or_panic`, `get`, `get_or_panic`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::internal::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
-| `std::string` | `String`, `from_bytes`, `append_bytes`, `append_byte`, `append_string`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `lib/kizu/std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
+| `std::string` | `String`, `from_bytes`, `join`, `trim_space_in_place`, `append_bytes`, `append_byte`, `append_string`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `as_mut_bytes`, `deinit` | Kizu implementation in `lib/kizu/std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage private and mutable access exclusive |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::json` | `encoder`, `begin_object`, `end_object`, `begin_array`, `end_array`, `begin_object_field`, `begin_array_field`, `write_i64`, `write_bool`, `write_null`, `write_bytes`, `write_*_field`, `finish_into`, `deinit`, `encode<T>`, `encode_value<T>` | Kizu source over `String` and `std::meta`; API misuse traps through `std::internal::builtin::panic` | keep only the trap primitive trusted; `decode<T>` and `Value` still to come |
 | `std::map` | `Map<[]u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::internal::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
@@ -213,7 +213,11 @@ or reach around them into Go helpers.
 
 New std APIs require all of the following in the same change:
 
-- SPEC or ADR entry for signature, ownership, error, and capability rules.
+- The relevant `docs/std/` reference updated with signature, ownership, error,
+  capability, and observable behavior.
+- An ADR only when a separate design decision has rationale or rejected
+  alternatives worth preserving. Do not duplicate the current API contract or
+  implementation comments in an ADR.
 - This registry updated with the current implementation boundary.
 - Positive example under `examples/`.
 - Negative example when the API has safety or error boundaries.

@@ -615,6 +615,66 @@ test "parser lifecycle owns its token stream and diagnostics" {
     }
 }
 
+test "parser normalizes lexer comment tokens across Unicode and CRLF" {
+    let allocator = mem::page_allocator();
+    var input = string::new(allocator);
+    defer input.deinit();
+    try input.append_bytes("///　first  ");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("///");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("/// last　");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("fn main() {}");
+    let source_bytes = input.as_bytes();
+    var scanner = lexer::new(allocator, source_bytes);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect(actual.kind == token::Kind::Function);
+    testing::expect_equal<i64>(3, actual.doc_comments.len());
+
+    let empty_scanner = lexer::new(allocator, "");
+    var value = try parser::new(allocator, move empty_scanner);
+    defer value.deinit();
+    let text = try value.comment_text(&actual.doc_comments);
+    defer text.deinit();
+    var expected = string::new(allocator);
+    defer expected.deinit();
+    try expected.append_bytes("first  ");
+    try expected.append_byte(cast<u8>(10));
+    try expected.append_byte(cast<u8>(10));
+    try expected.append_bytes("last");
+    let expected_bytes = expected.as_bytes();
+    expect_retained_bytes(&text, expected_bytes);
+}
+
+test "parser comment normalization keeps lexer replacement scalars" {
+    let allocator = mem::page_allocator();
+    var input = string::new(allocator);
+    defer input.deinit();
+    try input.append_bytes("/// ");
+    try input.append_byte(cast<u8>(255));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("fn main() {}");
+    let source_bytes = input.as_bytes();
+    var scanner = lexer::new(allocator, source_bytes);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect_equal<i64>(1, actual.doc_comments.len());
+
+    let empty_scanner = lexer::new(allocator, "");
+    var value = try parser::new(allocator, move empty_scanner);
+    defer value.deinit();
+    let text = try value.comment_text(&actual.doc_comments);
+    defer text.deinit();
+    expect_retained_bytes(&text, "�");
+}
+
 test "parser retains import paths after token cleanup" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
