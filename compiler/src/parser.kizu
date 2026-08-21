@@ -5,6 +5,7 @@ import compiler::source;
 import compiler::token;
 import std::arena;
 import std::array;
+import std::fmt;
 import std::mem;
 import std::string;
 
@@ -79,6 +80,117 @@ fn (self: &Parser) current_kind() -> token::Kind {
 fn (self: &Parser) peek_kind() -> token::Kind {
     let handle = self.stream.get_or_panic(self.position + 1);
     return self.tokens.at(handle).kind;
+}
+
+fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
+    if self.current_kind() == expected {
+        return true;
+    }
+    let handle = self.stream.get_or_panic(self.position);
+    let message = try expected_token_message(
+        self.allocator,
+        "expected ",
+        expected,
+        self.tokens.at(handle)
+    );
+    try self.record_error(move message);
+    return false;
+}
+
+fn (self: &var Parser) expect_peek(expected: token::Kind) -> !bool {
+    if self.peek_kind() == expected {
+        try self.next_token();
+        return true;
+    }
+    let handle = self.stream.get_or_panic(self.position + 1);
+    let message = try expected_token_message(
+        self.allocator,
+        "expected next token ",
+        expected,
+        self.tokens.at(handle)
+    );
+    try self.record_error(move message);
+    return false;
+}
+
+fn (self: &var Parser) record_error(message: string::String) -> !void {
+    defer message.deinit();
+    let handle = self.stream.get_or_panic(self.position);
+    let bytes = message.as_bytes();
+    let entry = try diagnostic_at_token(
+        self.allocator,
+        self.tokens.at(handle),
+        bytes
+    );
+    errdefer entry.deinit();
+    return self.diagnostics_store.append(move entry);
+}
+
+fn expected_token_message(
+    allocator: Allocator,
+    prefix: []u8,
+    expected: token::Kind,
+    actual: &token::Token
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    try append_token_type_description(&var out, expected);
+    try out.append_bytes(", got ");
+    try append_token_description(&var out, actual);
+    return move out;
+}
+
+fn append_token_description(
+    out: &var string::String,
+    actual: &token::Token
+) -> !void {
+    let literal = actual.literal.as_bytes();
+    let class = token_class_description(actual.kind);
+    if mem::len(class) > 0 {
+        try out.append_bytes(class);
+        try out.append_byte(cast<u8>(32));
+        return fmt::append_bytes_literal(out, literal);
+    }
+    if actual.kind == token::Kind::Illegal {
+        try out.append_bytes("illegal token");
+        if mem::len(literal) > 0 {
+            try out.append_byte(cast<u8>(32));
+            try fmt::append_bytes_literal(out, literal);
+        }
+        return;
+    }
+    if actual.kind == token::Kind::Eof {
+        return out.append_bytes("end of file");
+    }
+    try out.append_byte(cast<u8>(96));
+    try out.append_bytes(literal);
+    return out.append_byte(cast<u8>(96));
+}
+
+fn append_token_type_description(
+    out: &var string::String,
+    kind: token::Kind
+) -> !void {
+    let class = token_class_description(kind);
+    if mem::len(class) > 0 {
+        return out.append_bytes(class);
+    }
+    if kind == token::Kind::Eof {
+        return out.append_bytes("end of file");
+    }
+    try out.append_byte(cast<u8>(96));
+    try out.append_bytes(token::spelling(kind));
+    return out.append_byte(cast<u8>(96));
+}
+
+fn token_class_description(kind: token::Kind) -> []u8 {
+    return match kind {
+        Ident => "identifier",
+        Int => "integer",
+        String => "string",
+        _ => "",
+    };
 }
 
 fn lowest_precedence() -> i64 {

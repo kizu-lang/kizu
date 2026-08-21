@@ -71,6 +71,57 @@ fn expect_peek_precedence(
     return;
 }
 
+fn expect_parser_diagnostic(
+    value: &parser::Parser,
+    index: i64,
+    expected: []u8,
+    start_column: i64,
+    end_column: i64
+) -> void {
+    if value.diagnostic(index) |entry| {
+        let message = entry.message.as_bytes();
+        testing::expect_equal<[]u8>(expected, message);
+        testing::expect_equal<i64>(1, entry.span.start.line);
+        testing::expect_equal<i64>(start_column, entry.span.start.column);
+        testing::expect_equal<i64>(1, entry.span.end.line);
+        testing::expect_equal<i64>(end_column, entry.span.end.column);
+    } else {
+        testing::fail("missing parser diagnostic");
+    }
+    return;
+}
+
+fn expect_current_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_kind: token::Kind,
+    expected_message: []u8,
+    end_column: i64
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(!try value.expect_current(expected_kind));
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    expect_parser_diagnostic(&value, 0, expected_message, 1, end_column);
+    return;
+}
+
+fn expect_peek_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_kind: token::Kind,
+    expected_message: []u8
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(!try value.expect_peek(expected_kind));
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    expect_parser_diagnostic(&value, 0, expected_message, 1, 4);
+    return;
+}
+
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
     var sources = source::new(allocator);
@@ -191,4 +242,75 @@ test "parser recognizes optional expression terminators" {
     try expect_peek_expression_end(allocator, "a)", true);
     try expect_peek_expression_end(allocator, "a]", true);
     try expect_peek_expression_end(allocator, "a+", false);
+}
+
+test "parser expectations retain diagnostics and advance only on match" {
+    let allocator = mem::page_allocator();
+    let scanner = lexer::new(allocator, "foo 1");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(try value.expect_current(token::Kind::Ident));
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Int);
+    testing::expect(!try value.expect_peek(token::Kind::String));
+    let expected =
+        \\expected next token string, got integer "1"
+    ;
+    expect_parser_diagnostic(&value, 0, expected, 1, 4);
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Int);
+    testing::expect(try value.expect_peek(token::Kind::Int));
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+}
+
+test "parser token diagnostics preserve every description class" {
+    let allocator = mem::page_allocator();
+    let identifier =
+        \\expected `fn`, got identifier "foo"
+    ;
+    try expect_current_error(
+        allocator,
+        "foo",
+        token::Kind::Function,
+        identifier,
+        4
+    );
+    let symbol =
+        "expected identifier, got `+`"
+        ;
+    try expect_current_error(
+        allocator,
+        "+",
+        token::Kind::Ident,
+        symbol,
+        2
+    );
+    let illegal =
+        \\expected end of file, got illegal token "#"
+    ;
+    try expect_current_error(
+        allocator,
+        "#",
+        token::Kind::Eof,
+        illegal,
+        2
+    );
+    let eof =
+        "expected next token identifier, got end of file"
+        ;
+    try expect_peek_error(allocator, "foo", token::Kind::Ident, eof);
+    let unicode =
+        \\expected next token integer, got string "caf\xC3\xA9"
+    ;
+    let unicode_input =
+        \\foo "café"
+    ;
+    try expect_peek_error(
+        allocator,
+        unicode_input,
+        token::Kind::Int,
+        unicode
+    );
 }
