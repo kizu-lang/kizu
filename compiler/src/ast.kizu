@@ -3,6 +3,7 @@ import compiler::typ;
 import std::arena;
 import std::array;
 import std::map;
+import std::mem;
 import std::string;
 
 // Mechanical port of internal/ast's declaration, statement, and expression
@@ -10,8 +11,20 @@ import std::string;
 // Expression, and Statement are copy handles whose types keep the three closed
 // node categories distinct.
 
-/// Owns the declaration, statement, and expression graphs for one program.
+/// Identifies immutable text retained by an Ast.
+pub struct Text {
+    pub node: arena::Handle<string::String>
+}
+
+/// Identifies one immutable expression list retained by an Ast.
+pub struct ExpressionList {
+    pub node: arena::Handle<array::Array<Expression>>
+}
+
+/// Owns the node graphs and shared values for one program.
 pub struct Ast {
+    pub texts: arena::Arena<string::String>,
+    pub expression_lists: arena::Arena<array::Array<Expression>>,
     pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
     pub statements: arena::Arena<StatementNode>
@@ -70,18 +83,18 @@ pub union DeclarationNode {
 
 /// Represents one explicit top-level module import.
 pub struct ImportDecl {
-    pub path: array::Array<string::String>
+    pub path: array::Array<Text>
 }
 
 /// Is the declaration information visible to a function caller.
 pub struct FunctionSignature {
     pub receiver: bool,
-    pub name: string::String,
+    pub name: Text,
     pub static_params: array::Array<StaticParam>,
     pub params: array::Array<Param>,
     pub return_type: ?typ::Type,
     pub requires_unsafe: bool,
-    pub extern_abi: string::String,
+    pub extern_abi: Text,
     pub public: bool,
     pub std: bool
 }
@@ -89,28 +102,28 @@ pub struct FunctionSignature {
 /// Represents a function declaration and its optional body.
 pub struct FunctionDecl {
     pub signature: FunctionSignature,
-    pub doc: string::String,
+    pub doc: Text,
     pub derived: bool,
     pub body: ?Block
 }
 
 /// Is one entry of a static argument declaration list.
 pub struct StaticParam {
-    pub name: string::String,
+    pub name: Text,
     pub type_name: ?typ::Type
 }
 
 /// Represents a top-level test block.
 pub struct TestDecl {
-    pub name: string::String,
+    pub name: Text,
     pub body: ?Block
 }
 
 /// Represents a top-level struct declaration.
 pub struct StructDecl {
-    pub name: string::String,
-    pub doc: string::String,
-    pub type_params: array::Array<string::String>,
+    pub name: Text,
+    pub doc: Text,
+    pub type_params: array::Array<Text>,
     pub fields: array::Array<Field>,
     pub public: bool,
     pub requires_unsafe: bool
@@ -118,55 +131,55 @@ pub struct StructDecl {
 
 /// Represents a top-level tag enum declaration.
 pub struct EnumDecl {
-    pub name: string::String,
-    pub doc: string::String,
-    pub tags: array::Array<string::String>,
-    pub tag_docs: ?map::Map<[]u8, string::String>,
+    pub name: Text,
+    pub doc: Text,
+    pub tags: array::Array<Text>,
+    pub tag_docs: ?map::Map<[]u8, Text>,
     pub public: bool
 }
 
 /// Represents a top-level error set declaration.
 pub struct ErrorSetDecl {
-    pub name: string::String,
-    pub doc: string::String,
-    pub members: array::Array<string::String>,
-    pub member_docs: ?map::Map<[]u8, string::String>,
+    pub name: Text,
+    pub doc: Text,
+    pub members: array::Array<Text>,
+    pub member_docs: ?map::Map<[]u8, Text>,
     pub public: bool
 }
 
 /// Represents a top-level tagged union declaration.
 pub struct UnionDecl {
-    pub name: string::String,
-    pub doc: string::String,
-    pub type_params: array::Array<string::String>,
+    pub name: Text,
+    pub doc: Text,
+    pub type_params: array::Array<Text>,
     pub variants: array::Array<UnionVariant>,
     pub public: bool
 }
 
 /// Represents one tagged union variant.
 pub struct UnionVariant {
-    pub name: string::String,
-    pub doc: string::String,
+    pub name: Text,
+    pub doc: Text,
     pub payload: ?typ::Type
 }
 
 /// Represents required method signatures.
 pub struct ContractDecl {
-    pub name: string::String,
+    pub name: Text,
     pub methods: array::Array<FunctionDecl>,
     pub public: bool
 }
 
 /// Asserts that one concrete type satisfies one contract.
 pub struct ImplDecl {
-    pub contract_name: string::String,
-    pub type_name: string::String
+    pub contract_name: Text,
+    pub type_name: Text
 }
 
 /// Represents a named struct field.
 pub struct Field {
-    pub name: string::String,
-    pub doc: string::String,
+    pub name: Text,
+    pub doc: Text,
     pub type_name: typ::Type,
     pub borrow: bool,
     pub mut_borrow: bool,
@@ -175,7 +188,7 @@ pub struct Field {
 
 /// Represents one function parameter.
 pub struct Param {
-    pub name: string::String,
+    pub name: Text,
     pub type_name: typ::Type,
     pub borrow: bool,
     pub mut_borrow: bool
@@ -183,8 +196,26 @@ pub struct Param {
 
 /// Is one enum tag or union variant exposed to compile-time reflection.
 pub struct MetaVariant {
-    pub name: []u8,
+    pub name: Text,
     pub has_payload: bool
+}
+
+/// Is one public field filled by a compile-time construct expansion.
+pub struct ConstructField {
+    pub name: []u8,
+    pub type_name: []u8
+}
+
+/// Owns the generated statement list and its retained result expression.
+pub struct ConstructResult {
+    pub statements: array::Array<Statement>,
+    pub literal: Expression
+}
+
+struct ConstructBuilt {
+    statement: Statement,
+    cleanup: ?Statement,
+    field: FieldValue
 }
 
 /// Is one node that may appear as a statement.
@@ -242,7 +273,7 @@ pub struct BlockStmt {
 /// Represents a let or var declaration.
 pub struct LetStmt {
     pub mutable: bool,
-    pub name: string::String,
+    pub name: Text,
     pub value: Expression
 }
 
@@ -272,21 +303,21 @@ pub struct IfStmt {
     pub condition: Expression,
     pub consequence: Block,
     pub alternative: ?Block,
-    pub capture: string::String
+    pub capture: Text
 }
 
 /// Represents a loop guarded by a condition expression.
 pub struct WhileStmt {
-    pub label: string::String,
+    pub label: Text,
     pub condition: Expression,
     pub body: Block,
-    pub capture: string::String
+    pub capture: Text
 }
 
 /// Represents a bounded integer range loop.
 pub struct ForStmt {
-    pub label: string::String,
-    pub name: string::String,
+    pub label: Text,
+    pub name: Text,
     pub start: Expression,
     pub end: Expression,
     pub body: Block
@@ -294,26 +325,26 @@ pub struct ForStmt {
 
 /// Exits the nearest loop or a named enclosing loop.
 pub struct BreakStmt {
-    pub label: string::String
+    pub label: Text
 }
 
 /// Skips to the next iteration of the nearest or named loop.
 pub struct ContinueStmt {
-    pub label: string::String
+    pub label: Text
 }
 
 /// Represents an enum or union tag match.
 pub struct MatchStmt {
     pub value: Expression,
     pub arms: array::Array<MatchArm>,
-    pub meta_capture: string::String,
-    pub meta_owner: string::String
+    pub meta_capture: Text,
+    pub meta_owner: Text
 }
 
 /// Represents one tag branch in a match.
 pub struct MatchArm {
-    pub tag: string::String,
-    pub binding: string::String,
+    pub tag: Text,
+    pub binding: Text,
     pub body: Statement
 }
 
@@ -327,15 +358,15 @@ pub struct ComptimeIfStmt {
 /// Repeats a body for every element of a compile-time list.
 pub struct ComptimeForStmt {
     pub list: Expression,
-    pub name: string::String,
+    pub name: Text,
     pub body: Block
 }
 
 /// Repeats a body for every variant of a compile-time value.
 pub struct ComptimeMatchStmt {
     pub value: Expression,
-    pub name: string::String,
-    pub binding: string::String,
+    pub name: Text,
+    pub binding: Text,
     pub body: Block
 }
 
@@ -347,18 +378,18 @@ pub struct ExprStmt {
 
 /// Represents a name reference.
 pub struct IdentExpr {
-    pub name: string::String,
+    pub name: Text,
     pub span: Span
 }
 
 /// Represents an integer literal.
 pub struct IntExpr {
-    pub value: string::String
+    pub value: Text
 }
 
 /// Represents a string literal.
 pub struct StringExpr {
-    pub value: string::String
+    pub value: Text
 }
 
 /// Is the null literal of an optional type.
@@ -380,7 +411,7 @@ pub struct BoolExpr {
 
 /// Represents a compile-time type value.
 pub struct TypeExpr {
-    pub type_name: string::String
+    pub type_name: Text
 }
 
 /// Represents an expression evaluated during compilation.
@@ -390,14 +421,14 @@ pub struct ComptimeExpr {
 
 /// Represents a unary operator expression.
 pub struct PrefixExpr {
-    pub operator: string::String,
+    pub operator: Text,
     pub right: Expression
 }
 
 /// Represents an infix binary operator expression.
 pub struct BinaryExpr {
     pub left: Expression,
-    pub operator: string::String,
+    pub operator: Text,
     pub operator_span: Span,
     pub right: Expression
 }
@@ -405,13 +436,13 @@ pub struct BinaryExpr {
 /// Represents a function call.
 pub struct CallExpr {
     pub callee: Expression,
-    pub args: array::Array<Expression>
+    pub args: ExpressionList
 }
 
 /// Represents a call target with explicit static arguments.
 pub struct TypeApplyExpr {
     pub callee: Expression,
-    pub type_arg: string::String
+    pub type_arg: Text
 }
 
 /// Represents an explicit cast<T>(value) conversion.
@@ -435,7 +466,7 @@ pub struct MoveExpr {
 /// Marks an expression whose memory safety the compiler does not prove.
 pub struct UnsafeExpr {
     pub value: Expression,
-    pub safety: string::String,
+    pub safety: Text,
     pub span: Span
 }
 
@@ -451,7 +482,7 @@ pub struct IndexExpr {
 
 /// Represents construction of a struct value.
 pub struct StructLiteralExpr {
-    pub type_name: string::String,
+    pub type_name: Text,
     pub fields: array::Array<FieldValue>,
     pub span: Span
 }
@@ -464,14 +495,14 @@ pub struct BufferLiteralExpr {
 
 /// Represents one field initializer in a struct literal.
 pub struct FieldValue {
-    pub name: string::String,
+    pub name: Text,
     pub value: Expression
 }
 
 /// Represents field access on a receiver expression.
 pub struct FieldExpr {
     pub receiver: Expression,
-    pub name: string::String,
+    pub name: Text,
     pub namespace: bool,
     pub span: Span
 }
@@ -485,6 +516,8 @@ pub struct DerefExpr {
 /// Creates empty storage for one parsed AST.
 pub fn new(allocator: Allocator) -> Ast {
     return Ast {
+        texts: arena::new<string::String>(allocator),
+        expression_lists: arena::new<array::Array<Expression>>(allocator),
         declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
         statements: arena::new<StatementNode>(allocator)
@@ -496,6 +529,51 @@ pub fn new_program(allocator: Allocator) -> Program {
     return Program {
         declarations: array::new<Declaration>(allocator)
     };
+}
+
+/// Retains owned text and returns its copyable identity.
+fn (self: &var Ast) add_text(value: string::String) -> Text {
+    return Text { node: self.texts.add(move value) };
+}
+
+/// Copies borrowed bytes into text retained for the Ast lifetime.
+fn (self: &var Ast) add_text_from_bytes(
+    allocator: Allocator,
+    bytes: []u8
+) -> !Text {
+    let value = try string::from_bytes(allocator, bytes);
+    return self.add_text(move value);
+}
+
+/// Retains one immutable expression handle list for shared call sites.
+fn (self: &var Ast) add_expression_list(
+    values: array::Array<Expression>
+) -> ExpressionList {
+    return ExpressionList {
+        node: self.expression_lists.add(move values)
+    };
+}
+
+fn (self: ExpressionList) len(ast: &Ast) -> i64 {
+    return expression_list_len(ast.expression_lists.at(self.node));
+}
+
+fn (self: ExpressionList) get_or_panic(ast: &Ast, index: i64) -> Expression {
+    return expression_list_get_or_panic(
+        ast.expression_lists.at(self.node),
+        index
+    );
+}
+
+fn expression_list_len(values: &array::Array<Expression>) -> i64 {
+    return values.len();
+}
+
+fn expression_list_get_or_panic(
+    values: &array::Array<Expression>,
+    index: i64
+) -> Expression {
+    return values.get_or_panic(index);
 }
 
 /// Retains one declaration node and returns its typed handle.
@@ -562,7 +640,8 @@ fn (self: &StaticParam) is_type() -> bool {
 pub fn comptime_match_expansion(
     allocator: Allocator,
     stmt: &ComptimeMatchStmt,
-    owner: []u8,
+    owner: Text,
+    empty: Text,
     variants: &array::Array<MetaVariant>
 ) -> !MatchStmt {
     var arms = array::new<MatchArm>(allocator);
@@ -571,45 +650,37 @@ pub fn comptime_match_expansion(
     let body = stmt.body.as_statement();
     var index = 0;
     while variants.at(index) |variant| {
-        let tag = try string::from_bytes(allocator, variant.name);
-        errdefer tag.deinit();
-        var binding = string::new(allocator);
-        errdefer binding.deinit();
+        var binding = empty;
         if variant.has_payload {
-            let binding_bytes = stmt.binding.as_bytes();
-            try binding.append_bytes(binding_bytes);
+            binding = stmt.binding;
         }
         try arms.append(MatchArm {
-            tag: move tag,
-            binding: move binding,
+            tag: variant.name,
+            binding: binding,
             body: body
         });
         index = index + 1;
     }
-    let capture_bytes = stmt.name.as_bytes();
-    let capture = try string::from_bytes(allocator, capture_bytes);
-    errdefer capture.deinit();
-    let meta_owner = try string::from_bytes(allocator, owner);
     return MatchStmt {
         value: stmt.value,
         arms: move arms,
-        meta_capture: move capture,
-        meta_owner: move meta_owner
+        meta_capture: stmt.name,
+        meta_owner: owner
     };
 }
 
 fn add_variant_path(
     ast: &var Ast,
-    owner_name: string::String,
-    variant_name: string::String
+    owner_name: Text,
+    variant_name: Text
 ) -> Expression {
     let receiver = ast.add_expression(ExpressionNode::Ident(IdentExpr {
-        name: move owner_name,
+        name: owner_name,
         span: zero_span()
     }));
     return ast.add_expression(ExpressionNode::Field(FieldExpr {
         receiver: receiver,
-        name: move variant_name,
+        name: variant_name,
         namespace: true,
         span: zero_span()
     }));
@@ -621,22 +692,206 @@ pub fn variant_expansion(
     ast: &var Ast,
     owner: []u8,
     variant: []u8,
-    args: array::Array<Expression>
+    args: ExpressionList
 ) -> !Expression {
-    errdefer args.deinit();
-    let owner_name = try string::from_bytes(allocator, owner);
-    errdefer owner_name.deinit();
-    let variant_name = try string::from_bytes(allocator, variant);
-    errdefer variant_name.deinit();
-    if args.len() == 0 {
-        args.deinit();
-        return add_variant_path(ast, move owner_name, move variant_name);
+    let owner_name = try ast.add_text_from_bytes(allocator, owner);
+    let variant_name = try ast.add_text_from_bytes(allocator, variant);
+    let has_args = args.len(ast) > 0;
+    if !has_args {
+        return add_variant_path(ast, owner_name, variant_name);
     }
-    let path = add_variant_path(ast, move owner_name, move variant_name);
+    let path = add_variant_path(ast, owner_name, variant_name);
     return ast.add_expression(ExpressionNode::Call(CallExpr {
         callee: path,
-        args: move args
+        args: args
     }));
+}
+
+/// Reports whether a type spelling carries a cleanup contract.
+pub fn owner_type(
+    owners: &map::Map<[]u8, bool>,
+    type_name: []u8
+) -> bool {
+    let base = base_type_name(type_name);
+    return owners.get(base) orelse false;
+}
+
+fn base_type_name(type_name: []u8) -> []u8 {
+    if typ::split_apply(type_name) |parts| {
+        return parts.base;
+    }
+    return type_name;
+}
+
+fn joined_text(
+    allocator: Allocator,
+    ast: &var Ast,
+    left: []u8,
+    middle: []u8,
+    right: []u8
+) -> !Text {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.reserve(mem::len(left) + mem::len(middle) + mem::len(right));
+    try out.append_bytes(left);
+    try out.append_bytes(middle);
+    try out.append_bytes(right);
+    return ast.add_text(move out);
+}
+
+fn construct_binding(
+    allocator: Allocator,
+    ast: &var Ast,
+    field: []u8
+) -> !Text {
+    return joined_text(allocator, ast, "construct$", "", field);
+}
+
+fn add_construct_cleanup(
+    ast: &var Ast,
+    binding: Text,
+    method_name: Text,
+    args: ExpressionList
+) -> Statement {
+    let receiver = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: binding,
+        span: zero_span()
+    }));
+    let method = ast.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: receiver,
+        name: method_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let call = ast.add_expression(ExpressionNode::Call(CallExpr {
+        callee: method,
+        args: args
+    }));
+    return ast.add_statement(StatementNode::ErrDefer(ErrDeferStmt {
+        expr: call
+    }));
+}
+
+fn add_construct_field(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    worker_name: Text,
+    cleanup_method: Text,
+    empty_args: ExpressionList,
+    field: &ConstructField,
+    args: ExpressionList,
+    owners: &map::Map<[]u8, bool>
+) -> !ConstructBuilt {
+    let binding = try construct_binding(allocator, ast, field.name);
+    let type_arg = try joined_text(allocator, ast, owner, ", ", field.name);
+    let field_name = try ast.add_text_from_bytes(allocator, field.name);
+    let worker_expr = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: worker_name,
+        span: zero_span()
+    }));
+    let applied = ast.add_expression(ExpressionNode::TypeApply(TypeApplyExpr {
+        callee: worker_expr,
+        type_arg: type_arg
+    }));
+    let call = ast.add_expression(ExpressionNode::Call(CallExpr {
+        callee: applied,
+        args: args
+    }));
+    let value = ast.add_expression(ExpressionNode::Try(TryExpr {
+        value: call
+    }));
+    let statement = ast.add_statement(StatementNode::Let(LetStmt {
+        mutable: false,
+        name: binding,
+        value: value
+    }));
+    let field_value = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: binding,
+        span: zero_span()
+    }));
+    if owner_type(owners, field.type_name) {
+        let cleanup = add_construct_cleanup(
+            ast,
+            binding,
+            cleanup_method,
+            empty_args
+        );
+        let moved = ast.add_expression(ExpressionNode::Move(MoveExpr {
+            value: field_value,
+            span: zero_span()
+        }));
+        return ConstructBuilt {
+            statement: statement,
+            cleanup: cleanup,
+            field: FieldValue {
+                name: field_name,
+                value: moved
+            }
+        };
+    }
+    return ConstructBuilt {
+        statement: statement,
+        cleanup: null,
+        field: FieldValue {
+            name: field_name,
+            value: field_value
+        }
+    };
+}
+
+/// Expands one reflected struct construction into ordinary AST nodes.
+pub fn construct_expansion(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    worker: []u8,
+    fields: &array::Array<ConstructField>,
+    args: ExpressionList,
+    owners: &map::Map<[]u8, bool>
+) -> !ConstructResult {
+    var statements = array::new<Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.reserve(fields.len() * 2);
+    var values = array::new<FieldValue>(allocator);
+    errdefer values.deinit();
+    try values.reserve(fields.len());
+    let type_name = try ast.add_text_from_bytes(allocator, owner);
+    let worker_name = try ast.add_text_from_bytes(allocator, worker);
+    let cleanup_method = try ast.add_text_from_bytes(
+        allocator,
+        typ::cleanup_method()
+    );
+    let empty_args = ast.add_expression_list(array::new<Expression>(allocator));
+    var index = 0;
+    while fields.at(index) |field| {
+        let built = try add_construct_field(
+            allocator,
+            ast,
+            owner,
+            worker_name,
+            cleanup_method,
+            empty_args,
+            field,
+            args,
+            owners
+        );
+        try statements.append(built.statement);
+        if built.cleanup |cleanup| {
+            try statements.append(cleanup);
+        }
+        try values.append(built.field);
+        index = index + 1;
+    }
+    let literal = ast.add_expression(ExpressionNode::StructLiteral(StructLiteralExpr {
+        type_name: type_name,
+        fields: move values,
+        span: zero_span()
+    }));
+    return ConstructResult {
+        statements: move statements,
+        literal: literal
+    };
 }
 
 /// Returns the expression covered by a value-transparent marker.

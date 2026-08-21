@@ -86,7 +86,9 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | --- | --- | --- |
 | named string constant set | `enum` + spelling function | identity と表示用 bytes を分ける |
 | `string` | `[]u8` または `std::string::String` | static/source view は前者、生成して保持する bytes は後者 |
+| AST nodes が共有する `string` | AST 所有の `Text` handle | logical text ごとに一度保持し、生成 node 間で handle を再利用する。content interning はしない |
 | `[]T` | `[]T` または `std::array::Array<T>` | borrow view は前者、容量と cleanup を持つ slice は後者 |
+| AST nodes が共有する `[]Expression` | AST 所有の `ExpressionList` handle | Go の共有 slice backing を一つの retained list と copy handle で表す |
 | `map[string]V` | `std::map::Map<[]u8, V>` | iteration order と overwrite behavior を先に確認する |
 | immutable map literal | pure lookup function または明示 owner の `Map` | hidden global allocator を作らず、hot path は計測する |
 | `*T` | `&T` / `&var T` / `Box<T>` / arena handle | nullable、mutation、owner、lifetime を ownership 表で固定する |

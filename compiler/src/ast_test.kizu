@@ -6,11 +6,12 @@ import std::mem;
 import std::string;
 import std::testing;
 
-fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes(bytes);
-    return move out;
+fn retained_text(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    bytes: []u8
+) -> !ast::Text {
+    return tree.add_text_from_bytes(allocator, bytes);
 }
 
 fn zero_span() -> ast::Span {
@@ -21,21 +22,35 @@ fn zero_span() -> ast::Span {
     };
 }
 
+fn expect_text(tree: &ast::Ast, value: ast::Text, expected: []u8) -> void {
+    expect_retained_text(tree.texts.at(value.node), expected);
+    return;
+}
+
+fn expect_retained_text(
+    retained: &string::String,
+    expected: []u8
+) -> void {
+    let bytes = retained.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
 fn empty_signature(
     allocator: Allocator,
+    tree: &var ast::Ast,
     name: []u8
 ) -> !ast::FunctionSignature {
-    let function_name = try owned_text(allocator, name);
-    errdefer function_name.deinit();
-    let extern_abi = try owned_text(allocator, "");
+    let function_name = try retained_text(allocator, tree, name);
+    let extern_abi = try retained_text(allocator, tree, "");
     return ast::FunctionSignature {
         receiver: false,
-        name: move function_name,
+        name: function_name,
         static_params: array::new<ast::StaticParam>(allocator),
         params: array::new<ast::Param>(allocator),
         return_type: null,
         requires_unsafe: false,
-        extern_abi: move extern_abi,
+        extern_abi: extern_abi,
         public: false,
         std: false
     };
@@ -49,8 +64,7 @@ fn expect_marker_value(
     if ast::marker_value(tree, marker) |inner| {
         match tree.expressions.at(inner.node) {
             Int(value) => {
-                let bytes = value.value.as_bytes();
-                testing::expect(mem::equal_bytes(bytes, expected));
+                expect_text(tree, value.value, expected);
             },
             _ => testing::fail("marker did not retain its integer child"),
         }
@@ -78,18 +92,117 @@ fn expect_variant_path(
         Field(field) => {
             testing::expect(field.namespace);
             testing::expect(field.span.is_zero());
-            let variant = field.name.as_bytes();
-            testing::expect_equal<[]u8>(expected_variant, variant);
+            expect_text(tree, field.name, expected_variant);
             match tree.expressions.at(field.receiver.node) {
                 Ident(ident) => {
                     testing::expect(ident.span.is_zero());
-                    let owner = ident.name.as_bytes();
-                    testing::expect_equal<[]u8>(expected_owner, owner);
+                    expect_text(tree, ident.name, expected_owner);
                 },
                 _ => testing::fail("variant owner was not an identifier"),
             }
         },
         _ => testing::fail("variant path was not a namespace field"),
+    }
+    return;
+}
+
+fn expect_ident_name(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Ident(ident) => {
+            testing::expect(ident.span.is_zero());
+            expect_text(tree, ident.name, expected);
+        },
+        _ => testing::fail("expression was not an identifier"),
+    }
+    return;
+}
+
+fn expect_construct_worker(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected_binding: []u8,
+    expected_type_arg: []u8,
+    expected_args: ast::ExpressionList,
+    expected_arg: ast::Expression
+) -> void {
+    match tree.statements.at(statement.node) {
+        Let(binding) => {
+            testing::expect(!binding.mutable);
+            expect_text(tree, binding.name, expected_binding);
+            match tree.expressions.at(binding.value.node) {
+                Try(tried) => match tree.expressions.at(tried.value.node) {
+                    Call(call) => {
+                        testing::expect(call.args.node == expected_args.node);
+                        testing::expect_equal<i64>(1, call.args.len(tree));
+                        testing::expect(
+                            call.args.get_or_panic(tree, 0).node == expected_arg.node
+                        );
+                        match tree.expressions.at(call.callee.node) {
+                            TypeApply(applied) => {
+                                expect_text(tree, applied.type_arg, expected_type_arg);
+                                expect_ident_name(tree, applied.callee, "make");
+                            },
+                            _ => testing::fail("worker call had no static field argument"),
+                        }
+                    },
+                    _ => testing::fail("worker result was not a call"),
+                },
+                _ => testing::fail("worker result was not tried"),
+            }
+        },
+        _ => testing::fail("construct statement was not a binding"),
+    }
+    return;
+}
+
+fn expect_construct_cleanup(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected_binding: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        ErrDefer(cleanup) => match tree.expressions.at(cleanup.expr.node) {
+            Call(call) => {
+                testing::expect_equal<i64>(0, call.args.len(tree));
+                match tree.expressions.at(call.callee.node) {
+                    Field(method) => {
+                        testing::expect(!method.namespace);
+                        testing::expect(method.span.is_zero());
+                        expect_text(tree, method.name, "deinit");
+                        expect_ident_name(tree, method.receiver, expected_binding);
+                    },
+                    _ => testing::fail("cleanup callee was not a method field"),
+                }
+            },
+            _ => testing::fail("errdefer did not retain a cleanup call"),
+        },
+        _ => testing::fail("owner field had no errdefer"),
+    }
+    return;
+}
+
+fn expect_construct_field(
+    tree: &ast::Ast,
+    field: &ast::FieldValue,
+    expected_name: []u8,
+    expected_binding: []u8,
+    moved: bool
+) -> void {
+    expect_text(tree, field.name, expected_name);
+    if moved {
+        match tree.expressions.at(field.value.node) {
+            Move(marker) => {
+                testing::expect(marker.span.is_zero());
+                expect_ident_name(tree, marker.value, expected_binding);
+            },
+            _ => testing::fail("owner field handoff was not marked move"),
+        }
+    } else {
+        expect_ident_name(tree, field.value, expected_binding);
     }
     return;
 }
@@ -119,20 +232,24 @@ test "program retains declaration handles and nested contract methods" {
     let body = tree.add_block(ast::BlockStmt {
         statements: move body_statements
     });
-    var signature = try empty_signature(allocator, "visit");
+    var signature = try empty_signature(allocator, &var tree, "visit");
     errdefer signature.deinit();
     try signature.static_params.append(ast::StaticParam {
-        name: try owned_text(allocator, "T"),
+        name: try retained_text(allocator, &var tree, "T"),
         type_name: null
     });
     try signature.static_params.append(ast::StaticParam {
-        name: try owned_text(allocator, "count"),
+        name: try retained_text(allocator, &var tree, "count"),
         type_name: integer
     });
-    let function_doc = try owned_text(allocator, "Visits one value.");
+    let function_doc = try retained_text(
+        allocator,
+        &var tree,
+        "Visits one value."
+    );
     let function_decl = ast::FunctionDecl {
         signature: move signature,
-        doc: move function_doc,
+        doc: function_doc,
         derived: false,
         body: body
     };
@@ -142,17 +259,17 @@ test "program retains declaration handles and nested contract methods" {
     try program.add_declaration(function);
     var methods = array::new<ast::FunctionDecl>(allocator);
     errdefer methods.deinit();
-    let method_signature = try empty_signature(allocator, "visit");
+    let method_signature = try empty_signature(allocator, &var tree, "visit");
     errdefer method_signature.deinit();
-    let method_doc = try owned_text(allocator, "");
+    let method_doc = try retained_text(allocator, &var tree, "");
     try methods.append(ast::FunctionDecl {
         signature: move method_signature,
-        doc: move method_doc,
+        doc: method_doc,
         derived: false,
         body: null
     });
     let contract_node = ast::ContractDecl {
-        name: try owned_text(allocator, "Visitor"),
+        name: try retained_text(allocator, &var tree, "Visitor"),
         methods: move methods,
         public: true
     };
@@ -160,34 +277,32 @@ test "program retains declaration handles and nested contract methods" {
         move contract_node
     ));
     try program.add_declaration(contract_decl);
-    var tags = array::new<string::String>(allocator);
+    var tags = array::new<ast::Text>(allocator);
     errdefer tags.deinit();
-    try tags.append(try owned_text(allocator, "Ready"));
-    var tag_docs = map::new<[]u8, string::String>(allocator);
+    try tags.append(try retained_text(allocator, &var tree, "Ready"));
+    var tag_docs = map::new<[]u8, ast::Text>(allocator);
     errdefer tag_docs.deinit();
     try tag_docs.insert(
         "Ready",
-        try owned_text(allocator, "The visitor may run.")
+        try retained_text(allocator, &var tree, "The visitor may run.")
     );
-    let enum_name = try owned_text(allocator, "State");
-    errdefer enum_name.deinit();
-    let enum_doc = try owned_text(allocator, "Visitor state.");
+    let enum_name = try retained_text(allocator, &var tree, "State");
+    let enum_doc = try retained_text(allocator, &var tree, "Visitor state.");
     let enum_node = ast::EnumDecl {
-        name: move enum_name,
-        doc: move enum_doc,
+        name: enum_name,
+        doc: enum_doc,
         tags: move tags,
         tag_docs: move tag_docs,
         public: true
     };
     let enum_decl = tree.add_declaration(ast::DeclarationNode::Enum(move enum_node));
     try program.add_declaration(enum_decl);
-    let error_name = try owned_text(allocator, "Failure");
-    errdefer error_name.deinit();
-    let error_doc = try owned_text(allocator, "");
+    let error_name = try retained_text(allocator, &var tree, "Failure");
+    let error_doc = try retained_text(allocator, &var tree, "");
     let error_node = ast::ErrorSetDecl {
-        name: move error_name,
-        doc: move error_doc,
-        members: array::new<string::String>(allocator),
+        name: error_name,
+        doc: error_doc,
+        members: array::new<ast::Text>(allocator),
         member_docs: null,
         public: false
     };
@@ -198,8 +313,7 @@ test "program retains declaration handles and nested contract methods" {
     testing::expect_equal<i64>(4, program.declarations.len());
     match tree.declarations.at(function.node) {
         Function(value) => {
-            let name = value.signature.name.as_bytes();
-            testing::expect_equal<[]u8>("visit", name);
+            expect_text(&tree, value.signature.name, "visit");
             if value.body |retained| {
                 expect_block_len(&tree, retained, 0);
             } else {
@@ -249,8 +363,9 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let subject_name = try retained_text(allocator, &var tree, "slot");
     let subject = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
-        name: try string::from_bytes(allocator, "slot"),
+        name: subject_name,
         span: zero_span()
     }));
     var body_statements = array::new<ast::Statement>(allocator);
@@ -258,26 +373,29 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     let body = tree.add_block(ast::BlockStmt {
         statements: move body_statements
     });
-    let capture_name = try string::from_bytes(allocator, "variant");
-    errdefer capture_name.deinit();
-    let payload_name = try string::from_bytes(allocator, "payload");
+    let capture_name = try retained_text(allocator, &var tree, "variant");
+    let payload_name = try retained_text(allocator, &var tree, "payload");
+    let owner_name = try retained_text(allocator, &var tree, "Slot");
+    let empty_name = try retained_text(allocator, &var tree, "");
+    let vacant_name = try retained_text(allocator, &var tree, "Vacant");
+    let held_name = try retained_text(allocator, &var tree, "Held");
     let comptime_node = ast::ComptimeMatchStmt {
         value: subject,
-        name: move capture_name,
-        binding: move payload_name,
+        name: capture_name,
+        binding: payload_name,
         body: body
     };
     let comptime_stmt = tree.add_statement(ast::StatementNode::ComptimeMatch(
-        move comptime_node
+        comptime_node
     ));
     var variants = array::new<ast::MetaVariant>(allocator);
     defer variants.deinit();
     try variants.append(ast::MetaVariant {
-        name: "Vacant",
+        name: vacant_name,
         has_payload: false
     });
     try variants.append(ast::MetaVariant {
-        name: "Held",
+        name: held_name,
         has_payload: true
     });
     match tree.statements.at(comptime_stmt.node) {
@@ -285,29 +403,24 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
             let expanded = try ast::comptime_match_expansion(
                 allocator,
                 stmt,
-                "Slot",
+                owner_name,
+                empty_name,
                 &variants
             );
             defer expanded.deinit();
             testing::expect_equal<i64>(2, expanded.arms.len());
-            let capture = expanded.meta_capture.as_bytes();
-            let owner = expanded.meta_owner.as_bytes();
-            testing::expect_equal<[]u8>("variant", capture);
-            testing::expect_equal<[]u8>("Slot", owner);
+            expect_text(&tree, expanded.meta_capture, "variant");
+            expect_text(&tree, expanded.meta_owner, "Slot");
             if expanded.arms.at(0) |arm| {
-                let tag = arm.tag.as_bytes();
-                let binding = arm.binding.as_bytes();
-                testing::expect_equal<[]u8>("Vacant", tag);
-                testing::expect_equal<[]u8>("", binding);
+                expect_text(&tree, arm.tag, "Vacant");
+                expect_text(&tree, arm.binding, "");
                 testing::expect(arm.body.node == body.node);
             } else {
                 testing::fail("missing first expansion arm");
             }
             if expanded.arms.at(1) |arm| {
-                let tag = arm.tag.as_bytes();
-                let binding = arm.binding.as_bytes();
-                testing::expect_equal<[]u8>("Held", tag);
-                testing::expect_equal<[]u8>("payload", binding);
+                expect_text(&tree, arm.tag, "Held");
+                expect_text(&tree, arm.binding, "payload");
                 testing::expect(arm.body.node == body.node);
             } else {
                 testing::fail("missing second expansion arm");
@@ -316,40 +429,41 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
         },
         _ => testing::fail("comptime match was not retained in the statement arena"),
     }
-    var no_args = array::new<ast::Expression>(allocator);
+    let no_args = tree.add_expression_list(array::new<ast::Expression>(allocator));
     let tag = try ast::variant_expansion(
         allocator,
         &var tree,
         "Slot",
         "Vacant",
-        move no_args
+        no_args
     );
     expect_variant_path(&tree, tag, "Slot", "Vacant");
     var source_args = array::new<ast::Expression>(allocator);
     errdefer source_args.deinit();
     try source_args.append(subject);
+    let source_args_list = tree.add_expression_list(move source_args);
     let source_call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
         callee: subject,
-        args: move source_args
+        args: source_args_list
     }));
     match tree.expressions.at(source_call.node) {
         Call(source) => {
-            let copied_args = try source.args.clone(allocator);
+            let shared_args = source.args;
             let call = try ast::variant_expansion(
                 allocator,
                 &var tree,
                 "Slot",
                 "Held",
-                move copied_args
+                shared_args
             );
             match tree.expressions.at(call.node) {
                 Call(value) => {
-                    testing::expect_equal<i64>(1, value.args.len());
+                    testing::expect(value.args.node == source_args_list.node);
+                    testing::expect_equal<i64>(1, value.args.len(&tree));
                     expect_variant_path(&tree, value.callee, "Slot", "Held");
-                    match tree.expressions.at(value.args.get_or_panic(0).node) {
+                    match tree.expressions.at(value.args.get_or_panic(&tree, 0).node) {
                         Ident(ident) => {
-                            let name = ident.name.as_bytes();
-                            testing::expect_equal<[]u8>("slot", name);
+                            expect_text(&tree, ident.name, "slot");
                         },
                         _ => testing::fail("variant payload argument changed shape"),
                     }
@@ -361,12 +475,126 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     }
 }
 
+test "construct expansion builds fields in order and marks owner handoff" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let subject_name = try retained_text(allocator, &var tree, "input");
+    let subject = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: subject_name,
+        span: zero_span()
+    }));
+    var source_args = array::new<ast::Expression>(allocator);
+    errdefer source_args.deinit();
+    try source_args.append(subject);
+    let source_args_list = tree.add_expression_list(move source_args);
+    let source_call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
+        callee: subject,
+        args: source_args_list
+    }));
+    var fields = array::new<ast::ConstructField>(allocator);
+    defer fields.deinit();
+    try fields.append(ast::ConstructField {
+        name: "name",
+        type_name: "std::string::String"
+    });
+    try fields.append(ast::ConstructField {
+        name: "count",
+        type_name: "i64"
+    });
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    try owners.insert("std::array::Array", true);
+    testing::expect(ast::owner_type(
+        &owners,
+        "std::array::Array<std::string::String>"
+    ));
+    testing::expect(!ast::owner_type(&owners, "i64"));
+    match tree.expressions.at(source_call.node) {
+        Call(source) => {
+            let shared_args = source.args;
+            let expanded = try ast::construct_expansion(
+                allocator,
+                &var tree,
+                "User",
+                "make",
+                &fields,
+                shared_args,
+                &owners
+            );
+            defer expanded.deinit();
+            testing::expect_equal<i64>(3, expanded.statements.len());
+            expect_construct_worker(
+                &tree,
+                expanded.statements.get_or_panic(0),
+                "construct$name",
+                "User, name",
+                source_args_list,
+                subject
+            );
+            expect_construct_cleanup(
+                &tree,
+                expanded.statements.get_or_panic(1),
+                "construct$name"
+            );
+            expect_construct_worker(
+                &tree,
+                expanded.statements.get_or_panic(2),
+                "construct$count",
+                "User, count",
+                source_args_list,
+                subject
+            );
+            match tree.expressions.at(expanded.literal.node) {
+                StructLiteral(literal) => {
+                    testing::expect(literal.span.is_zero());
+                    expect_text(&tree, literal.type_name, "User");
+                    testing::expect_equal<i64>(2, literal.fields.len());
+                    if literal.fields.at(0) |field| {
+                        expect_construct_field(
+                            &tree,
+                            field,
+                            "name",
+                            "construct$name",
+                            true
+                        );
+                    } else {
+                        testing::fail("missing owner field");
+                    }
+                    if literal.fields.at(1) |field| {
+                        expect_construct_field(
+                            &tree,
+                            field,
+                            "count",
+                            "construct$count",
+                            false
+                        );
+                    } else {
+                        testing::fail("missing copy field");
+                    }
+                },
+                _ => testing::fail("construct result was not a struct literal"),
+            }
+            match tree.expressions.at(source_call.node) {
+                Call(retained) => {
+                    testing::expect(retained.args.node == source_args_list.node);
+                    testing::expect_equal<i64>(1, retained.args.len(&tree));
+                },
+                _ => testing::fail("source call changed shape"),
+            }
+        },
+        _ => testing::fail("source arguments were not retained by a call"),
+    }
+}
+
 test "typed handles retain a shared expression graph" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let literal_text = try retained_text(allocator, &var tree, "41");
     let literal = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
-        value: try owned_text(allocator, "41")
+        value: literal_text
     }));
     let marker = tree.add_expression(ast::ExpressionNode::Move(ast::MoveExpr {
         value: literal,
@@ -375,9 +603,14 @@ test "typed handles retain a shared expression graph" {
     let comptime_marker = tree.add_expression(ast::ExpressionNode::Comptime(
         ast::ComptimeExpr { expr: literal }
     ));
+    let safety = try retained_text(
+        allocator,
+        &var tree,
+        "integer literal has no unsafe effect"
+    );
     let unsafe_marker = tree.add_expression(ast::ExpressionNode::Unsafe(ast::UnsafeExpr {
         value: literal,
-        safety: try owned_text(allocator, "integer literal has no unsafe effect"),
+        safety: safety,
         span: zero_span()
     }));
     let statement = tree.add_statement(ast::StatementNode::Expr(ast::ExprStmt {
