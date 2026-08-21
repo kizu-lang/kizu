@@ -1,6 +1,7 @@
 import std::arena;
 import std::array;
 import std::fmt;
+import std::map;
 import std::mem;
 import std::string;
 
@@ -102,6 +103,13 @@ pub contract NameMapper {
         allocator: Allocator,
         path: &array::Array<string::String>
     ) -> !array::Array<string::String>;
+}
+
+// NoReplacements selects the plain static renderer instantiation.
+struct NoReplacements {}
+
+struct ParsedSubstitutions {
+    values: map::Map<[]u8, Type>
 }
 
 // parser reads one type spelling left to right while owning every node it has
@@ -396,17 +404,27 @@ out: &var string::String,
 value: &Type,
 handle: arena::Handle<Node>
 ) -> !void {
+    let lookup = NoReplacements {};
+    return append_node_with<NoReplacements>(out, value, handle, &lookup);
+}
+
+fn append_node_with<R>(
+out: &var string::String,
+value: &Type,
+handle: arena::Handle<Node>,
+lookup: &R
+) -> !void {
     match value.nodes.at(handle) {
-        Name(node) => try append_name(out, value, node),
+        Name(node) => try append_name_with<R>(out, value, node, lookup),
         Slice(node) => {
             try out.append_bytes("[]");
-            try append_node(out, value, node.elem);
+            try append_node_with<R>(out, value, node.elem, lookup);
         },
         Buffer(node) => {
             try out.append_byte(cast<u8>(91));
             try fmt::append_i64(out, node.size);
             try out.append_byte(cast<u8>(93));
-            try append_node(out, value, node.elem);
+            try append_node_with<R>(out, value, node.elem, lookup);
         },
         Borrow(node) => {
             if node.mutable {
@@ -414,28 +432,73 @@ handle: arena::Handle<Node>
             } else {
                 try out.append_byte(cast<u8>(38));
             }
-            try append_node(out, value, node.elem);
+            try append_node_with<R>(out, value, node.elem, lookup);
         },
         Optional(node) => {
             try out.append_byte(cast<u8>(63));
-            try append_node(out, value, node.elem);
+            try append_node_with<R>(out, value, node.elem, lookup);
         },
         Const(node) => {
             try out.append_bytes("const ");
-            try append_node(out, value, node.elem);
+            try append_node_with<R>(out, value, node.elem, lookup);
         },
         ErrorUnion(node) => {
             if node.err |err| {
-                try append_node(out, value, err);
+                try append_node_with<R>(out, value, err, lookup);
             }
             try out.append_byte(cast<u8>(33));
-            try append_node(out, value, node.ok);
+            try append_node_with<R>(out, value, node.ok, lookup);
         },
     }
     return;
 }
 
-fn append_name(out: &var string::String, value: &Type, node: &Name) -> !void {
+fn append_name_with<R>(
+out: &var string::String,
+value: &Type,
+node: &Name,
+lookup: &R
+) -> !void {
+    comptime if R == type<NoReplacements> {
+    } else {
+        if node.path.len() == 1 and node.args.len() == 0 {
+            if node.path.at(0) |part| {
+                let bytes = part.as_bytes();
+                if try lookup.append_replacement(out, bytes) {
+                    return;
+                }
+            }
+        }
+    }
+    try append_name_path(out, node);
+    if node.args.len() == 0 {
+        return;
+    }
+    try out.append_byte(cast<u8>(60));
+    var index = 0;
+    while node.args.get(index) |arg| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_node_with<R>(out, value, arg, lookup);
+        index = index + 1;
+    }
+    try out.append_byte(cast<u8>(62));
+    return;
+}
+
+fn (self: &ParsedSubstitutions) append_replacement(
+out: &var string::String,
+name: []u8
+) -> !bool {
+    if self.values.at(name) |replacement| {
+        try append_node(out, replacement, replacement.root);
+        return true;
+    }
+    return false;
+}
+
+fn append_name_path(out: &var string::String, node: &Name) -> !void {
     var index = 0;
     while node.path.at(index) |part| {
         if index > 0 {
@@ -445,19 +508,6 @@ fn append_name(out: &var string::String, value: &Type, node: &Name) -> !void {
         try out.append_bytes(bytes);
         index = index + 1;
     }
-    if node.args.len() == 0 {
-        return;
-    }
-    try out.append_byte(cast<u8>(60));
-    index = 0;
-    while node.args.get(index) |arg| {
-        if index > 0 {
-            try out.append_bytes(", ");
-        }
-        try append_node(out, value, arg);
-        index = index + 1;
-    }
-    try out.append_byte(cast<u8>(62));
     return;
 }
 
@@ -642,6 +692,42 @@ mapper: &var M
         return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
     return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
+}
+
+/// Replaces type parameters in a spelling and renders the owned result.
+pub fn substitute_text(
+allocator: Allocator,
+text: []u8,
+substitutions: &map::Map<[]u8, []u8>
+) -> !string::String {
+    if substitutions.len() == 0 {
+        return owned_text(allocator, text);
+    }
+    let parsed = try parse(allocator, text);
+    defer parsed.deinit();
+    var parsed_substitutions = ParsedSubstitutions {
+        values: map::new<[]u8, Type>(allocator)
+    };
+    defer parsed_substitutions.deinit();
+    var index = 0;
+    while substitutions.key_at(index) |name| {
+        if substitutions.get(name) |replacement| {
+            try parsed_substitutions.values.insert(
+                name,
+                try parse(allocator, replacement)
+            );
+        }
+        index = index + 1;
+    }
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_node_with<ParsedSubstitutions>(
+        &var out,
+        &parsed,
+        parsed.root,
+        &parsed_substitutions
+    );
+    return move out;
 }
 
 /// Calls visitor for value and every nested type, outermost first.
