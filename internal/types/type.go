@@ -369,6 +369,46 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 	return "", mutable, Type(rest), true
 }
 
+// borrowedValueType returns the value visible through an explicit borrow.
+// Borrow locals already store this inner type in scope; this keeps direct
+// borrowed-return expressions equally transparent to field, method, and match
+// reads without erasing their borrow type in move-sensitive positions.
+func borrowedValueType(value Type) Type {
+	if _, _, inner, ok := explicitBorrowType(value); ok {
+		return inner
+	}
+	return value
+}
+
+// coerceReturnedBorrowArgument admits a borrow-return expression only into a
+// borrow parameter. Explicit `&value` syntax is unwrapped before expression
+// checking; a call returning &T reaches this point still carrying that type,
+// so it must make the same owning/borrowed distinction here.
+func coerceReturnedBorrowArgument(
+	got Type,
+	want Type,
+	wantBorrow bool,
+	wantMutable bool,
+) (Type, error) {
+	_, mutable, inner, ok := explicitBorrowType(got)
+	if !ok {
+		return got, nil
+	}
+	if !wantBorrow {
+		return "", errorf("type error: borrow argument cannot be passed to owning parameter")
+	}
+	if mutable && !wantMutable {
+		return "", errorf("type error: argument expects &T, got &var")
+	}
+	if !mutable && wantMutable {
+		return "", errorf("type error: argument expects &var T, got &T")
+	}
+	if !sameType(inner, want) {
+		return got, nil
+	}
+	return inner, nil
+}
+
 // joinTypes renders static arguments for an instantiation key.
 func joinTypes(types []Type) string {
 	parts := make([]string, 0, len(types))

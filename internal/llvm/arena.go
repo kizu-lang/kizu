@@ -108,10 +108,12 @@ func (e *emitter) writeArenaAdd(instr *ir.Instr) error {
 	return nil
 }
 
-// writeArenaAt lowers Arena.at(handle) to a checked copy load.
+// writeArenaAt lowers Arena.at(handle) to a checked shared borrow. Borrows with
+// value IR load a copy; address-spelled borrows (currently unions) keep the
+// runtime element address.
 func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || !isArenaHandleType(instr.Args[1].Type) {
-		return fmt.Errorf("llvm error: arena.at expects Arena<T>, Handle<T> -> T")
+		return fmt.Errorf("llvm error: arena.at expects Arena<T>, Handle<T> -> &T")
 	}
 	arena := e.value(instr.Args[0])
 	handle := e.value(instr.Args[1])
@@ -119,6 +121,10 @@ func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
 		ptrName, arena.operand, handle.operand)
 	e.writeNullFailure(instr, ptrName, "arena.at", "arena_handle")
+	if strings.HasPrefix(instr.Result.Type, "&") {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
+		return nil
+	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
 		resultName, e.llvmType(instr.Result.Type), ptrName)

@@ -96,7 +96,12 @@ policy.
 - `std::arena::Arena<T>.add(value)` moves `value` into the arena.
 - `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.
 - `std::arena::Handle<T>` is an opaque ID, not a raw pointer.
-- `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a local borrow-like value.
+- `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a shared borrow `&T`
+  tied to the arena.
+- A bound `Arena.at` result keeps the arena borrowed until its last use; `add`
+  and `deinit` cannot run while that borrow is live.
+- An `Arena.at` borrow can return through a parameter-rooted arena, but cannot
+  escape a local arena.
 - `std::arena::Arena<T>` may own elements that themselves own resources.
 - `std::arena::Arena<T>.deinit()` consumes every initialized owner element before
   releasing arena storage and invalidating the binding.
@@ -239,7 +244,7 @@ memory-safety invariants to representative examples.
 | `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
-| arena at is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_at_move.kizu` |
+| arena at returns an arena-tied `&T` | `examples/arena.kizu`, `examples/arena_helper.kizu`, `tests/behavior/src/arena_param.kizu` | `examples/negative/arena_at_move.kizu`, `examples/negative/arena_at_borrow_escape.kizu`, `examples/negative/arena_deinit_while_at_borrowed.kizu` |
 | arena cleanup invalidates arena and handles | `examples/arena.kizu` | `examples/negative/arena_double_deinit.kizu`, `examples/negative/arena_add_after_deinit.kizu`, `examples/negative/arena_at_after_deinit.kizu`, `examples/negative/arena_deinit_while_borrowed.kizu`, `examples/negative/arena_deinit_wrong_receiver.kizu`, `examples/negative/arena_deinit_borrowed_receiver.kizu`, `examples/negative/arena_deinit_temporary_receiver.kizu`, `examples/negative/arena_deinit_moved_receiver.kizu`, `examples/negative/arena_handle_after_deinit.kizu` |
 | arena cleanup consumes owner elements before storage | `examples/arena_owner_elements.kizu` | |
 | Box take transfers its payload and consumes the cell | `examples/std_mem_box_take.kizu` | `examples/negative/std_mem_box_take_after_take.kizu`, `examples/negative/std_mem_box_take_while_borrowed.kizu` |

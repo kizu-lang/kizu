@@ -1063,6 +1063,9 @@ func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (boo
 		!c.arenaOutlivesFrame(arena.arenaID, env) {
 		return true, errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
+	if handled, err := c.checkArenaBorrowReturnExit(stmt.Value, env); handled {
+		return true, err
+	}
 	if call, ok := stmt.Value.(*ast.CallExpr); ok {
 		if handled, err := c.checkTiedAllocatorReturn(call, env); handled {
 			if err != nil {
@@ -1072,6 +1075,49 @@ func (c *Checker) checkReturnValueEscapes(stmt *ast.ReturnStmt, env *scope) (boo
 		}
 	}
 	return false, nil
+}
+
+// checkArenaBorrowReturnExit completes the return path once Arena.at is known
+// to be the returned borrow, including the ordinary owner-exit check.
+func (c *Checker) checkArenaBorrowReturnExit(
+	expr ast.Expression,
+	env *scope,
+) (bool, error) {
+	handled, err := c.checkArenaBorrowReturn(expr, env)
+	if !handled || err != nil {
+		return handled, err
+	}
+	return true, c.checkOwnersConsumed(env, 0, leakExit{})
+}
+
+// checkArenaBorrowReturn validates the structural source of a direct
+// Arena.at borrow return. A source rooted in a borrow parameter outlives the
+// frame by contract; a source rooted in local state would dangle.
+func (c *Checker) checkArenaBorrowReturn(
+	expr ast.Expression,
+	env *scope,
+) (bool, error) {
+	if c.currentFunction == nil {
+		return false, nil
+	}
+	_, returnMutable, returnElem, ok := explicitOwnershipBorrowType(
+		returnTypeName(c.currentFunction),
+	)
+	if !ok || returnMutable {
+		return false, nil
+	}
+	source, elem, ok, err := c.arenaAtBorrowSource(expr, env)
+	if err != nil || !ok {
+		return ok, err
+	}
+	if !sameOwnershipType(elem, returnElem) {
+		return false, nil
+	}
+	if !paramRootedBinding(source.target) {
+		return true, errorAt(expressionSpan(expr),
+			"borrow error: arena.at borrow from local `%s` cannot escape", source.target.name)
+	}
+	return true, nil
 }
 
 // checkTiedAllocatorReturn handles `return <factory>(...)` for tied-allocator
@@ -1159,6 +1205,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if target, path, mutable, ok := c.stringViewInitializer(stmt.Value, env); ok {
 		return c.checkStringViewLetStmt(stmt, target, path, mutable, env)
 	}
+	if handled, err := c.checkExplicitBorrowResultLetStmt(stmt, env); handled {
+		return err
+	}
 	sources, elem, mutable, ok, err := c.returnedBorrowInitializer(stmt.Value, env)
 	if ok || err != nil {
 		if err != nil {
@@ -1185,6 +1234,89 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	}
 	env.define(value)
 	return nil
+}
+
+// checkExplicitBorrowResultLetStmt recognizes Arena.at and declared borrow
+// returns before the view-capture path, because &Owner binds a reference and
+// must not inherit the owner's deinit obligation.
+func (c *Checker) checkExplicitBorrowResultLetStmt(
+	stmt *ast.LetStmt,
+	env *scope,
+) (bool, error) {
+	source, elem, ok, err := c.arenaAtBorrowSource(stmt.Value, env)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, c.checkExplicitReturnedBorrowLetStmt(
+			stmt, []borrowSource{source}, elem, false, env,
+		)
+	}
+	sources, elem, mutable, ok, err := c.explicitReturnedBorrowInitializer(stmt.Value, env)
+	if !ok || err != nil {
+		return ok || err != nil, err
+	}
+	return true, c.checkExplicitReturnedBorrowLetStmt(stmt, sources, elem, mutable, env)
+}
+
+// explicitReturnedBorrowInitializer separates a declared &T or &var T result
+// from owners that merely capture views. Both carry structural sources, but
+// only the latter retain an ownership obligation in the caller.
+func (c *Checker) explicitReturnedBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+) ([]borrowSource, string, bool, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, "", false, false, nil
+	}
+	_, fn := c.calledFunction(call.Callee)
+	if fn == nil {
+		return nil, "", false, false, nil
+	}
+	if _, _, _, ok := explicitOwnershipBorrowType(returnTypeName(fn)); !ok {
+		return nil, "", false, false, nil
+	}
+	return c.returnedBorrowInitializer(expr, env)
+}
+
+// arenaAtBorrowSource recognizes a direct Arena.at result and resolves the
+// arena place that keeps the element alive. It validates the complete call
+// before the caller records the returned shared borrow.
+func (c *Checker) arenaAtBorrowSource(
+	expr ast.Expression,
+	env *scope,
+) (borrowSource, string, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return borrowSource{}, "", false, nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Namespace || field.Name != "at" {
+		return borrowSource{}, "", false, nil
+	}
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return borrowSource{}, "", false, nil
+	}
+	base, elem, ok := splitGenericType(borrowedOwnershipValueType(receiverType))
+	if !ok || base != "std::arena::Arena" {
+		return borrowSource{}, "", false, nil
+	}
+	target, path, err := c.borrowTarget(field.Receiver, env)
+	if err != nil {
+		return borrowSource{}, "", true, err
+	}
+	result, err := c.readExpr(expr, env)
+	if err != nil {
+		return borrowSource{}, "", true, err
+	}
+	_, mutable, resultElem, resultBorrow := explicitOwnershipBorrowType(result)
+	if !resultBorrow || mutable || !sameOwnershipType(resultElem, elem) {
+		return borrowSource{}, "", true,
+			errorf("arena error: Arena.at must return &%s, got %s", elem, result)
+	}
+	return borrowSource{target: target, field: path}, elem, true, nil
 }
 
 // rejectStoredOptional refuses to store a `?T` whose payload owns memory or
@@ -1343,6 +1475,29 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 		return err
 	}
 	if err := c.attachAllocProvenance(value); err != nil {
+		return err
+	}
+	env.define(value)
+	return nil
+}
+
+// checkExplicitReturnedBorrowLetStmt binds a declared borrow result. The
+// element may itself be an owner type, but the binding owns only a reference
+// to it and therefore never inherits the element's deinit obligation.
+func (c *Checker) checkExplicitReturnedBorrowLetStmt(
+	stmt *ast.LetStmt,
+	sources []borrowSource,
+	elem string,
+	mutable bool,
+	env *scope,
+) error {
+	value := c.newBinding(stmt.Name, elem)
+	value.mutable = stmt.Mutable
+	value.declSpan = expressionSpan(stmt.Value)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.mutBorrow = mutable
+	if err := c.bindBorrowSources(value, sources, mutable); err != nil {
 		return err
 	}
 	env.define(value)
@@ -2702,6 +2857,7 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
+	valueType = borrowedOwnershipValueType(valueType)
 	tags, unionPayloads, ok := c.matchTags(valueType)
 	if !ok {
 		return errorf("move error: match expects enum or union, got %s", valueType)
@@ -3438,7 +3594,7 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 			return typeName, nil
 		}
 		return "", errorAt(expressionSpan(expr),
-			"arena error: arena.at returns a local borrow and cannot be moved")
+			"arena error: arena.at returns &T and cannot be moved")
 	}
 	if st, ok := expr.(*ast.StructLiteralExpr); ok {
 		return c.moveStructLiteralExpr(st, env)
@@ -3515,6 +3671,7 @@ func (c *Checker) checkMatchExprValue(
 	if err != nil {
 		return "", err
 	}
+	valueType = borrowedOwnershipValueType(valueType)
 	tags, unionPayloads, ok := c.matchTags(valueType)
 	if !ok {
 		return "", errorf("move error: match expects enum or union, got %s", valueType)
@@ -5225,6 +5382,12 @@ func (c *Checker) checkGenericUserArg(
 	if err != nil {
 		return err
 	}
+	got, err = coerceOwnershipBorrowArgument(
+		got, want, fn.params[idx].borrow, fn.params[idx].mutBorrow,
+	)
+	if err != nil {
+		return err
+	}
 	if got != want {
 		return errorf("move error: arg %d of `%s` expects %s, got %s",
 			idx+1, name, want, got)
@@ -5350,6 +5513,7 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if err != nil {
 		return "", err
 	}
+	receiverType = borrowedOwnershipValueType(receiverType)
 	if root, field, ok := directFieldRoot(expr, env); ok {
 		if field != "" && root.fieldDeinit[field] {
 			return "", errorAt(expr.Span, "move error: field `%s.%s` was deinitialized",
@@ -5476,7 +5640,7 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if c.containsArenaAt(expr.Receiver, env) {
 		return "", errorAt(
 			expr.Span,
-			"arena error: arena.at returns a local borrow and its fields cannot be moved",
+			"arena error: arena.at returns &T, so its fields cannot be moved",
 		)
 	}
 	if err := c.consumeOwnerField(expr, env); err != nil {
@@ -5581,6 +5745,13 @@ func (c *Checker) readDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 		if value.borrowedParam {
 			return value.typeName, nil
 		}
+	}
+	receiverType, err := c.readExpr(expr.Receiver, env)
+	if err != nil {
+		return "", err
+	}
+	if _, _, inner, ok := explicitOwnershipBorrowType(receiverType); ok {
+		return inner, nil
 	}
 	if typeName, ok, err := c.rawPointerDerefExprType(expr, env); ok || err != nil {
 		return typeName, err
@@ -5708,6 +5879,9 @@ func (c *Checker) checkMethodCallExpr(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if typ, ok, err := c.checkArenaAtReceiverMethod(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkDirectFieldReceiverMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -5715,6 +5889,32 @@ func (c *Checker) checkMethodCallExpr(
 		return typ, err
 	}
 	return c.checkLocalReceiverMethod(field, args, env)
+}
+
+// checkArenaAtReceiverMethod lets an immediate shared Arena.at result receive
+// the same read-only methods as a bound &T. The arena source remains borrowed
+// across argument checking and the call itself.
+func (c *Checker) checkArenaAtReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	source, elem, ok, err := c.arenaAtBorrowSource(field.Receiver, env)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	if err := checkBorrowConflictForField(source.target, source.field, false); err != nil {
+		return "", true, err
+	}
+	c.activateBorrow(source.target, source.field, false)
+	defer releaseTemporaryBorrow(temporaryBorrow{
+		value: source.target, field: source.field,
+	})
+	receiver := c.newBinding(field.Receiver.String(), elem)
+	receiver.borrowedParam = true
+	receiver.localBorrow = true
+	result, err := c.checkDirectFieldReceiverByType(receiver, field.Name, args, env)
+	return result, true, err
 }
 
 // checkLocalReceiverMethod validates methods whose receiver must be a local binding.
@@ -6008,7 +6208,7 @@ func (c *Checker) checkFieldArenaAt(
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
-	return arg, nil
+	return "&" + arg, nil
 }
 
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
@@ -6950,9 +7150,13 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
 }
 
-// checkArenaAt reads a handle and returns a local borrow-like value.
+// checkArenaAt reads a handle and returns a shared borrow tied to the arena.
 func (c *Checker) checkArenaAt(arena *binding, args []ast.Expression, env *scope) (string, error) {
-	return c.checkArenaHandleArg(arena, args, env, "arena.at")
+	elem, err := c.checkArenaHandleArg(arena, args, env, "arena.at")
+	if err != nil {
+		return "", err
+	}
+	return "&" + elem, nil
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor
@@ -7792,6 +7996,43 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 		return "", false, "", false
 	}
 	return "", mutable, rest, true
+}
+
+// coerceOwnershipBorrowArgument admits an expression already typed as &T only
+// where the callee borrows T. Explicit prefix borrows are transparent to this
+// checker; borrow-return calls need the equivalent conversion here.
+func coerceOwnershipBorrowArgument(
+	got string,
+	want string,
+	wantBorrow bool,
+	wantMutable bool,
+) (string, error) {
+	_, mutable, inner, ok := explicitOwnershipBorrowType(got)
+	if !ok {
+		return got, nil
+	}
+	if !wantBorrow {
+		return "", errorf("move error: borrow argument cannot be passed to owning parameter")
+	}
+	if mutable && !wantMutable {
+		return "", errorf("move error: argument expects &T, got &var")
+	}
+	if !mutable && wantMutable {
+		return "", errorf("move error: argument expects &var T, got &T")
+	}
+	if !sameOwnershipType(inner, want) {
+		return got, nil
+	}
+	return inner, nil
+}
+
+// borrowedOwnershipValueType returns the value visible through an explicit
+// borrow while leaving move-sensitive callers free to retain the &T spelling.
+func borrowedOwnershipValueType(typeName string) string {
+	if _, _, inner, ok := explicitOwnershipBorrowType(typeName); ok {
+		return inner
+	}
+	return typeName
 }
 
 // isRawPointerType reports whether typeName is a raw pointer spelling.

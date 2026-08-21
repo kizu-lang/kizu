@@ -1312,7 +1312,7 @@ fn main() {
     let h = boxes.add(Box { user: User { name: "alice" } });
     take(boxes.at(h).user);
 }`,
-			want: "arena.at returns a local borrow and its fields cannot be moved",
+			want: "arena.at returns &T, so its fields cannot be moved",
 		},
 	}
 	runErrorCases(t, cases)

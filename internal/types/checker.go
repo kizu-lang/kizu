@@ -2552,6 +2552,7 @@ func (c *Checker) checkMatchStmt(
 	if err != nil {
 		return false, err
 	}
+	valueType = borrowedValueType(valueType)
 	if tagged := c.taggedType(valueType); tagged != nil {
 		return c.checkMatchArms(stmt, tagged, nil, env, wantReturn, unsafe)
 	}
@@ -2934,6 +2935,7 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeM
 	if err != nil {
 		return "", err
 	}
+	valueType = borrowedValueType(valueType)
 	tagged := c.taggedType(valueType)
 	unionType := c.unions[string(valueType)]
 	if tagged == nil && unionType == nil {
@@ -5032,6 +5034,12 @@ func (c *Checker) checkGenericUserArg(
 	if err != nil {
 		return err
 	}
+	got, err = coerceReturnedBorrowArgument(
+		got, want, fn.borrowParams[idx], fn.mutBorrowParams[idx],
+	)
+	if err != nil {
+		return err
+	}
 	if !sameType(got, want) {
 		return userCallArgError(name, fn, idx, want, got)
 	}
@@ -5094,6 +5102,12 @@ func (c *Checker) checkUserCallArg(
 		}
 	}
 	got, err := c.checkContextualExpr(checkedArg, fn.params[idx], env, unsafe)
+	if err != nil {
+		return err
+	}
+	got, err = coerceReturnedBorrowArgument(
+		got, fn.params[idx], fn.borrowParams[idx], fn.mutBorrowParams[idx],
+	)
 	if err != nil {
 		return err
 	}
@@ -5280,6 +5294,7 @@ func (c *Checker) resolveFieldExpr(
 	if err != nil {
 		return "", nil, err
 	}
+	receiver = borrowedValueType(receiver)
 	if receiver == "std::fs::Metadata" {
 		fieldType, err := checkFsMetadataField(expr.Name)
 		return fieldType, nil, err
@@ -5435,6 +5450,9 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeM
 	if err != nil {
 		return "", err
 	}
+	if _, _, inner, ok := explicitBorrowType(receiver); ok {
+		return inner, nil
+	}
 	if isPointerType(receiver) {
 		if err := requireUnsafeCapabilityAt(
 			unsafe,
@@ -5585,6 +5603,7 @@ func (c *Checker) checkMethodCallExpr(
 	if err != nil {
 		return "", err
 	}
+	receiver = borrowedValueType(receiver)
 	typ, ok, err := c.checkKnownReceiverMethod(field, receiver, args, env, unsafe)
 	if ok || err != nil {
 		return typ, err
@@ -6054,6 +6073,12 @@ func (c *Checker) checkStdMethod(
 		if err != nil {
 			return "", err
 		}
+		got, err = coerceReturnedBorrowArgument(
+			got, want, method.Params[idx].Borrow, method.Params[idx].MutBorrow,
+		)
+		if err != nil {
+			return "", err
+		}
 		if !sameType(got, want) {
 			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
 		}
@@ -6445,6 +6470,15 @@ func (c *Checker) checkCallableArgs(
 		if err != nil {
 			return "", err
 		}
+		got, err = coerceReturnedBorrowArgument(
+			got,
+			want,
+			method.borrowParams[idx+offset],
+			method.mutBorrowParams[idx+offset],
+		)
+		if err != nil {
+			return "", err
+		}
 		if !sameType(got, want) {
 			return "", errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, method.name, want, got)
@@ -6559,7 +6593,7 @@ func (c *Checker) checkArenaAt(
 	if err := c.checkArenaHandleArg(arg, args, env, unsafe, "arena.at"); err != nil {
 		return "", err
 	}
-	return Type(arg), nil
+	return Type("&" + arg), nil
 }
 
 // checkArenaHandleArg validates the one handle argument an arena accessor

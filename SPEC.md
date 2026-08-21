@@ -44,7 +44,7 @@ borrow 中の値の move を許さない
 borrow escape を許さない
 borrow を struct field に保存させない
 borrow を comptime / unsafe 境界で延命させない
-arena.at(handle) は local borrow だけを返す
+arena.at(handle) は arena に tied な `&T` だけを返す
 borrow 中の arena の add / deinit、可変 borrow 中の at を許さない
 別 arena の handle 使用を許さない
 handle を raw pointer として扱わせない
@@ -1646,7 +1646,11 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
 * `std::arena::Arena<T>.add(value)` は value を arena に move する
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
-* `std::arena::Arena<T>.at(handle)` はローカル borrow を返す
+* `std::arena::Arena<T>.at(handle)` は arena に tied な shared borrow `&T` を返す。
+  直接 field / method / match を読め、local binding に束縛した場合は最後の使用まで
+  arena を borrow する。その間は `add` / `deinit` を実行できず、要素を move
+  できない。borrow parameter を根に持つ arena からは返せるが、local arena 由来の
+  borrow は function から escape できない
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
 * `std::arena::Arena<T>.deinit()` は initialized element を各要素の `deinit()` で
   consume してから arena storage を解放し、binding を無効化する
@@ -2536,6 +2540,13 @@ borrow が container の変更や解放より長生きする経路を positional
 container は borrow され、shared borrow 中は `insert` / `deinit` が、
 mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
 `Map.key_at` が返す key も map storage への view なので capture 限定です。
+
+`Arena.at(handle)` は handle provenance により要素の存在を静的に扱えるため、
+optional ではない `&T` を返します。直接 read するほか local binding に保存でき、
+その binding の最後の使用まで arena を shared borrow します。borrow 中の `add` と
+`deinit`、および borrow からの owner move は拒否します。borrow parameter を根に
+持つ arena からの `&T` return はその structural provenance を caller へ引き継ぎ、
+local arena からの return は borrow escape として拒否します。
 
 **cleanup の義務.** `Array.deinit` と `Arena.deinit` は残っている initialized element を、
 `Map.deinit` は保持している value を cleanup してから storage を解放します。
