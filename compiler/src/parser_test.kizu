@@ -295,6 +295,60 @@ test "parser type close accepts current, nested, and peek angles" {
     testing::expect(mismatch.peek_kind() == token::Kind::Plus);
 }
 
+test "parser statement terminators accept current and peek semicolons" {
+    let allocator = mem::page_allocator();
+    let current_scanner = lexer::new(allocator, "; +");
+    var current = try parser::new(allocator, move current_scanner);
+    defer current.deinit();
+    testing::expect(try current.expect_statement_terminator("return statement"));
+    testing::expect(current.current_kind() == token::Kind::Semicolon);
+    testing::expect(current.peek_kind() == token::Kind::Plus);
+    let peek_scanner = lexer::new(allocator, "foo ;");
+    var peek = try parser::new(allocator, move peek_scanner);
+    defer peek.deinit();
+    testing::expect(try peek.expect_statement_terminator("return statement"));
+    testing::expect(peek.current_kind() == token::Kind::Semicolon);
+    testing::expect(peek.peek_kind() == token::Kind::Eof);
+    let mismatch_scanner = lexer::new(allocator, "foo +");
+    var mismatch = try parser::new(allocator, move mismatch_scanner);
+    defer mismatch.deinit();
+    testing::expect(!try mismatch.expect_statement_terminator("return statement"));
+    let expected = "expected `;` after return statement";
+    expect_parser_diagnostic(&mismatch, 0, expected, 1, 4);
+    testing::expect(mismatch.current_kind() == token::Kind::Ident);
+    testing::expect(mismatch.peek_kind() == token::Kind::Plus);
+}
+
+test "parser list delimiters accept comma, brace, and end of file" {
+    let allocator = mem::page_allocator();
+    let comma_scanner = lexer::new(allocator, "foo ,");
+    var comma = try parser::new(allocator, move comma_scanner);
+    defer comma.deinit();
+    testing::expect(try comma.consume_list_delimiter("struct field"));
+    testing::expect(comma.current_kind() == token::Kind::Comma);
+    testing::expect(comma.peek_kind() == token::Kind::Eof);
+    let brace_scanner = lexer::new(allocator, "foo }");
+    var brace = try parser::new(allocator, move brace_scanner);
+    defer brace.deinit();
+    testing::expect(try brace.consume_list_delimiter("struct field"));
+    testing::expect(brace.current_kind() == token::Kind::Ident);
+    testing::expect(brace.peek_kind() == token::Kind::RBrace);
+    let eof_scanner = lexer::new(allocator, "foo");
+    var eof = try parser::new(allocator, move eof_scanner);
+    defer eof.deinit();
+    testing::expect(try eof.consume_list_delimiter("struct field"));
+    testing::expect(eof.current_kind() == token::Kind::Ident);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    let mismatch_scanner = lexer::new(allocator, "foo ;");
+    var mismatch = try parser::new(allocator, move mismatch_scanner);
+    defer mismatch.deinit();
+    testing::expect(!try mismatch.consume_list_delimiter("struct field"));
+    let expected = "expected `,` after struct field";
+    expect_parser_diagnostic(&mismatch, 0, expected, 1, 4);
+    testing::expect(mismatch.current_kind() == token::Kind::Ident);
+    testing::expect(mismatch.peek_kind() == token::Kind::Semicolon);
+}
+
 test "parser token diagnostics preserve every description class" {
     let allocator = mem::page_allocator();
     let identifier =
