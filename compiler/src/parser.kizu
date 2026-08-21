@@ -317,6 +317,70 @@ fn add_field_expr(
     ));
 }
 
+fn (self: &Parser) struct_literal_type_name(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?string::String {
+    var parts = array::new<ast::Text>(allocator);
+    defer parts.deinit();
+    if !try namespace_expr_parts(tree, expression, &var parts) or
+        parts.len() == 0 {
+        return null;
+    }
+    let last = parts.get_or_panic(parts.len() - 1);
+    if !text_starts_upper(tree, last) {
+        return null;
+    }
+    if parts.len() > 1 {
+        let previous = parts.get_or_panic(parts.len() - 2);
+        if text_starts_upper(tree, previous) {
+            return null;
+        }
+    }
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    var index = 0;
+    while index < parts.len() {
+        if index > 0 {
+            try name.append_bytes("::");
+        }
+        let part = parts.get_or_panic(index);
+        try append_retained_text(&var name, tree, part);
+        index = index + 1;
+    }
+    return move name;
+}
+
+fn namespace_expr_parts(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    parts: &var array::Array<ast::Text>
+) -> !bool {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => {
+            try parts.append(value.name);
+            return true;
+        },
+        Field(value) => {
+            if !value.namespace or
+                !try namespace_expr_parts(tree, value.receiver, parts) {
+                return false;
+            }
+            try parts.append(value.name);
+            return true;
+        },
+        _ => return false,
+    }
+}
+
+fn text_starts_upper(tree: &ast::Ast, value: ast::Text) -> bool {
+    let retained = tree.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    return mem::len(bytes) > 0 and
+        bytes[0] >= cast<u8>(65) and bytes[0] <= cast<u8>(90);
+}
+
 fn (self: &var Parser) parse_buffer_literal_expr(
     tree: &var ast::Ast,
     types: &var typ::Table

@@ -234,6 +234,51 @@ fn add_ident_expression(
     }));
 }
 
+fn add_field_expression(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    receiver: ast::Expression,
+    name: []u8,
+    namespace: bool
+) -> !ast::Expression {
+    let retained = try tree.add_text_from_bytes(allocator, name);
+    return tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: receiver,
+        name: retained,
+        namespace: namespace,
+        span: zero_span()
+    }));
+}
+
+fn expect_struct_literal_type_name(
+    allocator: Allocator,
+    value: &parser::Parser,
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> !void {
+    if try value.struct_literal_type_name(allocator, tree, expression) |name| {
+        defer name.deinit();
+        expect_retained_bytes(&name, expected);
+    } else {
+        testing::fail("parser rejected a struct literal type name");
+    }
+    return;
+}
+
+fn expect_no_struct_literal_type_name(
+    allocator: Allocator,
+    value: &parser::Parser,
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !void {
+    if try value.struct_literal_type_name(allocator, tree, expression) |name| {
+        name.deinit();
+        testing::fail("parser accepted an invalid struct literal type name");
+    }
+    return;
+}
+
 fn expect_type_apply_expression(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -1041,6 +1086,90 @@ test "parser retains fixed byte buffer literals after token cleanup" {
     testing::expect(value.peek_kind() == token::Kind::Eof);
     value.deinit();
     expect_buffer_literal(&tree, expression, 4);
+}
+
+test "parser classifies namespaced struct literal targets" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let package = try add_ident_expression(allocator, &var tree, "app", 1, 4);
+    let module = try add_field_expression(
+        allocator,
+        &var tree,
+        package,
+        "model",
+        true
+    );
+    let qualified = try add_field_expression(
+        allocator,
+        &var tree,
+        module,
+        "User",
+        true
+    );
+    try expect_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        qualified,
+        "app::model::User"
+    );
+    let direct = try add_ident_expression(allocator, &var tree, "User", 1, 5);
+    try expect_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        direct,
+        "User"
+    );
+}
+
+test "parser rejects non-type struct literal targets" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let package = try add_ident_expression(allocator, &var tree, "app", 1, 4);
+    let lower = try add_field_expression(
+        allocator,
+        &var tree,
+        package,
+        "user",
+        true
+    );
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, lower);
+    let owner = try add_ident_expression(allocator, &var tree, "Outer", 1, 6);
+    let nested_type = try add_field_expression(
+        allocator,
+        &var tree,
+        owner,
+        "Inner",
+        true
+    );
+    try expect_no_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        nested_type
+    );
+    let instance = try add_field_expression(
+        allocator,
+        &var tree,
+        package,
+        "User",
+        false
+    );
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, instance);
+    let value_text = try tree.add_text_from_bytes(allocator, "1");
+    let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: value_text
+    }));
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, integer);
 }
 
 test "parser rejects non-buffer and non-byte buffer literals" {
