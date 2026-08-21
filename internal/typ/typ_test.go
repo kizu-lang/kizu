@@ -100,8 +100,7 @@ func TestAbsorbsErrorSetComparesParsedStructure(t *testing.T) {
 	}
 }
 
-// TestTableReusesParsedStructure reuses a root and makes its nested handles
-// available by canonical spelling.
+// TestTableReusesParsedStructure reuses a retained canonical root.
 func TestTableReusesParsedStructure(t *testing.T) {
 	table := NewTable()
 	first, err := table.Parse("ParseError!Array<i64>")
@@ -114,18 +113,6 @@ func TestTableReusesParsedStructure(t *testing.T) {
 	}
 	if first != second {
 		t.Fatal("table parsed the same spelling more than once")
-	}
-
-	_, success, ok := ErrorUnionParts(first)
-	if !ok {
-		t.Fatal("parsed type is not an error union")
-	}
-	cachedSuccess, err := table.Parse(success.String())
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cachedSuccess != success {
-		t.Fatal("table did not retain the nested success type")
 	}
 }
 

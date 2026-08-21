@@ -12,7 +12,7 @@ func NewTable() *Table {
 	return &Table{parsed: map[string]Type{}}
 }
 
-// Remember retains value and registers its nested types by canonical spelling.
+// Remember retains value under its canonical spelling.
 func (t *Table) Remember(value Type) Type {
 	if value == nil {
 		return nil
@@ -21,12 +21,7 @@ func (t *Table) Remember(value Type) Type {
 	if parsed, ok := t.parsed[name]; ok {
 		return parsed
 	}
-	Walk(value, func(node Type) {
-		nodeName := node.String()
-		if _, exists := t.parsed[nodeName]; !exists {
-			t.parsed[nodeName] = node
-		}
-	})
+	t.parsed[name] = value
 	return value
 }
 
