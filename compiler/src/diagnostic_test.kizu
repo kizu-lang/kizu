@@ -1,0 +1,195 @@
+import compiler::ast;
+import compiler::diagnostic;
+import compiler::source;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn expect_string(actual: &string::String, expected: []u8) -> void {
+    let bytes = actual.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn empty_sources(allocator: Allocator) -> source::SourceMap {
+    return source::new(allocator);
+}
+
+fn zero_span() -> ast::Span {
+    return ast::Span {
+        source: null,
+        start: ast::Position { line: 0, column: 0 },
+        end: ast::Position { line: 0, column: 0 }
+    };
+}
+
+test "ADR diagnostic text stays structured and renders unchanged" {
+    let allocator = mem::page_allocator();
+    var sources = empty_sources(allocator);
+    defer sources.deinit();
+    let input =
+        \\type error: operator `==` operands must have same type
+        \\note: left operand has type Color
+        \\note: right operand has type Animal
+        \\help: compare values of the same enum
+    ;
+    let span = ast::Span {
+        source: null,
+        start: ast::Position { line: 6, column: 14 },
+        end: ast::Position { line: 6, column: 16 }
+    };
+    var value = try diagnostic::from_text(
+        allocator,
+        diagnostic::Severity::Error,
+        span,
+        input
+    );
+    defer value.deinit();
+    expect_string(&value.category, "type error");
+    expect_string(&value.message, "operator `==` operands must have same type");
+    testing::expect_equal<i64>(2, value.notes.len());
+    expect_string(&value.help, "compare values of the same enum");
+    testing::expect(value.severity_level() == diagnostic::Severity::Error);
+    testing::expect(value.source_span().start.line == 6);
+    try value.with_code("KZ1001");
+    expect_string(&value.code, "KZ1001");
+    let rendered = try value.error(allocator, &sources);
+    defer rendered.deinit();
+    let expected =
+        \\type error: operator `==` operands must have same type at 6:14
+        \\note: left operand has type Color
+        \\note: right operand has type Animal
+        \\help: compare values of the same enum
+    ;
+    expect_string(&rendered, expected);
+    let cli = try value.cli_error(allocator, &sources);
+    defer cli.deinit();
+    let expected_cli =
+        \\error: type error: operator `==` operands must have same type at 6:14
+        \\note: left operand has type Color
+        \\note: right operand has type Animal
+        \\help: compare values of the same enum
+    ;
+    expect_string(&cli, expected_cli);
+}
+
+test "diagnostic rendering resolves the source path at the output boundary" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path = try string::from_bytes(allocator, "src/main.kizu");
+    errdefer path.deinit();
+    let text = try string::from_bytes(allocator, "fn main( {}");
+    errdefer text.deinit();
+    let id = try sources.add(move path, move text);
+    let span = ast::Span {
+        source: id,
+        start: ast::Position { line: 1, column: 9 },
+        end: ast::Position { line: 1, column: 10 }
+    };
+    let value = try diagnostic::new(
+        allocator,
+        diagnostic::Severity::Error,
+        "",
+        span,
+        "expected parameter"
+    );
+    defer value.deinit();
+    let rendered = try value.error(allocator, &sources);
+    defer rendered.deinit();
+    expect_string(&rendered, "expected parameter at src/main.kizu:1:9");
+}
+
+test "warning severity renders without CLI error wrapping" {
+    let allocator = mem::page_allocator();
+    var sources = empty_sources(allocator);
+    defer sources.deinit();
+    let span = ast::Span {
+        source: null,
+        start: ast::Position { line: 1, column: 1 },
+        end: ast::Position { line: 0, column: 0 }
+    };
+    let value = try diagnostic::new(
+        allocator,
+        diagnostic::Severity::Warning,
+        "",
+        span,
+        "deprecated syntax will be removed"
+    );
+    defer value.deinit();
+    let rendered = try value.error(allocator, &sources);
+    defer rendered.deinit();
+    expect_string(
+        &rendered,
+        "warning: deprecated syntax will be removed at 1:1"
+    );
+    let cli = try value.cli_error(allocator, &sources);
+    defer cli.deinit();
+    expect_string(&cli, "warning: deprecated syntax will be removed at 1:1");
+}
+
+test "text parsing keeps fallback notes and multiline help" {
+    let allocator = mem::page_allocator();
+    var sources = empty_sources(allocator);
+    defer sources.deinit();
+    let input =
+        \\warning: check this
+        \\plain continuation
+        \\help: first step
+        \\help: second step
+    ;
+    let value = try diagnostic::from_text(
+        allocator,
+        diagnostic::Severity::Error,
+        zero_span(),
+        input
+    );
+    defer value.deinit();
+    testing::expect(value.severity_level() == diagnostic::Severity::Warning);
+    expect_string(&value.message, "check this");
+    testing::expect_equal<i64>(1, value.notes.len());
+    if value.notes.at(0) |note| {
+        expect_string(note, "plain continuation");
+    } else {
+        testing::fail("fallback note was not retained");
+    }
+    let expected_help =
+        \\first step
+        \\second step
+    ;
+    expect_string(&value.help, expected_help);
+    let rendered = try value.error(allocator, &sources);
+    defer rendered.deinit();
+    let expected =
+        \\warning: check this
+        \\note: plain continuation
+        \\help: first step
+        \\help: second step
+    ;
+    expect_string(&rendered, expected);
+}
+
+test "diagnostic mutators retain caller bytes" {
+    let allocator = mem::page_allocator();
+    var value = try diagnostic::new(
+        allocator,
+        diagnostic::Severity::Error,
+        "",
+        zero_span(),
+        "failed"
+    );
+    defer value.deinit();
+    var note = try string::from_bytes(allocator, "first note");
+    defer note.deinit();
+    let note_bytes = note.as_bytes();
+    try value.with_note(allocator, note_bytes);
+    note.clear();
+    try value.with_help("first help");
+    try value.with_help("replacement help");
+    if value.notes.at(0) |retained| {
+        expect_string(retained, "first note");
+    } else {
+        testing::fail("note was not retained");
+    }
+    expect_string(&value.help, "replacement help");
+}
