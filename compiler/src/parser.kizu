@@ -1,8 +1,62 @@
 import compiler::ast;
+import compiler::diagnostic;
+import compiler::token;
+import std::mem;
 
 // Partial mechanical port of internal/parser/parser.go. Expression handles
 // borrow their Ast explicitly because the Kizu graph owner replaces Go node
 // pointers retained by the runtime.
+
+// Builds a half-open diagnostic span from the current parser token.
+fn diagnostic_at_token(
+    allocator: Allocator,
+    current: &token::Token,
+    message: []u8
+) -> !diagnostic::Diagnostic {
+    return diagnostic::new(
+        allocator,
+        diagnostic::Severity::Error,
+        "",
+        token_span(current),
+        message
+    );
+}
+
+// Converts a token position into a half-open AST span.
+fn token_span(current: &token::Token) -> ast::Span {
+    let width = token_width(current);
+    return ast::Span {
+        source: current.source,
+        start: ast::Position {
+            line: current.line,
+            column: current.column
+        },
+        end: ast::Position {
+            line: current.line,
+            column: current.column + width
+        }
+    };
+}
+
+// Counts scalars in lexer-normalized token text. Every byte outside the UTF-8
+// continuation range begins exactly one scalar, including the replacement
+// scalar used when the source contained invalid UTF-8.
+fn token_width(current: &token::Token) -> i64 {
+    let bytes = current.literal.as_bytes();
+    var width = 0;
+    var index = 0;
+    while index < mem::len(bytes) {
+        let byte = bytes[index];
+        if byte < cast<u8>(128) or byte > cast<u8>(191) {
+            width = width + 1;
+        }
+        index = index + 1;
+    }
+    if width < 1 {
+        return 1;
+    }
+    return width;
+}
 
 // Returns the best source span currently stored on an expression.
 fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
