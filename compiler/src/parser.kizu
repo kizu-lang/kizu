@@ -237,6 +237,108 @@ fn (self: &var Parser) parse_receiver(
     return move params;
 }
 
+fn (self: &var Parser) parse_impl_decl(
+    tree: &var ast::Ast
+) -> !ast::Declaration {
+    if !try self.expect_peek(token::Kind::Ident) {
+        return add_empty_impl_decl(self.allocator, tree);
+    }
+    let contract_handle = self.stream.get_or_panic(self.position);
+    if self.peek_kind() != token::Kind::For {
+        let message = try impl_missing_for_message(
+            self.allocator,
+            self.tokens.at(contract_handle)
+        );
+        try self.record_error(move message);
+        return add_empty_impl_decl(self.allocator, tree);
+    }
+    var contract_name = try owned_token_literal(
+        self.allocator,
+        self.tokens.at(contract_handle)
+    );
+    errdefer contract_name.deinit();
+    try self.next_token();
+    if !try self.expect_peek(token::Kind::Ident) {
+        let type_name = string::new(self.allocator);
+        return add_impl_decl(tree, move contract_name, move type_name);
+    }
+    let type_handle = self.stream.get_or_panic(self.position);
+    var type_name = try owned_token_literal(
+        self.allocator,
+        self.tokens.at(type_handle)
+    );
+    errdefer type_name.deinit();
+    if self.peek_kind() == token::Kind::LBrace {
+        let message = try impl_body_message(
+            self.allocator,
+            &contract_name,
+            &type_name
+        );
+        try self.record_error(move message);
+        return add_impl_decl(tree, move contract_name, move type_name);
+    }
+    let _ = try self.expect_statement_terminator("impl declaration");
+    return add_impl_decl(tree, move contract_name, move type_name);
+}
+
+fn add_empty_impl_decl(
+    allocator: Allocator,
+    tree: &var ast::Ast
+) -> ast::Declaration {
+    let contract_name = string::new(allocator);
+    let type_name = string::new(allocator);
+    return add_impl_decl(tree, move contract_name, move type_name);
+}
+
+fn add_impl_decl(
+    tree: &var ast::Ast,
+    contract_name: string::String,
+    type_name: string::String
+) -> ast::Declaration {
+    let retained_contract = tree.add_text(move contract_name);
+    let retained_type = tree.add_text(move type_name);
+    return tree.add_declaration(ast::DeclarationNode::Impl(ast::ImplDecl {
+        contract_name: retained_contract,
+        type_name: retained_type
+    }));
+}
+
+fn impl_missing_for_message(
+    allocator: Allocator,
+    contract_token: &token::Token
+) -> !string::String {
+    var message = string::new(allocator);
+    errdefer message.deinit();
+    try message.append_bytes("expected `impl <contract> for ");
+    let name = contract_token.literal.as_bytes();
+    try message.append_bytes(name);
+    try message.append_bytes(
+        ";`; a method on a type is `fn (self: "
+    );
+    try message.append_bytes(name);
+    try message.append_bytes(") name(...)`");
+    return move message;
+}
+
+fn impl_body_message(
+    allocator: Allocator,
+    contract_name: &string::String,
+    type_name: &string::String
+) -> !string::String {
+    var message = string::new(allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`impl ");
+    try append_retained_string(&var message, contract_name);
+    try message.append_bytes(" for ");
+    try append_retained_string(&var message, type_name);
+    try message.append_bytes(
+        "` takes no body; write the methods as `fn (self: "
+    );
+    try append_retained_string(&var message, type_name);
+    try message.append_bytes(") name(...)` and end this with `;`");
+    return move message;
+}
+
 fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
     if self.current_kind() == expected {
         return true;

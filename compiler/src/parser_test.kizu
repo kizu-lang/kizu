@@ -244,6 +244,28 @@ fn expect_empty_import_path(
     return;
 }
 
+fn expect_impl_names(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    contract_name: []u8,
+    type_name: []u8
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Impl(value) => {
+            expect_retained_bytes(
+                tree.texts.at(value.contract_name.node),
+                contract_name
+            );
+            expect_retained_bytes(
+                tree.texts.at(value.type_name.node),
+                type_name
+            );
+        },
+        _ => testing::fail("parser did not retain an impl declaration"),
+    }
+    return;
+}
+
 fn new_function_signature(
     allocator: Allocator,
     tree: &var ast::Ast
@@ -654,6 +676,107 @@ test "parser keeps partial imports after syntax errors" {
     );
     terminator.deinit();
     expect_import_path(&tree, terminator_decl, "app", "", "");
+}
+
+test "parser retains impl declarations after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "impl Show for User; next");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_impl_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Semicolon);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    expect_impl_names(&tree, declaration, "Show", "User");
+}
+
+test "parser keeps partial impl declarations on missing words" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "impl ;");
+    var empty = try parser::new(allocator, move empty_scanner);
+    errdefer empty.deinit();
+    let empty_decl = try empty.parse_impl_decl(&var tree);
+    testing::expect(empty.current_kind() == token::Kind::Impl);
+    testing::expect(empty.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, empty.diagnostics_len());
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        5
+    );
+    empty.deinit();
+    expect_impl_names(&tree, empty_decl, "", "");
+    let for_scanner = lexer::new(allocator, "impl Show;");
+    var missing_for = try parser::new(allocator, move for_scanner);
+    errdefer missing_for.deinit();
+    let for_decl = try missing_for.parse_impl_decl(&var tree);
+    testing::expect(missing_for.current_kind() == token::Kind::Ident);
+    testing::expect(missing_for.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, missing_for.diagnostics_len());
+    let for_message =
+        "expected `impl <contract> for Show;`; a method on a type is `fn (self: Show) name(...)`"
+        ;
+    expect_parser_diagnostic(&missing_for, 0, for_message, 6, 10);
+    missing_for.deinit();
+    expect_impl_names(&tree, for_decl, "", "");
+    let type_scanner = lexer::new(allocator, "impl Show for ;");
+    var missing_type = try parser::new(allocator, move type_scanner);
+    errdefer missing_type.deinit();
+    let type_decl = try missing_type.parse_impl_decl(&var tree);
+    testing::expect(missing_type.current_kind() == token::Kind::For);
+    testing::expect(missing_type.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, missing_type.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_type,
+        0,
+        "expected next token identifier, got `;`",
+        11,
+        14
+    );
+    missing_type.deinit();
+    expect_impl_names(&tree, type_decl, "Show", "");
+}
+
+test "parser rejects impl bodies and missing terminators" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let body_scanner = lexer::new(allocator, "impl Show for User {");
+    var body = try parser::new(allocator, move body_scanner);
+    errdefer body.deinit();
+    let body_decl = try body.parse_impl_decl(&var tree);
+    testing::expect(body.current_kind() == token::Kind::Ident);
+    testing::expect(body.peek_kind() == token::Kind::LBrace);
+    testing::expect_equal<i64>(1, body.diagnostics_len());
+    let body_message =
+        "`impl Show for User` takes no body; write the methods as `fn (self: User) name(...)` and end this with `;`"
+        ;
+    expect_parser_diagnostic(&body, 0, body_message, 15, 19);
+    body.deinit();
+    expect_impl_names(&tree, body_decl, "Show", "User");
+    let terminator_scanner = lexer::new(allocator, "impl Show for User next");
+    var terminator = try parser::new(allocator, move terminator_scanner);
+    errdefer terminator.deinit();
+    let terminator_decl = try terminator.parse_impl_decl(&var tree);
+    testing::expect(terminator.current_kind() == token::Kind::Ident);
+    testing::expect(terminator.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, terminator.diagnostics_len());
+    expect_parser_diagnostic(
+        &terminator,
+        0,
+        "expected `;` after impl declaration",
+        15,
+        19
+    );
+    terminator.deinit();
+    expect_impl_names(&tree, terminator_decl, "Show", "User");
 }
 
 test "parser retains function return type graphs" {
