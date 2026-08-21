@@ -3902,8 +3902,8 @@ func viewFreeReturnType(typeName string) bool {
 
 // viewCarryingType reports whether a value of typeName can hold a view: view
 // spellings themselves, and declared structs or unions any of whose field
-// types carry one. Generic applications are judged conservatively through
-// their arguments; opaque runtime types own their memory and carry none.
+// types carry one. Generic containers follow the storage they actually retain:
+// Map copies its byte key and Handle stores only an opaque ID.
 func (c *Checker) viewCarryingType(typeName string) bool {
 	return c.viewCarryingTypeSeen(typeName, map[string]bool{})
 }
@@ -3933,14 +3933,8 @@ func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bo
 	base := typeName
 	if genericBase, arg, ok := splitGenericType(typeName); ok {
 		base = genericBase
-		args, err := typ.SplitArgs(arg)
-		if err != nil {
-			args = []string{arg}
-		}
-		for _, argType := range args {
-			if c.viewCarryingTypeSeen(argType, seen) {
-				return true
-			}
+		if c.genericArgsCarryView(base, arg, seen) {
+			return true
 		}
 	}
 	for _, fieldType := range c.structs[base] {
@@ -3950,6 +3944,27 @@ func (c *Checker) viewCarryingTypeSeen(typeName string, seen map[string]bool) bo
 	}
 	for _, payload := range c.unions[base] {
 		if payload != "" && c.viewCarryingTypeSeen(payload, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// genericArgsCarryView follows only the generic values the runtime type
+// retains. Map copies its byte key, and Handle retains no value of T.
+func (c *Checker) genericArgsCarryView(base string, text string, seen map[string]bool) bool {
+	args, err := typ.SplitArgs(text)
+	if err != nil {
+		args = []string{text}
+	}
+	if base == "std::arena::Handle" {
+		return false
+	}
+	if base == "std::map::Map" && len(args) == 2 {
+		return c.viewCarryingTypeSeen(args[1], seen)
+	}
+	for _, argType := range args {
+		if c.viewCarryingTypeSeen(argType, seen) {
 			return true
 		}
 	}
