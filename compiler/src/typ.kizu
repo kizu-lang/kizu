@@ -16,6 +16,9 @@ pub error Error {
     BufferSizeOverflow,
     ExpectedBufferClose,
     UnclosedArguments,
+    UnbalancedArgumentClose,
+    UnbalancedArgumentOpen,
+    EmptyStaticArgument,
 }
 
 /// Owns one parsed type and all of its nodes.
@@ -323,6 +326,56 @@ fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     errdefer out.deinit();
     try out.append_bytes(bytes);
     return move out;
+}
+
+/// Splits a static argument list at top-level commas.
+pub fn split_args(
+allocator: Allocator,
+text: []u8
+) -> !array::Array<string::String> {
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    var depth = 0;
+    var start = 0;
+    var index = 0;
+    var has_empty = false;
+    while index < mem::len(text) {
+        let byte = text[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+                if depth < 0 {
+                    return Error::UnbalancedArgumentClose;
+                }
+            } else {
+                if byte == cast<u8>(44) and depth == 0 {
+                    let part = mem::trim_ascii(text[start..index]);
+                    if mem::len(part) == 0 {
+                        has_empty = true;
+                    }
+                    try parts.append(try owned_text(allocator, part));
+                    start = index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    if depth != 0 {
+        return Error::UnbalancedArgumentOpen;
+    }
+    // Parser-produced static spellings contain only canonical ASCII spacing;
+    // source Unicode whitespace was already consumed by the lexer.
+    let final_part = mem::trim_ascii(text[start..mem::len(text)]);
+    if mem::len(final_part) == 0 {
+        has_empty = true;
+    }
+    try parts.append(try owned_text(allocator, final_part));
+    if has_empty {
+        return Error::EmptyStaticArgument;
+    }
+    return move parts;
 }
 
 /// Returns T for the optional value spelling `?T`.
