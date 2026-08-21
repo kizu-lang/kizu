@@ -84,6 +84,47 @@ fn (self: &Parser) peek_kind() -> token::Kind {
     return self.tokens.at(handle).kind;
 }
 
+fn (self: &var Parser) parse_import_decl(
+    tree: &var ast::Ast
+) -> !ast::Declaration {
+    var path = array::new<ast::Text>(self.allocator);
+    errdefer path.deinit();
+    if !try self.expect_peek(token::Kind::Ident) {
+        return add_import_decl(tree, move path);
+    }
+    let first_handle = self.stream.get_or_panic(self.position);
+    let first = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(first_handle)
+    );
+    try path.append(first);
+    while self.peek_kind() == token::Kind::DoubleColon {
+        try self.next_token();
+        if !try self.expect_peek(token::Kind::Ident) {
+            return add_import_decl(tree, move path);
+        }
+        let handle = self.stream.get_or_panic(self.position);
+        let part = try retain_literal(
+            self.allocator,
+            tree,
+            self.tokens.at(handle)
+        );
+        try path.append(part);
+    }
+    let _ = try self.expect_statement_terminator("import declaration");
+    return add_import_decl(tree, move path);
+}
+
+fn add_import_decl(
+    tree: &var ast::Ast,
+    path: array::Array<ast::Text>
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Import(
+        ast::ImportDecl { path: move path }
+    ));
+}
+
 fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
     if self.current_kind() == expected {
         return true;

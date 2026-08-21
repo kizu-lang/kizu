@@ -199,6 +199,50 @@ fn expect_continue_label(
     return;
 }
 
+fn expect_import_path(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    first: []u8,
+    second: []u8,
+    third: []u8
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Import(value) => {
+            var expected_len = 1;
+            if mem::len(second) > 0 {
+                expected_len = 2;
+            }
+            if mem::len(third) > 0 {
+                expected_len = 3;
+            }
+            testing::expect_equal<i64>(expected_len, value.path.len());
+            let first_part = value.path.get_or_panic(0);
+            expect_retained_bytes(tree.texts.at(first_part.node), first);
+            if expected_len >= 2 {
+                let second_part = value.path.get_or_panic(1);
+                expect_retained_bytes(tree.texts.at(second_part.node), second);
+            }
+            if expected_len == 3 {
+                let third_part = value.path.get_or_panic(2);
+                expect_retained_bytes(tree.texts.at(third_part.node), third);
+            }
+        },
+        _ => testing::fail("parser did not retain an import declaration"),
+    }
+    return;
+}
+
+fn expect_empty_import_path(
+    tree: &ast::Ast,
+    declaration: ast::Declaration
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Import(value) => testing::expect_equal<i64>(0, value.path.len()),
+        _ => testing::fail("parser did not retain an import declaration"),
+    }
+    return;
+}
+
 fn expect_type_expression(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -506,6 +550,69 @@ test "parser lifecycle owns its token stream and diagnostics" {
     } else {
         testing::fail("parser source was not retained");
     }
+}
+
+test "parser retains import paths after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "import app::parser::ast; next");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_import_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Semicolon);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    expect_import_path(&tree, declaration, "app", "parser", "ast");
+}
+
+test "parser keeps partial imports after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "import ;");
+    var empty = try parser::new(allocator, move empty_scanner);
+    defer empty.deinit();
+    let empty_decl = try empty.parse_import_decl(&var tree);
+    expect_empty_import_path(&tree, empty_decl);
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        7
+    );
+    let partial_scanner = lexer::new(allocator, "import app::;");
+    var partial = try parser::new(allocator, move partial_scanner);
+    errdefer partial.deinit();
+    let partial_decl = try partial.parse_import_decl(&var tree);
+    testing::expect(partial.current_kind() == token::Kind::DoubleColon);
+    testing::expect(partial.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &partial,
+        0,
+        "expected next token identifier, got `;`",
+        11,
+        13
+    );
+    partial.deinit();
+    expect_import_path(&tree, partial_decl, "app", "", "");
+    let terminator_scanner = lexer::new(allocator, "import app next");
+    var terminator = try parser::new(allocator, move terminator_scanner);
+    errdefer terminator.deinit();
+    let terminator_decl = try terminator.parse_import_decl(&var tree);
+    testing::expect(terminator.current_kind() == token::Kind::Ident);
+    testing::expect(terminator.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &terminator,
+        0,
+        "expected `;` after import declaration",
+        8,
+        11
+    );
+    terminator.deinit();
+    expect_import_path(&tree, terminator_decl, "app", "", "");
 }
 
 test "type apply lookahead rewinds cached tokens" {
