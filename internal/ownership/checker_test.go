@@ -389,6 +389,72 @@ fn main() -> !void {
 	runErrorCases(t, cases)
 }
 
+// TestCheckRejectsTransitiveViewCaptureMutation keeps every link in a
+// String-view-helper-capture chain borrowed for the capture body.
+func TestCheckRejectsTransitiveViewCaptureMutation(t *testing.T) {
+	source := `struct SplitView {
+    pub left: []u8,
+    pub right: []u8,
+}
+fn tail(bytes: []u8) -> []u8 {
+    return bytes[1..std::mem::len(bytes)];
+}
+fn split(bytes: []u8) -> !?SplitView {
+    return SplitView { left: bytes[0..1], right: bytes[1..std::mem::len(bytes)] };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = try std::string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    let suffix = tail(bytes);
+    if try split(suffix) |parts| {
+        try text.append_bytes("d");
+        print(parts.left);
+    }
+    return;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(),
+		"String.append_bytes` cannot run while string is borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsViewCaptureMutationThroughBorrowArgument derives the
+// capture tie from an explicit borrow parameter rather than argument syntax.
+func TestCheckRejectsViewCaptureMutationThroughBorrowArgument(t *testing.T) {
+	source := `struct SplitView {
+    pub left: []u8,
+    pub right: []u8,
+}
+fn split(text: &std::string::String) -> ?SplitView {
+    let bytes = text.as_bytes();
+    return SplitView { left: bytes[0..1], right: bytes[1..std::mem::len(bytes)] };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = try std::string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    if split(&text) |parts| {
+        try text.append_bytes("d");
+        print(parts.left);
+    }
+    return;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(),
+		"String.append_bytes` cannot run while string is borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsBorrowProvenanceReturnConflicts checks parent restrictions stay local.
 func TestCheckRejectsBorrowProvenanceReturnConflicts(t *testing.T) {
 	cases := []struct {

@@ -57,11 +57,12 @@ type Checker struct {
 	// binding; a statement ending with entries left over used the result some
 	// other way, which would lose the tie, so checkBlock rejects it.
 	pendingAllocTaints []allocTaint
-	// captureCondition is set while an if/while capture condition is checked,
-	// borrowReturn while the value of a declared borrow-optional return is.
-	// Calls producing `?&T` / `?&var T` are legal only in these two contexts
-	// and refuse everywhere else.
+	// captureCondition is set while an if/while borrow-optional condition is
+	// checked. viewCaptureCall identifies the one ordinary optional-producing
+	// call whose view-carrying payload the capture will tie to its inputs.
+	// borrowReturn marks the value of a declared borrow-optional return.
 	captureCondition bool
+	viewCaptureCall  *ast.CallExpr
 	borrowReturn     bool
 	result           Result
 }
@@ -1367,33 +1368,33 @@ func (c *Checker) returnedBorrowInitializer(
 	retName := returnTypeName(fn)
 	_, mutable, elem, ok := explicitOwnershipBorrowType(retName)
 	allocatorReturn := false
-	viewStructReturn := false
+	viewReturn := false
 	if !ok {
 		// An Allocator return with tie-capable sources is a tied allocator: it
 		// holds the buffer's writable view exclusively, so it behaves as a
 		// mutable borrow of its sources (page_allocator has none and falls
-		// through as a plain copy value). A view-capturing struct return ties
-		// the same way when a borrow-class view flows in, and falls through as
-		// a plain value when none does.
+		// through as a plain copy value). A view or view-capturing struct return
+		// ties the same way when a borrow-class view flows in, and falls through
+		// as a plain value when none does.
 		switch {
 		case retName == "Allocator":
 			allocatorReturn = true
 			mutable = true
 			elem = "Allocator"
-		case c.viewCaptureStructType(retName):
-			viewStructReturn = true
+		case retName == "[]u8" || c.viewCaptureStructType(retName):
+			viewReturn = true
 			elem = retName
 		default:
 			return nil, "", false, false, nil
 		}
 	}
 	sources, err := c.callBorrowReturnSources(name, fn, call, mutable, allocatorReturn,
-		viewStructReturn, env)
+		viewReturn, env)
 	if err != nil {
 		return nil, "", false, true, err
 	}
 	if len(sources) == 0 {
-		if allocatorReturn || viewStructReturn {
+		if allocatorReturn || viewReturn {
 			return nil, "", false, false, nil
 		}
 		return nil, "", false, true,
@@ -1408,15 +1409,15 @@ func (c *Checker) returnedBorrowInitializer(
 // callBorrowReturnSources lists the caller-side bindings a borrow-shaped call
 // result stays tied to: every qualifying borrow argument, plus — for Allocator
 // returns — every already-tied allocator argument, so re-wrapping an allocator
-// cannot launder its tie away, plus — for view-capturing struct returns —
-// every borrow-class view argument the result could have captured.
+// cannot launder its tie away, plus — for view returns — every borrow-class
+// view argument the result could have captured.
 func (c *Checker) callBorrowReturnSources(
 	name string,
 	fn *functionInfo,
 	call *ast.CallExpr,
 	mutable bool,
 	allocatorReturn bool,
-	viewStructReturn bool,
+	viewReturn bool,
 	env *scope,
 ) ([]borrowSource, error) {
 	sources := []borrowSource{}
@@ -1430,7 +1431,7 @@ func (c *Checker) callBorrowReturnSources(
 					sources = append(sources, borrowSource{target: alloc})
 				}
 			}
-			if viewStructReturn && fn.params[idx].typeName == "[]u8" {
+			if viewReturn && fn.params[idx].typeName == "[]u8" {
 				if view := c.borrowClassViewRoot(call.Args[idx], env); view != nil {
 					sources = append(sources, borrowSource{target: view})
 				}
@@ -2095,7 +2096,7 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 		borrowCond, isBorrowCond = match, ok
 	}
 	if !isBorrowCond {
-		read, err := c.readExpr(stmt.Condition, env)
+		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, env)
 		if err != nil {
 			return err
 		}
@@ -2140,6 +2141,38 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 		env.mergeMovedFrom(right)
 	}
 	return nil
+}
+
+// readCaptureCondition sanctions the one direct user call whose optional
+// payload can carry an input view. The capture records that provenance after
+// the call is read; nested calls remain ordinary calls and cannot borrow a
+// local view past their statement.
+func (c *Checker) readCaptureCondition(
+	expr ast.Expression,
+	capture string,
+	env *scope,
+) (string, error) {
+	call, ok := unwrapExpressionMarkers(expr).(*ast.CallExpr)
+	if capture == "" || !ok {
+		return c.readExpr(expr, env)
+	}
+	_, fn := c.calledFunction(call.Callee)
+	if fn == nil {
+		return c.readExpr(expr, env)
+	}
+	resultType := returnTypeName(fn)
+	if success, errorUnion := c.errorUnionElement(resultType); errorUnion {
+		resultType = success
+	}
+	payload, optional := typ.OptionalElem(resultType)
+	if !optional || !c.viewCarryingType(payload) {
+		return c.readExpr(expr, env)
+	}
+	saved := c.viewCaptureCall
+	c.viewCaptureCall = call
+	result, err := c.readExpr(expr, env)
+	c.viewCaptureCall = saved
+	return result, err
 }
 
 // checkBranchConsumeAgreement rejects an owner only one surviving branch
@@ -2239,7 +2272,7 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 		borrowCond, isBorrowCond = match, ok
 	}
 	if !isBorrowCond {
-		read, err := c.readExpr(stmt.Condition, env)
+		read, err := c.readCaptureCondition(stmt.Condition, stmt.Capture, env)
 		if err != nil {
 			return err
 		}
@@ -2522,43 +2555,64 @@ func (c *Checker) tieViewCapture(
 	if !c.viewCarryingType(optionalPayloadName(condType)) {
 		return nil
 	}
-	for _, target := range condContainerBindings(cond, env) {
-		if err := checkBorrowConflict(target, false); err != nil {
+	sources, err := c.condViewSources(cond, env)
+	if err != nil {
+		return err
+	}
+	for _, source := range sources {
+		if err := checkBorrowConflictForField(source.target, source.field, false); err != nil {
 			return err
 		}
-		c.activateBorrow(target, "", false)
+		c.activateBorrow(source.target, source.field, false)
 		capture.borrowedParam = true
 		capture.localBorrow = true
-		capture.borrowTargets = append(capture.borrowTargets, borrowSource{target: target})
+		capture.borrowTargets = append(capture.borrowTargets, source)
 	}
 	return nil
 }
 
-// condContainerBindings lists the owned container bindings a capture condition
-// call reads — its receiver and arguments, walking through `try`. A view
-// payload may alias any of their storage, and the producer's shape does not
-// say which, so a caller ties them all.
-func condContainerBindings(cond ast.Expression, env *scope) []*binding {
-	if tryExpr, ok := cond.(*ast.TryExpr); ok {
-		cond = tryExpr.Value
-	}
+// condViewSources lists the storage and borrow-class view sources a
+// capture-condition call reads. Declared functions derive sources from their
+// signatures; the syntactic container walk covers builtin accessors.
+func (c *Checker) condViewSources(cond ast.Expression, env *scope) ([]borrowSource, error) {
+	cond = unwrapExpressionMarkers(cond)
 	call, ok := cond.(*ast.CallExpr)
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	var targets []*binding
-	seen := map[*binding]bool{}
+	var sources []borrowSource
+	seen := map[borrowSource]bool{}
+	addSource := func(source borrowSource) {
+		if source.target == nil || seen[source] {
+			return
+		}
+		seen[source] = true
+		sources = append(sources, source)
+	}
+	name, fn := c.calledFunction(call.Callee)
+	if fn != nil {
+		derived, err := c.callBorrowReturnSources(name, fn, call, false, false, true, env)
+		if err != nil {
+			return nil, err
+		}
+		for _, source := range derived {
+			addSource(source)
+		}
+	}
 	add := func(expr ast.Expression) {
+		if value := c.borrowClassViewRoot(expr, env); value != nil {
+			addSource(borrowSource{target: value})
+			return
+		}
 		ident, ok := expr.(*ast.IdentExpr)
 		if !ok {
 			return
 		}
 		value, exists := env.lookup(ident.Name)
-		if !exists || value.moved || seen[value] || !isContainerTypeName(value.typeName) {
+		if !exists || value.moved || !isContainerTypeName(value.typeName) {
 			return
 		}
-		seen[value] = true
-		targets = append(targets, value)
+		addSource(borrowSource{target: value})
 	}
 	if field, ok := call.Callee.(*ast.FieldExpr); ok {
 		add(field.Receiver)
@@ -2566,7 +2620,7 @@ func condContainerBindings(cond ast.Expression, env *scope) []*binding {
 	for _, arg := range call.Args {
 		add(arg)
 	}
-	return targets
+	return sources, nil
 }
 
 // isContainerTypeName reports whether a type owns storage a returned view
@@ -2602,7 +2656,11 @@ func (c *Checker) refuseContainerViewOrelse(
 	if !c.viewCarryingType(optionalPayloadName(condType)) {
 		return nil
 	}
-	if len(condContainerBindings(cond, env)) == 0 {
+	sources, err := c.condViewSources(cond, env)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
 		return nil
 	}
 	return errorf(
@@ -3697,8 +3755,9 @@ func (c *Checker) checkBorrowOptionalResult(
 
 // dispatchCallExpr routes a call expression to its checker by callee shape.
 func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
+	sanctioned := c.viewCaptureCall == expr
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		return c.checkFieldCallExpr(field, expr.Args, env)
+		return c.checkFieldCallExpr(field, expr.Args, env, sanctioned)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env)
@@ -3710,10 +3769,9 @@ func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, erro
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
-	return c.checkUserCall(name.Name, expr.Args, env, false)
+	return c.checkUserCall(name.Name, expr.Args, env, sanctioned)
 }
 
-// checkUserCall validates ownership effects for a declared function call.
 // checkUserCall validates one declared-function call. sanctioned marks the
 // callers that tie a factory result themselves and so may skip the
 // tied-allocator let-binding requirement.
@@ -4023,11 +4081,14 @@ func (c *Checker) checkFieldCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, error) {
 	if typ, ok, err := c.checkUnionConstructor(field, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkQualifiedUserCall(field, args, env); ok || err != nil {
+	if typ, ok, err := c.checkQualifiedUserCall(
+		field, args, env, sanctioned,
+	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env); ok || err != nil {
@@ -4041,6 +4102,7 @@ func (c *Checker) checkQualifiedUserCall(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
+	sanctioned bool,
 ) (string, bool, error) {
 	name, ok := qualifiedName(field)
 	if !ok {
@@ -4053,7 +4115,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if len(fn.sig.TypeParamNames()) > 0 {
 		return "", false, nil
 	}
-	typ, err := c.checkUserCall(name, args, env, false)
+	typ, err := c.checkUserCall(name, args, env, sanctioned)
 	return typ, true, err
 }
 
