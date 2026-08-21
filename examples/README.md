@@ -85,6 +85,7 @@ go test ./...
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | contextual integer literals | `contextual_integer_literals.kizu` | narrows integer literals in explicit `u8` / `i32` std and user API contexts |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
+| explicit copy-element array clone | `std_array.kizu` | clones into a caller-selected allocator without aliasing the source buffer |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through `at`/`at_mut` captures |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
@@ -235,6 +236,7 @@ single source file. Run them with `kizu check <package-root>`.
 | array append element type must match `T` | `negative/std_array_wrong_type.kizu` | `Array.append` |
 | array append moves non-copy values | `negative/std_array_append_moves.kizu` | `moved value` |
 | array get is copy-only | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
+| array clone is copy-only | `negative/std_array_clone_non_copy.kizu` | `Array.clone` rejects owner elements that need per-type deep copy |
 | array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
 | box allocation failure is a recoverable error | `negative/std_mem_box_oom.kizu` | `runtime error: std::mem::Error::OutOfMemory` |
 | `Box.take` consumes the box and waits for borrows | `negative/std_mem_box_take_after_take.kizu`, `negative/std_mem_box_take_while_borrowed.kizu` | `moved value` / `cannot run while box is borrowed` |

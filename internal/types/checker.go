@@ -6009,6 +6009,10 @@ func (c *Checker) checkArrayMethod(
 		if !c.isCopyType(elem) {
 			return "", errorf("type error: `Array.%s` requires copy element", name)
 		}
+	case "clone":
+		if !c.isCopyType(elem) {
+			return "", errorf("type error: `Array.clone` requires copy element")
+		}
 	case "set":
 		if c.ownerType(elem) {
 			return "", errorf(

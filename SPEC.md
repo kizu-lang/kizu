@@ -2520,10 +2520,13 @@ length と capacity は変わりません。
 `&var std::string::String` から呼べます。method receiver は by-value の
 parameter として書きますが、consuming transfer ではありません。
 
-**element / value borrow.** `Array.get` / `get_or_panic` と `Map.get` は
-copy element / copy value 限定です。owner を copy すると持ち主が 2 つに
-なるためで、owner は `at` / `at_mut` で local borrow として読み書き
-します。`Array.at` / `at_mut` は borrow optional
+**element / value copy と container clone.** `Array.get` / `get_or_panic` と
+`Map.get` は copy element / copy value 限定です。`Array.clone(allocator)` も
+copy element 限定で、receiver を consume せず、指定した allocator 上に独立した
+Array storage を持つ新しい owner を返します。owner element の再帰的な複製は
+要素型ごとの明示的な関数で書き、汎用 clone は行いません。owner を単純に copy
+すると持ち主が 2 つになるためで、owner は `at` / `at_mut` で local borrow として
+読み書きします。`Array.at` / `at_mut` は borrow optional
 `?&T` / `?&var T` を、`Map.at` / `at_mut` は `?&V` / `?&var V` を返します。
 これを消費できるのは **capture 条件だけ**です(`if array.at(i) |elem|` /
 `while m.at(key) |v|`)。binding への保存も `orelse` も拒否します。element

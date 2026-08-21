@@ -1520,6 +1520,42 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsArrayCloneForCopyElements keeps the source usable and gives
+// the clone its own cleanup obligation.
+func TestCheckAcceptsArrayCloneForCopyElements(t *testing.T) {
+	source := `fn copy(values: std::array::Array<i64>, allocator: Allocator) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    print(values.len());
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsArrayCloneForOwnerElements keeps deep copy per type.
+func TestCheckRejectsArrayCloneForOwnerElements(t *testing.T) {
+	err := checkSource(`fn copy(
+    values: std::array::Array<std::string::String>,
+    allocator: Allocator,
+) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    return;
+}
+fn main() {}`)
+	if err == nil {
+		t.Fatal("expected copy-element error")
+	}
+	if !strings.Contains(err.Error(), "`Array.clone` requires copy element") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsArrayPopOrPanicArguments fixes the zero-argument signature.
 func TestCheckRejectsArrayPopOrPanicArguments(t *testing.T) {
 	err := checkSource(`fn check(values: std::array::Array<i64>) -> i64 {

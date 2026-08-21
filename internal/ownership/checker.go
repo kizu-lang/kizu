@@ -6047,7 +6047,7 @@ var containerAccessTables = map[string]containerAccessTable{
 		"pop": accessMutate, "pop_or_panic": accessMutate,
 		"truncate": accessMutate, "clear": accessMutate,
 		"len": accessRead, "capacity": accessRead,
-		"get": accessRead, "get_or_panic": accessRead,
+		"get": accessRead, "get_or_panic": accessRead, "clone": accessRead,
 		// Unlike String's, Array's as_bytes/as_mut_bytes are std-internal
 		// calls guarded here as reads; String's form view bindings and are
 		// guarded where the binding forms.
@@ -6309,8 +6309,8 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayPop(elem, name, args, false)
 	case "len", "capacity":
 		return c.checkArrayReadNoArgs(name, args)
-	case "get", "get_or_panic":
-		return c.checkArrayGet(elem, name, args, env)
+	case "get", "get_or_panic", "clone":
+		return c.checkArrayCopyMethod(elem, name, args, env)
 	case "at", "at_mut":
 		return c.checkArrayAtCondition(array, elem, name, args, env)
 	case "set":
@@ -6326,6 +6326,43 @@ func (c *Checker) checkArrayMethod(
 		// the table refusal above is the user-facing one.
 		return "", errorf("array error: method `%s` is classified but unhandled", name)
 	}
+}
+
+// checkArrayCopyMethod dispatches operations whose result duplicates copy
+// elements without consuming the source Array.
+func (c *Checker) checkArrayCopyMethod(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if name == "clone" {
+		return c.checkArrayClone(elem, args, env)
+	}
+	return c.checkArrayGet(elem, name, args, env)
+}
+
+// checkArrayClone validates the explicit allocator and limits clone to copy
+// elements. Owner elements need per-type deep-copy logic (ADR-0124).
+func (c *Checker) checkArrayClone(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", errorf("array error: `Array.clone` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", errorf("array error: `Array.clone` expects Allocator, got %s", got)
+	}
+	if !c.isCopyType(elem) {
+		return "", errorf("array error: `Array.clone` requires copy element")
+	}
+	return "!std::array::Array<" + elem + ">", nil
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.

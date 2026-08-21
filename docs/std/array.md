@@ -9,6 +9,7 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.reserve(additional: i64) -> !void
+array.clone(allocator: Allocator) -> !Array<T>
 array.pop() -> ?T
 array.pop_or_panic() -> T
 array.get(index: i64) -> ?T
@@ -20,6 +21,10 @@ array.deinit() -> void
 ```
 
 `std::array::new<T>()` のような hidden default allocator は使いません。
+`clone` は copy 要素に限って、指定した allocator 上へ同じ順序の独立した
+buffer を作ります。owner 要素は要素ごとの deep-copy が必要なので
+`Array.clone` では扱いません(ADR-0124)。`[]u8` のような view は copy ですが、
+view が指す backing bytes までは複製しません。
 `array.get` は bounds check し、範囲外なら `null` を返します。
 `array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。

@@ -1834,6 +1834,44 @@ fn main(values: std::array::Array<Name>) {
 	}
 }
 
+// TestCheckArrayCloneDoesNotMoveCopyArray keeps clone as a read of the source
+// while tracking the returned Array as a separate owner.
+func TestCheckArrayCloneDoesNotMoveCopyArray(t *testing.T) {
+	source := `fn copy(values: std::array::Array<i64>, allocator: Allocator) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    print(values.len());
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckArrayCloneRejectsOwnerElements keeps element-specific deep copy
+// outside the generic Array API.
+func TestCheckArrayCloneRejectsOwnerElements(t *testing.T) {
+	source := `fn copy(
+    values: std::array::Array<std::string::String>,
+    allocator: Allocator,
+) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    return;
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected copy-element error")
+	}
+	if !strings.Contains(err.Error(), "`Array.clone` requires copy element") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckArrayPopMovesNonCopyElement keeps resource arrays usable without copy reads.
 func TestCheckArrayPopMovesNonCopyElement(t *testing.T) {
 	source := `struct Name { value: []u8 }
