@@ -7,6 +7,7 @@ import compiler::typ;
 import std::arena;
 import std::array;
 import std::fmt;
+import std::map;
 import std::mem;
 import std::string;
 
@@ -438,6 +439,150 @@ fn (self: &var Parser) parse_type_arg_list(
         try self.next_token();
     }
     return move out;
+}
+
+fn (self: &var Parser) parse_generic_param_list(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?array::Array<ast::Text> {
+    if try self.parse_static_param_list(tree, types) |params| {
+        defer params.deinit();
+        var names = array::new<ast::Text>(self.allocator);
+        errdefer names.deinit();
+        var index = 0;
+        while params.at(index) |param| {
+            if !param.is_type() {
+                let message = try expected_type_param_message(
+                    self.allocator,
+                    tree,
+                    types,
+                    param
+                );
+                try self.record_error(move message);
+                names.deinit();
+                return null;
+            }
+            try names.append(param.name);
+            index = index + 1;
+        }
+        return move names;
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_static_param_list(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?array::Array<ast::StaticParam> {
+    var params = array::new<ast::StaticParam>(self.allocator);
+    errdefer params.deinit();
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    try self.next_token();
+    while true {
+        let handle = self.stream.get_or_panic(self.position);
+        if self.tokens.at(handle).kind != token::Kind::Ident {
+            let message = try unexpected_token_message(
+                self.allocator,
+                "expected static parameter, got ",
+                self.tokens.at(handle)
+            );
+            try self.record_error(move message);
+            params.deinit();
+            return null;
+        }
+        if static_param_seen(&seen, self.tokens.at(handle)) {
+            let message = try token_literal_message(
+                self.allocator,
+                "duplicate static parameter ",
+                self.tokens.at(handle)
+            );
+            try self.record_error(move message);
+            params.deinit();
+            return null;
+        }
+        try retain_static_param_name(&var seen, self.tokens.at(handle));
+        let name = try retain_literal(
+            self.allocator,
+            tree,
+            self.tokens.at(handle)
+        );
+        if self.peek_kind() == token::Kind::Colon {
+            try self.next_token();
+            try self.next_token();
+            let type_name = try self.parse_type_name(types);
+            try params.append(ast::StaticParam {
+                name: name,
+                type_name: type_name
+            });
+        } else {
+            try params.append(ast::StaticParam {
+                name: name,
+                type_name: null
+            });
+        }
+        if self.peek_kind() != token::Kind::Comma {
+            return move params;
+        }
+        try self.next_token();
+        if self.peek_kind() == token::Kind::Gt {
+            return move params;
+        }
+        try self.next_token();
+    }
+    return move params;
+}
+
+fn static_param_seen(
+    seen: &map::Map<[]u8, bool>,
+    current: &token::Token
+) -> bool {
+    let key = current.literal.as_bytes();
+    return seen.contains(key);
+}
+
+fn retain_static_param_name(
+    seen: &var map::Map<[]u8, bool>,
+    current: &token::Token
+) -> !void {
+    let key = current.literal.as_bytes();
+    return seen.insert(key, true);
+}
+
+fn expected_type_param_message(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    param: &ast::StaticParam
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("expected type parameter, got ");
+    try append_retained_text(&var out, tree, param.name);
+    if param.type_name |type_name| {
+        try out.append_bytes(": ");
+        let rendered = try typ::render(allocator, types, type_name);
+        defer rendered.deinit();
+        let type_bytes = rendered.as_bytes();
+        try out.append_bytes(type_bytes);
+    }
+    return move out;
+}
+
+fn append_retained_text(
+    out: &var string::String,
+    tree: &ast::Ast,
+    value: ast::Text
+) -> !void {
+    return append_retained_string(out, tree.texts.at(value.node));
+}
+
+fn append_retained_string(
+    out: &var string::String,
+    retained: &string::String
+) -> !void {
+    let bytes = retained.as_bytes();
+    return out.append_bytes(bytes);
 }
 
 fn (self: &var Parser) parse_static_type_arg(

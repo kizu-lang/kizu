@@ -1006,6 +1006,156 @@ test "parser rejects invalid static arguments without a partial list" {
     );
 }
 
+test "parser retains static parameters in Ast and type Table owners" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "<T, n: i64,>");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_static_param_list(&var tree, &var types) |params| {
+        defer params.deinit();
+        testing::expect(value.current_kind() == token::Kind::Comma);
+        testing::expect(value.peek_kind() == token::Kind::Gt);
+        value.deinit();
+        testing::expect_equal<i64>(2, params.len());
+        if params.at(0) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "T");
+            testing::expect(param.is_type());
+        } else {
+            testing::fail("missing type static parameter");
+        }
+        if params.at(1) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "n");
+            testing::expect(!param.is_type());
+            if param.type_name |type_name| {
+                let rendered = try typ::render(
+                    allocator,
+                    &types,
+                    type_name
+                );
+                defer rendered.deinit();
+                expect_retained_bytes(&rendered, "i64");
+            } else {
+                testing::fail("missing value parameter type");
+            }
+        } else {
+            testing::fail("missing value static parameter");
+        }
+    } else {
+        value.deinit();
+        testing::fail("parser discarded static parameters");
+    }
+}
+
+test "parser rejects duplicate and malformed static parameters" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let duplicate_scanner = lexer::new(allocator, "<T, T>");
+    var duplicate = try parser::new(allocator, move duplicate_scanner);
+    defer duplicate.deinit();
+    if try duplicate.parse_static_param_list(&var tree, &var types) |_| {
+        testing::fail("parser retained duplicate static parameters");
+    }
+    expect_parser_diagnostic(
+        &duplicate,
+        0,
+        "duplicate static parameter T",
+        5,
+        6
+    );
+    let malformed_scanner = lexer::new(allocator, "<+>");
+    var malformed = try parser::new(allocator, move malformed_scanner);
+    defer malformed.deinit();
+    if try malformed.parse_static_param_list(&var tree, &var types) |_| {
+        testing::fail("parser retained a malformed static parameter");
+    }
+    expect_parser_diagnostic(
+        &malformed,
+        0,
+        "expected static parameter, got `+`",
+        2,
+        3
+    );
+}
+
+test "parser keeps Go recovery when a static parameter type is malformed" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "<n: +>");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_static_param_list(&var tree, &var types) |params| {
+        defer params.deinit();
+        testing::expect_equal<i64>(1, params.len());
+        if params.at(0) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "n");
+            testing::expect(param.is_type());
+        } else {
+            testing::fail("missing recovered static parameter");
+        }
+    } else {
+        testing::fail("parser did not preserve static parameter recovery");
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected type, got `+`",
+        5,
+        6
+    );
+    testing::expect(value.current_kind() == token::Kind::Plus);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+}
+
+test "parser accepts only type entries in generic parameter lists" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "<T, U,>");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_generic_param_list(&var tree, &var types) |names| {
+        defer names.deinit();
+        testing::expect_equal<i64>(2, names.len());
+        if names.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "T");
+        } else {
+            testing::fail("missing first generic parameter");
+        }
+        if names.at(1) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "U");
+        } else {
+            testing::fail("missing second generic parameter");
+        }
+    } else {
+        testing::fail("parser discarded generic parameters");
+    }
+    let value_scanner = lexer::new(allocator, "<T, n: i64>");
+    var with_value = try parser::new(allocator, move value_scanner);
+    defer with_value.deinit();
+    if try with_value.parse_generic_param_list(&var tree, &var types) |_| {
+        testing::fail("parser accepted a value parameter as generic type");
+    }
+    expect_parser_diagnostic(
+        &with_value,
+        0,
+        "expected type parameter, got n: i64",
+        8,
+        11
+    );
+}
+
 test "parser token diagnostics preserve every description class" {
     let allocator = mem::page_allocator();
     let identifier =
