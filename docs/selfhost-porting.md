@@ -54,9 +54,29 @@ work unit の出力は次を含みます。
 - Go source と Kizu target の path
 - port した declaration と意図的に範囲外にした declaration
 - 参照した ownership 行
+- 対象 declaration と専用 helper の Go / Kizu code LOC と比率
 - observable な差がないこと、または残る差
 - 実行した check / test
 - `high / medium / low` の confidence と、その根拠
+
+### Size parity gate
+
+移植で同じ処理が大幅に長くなることは、単なる見た目ではなく language / std / ownership
+設計の不足を見つける signal として扱います。blank、comment、test、共用済みの基盤を除き、対象
+declaration とその移植だけが必要とする result type / helper の code LOC を Go と Kizu で
+数えます。test と document の行数は別に報告し、実装比率へ混ぜません。
+
+- Kizu が Go の 1.5 倍以上なら、増えた行を ownership の明示、error 処理、API shape、
+  重複処理に分類して理由を調べる
+- 2 倍以上なら、全増分を既存の原理で説明できない限り移植を止める
+- local representation や分割の問題なら target を直す
+- 複数 module で必要になる primitive がないなら std gap として切り出す
+- source で表現できない、または毎回 boilerplate を要求するなら language gap として止め、
+  移植の途中で仕様を足さない
+
+LOC を揃えるために lifecycle、境界 check、意味のある名前を消しません。比率は品質目標では
+なく調査 trigger です。明示 ownership に必要な増分は、その根拠と cleanup path が説明できれば
+許容します。
 
 ## Mechanical mapping
 

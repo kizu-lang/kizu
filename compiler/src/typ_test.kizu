@@ -1,5 +1,7 @@
 import compiler::typ;
+import std::array;
 import std::mem;
+import std::string;
 import std::testing;
 
 fn expect_round_trip(allocator: Allocator, text: []u8) -> !void {
@@ -144,4 +146,53 @@ test "name spelling helpers split only their documented seam" {
         testing::fail("unqualified method name was accepted");
     }
     testing::expect(mem::equal_bytes(typ::cleanup_method(), "deinit"));
+}
+
+pub struct Qualifier {
+    pub calls: i64
+}
+
+fn qualified_part(allocator: Allocator, bytes: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(bytes);
+    return move out;
+}
+
+fn (self: &var Qualifier) rename_path(
+allocator: Allocator,
+path: &array::Array<string::String>
+) -> !array::Array<string::String> {
+    self.calls = self.calls + 1;
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit();
+    try out.append(try qualified_part(allocator, "resolved"));
+    var index = 0;
+    while path.at(index) |part| {
+        let bytes = part.as_bytes();
+        try out.append(try qualified_part(allocator, bytes));
+        index = index + 1;
+    }
+    return move out;
+}
+
+test "map names rewrites every name and preserves surrounding structure" {
+    let allocator = mem::page_allocator();
+    let parsed = try typ::parse(allocator, "Error![4]Pair<T, bool>");
+    defer parsed.deinit();
+    var qualifier = Qualifier { calls: 0 };
+    let mapped = try typ::map_names<Qualifier>(
+        allocator,
+        &parsed,
+        &var qualifier
+    );
+    defer mapped.deinit();
+    let rendered = try typ::render(allocator, &mapped);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    testing::expect(mem::equal_bytes(
+        bytes,
+        "resolved::Error![4]resolved::Pair<resolved::T, resolved::bool>"
+    ));
+    testing::expect_equal<i64>(4, qualifier.calls);
 }

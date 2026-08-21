@@ -96,12 +96,27 @@ pub contract TypeVisitor {
     fn visit(value: &Node) -> void;
 }
 
+/// Describes the path rewrite MapNames requires.
+pub contract NameMapper {
+    fn rename_path(
+        allocator: Allocator,
+        path: &array::Array<string::String>
+    ) -> !array::Array<string::String>;
+}
+
 // parser reads one type spelling left to right while owning every node it has
 // accepted so an error can release the partial tree in one visible cleanup.
 struct Parser {
     allocator: Allocator,
     input: []u8,
     position: i64,
+    nodes: arena::Arena<Node>
+}
+
+// TypeBuilder keeps one output arena and its allocator out of recursive
+// transforms. It makes the ownership boundary visible once per result tree.
+struct TypeBuilder {
+    allocator: Allocator,
     nodes: arena::Arena<Node>
 }
 
@@ -541,6 +556,92 @@ b: &ErrorUnion
         }
     }
     return equal_node(left, a.ok, right, b.ok);
+}
+
+/// Rewrites every name path while preserving the type structure around it.
+pub fn map_names<M>(
+allocator: Allocator,
+value: &Type,
+mapper: &var M
+) -> !Type {
+    var builder = TypeBuilder {
+        allocator: allocator,
+        nodes: arena::new<Node>(allocator)
+    };
+    errdefer builder.deinit();
+    let root = try map_names_node<M>(&var builder, value, value.root, mapper);
+    return Type { nodes: move builder.nodes, root: root };
+}
+
+fn map_names_node<M>(
+builder: &var TypeBuilder,
+value: &Type,
+handle: arena::Handle<Node>,
+mapper: &var M
+) -> !arena::Handle<Node> {
+    return match value.nodes.at(handle) {
+        Name(node) => try map_name_node<M>(builder, value, node, mapper),
+        Slice(node) => {
+            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            builder.nodes.add(Node::Slice(Slice { elem: elem }))
+        },
+        Buffer(node) => {
+            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            builder.nodes.add(Node::Buffer(Buffer { size: node.size, elem: elem }))
+        },
+        Borrow(node) => {
+            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            builder.nodes.add(Node::Borrow(Borrow {
+                elem: elem,
+                mutable: node.mutable
+            }))
+        },
+        Optional(node) => {
+            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            builder.nodes.add(Node::Optional(Optional { elem: elem }))
+        },
+        Const(node) => {
+            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            builder.nodes.add(Node::Const(Const { elem: elem }))
+        },
+        ErrorUnion(node) => try map_error_union_names<M>(builder, value, node, mapper),
+    };
+}
+
+fn map_name_node<M>(
+builder: &var TypeBuilder,
+value: &Type,
+node: &Name,
+mapper: &var M
+) -> !arena::Handle<Node> {
+    var path = try mapper.rename_path(builder.allocator, &node.path);
+    errdefer path.deinit();
+    var args = array::new<arena::Handle<Node>>(builder.allocator);
+    errdefer args.deinit();
+    var index = 0;
+    while node.args.get(index) |arg| {
+        try args.append(try map_names_node<M>(builder, value, arg, mapper));
+        index = index + 1;
+    }
+    return builder.nodes.add(Node::Name(Name {
+        path: move path,
+        args: move args
+    }));
+}
+
+// map_error_union_names keeps Go's callback order: success before error.
+fn map_error_union_names<M>(
+builder: &var TypeBuilder,
+value: &Type,
+node: &ErrorUnion,
+mapper: &var M
+) -> !arena::Handle<Node> {
+    let ok = try map_names_node<M>(builder, value, node.ok, mapper);
+    if node.err |source_err| {
+        let err = try map_names_node<M>(builder, value, source_err, mapper);
+        return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
+    }
+    return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
 }
 
 /// Calls visitor for value and every nested type, outermost first.
