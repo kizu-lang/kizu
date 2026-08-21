@@ -2565,7 +2565,8 @@ func TestReferencedTypeNamesSeesThroughEveryWrapper(t *testing.T) {
 		{"std::array::Array<&[]Secret>", []string{"std::array::Array", "Secret"}},
 		{"std::map::Map<[]u8, &Secret>", []string{"std::map::Map", "u8", "Secret"}},
 	} {
-		got := referencedTypeNames(tc.spelling)
+		table := newTypeTable()
+		got := table.referencedTypeNames(Type(tc.spelling))
 		if len(got) != len(tc.want) {
 			t.Fatalf("referencedTypeNames(%q) = %q, want %q", tc.spelling, got, tc.want)
 		}

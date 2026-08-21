@@ -271,7 +271,8 @@ func (c *Checker) resolveMetaTypeText(text string) (string, error) {
 	for idx, arg := range args {
 		// A form's own arguments carry the type parameters of the body being
 		// instantiated, so they are bound before the form is resolved.
-		resolved, err := c.resolveMetaTypeText(string(substituteTypeParams(Type(arg), c.typeArgValues)))
+		resolved, err := c.resolveMetaTypeText(string(c.types.substituteTypeParams(
+			Type(arg), c.typeArgValues)))
 		if err != nil {
 			return "", err
 		}
@@ -501,8 +502,8 @@ func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
 	if err == nil && resolved != text {
 		return resolved, nil
 	}
-	parsed, err := typ.Parse(text)
-	if err != nil {
+	parsed, ok := c.types.lookup(Type(text))
+	if !ok {
 		return text, nil
 	}
 	switch node := parsed.(type) {

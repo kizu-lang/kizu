@@ -50,6 +50,7 @@ func (c *Checker) underMark(
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
+	types         typeTable
 	functions     map[string]*functionType
 	structs       map[string]*ast.StructDecl
 	enums         map[string]*enumType
@@ -100,6 +101,7 @@ type Checker struct {
 }
 
 type scope struct {
+	types     *typeTable
 	parent    *scope
 	values    map[string]Type
 	mutable   map[string]bool
@@ -119,6 +121,7 @@ type scope struct {
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
+		types:            newTypeTable(),
 		functions:        map[string]*functionType{},
 		structs:          map[string]*ast.StructDecl{},
 		enums:            map[string]*enumType{},
@@ -978,10 +981,10 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	}
 	args, err := typ.SplitArgs(typeArg)
 	if err != nil {
-		return string(substituteTypeParams(Type(typeArg), c.typeArgValues))
+		return string(c.types.substituteTypeParams(Type(typeArg), c.typeArgValues))
 	}
 	for idx, arg := range args {
-		args[idx] = string(substituteTypeParams(Type(arg), c.typeArgValues))
+		args[idx] = string(c.types.substituteTypeParams(Type(arg), c.typeArgValues))
 	}
 	return strings.Join(args, ", ")
 }
@@ -1003,8 +1006,8 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if err == nil {
 		resolved = rewritten
 	}
-	parsed, err := typ.Parse(resolved)
-	if err != nil {
+	parsed, ok := c.types.lookup(Type(resolved))
+	if !ok {
 		return "", errorf("type error: unknown type `%s`", resolved)
 	}
 	return c.parseTypeNode(parsed)
@@ -1017,6 +1020,7 @@ func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
 	if parsed == nil {
 		return "", errorf("type error: missing type")
 	}
+	c.types.remember(parsed)
 	name := parsed.String()
 	switch node := parsed.(type) {
 	case *typ.ErrorUnion:
@@ -1044,7 +1048,7 @@ func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
 	if _, ok := elem.(*typ.Optional); ok {
 		return "", errorf("type error: `%s` cannot wrap an optional yet", name)
 	}
-	if _, err := c.parseType(elem.String()); err != nil {
+	if _, err := c.parseTypeNode(elem); err != nil {
 		return "", err
 	}
 	return Type(name), nil
@@ -1078,7 +1082,7 @@ func (c *Checker) isTypeName(name string) bool {
 // parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
 func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
 	if node.Err != nil {
-		errName, err := c.parseType(node.Err.String())
+		errName, err := c.parseTypeNode(node.Err)
 		if err != nil {
 			return "", err
 		}
@@ -1247,7 +1251,7 @@ func (c *Checker) parsePointerType(name string, arg string) (Type, error) {
 
 // rejectPrivateType reports an error when typeName exposes a private declaration.
 func (c *Checker) rejectPrivateType(typeName string, context string) error {
-	for _, name := range referencedTypeNames(typeName) {
+	for _, name := range c.types.referencedTypeNames(Type(typeName)) {
 		if !c.isUserDeclaredType(name) {
 			continue
 		}
@@ -1263,10 +1267,10 @@ func (c *Checker) rejectPrivateType(typeName string, context string) error {
 // from the parsed structure, so every wrapper is seen however they nest: reading
 // the names off the text instead stopped at the first wrapper it recognized, and
 // `&[]Secret` answered `[]Secret`, a name no declaration can have.
-func referencedTypeNames(typeName string) []string {
-	parsed, err := typ.Parse(typeName)
-	if err != nil {
-		return []string{typeName}
+func (t *typeTable) referencedTypeNames(typeName Type) []string {
+	parsed, ok := t.lookup(typeName)
+	if !ok {
+		return []string{string(typeName)}
 	}
 	var names []string
 	typ.Walk(parsed, func(node typ.Type) {
@@ -1358,7 +1362,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if err := checkMainReturnType(fn); err != nil {
 		return err
 	}
-	env := newScope(nil)
+	env := newScope(nil, &c.types)
 	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
 		return err
@@ -1586,7 +1590,7 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
 		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources)
 	}
-	if isBorrowedViewReturnType(typ) {
+	if c.types.isBorrowedViewReturnType(typ) {
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
 		if len(sources) > 0 {
 			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources)
@@ -1859,7 +1863,7 @@ func (c *Checker) checkReturnStmt(
 	unsafe unsafeMark,
 ) (bool, error) {
 	if stmt.Value == nil {
-		if acceptsBareReturn(want) {
+		if c.acceptsBareReturn(want) {
 			return true, nil
 		}
 		return false, errorf("type error: return expects %s, got void", want)
@@ -1869,8 +1873,8 @@ func (c *Checker) checkReturnStmt(
 	}
 	if _, ok := stmt.Value.(*ast.NullExpr); ok {
 		success := want
-		if elem, isUnion := errorUnionElement(success); isUnion {
-			success = Type(elem)
+		if elem, isUnion := c.types.errorUnionElement(success); isUnion {
+			success = elem
 		}
 		if _, isOptional := optionalElem(success); isOptional {
 			return true, nil
@@ -1954,8 +1958,8 @@ func (c *Checker) checkErrorUnionReturn(
 	want Type,
 	got Type,
 ) (bool, error) {
-	if elem, ok := errorUnionElement(want); ok {
-		success := Type(elem)
+	if elem, ok := c.types.errorUnionElement(want); ok {
+		success := elem
 		coerced, err := c.coerceContextualIntegerLiteral(expr, success, got)
 		if err != nil {
 			return false, err
@@ -1967,21 +1971,20 @@ func (c *Checker) checkErrorUnionReturn(
 			return ok, err
 		}
 	}
-	if absorbsErrorUnion(want, got) {
+	if c.types.absorbsErrorUnion(want, got) {
 		return true, nil
 	}
-	if errorType, elem, ok := errorUnionParts(want); ok {
+	if errorType, success, ok := c.types.errorUnionParts(want); ok {
 		// `!T` declares no error set, so it accepts a member of any of them,
 		// the same way it accepts a `try` from any set (ADR-0087).
 		if errorType == "" && c.errorSets[string(got)] != nil {
 			return true, nil
 		}
-		success := Type(elem)
 		coerced, err := c.coerceContextualIntegerLiteral(expr, success, got)
 		if err != nil {
 			return false, err
 		}
-		if sameType(coerced, success) || sameType(got, Type(errorType)) {
+		if sameType(coerced, success) || sameType(got, errorType) {
 			return true, nil
 		}
 		if ok, err := c.wrapsIntoOptional(expr, success, got); ok || err != nil {
@@ -1992,14 +1995,11 @@ func (c *Checker) checkErrorUnionReturn(
 }
 
 // acceptsBareReturn reports whether return without a value satisfies a result type.
-func acceptsBareReturn(want Type) bool {
+func (c *Checker) acceptsBareReturn(want Type) bool {
 	if want == typeVoid {
 		return true
 	}
-	if elem, ok := errorUnionElement(want); ok && elem == string(typeVoid) {
-		return true
-	}
-	if _, elem, ok := errorUnionParts(want); ok && elem == string(typeVoid) {
+	if _, success, ok := c.types.errorUnionParts(want); ok && success == typeVoid {
 		return true
 	}
 	return false
@@ -2128,12 +2128,12 @@ func (c *Checker) structuralReturnSources(
 	unsafe unsafeMark,
 	argAt func(idx int) ast.Expression,
 ) (map[string]bool, error) {
-	if !isBorrowedViewReturnType(fn.returnType) {
+	if !c.types.isBorrowedViewReturnType(fn.returnType) {
 		return map[string]bool{}, nil
 	}
 	union := map[string]bool{}
 	for idx := range fn.params {
-		if !tieCapableParam(fn.params[idx], fn.borrowParams[idx]) {
+		if !c.tieCapableParam(fn.params[idx], fn.borrowParams[idx]) {
 			continue
 		}
 		arg := argAt(idx)
@@ -2153,8 +2153,8 @@ func (c *Checker) structuralReturnSources(
 
 // tieCapableParam reports whether an argument in this slot can back a
 // returned view: an explicit borrow, or a view-typed parameter.
-func tieCapableParam(param Type, borrowed bool) bool {
-	return borrowed || isBorrowedViewReturnType(param)
+func (c *Checker) tieCapableParam(param Type, borrowed bool) bool {
+	return borrowed || c.types.isBorrowedViewReturnType(param)
 }
 
 // methodBorrowSources handles built-in method-style view returns.
@@ -3429,25 +3429,25 @@ func (c *Checker) checkUnsafeExpr(
 
 // checkTryExpr validates error-union propagation and returns the success type.
 func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark) (Type, error) {
-	if _, _, ok := errorUnionParts(c.currentReturn); !ok {
+	if _, _, ok := c.types.errorUnionParts(c.currentReturn); !ok {
 		return "", errorf("type error: try requires function to return !T")
 	}
 	source, err := c.checkExpr(expr.Value, env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	sourceError, elem, ok := errorUnionParts(source)
+	sourceError, success, ok := c.types.errorUnionParts(source)
 	if !ok {
 		return "", errorf("type error: try expects !T, got %s", source)
 	}
-	targetError, _, _ := errorUnionParts(c.currentReturn)
+	targetError, _, _ := c.types.errorUnionParts(c.currentReturn)
 	// `!T` declares no error set, so it propagates whatever the body fails
 	// with, which is what lets a function call things that fail in different
 	// ways without naming every one. A declared `E!T` accepts only E.
 	if targetError != "" && sourceError != targetError {
 		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
-	return Type(elem), nil
+	return success, nil
 }
 
 // checkCallExpr validates builtin and user function calls.
@@ -4651,7 +4651,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	// arguments bound, forms included: `-> std::meta::field_type<T, f>` is a
 	// concrete type here even though it is not one where it was written.
 	restore := c.bindMetaFields(fieldArgs)
-	result, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	result, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
 	restore()
 	if err != nil {
 		return "", true, err
@@ -4820,23 +4820,24 @@ func (c *Checker) checkGenericInstantiation(
 	}
 	defer func() { c.instantiationDepth-- }()
 	defer c.bindMetaFields(fieldArgs)()
-	env := newScope(nil)
+	env := newScope(nil, &c.types)
 	staticParams, err := defineStaticValueParams(env, fn.sig)
 	if err != nil {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
-		typ := substituteTypeParams(fn.params[idx], subst)
+		typ := c.types.substituteTypeParams(fn.params[idx], subst)
 		if err := env.defineSignatureParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
 			return err
 		}
 	}
-	returnType, err := c.resolveInstanceType(substituteTypeParams(fn.returnType, subst))
+	returnType, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
 	if err != nil {
 		return err
 	}
 	for idx := range fn.params {
-		if err := c.revalidateSubstituted(substituteTypeParams(fn.params[idx], subst)); err != nil {
+		paramType := c.types.substituteTypeParams(fn.params[idx], subst)
+		if err := c.revalidateSubstituted(paramType); err != nil {
 			return err
 		}
 	}
@@ -5017,7 +5018,7 @@ func (c *Checker) checkGenericUserArg(
 	env *scope,
 	unsafe unsafeMark,
 ) error {
-	want := substituteTypeParams(fn.params[idx], subst)
+	want := c.types.substituteTypeParams(fn.params[idx], subst)
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
 	if err != nil {
 		return err
@@ -6930,9 +6931,9 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMa
 }
 
 // newScope creates a lexical type scope.
-func newScope(parent *scope) *scope {
+func newScope(parent *scope, types *typeTable) *scope {
 	return &scope{
-		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
+		types: types, parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
 		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
 		param:        map[string]bool{},
 		borrowSource: map[string][]string{}, unread: map[string]ast.Span{},
@@ -6941,7 +6942,7 @@ func newScope(parent *scope) *scope {
 
 // child creates a nested lexical type scope.
 func (s *scope) child() *scope {
-	return newScope(s)
+	return newScope(s, s.types)
 }
 
 // declareLocal records a binding this scope will be asked about. `_` is the
@@ -7000,7 +7001,7 @@ func (s *scope) defineWithSource(name string, typ Type, mutable bool, sources []
 // defineParam binds a function parameter and records borrow capabilities.
 func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
 	var sources []string
-	if borrowed || isBorrowedViewReturnType(typ) {
+	if borrowed || s.types.isBorrowedViewReturnType(typ) {
 		sources = []string{name}
 	}
 	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources)
