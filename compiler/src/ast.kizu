@@ -1,0 +1,384 @@
+import compiler::source;
+import compiler::typ;
+import std::arena;
+import std::array;
+import std::string;
+
+// Mechanical port of internal/ast's statement and expression representation.
+// Ast owns every node for one parsed program; Expression and Statement are
+// copy handles whose types keep the two closed node categories distinct.
+
+/// Owns the statement and expression graphs for one parsed program.
+pub struct Ast {
+    pub expressions: arena::Arena<ExpressionNode>,
+    pub statements: arena::Arena<StatementNode>,
+    pub blocks: arena::Arena<BlockStmt>
+}
+
+/// Identifies one expression retained by an Ast.
+pub struct Expression {
+    pub node: arena::Handle<ExpressionNode>
+}
+
+/// Identifies one statement retained by an Ast.
+pub struct Statement {
+    pub node: arena::Handle<StatementNode>
+}
+
+/// Identifies one block retained by an Ast.
+pub struct Block {
+    pub node: arena::Handle<BlockStmt>
+}
+
+/// Identifies a one-based source position.
+pub struct Position {
+    pub line: i64,
+    pub column: i64
+}
+
+/// Identifies a half-open source range.
+pub struct Span {
+    pub source: ?source::SourceId,
+    pub start: Position,
+    pub end: Position
+}
+
+/// Is one node that may appear as a statement.
+pub union StatementNode {
+    Block(Block),
+    Let(LetStmt),
+    Assign(AssignStmt),
+    Return(ReturnStmt),
+    Defer(DeferStmt),
+    ErrDefer(ErrDeferStmt),
+    If(IfStmt),
+    While(WhileStmt),
+    For(ForStmt),
+    Break(BreakStmt),
+    Continue(ContinueStmt),
+    Match(MatchStmt),
+    ComptimeIf(ComptimeIfStmt),
+    ComptimeFor(ComptimeForStmt),
+    ComptimeMatch(ComptimeMatchStmt),
+    Expr(ExprStmt),
+}
+
+/// Is one node that may produce a value.
+pub union ExpressionNode {
+    Ident(IdentExpr),
+    Int(IntExpr),
+    String(StringExpr),
+    Null(NullExpr),
+    OrelseGuard(OrelseGuardExpr),
+    Bool(BoolExpr),
+    Type(TypeExpr),
+    Comptime(ComptimeExpr),
+    Prefix(PrefixExpr),
+    Binary(BinaryExpr),
+    Call(CallExpr),
+    TypeApply(TypeApplyExpr),
+    Cast(CastExpr),
+    Try(TryExpr),
+    Move(MoveExpr),
+    Unsafe(UnsafeExpr),
+    Index(IndexExpr),
+    StructLiteral(StructLiteralExpr),
+    BufferLiteral(BufferLiteralExpr),
+    Field(FieldExpr),
+    Deref(DerefExpr),
+    If(IfStmt),
+    Match(MatchStmt),
+}
+
+/// Represents a sequence of statements.
+pub struct BlockStmt {
+    pub statements: array::Array<Statement>
+}
+
+/// Represents a let or var declaration.
+pub struct LetStmt {
+    pub mutable: bool,
+    pub name: string::String,
+    pub value: Expression
+}
+
+/// Represents assignment to an existing binding.
+pub struct AssignStmt {
+    pub target: Expression,
+    pub value: Expression
+}
+
+/// Represents an explicit return statement.
+pub struct ReturnStmt {
+    pub value: ?Expression
+}
+
+/// Registers one cleanup expression for the current lexical block.
+pub struct DeferStmt {
+    pub expr: Expression
+}
+
+/// Registers a cleanup expression for an error-return path.
+pub struct ErrDeferStmt {
+    pub expr: Expression
+}
+
+/// Represents a conditional branch or conditional expression.
+pub struct IfStmt {
+    pub condition: Expression,
+    pub consequence: Block,
+    pub alternative: ?Block,
+    pub capture: string::String
+}
+
+/// Represents a loop guarded by a condition expression.
+pub struct WhileStmt {
+    pub label: string::String,
+    pub condition: Expression,
+    pub body: Block,
+    pub capture: string::String
+}
+
+/// Represents a bounded integer range loop.
+pub struct ForStmt {
+    pub label: string::String,
+    pub name: string::String,
+    pub start: Expression,
+    pub end: Expression,
+    pub body: Block
+}
+
+/// Exits the nearest loop or a named enclosing loop.
+pub struct BreakStmt {
+    pub label: string::String
+}
+
+/// Skips to the next iteration of the nearest or named loop.
+pub struct ContinueStmt {
+    pub label: string::String
+}
+
+/// Represents an enum or union tag match.
+pub struct MatchStmt {
+    pub value: Expression,
+    pub arms: array::Array<MatchArm>,
+    pub meta_capture: string::String,
+    pub meta_owner: string::String
+}
+
+/// Represents one tag branch in a match.
+pub struct MatchArm {
+    pub tag: string::String,
+    pub binding: string::String,
+    pub body: Statement
+}
+
+/// Represents a branch selected during compilation.
+pub struct ComptimeIfStmt {
+    pub condition: Expression,
+    pub consequence: Block,
+    pub alternative: ?Block
+}
+
+/// Repeats a body for every element of a compile-time list.
+pub struct ComptimeForStmt {
+    pub list: Expression,
+    pub name: string::String,
+    pub body: Block
+}
+
+/// Repeats a body for every variant of a compile-time value.
+pub struct ComptimeMatchStmt {
+    pub value: Expression,
+    pub name: string::String,
+    pub binding: string::String,
+    pub body: Block
+}
+
+/// Wraps an expression used as a statement.
+pub struct ExprStmt {
+    pub expr: Expression,
+    pub semicolon: bool
+}
+
+/// Represents a name reference.
+pub struct IdentExpr {
+    pub name: string::String,
+    pub span: Span
+}
+
+/// Represents an integer literal.
+pub struct IntExpr {
+    pub value: string::String
+}
+
+/// Represents a string literal.
+pub struct StringExpr {
+    pub value: string::String
+}
+
+/// Is the null literal of an optional type.
+pub struct NullExpr {
+    pub span: Span
+}
+
+/// Is `cond orelse return/break/continue`.
+pub struct OrelseGuardExpr {
+    pub condition: Expression,
+    pub exit: Statement,
+    pub span: Span
+}
+
+/// Represents a boolean literal.
+pub struct BoolExpr {
+    pub value: bool
+}
+
+/// Represents a compile-time type value.
+pub struct TypeExpr {
+    pub type_name: string::String
+}
+
+/// Represents an expression evaluated during compilation.
+pub struct ComptimeExpr {
+    pub expr: Expression
+}
+
+/// Represents a unary operator expression.
+pub struct PrefixExpr {
+    pub operator: string::String,
+    pub right: Expression
+}
+
+/// Represents an infix binary operator expression.
+pub struct BinaryExpr {
+    pub left: Expression,
+    pub operator: string::String,
+    pub operator_span: Span,
+    pub right: Expression
+}
+
+/// Represents a function call.
+pub struct CallExpr {
+    pub callee: Expression,
+    pub args: array::Array<Expression>
+}
+
+/// Represents a call target with explicit static arguments.
+pub struct TypeApplyExpr {
+    pub callee: Expression,
+    pub type_arg: string::String
+}
+
+/// Represents an explicit cast<T>(value) conversion.
+pub struct CastExpr {
+    pub target_type: typ::Type,
+    pub value: Expression,
+    pub keyword_span: Span
+}
+
+/// Unwraps a !T value or returns the error from the current function.
+pub struct TryExpr {
+    pub value: Expression
+}
+
+/// Marks the place an owner is handed off from.
+pub struct MoveExpr {
+    pub value: Expression,
+    pub span: Span
+}
+
+/// Marks an expression whose memory safety the compiler does not prove.
+pub struct UnsafeExpr {
+    pub value: Expression,
+    pub safety: string::String,
+    pub span: Span
+}
+
+/// Represents checked byte indexing or one-dimensional slicing.
+pub struct IndexExpr {
+    pub target: Expression,
+    pub index: ?Expression,
+    pub start: ?Expression,
+    pub end: ?Expression,
+    pub slice: bool,
+    pub span: Span
+}
+
+/// Represents construction of a struct value.
+pub struct StructLiteralExpr {
+    pub type_name: string::String,
+    pub fields: array::Array<FieldValue>,
+    pub span: Span
+}
+
+/// Is a zero-filled fixed-length byte buffer literal.
+pub struct BufferLiteralExpr {
+    pub size: i64,
+    pub span: Span
+}
+
+/// Represents one field initializer in a struct literal.
+pub struct FieldValue {
+    pub name: string::String,
+    pub value: Expression
+}
+
+/// Represents field access on a receiver expression.
+pub struct FieldExpr {
+    pub receiver: Expression,
+    pub name: string::String,
+    pub namespace: bool,
+    pub span: Span
+}
+
+/// Represents explicit postfix dereference.
+pub struct DerefExpr {
+    pub receiver: Expression,
+    pub operator_span: Span
+}
+
+/// Creates empty storage for one parsed AST.
+pub fn new(allocator: Allocator) -> Ast {
+    return Ast {
+        expressions: arena::new<ExpressionNode>(allocator),
+        statements: arena::new<StatementNode>(allocator),
+        blocks: arena::new<BlockStmt>(allocator)
+    };
+}
+
+/// Retains one expression node and returns its typed handle.
+fn (self: &var Ast) add_expression(node: ExpressionNode) -> Expression {
+    return Expression {
+        node: self.expressions.add(move node)
+    };
+}
+
+/// Retains one statement node and returns its typed handle.
+fn (self: &var Ast) add_statement(node: StatementNode) -> Statement {
+    return Statement {
+        node: self.statements.add(move node)
+    };
+}
+
+/// Retains one block and returns its typed handle.
+fn (self: &var Ast) add_block(block: BlockStmt) -> Block {
+    return Block {
+        node: self.blocks.add(move block)
+    };
+}
+
+/// Reports whether a span has no source position.
+fn (self: Span) is_zero() -> bool {
+    return self.start.line == 0 or self.start.column == 0;
+}
+
+/// Returns the expression covered by a value-transparent marker.
+pub fn marker_value(ast: &Ast, value: Expression) -> ?Expression {
+    match ast.expressions.at(value.node) {
+        Comptime(node) => return node.expr,
+        Unsafe(node) => return node.value,
+        Move(node) => return node.value,
+        _ => return null,
+    }
+}

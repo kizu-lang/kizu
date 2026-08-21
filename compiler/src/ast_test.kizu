@@ -1,0 +1,105 @@
+import compiler::ast;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(bytes);
+    return move out;
+}
+
+fn zero_span() -> ast::Span {
+    return ast::Span {
+        source: null,
+        start: ast::Position { line: 0, column: 0 },
+        end: ast::Position { line: 0, column: 0 }
+    };
+}
+
+fn expect_marker_value(
+    tree: &ast::Ast,
+    marker: ast::Expression,
+    expected: []u8
+) -> void {
+    if ast::marker_value(tree, marker) |inner| {
+        match tree.expressions.at(inner.node) {
+            Int(value) => {
+                let bytes = value.value.as_bytes();
+                testing::expect(mem::equal_bytes(bytes, expected));
+            },
+            _ => testing::fail("marker did not retain its integer child"),
+        }
+    } else {
+        testing::fail("transparent marker was not recognized");
+    }
+    return;
+}
+
+fn expect_block_len(block: &ast::BlockStmt, expected: i64) -> void {
+    testing::expect_equal<i64>(expected, block.statements.len());
+}
+
+test "span zero state follows its source position" {
+    let missing = zero_span();
+    testing::expect(missing.is_zero());
+    let present = ast::Span {
+        source: null,
+        start: ast::Position { line: 2, column: 4 },
+        end: ast::Position { line: 2, column: 7 }
+    };
+    testing::expect(!present.is_zero());
+}
+
+test "typed handles retain a shared expression graph" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let literal = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: try owned_text(allocator, "41")
+    }));
+    let marker = tree.add_expression(ast::ExpressionNode::Move(ast::MoveExpr {
+        value: literal,
+        span: zero_span()
+    }));
+    let comptime_marker = tree.add_expression(ast::ExpressionNode::Comptime(
+        ast::ComptimeExpr { expr: literal }
+    ));
+    let unsafe_marker = tree.add_expression(ast::ExpressionNode::Unsafe(ast::UnsafeExpr {
+        value: literal,
+        safety: try owned_text(allocator, "integer literal has no unsafe effect"),
+        span: zero_span()
+    }));
+    let statement = tree.add_statement(ast::StatementNode::Expr(ast::ExprStmt {
+        expr: marker,
+        semicolon: true
+    }));
+    var statements = array::new<ast::Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.append(statement);
+    let block = tree.add_block(ast::BlockStmt {
+        statements: move statements
+    });
+    let first_block = tree.add_statement(ast::StatementNode::Block(block));
+    let second_block = tree.add_statement(ast::StatementNode::Block(block));
+    expect_marker_value(&tree, marker, "41");
+    expect_marker_value(&tree, comptime_marker, "41");
+    expect_marker_value(&tree, unsafe_marker, "41");
+    if ast::marker_value(&tree, literal) |_| {
+        testing::fail("plain expression was treated as a marker");
+    }
+    match tree.statements.at(statement.node) {
+        Expr(value) => testing::expect(value.semicolon),
+        _ => testing::fail("statement handle changed node category"),
+    }
+    match tree.statements.at(first_block.node) {
+        Block(value) => expect_block_len(tree.blocks.at(value.node), 1),
+        _ => testing::fail("first block handle changed node category"),
+    }
+    match tree.statements.at(second_block.node) {
+        Block(value) => expect_block_len(tree.blocks.at(value.node), 1),
+        _ => testing::fail("shared block handle changed node category"),
+    }
+}
