@@ -60,8 +60,38 @@ fn expect_marker_value(
     return;
 }
 
-fn expect_block_len(block: &ast::BlockStmt, expected: i64) -> void {
-    testing::expect_equal<i64>(expected, block.statements.len());
+fn expect_block_len(tree: &ast::Ast, block: ast::Block, expected: i64) -> void {
+    match tree.statements.at(block.node) {
+        Block(value) => testing::expect_equal<i64>(expected, value.statements.len()),
+        _ => testing::fail("block handle did not retain a block statement"),
+    }
+    return;
+}
+
+fn expect_variant_path(
+    tree: &ast::Ast,
+    path: ast::Expression,
+    expected_owner: []u8,
+    expected_variant: []u8
+) -> void {
+    match tree.expressions.at(path.node) {
+        Field(field) => {
+            testing::expect(field.namespace);
+            testing::expect(field.span.is_zero());
+            let variant = field.name.as_bytes();
+            testing::expect_equal<[]u8>(expected_variant, variant);
+            match tree.expressions.at(field.receiver.node) {
+                Ident(ident) => {
+                    testing::expect(ident.span.is_zero());
+                    let owner = ident.name.as_bytes();
+                    testing::expect_equal<[]u8>(expected_owner, owner);
+                },
+                _ => testing::fail("variant owner was not an identifier"),
+            }
+        },
+        _ => testing::fail("variant path was not a namespace field"),
+    }
+    return;
 }
 
 test "span zero state follows its source position" {
@@ -171,7 +201,7 @@ test "program retains declaration handles and nested contract methods" {
             let name = value.signature.name.as_bytes();
             testing::expect_equal<[]u8>("visit", name);
             if value.body |retained| {
-                expect_block_len(tree.blocks.at(retained.node), 0);
+                expect_block_len(&tree, retained, 0);
             } else {
                 testing::fail("function body was not retained");
             }
@@ -215,6 +245,122 @@ test "program retains declaration handles and nested contract methods" {
     }
 }
 
+test "variant helpers preserve shared bodies and ordinary expression shape" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let subject = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: try string::from_bytes(allocator, "slot"),
+        span: zero_span()
+    }));
+    var body_statements = array::new<ast::Statement>(allocator);
+    errdefer body_statements.deinit();
+    let body = tree.add_block(ast::BlockStmt {
+        statements: move body_statements
+    });
+    let capture_name = try string::from_bytes(allocator, "variant");
+    errdefer capture_name.deinit();
+    let payload_name = try string::from_bytes(allocator, "payload");
+    let comptime_node = ast::ComptimeMatchStmt {
+        value: subject,
+        name: move capture_name,
+        binding: move payload_name,
+        body: body
+    };
+    let comptime_stmt = tree.add_statement(ast::StatementNode::ComptimeMatch(
+        move comptime_node
+    ));
+    var variants = array::new<ast::MetaVariant>(allocator);
+    defer variants.deinit();
+    try variants.append(ast::MetaVariant {
+        name: "Vacant",
+        has_payload: false
+    });
+    try variants.append(ast::MetaVariant {
+        name: "Held",
+        has_payload: true
+    });
+    match tree.statements.at(comptime_stmt.node) {
+        ComptimeMatch(stmt) => {
+            let expanded = try ast::comptime_match_expansion(
+                allocator,
+                stmt,
+                "Slot",
+                &variants
+            );
+            defer expanded.deinit();
+            testing::expect_equal<i64>(2, expanded.arms.len());
+            let capture = expanded.meta_capture.as_bytes();
+            let owner = expanded.meta_owner.as_bytes();
+            testing::expect_equal<[]u8>("variant", capture);
+            testing::expect_equal<[]u8>("Slot", owner);
+            if expanded.arms.at(0) |arm| {
+                let tag = arm.tag.as_bytes();
+                let binding = arm.binding.as_bytes();
+                testing::expect_equal<[]u8>("Vacant", tag);
+                testing::expect_equal<[]u8>("", binding);
+                testing::expect(arm.body.node == body.node);
+            } else {
+                testing::fail("missing first expansion arm");
+            }
+            if expanded.arms.at(1) |arm| {
+                let tag = arm.tag.as_bytes();
+                let binding = arm.binding.as_bytes();
+                testing::expect_equal<[]u8>("Held", tag);
+                testing::expect_equal<[]u8>("payload", binding);
+                testing::expect(arm.body.node == body.node);
+            } else {
+                testing::fail("missing second expansion arm");
+            }
+            expect_block_len(&tree, body, 0);
+        },
+        _ => testing::fail("comptime match was not retained in the statement arena"),
+    }
+    var no_args = array::new<ast::Expression>(allocator);
+    let tag = try ast::variant_expansion(
+        allocator,
+        &var tree,
+        "Slot",
+        "Vacant",
+        move no_args
+    );
+    expect_variant_path(&tree, tag, "Slot", "Vacant");
+    var source_args = array::new<ast::Expression>(allocator);
+    errdefer source_args.deinit();
+    try source_args.append(subject);
+    let source_call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
+        callee: subject,
+        args: move source_args
+    }));
+    match tree.expressions.at(source_call.node) {
+        Call(source) => {
+            let copied_args = try source.args.clone(allocator);
+            let call = try ast::variant_expansion(
+                allocator,
+                &var tree,
+                "Slot",
+                "Held",
+                move copied_args
+            );
+            match tree.expressions.at(call.node) {
+                Call(value) => {
+                    testing::expect_equal<i64>(1, value.args.len());
+                    expect_variant_path(&tree, value.callee, "Slot", "Held");
+                    match tree.expressions.at(value.args.get_or_panic(0).node) {
+                        Ident(ident) => {
+                            let name = ident.name.as_bytes();
+                            testing::expect_equal<[]u8>("slot", name);
+                        },
+                        _ => testing::fail("variant payload argument changed shape"),
+                    }
+                },
+                _ => testing::fail("payload expansion was not a call"),
+            }
+        },
+        _ => testing::fail("source arguments were not retained by a call"),
+    }
+}
+
 test "typed handles retain a shared expression graph" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
@@ -244,8 +390,10 @@ test "typed handles retain a shared expression graph" {
     let block = tree.add_block(ast::BlockStmt {
         statements: move statements
     });
-    let first_block = tree.add_statement(ast::StatementNode::Block(block));
-    let second_block = tree.add_statement(ast::StatementNode::Block(block));
+    let first_block = block.as_statement();
+    let second_block = block.as_statement();
+    testing::expect(first_block.node == block.node);
+    testing::expect(second_block.node == block.node);
     expect_marker_value(&tree, marker, "41");
     expect_marker_value(&tree, comptime_marker, "41");
     expect_marker_value(&tree, unsafe_marker, "41");
@@ -257,11 +405,11 @@ test "typed handles retain a shared expression graph" {
         _ => testing::fail("statement handle changed node category"),
     }
     match tree.statements.at(first_block.node) {
-        Block(value) => expect_block_len(tree.blocks.at(value.node), 1),
+        Block(value) => testing::expect_equal<i64>(1, value.statements.len()),
         _ => testing::fail("first block handle changed node category"),
     }
     match tree.statements.at(second_block.node) {
-        Block(value) => expect_block_len(tree.blocks.at(value.node), 1),
+        Block(value) => testing::expect_equal<i64>(1, value.statements.len()),
         _ => testing::fail("shared block handle changed node category"),
     }
 }

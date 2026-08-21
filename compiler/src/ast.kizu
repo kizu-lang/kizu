@@ -14,8 +14,7 @@ import std::string;
 pub struct Ast {
     pub declarations: arena::Arena<DeclarationNode>,
     pub expressions: arena::Arena<ExpressionNode>,
-    pub statements: arena::Arena<StatementNode>,
-    pub blocks: arena::Arena<BlockStmt>
+    pub statements: arena::Arena<StatementNode>
 }
 
 /// Is the root of one parsed Kizu source file.
@@ -40,7 +39,7 @@ pub struct Statement {
 
 /// Identifies one block retained by an Ast.
 pub struct Block {
-    pub node: arena::Handle<BlockStmt>
+    pub node: arena::Handle<StatementNode>
 }
 
 /// Identifies a one-based source position.
@@ -182,9 +181,15 @@ pub struct Param {
     pub mut_borrow: bool
 }
 
+/// Is one enum tag or union variant exposed to compile-time reflection.
+pub struct MetaVariant {
+    pub name: []u8,
+    pub has_payload: bool
+}
+
 /// Is one node that may appear as a statement.
 pub union StatementNode {
-    Block(Block),
+    Block(BlockStmt),
     Let(LetStmt),
     Assign(AssignStmt),
     Return(ReturnStmt),
@@ -482,8 +487,7 @@ pub fn new(allocator: Allocator) -> Ast {
     return Ast {
         declarations: arena::new<DeclarationNode>(allocator),
         expressions: arena::new<ExpressionNode>(allocator),
-        statements: arena::new<StatementNode>(allocator),
-        blocks: arena::new<BlockStmt>(allocator)
+        statements: arena::new<StatementNode>(allocator)
     };
 }
 
@@ -523,13 +527,26 @@ fn (self: &var Ast) add_statement(node: StatementNode) -> Statement {
 /// Retains one block and returns its typed handle.
 fn (self: &var Ast) add_block(block: BlockStmt) -> Block {
     return Block {
-        node: self.blocks.add(move block)
+        node: self.statements.add(StatementNode::Block(move block))
     };
+}
+
+/// Views a retained block as the statement node with the same identity.
+fn (self: Block) as_statement() -> Statement {
+    return Statement { node: self.node };
 }
 
 /// Reports whether a span has no source position.
 fn (self: Span) is_zero() -> bool {
     return self.start.line == 0 or self.start.column == 0;
+}
+
+fn zero_span() -> Span {
+    return Span {
+        source: null,
+        start: Position { line: 0, column: 0 },
+        end: Position { line: 0, column: 0 }
+    };
 }
 
 /// Reports whether this entry declares a type parameter.
@@ -539,6 +556,87 @@ fn (self: &StaticParam) is_type() -> bool {
     } else {
         return true;
     }
+}
+
+/// Expands one compile-time match into the ordinary match every phase reads.
+pub fn comptime_match_expansion(
+    allocator: Allocator,
+    stmt: &ComptimeMatchStmt,
+    owner: []u8,
+    variants: &array::Array<MetaVariant>
+) -> !MatchStmt {
+    var arms = array::new<MatchArm>(allocator);
+    errdefer arms.deinit();
+    try arms.reserve(variants.len());
+    let body = stmt.body.as_statement();
+    var index = 0;
+    while variants.at(index) |variant| {
+        let tag = try string::from_bytes(allocator, variant.name);
+        errdefer tag.deinit();
+        var binding = string::new(allocator);
+        errdefer binding.deinit();
+        if variant.has_payload {
+            let binding_bytes = stmt.binding.as_bytes();
+            try binding.append_bytes(binding_bytes);
+        }
+        try arms.append(MatchArm {
+            tag: move tag,
+            binding: move binding,
+            body: body
+        });
+        index = index + 1;
+    }
+    let capture_bytes = stmt.name.as_bytes();
+    let capture = try string::from_bytes(allocator, capture_bytes);
+    errdefer capture.deinit();
+    let meta_owner = try string::from_bytes(allocator, owner);
+    return MatchStmt {
+        value: stmt.value,
+        arms: move arms,
+        meta_capture: move capture,
+        meta_owner: move meta_owner
+    };
+}
+
+fn add_variant_path(
+    ast: &var Ast,
+    owner_name: string::String,
+    variant_name: string::String
+) -> Expression {
+    let receiver = ast.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: move owner_name,
+        span: zero_span()
+    }));
+    return ast.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: receiver,
+        name: move variant_name,
+        namespace: true,
+        span: zero_span()
+    }));
+}
+
+/// Expands one reflected variant constructor into an ordinary expression.
+pub fn variant_expansion(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    variant: []u8,
+    args: array::Array<Expression>
+) -> !Expression {
+    errdefer args.deinit();
+    let owner_name = try string::from_bytes(allocator, owner);
+    errdefer owner_name.deinit();
+    let variant_name = try string::from_bytes(allocator, variant);
+    errdefer variant_name.deinit();
+    if args.len() == 0 {
+        args.deinit();
+        return add_variant_path(ast, move owner_name, move variant_name);
+    }
+    let path = add_variant_path(ast, move owner_name, move variant_name);
+    return ast.add_expression(ExpressionNode::Call(CallExpr {
+        callee: path,
+        args: move args
+    }));
 }
 
 /// Returns the expression covered by a value-transparent marker.
