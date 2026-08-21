@@ -216,6 +216,43 @@ fn expect_type_expression(
     return;
 }
 
+fn add_ident_expression(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    name: []u8,
+    start_column: i64,
+    end_column: i64
+) -> !ast::Expression {
+    let retained = try tree.add_text_from_bytes(allocator, name);
+    return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: retained,
+        span: ast::Span {
+            source: null,
+            start: ast::Position { line: 1, column: start_column },
+            end: ast::Position { line: 1, column: end_column }
+        }
+    }));
+}
+
+fn expect_type_apply_expression(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    callee: ast::Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        TypeApply(value) => {
+            testing::expect(value.callee.node == callee.node);
+            expect_retained_bytes(
+                tree.texts.at(value.type_arg.node),
+                expected
+            );
+        },
+        _ => testing::fail("parser did not retain a type application"),
+    }
+    return;
+}
+
 fn parse_break_then_deinit(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -759,6 +796,198 @@ test "parser keeps partial type expressions and exact diagnostics" {
         "expected next token `>`, got end of file",
         6,
         9
+    );
+}
+
+test "parser retains field namespace and dereference postfix nodes" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let receiver = try add_ident_expression(
+        allocator,
+        &var tree,
+        "pkg",
+        1,
+        4
+    );
+    let field_scanner = lexer::new(allocator, ".field");
+    var field_parser = try parser::new(allocator, move field_scanner);
+    errdefer field_parser.deinit();
+    let field = try field_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        false
+    );
+    testing::expect(field_parser.current_kind() == token::Kind::Ident);
+    field_parser.deinit();
+    match tree.expressions.at(field.node) {
+        Field(value) => {
+            testing::expect(value.receiver.node == receiver.node);
+            testing::expect(!value.namespace);
+            expect_retained_bytes(tree.texts.at(value.name.node), "field");
+            testing::expect_equal<i64>(1, value.span.start.column);
+            testing::expect_equal<i64>(7, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain field access"),
+    }
+    let namespace_scanner = lexer::new(allocator, "::Item");
+    var namespace_parser = try parser::new(
+        allocator,
+        move namespace_scanner
+    );
+    defer namespace_parser.deinit();
+    let namespace = try namespace_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        true
+    );
+    match tree.expressions.at(namespace.node) {
+        Field(value) => {
+            testing::expect(value.namespace);
+            expect_retained_bytes(tree.texts.at(value.name.node), "Item");
+        },
+        _ => testing::fail("parser did not retain namespace access"),
+    }
+    let deref_scanner = lexer::new(allocator, ".*");
+    var deref_parser = try parser::new(allocator, move deref_scanner);
+    defer deref_parser.deinit();
+    let deref = try deref_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        false
+    );
+    match tree.expressions.at(deref.node) {
+        Deref(value) => {
+            testing::expect(value.receiver.node == receiver.node);
+            testing::expect_equal<i64>(2, value.operator_span.start.column);
+            testing::expect_equal<i64>(3, value.operator_span.end.column);
+        },
+        _ => testing::fail("parser did not retain postfix dereference"),
+    }
+}
+
+test "parser retains malformed field nodes with Go diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let receiver = try add_ident_expression(
+        allocator,
+        &var tree,
+        "value",
+        1,
+        6
+    );
+    let scanner = lexer::new(allocator, ".+");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let field = try value.parse_field_expr(&var tree, receiver, false);
+    match tree.expressions.at(field.node) {
+        Field(node) => {
+            expect_retained_bytes(tree.texts.at(node.name.node), "");
+            testing::expect(node.span.is_zero());
+        },
+        _ => testing::fail("malformed field did not retain a field node"),
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token identifier, got `+`",
+        1,
+        2
+    );
+    testing::expect(value.current_kind() == token::Kind::Dot);
+    testing::expect(value.peek_kind() == token::Kind::Plus);
+}
+
+test "parser retains type applications after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let callee = try add_ident_expression(
+        allocator,
+        &var tree,
+        "make",
+        1,
+        5
+    );
+    let scanner = lexer::new(allocator, "<Array<T>, 4,>");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let applied = try value.parse_type_apply_expr(
+        &var tree,
+        &var types,
+        callee
+    );
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_type_apply_expression(
+        &tree,
+        applied,
+        callee,
+        "Array<T>, 4"
+    );
+}
+
+test "parser keeps nested and partial type application token states" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let callee = try add_ident_expression(
+        allocator,
+        &var tree,
+        "make",
+        1,
+        5
+    );
+    let nested_scanner = lexer::new(allocator, "<Array<T>>");
+    var nested = try parser::new(allocator, move nested_scanner);
+    defer nested.deinit();
+    let nested_expr = try nested.parse_type_apply_expr(
+        &var tree,
+        &var types,
+        callee
+    );
+    expect_type_apply_expression(&tree, nested_expr, callee, "Array<T>");
+    testing::expect(nested.current_kind() == token::Kind::Gt);
+    testing::expect(nested.peek_kind() == token::Kind::Eof);
+    let invalid_scanner = lexer::new(allocator, "<+>");
+    var invalid = try parser::new(allocator, move invalid_scanner);
+    defer invalid.deinit();
+    let invalid_expr = try invalid.parse_type_apply_expr(
+        &var tree,
+        &var types,
+        callee
+    );
+    expect_type_apply_expression(&tree, invalid_expr, callee, "");
+    expect_parser_diagnostic(
+        &invalid,
+        0,
+        "expected static argument, got `+`",
+        2,
+        3
+    );
+    testing::expect(invalid.current_kind() == token::Kind::Plus);
+    testing::expect(invalid.peek_kind() == token::Kind::Gt);
+    let close_scanner = lexer::new(allocator, "<i64");
+    var missing_close = try parser::new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_type_apply_expr(
+        &var tree,
+        &var types,
+        callee
+    );
+    expect_type_apply_expression(&tree, partial, callee, "i64");
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `>`, got end of file",
+        2,
+        5
     );
 }
 
