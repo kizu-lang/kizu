@@ -6,6 +6,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -58,6 +59,27 @@ func TestParseExpectedGotDescribesTokenText(t *testing.T) {
 	got := p.Errors()[0]
 	if !strings.Contains(got, `expected enum tag, got integer "1"`) {
 		t.Fatalf("error = %q, want integer token description", got)
+	}
+}
+
+// TestTokenDescriptionUsesDeterministicBytes keeps parser diagnostics aligned
+// with the self-hosted std::fmt byte-literal contract.
+func TestTokenDescriptionUsesDeterministicBytes(t *testing.T) {
+	tests := []struct {
+		tok  token.Token
+		want string
+	}{
+		{tok: token.Token{Type: token.Ident, Literal: "café"}, want: `identifier "caf\xC3\xA9"`},
+		{tok: token.Token{Type: token.String, Literal: "line\n"}, want: `string "line\n"`},
+		{
+			tok:  token.Token{Type: token.Illegal, Literal: string([]byte{0xef, 0xbf, 0xbd})},
+			want: `illegal token "\xEF\xBF\xBD"`,
+		},
+	}
+	for _, tt := range tests {
+		if got := tokenDescription(tt.tok); got != tt.want {
+			t.Fatalf("tokenDescription(%v) = %q, want %q", tt.tok.Type, got, tt.want)
+		}
 	}
 }
 

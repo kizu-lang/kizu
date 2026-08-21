@@ -76,3 +76,13 @@ func TestWarningRendersSeverity(t *testing.T) {
 		t.Fatalf("got %q, want %q", diag.CLIError(), want)
 	}
 }
+
+// TestQuoteBytesMatchesSelfhostFmt keeps shipping diagnostics on the same
+// deterministic ASCII contract as std::fmt::append_bytes_literal.
+func TestQuoteBytesMatchesSelfhostFmt(t *testing.T) {
+	input := string([]byte{'A', 0x20, 0x7e, '"', '\\', '\n', '\r', '\t', 0x00, 0x1f, 0x7f, 0xc3, 0xa9})
+	want := `"A ~\"\\\n\r\t\x00\x1F\x7F\xC3\xA9"`
+	if got := QuoteBytes(input); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

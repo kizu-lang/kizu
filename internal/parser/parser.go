@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -1975,14 +1976,14 @@ func (p *Parser) errorExpectedDeclaration() {
 func tokenDescription(tok token.Token) string {
 	switch tok.Type {
 	case token.Ident:
-		return fmt.Sprintf("identifier %q", tok.Literal)
+		return "identifier " + diag.QuoteBytes(tok.Literal)
 	case token.Int:
-		return fmt.Sprintf("integer %q", tok.Literal)
+		return "integer " + diag.QuoteBytes(tok.Literal)
 	case token.String:
-		return fmt.Sprintf("string %q", tok.Literal)
+		return "string " + diag.QuoteBytes(tok.Literal)
 	case token.Illegal:
 		if tok.Literal != "" {
-			return fmt.Sprintf("illegal token %q", tok.Literal)
+			return "illegal token " + diag.QuoteBytes(tok.Literal)
 		}
 		return "illegal token"
 	case token.EOF:
