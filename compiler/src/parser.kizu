@@ -142,6 +142,78 @@ fn (self: &var Parser) parse_return_clause(
     return false;
 }
 
+fn (self: &var Parser) parse_params(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !array::Array<ast::Param> {
+    var params = array::new<ast::Param>(self.allocator);
+    errdefer params.deinit();
+    try self.next_token();
+    if self.current_kind() == token::Kind::RParen {
+        return move params;
+    }
+    while true {
+        if self.current_kind() == token::Kind::Comptime {
+            try self.record_context_error(
+                "compile-time parameter belongs in `<...>`, not `(...)`",
+                ""
+            );
+            return move params;
+        }
+        if self.current_kind() != token::Kind::Ident {
+            let handle = self.stream.get_or_panic(self.position);
+            let message = try unexpected_token_message(
+                self.allocator,
+                "expected parameter name, got ",
+                self.tokens.at(handle)
+            );
+            try self.record_error(move message);
+            return move params;
+        }
+        let name_handle = self.stream.get_or_panic(self.position);
+        if !try self.expect_peek(token::Kind::Colon) {
+            return move params;
+        }
+        try self.next_token();
+        var borrow = false;
+        var mut_borrow = false;
+        if self.current_kind() == token::Kind::Amp {
+            borrow = true;
+            try self.next_token();
+            if self.current_kind() == token::Kind::Var {
+                mut_borrow = true;
+                try self.next_token();
+            }
+        }
+        let parsed = try self.parse_type_name(types);
+        if parsed |type_name| {
+            let name = try retain_literal(
+                self.allocator,
+                tree,
+                self.tokens.at(name_handle)
+            );
+            try params.append(ast::Param {
+                name: name,
+                type_name: type_name,
+                borrow: borrow,
+                mut_borrow: mut_borrow
+            });
+        } else {
+            return move params;
+        }
+        if self.peek_kind() != token::Kind::Comma {
+            break;
+        }
+        try self.next_token();
+        if self.peek_kind() == token::Kind::RParen {
+            break;
+        }
+        try self.next_token();
+    }
+    let _ = try self.expect_peek(token::Kind::RParen);
+    return move params;
+}
+
 fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
     if self.current_kind() == expected {
         return true;

@@ -263,6 +263,27 @@ fn new_function_signature(
     };
 }
 
+fn expect_param(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    params: &array::Array<ast::Param>,
+    index: i64,
+    name: []u8,
+    type_name: []u8,
+    borrow: bool,
+    mut_borrow: bool
+) -> !void {
+    let param = params.get_or_panic(index);
+    expect_retained_bytes(tree.texts.at(param.name.node), name);
+    testing::expect_equal<bool>(borrow, param.borrow);
+    testing::expect_equal<bool>(mut_borrow, param.mut_borrow);
+    let rendered = try typ::render(allocator, types, param.type_name);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, type_name);
+    return;
+}
+
 fn expect_type_expression(
     tree: &ast::Ast,
     expression: ast::Expression,
@@ -704,6 +725,222 @@ test "parser return clause absence and failure preserve Go cursor behavior" {
         "expected type, got `;`",
         7,
         8
+    );
+}
+
+test "parser retains borrowed parameters after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "(a: &i64, b: &var i64,) next");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree, &var types);
+    defer params.deinit();
+    testing::expect_equal<i64>(2, params.len());
+    testing::expect(value.current_kind() == token::Kind::RParen);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &types,
+        &params,
+        0,
+        "a",
+        "i64",
+        true,
+        false
+    );
+    try expect_param(
+        allocator,
+        &tree,
+        &types,
+        &params,
+        1,
+        "b",
+        "i64",
+        true,
+        true
+    );
+}
+
+test "parser retains an owned parameter without a trailing comma" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "(a: i64) next");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree, &var types);
+    defer params.deinit();
+    testing::expect_equal<i64>(1, params.len());
+    testing::expect(value.current_kind() == token::Kind::RParen);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &types,
+        &params,
+        0,
+        "a",
+        "i64",
+        false,
+        false
+    );
+}
+
+test "parser keeps empty and partial parameter lists" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let empty_scanner = lexer::new(allocator, "() next");
+    var empty = try parser::new(allocator, move empty_scanner);
+    defer empty.deinit();
+    let empty_params = try empty.parse_params(&var tree, &var types);
+    defer empty_params.deinit();
+    testing::expect_equal<i64>(0, empty_params.len());
+    testing::expect(empty.current_kind() == token::Kind::RParen);
+    testing::expect(empty.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, empty.diagnostics_len());
+    let missing_close_scanner = lexer::new(allocator, "(a: i64");
+    var missing_close = try parser::new(
+        allocator,
+        move missing_close_scanner
+    );
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_params(&var tree, &var types);
+    defer partial.deinit();
+    testing::expect_equal<i64>(1, partial.len());
+    testing::expect(missing_close.current_kind() == token::Kind::Ident);
+    testing::expect(missing_close.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(1, missing_close.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `)`, got end of file",
+        5,
+        8
+    );
+}
+
+test "parser reports malformed parameters without appending them" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let comptime_scanner = lexer::new(allocator, "(comptime n: i64)");
+    var static_param = try parser::new(allocator, move comptime_scanner);
+    defer static_param.deinit();
+    let comptime_params = try static_param.parse_params(&var tree, &var types);
+    defer comptime_params.deinit();
+    testing::expect_equal<i64>(0, comptime_params.len());
+    testing::expect(static_param.current_kind() == token::Kind::Comptime);
+    testing::expect(static_param.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, static_param.diagnostics_len());
+    expect_parser_diagnostic(
+        &static_param,
+        0,
+        "compile-time parameter belongs in `<...>`, not `(...)`",
+        2,
+        10
+    );
+    let name_scanner = lexer::new(allocator, "(1: i64)");
+    var name = try parser::new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_params = try name.parse_params(&var tree, &var types);
+    defer name_params.deinit();
+    testing::expect_equal<i64>(0, name_params.len());
+    testing::expect(name.current_kind() == token::Kind::Int);
+    testing::expect(name.peek_kind() == token::Kind::Colon);
+    testing::expect_equal<i64>(1, name.diagnostics_len());
+    let name_message =
+        \\expected parameter name, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &name,
+        0,
+        name_message,
+        2,
+        3
+    );
+    let colon_scanner = lexer::new(allocator, "(a i64)");
+    var colon = try parser::new(allocator, move colon_scanner);
+    defer colon.deinit();
+    let colon_params = try colon.parse_params(&var tree, &var types);
+    defer colon_params.deinit();
+    testing::expect_equal<i64>(0, colon_params.len());
+    testing::expect(colon.current_kind() == token::Kind::Ident);
+    testing::expect(colon.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, colon.diagnostics_len());
+    let colon_message =
+        \\expected next token `:`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(
+        &colon,
+        0,
+        colon_message,
+        2,
+        3
+    );
+    let type_scanner = lexer::new(allocator, "(a: ;)");
+    var type_value = try parser::new(allocator, move type_scanner);
+    defer type_value.deinit();
+    let type_params = try type_value.parse_params(&var tree, &var types);
+    defer type_params.deinit();
+    testing::expect_equal<i64>(0, type_params.len());
+    testing::expect(type_value.current_kind() == token::Kind::Semicolon);
+    testing::expect(type_value.peek_kind() == token::Kind::RParen);
+    testing::expect_equal<i64>(1, type_value.diagnostics_len());
+    expect_parser_diagnostic(
+        &type_value,
+        0,
+        "expected type, got `;`",
+        5,
+        6
+    );
+}
+
+test "parser returns valid parameters before a malformed parameter" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "(a: i64, 1: i64)");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree, &var types);
+    defer params.deinit();
+    testing::expect_equal<i64>(1, params.len());
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect(value.peek_kind() == token::Kind::Colon);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    let expected =
+        \\expected parameter name, got integer "1"
+    ;
+    expect_parser_diagnostic(&value, 0, expected, 10, 11);
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &types,
+        &params,
+        0,
+        "a",
+        "i64",
+        false,
+        false
     );
 }
 
