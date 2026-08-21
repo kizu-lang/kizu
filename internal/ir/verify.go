@@ -25,7 +25,12 @@ var ErrVerify = errors.New("ir verify error")
 // Checking here instead means the producer is told, in terms of the IR it
 // built, rather than each backend rejecting the subset it happens to read.
 func Verify(module *Module) error {
-	v := &verifier{module: module, params: map[string][]Param{}}
+	return verifyWithTypes(module, typ.NewTable())
+}
+
+// verifyWithTypes verifies module using the type table that produced it.
+func verifyWithTypes(module *Module, types *typ.Table) error {
+	v := &verifier{module: module, types: types, params: map[string][]Param{}}
 	for _, fn := range module.Functions {
 		v.params[fn.Name] = fn.Params
 	}
@@ -41,6 +46,7 @@ func Verify(module *Module) error {
 // rule takes only what it checks and reports through one message.
 type verifier struct {
 	module *Module
+	types  *typ.Table
 	params map[string][]Param
 	fn     *Function
 	block  *Block
@@ -147,7 +153,7 @@ func (v *verifier) unionPayload(instr *Instr) error {
 
 // successWrap checks the payload an error union's success carries.
 func (v *verifier) successWrap(instr *Instr) error {
-	_, success, isUnion := errorUnionParts(instr.Result.Type)
+	_, success, isUnion := errorUnionParts(v.types, instr.Result.Type)
 	if !isUnion || len(instr.Args) != 1 {
 		return nil
 	}
@@ -172,7 +178,7 @@ func (v *verifier) terminator() error {
 		}
 	}
 	got := term.Value.Type
-	if term.Op != "return" || got == "" || absorbsErrorSet(v.fn.Return, got) {
+	if term.Op != "return" || got == "" || absorbsErrorSet(v.types, v.fn.Return, got) {
 		return nil
 	}
 	if v.fn.Return != got {
@@ -182,8 +188,13 @@ func (v *verifier) terminator() error {
 }
 
 // absorbsErrorSet parses the IR spellings before asking the structural type query.
-func absorbsErrorSet(want string, got string) bool {
-	return typ.ParseAbsorbsErrorSet(want, got)
+func absorbsErrorSet(types *typ.Table, want string, got string) bool {
+	wantType, err := types.Parse(want)
+	if err != nil {
+		return false
+	}
+	gotType, err := types.Parse(got)
+	return err == nil && typ.AbsorbsErrorSet(wantType, gotType)
 }
 
 // fail names one position that holds a value of a type its declaration did not

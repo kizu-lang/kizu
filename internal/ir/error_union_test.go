@@ -2,6 +2,8 @@ package ir
 
 import (
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // voidTailPropagationSource returns a `!void` callee's result directly. The try
@@ -54,9 +56,10 @@ func TestLowerErrorOkArgCountMatchesSuccessType(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			module := lowerSource(t, source)
+			types := typ.NewTable()
 			wraps := 0
 			for _, fn := range module.Functions {
-				wraps += assertErrorOKArity(t, fn)
+				wraps += assertErrorOKArity(t, types, fn)
 			}
 			if wraps == 0 {
 				t.Fatal("source lowered no success wrap, so the arity rule went unchecked")
@@ -68,7 +71,7 @@ func TestLowerErrorOkArgCountMatchesSuccessType(t *testing.T) {
 // assertErrorOKArity checks every success wrap in one function and returns how
 // many it saw, so a source that stops exercising the rule fails loudly instead
 // of passing vacuously.
-func assertErrorOKArity(t *testing.T, fn *Function) int {
+func assertErrorOKArity(t *testing.T, types *typ.Table, fn *Function) int {
 	t.Helper()
 	seen := 0
 	for _, block := range fn.Blocks {
@@ -77,7 +80,7 @@ func assertErrorOKArity(t *testing.T, fn *Function) int {
 				continue
 			}
 			seen++
-			success, ok := errorUnionSuccessType(instr.Result.Type)
+			success, ok := errorUnionSuccessType(types, instr.Result.Type)
 			if !ok {
 				t.Errorf("%s: error.ok result %s is not an error union", fn.Name, instr.Result.Type)
 				continue

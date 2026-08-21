@@ -12,6 +12,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // LoadProgram parses every module in graph and returns a qualified package program.
@@ -30,6 +31,7 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 		packages:        map[string]bool{},
 		types:           map[string]typeExport{},
 		functions:       map[string]functionExport{},
+		parsedTypes:     typ.NewTable(),
 		sourceOverrides: cleanSourceOverrides(sources),
 		sources:         source.NewMap(),
 	}
@@ -67,6 +69,7 @@ type graphChecker struct {
 	order           []string
 	types           map[string]typeExport
 	functions       map[string]functionExport
+	parsedTypes     *typ.Table
 	sourceOverrides map[string]string
 	// sources owns each module path and input once while syntax records carry IDs.
 	sources *source.Map

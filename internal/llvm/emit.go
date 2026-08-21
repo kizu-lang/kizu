@@ -16,6 +16,7 @@ import (
 func Emit(module *ir.Module) (string, error) {
 	e := &emitter{
 		module:  module,
+		types:   typ.NewTable(),
 		strings: map[string]string{},
 		values:  map[string]valueInfo{},
 	}
@@ -31,6 +32,7 @@ func Emit(module *ir.Module) (string, error) {
 
 type emitter struct {
 	module          *ir.Module
+	types           *typ.Table
 	out             bytes.Buffer
 	strings         map[string]string
 	values          map[string]valueInfo
@@ -336,15 +338,15 @@ func expectEntryKey(instr *ir.Instr) string {
 func (e *emitter) writeErrorUnionTypes() {
 	names := e.sortedErrorUnionNames()
 	for _, name := range names {
-		_, success, _ := errorUnionParts(name)
+		_, success, _ := e.errorUnionParts(name)
 		failureType := "i64"
 		if success == "void" {
 			fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
-				llvmErrorUnionTypeName(name), failureType)
+				e.llvmErrorUnionTypeName(name), failureType)
 			continue
 		}
 		fmt.Fprintf(&e.out, "%s = type { i8, %s, %s }\n",
-			llvmErrorUnionTypeName(name), e.llvmType(success), failureType)
+			e.llvmErrorUnionTypeName(name), e.llvmType(success), failureType)
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
@@ -367,12 +369,12 @@ func (e *emitter) writeOptionalTypes() {
 
 // sortedOptionalNames returns every optional type this module spells.
 func (e *emitter) sortedOptionalNames() []string {
-	return e.collectModuleTypeNames(collectOptionalName)
+	return e.collectModuleTypeNames(e.collectOptionalName)
 }
 
 // collectOptionalName records name when it is an optional value type, or an
 // error union whose success is one (`E!?T` defines `?T`'s aggregate too).
-func collectOptionalName(seen map[string]bool, name string) {
+func (e *emitter) collectOptionalName(seen map[string]bool, name string) {
 	if _, ok := optionalElemLLVM(name); ok {
 		seen[name] = true
 		return
@@ -383,8 +385,8 @@ func collectOptionalName(seen map[string]bool, name string) {
 	if !strings.Contains(name, "!") {
 		return
 	}
-	if success, ok := errorUnionSuccessType(name); ok {
-		collectOptionalName(seen, success)
+	if success, ok := e.errorUnionSuccessType(name); ok {
+		e.collectOptionalName(seen, success)
 	}
 }
 
@@ -685,7 +687,7 @@ func (e *emitter) collectModuleTypeNames(collect func(map[string]bool, string)) 
 // validateModuleTypes rejects unsupported ABI shapes before header emission.
 func (e *emitter) validateModuleTypes() error {
 	for _, name := range e.sortedErrorUnionNames() {
-		if err := validateErrorUnionType(name); err != nil {
+		if err := e.validateErrorUnionType(name); err != nil {
 			return err
 		}
 	}
@@ -725,7 +727,7 @@ func (e *emitter) unionPayloadCapacity(name string) (int, error) {
 
 // collectErrorUnionName records concrete !T / Error!T type names.
 func (e *emitter) collectErrorUnionName(seen map[string]bool, name string) {
-	parsed, err := typ.Parse(name)
+	parsed, err := e.types.Parse(name)
 	if err != nil {
 		return
 	}
@@ -752,7 +754,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.wroteParamLoads = false
 	e.precomputeBlockExitLabels(fn)
 	returnType := e.llvmType(fn.Return)
-	_, returnsErrorUnion := errorUnionSuccessType(fn.Return)
+	_, returnsErrorUnion := e.errorUnionSuccessType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
 	params := make([]string, 0, len(fn.Params))
 	if e.mainReturnsInt {
@@ -866,11 +868,11 @@ func (e *emitter) forwardsOperand(instr *ir.Instr) bool {
 
 // validateFunctionTypes rejects ABI shapes this backend cannot lower faithfully.
 func (e *emitter) validateFunctionTypes(fn *ir.Function) error {
-	if err := validateErrorUnionType(fn.Return); err != nil {
+	if err := e.validateErrorUnionType(fn.Return); err != nil {
 		return err
 	}
 	for _, param := range fn.Params {
-		if err := validateErrorUnionType(param.Type); err != nil {
+		if err := e.validateErrorUnionType(param.Type); err != nil {
 			return err
 		}
 	}
@@ -878,8 +880,8 @@ func (e *emitter) validateFunctionTypes(fn *ir.Function) error {
 }
 
 // validateErrorUnionType checks the supported error-union ABI subset.
-func validateErrorUnionType(typ string) error {
-	success, ok := errorUnionSuccessType(typ)
+func (e *emitter) validateErrorUnionType(typ string) error {
+	success, ok := e.errorUnionSuccessType(typ)
 	if !ok {
 		return nil
 	}
@@ -1333,7 +1335,7 @@ func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
 	if !strings.HasPrefix(llvmFunctionName(name), "std__internal__builtin__") {
 		return false
 	}
-	if _, ok := errorUnionSuccessType(instr.Result.Type); ok {
+	if _, ok := e.errorUnionSuccessType(instr.Result.Type); ok {
 		return true
 	}
 	_, ok := optionalElemLLVM(instr.Result.Type)
@@ -1389,14 +1391,14 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: cast expects 1 arg")
 	}
 	source := instr.Args[0]
-	if _, sourceIsError := errorUnionSuccessType(source.Type); sourceIsError {
+	if _, sourceIsError := e.errorUnionSuccessType(source.Type); sourceIsError {
 		return fmt.Errorf(
 			"llvm error: cannot cast error union %s to %s",
 			source.Type,
 			instr.Result.Type,
 		)
 	}
-	if _, targetIsError := errorUnionSuccessType(instr.Result.Type); targetIsError {
+	if _, targetIsError := e.errorUnionSuccessType(instr.Result.Type); targetIsError {
 		return fmt.Errorf(
 			"llvm error: cannot cast %s to error union %s",
 			source.Type,
@@ -1486,7 +1488,7 @@ func (e *emitter) failureCode(resultName string, source ir.Value) string {
 		resultName,
 		e.llvmType(source.Type),
 		e.value(source).operand,
-		errorUnionFailureIndex(source.Type),
+		e.errorUnionFailureIndex(source.Type),
 	)
 	return resultName
 }
@@ -1871,7 +1873,7 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 // registered for the result is the alloca pointer: a buffer is its storage,
 // and the views buffer.as_bytes hands out point into it (ADR-0097).
 func (e *emitter) writeBufferNew(instr *ir.Instr) error {
-	size, ok := bufferSize(instr.Result.Type)
+	size, ok := e.bufferSize(instr.Result.Type)
 	if !ok {
 		return fmt.Errorf("llvm error: buffer.new expects `[N]u8` result, got %s",
 			instr.Result.Type)
@@ -1888,7 +1890,7 @@ func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "[]u8" {
 		return fmt.Errorf("llvm error: buffer.as_bytes expects buffer -> []u8")
 	}
-	size, ok := bufferSize(instr.Args[0].Type)
+	size, ok := e.bufferSize(instr.Args[0].Type)
 	if !ok {
 		return fmt.Errorf("llvm error: buffer.as_bytes expects `[N]u8`, got %s",
 			instr.Args[0].Type)
@@ -1905,8 +1907,8 @@ func (e *emitter) writeBufferAsBytes(instr *ir.Instr) error {
 }
 
 // bufferSize parses N from a `[N]u8` spelling.
-func bufferSize(typeName string) (int64, bool) {
-	parsed, err := typ.Parse(typeName)
+func (e *emitter) bufferSize(typeName string) (int64, bool) {
+	parsed, err := e.types.Parse(typeName)
 	if err != nil {
 		return 0, false
 	}
@@ -1961,11 +1963,11 @@ func (e *emitter) writePanicFail(instr *ir.Instr) error {
 
 // writeErrorOK builds a successful error-union value.
 func (e *emitter) writeErrorOK(instr *ir.Instr) error {
-	success, ok := errorUnionSuccessType(instr.Result.Type)
+	success, ok := e.errorUnionSuccessType(instr.Result.Type)
 	if !ok {
 		return fmt.Errorf("llvm error: error.ok result must be !T, got %s", instr.Result.Type)
 	}
-	if err := validateErrorUnionType(instr.Result.Type); err != nil {
+	if err := e.validateErrorUnionType(instr.Result.Type); err != nil {
 		return err
 	}
 	resultName := localName(instr.Result.Name)
@@ -1999,10 +2001,10 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 // writeErrorError builds a failed error-union value. The failure payload is a
 // member of an error set, and its representation is already the global code.
 func (e *emitter) writeErrorError(instr *ir.Instr) error {
-	if _, _, ok := errorUnionParts(instr.Result.Type); !ok {
+	if _, _, ok := e.errorUnionParts(instr.Result.Type); !ok {
 		return fmt.Errorf("llvm error: error.error result must be !T, got %s", instr.Result.Type)
 	}
-	if err := validateErrorUnionType(instr.Result.Type); err != nil {
+	if err := e.validateErrorUnionType(instr.Result.Type); err != nil {
 		return err
 	}
 	if len(instr.Args) != 1 {
@@ -2015,7 +2017,7 @@ func (e *emitter) writeErrorError(instr *ir.Instr) error {
 	// A declared `E!T` accepts only E. Codes are global, so a member of another
 	// set would lower to a union that claims E while holding another set's code,
 	// and nothing below here records which set a union carries.
-	if errorName, _, _ := errorUnionParts(instr.Result.Type); errorName != "" &&
+	if errorName, _, _ := e.errorUnionParts(instr.Result.Type); errorName != "" &&
 		arg.Type != errorName {
 		return fmt.Errorf("llvm error: error.error cannot put %s into %s",
 			arg.Type, instr.Result.Type)
@@ -2038,7 +2040,7 @@ func (e *emitter) writeErrorFailureCode(
 		baseName, unionType)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %s, %d\n",
 		resultName, unionType, baseName, codeOperand,
-		errorUnionFailureIndex(resultType))
+		e.errorUnionFailureIndex(resultType))
 }
 
 // writeErrorTry unwraps success or returns failure from the current function.
@@ -2047,17 +2049,17 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: error.try expects 1 arg")
 	}
 	source := instr.Args[0]
-	sourceError, success, ok := errorUnionParts(source.Type)
+	sourceError, success, ok := e.errorUnionParts(source.Type)
 	if !ok {
 		return fmt.Errorf("llvm error: error.try expects !T, got %s", source.Type)
 	}
-	if err := validateErrorUnionType(source.Type); err != nil {
+	if err := e.validateErrorUnionType(source.Type); err != nil {
 		return err
 	}
 	if instr.Result.Type != success {
 		return fmt.Errorf("llvm error: error.try returns %s, got %s", success, instr.Result.Type)
 	}
-	targetError, _, ok := errorUnionParts(e.currentReturn)
+	targetError, _, ok := e.errorUnionParts(e.currentReturn)
 	if !ok {
 		return fmt.Errorf("llvm error: error.try requires function to return !T")
 	}
@@ -2350,7 +2352,7 @@ func helperLabel(base string, suffix string) string {
 func (e *emitter) writeTerminator(term ir.Terminator) error {
 	switch term.Op {
 	case "return":
-		if _, ok := errorUnionSuccessType(e.currentReturn); ok {
+		if _, ok := e.errorUnionSuccessType(e.currentReturn); ok {
 			return e.writeErrorUnionReturn(term.Value)
 		}
 		if term.Value.Type == "void" {
@@ -2418,13 +2420,18 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value) error {
 // from a function that declares no error set, which is the absorption `try`
 // does written as a return.
 func (e *emitter) absorbsErrorUnionReturn(value ir.Value) bool {
-	return typ.ParseAbsorbsErrorSet(e.currentReturn, value.Type)
+	want, err := e.types.Parse(e.currentReturn)
+	if err != nil {
+		return false
+	}
+	got, err := e.types.Parse(value.Type)
+	return err == nil && typ.AbsorbsErrorSet(want, got)
 }
 
 // writeAbsorbedErrorUnionReturn returns one error union as another, naming the
 // failure on the way because the target describes its own with text.
 func (e *emitter) writeAbsorbedErrorUnionReturn(value ir.Value) error {
-	_, success, _ := errorUnionParts(value.Type)
+	_, success, _ := e.errorUnionParts(value.Type)
 	source := e.value(value)
 	sourceType := e.llvmType(value.Type)
 	okName := "%" + e.nextSyntheticValue("absorb.ok")
@@ -2478,7 +2485,7 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	okName := "%" + e.nextSyntheticValue("main.ok")
 	okBoolName := okName + ".bool"
 	codeName := "%" + e.nextSyntheticValue("main.code")
-	_, success, _ := errorUnionParts(value.Type)
+	_, success, _ := e.errorUnionParts(value.Type)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, unionType, valueInfo.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBoolName, okName)
 	okLabel := e.nextSyntheticValue("main.exit.ok")
@@ -2505,7 +2512,7 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 // so it reports why it exits 1 instead of failing silently. The failure is one
 // global code, and the spelling comes from the module's table of error names.
 func (e *emitter) writeMainErrorMessage(source ir.Value) error {
-	if _, _, ok := errorUnionParts(source.Type); !ok {
+	if _, _, ok := e.errorUnionParts(source.Type); !ok {
 		return nil
 	}
 	e.writeMainErrorName(e.failureCode("%"+e.nextSyntheticValue("main.err.code"), source))
@@ -2572,8 +2579,8 @@ func structFieldIndex(st ir.Struct, name string) (int, bool) {
 }
 
 // errorUnionFailureIndex returns the field index of the failure payload.
-func errorUnionFailureIndex(typ string) int {
-	success, ok := errorUnionSuccessType(typ)
+func (e *emitter) errorUnionFailureIndex(typ string) int {
+	success, ok := e.errorUnionSuccessType(typ)
 	if ok && success == "void" {
 		return 1
 	}

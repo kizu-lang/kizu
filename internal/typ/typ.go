@@ -349,17 +349,6 @@ func ErrorUnionParts(value Type) (Type, Type, bool) {
 	return node.Err, node.Ok, true
 }
 
-// ParseErrorUnionParts parses a text boundary before returning the spellings
-// of an error union's parts. Structural callers use ErrorUnionParts directly.
-func ParseErrorUnionParts(text string) (string, string, bool) {
-	parsed, err := Parse(text)
-	if err != nil {
-		return "", "", false
-	}
-	errorType, success, ok := ErrorUnionParts(parsed)
-	return Text(errorType), Text(success), ok
-}
-
 // OptionalElem returns T for an optional value type `?T`, and reports whether
 // text is one. A `?ptr<...>` spelling keeps its raw-pointer C-ABI meaning and
 // is not an optional value type. This is the one definition of that carve-out;
@@ -396,17 +385,6 @@ func AbsorbsErrorSet(want Type, got Type) bool {
 	}
 	gotSet, gotSuccess, isUnion := ErrorUnionParts(got)
 	return isUnion && gotSet != nil && Equal(gotSuccess, wantSuccess)
-}
-
-// ParseAbsorbsErrorSet parses two text boundaries before asking whether the
-// structured types absorb one another's error set.
-func ParseAbsorbsErrorSet(want string, got string) bool {
-	wantType, err := Parse(want)
-	if err != nil {
-		return false
-	}
-	gotType, err := Parse(got)
-	return err == nil && AbsorbsErrorSet(wantType, gotType)
 }
 
 // SplitApply separates `Base` and `Args` in a `Base<Args>` spelling, without

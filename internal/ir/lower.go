@@ -18,7 +18,7 @@ func Lower(program *ast.Program) (*Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := Verify(module); err != nil {
+	if err := verifyWithTypes(module, l.types); err != nil {
 		return nil, err
 	}
 	return module, nil
@@ -27,6 +27,7 @@ func Lower(program *ast.Program) (*Module, error) {
 type lowerer struct {
 	program     *ast.Program
 	module      *Module
+	types       *typ.Table
 	signatures  map[string]Signature
 	current     *Function
 	block       *Block
@@ -133,6 +134,7 @@ func newLowerer(program *ast.Program) *lowerer {
 	}
 	return &lowerer{
 		program: program,
+		types:   typ.NewTable(),
 		module: &Module{
 			Structs:   map[string]Struct{},
 			Enums:     map[string]Enum{},
@@ -699,7 +701,7 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 // lowerReturnType gives a function's result the type it travels as, so a
 // returned borrow follows the same rule a borrowed parameter does.
 func (l *lowerer) lowerReturnType(name string) string {
-	parsed, err := typ.Parse(name)
+	parsed, err := l.types.Parse(name)
 	if err != nil {
 		return returnType(name)
 	}
@@ -1041,7 +1043,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		return err
 	}
 	errorReturn := l.producesErrorValue(value)
-	if _, success, ok := errorUnionParts(l.current.Return); ok {
+	if _, success, ok := errorUnionParts(l.types, l.current.Return); ok {
 		if value.Type == success {
 			// A `!void` success carries no payload, so its wrap takes no operand.
 			// `return try f();` on a `!void` callee unwraps to a void value, and
@@ -1081,7 +1083,7 @@ func (l *lowerer) producesErrorValue(v Value) bool {
 // returnValueType returns the type a returned value has to have: the success
 // type of a `!T` function, or the return type itself.
 func (l *lowerer) returnValueType() string {
-	if success, ok := errorUnionSuccessType(l.current.Return); ok {
+	if success, ok := errorUnionSuccessType(l.types, l.current.Return); ok {
 		return success
 	}
 	return l.current.Return
@@ -1089,7 +1091,7 @@ func (l *lowerer) returnValueType() string {
 
 // returnVoidValue returns the correct SSA return value for void-like returns.
 func (l *lowerer) returnVoidValue() Value {
-	if success, ok := errorUnionSuccessType(l.current.Return); ok && success == "void" {
+	if success, ok := errorUnionSuccessType(l.types, l.current.Return); ok && success == "void" {
 		return l.emit("error.ok", l.current.Return, nil, "")
 	}
 	return Value{Name: "void", Type: "void"}
@@ -1726,7 +1728,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	for index := range cleanups {
 		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
 	}
-	result := l.emit("error.try", errorUnionElementType(value.Type), []Value{value}, "")
+	result := l.emit("error.try", errorUnionElementType(l.types, value.Type), []Value{value}, "")
 	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = cleanups
 	return result, nil
 }
@@ -2171,7 +2173,7 @@ func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error
 		return Value{}, err
 	}
 	cleanup.OnError = true
-	success := errorUnionElementType(result.Type)
+	success := errorUnionElementType(l.types, result.Type)
 	value := l.emit("error.try", success, []Value{result}, "")
 	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = []Cleanup{cleanup}
 	args := []Value{value}

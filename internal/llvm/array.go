@@ -355,7 +355,7 @@ func (e *emitter) writeArrayBoolResult(
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
 		baseName, unionType, okByteName)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %d, %d\n",
-		resultName, unionType, baseName, code, errorUnionFailureIndex(result.Type))
+		resultName, unionType, baseName, code, e.errorUnionFailureIndex(result.Type))
 	e.values[result.Name] = valueInfo{typ: result.Type, operand: resultName}
 	return nil
 }

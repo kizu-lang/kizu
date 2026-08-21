@@ -213,8 +213,8 @@ func arenaElementType(arena string) string {
 }
 
 // errorUnionElementType returns T for !T or Error!T.
-func errorUnionElementType(result string) string {
-	success, ok := errorUnionSuccessType(result)
+func errorUnionElementType(types *typ.Table, result string) string {
+	success, ok := errorUnionSuccessType(types, result)
 	if !ok {
 		return "unknown"
 	}
@@ -222,12 +222,17 @@ func errorUnionElementType(result string) string {
 }
 
 // errorUnionSuccessType returns T for !T or Error!T.
-func errorUnionSuccessType(result string) (string, bool) {
-	_, success, ok := errorUnionParts(result)
+func errorUnionSuccessType(types *typ.Table, result string) (string, bool) {
+	_, success, ok := errorUnionParts(types, result)
 	return success, ok
 }
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
-func errorUnionParts(result string) (string, string, bool) {
-	return typ.ParseErrorUnionParts(result)
+func errorUnionParts(types *typ.Table, result string) (string, string, bool) {
+	parsed, err := types.Parse(result)
+	if err != nil {
+		return "", "", false
+	}
+	errorType, success, ok := typ.ErrorUnionParts(parsed)
+	return typ.Text(errorType), typ.Text(success), ok
 }

@@ -212,7 +212,7 @@ func namespaceParts(expr ast.Expression) ([]string, bool) {
 
 // resolveType rewrites a source type name into its package-qualified form.
 func (c *graphChecker) resolveType(module *moduleUnit, name string) (string, error) {
-	parsed, err := typ.Parse(name)
+	parsed, err := c.parsedTypes.Parse(name)
 	if err != nil {
 		return "", fmt.Errorf("module error: unknown type `%s`", name)
 	}

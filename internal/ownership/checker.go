@@ -14,6 +14,7 @@ import (
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
+	types        *typ.Table
 	functions    map[string]*functionInfo
 	impls        map[string]map[string]*functionInfo
 	structs      map[string]map[string]string
@@ -170,6 +171,7 @@ type temporaryBorrow struct {
 // New creates an empty ownership checker.
 func New() *Checker {
 	return &Checker{
+		types:        typ.NewTable(),
 		functions:    map[string]*functionInfo{},
 		impls:        map[string]map[string]*functionInfo{},
 		structs:      map[string]map[string]string{},
@@ -743,7 +745,7 @@ func (c *Checker) fieldTypeNeedsConsume(typeName string) bool {
 // is the element's.
 func (c *Checker) resultTypeNeedsConsume(typeName string) bool {
 	for {
-		if _, success, isUnion := errorUnionParts(typeName); isUnion {
+		if _, success, isUnion := c.errorUnionParts(typeName); isUnion {
 			typeName = success
 			continue
 		}
@@ -1000,7 +1002,7 @@ func (c *Checker) returnTakesErrorPath(expr ast.Expression, env *scope) bool {
 	if c.errorSets[typeName] != nil {
 		return true
 	}
-	_, _, isUnion := errorUnionParts(typeName)
+	_, _, isUnion := c.errorUnionParts(typeName)
 	return isUnion
 }
 
@@ -2936,7 +2938,7 @@ const (
 // aggregates escape the arm; views and anything unclassified stay borrowed, so
 // an unhandled type errs toward rejection, never toward escape (ADR-0090).
 func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
-	parsed, err := typ.Parse(typeName)
+	parsed, err := c.types.Parse(typeName)
 	if err != nil {
 		return payloadBorrows
 	}
@@ -5169,7 +5171,7 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	arg, ok := errorUnionElement(got)
+	arg, ok := c.errorUnionElement(got)
 	if !ok {
 		return "", errorf("move error: try expects !T, got %s", got)
 	}
@@ -7491,14 +7493,19 @@ func checkDeinitializedBorrow(name string, value *binding, span ast.Span) error 
 }
 
 // errorUnionElement extracts T from !T.
-func errorUnionElement(typeName string) (string, bool) {
-	_, success, ok := errorUnionParts(typeName)
+func (c *Checker) errorUnionElement(typeName string) (string, bool) {
+	_, success, ok := c.errorUnionParts(typeName)
 	return success, ok
 }
 
 // errorUnionParts extracts error and success types from !T or Error!T.
-func errorUnionParts(typeName string) (string, string, bool) {
-	return typ.ParseErrorUnionParts(typeName)
+func (c *Checker) errorUnionParts(typeName string) (string, string, bool) {
+	parsed, err := c.types.Parse(typeName)
+	if err != nil {
+		return "", "", false
+	}
+	errorType, success, ok := typ.ErrorUnionParts(parsed)
+	return typ.Text(errorType), typ.Text(success), ok
 }
 
 // returnTypeName returns void for functions without an explicit return type.

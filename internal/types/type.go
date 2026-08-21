@@ -15,12 +15,12 @@ type Type string
 // asks structural questions about. Type remains the comparable spelling used
 // by checker maps and diagnostics.
 type typeTable struct {
-	parsed map[Type]typ.Type
+	parsed *typ.Table
 }
 
 // newTypeTable creates an empty phase-owned type table.
 func newTypeTable() typeTable {
-	return typeTable{parsed: map[Type]typ.Type{}}
+	return typeTable{parsed: typ.NewTable()}
 }
 
 // remember records a type the source parser or checker already parsed.
@@ -28,30 +28,16 @@ func (t *typeTable) remember(parsed typ.Type) Type {
 	if parsed == nil {
 		return ""
 	}
-	name := Type(parsed.String())
-	if _, exists := t.parsed[name]; exists {
-		return name
-	}
-	typ.Walk(parsed, func(node typ.Type) {
-		nodeName := Type(node.String())
-		if _, exists := t.parsed[nodeName]; !exists {
-			t.parsed[nodeName] = node
-		}
-	})
-	return name
+	return Type(t.parsed.Remember(parsed).String())
 }
 
 // lookup returns the one parsed structure for value, parsing compiler-produced
 // spellings only on their first structural query.
 func (t *typeTable) lookup(value Type) (typ.Type, bool) {
-	if parsed, ok := t.parsed[value]; ok {
-		return parsed, true
-	}
-	parsed, err := typ.Parse(string(value))
+	parsed, err := t.parsed.Parse(string(value))
 	if err != nil {
 		return nil, false
 	}
-	t.remember(parsed)
 	return parsed, true
 }
 

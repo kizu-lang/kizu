@@ -315,7 +315,7 @@ func (l *lowerer) resolveMetaTypeDeep(text string) string {
 	if resolved := l.resolveMetaTypeText(text); resolved != text {
 		return resolved
 	}
-	parsed, err := typ.Parse(text)
+	parsed, err := l.types.Parse(text)
 	if err != nil {
 		return text
 	}
