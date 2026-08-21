@@ -253,6 +253,39 @@ fn expect_type_apply_expression(
     return;
 }
 
+fn expect_error_ident(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    start_column: i64,
+    end_column: i64
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => {
+            expect_retained_bytes(tree.texts.at(value.name.node), "<error>");
+            testing::expect_equal<i64>(start_column, value.span.start.column);
+            testing::expect_equal<i64>(end_column, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain an error identifier"),
+    }
+    return;
+}
+
+fn expect_buffer_literal(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected_size: i64
+) -> void {
+    match tree.expressions.at(expression.node) {
+        BufferLiteral(value) => {
+            testing::expect_equal<i64>(expected_size, value.size);
+            testing::expect_equal<i64>(1, value.span.start.column);
+            testing::expect_equal<i64>(2, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain a buffer literal"),
+    }
+    return;
+}
+
 fn parse_break_then_deinit(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -988,6 +1021,118 @@ test "parser keeps nested and partial type application token states" {
         "expected next token `>`, got end of file",
         2,
         5
+    );
+}
+
+test "parser retains fixed byte buffer literals after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "[004]u8{}");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_buffer_literal(&tree, expression, 4);
+}
+
+test "parser rejects non-buffer and non-byte buffer literals" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let slice_scanner = lexer::new(allocator, "[]u8{}");
+    var slice_parser = try parser::new(allocator, move slice_scanner);
+    defer slice_parser.deinit();
+    let slice = try slice_parser.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    expect_error_ident(&tree, slice, 1, 2);
+    expect_parser_diagnostic(
+        &slice_parser,
+        0,
+        "expected buffer literal `[N]u8{}`, got type `[]u8`",
+        3,
+        5
+    );
+    let elem_scanner = lexer::new(allocator, "[4]i64{}");
+    var elem_parser = try parser::new(allocator, move elem_scanner);
+    defer elem_parser.deinit();
+    let elem = try elem_parser.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    expect_error_ident(&tree, elem, 1, 2);
+    expect_parser_diagnostic(
+        &elem_parser,
+        0,
+        "buffer element must be u8, got i64",
+        4,
+        7
+    );
+}
+
+test "parser keeps buffer literal recovery and brace short circuit" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let size_scanner = lexer::new(allocator, "[0]u8{}");
+    var size_parser = try parser::new(allocator, move size_scanner);
+    defer size_parser.deinit();
+    let bad_size = try size_parser.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    expect_error_ident(&tree, bad_size, 1, 2);
+    expect_parser_diagnostic(
+        &size_parser,
+        0,
+        "buffer size must be a positive integer, got 0",
+        2,
+        3
+    );
+    let open_scanner = lexer::new(allocator, "[4]u8");
+    var missing_open = try parser::new(allocator, move open_scanner);
+    defer missing_open.deinit();
+    let open_error = try missing_open.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    expect_error_ident(&tree, open_error, 1, 2);
+    testing::expect_equal<i64>(1, missing_open.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_open,
+        0,
+        "expected next token `{`, got end of file",
+        4,
+        6
+    );
+    let close_scanner = lexer::new(allocator, "[4]u8{");
+    var missing_close = try parser::new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let close_error = try missing_close.parse_buffer_literal_expr(
+        &var tree,
+        &var types
+    );
+    expect_error_ident(&tree, close_error, 1, 2);
+    testing::expect_equal<i64>(1, missing_close.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `}`, got end of file",
+        6,
+        7
     );
 }
 

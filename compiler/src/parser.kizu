@@ -317,6 +317,87 @@ fn add_field_expr(
     ));
 }
 
+fn (self: &var Parser) parse_buffer_literal_expr(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Expression {
+    let span = token_span_at(self);
+    let parsed = try self.parse_type_name(types);
+    if parsed |type_name| {
+        match typ::root_node(types, type_name) {
+            Buffer(buffer) => {
+                let elem_type = typ::child_type(type_name, buffer.elem);
+                let elem = try typ::render(
+                    self.allocator,
+                    types,
+                    elem_type
+                );
+                defer elem.deinit();
+                if !string_equals_bytes(&elem, "u8") {
+                    let message = try string_value_message(
+                        self.allocator,
+                        "buffer element must be u8, got ",
+                        &elem,
+                        ""
+                    );
+                    try self.record_error(move message);
+                    return add_error_ident(self.allocator, tree, span);
+                }
+                if !try self.expect_peek(token::Kind::LBrace) or
+                    !try self.expect_peek(token::Kind::RBrace) {
+                    return add_error_ident(self.allocator, tree, span);
+                }
+                return tree.add_expression(ast::ExpressionNode::BufferLiteral(
+                    ast::BufferLiteralExpr { size: buffer.size, span: span }
+                ));
+            },
+            _ => {},
+        }
+        let rendered = try typ::render(self.allocator, types, type_name);
+        defer rendered.deinit();
+        let message = try string_value_message(
+            self.allocator,
+            "expected buffer literal `[N]u8{}`, got type `",
+            &rendered,
+            "`"
+        );
+        try self.record_error(move message);
+    }
+    return add_error_ident(self.allocator, tree, span);
+}
+
+fn add_error_ident(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    span: ast::Span
+) -> !ast::Expression {
+    let name = try tree.add_text_from_bytes(allocator, "<error>");
+    return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: name,
+        span: span
+    }));
+}
+
+fn string_equals_bytes(value: &string::String, expected: []u8) -> bool {
+    let bytes = value.as_bytes();
+    return mem::equal_bytes(bytes, expected);
+}
+
+fn string_value_message(
+    allocator: Allocator,
+    prefix: []u8,
+    value: &string::String,
+    suffix: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    let bytes = value.as_bytes();
+    try out.append_bytes(bytes);
+    try out.append_bytes(suffix);
+    return move out;
+}
+
 fn token_span_at(parser: &Parser) -> ast::Span {
     let handle = parser.stream.get_or_panic(parser.position);
     return token_span(parser.tokens.at(handle));
