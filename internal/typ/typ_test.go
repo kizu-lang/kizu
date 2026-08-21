@@ -9,6 +9,7 @@ var roundTrip = []string{
 	"Io", "Allocator", "Function", "Self", "T",
 	"Point", "std::map::Map", "std::arena::Handle",
 	"[]u8", "[][]u8", "[]Point",
+	"[4]u8", "[32]Array<Point>",
 	"&i64", "&var i64", "&[]u8", "&var Point",
 	"?ptr<u8>", "?i64",
 	"!void", "!i64", "![]u8", "!&i64", "!&var i64",
@@ -54,6 +55,7 @@ func TestSubstituteReplacesWholeNamesOnly(t *testing.T) {
 		{"[]Timer", "[]Timer"},
 		{"&Tag", "&Tag"},
 		{"[]T", "[]i64"},
+		{"[4]T", "[4]i64"},
 		{"&var T", "&var i64"},
 		{"!T", "!i64"},
 		{"Pair<T, []T>", "Pair<i64, []i64>"},
@@ -65,6 +67,27 @@ func TestSubstituteReplacesWholeNamesOnly(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Fatalf("SubstituteText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestWalkVisitsBufferElement keeps fixed buffers on the same structural walk as slices.
+func TestWalkVisitsBufferElement(t *testing.T) {
+	parsed, err := Parse("[4]Secret")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var visited []string
+	Walk(parsed, func(node Type) {
+		visited = append(visited, node.String())
+	})
+	want := []string{"[4]Secret", "Secret"}
+	if len(visited) != len(want) {
+		t.Fatalf("Walk visited %q, want %q", visited, want)
+	}
+	for index := range want {
+		if visited[index] != want[index] {
+			t.Fatalf("Walk visited %q, want %q", visited, want)
 		}
 	}
 }

@@ -322,6 +322,8 @@ func Walk(t Type, visit func(Type)) {
 		}
 	case *Slice:
 		Walk(node.Elem, visit)
+	case *Buffer:
+		Walk(node.Elem, visit)
 	case *Borrow:
 		Walk(node.Elem, visit)
 	case *Optional:
@@ -450,6 +452,8 @@ func Substitute(t Type, subst map[string]Type) Type {
 		return &Name{Path: node.Path, Args: args}
 	case *Slice:
 		return &Slice{Elem: Substitute(node.Elem, subst)}
+	case *Buffer:
+		return &Buffer{Size: node.Size, Elem: Substitute(node.Elem, subst)}
 	case *Borrow:
 		return &Borrow{Elem: Substitute(node.Elem, subst), Mut: node.Mut}
 	case *Optional:
