@@ -243,9 +243,6 @@ type typeResolver struct {
 
 // resolveBase resolves one non-generic type base.
 func (r typeResolver) resolveBase(name string) (string, error) {
-	if isPrimitiveType(name) {
-		return name, nil
-	}
 	if strings.HasPrefix(name, stdlib.Root+"::") {
 		r.module.use(stdlib.Root)
 		if !ReachableFrom(name, r.module.path) {
@@ -259,6 +256,9 @@ func (r typeResolver) resolveBase(name string) (string, error) {
 	local := r.module.qualify(name)
 	if _, ok := r.checker.types[local]; ok {
 		return local, nil
+	}
+	if isPrimitiveType(name) {
+		return name, nil
 	}
 	return name, nil
 }
