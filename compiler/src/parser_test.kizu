@@ -199,6 +199,23 @@ fn expect_continue_label(
     return;
 }
 
+fn expect_type_expression(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Type(value) => {
+            expect_retained_bytes(
+                tree.texts.at(value.type_name.node),
+                expected
+            );
+        },
+        _ => testing::fail("parser did not retain a type expression"),
+    }
+    return;
+}
+
 fn parse_break_then_deinit(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -664,6 +681,85 @@ test "parser retains keyword literal expressions" {
         },
         _ => testing::fail("null did not retain a null expression"),
     }
+}
+
+test "parser retains type expressions after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "type<ptr<const u8>>");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_type_expr(&var tree, &var types);
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_type_expression(&tree, expression, "ptr<const u8>");
+}
+
+test "parser accepts value static arguments in type expressions" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "type<4096>");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try value.parse_type_expr(&var tree, &var types);
+    expect_type_expression(&tree, expression, "4096");
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+}
+
+test "parser keeps partial type expressions and exact diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let open_scanner = lexer::new(allocator, "type i64");
+    var missing_open = try parser::new(allocator, move open_scanner);
+    defer missing_open.deinit();
+    let empty = try missing_open.parse_type_expr(&var tree, &var types);
+    expect_type_expression(&tree, empty, "");
+    let expected_open =
+        \\expected next token `<`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(
+        &missing_open,
+        0,
+        expected_open,
+        1,
+        5
+    );
+    let arg_scanner = lexer::new(allocator, "type<+>");
+    var invalid_arg = try parser::new(allocator, move arg_scanner);
+    defer invalid_arg.deinit();
+    let invalid = try invalid_arg.parse_type_expr(&var tree, &var types);
+    expect_type_expression(&tree, invalid, "");
+    expect_parser_diagnostic(
+        &invalid_arg,
+        0,
+        "expected static argument, got `+`",
+        6,
+        7
+    );
+    testing::expect(invalid_arg.current_kind() == token::Kind::Plus);
+    testing::expect(invalid_arg.peek_kind() == token::Kind::Gt);
+    let close_scanner = lexer::new(allocator, "type<i64");
+    var missing_close = try parser::new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_type_expr(&var tree, &var types);
+    expect_type_expression(&tree, partial, "i64");
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `>`, got end of file",
+        6,
+        9
+    );
 }
 
 test "parser retains optional payload captures after token cleanup" {
