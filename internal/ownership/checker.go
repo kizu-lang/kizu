@@ -743,7 +743,7 @@ func (c *Checker) fieldTypeNeedsConsume(typeName string) bool {
 // is the element's.
 func (c *Checker) resultTypeNeedsConsume(typeName string) bool {
 	for {
-		if _, success, isUnion := typ.ErrorUnionParts(typeName); isUnion {
+		if _, success, isUnion := errorUnionParts(typeName); isUnion {
 			typeName = success
 			continue
 		}
@@ -7498,7 +7498,7 @@ func errorUnionElement(typeName string) (string, bool) {
 
 // errorUnionParts extracts error and success types from !T or Error!T.
 func errorUnionParts(typeName string) (string, string, bool) {
-	return typ.ErrorUnionParts(typeName)
+	return typ.ParseErrorUnionParts(typeName)
 }
 
 // returnTypeName returns void for functions without an explicit return type.

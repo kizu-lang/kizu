@@ -339,23 +339,25 @@ func Walk(t Type, visit func(Type)) {
 }
 
 // ErrorUnionParts returns the error type and T of an error union, and reports
-// whether text is one. `!T` gives an empty error type. The answer comes from
-// the structure, so the `!` inside `Array<!i64>` does not make that type an
-// error union.
-func ErrorUnionParts(text string) (string, string, bool) {
+// whether value is one. `!T` gives a nil error type. The caller parses text at
+// its boundary; structural questions do not parse or allocate.
+func ErrorUnionParts(value Type) (Type, Type, bool) {
+	node, ok := value.(*ErrorUnion)
+	if !ok {
+		return nil, nil, false
+	}
+	return node.Err, node.Ok, true
+}
+
+// ParseErrorUnionParts parses a text boundary before returning the spellings
+// of an error union's parts. Structural callers use ErrorUnionParts directly.
+func ParseErrorUnionParts(text string) (string, string, bool) {
 	parsed, err := Parse(text)
 	if err != nil {
 		return "", "", false
 	}
-	node, ok := parsed.(*ErrorUnion)
-	if !ok {
-		return "", "", false
-	}
-	errorType := ""
-	if node.Err != nil {
-		errorType = node.Err.String()
-	}
-	return errorType, node.Ok.String(), true
+	errorType, success, ok := ErrorUnionParts(parsed)
+	return Text(errorType), Text(success), ok
 }
 
 // OptionalElem returns T for an optional value type `?T`, and reports whether
@@ -387,13 +389,24 @@ func BorrowOptionalElem(text string) (string, bool, bool) {
 // want by the absorption `try` does. `!T` declares no error set (ADR-0087), so
 // an `E!T` reaching it arrives with E absorbed. A declared `E!T` named the one
 // set it takes and absorbs nothing.
-func AbsorbsErrorSet(want string, got string) bool {
+func AbsorbsErrorSet(want Type, got Type) bool {
 	wantSet, wantSuccess, isUnion := ErrorUnionParts(want)
-	if !isUnion || wantSet != "" {
+	if !isUnion || wantSet != nil {
 		return false
 	}
 	gotSet, gotSuccess, isUnion := ErrorUnionParts(got)
-	return isUnion && gotSet != "" && gotSuccess == wantSuccess
+	return isUnion && gotSet != nil && Equal(gotSuccess, wantSuccess)
+}
+
+// ParseAbsorbsErrorSet parses two text boundaries before asking whether the
+// structured types absorb one another's error set.
+func ParseAbsorbsErrorSet(want string, got string) bool {
+	wantType, err := Parse(want)
+	if err != nil {
+		return false
+	}
+	gotType, err := Parse(got)
+	return err == nil && AbsorbsErrorSet(wantType, gotType)
 }
 
 // SplitApply separates `Base` and `Args` in a `Base<Args>` spelling, without

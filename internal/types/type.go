@@ -308,7 +308,7 @@ func optionalElem(t Type) (Type, bool) {
 // function that declares no error set is the same absorption `try` does. A
 // declared `E!T` is not this, because it named the one set it accepts.
 func absorbsErrorUnion(want Type, got Type) bool {
-	return typ.AbsorbsErrorSet(string(want), string(got))
+	return typ.ParseAbsorbsErrorSet(string(want), string(got))
 }
 
 // explicitBorrowType extracts &T and &var T spellings.
@@ -464,7 +464,7 @@ func errorUnionElement(typ Type) (string, bool) {
 
 // errorUnionParts extracts error and success types from !T or Error!T.
 func errorUnionParts(union Type) (string, string, bool) {
-	return typ.ErrorUnionParts(string(union))
+	return typ.ParseErrorUnionParts(string(union))
 }
 
 // splitGenericType extracts base and raw arguments from base<args>.

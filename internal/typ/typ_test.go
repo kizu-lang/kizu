@@ -46,6 +46,63 @@ func TestParseRejectsTextThatIsNotAType(t *testing.T) {
 	}
 }
 
+// TestErrorUnionPartsReadsParsedStructure keeps structural queries free of
+// spelling scans: a nested error union is not the root error union.
+func TestErrorUnionPartsReadsParsedStructure(t *testing.T) {
+	bare, err := Parse("!i64")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	set, success, ok := ErrorUnionParts(bare)
+	if !ok || set != nil || success.String() != "i64" {
+		t.Fatalf("ErrorUnionParts(!i64) = (%v, %v, %t)", set, success, ok)
+	}
+
+	declared, err := Parse("ParseError!i64")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	set, success, ok = ErrorUnionParts(declared)
+	if !ok || set.String() != "ParseError" || success.String() != "i64" {
+		t.Fatalf("ErrorUnionParts(ParseError!i64) = (%v, %v, %t)", set, success, ok)
+	}
+
+	nested, err := Parse("Array<!i64>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if set, success, ok = ErrorUnionParts(nested); ok {
+		t.Fatalf("ErrorUnionParts(Array<!i64>) = (%v, %v, true)", set, success)
+	}
+}
+
+// TestAbsorbsErrorSetComparesParsedStructure checks the one allowed error-set
+// absorption without returning to spelling comparisons.
+func TestAbsorbsErrorSetComparesParsedStructure(t *testing.T) {
+	want, err := Parse("!Array<i64>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := Parse("ParseError!Array<i64>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !AbsorbsErrorSet(want, got) {
+		t.Fatal("!Array<i64> did not absorb ParseError!Array<i64>")
+	}
+
+	other, err := Parse("ParseError!Array<u8>")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if AbsorbsErrorSet(want, other) {
+		t.Fatal("!Array<i64> absorbed ParseError!Array<u8>")
+	}
+	if ParseAbsorbsErrorSet("not a type", "ParseError!Array<i64>") {
+		t.Fatal("malformed text boundary was absorbed")
+	}
+}
+
 // TestSubstituteReplacesWholeNamesOnly is the bug the spelling-level
 // substitution had: replacing `T` inside `[]u8` produced `[]i648`.
 func TestSubstituteReplacesWholeNamesOnly(t *testing.T) {

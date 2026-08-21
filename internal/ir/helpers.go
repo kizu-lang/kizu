@@ -229,5 +229,5 @@ func errorUnionSuccessType(result string) (string, bool) {
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
 func errorUnionParts(result string) (string, string, bool) {
-	return typ.ErrorUnionParts(result)
+	return typ.ParseErrorUnionParts(result)
 }

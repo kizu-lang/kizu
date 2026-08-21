@@ -276,7 +276,7 @@ func errorUnionSuccessType(typ string) (string, bool) {
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
 func errorUnionParts(name string) (string, string, bool) {
-	return typ.ErrorUnionParts(name)
+	return typ.ParseErrorUnionParts(name)
 }
 
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.

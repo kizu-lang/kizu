@@ -172,13 +172,18 @@ func (v *verifier) terminator() error {
 		}
 	}
 	got := term.Value.Type
-	if term.Op != "return" || got == "" || typ.AbsorbsErrorSet(v.fn.Return, got) {
+	if term.Op != "return" || got == "" || absorbsErrorSet(v.fn.Return, got) {
 		return nil
 	}
 	if v.fn.Return != got {
 		return v.fail("return value", v.fn.Return, got)
 	}
 	return nil
+}
+
+// absorbsErrorSet parses the IR spellings before asking the structural type query.
+func absorbsErrorSet(want string, got string) bool {
+	return typ.ParseAbsorbsErrorSet(want, got)
 }
 
 // fail names one position that holds a value of a type its declaration did not
