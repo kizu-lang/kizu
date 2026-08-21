@@ -1,3 +1,4 @@
+import compiler::ast;
 import compiler::lexer;
 import compiler::parser;
 import compiler::source;
@@ -5,6 +6,43 @@ import compiler::token;
 import std::mem;
 import std::string;
 import std::testing;
+
+fn zero_span() -> ast::Span {
+    return ast::Span {
+        source: null,
+        start: ast::Position { line: 0, column: 0 },
+        end: ast::Position { line: 0, column: 0 }
+    };
+}
+
+fn retained_text(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    bytes: []u8
+) -> !ast::Text {
+    return tree.add_text_from_bytes(allocator, bytes);
+}
+
+fn expect_type_apply_lookahead(
+    allocator: Allocator,
+    input: []u8,
+    expected: bool
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    testing::expect_equal<bool>(expected, try value.type_apply_looks_like_call());
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    testing::expect_equal<bool>(expected, try value.type_apply_looks_like_call());
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    try value.next_token();
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.current_kind());
+    return;
+}
 
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
@@ -41,4 +79,56 @@ test "parser lifecycle owns its token stream and diagnostics" {
     } else {
         testing::fail("parser source was not retained");
     }
+}
+
+test "type apply lookahead rewinds cached tokens" {
+    let allocator = mem::page_allocator();
+    try expect_type_apply_lookahead(allocator, "f<T>(x)", true);
+    try expect_type_apply_lookahead(allocator, "f<Array<T>>(x)", true);
+    try expect_type_apply_lookahead(allocator, "f<T> + x", false);
+    try expect_type_apply_lookahead(allocator, "f<T;", false);
+    try expect_type_apply_lookahead(allocator, "f<T{", false);
+    try expect_type_apply_lookahead(allocator, "f<T}", false);
+    try expect_type_apply_lookahead(allocator, "f<T", false);
+}
+
+test "type apply target is an identifier or namespace field" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let function_name = try retained_text(allocator, &var tree, "f");
+    let empty_name = try retained_text(allocator, &var tree, "");
+    let field_name = try retained_text(allocator, &var tree, "call");
+    let integer_text = try retained_text(allocator, &var tree, "1");
+    let function = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: function_name,
+        span: zero_span()
+    }));
+    let empty = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: empty_name,
+        span: zero_span()
+    }));
+    let namespace = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: function,
+        name: field_name,
+        namespace: true,
+        span: zero_span()
+    }));
+    let instance = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: function,
+        name: field_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: integer_text
+    }));
+    let scanner = lexer::new(allocator, "f<T>(x)");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(try value.should_parse_type_apply(&tree, function));
+    testing::expect(try value.should_parse_type_apply(&tree, namespace));
+    testing::expect(!try value.should_parse_type_apply(&tree, empty));
+    testing::expect(!try value.should_parse_type_apply(&tree, instance));
+    testing::expect(!try value.should_parse_type_apply(&tree, integer));
 }

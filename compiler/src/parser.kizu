@@ -81,6 +81,86 @@ fn (self: &Parser) peek_kind() -> token::Kind {
     return self.tokens.at(handle).kind;
 }
 
+// Reports whether `<...>` after expression is a static call argument list.
+fn (self: &var Parser) should_parse_type_apply(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !bool {
+    if !can_type_apply_target(tree, expression) {
+        return false;
+    }
+    return self.type_apply_looks_like_call();
+}
+
+// Scans through a possible static argument list, then restores the token and
+// diagnostic cursors so the real parse sees the same state. A lexer allocation
+// failure remains terminal for the parse because scanning may already have
+// advanced; the caller propagates it and destroys the Parser.
+fn (self: &var Parser) type_apply_looks_like_call() -> !bool {
+    let position = self.position;
+    let diagnostic_count = self.diagnostics_store.len();
+    let decision = self.scan_type_apply_lookahead();
+    self.restore_lookahead(position, diagnostic_count);
+    return move decision;
+}
+
+fn (self: &var Parser) scan_type_apply_lookahead() -> !bool {
+    try self.next_token();
+    var depth = 1;
+    while depth > 0 {
+        try self.next_token();
+        let kind = self.current_kind();
+        if kind == token::Kind::Eof or
+            kind == token::Kind::Semicolon or
+            kind == token::Kind::LBrace or
+            kind == token::Kind::RBrace {
+            return false;
+        }
+        if kind == token::Kind::Lt {
+            depth = depth + 1;
+        }
+        if kind == token::Kind::Gt {
+            depth = depth - 1;
+        }
+    }
+    return self.peek_kind() == token::Kind::LParen;
+}
+
+fn (self: &var Parser) restore_lookahead(
+    position: i64,
+    diagnostic_count: i64
+) -> void {
+    self.position = position;
+    while self.diagnostics_store.len() > diagnostic_count {
+        let abandoned = self.diagnostics_store.pop_or_panic();
+        abandoned.deinit();
+    }
+    return;
+}
+
+// Reports whether expression may receive static call arguments.
+fn can_type_apply_target(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> bool {
+    match tree.expressions.at(expression.node) {
+        Field(value) => return value.namespace,
+        Ident(value) => return retained_text_has_bytes(&tree.texts, value.name),
+        _ => return false,
+    }
+}
+
+fn retained_text_has_bytes(
+    texts: &arena::Arena<string::String>,
+    value: ast::Text
+) -> bool {
+    return retained_string_has_bytes(texts.at(value.node));
+}
+
+fn retained_string_has_bytes(value: &string::String) -> bool {
+    return value.len() > 0;
+}
+
 // Builds a half-open diagnostic span from the current parser token.
 fn diagnostic_at_token(
     allocator: Allocator,
@@ -181,8 +261,8 @@ fn append_next_token(
     tokens: &var arena::Arena<token::Token>,
     stream: &var array::Array<arena::Handle<token::Token>>
 ) -> !void {
-    // Reserve before scanning so recoverable allocation failure cannot leave
-    // the scanner frontier ahead of the ordered handle stream.
+    // Reserve before scanning so stream growth failure cannot leave the
+    // scanner frontier ahead of the ordered handle stream.
     try stream.reserve(1);
     let next = try scanner.next_token();
     let handle = tokens.add(move next);
