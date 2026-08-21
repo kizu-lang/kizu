@@ -500,6 +500,24 @@ func TestFormatTaggedDeclarationsKeepTrailingComma(t *testing.T) {
 	}
 }
 
+// TestFormatMethodNamedErrorKeepsNormalBody distinguishes a method name from
+// the `error Name { ... }` declaration introducer.
+func TestFormatMethodNamedErrorKeepsNormalBody(t *testing.T) {
+	src := "struct Diagnostic {}\n" +
+		"fn (self: &Diagnostic) error() -> void { return; }\n"
+	want := "struct Diagnostic {}\n" +
+		"\n" +
+		"fn (self: &Diagnostic) error() -> void {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(error method):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(error method idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatComptimeMatchDoesNotAddArmComma distinguishes the compile-time
 // structural body from a runtime match arm list.
 func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {

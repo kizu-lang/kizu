@@ -637,6 +637,9 @@ func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bo
 	if index < 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
 		return false
 	}
+	if opensErrorSetBlock(tokens, index) {
+		return true
+	}
 	// Walk back to the keyword that introduced this `{`. Another brace or a
 	// semicolon means the keyword belongs to an enclosing construct, not this
 	// block, which is what keeps a match arm's own `{ ... }` body normal.
@@ -646,15 +649,22 @@ func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bo
 			return true
 		case token.Match:
 			return cursor == 0 || tokens[cursor-1].Type != token.Comptime
-		case token.Ident:
-			if tokens[cursor].Literal == "error" {
-				return true
-			}
 		case token.LBrace, token.RBrace, token.Semicolon:
 			return false
 		}
 	}
 	return false
+}
+
+// opensErrorSetBlock reports whether the current brace follows `error Name`.
+// Looking for any earlier identifier spelled `error` also catches an ordinary
+// function or method named error and incorrectly adds an enum-style comma to
+// its final statement.
+func opensErrorSetBlock(tokens []token.Token, index int) bool {
+	return index >= 2 &&
+		tokens[index-1].Type == token.Ident &&
+		tokens[index-2].Type == token.Ident &&
+		tokens[index-2].Literal == "error"
 }
 
 // opensInlineLiteralAtCurrentIndex recognizes a same-line aggregate literal.
@@ -701,13 +711,16 @@ func canOpenAggregateLiteral(t token.Token) bool {
 // braceStartsBody distinguishes declaration and control-flow bodies from
 // aggregate literals whose opening token also follows an identifier.
 func braceStartsBody(tokens []token.Token, index int) bool {
+	if opensErrorSetBlock(tokens, index) {
+		return true
+	}
 	for cursor := index - 1; cursor >= 0; cursor-- {
 		switch tokens[cursor].Type {
 		case token.Function, token.Struct, token.Enum, token.Union, token.Contract,
 			token.Impl, token.If, token.Else, token.While, token.For, token.Match:
 			return true
 		case token.Ident:
-			if tokens[cursor].Literal == "error" || tokens[cursor].Literal == "test" {
+			if tokens[cursor].Literal == "test" {
 				return true
 			}
 		case token.LBrace, token.RBrace, token.Semicolon:
