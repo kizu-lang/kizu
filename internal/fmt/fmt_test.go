@@ -370,3 +370,149 @@ func TestFormatGroupingParenTakesSpace(t *testing.T) {
 		t.Fatalf("Format(grouping paren idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
+
+// TestFormatPostfixIndexAndComparisonGroup keeps postfix brackets attached
+// while a grouping parenthesis after `>` remains visibly separate.
+func TestFormatPostfixIndexAndComparisonGroup(t *testing.T) {
+	src := "fn read(bytes: []u8, index: i64) -> u8 {\n" +
+		"    if bytes [index] >(0) {\n" +
+		"        return bytes [index];\n" +
+		"    }\n" +
+		"}\n"
+	want := "fn read(bytes: []u8, index: i64) -> u8 {\n" +
+		"    if bytes[index] > (0) {\n" +
+		"        return bytes[index];\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(postfix and group):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatNamedErrorUnionHugsBothTypes keeps `!` attached when an explicit
+// error set appears on its left, while the return arrow remains separated.
+func TestFormatNamedErrorUnionHugsBothTypes(t *testing.T) {
+	src := "fn read() -> ReadError ! []u8 { return Error::Closed; }"
+	want := "fn read() -> ReadError![]u8 {\n" +
+		"    return Error::Closed;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(named error union):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatContinuationIndent tracks grouping depth instead of flattening
+// every source-preserved line break to the surrounding brace depth.
+func TestFormatContinuationIndent(t *testing.T) {
+	src := "fn calculate(\n" +
+		"left: i64,\n" +
+		"right: i64\n" +
+		") -> i64 {\n" +
+		"    return outer(\n" +
+		"    inner(\n" +
+		"    left\n" +
+		"    ),\n" +
+		"    right\n" +
+		"    );\n" +
+		"}\n"
+	want := "fn calculate(\n" +
+		"    left: i64,\n" +
+		"    right: i64\n" +
+		") -> i64 {\n" +
+		"    return outer(\n" +
+		"        inner(\n" +
+		"            left\n" +
+		"        ),\n" +
+		"        right\n" +
+		"    );\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(continuation indent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if got := Format(want); got != want {
+		t.Fatalf("Format(continuation idempotent):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatSameLineNestedCallClosesAtStatementDepth avoids accumulating
+// indentation for delimiters that opened together on one source line.
+func TestFormatSameLineNestedCallClosesAtStatementDepth(t *testing.T) {
+	src := "fn calculate(value: i64) -> i64 {\n" +
+		"    return outer(inner(\n" +
+		"    value\n" +
+		"    ));\n" +
+		"}\n"
+	want := "fn calculate(value: i64) -> i64 {\n" +
+		"    return outer(inner(\n" +
+		"        value\n" +
+		"    ));\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(same-line nested call):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatContinuationCommentUsesGroupIndent keeps comments and the token
+// after them at the surrounding call's continuation depth.
+func TestFormatContinuationCommentUsesGroupIndent(t *testing.T) {
+	src := "fn send(value: i64) -> void {\n" +
+		"    use(\n" +
+		"    // payload\n" +
+		"    value\n" +
+		"    );\n" +
+		"}\n"
+	want := "fn send(value: i64) -> void {\n" +
+		"    use(\n" +
+		"        // payload\n" +
+		"        value\n" +
+		"    );\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(continuation comment):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatKeepsSameLineAggregateLiteralCompact distinguishes data literals
+// from declaration and control-flow blocks.
+func TestFormatKeepsSameLineAggregateLiteralCompact(t *testing.T) {
+	src := "fn span() -> Span {\n" +
+		"    return Span { start: 0, end: 1 };\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("Format(compact aggregate):\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestFormatTaggedDeclarationsKeepTrailingComma applies the same list style
+// to error names and union variants that enums already use.
+func TestFormatTaggedDeclarationsKeepTrailingComma(t *testing.T) {
+	src := "error ReadError { Closed, Invalid }\n" +
+		"union Value { Int(i64), None }\n"
+	want := "error ReadError {\n" +
+		"    Closed, Invalid,\n" +
+		"}\n" +
+		"\n" +
+		"union Value {\n" +
+		"    Int(i64), None,\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(tagged declarations):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatComptimeMatchDoesNotAddArmComma distinguishes the compile-time
+// structural body from a runtime match arm list.
+func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {
+	src := "fn encode<T>(value: &T) -> void {\n" +
+		"    comptime match value |v| {\n" +
+		"        comptime if std::meta::has_payload<T, v>() {\n" +
+		"            print(1);\n" +
+		"        } else {\n" +
+		"            print(0);\n" +
+		"        }\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != src {
+		t.Fatalf("Format(comptime match):\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
