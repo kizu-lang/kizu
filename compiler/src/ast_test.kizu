@@ -301,6 +301,72 @@ fn expect_owner(
     return;
 }
 
+fn expect_type_name(
+    allocator: Allocator,
+    types: &typ::Table,
+    value: typ::Type,
+    expected: []u8
+) -> !void {
+    let rendered = try typ::render(allocator, types, value);
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_cleanup_field(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected_field: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => {
+            testing::expect(value.semicolon);
+            match tree.expressions.at(value.expr.node) {
+                Call(call) => {
+                    testing::expect_equal<i64>(0, call.args.len(tree));
+                    match tree.expressions.at(call.callee.node) {
+                        Field(method) => {
+                            expect_text(tree, method.name, "deinit");
+                            match tree.expressions.at(method.receiver.node) {
+                                Field(field) => {
+                                    expect_text(tree, field.name, expected_field);
+                                    expect_ident_name(tree, field.receiver, "self");
+                                },
+                                _ => testing::fail("cleanup receiver was not a field"),
+                            }
+                        },
+                        _ => testing::fail("cleanup callee was not a method"),
+                    }
+                },
+                _ => testing::fail("cleanup statement was not a call"),
+            }
+        },
+        _ => testing::fail("cleanup was not an expression statement"),
+    }
+    return;
+}
+
+fn expect_cleanup_ident(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => match tree.expressions.at(value.expr.node) {
+            Call(call) => match tree.expressions.at(call.callee.node) {
+                Field(method) => {
+                    expect_text(tree, method.name, "deinit");
+                    expect_ident_name(tree, method.receiver, expected);
+                },
+                _ => testing::fail("cleanup callee was not a method"),
+            },
+            _ => testing::fail("cleanup statement was not a call"),
+        },
+        _ => testing::fail("cleanup was not an expression statement"),
+    }
+    return;
+}
+
 test "span zero state follows its source position" {
     let missing = zero_span();
     testing::expect(missing.is_zero());
@@ -545,6 +611,335 @@ test "deinit owner discovery includes declared and transitive holders" {
     expect_owner(&declared, "Generated", false);
     expect_owner(&declared, "Resource", true);
     expect_owner(&declared, "Inner", false);
+}
+
+test "derived struct deinit consumes plain and optional owner fields" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let string_type = try types.parse("std::string::String");
+    let optional_string = try types.parse("?std::string::String");
+    let integer = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var fields = array::new<ast::Field>(allocator);
+    errdefer fields.deinit();
+    let empty = try retained_text(allocator, &var tree, "");
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "name"),
+        doc: empty,
+        type_name: string_type,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "age"),
+        doc: empty,
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "nick"),
+        doc: empty,
+        type_name: optional_string,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    var type_params = array::new<ast::Text>(allocator);
+    errdefer type_params.deinit();
+    try type_params.append(try retained_text(allocator, &var tree, "T"));
+    let visitor_name = try retained_text(allocator, &var tree, "Visitor");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Struct(
+        ast::StructDecl {
+        name: visitor_name,
+        doc: empty,
+        type_params: move type_params,
+        fields: move fields,
+        public: false,
+        requires_unsafe: false
+    }
+    ));
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    if try ast::derive_deinit(
+        allocator,
+        &var tree,
+        &var types,
+        &owners,
+        declaration
+    ) |function| {
+        let generated = tree.add_declaration(ast::DeclarationNode::Function(
+            move function
+        ));
+        match tree.declarations.at(generated.node) {
+            Function(value) => {
+                testing::expect(value.derived);
+                testing::expect(value.signature.receiver);
+                testing::expect(!value.signature.std);
+                expect_text(&tree, value.signature.name, "Visitor.deinit");
+                testing::expect_equal<i64>(1, value.signature.static_params.len());
+                if value.signature.static_params.at(0) |param| {
+                    expect_text(&tree, param.name, "T");
+                    testing::expect(param.is_type());
+                } else {
+                    testing::fail("derived deinit lost its type parameter");
+                }
+                testing::expect_equal<i64>(1, value.signature.params.len());
+                if value.signature.params.at(0) |receiver| {
+                    expect_text(&tree, receiver.name, "self");
+                    try expect_type_name(
+                        allocator,
+                        &types,
+                        receiver.type_name,
+                        "Visitor<T>"
+                    );
+                } else {
+                    testing::fail("derived deinit had no receiver");
+                }
+                if value.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => {
+                            testing::expect_equal<i64>(3, block.statements.len());
+                            expect_cleanup_field(
+                                &tree,
+                                block.statements.get_or_panic(0),
+                                "name"
+                            );
+                            let optional = block.statements.get_or_panic(1);
+                            match tree.statements.at(optional.node) {
+                                If(opened) => {
+                                    expect_text(&tree, opened.capture, "held");
+                                    match tree.expressions.at(opened.condition.node) {
+                                        Field(field) => {
+                                            expect_text(&tree, field.name, "nick");
+                                            expect_ident_name(
+                                                &tree,
+                                                field.receiver,
+                                                "self"
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "optional owner was not read as a field"
+                                        ),
+                                    }
+                                    match tree.statements.at(opened.consequence.node) {
+                                        Block(consequence) => {
+                                            testing::expect_equal<i64>(
+                                                1,
+                                                consequence.statements.len()
+                                            );
+                                            expect_cleanup_ident(
+                                                &tree,
+                                                consequence.statements.get_or_panic(0),
+                                                "held"
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "optional owner had no consequence block"
+                                        ),
+                                    }
+                                },
+                                _ => testing::fail("optional owner was not opened first"),
+                            }
+                            match tree.statements.at(
+                                block.statements.get_or_panic(2).node
+                            ) {
+                                Return(returned) => if returned.value |_| {
+                                    testing::fail("derived return carried a value");
+                                },
+                                _ => testing::fail("derived deinit had no final return"),
+                            }
+                        },
+                        _ => testing::fail("derived body handle was not a block"),
+                    }
+                } else {
+                    testing::fail("derived deinit had no body");
+                }
+            },
+            _ => testing::fail("derived declaration was not a function"),
+        }
+    } else {
+        testing::fail("struct holding owners got no derived deinit");
+    }
+}
+
+test "derived union deinit matches every variant and consumes owner payload" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let string_type = try types.parse("std::string::String");
+    let integer = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty = try retained_text(allocator, &var tree, "");
+    var variants = array::new<ast::UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, &var tree, "Kept"),
+        doc: empty,
+        payload: string_type
+    });
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, &var tree, "Count"),
+        doc: empty,
+        payload: integer
+    });
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, &var tree, "Vacant"),
+        doc: empty,
+        payload: null
+    });
+    let slot_name = try retained_text(allocator, &var tree, "std::Slot");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Union(
+        ast::UnionDecl {
+        name: slot_name,
+        doc: empty,
+        type_params: array::new<ast::Text>(allocator),
+        variants: move variants,
+        public: false
+    }
+    ));
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    if try ast::derive_deinit(
+        allocator,
+        &var tree,
+        &var types,
+        &owners,
+        declaration
+    ) |function| {
+        let generated = tree.add_declaration(ast::DeclarationNode::Function(
+            move function
+        ));
+        match tree.declarations.at(generated.node) {
+            Function(value) => {
+                testing::expect(value.signature.std);
+                expect_text(&tree, value.signature.name, "std::Slot.deinit");
+                if value.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => match tree.statements.at(
+                            block.statements.get_or_panic(0).node
+                        ) {
+                            Match(selected) => {
+                                testing::expect_equal<i64>(3, selected.arms.len());
+                                expect_ident_name(&tree, selected.value, "self");
+                                if selected.arms.at(0) |arm| {
+                                    expect_text(&tree, arm.tag, "Kept");
+                                    expect_text(&tree, arm.binding, "held");
+                                    expect_cleanup_ident(&tree, arm.body, "held");
+                                } else {
+                                    testing::fail("owner variant had no match arm");
+                                }
+                                if selected.arms.at(1) |arm| {
+                                    expect_text(&tree, arm.binding, "");
+                                    expect_block_len(&tree, ast::Block {
+                                        node: arm.body.node
+                                    }, 0);
+                                } else {
+                                    testing::fail("copy variant had no match arm");
+                                }
+                                if selected.arms.at(2) |arm| {
+                                    expect_text(&tree, arm.binding, "");
+                                    expect_block_len(&tree, ast::Block {
+                                        node: arm.body.node
+                                    }, 0);
+                                } else {
+                                    testing::fail("empty variant had no match arm");
+                                }
+                            },
+                            _ => testing::fail(
+                                "union deinit body did not start with match"
+                            ),
+                        },
+                        _ => testing::fail("derived union body was not a block"),
+                    }
+                } else {
+                    testing::fail("derived union deinit had no body");
+                }
+            },
+            _ => testing::fail("derived union declaration was not a function"),
+        }
+    } else {
+        testing::fail("union carrying an owner got no derived deinit");
+    }
+}
+
+test "adding derived deinits skips copy and manually cleaned types" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let resource = try types.parse("Resource");
+    let integer = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var program = ast::new_program(allocator);
+    defer program.deinit();
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Resource.deinit",
+        false
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Holder",
+        "resource",
+        resource
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Manual",
+        "resource",
+        resource
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Manual.deinit",
+        false
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Point",
+        "x",
+        integer
+    );
+    try ast::add_derived_deinits(
+        allocator,
+        &var tree,
+        &var types,
+        &var program
+    );
+    testing::expect_equal<i64>(6, program.declarations.len());
+    let generated = program.declarations.get_or_panic(5);
+    match tree.declarations.at(generated.node) {
+        Function(value) => {
+            testing::expect(value.derived);
+            expect_text(&tree, value.signature.name, "Holder.deinit");
+        },
+        _ => testing::fail("appended derived declaration was not a function"),
+    }
+    try ast::add_derived_deinits(
+        allocator,
+        &var tree,
+        &var types,
+        &var program
+    );
+    testing::expect_equal<i64>(6, program.declarations.len());
 }
 
 test "variant helpers preserve shared bodies and ordinary expression shape" {
