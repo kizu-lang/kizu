@@ -137,9 +137,8 @@ struct Parser {
     nodes: arena::Arena<Node>
 }
 
-// TypeBuilder keeps one output arena and its allocator out of recursive
-// transforms. It makes the ownership boundary visible once per result tree.
-struct TypeBuilder {
+/// Owns one type graph until it is transferred into a phase Table.
+pub struct Builder {
     allocator: Allocator,
     nodes: arena::Arena<Node>
 }
@@ -156,6 +155,30 @@ pub fn new(allocator: Allocator) -> Table {
         trees: arena::new<TypeTree>(allocator),
         parsed: map::new<[]u8, Type>(allocator)
     };
+}
+
+/// Creates an empty graph builder for one parsed or transformed type.
+pub fn new_builder(allocator: Allocator) -> Builder {
+    return Builder {
+        allocator: allocator,
+        nodes: arena::new<Node>(allocator)
+    };
+}
+
+/// Retains one node and returns its identity inside this graph.
+fn (self: &var Builder) add(node: Node) -> arena::Handle<Node> {
+    return self.nodes.add(move node);
+}
+
+/// Transfers the completed graph into its phase table.
+pub fn finish_builder(
+    builder: Builder,
+    table: &var Table,
+    root: arena::Handle<Node>
+) -> Type {
+    let tree = TypeTree { nodes: move builder.nodes, root: root };
+    let tree_handle = table.trees.add(move tree);
+    return Type { tree: tree_handle, root: root };
 }
 
 /// Returns the retained type for text, parsing its tree on first use.
@@ -733,10 +756,7 @@ pub fn map_names<M>(
     value: Type,
     mapper: &var M
 ) -> !Type {
-    var builder = TypeBuilder {
-        allocator: table.allocator,
-        nodes: arena::new<Node>(table.allocator)
-    };
+    var builder = new_builder(table.allocator);
     errdefer builder.deinit();
     let root = try map_names_node<M>(
         &var builder,
@@ -744,13 +764,11 @@ pub fn map_names<M>(
         value.root,
         mapper
     );
-    let tree = TypeTree { nodes: move builder.nodes, root: root };
-    let tree_handle = table.trees.add(move tree);
-    return Type { tree: tree_handle, root: root };
+    return finish_builder(move builder, table, root);
 }
 
 fn map_names_node<M>(
-    builder: &var TypeBuilder,
+    builder: &var Builder,
     value: &TypeTree,
     handle: arena::Handle<Node>,
     mapper: &var M
@@ -785,7 +803,7 @@ fn map_names_node<M>(
 }
 
 fn map_name_node<M>(
-    builder: &var TypeBuilder,
+    builder: &var Builder,
     value: &TypeTree,
     node: &Name,
     mapper: &var M
@@ -807,7 +825,7 @@ fn map_name_node<M>(
 
 // map_error_union_names keeps Go's callback order: success before error.
 fn map_error_union_names<M>(
-    builder: &var TypeBuilder,
+    builder: &var Builder,
     value: &TypeTree,
     node: &ErrorUnion,
     mapper: &var M

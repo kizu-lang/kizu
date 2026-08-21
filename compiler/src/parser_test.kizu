@@ -3,9 +3,52 @@ import compiler::lexer;
 import compiler::parser;
 import compiler::source;
 import compiler::token;
+import compiler::typ;
 import std::mem;
 import std::string;
 import std::testing;
+
+struct TypeShape {
+    count: i64,
+    first: i64,
+    second: i64,
+    third: i64,
+    fourth: i64,
+    fifth: i64
+}
+
+fn (self: &var TypeShape) visit(value: &typ::Node) -> void {
+    let code = match value {
+        Name(_) => 1,
+        Slice(_) => 2,
+        Buffer(_) => 3,
+        Borrow(_) => 4,
+        Optional(_) => 5,
+        Const(_) => 6,
+        ErrorUnion(_) => 7,
+    };
+    if self.count == 0 {
+        self.first = code;
+    } else {
+        if self.count == 1 {
+            self.second = code;
+        } else {
+            if self.count == 2 {
+                self.third = code;
+            } else {
+                if self.count == 3 {
+                    self.fourth = code;
+                } else {
+                    if self.count == 4 {
+                        self.fifth = code;
+                    }
+                }
+            }
+        }
+    }
+    self.count = self.count + 1;
+    return;
+}
 
 fn zero_span() -> ast::Span {
     return ast::Span {
@@ -189,6 +232,90 @@ fn parse_capture_then_deinit(
     var value = try parser::new(allocator, move scanner);
     defer value.deinit();
     return value.parse_payload_capture(tree);
+}
+
+fn parse_type_then_deinit(
+    allocator: Allocator,
+    types: &var typ::Table,
+    input: []u8
+) -> !?typ::Type {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_type_name(types);
+}
+
+fn expect_parsed_type(
+    allocator: Allocator,
+    types: &var typ::Table,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    let parsed = try parse_type_then_deinit(allocator, types, input);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, expected);
+    } else {
+        testing::fail("parser did not retain a type name");
+    }
+    return;
+}
+
+fn expect_type_shape(
+    allocator: Allocator,
+    types: &var typ::Table,
+    input: []u8,
+    count: i64,
+    first: i64,
+    second: i64,
+    third: i64
+) -> !void {
+    let parsed = try parse_type_then_deinit(allocator, types, input);
+    if parsed |type_name| {
+        var shape = TypeShape {
+            count: 0,
+            first: 0,
+            second: 0,
+            third: 0,
+            fourth: 0,
+            fifth: 0
+        };
+        typ::walk<TypeShape>(types, type_name, &var shape);
+        testing::expect_equal<i64>(count, shape.count);
+        testing::expect_equal<i64>(first, shape.first);
+        testing::expect_equal<i64>(second, shape.second);
+        testing::expect_equal<i64>(third, shape.third);
+    } else {
+        testing::fail("parser did not retain a type shape");
+    }
+    return;
+}
+
+fn expect_type_error(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8,
+    start_column: i64,
+    end_column: i64
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var types);
+    if parsed |_| {
+        testing::fail("invalid type retained a type name");
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        expected,
+        start_column,
+        end_column
+    );
+    return;
 }
 
 test "parser lifecycle owns its token stream and diagnostics" {
@@ -563,6 +690,187 @@ test "parser rejects malformed payload captures without retained text" {
     expect_parser_diagnostic(&close_parser, 0, expected_close, 8, 12);
     testing::expect(close_parser.current_kind() == token::Kind::Ident);
     testing::expect(close_parser.peek_kind() == token::Kind::Plus);
+}
+
+test "parser retains canonical type names after token cleanup" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    try expect_parsed_type(allocator, &var types, "i64", "i64");
+    try expect_parsed_type(allocator, &var types, "?i64", "?i64");
+    try expect_parsed_type(allocator, &var types, "!&var T", "!&var T");
+    try expect_parsed_type(
+        allocator,
+        &var types,
+        "ParseError!std::array::Array<T>",
+        "ParseError!std::array::Array<T>"
+    );
+    try expect_parsed_type(allocator, &var types, "[]u8", "[]u8");
+    try expect_parsed_type(allocator, &var types, "[004]u8", "[4]u8");
+    try expect_parsed_type(
+        allocator,
+        &var types,
+        "ptr<const u8>",
+        "ptr<const u8>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var types,
+        "Array<ptr<const u8>>",
+        "Array<ptr<const u8>>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var types,
+        "std::map::Map<[]u8, Array<?T>>",
+        "std::map::Map<[]u8, Array<?T>>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var types,
+        "Array<T,>",
+        "Array<T>"
+    );
+    try expect_parsed_type(allocator, &var types, "E!F!T", "E!F!T");
+}
+
+test "parser preserves prefix and error union graph precedence" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    try expect_type_shape(
+        allocator,
+        &var types,
+        "?E!T",
+        4,
+        5,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var types,
+        "&E!T",
+        4,
+        4,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var types,
+        "[]E!T",
+        4,
+        2,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var types,
+        "[2]E!T",
+        4,
+        3,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var types,
+        "E!F!T",
+        5,
+        7,
+        1,
+        7
+    );
+}
+
+test "parser reports malformed type names at the current token" {
+    let allocator = mem::page_allocator();
+    try expect_type_error(
+        allocator,
+        "+",
+        "expected type, got `+`",
+        1,
+        2
+    );
+    try expect_type_error(
+        allocator,
+        "[0]u8",
+        "buffer size must be a positive integer, got 0",
+        2,
+        3
+    );
+    try expect_type_error(
+        allocator,
+        "[9223372036854775808]u8",
+        "buffer size must be a positive integer, got 9223372036854775808",
+        2,
+        21
+    );
+    try expect_type_error(
+        allocator,
+        "[]const u8",
+        "expected static type argument, got const",
+        3,
+        8
+    );
+    try expect_type_error(
+        allocator,
+        "Array<T",
+        "expected next token `>`, got end of file",
+        7,
+        8
+    );
+    try expect_type_error(
+        allocator,
+        "Array<>",
+        "expected type, got `>`",
+        7,
+        8
+    );
+}
+
+test "parser keeps a valid namespace prefix before a malformed suffix" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "std::+");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var types);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, &types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "std");
+    } else {
+        testing::fail("valid namespace prefix was discarded");
+    }
+    let expected = "expected next token identifier, got `+`";
+    expect_parser_diagnostic(&value, 0, expected, 4, 6);
+    testing::expect(value.current_kind() == token::Kind::DoubleColon);
+    testing::expect(value.peek_kind() == token::Kind::Plus);
+}
+
+test "parser applies ptr const rules to the retained partial path" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "ptr::<const u8>");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var types);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, &types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "ptr<const u8>");
+    } else {
+        testing::fail("partial ptr path did not retain const arguments");
+    }
+    let expected = "expected next token identifier, got `<`";
+    expect_parser_diagnostic(&value, 0, expected, 4, 6);
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
 }
 
 test "parser token diagnostics preserve every description class" {

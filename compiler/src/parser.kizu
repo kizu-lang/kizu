@@ -3,6 +3,7 @@ import compiler::diagnostic;
 import compiler::lexer;
 import compiler::source;
 import compiler::token;
+import compiler::typ;
 import std::arena;
 import std::array;
 import std::fmt;
@@ -234,6 +235,294 @@ fn (self: &var Parser) parse_payload_capture(
     return capture;
 }
 
+fn (self: &var Parser) parse_type_name(
+    types: &var typ::Table
+) -> !?typ::Type {
+    var builder = typ::new_builder(self.allocator);
+    errdefer builder.deinit();
+    let parsed = try self.parse_type_node(&var builder);
+    if parsed |root| {
+        return typ::finish_builder(move builder, types, root);
+    }
+    builder.deinit();
+    return null;
+}
+
+fn (self: &var Parser) parse_type_node(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    match self.current_kind() {
+        Bang => return self.parse_error_union_type(builder),
+        Amp => return self.parse_borrow_type(builder),
+        LBracket => return self.parse_bracket_type(builder),
+        Question => return self.parse_optional_type(builder),
+        Ident => return self.parse_named_type(builder),
+        _ => {
+            let handle = self.stream.get_or_panic(self.position);
+            let message = try unexpected_token_message(
+                self.allocator,
+                "expected type, got ",
+                self.tokens.at(handle)
+            );
+            try self.record_error(move message);
+            return null;
+        },
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_optional_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    try self.next_token();
+    let parsed = try self.parse_type_node(builder);
+    if parsed |inner| {
+        return builder.add(typ::Node::Optional(typ::Optional {
+            elem: inner
+        }));
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_error_union_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    try self.next_token();
+    let parsed = try self.parse_type_node(builder);
+    if parsed |ok| {
+        return builder.add(typ::Node::ErrorUnion(typ::ErrorUnion {
+            err: null,
+            ok: ok
+        }));
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_borrow_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    try self.next_token();
+    let mutable = self.current_kind() == token::Kind::Var;
+    if mutable {
+        try self.next_token();
+    }
+    let parsed = try self.parse_type_node(builder);
+    if parsed |inner| {
+        return builder.add(typ::Node::Borrow(typ::Borrow {
+            elem: inner,
+            mutable: mutable
+        }));
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_named_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    var path = try self.parse_type_path();
+    errdefer path.deinit();
+    let allow_const = type_path_is_ptr(&path);
+    if self.peek_kind() == token::Kind::Bang {
+        let args = array::new<arena::Handle<typ::Node>>(self.allocator);
+        let err = builder.add(typ::Node::Name(typ::Name {
+            path: move path,
+            args: move args
+        }));
+        try self.next_token();
+        try self.next_token();
+        let parsed = try self.parse_type_node(builder);
+        if parsed |ok| {
+            return builder.add(typ::Node::ErrorUnion(typ::ErrorUnion {
+                err: err,
+                ok: ok
+            }));
+        }
+        return null;
+    }
+    if self.peek_kind() != token::Kind::Lt {
+        let args = array::new<arena::Handle<typ::Node>>(self.allocator);
+        return builder.add(typ::Node::Name(typ::Name {
+            path: move path,
+            args: move args
+        }));
+    }
+    var args = array::new<arena::Handle<typ::Node>>(self.allocator);
+    errdefer args.deinit();
+    try self.next_token();
+    try self.next_token();
+    if !try self.parse_type_arguments(builder, &var args, allow_const) or
+        !try self.expect_type_close() {
+        args.deinit();
+        path.deinit();
+        return null;
+    }
+    return builder.add(typ::Node::Name(typ::Name {
+        path: move path,
+        args: move args
+    }));
+}
+
+fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
+    var path = array::new<string::String>(self.allocator);
+    errdefer path.deinit();
+    let first = self.stream.get_or_panic(self.position);
+    try path.append(try owned_token_literal(
+        self.allocator,
+        self.tokens.at(first)
+    ));
+    while self.peek_kind() == token::Kind::DoubleColon {
+        try self.next_token();
+        if !try self.expect_peek(token::Kind::Ident) {
+            return move path;
+        }
+        let part = self.stream.get_or_panic(self.position);
+        try path.append(try owned_token_literal(
+            self.allocator,
+            self.tokens.at(part)
+        ));
+    }
+    return move path;
+}
+
+fn (self: &var Parser) parse_type_arguments(
+    builder: &var typ::Builder,
+    args: &var array::Array<arena::Handle<typ::Node>>,
+    allow_const: bool
+) -> !bool {
+    while true {
+        let parsed = try self.parse_type_argument(builder, allow_const);
+        if parsed |arg| {
+            try args.append(arg);
+        } else {
+            return false;
+        }
+        if self.peek_kind() != token::Kind::Comma {
+            return true;
+        }
+        try self.next_token();
+        if self.peek_kind() == token::Kind::Gt {
+            return true;
+        }
+        try self.next_token();
+    }
+    return true;
+}
+
+fn (self: &var Parser) parse_type_argument(
+    builder: &var typ::Builder,
+    allow_const: bool
+) -> !?arena::Handle<typ::Node> {
+    let handle = self.stream.get_or_panic(self.position);
+    let is_const = self.current_kind() == token::Kind::Ident and
+        token_literal_equal(self.tokens.at(handle), "const");
+    if !is_const {
+        return self.parse_type_node(builder);
+    }
+    if !allow_const {
+        try self.record_context_error(
+            "expected static type argument, got const",
+            ""
+        );
+        return null;
+    }
+    try self.next_token();
+    let parsed = try self.parse_type_node(builder);
+    if parsed |inner| {
+        return builder.add(typ::Node::Const(typ::Const { elem: inner }));
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_bracket_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    if self.peek_kind() == token::Kind::Int {
+        return self.parse_buffer_type(builder);
+    }
+    if !try self.expect_peek(token::Kind::RBracket) {
+        return null;
+    }
+    try self.next_token();
+    let parsed = try self.parse_type_argument(builder, false);
+    if parsed |elem| {
+        return builder.add(typ::Node::Slice(typ::Slice { elem: elem }));
+    }
+    return null;
+}
+
+fn (self: &var Parser) parse_buffer_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    try self.next_token();
+    let handle = self.stream.get_or_panic(self.position);
+    var size = 0;
+    if positive_decimal(self.tokens.at(handle)) |parsed| {
+        size = parsed;
+    } else {
+        let message = try token_literal_message(
+            self.allocator,
+            "buffer size must be a positive integer, got ",
+            self.tokens.at(handle)
+        );
+        try self.record_error(move message);
+        return null;
+    }
+    if !try self.expect_peek(token::Kind::RBracket) {
+        return null;
+    }
+    try self.next_token();
+    let parsed = try self.parse_type_argument(builder, false);
+    if parsed |elem| {
+        return builder.add(typ::Node::Buffer(typ::Buffer {
+            size: size,
+            elem: elem
+        }));
+    }
+    return null;
+}
+
+fn owned_token_literal(
+    allocator: Allocator,
+    current: &token::Token
+) -> !string::String {
+    let bytes = current.literal.as_bytes();
+    return string::from_bytes(allocator, bytes);
+}
+
+fn token_literal_equal(current: &token::Token, expected: []u8) -> bool {
+    let bytes = current.literal.as_bytes();
+    return mem::equal_bytes(bytes, expected);
+}
+
+fn type_path_is_ptr(path: &array::Array<string::String>) -> bool {
+    if path.len() != 1 {
+        return false;
+    }
+    if path.at(0) |part| {
+        let bytes = part.as_bytes();
+        return mem::equal_bytes(bytes, "ptr");
+    }
+    return false;
+}
+
+fn positive_decimal(current: &token::Token) -> ?i64 {
+    let bytes = current.literal.as_bytes();
+    var value = 0;
+    var index = 0;
+    while index < mem::len(bytes) {
+        let digit = cast<i64>(bytes[index] - cast<u8>(48));
+        if value > (9223372036854775807 - digit) / 10 {
+            return null;
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    if value <= 0 {
+        return null;
+    }
+    return value;
+}
+
 fn (self: &var Parser) record_context_error(
     prefix: []u8,
     context: []u8
@@ -270,6 +559,31 @@ fn expected_token_message(
     try append_token_type_description(&var out, expected);
     try out.append_bytes(", got ");
     try append_token_description(&var out, actual);
+    return move out;
+}
+
+fn unexpected_token_message(
+    allocator: Allocator,
+    prefix: []u8,
+    actual: &token::Token
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    try append_token_description(&var out, actual);
+    return move out;
+}
+
+fn token_literal_message(
+    allocator: Allocator,
+    prefix: []u8,
+    actual: &token::Token
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    let bytes = actual.literal.as_bytes();
+    try out.append_bytes(bytes);
     return move out;
 }
 
