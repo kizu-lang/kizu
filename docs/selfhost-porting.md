@@ -86,6 +86,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | --- | --- | --- |
 | named string constant set | `enum` + spelling function | identity と表示用 bytes を分ける |
 | `string` | `[]u8` または `std::string::String` | static/source view は前者、生成して保持する bytes は後者 |
+| `typ.Type.String()` / `typ.Text` | `typ::render(allocator, table, value)` | `Type` handle の owner `Table` を渡し、返った `String` は使用scopeで `deinit` する |
 | AST nodes が共有する `string` | AST 所有の `Text` handle | logical text ごとに一度保持し、生成 node 間で handle を再利用する。content interning はしない |
 | `[]T` | `[]T` または `std::array::Array<T>` | borrow view は前者、容量と cleanup を持つ slice は後者 |
 | AST nodes が共有する `[]Expression` | AST 所有の `ExpressionList` handle | Go の共有 slice backing を一つの retained list と copy handle で表す |

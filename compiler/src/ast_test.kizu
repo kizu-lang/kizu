@@ -207,6 +207,100 @@ fn expect_construct_field(
     return;
 }
 
+fn add_struct_with_field(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    name: []u8,
+    field_name: []u8,
+    field_type: typ::Type
+) -> !void {
+    var fields = array::new<ast::Field>(allocator);
+    errdefer fields.deinit();
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, tree, field_name),
+        doc: try retained_text(allocator, tree, ""),
+        type_name: field_type,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    let declaration_name = try retained_text(allocator, tree, name);
+    let declaration_doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Struct(
+        ast::StructDecl {
+        name: declaration_name,
+        doc: declaration_doc,
+        type_params: array::new<ast::Text>(allocator),
+        fields: move fields,
+        public: false,
+        requires_unsafe: false
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_union_with_payload(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    name: []u8,
+    variant_name: []u8,
+    payload: typ::Type
+) -> !void {
+    var variants = array::new<ast::UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, tree, variant_name),
+        doc: try retained_text(allocator, tree, ""),
+        payload: payload
+    });
+    let declaration_name = try retained_text(allocator, tree, name);
+    let declaration_doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Union(
+        ast::UnionDecl {
+        name: declaration_name,
+        doc: declaration_doc,
+        type_params: array::new<ast::Text>(allocator),
+        variants: move variants,
+        public: false
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_cleanup_function(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    name: []u8,
+    derived: bool
+) -> !void {
+    var signature = try empty_signature(allocator, tree, name);
+    errdefer signature.deinit();
+    signature.receiver = true;
+    let doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: derived,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn expect_owner(
+    owners: &map::Map<[]u8, bool>,
+    name: []u8,
+    expected: bool
+) -> void {
+    let actual = owners.get(name) orelse false;
+    testing::expect(actual == expected);
+    return;
+}
+
 test "span zero state follows its source position" {
     let missing = zero_span();
     testing::expect(missing.is_zero());
@@ -357,6 +451,100 @@ test "program retains declaration handles and nested contract methods" {
         },
         _ => testing::fail("error set handle changed node category"),
     }
+}
+
+test "deinit owner discovery includes declared and transitive holders" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let outer_type = try types.parse("Outer");
+    let middle_type = try types.parse("Middle");
+    let optional_inner_type = try types.parse("?Inner");
+    let array_type = try types.parse("std::array::Array<u8>");
+    let integer_type = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var program = ast::new_program(allocator);
+    defer program.deinit();
+    try add_union_with_payload(
+        allocator,
+        &var tree,
+        &var program,
+        "Slot",
+        "Held",
+        outer_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Outer",
+        "middle",
+        middle_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Middle",
+        "inner",
+        optional_inner_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Inner",
+        "bytes",
+        array_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Point",
+        "x",
+        integer_type
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "std::array::Array.deinit",
+        false
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Generated.deinit",
+        true
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Resource<u8>.deinit",
+        false
+    );
+    let owners = try ast::deinit_owners(allocator, &tree, &types, &program);
+    defer owners.deinit();
+    expect_owner(&owners, "std::arena::Arena", true);
+    expect_owner(&owners, "std::array::Array", true);
+    expect_owner(&owners, "Generated", true);
+    expect_owner(&owners, "Resource", true);
+    expect_owner(&owners, "Inner", true);
+    expect_owner(&owners, "Middle", true);
+    expect_owner(&owners, "Outer", true);
+    expect_owner(&owners, "Slot", true);
+    expect_owner(&owners, "Point", false);
+    let declared = try ast::declared_deinits(allocator, &tree, &program);
+    defer declared.deinit();
+    expect_owner(&declared, "std::arena::Arena", true);
+    expect_owner(&declared, "std::array::Array", true);
+    expect_owner(&declared, "Generated", false);
+    expect_owner(&declared, "Resource", true);
+    expect_owner(&declared, "Inner", false);
 }
 
 test "variant helpers preserve shared bodies and ordinary expression shape" {

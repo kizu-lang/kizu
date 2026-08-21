@@ -723,6 +723,171 @@ fn base_type_name(type_name: []u8) -> []u8 {
     return type_name;
 }
 
+fn new_owner_map(allocator: Allocator) -> !map::Map<[]u8, bool> {
+    var owners = map::new<[]u8, bool>(allocator);
+    errdefer owners.deinit();
+    try owners.insert("std::arena::Arena", true);
+    return move owners;
+}
+
+fn add_declared_deinit_name(
+    owners: &var map::Map<[]u8, bool>,
+    retained: &string::String
+) -> !void {
+    let name = retained.as_bytes();
+    if typ::split_method_name(name) |parts| {
+        if mem::equal_bytes(parts.method, typ::cleanup_method()) {
+            let receiver = parts.receiver;
+            let base = base_type_name(receiver);
+            try owners.insert(base, true);
+        }
+    }
+    return;
+}
+
+fn collect_declared_deinits(
+    ast: &Ast,
+    program: &Program,
+    owners: &var map::Map<[]u8, bool>,
+    include_derived: bool
+) -> !void {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        match ast.declarations.at(declaration.node) {
+            Function(function) => {
+                if function.signature.receiver and
+                    (include_derived or !function.derived) {
+                    try add_declared_deinit_name(
+                        owners,
+                        ast.texts.at(function.signature.name.node)
+                    );
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn type_holds_owner(
+    allocator: Allocator,
+    types: &typ::Table,
+    owners: &map::Map<[]u8, bool>,
+    value: typ::Type
+) -> !bool {
+    let rendered = try typ::render(allocator, types, value);
+    defer rendered.deinit();
+    let text = rendered.as_bytes();
+    if typ::optional_elem(text) |elem| {
+        return owner_type(owners, elem);
+    }
+    return owner_type(owners, text);
+}
+
+fn declared_holder(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    owners: &map::Map<[]u8, bool>,
+    declaration: Declaration
+) -> !?Text {
+    match ast.declarations.at(declaration.node) {
+        Struct(value) => {
+            var index = 0;
+            while value.fields.at(index) |field| {
+                if try type_holds_owner(
+                    allocator,
+                    types,
+                    owners,
+                    field.type_name
+                ) {
+                    return value.name;
+                }
+                index = index + 1;
+            }
+            return null;
+        },
+        Union(value) => {
+            var index = 0;
+            while value.variants.at(index) |variant| {
+                if variant.payload |payload| {
+                    if try type_holds_owner(
+                        allocator,
+                        types,
+                        owners,
+                        payload
+                    ) {
+                        return value.name;
+                    }
+                }
+                index = index + 1;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+fn add_owner_bytes(
+    owners: &var map::Map<[]u8, bool>,
+    retained: &string::String
+) -> !bool {
+    let name = retained.as_bytes();
+    if owners.contains(name) {
+        return false;
+    }
+    try owners.insert(name, true);
+    return true;
+}
+
+/// Returns every declared or transitive owner base name in one program.
+pub fn deinit_owners(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    program: &Program
+) -> !map::Map<[]u8, bool> {
+    var owners = try new_owner_map(allocator);
+    errdefer owners.deinit();
+    try collect_declared_deinits(ast, program, &var owners, true);
+    var grew = true;
+    while grew {
+        grew = false;
+        var index = 0;
+        while program.declarations.get(index) |declaration| {
+            if try declared_holder(
+                allocator,
+                ast,
+                types,
+                &owners,
+                declaration
+            ) |name| {
+                if try add_owner_bytes(
+                    &var owners,
+                    ast.texts.at(name.node)
+                ) {
+                    grew = true;
+                }
+            }
+            index = index + 1;
+        }
+    }
+    return move owners;
+}
+
+/// Returns owner base names with cleanup written by the program's author.
+pub fn declared_deinits(
+    allocator: Allocator,
+    ast: &Ast,
+    program: &Program
+) -> !map::Map<[]u8, bool> {
+    var declared = try new_owner_map(allocator);
+    errdefer declared.deinit();
+    try collect_declared_deinits(ast, program, &var declared, false);
+    return move declared;
+}
+
 fn joined_text(
     allocator: Allocator,
     ast: &var Ast,
