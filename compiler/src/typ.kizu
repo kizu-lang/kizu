@@ -73,6 +73,24 @@ pub struct ErrorUnion {
     pub ok: arena::Handle<Node>
 }
 
+/// Is the payload and mutability of a borrow optional spelling.
+pub struct BorrowOptionalParts {
+    pub elem: []u8,
+    pub mutable: bool
+}
+
+/// Is the base and argument text of a generic application spelling.
+pub struct ApplyParts {
+    pub base: []u8,
+    pub args: []u8
+}
+
+/// Is the receiver and method of a receiver-qualified method name.
+pub struct MethodNameParts {
+    pub receiver: []u8,
+    pub method: []u8
+}
+
 /// Describes the structural callback Walk requires.
 pub contract TypeVisitor {
     fn visit(value: &Node) -> void;
@@ -282,6 +300,68 @@ fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
     errdefer out.deinit();
     try out.append_bytes(bytes);
     return move out;
+}
+
+/// Returns T for the optional value spelling `?T`.
+pub fn optional_elem(text: []u8) -> ?[]u8 {
+    if !mem::starts_with(text, "?") or mem::starts_with(text, "?ptr<") {
+        return null;
+    }
+    return text[1..mem::len(text)];
+}
+
+/// Splits `?&T` or `?&var T` into its payload and mutability.
+pub fn borrow_optional_elem(text: []u8) -> ?BorrowOptionalParts {
+    if mem::starts_with(text, "?&var ") {
+        return BorrowOptionalParts {
+            elem: text[6..mem::len(text)],
+            mutable: true
+        };
+    }
+    if mem::starts_with(text, "?&") {
+        return BorrowOptionalParts {
+            elem: text[2..mem::len(text)],
+            mutable: false
+        };
+    }
+    return null;
+}
+
+/// Splits `Base<Args>` without interpreting Base or Args.
+pub fn split_apply(name: []u8) -> ?ApplyParts {
+    var open = 0;
+    while open < mem::len(name) and name[open] != cast<u8>(60) {
+        open = open + 1;
+    }
+    let end = mem::len(name);
+    if open < 1 or open == end or name[end - 1] != cast<u8>(62) or
+        open + 1 == end - 1 {
+        return null;
+    }
+    return ApplyParts {
+        base: name[0..open],
+        args: name[open + 1..end - 1]
+    };
+}
+
+/// Splits a receiver-qualified method name at its last dot.
+pub fn split_method_name(name: []u8) -> ?MethodNameParts {
+    var index = mem::len(name);
+    while index > 0 {
+        index = index - 1;
+        if name[index] == cast<u8>(46) {
+            return MethodNameParts {
+                receiver: name[0..index],
+                method: name[index + 1..mem::len(name)]
+            };
+        }
+    }
+    return null;
+}
+
+/// Returns the method name that discharges an owner's consume obligation.
+pub fn cleanup_method() -> []u8 {
+    return "deinit";
 }
 
 /// Renders one parsed type back to its canonical spelling.
