@@ -318,6 +318,27 @@ fn expect_type_error(
     return;
 }
 
+fn expect_static_type_arg(
+    allocator: Allocator,
+    types: &var typ::Table,
+    input: []u8,
+    allow_const: bool,
+    expected: []u8
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_static_type_arg(types, allow_const) |arg| {
+        value.deinit();
+        defer arg.deinit();
+        expect_retained_bytes(&arg, expected);
+    } else {
+        value.deinit();
+        testing::fail("parser did not retain a static argument");
+    }
+    return;
+}
+
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
     var sources = source::new(allocator);
@@ -871,6 +892,118 @@ test "parser applies ptr const rules to the retained partial path" {
     expect_parser_diagnostic(&value, 0, expected, 4, 6);
     testing::expect(value.current_kind() == token::Kind::Gt);
     testing::expect(value.peek_kind() == token::Kind::Eof);
+}
+
+test "parser renders static arguments independently of its token stream" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    try expect_static_type_arg(
+        allocator,
+        &var types,
+        "Array<?T>",
+        false,
+        "Array<?T>"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var types,
+        "ptr<const u8>",
+        false,
+        "ptr<const u8>"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var types,
+        "const u8",
+        true,
+        "const u8"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var types,
+        "4096",
+        false,
+        "4096"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var types,
+        "true",
+        false,
+        "true"
+    );
+}
+
+test "parser joins static argument lists and retains closing tokens" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(
+        allocator,
+        "Array<T>, 4096, true,>"
+    );
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var types, false) |args| {
+        defer args.deinit();
+        expect_retained_bytes(&args, "Array<T>, 4096, true");
+    } else {
+        testing::fail("parser discarded a static argument list");
+    }
+    testing::expect(value.current_kind() == token::Kind::Comma);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+    testing::expect(try value.expect_type_close());
+    testing::expect(value.current_kind() == token::Kind::Gt);
+}
+
+test "parser preserves nested static argument closing tokens" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "Array<T>>");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var types, false) |args| {
+        defer args.deinit();
+        expect_retained_bytes(&args, "Array<T>");
+    } else {
+        testing::fail("parser discarded a nested static argument");
+    }
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+    testing::expect(try value.expect_type_close());
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+}
+
+test "parser rejects invalid static arguments without a partial list" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "i64, +");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var types, false) |_| {
+        testing::fail("parser retained a partial static argument list");
+    }
+    let expected = "expected static argument, got `+`";
+    expect_parser_diagnostic(&value, 0, expected, 6, 7);
+    testing::expect(value.current_kind() == token::Kind::Plus);
+    let const_scanner = lexer::new(allocator, "const u8");
+    var const_parser = try parser::new(allocator, move const_scanner);
+    defer const_parser.deinit();
+    if try const_parser.parse_static_type_arg(&var types, false) |_| {
+        testing::fail("parser accepted const outside an allowed position");
+    }
+    let const_expected = "expected static type argument, got const";
+    expect_parser_diagnostic(
+        &const_parser,
+        0,
+        const_expected,
+        1,
+        6
+    );
 }
 
 test "parser token diagnostics preserve every description class" {

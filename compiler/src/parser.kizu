@@ -408,6 +408,80 @@ fn (self: &var Parser) parse_type_arguments(
     return true;
 }
 
+fn (self: &var Parser) parse_type_arg_list(
+    types: &var typ::Table,
+    allow_const: bool
+) -> !?string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var first = true;
+    while true {
+        if try self.parse_static_type_arg(types, allow_const) |arg| {
+            defer arg.deinit();
+            if !first {
+                try out.append_bytes(", ");
+            }
+            let bytes = arg.as_bytes();
+            try out.append_bytes(bytes);
+            first = false;
+        } else {
+            out.deinit();
+            return null;
+        }
+        if self.peek_kind() != token::Kind::Comma {
+            return move out;
+        }
+        try self.next_token();
+        if self.peek_kind() == token::Kind::Gt {
+            return move out;
+        }
+        try self.next_token();
+    }
+    return move out;
+}
+
+fn (self: &var Parser) parse_static_type_arg(
+    types: &var typ::Table,
+    allow_const: bool
+) -> !?string::String {
+    let kind = self.current_kind();
+    if kind == token::Kind::Ident or
+        kind == token::Kind::Bang or
+        kind == token::Kind::Amp or
+        kind == token::Kind::LBracket or
+        kind == token::Kind::Question {
+        var builder = typ::new_builder(self.allocator);
+        errdefer builder.deinit();
+        let parsed = try self.parse_type_argument(
+            &var builder,
+            allow_const
+        );
+        if parsed |root| {
+            let type_name = typ::finish_builder(move builder, types, root);
+            return try typ::render(self.allocator, types, type_name);
+        }
+        builder.deinit();
+        return null;
+    }
+    if kind == token::Kind::Int or
+        kind == token::Kind::True or
+        kind == token::Kind::False {
+        let handle = self.stream.get_or_panic(self.position);
+        return try owned_token_literal(
+            self.allocator,
+            self.tokens.at(handle)
+        );
+    }
+    let handle = self.stream.get_or_panic(self.position);
+    let message = try unexpected_token_message(
+        self.allocator,
+        "expected static argument, got ",
+        self.tokens.at(handle)
+    );
+    try self.record_error(move message);
+    return null;
+}
+
 fn (self: &var Parser) parse_type_argument(
     builder: &var typ::Builder,
     allow_const: bool
