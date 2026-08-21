@@ -167,6 +167,30 @@ fn parse_break_then_deinit(
     return value.parse_break_stmt(tree);
 }
 
+fn expect_optional_text(
+    tree: &ast::Ast,
+    value: ?ast::Text,
+    expected: []u8
+) -> void {
+    if value |text| {
+        expect_retained_bytes(tree.texts.at(text.node), expected);
+    } else {
+        testing::fail("parser did not retain optional text");
+    }
+    return;
+}
+
+fn parse_capture_then_deinit(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8
+) -> !?ast::Text {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_payload_capture(tree);
+}
+
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
     var sources = source::new(allocator);
@@ -492,6 +516,53 @@ test "parser retains keyword literal expressions" {
         },
         _ => testing::fail("null did not retain a null expression"),
     }
+}
+
+test "parser retains optional payload captures after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let absent_scanner = lexer::new(allocator, "value +");
+    var absent_parser = try parser::new(allocator, move absent_scanner);
+    defer absent_parser.deinit();
+    let absent = try absent_parser.parse_payload_capture(&var tree);
+    expect_optional_text(&tree, absent, "");
+    testing::expect(absent_parser.current_kind() == token::Kind::Ident);
+    testing::expect(absent_parser.peek_kind() == token::Kind::Plus);
+    let present = try parse_capture_then_deinit(
+        allocator,
+        &var tree,
+        "value |held|"
+    );
+    expect_optional_text(&tree, present, "held");
+}
+
+test "parser rejects malformed payload captures without retained text" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "value | |");
+    var name_parser = try parser::new(allocator, move name_scanner);
+    defer name_parser.deinit();
+    let missing_name = try name_parser.parse_payload_capture(&var tree);
+    if missing_name |_| {
+        testing::fail("malformed capture retained a name");
+    }
+    let expected_name = "expected next token identifier, got `|`";
+    expect_parser_diagnostic(&name_parser, 0, expected_name, 7, 8);
+    testing::expect(name_parser.current_kind() == token::Kind::Pipe);
+    testing::expect(name_parser.peek_kind() == token::Kind::Pipe);
+    let close_scanner = lexer::new(allocator, "value |held +");
+    var close_parser = try parser::new(allocator, move close_scanner);
+    defer close_parser.deinit();
+    let missing_close = try close_parser.parse_payload_capture(&var tree);
+    if missing_close |_| {
+        testing::fail("unclosed capture retained a name");
+    }
+    let expected_close = "expected next token `|`, got `+`";
+    expect_parser_diagnostic(&close_parser, 0, expected_close, 8, 12);
+    testing::expect(close_parser.current_kind() == token::Kind::Ident);
+    testing::expect(close_parser.peek_kind() == token::Kind::Plus);
 }
 
 test "parser token diagnostics preserve every description class" {
