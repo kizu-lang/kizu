@@ -44,6 +44,33 @@ fn expect_type_apply_lookahead(
     return;
 }
 
+fn expect_peek_expression_end(
+    allocator: Allocator,
+    input: []u8,
+    expected: bool
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<bool>(expected, value.peek_is_expression_end());
+    return;
+}
+
+fn expect_peek_precedence(
+    allocator: Allocator,
+    input: []u8,
+    expected: i64
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<i64>(1, value.current_precedence());
+    testing::expect_equal<i64>(expected, value.peek_precedence());
+    try value.next_token();
+    testing::expect_equal<i64>(expected, value.current_precedence());
+    return;
+}
+
 test "parser lifecycle owns its token stream and diagnostics" {
     let allocator = mem::page_allocator();
     var sources = source::new(allocator);
@@ -131,4 +158,37 @@ test "type apply target is an identifier or namespace field" {
     testing::expect(!try value.should_parse_type_apply(&tree, empty));
     testing::expect(!try value.should_parse_type_apply(&tree, instance));
     testing::expect(!try value.should_parse_type_apply(&tree, integer));
+}
+
+test "parser precedence preserves Pratt binding order" {
+    let allocator = mem::page_allocator();
+    try expect_peek_precedence(allocator, "a orelse", 2);
+    try expect_peek_precedence(allocator, "a or", 3);
+    try expect_peek_precedence(allocator, "a and", 4);
+    try expect_peek_precedence(allocator, "a ==", 5);
+    try expect_peek_precedence(allocator, "a !=", 5);
+    try expect_peek_precedence(allocator, "a <", 6);
+    try expect_peek_precedence(allocator, "a <=", 6);
+    try expect_peek_precedence(allocator, "a >", 6);
+    try expect_peek_precedence(allocator, "a >=", 6);
+    try expect_peek_precedence(allocator, "a +", 7);
+    try expect_peek_precedence(allocator, "a -", 7);
+    try expect_peek_precedence(allocator, "a *", 8);
+    try expect_peek_precedence(allocator, "a /", 8);
+    try expect_peek_precedence(allocator, "a %", 8);
+    try expect_peek_precedence(allocator, "a (", 10);
+    try expect_peek_precedence(allocator, "a [", 10);
+    try expect_peek_precedence(allocator, "a .", 11);
+    try expect_peek_precedence(allocator, "a ::", 11);
+    try expect_peek_precedence(allocator, "a", 1);
+}
+
+test "parser recognizes optional expression terminators" {
+    let allocator = mem::page_allocator();
+    try expect_peek_expression_end(allocator, "a;", true);
+    try expect_peek_expression_end(allocator, "a,", true);
+    try expect_peek_expression_end(allocator, "a}", true);
+    try expect_peek_expression_end(allocator, "a)", true);
+    try expect_peek_expression_end(allocator, "a]", true);
+    try expect_peek_expression_end(allocator, "a+", false);
 }
