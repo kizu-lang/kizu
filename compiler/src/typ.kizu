@@ -5,9 +5,9 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/typ's type representation, parser, renderer,
-// structural equality, and walk. One Type owns every Node in an arena; child
-// edges are copy handles into that arena rather than one allocation per edge.
+// Mechanical port of internal/typ's type representation, table, parser,
+// renderer, structural equality, and walk. One Table owns the parsed trees for
+// a compiler phase; Type and child edges are copy handles into those trees.
 
 pub error Error {
     ExpectedName,
@@ -21,8 +21,21 @@ pub error Error {
     EmptyStaticArgument,
 }
 
-/// Owns one parsed type and all of its nodes.
+/// Owns every parsed type tree retained by one compiler phase.
+pub struct Table {
+    allocator: Allocator,
+    trees: arena::Arena<TypeTree>,
+    parsed: map::Map<[]u8, Type>
+}
+
+/// Identifies one node in a type tree retained by a Table.
 pub struct Type {
+    tree: arena::Handle<TypeTree>,
+    root: arena::Handle<Node>
+}
+
+// TypeTree owns the node storage for one independently built type graph.
+struct TypeTree {
     nodes: arena::Arena<Node>,
     root: arena::Handle<Node>
 }
@@ -111,8 +124,8 @@ pub contract NameMapper {
 // NoReplacements selects the plain static renderer instantiation.
 struct NoReplacements {}
 
-struct ParsedSubstitutions {
-    values: map::Map<[]u8, Type>
+struct RenderedSubstitutions {
+    values: map::Map<[]u8, string::String>
 }
 
 // parser reads one type spelling left to right while owning every node it has
@@ -136,8 +149,32 @@ struct Span {
     end: i64
 }
 
-/// Parses one canonical type spelling into an owned type tree.
-pub fn parse(allocator: Allocator, text: []u8) -> !Type {
+/// Creates an empty type table for one compiler phase.
+pub fn new(allocator: Allocator) -> Table {
+    return Table {
+        allocator: allocator,
+        trees: arena::new<TypeTree>(allocator),
+        parsed: map::new<[]u8, Type>(allocator)
+    };
+}
+
+/// Returns the retained type for text, parsing its tree on first use.
+fn (self: &var Table) parse(text: []u8) -> !Type {
+    if self.parsed.get(text) |parsed| {
+        return parsed;
+    }
+    let tree = try parse_tree(self.allocator, text);
+    let root = tree.root;
+    let tree_handle = self.trees.add(move tree);
+    let value = Type {
+        tree: tree_handle, root: root
+    };
+    try self.parsed.insert(text, value);
+    return value;
+}
+
+// parse_tree parses one canonical spelling into an independent owned tree.
+fn parse_tree(allocator: Allocator, text: []u8) -> !TypeTree {
     var parser = Parser {
         allocator: allocator,
         input: text,
@@ -149,7 +186,7 @@ pub fn parse(allocator: Allocator, text: []u8) -> !Type {
     if parser.position != mem::len(text) {
         return Error::TrailingText;
     }
-    return Type {
+    return TypeTree {
         nodes: move parser.nodes,
         root: root
     };
@@ -440,44 +477,58 @@ pub fn cleanup_method() -> []u8 {
     return "deinit";
 }
 
-/// Renders one parsed type back to its canonical spelling.
-pub fn render(allocator: Allocator, value: &Type) -> !string::String {
+/// Renders one retained type back to its canonical spelling.
+pub fn render(
+allocator: Allocator,
+table: &Table,
+value: Type
+) -> !string::String {
+    return render_tree_node(
+    allocator,
+    table.trees.at(value.tree),
+    value.root
+    );
+}
+
+fn render_tree_node(
+allocator: Allocator,
+tree: &TypeTree,
+root: arena::Handle<Node>
+) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_node(&var out, value, value.root);
+    try append_tree_node(&var out, tree, root);
     return move out;
 }
 
-fn (self: &Type) string(allocator: Allocator) -> !string::String {
-    return render(allocator, self);
-}
-
-fn append_node(
+fn append_tree_node(
 out: &var string::String,
-value: &Type,
-handle: arena::Handle<Node>
+tree: &TypeTree,
+root: arena::Handle<Node>
 ) -> !void {
     let lookup = NoReplacements {};
-    return append_node_with<NoReplacements>(out, value, handle, &lookup);
+    return append_tree_node_with<NoReplacements>(
+    out, tree, root, &lookup
+    );
 }
 
-fn append_node_with<R>(
+fn append_tree_node_with<R>(
 out: &var string::String,
-value: &Type,
-handle: arena::Handle<Node>,
+tree: &TypeTree,
+root: arena::Handle<Node>,
 lookup: &R
 ) -> !void {
-    match value.nodes.at(handle) {
-        Name(node) => try append_name_with<R>(out, value, node, lookup),
+    match tree.nodes.at(root) {
+        Name(node) => try append_name_with<R>(out, tree, node, lookup),
         Slice(node) => {
             try out.append_bytes("[]");
-            try append_node_with<R>(out, value, node.elem, lookup);
+            try append_tree_node_with<R>(out, tree, node.elem, lookup);
         },
         Buffer(node) => {
             try out.append_byte(cast<u8>(91));
             try fmt::append_i64(out, node.size);
             try out.append_byte(cast<u8>(93));
-            try append_node_with<R>(out, value, node.elem, lookup);
+            try append_tree_node_with<R>(out, tree, node.elem, lookup);
         },
         Borrow(node) => {
             if node.mutable {
@@ -485,22 +536,22 @@ lookup: &R
             } else {
                 try out.append_byte(cast<u8>(38));
             }
-            try append_node_with<R>(out, value, node.elem, lookup);
+            try append_tree_node_with<R>(out, tree, node.elem, lookup);
         },
         Optional(node) => {
             try out.append_byte(cast<u8>(63));
-            try append_node_with<R>(out, value, node.elem, lookup);
+            try append_tree_node_with<R>(out, tree, node.elem, lookup);
         },
         Const(node) => {
             try out.append_bytes("const ");
-            try append_node_with<R>(out, value, node.elem, lookup);
+            try append_tree_node_with<R>(out, tree, node.elem, lookup);
         },
         ErrorUnion(node) => {
             if node.err |err| {
-                try append_node_with<R>(out, value, err, lookup);
+                try append_tree_node_with<R>(out, tree, err, lookup);
             }
             try out.append_byte(cast<u8>(33));
-            try append_node_with<R>(out, value, node.ok, lookup);
+            try append_tree_node_with<R>(out, tree, node.ok, lookup);
         },
     }
     return;
@@ -508,7 +559,7 @@ lookup: &R
 
 fn append_name_with<R>(
 out: &var string::String,
-value: &Type,
+tree: &TypeTree,
 node: &Name,
 lookup: &R
 ) -> !void {
@@ -533,19 +584,20 @@ lookup: &R
         if index > 0 {
             try out.append_bytes(", ");
         }
-        try append_node_with<R>(out, value, arg, lookup);
+        try append_tree_node_with<R>(out, tree, arg, lookup);
         index = index + 1;
     }
     try out.append_byte(cast<u8>(62));
     return;
 }
 
-fn (self: &ParsedSubstitutions) append_replacement(
+fn (self: &RenderedSubstitutions) append_replacement(
 out: &var string::String,
 name: []u8
 ) -> !bool {
     if self.values.at(name) |replacement| {
-        try append_node(out, replacement, replacement.root);
+        let bytes = replacement.as_bytes();
+        try out.append_bytes(bytes);
         return true;
     }
     return false;
@@ -565,14 +617,24 @@ fn append_name_path(out: &var string::String, node: &Name) -> !void {
 }
 
 /// Reports whether two type trees have the same structure.
-pub fn equal(left: &Type, right: &Type) -> bool {
-    return equal_node(left, left.root, right, right.root);
+pub fn equal(
+left_table: &Table,
+left: Type,
+right_table: &Table,
+right: Type
+) -> bool {
+    return equal_node(
+    left_table.trees.at(left.tree),
+    left.root,
+    right_table.trees.at(right.tree),
+    right.root
+    );
 }
 
 fn equal_node(
-left: &Type,
+left: &TypeTree,
 left_handle: arena::Handle<Node>,
-right: &Type,
+right: &TypeTree,
 right_handle: arena::Handle<Node>
 ) -> bool {
     return match left.nodes.at(left_handle) {
@@ -608,7 +670,12 @@ right_handle: arena::Handle<Node>
     };
 }
 
-fn equal_name(left: &Type, a: &Name, right: &Type, b: &Name) -> bool {
+fn equal_name(
+left: &TypeTree,
+a: &Name,
+right: &TypeTree,
+b: &Name
+) -> bool {
     if a.path.len() != b.path.len() or a.args.len() != b.args.len() {
         return false;
     }
@@ -640,9 +707,9 @@ fn equal_name(left: &Type, a: &Name, right: &Type, b: &Name) -> bool {
 }
 
 fn equal_error_union(
-left: &Type,
+left: &TypeTree,
 a: &ErrorUnion,
-right: &Type,
+right: &TypeTree,
 b: &ErrorUnion
 ) -> bool {
     if a.err |left_err| {
@@ -663,22 +730,29 @@ b: &ErrorUnion
 
 /// Rewrites every name path while preserving the type structure around it.
 pub fn map_names<M>(
-allocator: Allocator,
-value: &Type,
+table: &var Table,
+value: Type,
 mapper: &var M
 ) -> !Type {
     var builder = TypeBuilder {
-        allocator: allocator,
-        nodes: arena::new<Node>(allocator)
+        allocator: table.allocator,
+        nodes: arena::new<Node>(table.allocator)
     };
     errdefer builder.deinit();
-    let root = try map_names_node<M>(&var builder, value, value.root, mapper);
-    return Type { nodes: move builder.nodes, root: root };
+    let root = try map_names_node<M>(
+        &var builder,
+        table.trees.at(value.tree),
+        value.root,
+        mapper
+    );
+    let tree = TypeTree { nodes: move builder.nodes, root: root };
+    let tree_handle = table.trees.add(move tree);
+    return Type { tree: tree_handle, root: root };
 }
 
 fn map_names_node<M>(
 builder: &var TypeBuilder,
-value: &Type,
+value: &TypeTree,
 handle: arena::Handle<Node>,
 mapper: &var M
 ) -> !arena::Handle<Node> {
@@ -713,7 +787,7 @@ mapper: &var M
 
 fn map_name_node<M>(
 builder: &var TypeBuilder,
-value: &Type,
+value: &TypeTree,
 node: &Name,
 mapper: &var M
 ) -> !arena::Handle<Node> {
@@ -735,7 +809,7 @@ mapper: &var M
 // map_error_union_names keeps Go's callback order: success before error.
 fn map_error_union_names<M>(
 builder: &var TypeBuilder,
-value: &Type,
+value: &TypeTree,
 node: &ErrorUnion,
 mapper: &var M
 ) -> !arena::Handle<Node> {
@@ -756,40 +830,40 @@ substitutions: &map::Map<[]u8, []u8>
     if substitutions.len() == 0 {
         return owned_text(allocator, text);
     }
-    let parsed = try parse(allocator, text);
-    defer parsed.deinit();
-    var parsed_substitutions = ParsedSubstitutions {
-        values: map::new<[]u8, Type>(allocator)
+    var table = new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(text);
+    var rendered_substitutions = RenderedSubstitutions {
+        values: map::new<[]u8, string::String>(allocator)
     };
-    defer parsed_substitutions.deinit();
+    defer rendered_substitutions.deinit();
     var index = 0;
     while substitutions.key_at(index) |name| {
         if substitutions.get(name) |replacement| {
-            try parsed_substitutions.values.insert(
-                name,
-                try parse(allocator, replacement)
-            );
+            let replacement_type = try table.parse(replacement);
+            let replacement_text = try render(allocator, &table, replacement_type);
+            try rendered_substitutions.values.insert(name, move replacement_text);
         }
         index = index + 1;
     }
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_node_with<ParsedSubstitutions>(
+    try append_tree_node_with<RenderedSubstitutions>(
         &var out,
-        &parsed,
+        table.trees.at(parsed.tree),
         parsed.root,
-        &parsed_substitutions
+        &rendered_substitutions
     );
     return move out;
 }
 
 /// Calls visitor for value and every nested type, outermost first.
-pub fn walk<V>(value: &Type, visitor: &var V) -> void {
-    walk_node<V>(value, value.root, visitor);
+pub fn walk<V>(table: &Table, value: Type, visitor: &var V) -> void {
+    walk_node<V>(table.trees.at(value.tree), value.root, visitor);
 }
 
 fn walk_node<V>(
-value: &Type,
+value: &TypeTree,
 handle: arena::Handle<Node>,
 visitor: &var V
 ) -> void {

@@ -6,9 +6,10 @@ import std::string;
 import std::testing;
 
 fn expect_round_trip(allocator: Allocator, text: []u8) -> !void {
-    let parsed = try typ::parse(allocator, text);
-    defer parsed.deinit();
-    let rendered = try typ::render(allocator, &parsed);
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(text);
+    let rendered = try typ::render(allocator, &table, parsed);
     defer rendered.deinit();
     let bytes = rendered.as_bytes();
     testing::expect(mem::equal_bytes(bytes, text));
@@ -77,14 +78,29 @@ test "type parse renders every compiler spelling back" {
 
 test "type equality compares structure across independent arenas" {
     let allocator = mem::page_allocator();
-    let first = try typ::parse(allocator, "Pair<[]u8, [4]T>");
-    defer first.deinit();
-    let same = try typ::parse(allocator, "Pair<[]u8, [4]T>");
-    defer same.deinit();
-    let other = try typ::parse(allocator, "Pair<[]u8, [8]T>");
-    defer other.deinit();
-    testing::expect(typ::equal(&first, &same));
-    testing::expect(!typ::equal(&first, &other));
+    var left = typ::new(allocator);
+    defer left.deinit();
+    var right = typ::new(allocator);
+    defer right.deinit();
+    let first = try left.parse("Pair<[]u8, [4]T>");
+    let same = try right.parse("Pair<[]u8, [4]T>");
+    let other = try right.parse("Pair<[]u8, [8]T>");
+    testing::expect(typ::equal(&left, first, &right, same));
+    testing::expect(!typ::equal(&left, first, &right, other));
+}
+
+test "type table reuses roots and parses nested spellings independently" {
+    let allocator = mem::page_allocator();
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let first = try table.parse("ParseError!Array<i64>");
+    let second = try table.parse("ParseError!Array<i64>");
+    testing::expect(typ::equal(&table, first, &table, second));
+    let nested = try table.parse("Array<i64>");
+    let rendered = try typ::render(allocator, &table, nested);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, "Array<i64>"));
 }
 
 test "split args trims canonical space and keeps nested types whole" {
@@ -122,10 +138,11 @@ fn (self: &var Counter) visit(value: &typ::Node) -> void {
 
 test "walk visits buffer elements outermost first" {
     let allocator = mem::page_allocator();
-    let parsed = try typ::parse(allocator, "[4]Pair<T, bool>");
-    defer parsed.deinit();
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse("[4]Pair<T, bool>");
     var counter = Counter { total: 0, names: 0, buffers: 0 };
-    typ::walk<Counter>(&parsed, &var counter);
+    typ::walk<Counter>(&table, parsed, &var counter);
     testing::expect_equal<i64>(4, counter.total);
     testing::expect_equal<i64>(3, counter.names);
     testing::expect_equal<i64>(1, counter.buffers);
@@ -206,16 +223,16 @@ path: &array::Array<string::String>
 
 test "map names rewrites every name and preserves surrounding structure" {
     let allocator = mem::page_allocator();
-    let parsed = try typ::parse(allocator, "Error![4]Pair<T, bool>");
-    defer parsed.deinit();
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse("Error![4]Pair<T, bool>");
     var qualifier = Qualifier { calls: 0 };
     let mapped = try typ::map_names<Qualifier>(
-        allocator,
-        &parsed,
+        &var table,
+        parsed,
         &var qualifier
     );
-    defer mapped.deinit();
-    let rendered = try typ::render(allocator, &mapped);
+    let rendered = try typ::render(allocator, &table, mapped);
     defer rendered.deinit();
     let bytes = rendered.as_bytes();
     testing::expect(mem::equal_bytes(
