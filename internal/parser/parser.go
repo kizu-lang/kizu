@@ -197,7 +197,7 @@ func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
 		fn := functionStub(false, docs)
 		fn.RequiresUnsafe = true
 		p.nextToken()
-		return p.parseFunctionAfterFn(fn, true)
+		return p.parseFunctionAfterFn(fn)
 	default:
 		p.errorf("expected fn or struct after unsafe, got %s", tokenDescription(p.peek))
 		return functionStub(false, docs)
@@ -219,7 +219,8 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.Function) {
 		return fn
 	}
-	return p.parseFunctionAfterFn(fn, false)
+	p.parseFunctionSignatureAfterFn(fn)
+	return fn
 }
 
 // parseFunctionDecl parses a top-level function declaration.
@@ -229,7 +230,7 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 
 // parseFunctionDeclWithDoc parses a top-level function declaration with attached docs.
 func (p *Parser) parseFunctionDeclWithDoc(docs string) ast.Decl {
-	return p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docs}, true)
+	return p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docs})
 }
 
 // parseTestDecl parses a top-level test block.
@@ -246,35 +247,9 @@ func (p *Parser) parseTestDecl() ast.Decl {
 	return decl
 }
 
-// parseFunctionAfterFn parses a function declaration after the fn token. It is
-// not named for ast.FunctionSignature: it parses the body too, which is the one
-// thing that type does not hold.
-func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
-	if p.peek.Type == token.LParen && !p.parseReceiver(fn) {
-		return fn
-	}
-	if !p.expectPeek(token.Ident) {
-		return fn
-	}
-	fn.Name = p.cur.Literal
-	if p.peek.Type == token.LT {
-		p.nextToken()
-		fn.StaticParams = p.parseStaticParamList()
-		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
-			return fn
-		}
-	}
-	if !p.expectPeek(token.LParen) {
-		return fn
-	}
-	fn.Params = append(fn.Params, p.parseParams()...)
-	if !p.expectCur(token.RParen) {
-		return fn
-	}
-	if !p.parseReturnClause(fn) {
-		return fn
-	}
-	if !requireBody {
+// parseFunctionAfterFn parses a body-bearing function after the fn token.
+func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl) ast.Decl {
+	if !p.parseFunctionSignatureAfterFn(fn) {
 		return fn
 	}
 	if !p.expectPeek(token.LBrace) {
@@ -282,6 +257,33 @@ func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) as
 	}
 	fn.Body = p.parseBlockStmt()
 	return fn
+}
+
+// parseFunctionSignatureAfterFn parses the declaration information shared by
+// body-bearing functions, extern declarations, and contract requirements.
+func (p *Parser) parseFunctionSignatureAfterFn(fn *ast.FunctionDecl) bool {
+	if p.peek.Type == token.LParen && !p.parseReceiver(fn) {
+		return false
+	}
+	if !p.expectPeek(token.Ident) {
+		return false
+	}
+	fn.Name = p.cur.Literal
+	if p.peek.Type == token.LT {
+		p.nextToken()
+		fn.StaticParams = p.parseStaticParamList()
+		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
+			return false
+		}
+	}
+	if !p.expectPeek(token.LParen) {
+		return false
+	}
+	fn.Params = append(fn.Params, p.parseParams()...)
+	if !p.expectCur(token.RParen) {
+		return false
+	}
+	return p.parseReturnClause(fn)
 }
 
 // parseContractDecl parses a contract with method requirements.
@@ -307,15 +309,14 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 			p.errorf("expected contract method, got %s", tokenDescription(p.cur))
 			return methods
 		}
-		method := p.parseFunctionAfterFn(&ast.FunctionDecl{}, false)
-		if fn, ok := method.(*ast.FunctionDecl); ok {
-			if fn.Receiver {
-				p.errorf("a contract method takes no receiver;" +
-					" it says what a method looks like, not what it is on")
-				return methods
-			}
-			methods = append(methods, fn)
+		method := &ast.FunctionDecl{}
+		p.parseFunctionSignatureAfterFn(method)
+		if method.Receiver {
+			p.errorf("a contract method takes no receiver;" +
+				" it says what a method looks like, not what it is on")
+			return methods
 		}
+		methods = append(methods, method)
 		if p.peek.Type == token.Semicolon {
 			p.nextToken()
 		}
