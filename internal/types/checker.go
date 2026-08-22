@@ -590,8 +590,9 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 				return errorf("type error: union payload `%s::%s` cannot store an optional yet",
 					decl.Name, variant.Name)
 			}
-			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, payload); err != nil {
-				return err
+			if isBorrowPayload(variant.Payload) {
+				return errorf("type error: borrow payload `%s.%s` cannot store borrow",
+					decl.Name, variant.Name)
 			}
 			if c.types.containsTypeValue(parsed) {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
@@ -625,11 +626,15 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err != nil {
 			return err
 		}
-		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
-			return err
+		if field.Borrow {
+			return errorf("type error: borrow field `%s.%s` cannot store borrow",
+				decl.Name, field.Name)
 		}
-		if err := checkRawPointerFieldPolicy(&c.types, decl, field, typ); err != nil {
-			return err
+		if rawPointerFieldRequiresUnsafe(&c.types, decl.RequiresUnsafe, typ) {
+			return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
+				"so it must be declared `unsafe struct`"+
+				"\nhelp: write `unsafe struct %s` and document the invariant its fields carry",
+				decl.Name, field.Name, decl.Name)
 		}
 		if compileTimeOnlyType(&c.types, typ) {
 			return errorf("type error: struct field `%s.%s` cannot store %s",
@@ -880,8 +885,10 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 		c.typeParams = previousTypeParams
 	}()
 
-	if err := checkStaticParamPolicy(fn); err != nil {
-		return nil, err
+	if index, reserved := reservedFunctionStaticParamIndex(fn); reserved {
+		param := fn.StaticParams[index]
+		return nil, errorf(
+			"type error: Function static parameter `%s` is reserved for std", param.Name)
 	}
 	paramInfo, err := c.collectFunctionParams(fn)
 	if err != nil {
@@ -964,8 +971,12 @@ func (c *Checker) checkFunctionParam(
 			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
 			param.Name)
 	}
-	if err := checkFunctionParamPolicy(&c.types, param, paramType); err != nil {
-		return err
+	// A function name and a field token are known only at compile time, so they
+	// belong in the static argument list rather than the runtime parameter list.
+	if compileTimeOnlyType(&c.types, paramType) {
+		return errorf(
+			"type error: %s parameter `%s` belongs in `<...>`, not `(...)`",
+			paramType, param.Name)
 	}
 	if _, ok := optionalElem(paramType); ok && param.Borrow {
 		return errorf(

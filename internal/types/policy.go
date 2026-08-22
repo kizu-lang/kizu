@@ -1,8 +1,6 @@
 package types
 
 import (
-	"strings"
-
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -62,7 +60,8 @@ func ownerUnionIdentName(expr ast.Expression) string {
 	return ""
 }
 
-// checkStaticParamPolicy validates what a `<...>` entry may declare. `Function`
+// reservedFunctionStaticParamIndex finds a `<...>` entry that may not be
+// declared here. `Function`
 // is a function-name token a std wrapper forwards to a trusted primitive, not a
 // value a body can call, so declaring one outside std is rejected where it is
 // written rather than where the name fails to resolve.
@@ -70,16 +69,16 @@ func ownerUnionIdentName(expr ast.Expression) string {
 // `Field` is not restricted. It is what a `std::meta::construct` worker takes,
 // and a decoder anyone can write is the test of whether construct belongs in
 // the language at all: a form only std can use would make std privileged over
-// the thing its own users need to write.
-func checkStaticParamPolicy(fn ast.FunctionSignature) error {
-	for _, param := range fn.StaticParams {
+// the thing its own users need to write. The caller owns the diagnostic because
+// it owns the surrounding function-checking phase.
+func reservedFunctionStaticParamIndex(fn ast.FunctionSignature) (int, bool) {
+	for index, param := range fn.StaticParams {
 		if Type(typ.Text(param.Type)) != typeFunction || fn.Std {
 			continue
 		}
-		return errorf(
-			"type error: Function static parameter `%s` is reserved for std", param.Name)
+		return index, true
 	}
-	return nil
+	return 0, false
 }
 
 // compileTimeOnlyType reports whether a spelling holds a compile-time token
@@ -91,48 +90,18 @@ func compileTimeOnlyType(table *typeTable, typ Type) bool {
 	return table.containsCompileTimeOnly(typ)
 }
 
-// checkFunctionParamPolicy keeps the compile-time-only tokens out of the
-// runtime argument list. A function name and a field token are both known only
-// at compile time, so they are static arguments.
-func checkFunctionParamPolicy(table *typeTable, param ast.Param, typ Type) error {
-	if !compileTimeOnlyType(table, typ) {
-		return nil
-	}
-	return errorf(
-		"type error: %s parameter `%s` belongs in `<...>`, not `(...)`", typ, param.Name)
-}
-
-// checkStructFieldBorrowPolicy rejects borrow fields until a non-lifetime model exists.
-func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
-	if !field.Borrow {
-		return nil
-	}
-	return errorf("type error: borrow field `%s.%s` cannot store borrow",
-		decl.Name, field.Name)
-}
-
-// checkRawPointerFieldPolicy rejects a raw pointer field on a struct that has
-// not said it carries an invariant the compiler cannot check.
-func checkRawPointerFieldPolicy(
+// rawPointerFieldRequiresUnsafe reports whether a raw-pointer field belongs to
+// a struct that has not named the invariant the compiler cannot check.
+func rawPointerFieldRequiresUnsafe(
 	table *typeTable,
-	decl *ast.StructDecl,
-	field ast.Field,
+	requiresUnsafe bool,
 	fieldType Type,
-) error {
-	if decl.RequiresUnsafe || !table.containsRawPointer(fieldType) {
-		return nil
-	}
-	return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
-		"so it must be declared `unsafe struct`"+
-		"\nhelp: write `unsafe struct %s` and document the invariant its fields carry",
-		decl.Name, field.Name, decl.Name)
+) bool {
+	return !requiresUnsafe && table.containsRawPointer(fieldType)
 }
 
-// checkBorrowFieldPolicy rejects borrowed payloads.
-func checkBorrowFieldPolicy(typeName string, fieldName string, payload string) error {
-	if !strings.HasPrefix(payload, "&") {
-		return nil
-	}
-	return errorf("type error: borrow payload `%s.%s` cannot store borrow",
-		typeName, fieldName)
+// isBorrowPayload reports whether a union payload is structurally a borrow.
+func isBorrowPayload(payload typ.Type) bool {
+	_, ok := payload.(*typ.Borrow)
+	return ok
 }
