@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/quote"
 	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -183,8 +184,8 @@ func (d *FunctionDecl) String() string {
 		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %q fn %s%s%s(%s)%s",
-			prefix, d.ExternABI, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sextern %s fn %s%s%s(%s)%s",
+			prefix, quote.Bytes(d.ExternABI), receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
 	if d.Body == nil {
 		return fmt.Sprintf("%sfn %s%s%s(%s)%s;",
@@ -206,9 +207,9 @@ func (*TestDecl) declNode() {}
 // String returns a compact debug representation of the test declaration.
 func (d *TestDecl) String() string {
 	if d.Body == nil {
-		return fmt.Sprintf("test %q <missing>", d.Name)
+		return fmt.Sprintf("test %s <missing>", quote.Bytes(d.Name))
 	}
-	return fmt.Sprintf("test %q %s", d.Name, d.Body.String())
+	return fmt.Sprintf("test %s %s", quote.Bytes(d.Name), d.Body.String())
 }
 
 // StructDecl represents a top-level struct declaration.
@@ -802,7 +803,7 @@ func (*StringExpr) expressionNode() {}
 
 // String returns the quoted literal spelling.
 func (e *StringExpr) String() string {
-	return fmt.Sprintf("%q", e.Value)
+	return quote.Bytes(e.Value)
 }
 
 // NullExpr is the `null` literal of an optional type.

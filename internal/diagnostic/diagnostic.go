@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/quote"
 )
 
 // Severity identifies whether a diagnostic blocks compilation or is advisory.
@@ -31,33 +32,7 @@ type Diagnostic struct {
 // QuoteBytes returns the deterministic ASCII byte-literal form used by
 // std::fmt::append_bytes_literal in the self-hosted compiler.
 func QuoteBytes(text string) string {
-	const hex = "0123456789ABCDEF"
-	var out strings.Builder
-	out.WriteByte('"')
-	for i := 0; i < len(text); i++ {
-		value := text[i]
-		switch value {
-		case '"', '\\':
-			out.WriteByte('\\')
-			out.WriteByte(value)
-		case '\n':
-			out.WriteString(`\n`)
-		case '\r':
-			out.WriteString(`\r`)
-		case '\t':
-			out.WriteString(`\t`)
-		default:
-			if value >= 0x20 && value <= 0x7e {
-				out.WriteByte(value)
-				continue
-			}
-			out.WriteString(`\x`)
-			out.WriteByte(hex[value>>4])
-			out.WriteByte(hex[value&0x0f])
-		}
-	}
-	out.WriteByte('"')
-	return out.String()
+	return quote.Bytes(text)
 }
 
 // New constructs one structured diagnostic from its summary fields.
