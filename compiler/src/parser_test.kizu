@@ -2488,6 +2488,105 @@ test "parser list delimiters accept comma, brace, and end of file" {
     testing::expect(mismatch.peek_kind() == token::Kind::Semicolon);
 }
 
+fn expect_expr_statement(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expression: ast::Expression,
+    semicolon: bool
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => {
+            testing::expect(value.expr.node == expression.node);
+            testing::expect_equal<bool>(semicolon, value.semicolon);
+        },
+        _ => testing::fail("parser did not retain an expression statement"),
+    }
+    return;
+}
+
+test "parser finishes expression statements at explicit and branch ends" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let semicolon_scanner = lexer::new(allocator, "value;");
+    var semicolon = try parser::new(allocator, move semicolon_scanner);
+    defer semicolon.deinit();
+    let semicolon_expr = try add_ident_expression(
+        allocator,
+        &var tree,
+        "semicolon",
+        1,
+        10
+    );
+    let semicolon_stmt = try semicolon.finish_expr_stmt(
+        &var tree,
+        semicolon_expr
+    );
+    expect_expr_statement(&tree, semicolon_stmt, semicolon_expr, true);
+    testing::expect(semicolon.current_kind() == token::Kind::Semicolon);
+    testing::expect(semicolon.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, semicolon.diagnostics_len());
+
+    let brace_scanner = lexer::new(allocator, "value}");
+    var brace = try parser::new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_expr = try add_ident_expression(
+        allocator,
+        &var tree,
+        "brace",
+        1,
+        6
+    );
+    let brace_stmt = try brace.finish_expr_stmt(&var tree, brace_expr);
+    expect_expr_statement(&tree, brace_stmt, brace_expr, false);
+    testing::expect(brace.current_kind() == token::Kind::Ident);
+    testing::expect(brace.peek_kind() == token::Kind::RBrace);
+    testing::expect_equal<i64>(0, brace.diagnostics_len());
+
+    let comma_scanner = lexer::new(allocator, "value,");
+    var comma = try parser::new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_expr = try add_ident_expression(
+        allocator,
+        &var tree,
+        "comma",
+        1,
+        6
+    );
+    let comma_stmt = try comma.finish_expr_stmt(&var tree, comma_expr);
+    expect_expr_statement(&tree, comma_stmt, comma_expr, false);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Comma);
+    testing::expect_equal<i64>(0, comma.diagnostics_len());
+}
+
+test "parser retains unterminated expression statements with diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "value next");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try add_ident_expression(
+        allocator,
+        &var tree,
+        "value",
+        1,
+        6
+    );
+    let statement = try value.finish_expr_stmt(&var tree, expression);
+    expect_expr_statement(&tree, statement, expression, false);
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected `;` after expression statement",
+        1,
+        6
+    );
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+}
+
 test "parser retains break and continue labels in the AST" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
