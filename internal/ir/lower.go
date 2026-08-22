@@ -41,6 +41,14 @@ type lowerer struct {
 	// function being instantiated. Lowering reads a body once per binding rather
 	// than rewriting its AST, so `T` resolves through here.
 	typeBindings map[string]string
+	// captureValues holds the fixed parameters produced for the current runtime
+	// capture instance. The source capture is not a runtime container; comptime
+	// for exposes one of these values at a time.
+	captureValues map[string][]capturedParam
+	// activeCaptures preserves the passing mode of the value binding in the
+	// comptime-for expansion currently being lowered. A shared borrow can use a
+	// flat ABI, so its Value type alone is not enough to recover this fact.
+	activeCaptures map[string]runtimeCaptureParam
 	// instantiated records the generic instances already requested, keyed by
 	// the symbol they were given.
 	instantiated map[string]bool
@@ -85,10 +93,25 @@ type lowerer struct {
 
 // genericInstance is one generic function with its static parameters bound.
 type genericInstance struct {
-	decl     *ast.FunctionDecl
-	bindings map[string]string
-	values   map[string]staticValue
-	symbol   string
+	decl          *ast.FunctionDecl
+	bindings      map[string]string
+	values        map[string]staticValue
+	captureParams []runtimeCaptureParam
+	symbol        string
+}
+
+// runtimeCaptureParam is the fixed parameter shape inferred for one captured
+// argument. The element type drives comptime dispatch; borrow mode drives ABI.
+type runtimeCaptureParam struct {
+	typ       string
+	borrow    bool
+	mutBorrow bool
+}
+
+// capturedParam pairs one fixed IR parameter with its source passing mode.
+type capturedParam struct {
+	value Value
+	mode  runtimeCaptureParam
 }
 
 // staticValue is one compile-time value bound to a static parameter.
@@ -124,7 +147,7 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 	enums := map[string]*ast.EnumDecl{}
 	unions := map[string]*ast.UnionDecl{}
 	for _, decl := range program.Decls {
-		if fn, ok := decl.(*ast.FunctionDecl); ok && len(fn.StaticParams) > 0 {
+		if fn, ok := decl.(*ast.FunctionDecl); ok && fn.IsGeneric() {
 			generics[fn.Name] = fn
 		}
 		switch typed := decl.(type) {
@@ -145,18 +168,20 @@ func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer
 			ErrorSets: map[string]Enum{},
 			Unions:    map[string]Union{},
 		},
-		signatures:    map[string]Signature{},
-		typeBindings:  map[string]string{},
-		instantiated:  map[string]bool{},
-		staticValues:  map[string]staticValue{},
-		externSymbols: map[string]string{},
-		genericDecls:  generics,
-		structDecls:   structs,
-		enumDecls:     enums,
-		unionDecls:    unions,
-		metaFields:    map[string]metaField{},
-		deinitOwners:  ast.DeinitOwners(program),
-		ownership:     ownershipResult,
+		signatures:     map[string]Signature{},
+		typeBindings:   map[string]string{},
+		captureValues:  map[string][]capturedParam{},
+		activeCaptures: map[string]runtimeCaptureParam{},
+		instantiated:   map[string]bool{},
+		staticValues:   map[string]staticValue{},
+		externSymbols:  map[string]string{},
+		genericDecls:   generics,
+		structDecls:    structs,
+		enumDecls:      enums,
+		unionDecls:     unions,
+		metaFields:     map[string]metaField{},
+		deinitOwners:   ast.DeinitOwners(program),
+		ownership:      ownershipResult,
 	}
 }
 
@@ -198,16 +223,23 @@ func (l *lowerer) resolveTypeArgs(list string) string {
 // type argument, and returns the symbol it will be lowered under together with
 // the signature the caller sees. Lowering happens after the current function
 // finishes, so an instantiation never interrupts the function that asked for it.
-func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, Signature, error) {
+func (l *lowerer) requestGenericInstance(
+	name string,
+	typeArgs string,
+	captureParams []runtimeCaptureParam,
+) (string, Signature, error) {
 	decl, instance, err := l.genericBindings(name, typeArgs)
 	if err != nil {
 		return "", Signature{}, err
 	}
-	symbol := genericInstanceName(name, instance.order, instance.bindings, instance.values)
+	_, hasCapture := decl.RuntimeCapture()
+	symbol := genericInstanceName(
+		name, instance.order, instance.bindings, instance.values, captureParams, hasCapture)
 	if !l.instantiated[symbol] {
 		l.instantiated[symbol] = true
 		l.pending = append(l.pending, genericInstance{
-			decl: decl, bindings: instance.bindings, values: instance.values, symbol: symbol,
+			decl: decl, bindings: instance.bindings, values: instance.values,
+			captureParams: captureParams, symbol: symbol,
 		})
 	}
 	// The signature the caller sees resolves the forms the declaration wrote,
@@ -216,7 +248,7 @@ func (l *lowerer) requestGenericInstance(name string, typeArgs string) (string, 
 	if err != nil {
 		return "", Signature{}, err
 	}
-	signature := l.instanceSignature(decl.FunctionSignature, instance.bindings)
+	signature := l.instanceSignature(decl.FunctionSignature, instance.bindings, captureParams)
 	restore()
 	return symbol, signature, nil
 }
@@ -242,14 +274,19 @@ func (l *lowerer) genericBindings(
 	if decl == nil {
 		return nil, genericArguments{}, fmt.Errorf("ir error: `%s` is not a generic function", name)
 	}
-	args, err := typ.SplitArgs(typeArgs)
-	if err != nil {
-		return nil, genericArguments{}, fmt.Errorf("ir error: `%s`: %w", name, err)
+	fixedStaticCount := len(decl.StaticParams)
+	args := []string{}
+	if fixedStaticCount > 0 || strings.TrimSpace(typeArgs) != "" {
+		var err error
+		args, err = typ.SplitArgs(typeArgs)
+		if err != nil {
+			return nil, genericArguments{}, fmt.Errorf("ir error: `%s`: %w", name, err)
+		}
 	}
-	if len(args) != len(decl.StaticParams) {
+	if len(args) != fixedStaticCount {
 		return nil, genericArguments{}, fmt.Errorf(
 			"ir error: `%s` takes %d static parameters, got %d",
-			name, len(decl.StaticParams), len(args))
+			name, fixedStaticCount, len(args))
 	}
 	instance := genericArguments{
 		order:    make([]string, 0, len(decl.StaticParams)),
@@ -282,7 +319,7 @@ func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param,
 	if err != nil {
 		return nil, err
 	}
-	return l.instanceSignature(decl.FunctionSignature, instance.bindings).Params, nil
+	return l.instanceSignature(decl.FunctionSignature, instance.bindings, nil).Params, nil
 }
 
 // instanceSignature returns the signature a generic declaration has once its
@@ -292,11 +329,28 @@ func (l *lowerer) declaredInstanceParams(name string, typeArgs string) ([]Param,
 func (l *lowerer) instanceSignature(
 	sig ast.FunctionSignature,
 	bindings map[string]string,
+	captureParams []runtimeCaptureParam,
 ) Signature {
 	previous := l.typeBindings
 	l.typeBindings = bindings
 	defer func() { l.typeBindings = previous }()
-	return l.lowerSignature(sig)
+	signature := l.lowerSignature(sig)
+	capture, ok := sig.RuntimeCapture()
+	if !ok {
+		return signature
+	}
+	for index, captured := range captureParams {
+		param := Param{
+			Name:    "%" + captureElementName(capture.Name, index),
+			Type:    l.resolveType(captured.typ),
+			Passing: PassValue,
+		}
+		if captured.borrow {
+			param.Type, param.Passing = l.borrowIRType(param.Type, captured.mutBorrow)
+		}
+		signature.Params = append(signature.Params, param)
+	}
+	return signature
 }
 
 // lowerPendingGenerics lowers every requested instantiation, including any an
@@ -315,10 +369,14 @@ func (l *lowerer) lowerPendingGenerics() error {
 		if err != nil {
 			return err
 		}
-		lowered, err := l.lowerFunctionNamed(next.decl, next.symbol)
+		l.captureValues = map[string][]capturedParam{}
+		l.activeCaptures = map[string]runtimeCaptureParam{}
+		lowered, err := l.lowerFunctionNamedWithRuntimeCapture(next.decl, next.symbol, next.captureParams)
 		restore()
 		l.typeBindings = map[string]string{}
 		l.staticValues = map[string]staticValue{}
+		l.captureValues = map[string][]capturedParam{}
+		l.activeCaptures = map[string]runtimeCaptureParam{}
 		if err != nil {
 			return err
 		}
@@ -391,6 +449,8 @@ func genericInstanceName(
 	order []string,
 	bindings map[string]string,
 	values map[string]staticValue,
+	captureParams []runtimeCaptureParam,
+	hasCapture bool,
 ) string {
 	parts := make([]string, 0, len(order)+1)
 	parts = append(parts, name)
@@ -401,7 +461,29 @@ func genericInstanceName(
 		}
 		parts = append(parts, encodeStaticArg(values[param].text))
 	}
+	if hasCapture {
+		parts = append(parts, "capture", fmt.Sprintf("%d", len(captureParams)))
+		for _, captured := range captureParams {
+			parts = append(parts, encodeStaticArg(capturedParamText(captured)))
+		}
+	}
 	return strings.Join(parts, ".")
+}
+
+// capturedParamText gives one captured fixed parameter a stable instance spelling.
+func capturedParamText(param runtimeCaptureParam) string {
+	if param.mutBorrow {
+		return "&var " + param.typ
+	}
+	if param.borrow {
+		return "&" + param.typ
+	}
+	return param.typ
+}
+
+// captureElementName gives each expanded parameter a backend-safe, stable name.
+func captureElementName(capture string, index int) string {
+	return fmt.Sprintf("%s_capture_%d", capture, index)
 }
 
 // encodeStaticArg spells one static argument in the character set every backend
@@ -446,7 +528,7 @@ func (l *lowerer) lower() (*Module, error) {
 		if fn.ExternABI != "" {
 			continue
 		}
-		if len(fn.StaticParams) > 0 {
+		if fn.IsGeneric() {
 			continue
 		}
 		lowered, err := l.lowerFunction(fn)
@@ -615,6 +697,9 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 	params := make([]Param, 0, len(sig.Params))
 	for _, param := range sig.Params {
+		if param.Capture {
+			continue
+		}
 		params = append(params, l.lowerParam(param))
 	}
 	returned := l.lowerReturnType(l.resolveType(typ.Text(sig.ReturnType)))
@@ -631,7 +716,16 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 // second reading of the same declaration: a body and its callers disagreeing
 // about what it takes is the one thing a call site cannot see.
 func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Function, error) {
-	signature := l.lowerSignature(fn.FunctionSignature)
+	return l.lowerFunctionNamedWithRuntimeCapture(fn, name, nil)
+}
+
+// lowerFunctionNamedWithRuntimeCapture lowers one concrete fixed-arity capture instance.
+func (l *lowerer) lowerFunctionNamedWithRuntimeCapture(
+	fn *ast.FunctionDecl,
+	name string,
+	captureParams []runtimeCaptureParam,
+) (*Function, error) {
+	signature := l.instanceSignature(fn.FunctionSignature, l.typeBindings, captureParams)
 	l.current = &Function{Name: name, Params: signature.Params, Return: signature.Return}
 	l.env = newEnv()
 	slots, err := l.mutablyBorrowedLocals(fn)
@@ -643,14 +737,28 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.nextBlock = 0
 	l.loops = nil
 	l.deferFrames = nil
-	for index, param := range fn.Params {
-		l.env.set(param.Name, signature.Params[index].Value())
+	paramIndex := 0
+	for _, param := range fn.Params {
+		if param.Capture {
+			values := make([]capturedParam, 0, len(captureParams))
+			for _, captured := range captureParams {
+				values = append(values, capturedParam{
+					value: signature.Params[paramIndex].Value(),
+					mode:  captured,
+				})
+				paramIndex++
+			}
+			l.captureValues[param.Name] = values
+			continue
+		}
+		l.env.set(param.Name, signature.Params[paramIndex].Value())
 		// A parameter that arrives as the caller's storage is a storage name
 		// like a lent local: reads load, assignments store, and address
 		// consumers take the pointer itself.
-		if signature.Params[index].Passing == PassCallerStorage {
+		if signature.Params[paramIndex].Passing == PassCallerStorage {
 			l.slots[param.Name] = true
 		}
+		paramIndex++
 	}
 	l.block = l.newBlock("entry")
 	if err := l.lowerBlock(fn.Body); err != nil {
@@ -720,9 +828,25 @@ func (l *lowerer) lowerReturnType(name string) string {
 
 // scopedBinding remembers what a name meant before a block rebound it.
 type scopedBinding struct {
-	name  string
-	value Value
-	bound bool
+	name          string
+	value         Value
+	bound         bool
+	captureMode   runtimeCaptureParam
+	activeCapture bool
+}
+
+// shadowActiveCapture hides a comptime-for value binding while a nested
+// lexical binding with the same source name is in scope.
+func (l *lowerer) shadowActiveCapture(name string) func() {
+	previous, active := l.activeCaptures[name]
+	delete(l.activeCaptures, name)
+	return func() {
+		if active {
+			l.activeCaptures[name] = previous
+			return
+		}
+		delete(l.activeCaptures, name)
+	}
 }
 
 // scopeBlockBindings makes the declarations written directly in block local to
@@ -742,8 +866,10 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 			continue
 		}
 		previous, bound := l.env.get(declaration.Name)
+		captureMode, activeCapture := l.activeCaptures[declaration.Name]
 		saved = append(saved, scopedBinding{
 			name: declaration.Name, value: previous, bound: bound,
+			captureMode: captureMode, activeCapture: activeCapture,
 		})
 	}
 	if len(saved) == 0 {
@@ -754,6 +880,11 @@ func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
 		// binding that was in scope before either declaration.
 		for index := len(saved) - 1; index >= 0; index-- {
 			binding := saved[index]
+			if binding.activeCapture {
+				l.activeCaptures[binding.name] = binding.captureMode
+			} else {
+				delete(l.activeCaptures, binding.name)
+			}
 			if binding.bound {
 				l.env.set(binding.name, binding.value)
 				continue
@@ -1470,8 +1601,18 @@ func (l *lowerer) lowerPrefixExpr(expr *ast.PrefixExpr) (Value, error) {
 	return l.emit("unary."+expr.Operator, resultType, []Value{right}, ""), nil
 }
 
-// lowerBorrowExpr preserves the current value-level ABI for checked borrow arguments.
-func (l *lowerer) lowerBorrowExpr(_ string, expr ast.Expression) (Value, error) {
+// lowerBorrowExpr keeps a mutable borrow as caller storage even when no fixed
+// signature supplies a context yet, as with a captured trailing argument.
+// Shared borrows retain the existing value-level ABI.
+func (l *lowerer) lowerBorrowExpr(operator string, expr ast.Expression) (Value, error) {
+	if operator == "&var" {
+		if slot, ok := l.slotPointer(expr); ok {
+			return slot, nil
+		}
+		if storage, ok := l.lowerFieldStorage(expr); ok {
+			return storage, nil
+		}
+	}
 	return l.lowerExpr(expr)
 }
 
@@ -1554,6 +1695,11 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 
 // lowerNamedCallExpr lowers builtins and resolved function calls.
 func (l *lowerer) lowerNamedCallExpr(name string, rawArgs []ast.Expression) (Value, error) {
+	if decl := l.genericDecl(name); decl != nil {
+		if _, ok := decl.RuntimeCapture(); ok {
+			return l.lowerRuntimeCaptureCall(name, "", rawArgs)
+		}
+	}
 	args, err := l.lowerCallArgs(name, rawArgs)
 	if err != nil {
 		return Value{}, err
@@ -1590,6 +1736,11 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	typeArg string,
 	rawArgs []ast.Expression,
 ) (Value, error) {
+	if decl := l.genericDecl(name); decl != nil {
+		if _, ok := decl.RuntimeCapture(); ok {
+			return l.lowerRuntimeCaptureCall(name, typeArg, rawArgs)
+		}
+	}
 	value, handled, err := l.lowerTypedContainerPrimitive(name, typeArg, rawArgs)
 	if handled || err != nil {
 		return value, err
@@ -1618,7 +1769,7 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		}
 		return l.emit("test.expect_equal", "void", args, typeArg), nil
 	}
-	symbol, sig, err := l.requestGenericInstance(name, typeArg)
+	symbol, sig, err := l.requestGenericInstance(name, typeArg, nil)
 	if err != nil {
 		return Value{}, err
 	}
@@ -1627,6 +1778,100 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		return Value{}, err
 	}
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
+}
+
+// lowerRuntimeCaptureCall lowers the arguments once, captures the exact types
+// of the trailing values, and requests the corresponding fixed-arity body.
+func (l *lowerer) lowerRuntimeCaptureCall(
+	name string,
+	typeArg string,
+	rawArgs []ast.Expression,
+) (Value, error) {
+	decl, instance, err := l.genericBindings(name, typeArg)
+	if err != nil {
+		return Value{}, err
+	}
+	fixed := l.instanceSignature(decl.FunctionSignature, instance.bindings, nil)
+	if len(rawArgs) < len(fixed.Params) {
+		return Value{}, fmt.Errorf("ir error: `%s` expects at least %d args, got %d",
+			name, len(fixed.Params), len(rawArgs))
+	}
+	args, err := l.lowerCallArgsAs(fixed.Params, rawArgs[:len(fixed.Params)])
+	if err != nil {
+		return Value{}, err
+	}
+	captureParams := make([]runtimeCaptureParam, 0, len(rawArgs)-len(fixed.Params))
+	for _, rawArg := range rawArgs[len(fixed.Params):] {
+		arg, err := l.lowerRuntimeCaptureArg(rawArg)
+		if err != nil {
+			return Value{}, err
+		}
+		args = append(args, arg)
+		captureParams = append(captureParams, l.capturedRuntimeParam(
+			rawArg, arg,
+		))
+	}
+	symbol, sig, err := l.requestGenericInstance(name, typeArg, captureParams)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("call."+symbol, sig.Return, args, ""), nil
+}
+
+// lowerRuntimeCaptureArg preserves caller storage for an inferred mutable
+// borrow before the concrete instance signature exists. Shared borrows use the
+// same flat representation as ordinary fixed shared-borrow parameters.
+func (l *lowerer) lowerRuntimeCaptureArg(expr ast.Expression) (Value, error) {
+	_, mutable, _ := l.runtimeCaptureMode(expr)
+	if mutable {
+		target := borrowTargetExpr(expr)
+		if slot, ok := l.slotPointer(target); ok {
+			return slot, nil
+		}
+		if storage, ok := l.lowerFieldStorage(target); ok {
+			return storage, nil
+		}
+	}
+	return l.lowerContextualExpr(expr, "")
+}
+
+// runtimeCaptureMode returns the checked source mode, with the active
+// comptime-for binding taking precedence because the same AST identifier is
+// expanded once per captured argument and may have a different mode each time.
+func (l *lowerer) runtimeCaptureMode(expr ast.Expression) (bool, bool, bool) {
+	borrow, mutable, ok := l.ownership.RuntimeCaptureMode(expr)
+	if ident, isIdent := expr.(*ast.IdentExpr); isIdent {
+		if active, exists := l.activeCaptures[ident.Name]; exists {
+			borrow, mutable, ok = active.borrow, active.mutBorrow, true
+		}
+	}
+	if prefix, isPrefix := expr.(*ast.PrefixExpr); isPrefix &&
+		(prefix.Operator == "&" || prefix.Operator == "&var") {
+		return true, prefix.Operator == "&var", true
+	}
+	return borrow, mutable, ok
+}
+
+// capturedRuntimeParam recovers the source-visible passing mode around one
+// already-lowered argument. Borrow expressions carry no runtime wrapper; the
+// fixed instance signature is where that mode becomes an ABI decision.
+func (l *lowerer) capturedRuntimeParam(expr ast.Expression, value Value) runtimeCaptureParam {
+	param := runtimeCaptureParam{typ: value.Type}
+	if borrow, mutable, ok := l.runtimeCaptureMode(expr); ok {
+		param.borrow = borrow
+		param.mutBorrow = mutable
+	}
+	if prefix, ok := expr.(*ast.PrefixExpr); ok &&
+		(prefix.Operator == "&" || prefix.Operator == "&var") {
+		param.borrow = true
+		param.mutBorrow = prefix.Operator == "&var"
+	}
+	if isReferenceType(value.Type) {
+		param.typ = derefType(value.Type)
+		param.borrow = true
+		param.mutBorrow = isMutableReferenceType(value.Type)
+	}
+	return param
 }
 
 // lowerTypedContainerPrimitive lowers private storage operations whose static
@@ -1898,7 +2143,8 @@ func (l *lowerer) stdContainerParams(
 	method string,
 	typeArg string,
 ) ([]Param, error) {
-	_, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	_, sig, err := l.requestGenericInstance(
+		stdmethod.MethodName(receiver, method), typeArg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1939,7 +2185,8 @@ func (l *lowerer) stdContainerCallOp(
 	method string,
 	typeArg string,
 ) (string, Signature, error) {
-	symbol, sig, err := l.requestGenericInstance(stdmethod.MethodName(receiver, method), typeArg)
+	symbol, sig, err := l.requestGenericInstance(
+		stdmethod.MethodName(receiver, method), typeArg, nil)
 	if err != nil {
 		return "", Signature{}, err
 	}

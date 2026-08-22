@@ -252,11 +252,16 @@ func (l *lowerer) markLentArgs(expr *ast.CallExpr, found map[string]bool) {
 		return
 	}
 	for index, arg := range expr.Args {
-		if index >= len(sig.Params) {
-			return
-		}
-		if sig.Params[index].Passing == PassCallerStorage {
+		if index < len(sig.Params) && sig.Params[index].Passing == PassCallerStorage {
 			markIfName(arg, found)
+			continue
+		}
+		if index >= len(sig.Params) && isMutableBorrowExpr(arg) {
+			if decl := l.genericDecl(name); decl != nil {
+				if _, ok := decl.RuntimeCapture(); ok {
+					markIfName(arg, found)
+				}
+			}
 		}
 	}
 }
@@ -307,14 +312,30 @@ func (l *lowerer) markLentGenericArgs(
 	for index, arg := range args {
 		if index < len(params) && params[index].Passing == PassCallerStorage {
 			markIfName(arg, found)
+			continue
+		}
+		if index >= len(params) && isMutableBorrowExpr(arg) {
+			if decl := l.genericDecl(name); decl != nil {
+				if _, ok := decl.RuntimeCapture(); ok {
+					markIfName(arg, found)
+				}
+			}
 		}
 	}
+}
+
+// isMutableBorrowExpr reports the explicit mode a captured tail uses before
+// its fixed instance signature exists.
+func isMutableBorrowExpr(expr ast.Expression) bool {
+	prefix, ok := expr.(*ast.PrefixExpr)
+	return ok && prefix.Operator == "&var"
 }
 
 // markIfName records the local whose storage expr would hand over: the name
 // itself, or the root of a field path -- a `field.addr` projection needs the
 // root owner in memory, so the root is the local that loses SSA form.
 func markIfName(expr ast.Expression, found map[string]bool) {
+	expr = borrowTargetExpr(expr)
 	for {
 		field, ok := expr.(*ast.FieldExpr)
 		if !ok || field.Namespace {
@@ -330,6 +351,7 @@ func markIfName(expr ast.Expression, found map[string]bool) {
 // bindLocal binds a declaration. A local the function mutably borrows gets its
 // storage here, once, so every later use of the name means the same place.
 func (l *lowerer) bindLocal(name string, value Value) {
+	delete(l.activeCaptures, name)
 	if !l.slots[name] {
 		l.env.set(name, value)
 		return

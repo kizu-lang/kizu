@@ -42,7 +42,10 @@ type Checker struct {
 	instantiationDepth int
 	// metaFields binds the captures of the `comptime for` expansions currently
 	// open. A capture is not a value, so it is not a scope binding.
-	metaFields      map[string]metaField
+	metaFields map[string]metaField
+	// runtimeCaptures binds the trailing capture of the current generic
+	// instantiation to its fixed parameter bindings. Only comptime for opens it.
+	runtimeCaptures map[string][]runtimeCaptureElement
 	loopDepth       int
 	currentFunction *functionInfo
 	// collectMissingMarkers switches the missing `move` diagnostic from an
@@ -96,6 +99,23 @@ type functionInfo struct {
 }
 
 type paramInfo struct {
+	typeName  string
+	borrow    bool
+	mutBorrow bool
+}
+
+// runtimeCaptureElement is one fixed parameter produced by a capture
+// instantiation. The internal binding exists from function entry so every
+// early exit accounts for every owner; comptime for gives it a source alias.
+type runtimeCaptureElement struct {
+	typeName string
+	binding  string
+}
+
+// runtimeCaptureParam is the fixed parameter shape inferred from one call
+// argument. Borrow mode travels with the type so an instantiation never turns
+// a read through `&value` into ownership of value.
+type runtimeCaptureParam struct {
 	typeName  string
 	borrow    bool
 	mutBorrow bool
@@ -155,6 +175,9 @@ type borrowSource struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+	// aliases give compile-time expansions a source name for an existing
+	// binding without duplicating its ownership facts.
+	aliases map[string]string
 }
 
 type directFieldReceiver struct {
@@ -187,6 +210,7 @@ func New() *Checker {
 		enumOrder:         map[string][]string{},
 		unionOrder:        map[string][]string{},
 		metaFields:        map[string]metaField{},
+		runtimeCaptures:   map[string][]runtimeCaptureElement{},
 		checkedInstances:  map[string]bool{},
 		result:            newResult(),
 	}
@@ -215,7 +239,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParamNames()) > 0 {
+			if d.IsGeneric() {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -279,7 +303,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParamNames()) > 0 {
+			if d.IsGeneric() {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -422,6 +446,9 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 	params := make([]paramInfo, 0, len(fn.Params))
 	for _, param := range fn.Params {
+		if param.Capture {
+			continue
+		}
 		params = append(params, paramInfo{
 			typeName: typ.Text(param.TypeName), borrow: param.Borrow, mutBorrow: param.MutBorrow,
 		})
@@ -498,6 +525,9 @@ func (c *Checker) defineParams(fn *functionInfo, env *scope, subst map[string]st
 		env.define(c.newBinding(param.Name, typ.Text(param.Type)))
 	}
 	for idx, param := range fn.sig.Params {
+		if param.Capture {
+			continue
+		}
 		typeName := fn.params[idx].typeName
 		if subst != nil {
 			typeName = substituteOwnershipType(typeName, subst)
@@ -3503,7 +3533,7 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 // inGenericFunction reports whether the body being checked defers a type to its
 // instantiation, so whether a place hands off is not fixed by this source.
 func (c *Checker) inGenericFunction() bool {
-	return c.currentFunction != nil && len(c.currentFunction.sig.StaticParams) > 0
+	return c.currentFunction != nil && c.currentFunction.sig.IsGeneric()
 }
 
 // isCopyPlace reports whether expr names a binding whose type copies, so a
@@ -3942,33 +3972,244 @@ func (c *Checker) checkUserCall(
 	if !ok {
 		return "", errorf("move error: undefined function `%s`", name)
 	}
-	if len(fn.sig.TypeParamNames()) > 0 {
+	if len(fn.sig.StaticParams) > 0 {
 		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
-	if len(args) != len(fn.params) {
-		return "", errorf("move error: `%s` expects %d args, got %d",
+	if err := c.checkUserCallArgs(name, fn, args, env, sanctioned); err != nil {
+		return "", err
+	}
+	return returnTypeName(fn), nil
+}
+
+// checkUserCallArgs applies the fixed-prefix borrow/move contract and then the
+// ownership effect of each exact-captured trailing argument.
+func (c *Checker) checkUserCallArgs(
+	name string,
+	fn *functionInfo,
+	args []ast.Expression,
+	env *scope,
+	sanctioned bool,
+) error {
+	_, hasCapture := fn.sig.RuntimeCapture()
+	if (!hasCapture && len(args) != len(fn.params)) || (hasCapture && len(args) < len(fn.params)) {
+		return errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
-	if err := c.checkCallHandlePairing(fn.params, nil, args, env); err != nil {
-		return "", err
+	fixedArgs := args[:len(fn.params)]
+	if err := c.checkCallHandlePairing(fn.params, nil, fixedArgs, env); err != nil {
+		return err
 	}
 	// A tied-allocator factory call is only legal where something ties its
 	// result (the let recognizer, a param-rooted return — those pass
 	// sanctioned); anywhere else the tie would silently drop.
-	if !sanctioned && returnTypeName(fn) == "Allocator" && c.callTiesAllocator(fn, args, env) {
-		return "", errorf("borrow error: `%s` returns a tied allocator; bind it with `let`", name)
+	if !sanctioned && returnTypeName(fn) == "Allocator" && c.callTiesAllocator(fn, fixedArgs, env) {
+		return errorf("borrow error: `%s` returns a tied allocator; bind it with `let`", name)
 	}
-	borrowed, err := c.activateBorrowArgs(fn, args, env)
+	borrowed, err := c.activateBorrowArgs(fn, fixedArgs, env)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer releaseTemporaryBorrows(borrowed)
-	for idx, arg := range args {
+	for idx, arg := range fixedArgs {
 		if err := c.checkUserCallArg(fn, idx, arg, env, sanctioned); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return returnTypeName(fn), nil
+	if hasCapture {
+		captureParams, captureBorrows, err := c.checkRuntimeCaptureArgs(name, args[len(fn.params):], env)
+		if err != nil {
+			return err
+		}
+		defer releaseTemporaryBorrows(captureBorrows)
+		if err := c.checkGenericInstantiation(fn, nil, captureParams); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRuntimeCaptureArgs applies the ordinary ownership effect to each
+// trailing argument while recording its exact runtime type. There is no
+// capture container and therefore no separate ownership event for the tail.
+func (c *Checker) checkRuntimeCaptureArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) ([]runtimeCaptureParam, []temporaryBorrow, error) {
+	if len(args) > ast.MaxRuntimeCaptureArguments {
+		return nil, nil, errorf(
+			"move error: `%s` runtime argument capture has %d arguments, maximum is %d",
+			name, len(args), ast.MaxRuntimeCaptureArguments)
+	}
+	params := make([]runtimeCaptureParam, 0, len(args))
+	borrows := []temporaryBorrow{}
+	for _, arg := range args {
+		param, activated, err := c.checkRuntimeCaptureArg(arg, env)
+		if err != nil {
+			releaseTemporaryBorrows(borrows)
+			return nil, nil, err
+		}
+		c.result.runtimeCaptureModes[arg] = runtimeCaptureMode{
+			borrow: param.borrow, mutable: param.mutBorrow,
+		}
+		params = append(params, param)
+		borrows = append(borrows, activated...)
+	}
+	return params, borrows, nil
+}
+
+// checkRuntimeCaptureArg applies the same ownership effect as the fixed
+// parameter shape inferred by the type checker: a borrow reads, while a
+// by-value owner moves.
+func (c *Checker) checkRuntimeCaptureArg(
+	arg ast.Expression,
+	env *scope,
+) (runtimeCaptureParam, []temporaryBorrow, error) {
+	if param, borrows, handled, err := c.explicitCapturedBorrow(arg, env); handled || err != nil {
+		return param, borrows, err
+	}
+	if param, borrows, handled, err := c.arenaRuntimeCaptureBorrow(arg, env); handled || err != nil {
+		return param, borrows, err
+	}
+	if param, borrows, handled, err := c.returnedCapturedBorrow(arg, env); handled || err != nil {
+		return param, borrows, err
+	}
+	if param, borrows, handled, err := c.boundRuntimeCaptureBorrow(arg, env); handled || err != nil {
+		return param, borrows, err
+	}
+	typeName, err := c.moveExpr(arg, env)
+	if err != nil {
+		return runtimeCaptureParam{}, nil, err
+	}
+	if _, mutable, inner, ok := explicitOwnershipBorrowType(typeName); ok {
+		return runtimeCaptureParam{typeName: inner, borrow: true, mutBorrow: mutable}, nil, nil
+	}
+	return runtimeCaptureParam{typeName: typeName}, nil, nil
+}
+
+// explicitCapturedBorrow checks a written `&value` or `&var value`.
+func (c *Checker) explicitCapturedBorrow(
+	arg ast.Expression,
+	env *scope,
+) (runtimeCaptureParam, []temporaryBorrow, bool, error) {
+	prefix, ok := borrowPrefix(arg)
+	if !ok {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	typeName, err := c.readExpr(prefix.Right, env)
+	if err != nil {
+		return runtimeCaptureParam{}, nil, true, err
+	}
+	mutable := prefix.Operator == "&var"
+	activated, err := c.activateRuntimeCaptureBorrowArg(arg, mutable, env)
+	return runtimeCaptureParam{
+		typeName: typeName, borrow: true, mutBorrow: mutable,
+	}, activated, true, err
+}
+
+// arenaRuntimeCaptureBorrow keeps the Arena storage behind a direct at result.
+func (c *Checker) arenaRuntimeCaptureBorrow(
+	arg ast.Expression,
+	env *scope,
+) (runtimeCaptureParam, []temporaryBorrow, bool, error) {
+	source, elem, handled, err := c.arenaAtBorrowSource(arg, env)
+	if !handled || err != nil {
+		return runtimeCaptureParam{}, nil, handled, err
+	}
+	activated, err := c.activateRuntimeCaptureBorrowSources([]borrowSource{source}, false)
+	return runtimeCaptureParam{typeName: elem, borrow: true}, activated, true, err
+}
+
+// returnedCapturedBorrow keeps the sources of a declared borrow return.
+func (c *Checker) returnedCapturedBorrow(
+	arg ast.Expression,
+	env *scope,
+) (runtimeCaptureParam, []temporaryBorrow, bool, error) {
+	call, ok := arg.(*ast.CallExpr)
+	if !ok {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	_, fn := c.calledFunction(call.Callee)
+	if fn == nil {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	if _, _, _, borrowed := explicitOwnershipBorrowType(returnTypeName(fn)); !borrowed {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	sources, elem, mutable, handled, err := c.returnedBorrowInitializer(arg, env)
+	if !handled || err != nil {
+		return runtimeCaptureParam{}, nil, handled, err
+	}
+	activated, err := c.activateRuntimeCaptureBorrowSources(sources, mutable)
+	return runtimeCaptureParam{
+		typeName: elem, borrow: true, mutBorrow: mutable,
+	}, activated, true, err
+}
+
+// boundRuntimeCaptureBorrow preserves a local borrowed binding's passing mode.
+func (c *Checker) boundRuntimeCaptureBorrow(
+	arg ast.Expression,
+	env *scope,
+) (runtimeCaptureParam, []temporaryBorrow, bool, error) {
+	ident, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	value, found := env.lookup(ident.Name)
+	if !found || !value.borrowedParam {
+		return runtimeCaptureParam{}, nil, false, nil
+	}
+	typeName, err := c.readExpr(arg, env)
+	if err != nil {
+		return runtimeCaptureParam{}, nil, true, err
+	}
+	activated, err := c.activateRuntimeCaptureBorrowArg(arg, value.mutBorrow, env)
+	return runtimeCaptureParam{
+		typeName: typeName, borrow: true, mutBorrow: value.mutBorrow,
+	}, activated, true, err
+}
+
+// activateRuntimeCaptureBorrowArg applies the same call-scoped alias check as
+// a written fixed borrow parameter, then keeps it active through instantiation.
+func (c *Checker) activateRuntimeCaptureBorrowArg(
+	arg ast.Expression,
+	mutable bool,
+	env *scope,
+) ([]temporaryBorrow, error) {
+	value, field, err := c.callBorrowTarget(arg, env)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		if mutable {
+			return nil, errorf(
+				"borrow error: mutable borrow argument must be a local binding or direct field")
+		}
+		return nil, nil
+	}
+	borrowed, err := c.activateTemporaryBorrow(value, field, mutable)
+	if err != nil {
+		return nil, err
+	}
+	return []temporaryBorrow{borrowed}, nil
+}
+
+// activateRuntimeCaptureBorrowSources keeps a borrow-returning argument's
+// underlying caller storage borrowed for the enclosing capture call.
+func (c *Checker) activateRuntimeCaptureBorrowSources(
+	sources []borrowSource,
+	mutable bool,
+) ([]temporaryBorrow, error) {
+	activated := make([]temporaryBorrow, 0, len(sources))
+	for _, source := range sources {
+		borrowed, err := c.activateTemporaryBorrow(source.target, source.field, mutable)
+		if err != nil {
+			releaseTemporaryBorrows(activated)
+			return nil, err
+		}
+		activated = append(activated, borrowed)
+	}
+	return activated, nil
 }
 
 // checkUserCallArg applies one argument's ownership effect for a user call:
@@ -4269,7 +4510,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if len(fn.sig.TypeParamNames()) > 0 {
+	if len(fn.sig.StaticParams) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env, sanctioned)
@@ -5160,7 +5401,8 @@ func (c *Checker) checkGenericUserTypeApply(
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
 		return "", false, nil
 	}
-	if len(args) != len(fn.params) {
+	_, hasCapture := fn.sig.RuntimeCapture()
+	if (!hasCapture && len(args) != len(fn.params)) || (hasCapture && len(args) < len(fn.params)) {
 		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
@@ -5168,16 +5410,22 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	if err := c.checkCallHandlePairing(fn.params, subst, args, env); err != nil {
+	fixedArgs := args[:len(fn.params)]
+	if err := c.checkCallHandlePairing(fn.params, subst, fixedArgs, env); err != nil {
 		return "", true, err
 	}
-	for idx, arg := range args {
+	for idx, arg := range fixedArgs {
 		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
 			return "", true, err
 		}
 	}
+	captureParams, captureBorrows, err := c.checkRuntimeCaptureArgs(name, args[len(fn.params):], env)
+	if err != nil {
+		return "", true, err
+	}
+	defer releaseTemporaryBorrows(captureBorrows)
 	restore := c.bindMetaFields(c.genericCallFields(fn, typeArg))
-	err = c.checkGenericInstantiation(fn, subst)
+	err = c.checkGenericInstantiation(fn, subst, captureParams)
 	restore()
 	if err != nil {
 		return "", true, err
@@ -5185,7 +5433,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	ret := substituteOwnershipType(returnTypeName(fn), subst)
 	// No recognizer ties a generic factory's result, so a tied result would
 	// silently lose its buffer tie. Nothing needs this shape yet.
-	if ret == "Allocator" && c.callTiesAllocator(fn, args, env) {
+	if ret == "Allocator" && c.callTiesAllocator(fn, fixedArgs, env) {
 		return "", true, errorf(
 			"borrow error: generic function `%s` cannot return a tied allocator", name)
 	}
@@ -5200,9 +5448,10 @@ func (c *Checker) genericCallSubst(
 	typeArg string,
 ) (map[string]string, error) {
 	staticArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+	fixedStaticCount := len(fn.sig.StaticParams)
+	if !ok || len(staticArgs) != fixedStaticCount {
 		return nil, errorf("move error: `%s` expects %d static arguments",
-			name, len(fn.sig.StaticParams))
+			name, fixedStaticCount)
 	}
 	// Only the entries that declare types take part in substitution; a
 	// compile-time value carries no ownership.
@@ -5228,7 +5477,8 @@ func (c *Checker) genericCallSubst(
 // so each bound field is its own instance.
 func (c *Checker) genericCallFields(fn *functionInfo, typeArg string) map[string]metaField {
 	staticArgs, ok := splitGenericArgs(typeArg)
-	if !ok || len(staticArgs) != len(fn.sig.StaticParams) {
+	fixedStaticCount := len(fn.sig.StaticParams)
+	if !ok || len(staticArgs) != fixedStaticCount {
 		return nil
 	}
 	fields := map[string]metaField{}
@@ -5286,8 +5536,12 @@ func (c *Checker) bindMetaFields(fields map[string]metaField) func() {
 }
 
 // checkGenericInstantiation checks a generic function body for one static type set.
-func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
-	done, err := c.enterInstantiation(fn, subst)
+func (c *Checker) checkGenericInstantiation(
+	fn *functionInfo,
+	subst map[string]string,
+	captureParams []runtimeCaptureParam,
+) error {
+	done, err := c.enterInstantiation(fn, subst, captureParams)
 	if err != nil || done {
 		return err
 	}
@@ -5300,15 +5554,35 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeArgValues := c.typeArgValues
+	previousCaptures := c.runtimeCaptures
 	c.loopDepth = 0
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeArgValues = subst
+	if c.typeArgValues == nil {
+		c.typeArgValues = map[string]string{}
+	}
+	c.runtimeCaptures = map[string][]runtimeCaptureElement{}
+	if capture, ok := fn.sig.RuntimeCapture(); ok {
+		elements := make([]runtimeCaptureElement, 0, len(captureParams))
+		for index, captured := range captureParams {
+			name := fmt.Sprintf("%s argument %d", capture.Name, index+1)
+			value := c.newBinding(name, captured.typeName)
+			value.borrowedParam = captured.borrow
+			value.mutBorrow = captured.mutBorrow
+			env.define(value)
+			elements = append(elements, runtimeCaptureElement{
+				typeName: captured.typeName, binding: name,
+			})
+		}
+		c.runtimeCaptures[capture.Name] = elements
+	}
 	defer func() {
 		c.loopDepth = previousLoopDepth
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeArgValues = previousTypeArgValues
+		c.runtimeCaptures = previousCaptures
 	}()
 	return c.checkBlock(fn.body, env)
 }
@@ -5320,12 +5594,19 @@ const maxInstantiationDepth = 64
 
 // enterInstantiation records one instantiation and reports whether it has
 // already been checked.
-func (c *Checker) enterInstantiation(fn *functionInfo, subst map[string]string) (bool, error) {
+func (c *Checker) enterInstantiation(
+	fn *functionInfo,
+	subst map[string]string,
+	captureParams []runtimeCaptureParam,
+) (bool, error) {
 	args := make([]string, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
 	}
 	key := fn.name + "<" + strings.Join(args, ", ") + ">"
+	if _, ok := fn.sig.RuntimeCapture(); ok {
+		key += "...(" + joinOwnershipRuntimeCaptureParams(captureParams) + ")"
+	}
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -5337,6 +5618,21 @@ func (c *Checker) enterInstantiation(fn *functionInfo, subst map[string]string) 
 	c.checkedInstances[key] = true
 	c.instantiationDepth++
 	return false, nil
+}
+
+// joinOwnershipRuntimeCaptureParams keeps passing mode in the ownership instance key.
+func joinOwnershipRuntimeCaptureParams(params []runtimeCaptureParam) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		prefix := ""
+		if param.mutBorrow {
+			prefix = "&var "
+		} else if param.borrow {
+			prefix = "&"
+		}
+		parts = append(parts, prefix+param.typeName)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // elideTypeText shortens a spelling for a diagnostic, so a type that grew past
@@ -7414,25 +7710,34 @@ func (c *Checker) activateBorrowArgs(
 			)
 		}
 		if value != nil {
-			if fn.params[idx].mutBorrow && value.borrowedParam && !value.mutBorrow {
-				releaseTemporaryBorrows(borrowed)
-				return nil, errorf(
-					"borrow error: shared borrow `%s` cannot be forwarded as mutable",
-					value.name,
-				)
-			}
 			mutable := fn.params[idx].mutBorrow
-			if err := checkBorrowConflictForField(value, field, mutable); err != nil {
+			active, err := c.activateTemporaryBorrow(value, field, mutable)
+			if err != nil {
 				releaseTemporaryBorrows(borrowed)
 				return nil, err
 			}
-			c.activateBorrow(value, field, mutable)
-			borrowed = append(borrowed, temporaryBorrow{
-				value: value, field: field, mutable: mutable,
-			})
+			borrowed = append(borrowed, active)
 		}
 	}
 	return borrowed, nil
+}
+
+// activateTemporaryBorrow checks one call-scoped borrow and records exactly
+// what releaseTemporaryBorrows must undo when the call is complete.
+func (c *Checker) activateTemporaryBorrow(
+	value *binding,
+	field string,
+	mutable bool,
+) (temporaryBorrow, error) {
+	if mutable && value.borrowedParam && !value.mutBorrow {
+		return temporaryBorrow{}, errorf(
+			"borrow error: shared borrow `%s` cannot be forwarded as mutable", value.name)
+	}
+	if err := checkBorrowConflictForField(value, field, mutable); err != nil {
+		return temporaryBorrow{}, err
+	}
+	c.activateBorrow(value, field, mutable)
+	return temporaryBorrow{value: value, field: field, mutable: mutable}, nil
 }
 
 // callBorrowTarget resolves call-scoped borrowable places and ignores non-place shared values.
@@ -8147,7 +8452,11 @@ func splitGenericArgs(arg string) ([]string, bool) {
 
 // newScope creates a lexical ownership scope.
 func newScope(parent *scope) *scope {
-	return &scope{parent: parent, values: map[string]*binding{}}
+	return &scope{
+		parent:  parent,
+		values:  map[string]*binding{},
+		aliases: map[string]string{},
+	}
 }
 
 // child creates a nested lexical ownership scope.
@@ -8160,11 +8469,19 @@ func (s *scope) define(value *binding) {
 	s.values[value.name] = value
 }
 
+// defineAlias binds a source capture to an existing ownership binding.
+func (s *scope) defineAlias(name string, target string) {
+	s.aliases[name] = target
+}
+
 // lookup resolves a local name by walking parent scopes.
 func (s *scope) lookup(name string) (*binding, bool) {
 	for cur := s; cur != nil; cur = cur.parent {
 		if value, ok := cur.values[name]; ok {
 			return value, true
+		}
+		if target, ok := cur.aliases[name]; ok {
+			return s.lookup(target)
 		}
 	}
 	return nil, false
@@ -8493,8 +8810,11 @@ func (s *scope) clone() *scope {
 	if s == nil {
 		return nil
 	}
-	cloned := &scope{values: map[string]*binding{}}
+	cloned := &scope{values: map[string]*binding{}, aliases: map[string]string{}}
 	cloned.parent = s.parent.clone()
+	for name, target := range s.aliases {
+		cloned.aliases[name] = target
+	}
 	for name, value := range s.values {
 		copyValue := *value
 		copyValue.fieldBorrows = copyIntMap(value.fieldBorrows)

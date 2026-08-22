@@ -34,6 +34,7 @@ const (
 	Arrow       Type = "->"
 	Dot         Type = "."
 	Range       Type = ".."
+	Ellipsis    Type = "..."
 	DoubleColon Type = "::"
 
 	Comma     Type = ","

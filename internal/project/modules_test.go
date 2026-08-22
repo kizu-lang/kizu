@@ -439,6 +439,26 @@ pub fn make() -> Token {
 	}
 }
 
+// TestLoadGraphAllowsPrivateFieldConstructionInModuleTest checks that a test
+// keeps the declaring module's visibility even though it lowers through a
+// synthetic function name.
+func TestLoadGraphAllowsPrivateFieldConstructionInModuleTest(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `struct Token {
+    secret: i64,
+}
+
+test "construct private field" {
+    let current = Token { secret: 2 };
+    print(current.secret);
+}
+`,
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeFile creates an empty source file under root.
 func writeFile(t *testing.T, root string, rel string) {
 	t.Helper()

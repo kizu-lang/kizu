@@ -915,7 +915,7 @@ func noSpaceBefore(t token.Token) bool {
 func noSpaceAfter(t token.Token) bool {
 	switch t.Type {
 	case token.LParen, token.LBracket, token.Dot, token.DoubleColon,
-		token.Bang, token.Question, token.Amp, token.Range:
+		token.Bang, token.Question, token.Amp, token.Range, token.Ellipsis:
 		return true
 	}
 	return false

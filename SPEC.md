@@ -1133,7 +1133,7 @@ shared<T>
 full generics を実装しません。
 `std::arena::Arena<T>`、`std::arena::Handle<T>` は compiler-known な stdlib 型コンストラクタです。
 `!T` と raw pointer 型は専用の型構文として扱います。
-ADR-0066 の最小明示 function generics だけを採用します。
+ADR-0066 の最小明示 function generics と、末尾 runtime parameter capture だけを採用します。
 
 ### 7.1 index / slice expression
 
@@ -2121,7 +2121,7 @@ fn sized<n: i64>() -> i64 {
 - compile-time 値: 名前に型を付けます。`fn sized<n: i64>()`、
   `fn each<worker: Function>(start: i64, end: i64)`
 
-呼び出しはどちらも `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
+fixed static parameter の呼び出しは `<...>` に実引数を並べます。`f<i64>(value)`、`sized<4096>()`、
 `std::testing::expect_equal<i64>(expected, actual)`。
 
 compile-time 値として書けるのは整数、`true` / `false`、`Function`
@@ -2129,6 +2129,44 @@ compile-time 値として書けるのは整数、`true` / `false`、`Function`
 associated types、higher-kinded types、specialization は実装しません。
 reflection は §13.1 の comptime 専用 structural reflection だけを持ち、
 runtime reflection と AST 書き換えは持ちません。
+
+末尾 runtime parameter capture は `(...)` の最後に `name: ...` と書きます。`...` は
+型ではなく、call の残りの runtime argument を個別の固定 parameter として exact capture
+する宣言です。利用者が命名・構築できる `Parts` 型、tuple、runtime container はありません。
+
+```kizu
+fn append(out: &var String, parts: ...) -> !void {
+    comptime for parts |T, part| {
+        comptime if T == type<[]u8> {
+            try out.append_bytes(part);
+        } else {
+            try part.append_display(out);
+        }
+    }
+    return;
+}
+
+try append(&var out, "line ", line, ": ", message);
+```
+
+capture は general な型引数推論ではありません。各 argument が expected type のない通常の
+expression として既に持つ concrete type と passing mode を、source order のまま記録します。
+integer literal は `i64`、string literal は `[]u8` です。`value`、`&value`、`&var value`
+および borrow を返す expression は、通常の固定 parameter と同じ value / shared borrow /
+mutable borrow になります。所有権移譲には通常どおり `move` が必要で、borrow の alias 規則も
+同じです。
+
+通常の固定 runtime parameter にできる型は、同じ passing mode で全て capture できます。
+borrow 型、owner 型、error union を返す function 内の owner 型に capture 固有の除外は
+ありません。値で受けた owner は各 expansion の `part` が通常の parameter と同じ消費義務を
+持ちます。fallible function では、callee が取った owner を error path でも解放するため、
+必要な `errdefer part.deinit()` を expansion に明示します(ADR-0117)。
+
+capture は 1 function に 1 つ、最後の runtime parameter にだけ置けます。body を持つ free
+function だけが宣言でき、method、contract requirement、extern function には置けません。
+末尾 argument は 64 個までです。capture は first-class value ではなく、binding、field、
+return、index、runtime length、reflection、`other(parts...)` のような forwarding / spread
+を持ちません。開ける操作は §13.1 の `comptime for` だけです。
 
 通常の function / method 名は、generic かどうかに関係なく snake_case にします。
 `<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
@@ -2151,18 +2189,22 @@ mem::box<Item>(allocator, value)  // std::mem は Allocator も持つので型�
 module を分けます。variant は `array::with_capacity<T>(allocator, 64)` のように
 横に並べ、`new_` を接頭辞にしません。
 
-`<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
-format string など、type 以外の comptime value が必要になった場合は、同じ
-`<...>` を static argument list として拡張します。ただし syntax の意味を
-予約するだけで、整数や文字列の static argument は受理しません。
+`<...>` は type-only 構文ではなく static argument list です。整数、bool、`Function`、
+`Field` は上記の範囲で受理します。文字列の static argument は受理しません。
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
-明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /
+明示 static 引数付き call、または runtime parameter capture の call が発生した時に、その instance で type / ownership /
 borrow check します。同じ関数と同じ static 引数の組は 1 回だけ検査します。
 instantiation の入れ子は 64 段までで、超えると診断になります。呼ぶたびに
-static 引数が育つ body は同じ組に戻らないため、上限がなければ検査が止まりません。static 引数は type だけなので、`T` は instantiated body
+static 引数が育つ body は同じ組に戻らないため、上限がなければ検査が止まりません。type parameter の `T` は instantiated body
 内で comptime-only の `type` 値として扱います。`type` 値は runtime local、field、
 collection element、return value として保持できません。
+
+runtime parameter capture の instance key は function、fixed static 引数、末尾 argument の
+ordered `(passing mode, concrete type)` vector です。literal の内容は key に入りません。
+lowering は capture を固定個数の parameter と直列の body expansion にします。runtime の
+pack object、tag、type switch、loop、format parser は生成しません。通常の function call
+cost を消すための強制 inline は仕様にしません。
 
 Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
@@ -2242,20 +2284,29 @@ wrapping one (`?Field`, `[]Function`) does not change that.
 
 ### 13.1 comptime for と structural reflection
 
-`comptime for` は compile-time list の反復です。綴りは runtime の `for`
-(§6.11)と同じ capture 構文です。
+`comptime for` は compile-time list または末尾 runtime parameter capture の反復です。
+綴りは runtime の `for` (§6.11)と同じ capture 構文です。
 
 ```kizu
 comptime for std::meta::public_fields<T>() |f| {
     print(std::meta::field_name<T, f>());
+}
+
+comptime for parts |T, part| {
+    try append_one<T>(out, part);
 }
 ```
 
 `comptime if` と同じく、これは token stream や AST を書き換える macro では
 ありません。展開された各反復を、その束縛のもとで型・所有権・borrow 検査します。
 
-反復できるのは `std::meta::public_fields<T>()` と `std::meta::variants<T>()`
-だけです。整数 range は runtime の `for` が持ちます。
+structural list は capture を 1 つ取り、runtime parameter capture は type capture と runtime
+value capture をこの順で 2 つ取ります。各 expansion で `T` は comptime-only の `type` 値、
+`part` はその concrete type と passing mode を持つ通常の runtime binding です。各反復を
+その束縛のもとで type / ownership / borrow check します。
+
+反復できるのは `std::meta::public_fields<T>()`、`std::meta::variants<T>()`、現在の
+function が宣言した runtime parameter capture だけです。整数 range は runtime の `for` が持ちます。
 
 `std::meta` は、struct と sum type の構造をコンパイル時に読むための組み込みの
 式の形です。comptime 専用の**型**は持ちません(ADR-0113)。

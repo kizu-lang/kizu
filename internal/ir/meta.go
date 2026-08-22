@@ -21,6 +21,16 @@ type metaField struct {
 // lowerComptimeForStmt lowers the body once per field. The loop itself has no
 // runtime form: what reaches the IR is the expansions, in field order.
 func (l *lowerer) lowerComptimeForStmt(stmt *ast.ComptimeForStmt) error {
+	if ident, ok := stmt.List.(*ast.IdentExpr); ok {
+		if values, exists := l.captureValues[ident.Name]; exists {
+			return l.lowerRuntimeCaptureFor(stmt, values)
+		}
+	}
+	if stmt.Binding != "" {
+		return fmt.Errorf(
+			"ir error: structural comptime for has one capture, got `|%s, %s|`",
+			stmt.Name, stmt.Binding)
+	}
 	fields, err := l.comptimeForFields(stmt.List)
 	if err != nil {
 		return err
@@ -35,6 +45,48 @@ func (l *lowerer) lowerComptimeForStmt(stmt *ast.ComptimeForStmt) error {
 	}()
 	for _, field := range fields {
 		l.metaFields[stmt.Name] = field
+		if err := l.lowerBlock(stmt.Body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lowerRuntimeCaptureFor emits the body once per fixed parameter. The type
+// capture selects comptime branches; the value capture is an alias of the
+// corresponding parameter, so no runtime container, loop, tag, or dispatch remains.
+func (l *lowerer) lowerRuntimeCaptureFor(
+	stmt *ast.ComptimeForStmt,
+	values []capturedParam,
+) error {
+	if stmt.Binding == "" {
+		return fmt.Errorf(
+			"ir error: runtime argument capture needs type and value captures, as in `|T, value|`")
+	}
+	previousType, hadType := l.typeBindings[stmt.Name]
+	previousValue, hadValue := l.env.get(stmt.Binding)
+	previousMode, hadMode := l.activeCaptures[stmt.Binding]
+	defer func() {
+		if hadType {
+			l.typeBindings[stmt.Name] = previousType
+		} else {
+			delete(l.typeBindings, stmt.Name)
+		}
+		if hadValue {
+			l.env.set(stmt.Binding, previousValue)
+		} else {
+			l.env.remove(stmt.Binding)
+		}
+		if hadMode {
+			l.activeCaptures[stmt.Binding] = previousMode
+		} else {
+			delete(l.activeCaptures, stmt.Binding)
+		}
+	}()
+	for _, captured := range values {
+		l.typeBindings[stmt.Name] = l.resolveType(captured.mode.typ)
+		l.env.set(stmt.Binding, captured.value)
+		l.activeCaptures[stmt.Binding] = captured.mode
 		if err := l.lowerBlock(stmt.Body); err != nil {
 			return err
 		}
@@ -65,7 +117,7 @@ func (l *lowerer) comptimeForFields(list ast.Expression) ([]metaField, error) {
 // errComptimeForList names the lists a `comptime for` accepts.
 var errComptimeForList = fmt.Errorf(
 	"ir error: comptime for expects `std::meta::public_fields<T>()` or " +
-		"`std::meta::variants<T>()`")
+		"`std::meta::variants<T>()`, or a runtime argument capture")
 
 // variants lists an enum's tags or a union's variants in declaration order.
 func (l *lowerer) variants(typeArg string) ([]metaField, error) {

@@ -22,8 +22,10 @@ std::io::write_stderr_line(io: Io, bytes: &[]u8) -> !void
 ```
 
 The line helpers compose byte writes with a newline. They do not introduce
-format strings, implicit allocation, a generic `Writer`, or a display contract.
-The concrete API belongs to `docs/std/io.md`.
+format strings, implicit allocation, or a generic `Writer`. Values are formatted
+explicitly into caller-owned bytes through `std::fmt`; `std::io` remains the
+separate capability-bearing output boundary. The concrete API belongs to
+`docs/std/io.md`.
 
 Process helpers expose CLI state without filesystem or stdio side effects.
 
@@ -52,5 +54,5 @@ turns this value into an actual host exit status.
 | Alternative | Reason |
 | --- | --- |
 | Route ordinary output through builtin `print` | It is a diagnostic primitive, not an explicit fallible I/O API. |
-| Add a generic `Writer` or display contract | There is no concrete polymorphic output use yet, and it would expand the type and runtime surface. |
+| Make formatting generic over a `Writer` | The current sink is caller-owned `String`, and `std::io` already consumes bytes. Combining representation with capability-bearing I/O would add a second abstraction without removing a copy or runtime boundary. |
 | Add format strings to line output | `std::fmt` already supports explicit caller-owned diagnostic construction; line output only needs bytes plus a newline. |

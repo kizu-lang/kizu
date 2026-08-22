@@ -9,6 +9,107 @@ import (
 	"github.com/kizu-lang/kizu/internal/project"
 )
 
+// TestRuntimeCaptureOwnerUsesOrdinaryMoveRules checks that a capture carries no
+// erased ownership: each owner is handed off and consumed as its own parameter.
+func TestRuntimeCaptureOwnerUsesOrdinaryMoveRules(t *testing.T) {
+	valid := `fn consume(flag: bool, parts: ...) -> void {
+    comptime for parts |T, part| {
+        comptime if T == type<std::string::String> {
+            if flag {
+                part.deinit();
+            } else {
+                part.deinit();
+            }
+        } else {
+            std::meta::unsupported<T>();
+        }
+    }
+    return;
+}
+fn main() -> void {
+    let text = std::string::new(std::mem::page_allocator());
+    consume(true, move text);
+}`
+	if err := checkSource(valid); err != nil {
+		t.Fatalf("valid captured owner: %v", err)
+	}
+	invalid := strings.Replace(valid, "consume(true, move text)", "consume(true, text)", 1)
+	err := checkSource(invalid)
+	if err == nil || !strings.Contains(err.Error(), "write `move text`") {
+		t.Fatalf("error = %v, want missing move", err)
+	}
+	premature := `fn consume(parts: ...) -> void {
+    comptime for parts |T, part| {
+        part.deinit();
+        return;
+    }
+    return;
+}
+fn main() -> void {
+    let first = std::string::new(std::mem::page_allocator());
+    let second = std::string::new(std::mem::page_allocator());
+    consume(move first, move second);
+}`
+	err = checkSource(premature)
+	if err == nil || !strings.Contains(err.Error(), "owned value `parts argument 2`") {
+		t.Fatalf("error = %v, want later captured owner leak", err)
+	}
+}
+
+// TestRuntimeCaptureBorrowModesMatchFixedParameters checks that inferred
+// borrow parameters keep the same call-scoped aliasing and borrow-return rules
+// as written fixed parameters.
+func TestRuntimeCaptureBorrowModesMatchFixedParameters(t *testing.T) {
+	valid := `struct Item { value: i64 }
+fn inspect(parts: ...) -> void {
+    comptime for parts |T, part| { print(part.value); }
+    return;
+}
+fn main() -> void {
+    let items = std::arena::new<Item>(std::mem::page_allocator());
+    let handle = items.add(Item { value: 7 });
+    inspect(items.at(handle));
+    items.deinit();
+}`
+	if err := checkSource(valid); err != nil {
+		t.Fatalf("borrow-returning captured argument: %v", err)
+	}
+
+	aliased := `struct Item { value: i64 }
+fn touch(parts: ...) -> void {
+    comptime for parts |T, part| { part.value = part.value + 1; }
+    return;
+}
+fn main() -> void {
+    var item = Item { value: 1 };
+    touch(&var item, &var item);
+}`
+	err := checkSource(aliased)
+	if err == nil || !strings.Contains(err.Error(), "mutably borrowed") {
+		t.Fatalf("error = %v, want overlapping mutable borrow", err)
+	}
+}
+
+// TestRuntimeCaptureInstanceKeyIncludesBorrowMode prevents a checked by-value
+// owner body from being reused for a shared-borrow instance of the same type.
+func TestRuntimeCaptureInstanceKeyIncludesBorrowMode(t *testing.T) {
+	source := `fn consume(parts: ...) -> void {
+    comptime for parts |T, part| { part.deinit(); }
+    return;
+}
+fn main() -> void {
+    let first = std::string::new(std::mem::page_allocator());
+    consume(move first);
+    let second = std::string::new(std::mem::page_allocator());
+    consume(&second);
+    second.deinit();
+}`
+	err := checkSource(source)
+	if err == nil || !strings.Contains(err.Error(), "requires owned String receiver") {
+		t.Fatalf("error = %v, want borrowed-owner deinit rejection", err)
+	}
+}
+
 // TestCheckAcceptsCopyReuse checks that copy values are reusable after move contexts.
 func TestCheckAcceptsCopyReuse(t *testing.T) {
 	source := `fn take(a: i64) { print(a); }

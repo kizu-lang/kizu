@@ -76,7 +76,11 @@ type Checker struct {
 	// open, by capture name. A capture is not a value, so it lives here rather
 	// than in a scope: the only thing that may read it is a `std::meta` form.
 	metaFields map[string]metaField
-	loopLabels []string
+	// runtimeCaptures binds a runtime capture name to the fixed parameter shapes
+	// of the instantiation currently being checked. A capture has no runtime
+	// container; only comptime for may open it into one ordinary value at a time.
+	runtimeCaptures map[string][]runtimeCaptureParam
+	loopLabels      []string
 	// stdMethods indexes the signatures std declares for its container methods,
 	// so this checker reads them instead of restating them.
 	stdMethods stdmethod.MethodIndex
@@ -98,6 +102,15 @@ type Checker struct {
 	// The borrow-optional accessors (`at` / `at_mut`) return their `?&T` /
 	// `?&var T` only in this context and refuse everywhere else.
 	captureCondition bool
+}
+
+// runtimeCaptureParam is the fixed parameter one captured argument becomes.
+// Borrow mode is part of that shape: dropping it would turn `&owner` into an
+// owning value inside the instantiated body.
+type runtimeCaptureParam struct {
+	typ       Type
+	borrow    bool
+	mutBorrow bool
 }
 
 type scope struct {
@@ -133,6 +146,7 @@ func New() *Checker {
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
+		runtimeCaptures:  map[string][]runtimeCaptureParam{},
 	}
 }
 
@@ -153,7 +167,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParamNames()) > 0 {
+			if d.IsGeneric() {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -189,7 +203,7 @@ func (c *Checker) CheckAll(program *ast.Program) []error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			if len(d.TypeParamNames()) > 0 {
+			if d.IsGeneric() {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
@@ -366,6 +380,9 @@ func (c *Checker) checkPublicAPI(program *ast.Program) error {
 // is whatever the method itself says.
 func (c *Checker) checkPublicSignature(sig ast.FunctionSignature) error {
 	for _, param := range sig.Params {
+		if param.Capture {
+			continue
+		}
 		label := "function `" + sig.Name + "` parameter"
 		if err := c.rejectPrivateType(typ.Text(param.TypeName), label); err != nil {
 			return err
@@ -860,6 +877,9 @@ func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, 
 		"unsafe fn "+fn.Name, "what the caller must uphold"); err != nil {
 		return nil, err
 	}
+	if err := checkRuntimeCapturePolicy(fn); err != nil {
+		return nil, err
+	}
 	fnType, err := c.newFunctionType(fn.FunctionSignature)
 	if err != nil {
 		return nil, err
@@ -929,6 +949,9 @@ func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParam
 		mutBorrowParams: make([]bool, 0, len(fn.Params)),
 	}
 	for _, param := range fn.Params {
+		if param.Capture {
+			continue
+		}
 		paramType, err := c.parseTypeNode(param.TypeName)
 		if err != nil {
 			return functionParamInfo{}, err
@@ -1367,11 +1390,16 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if err != nil {
 		return err
 	}
-	for idx, param := range fn.sig.Params {
-		err := env.defineSignatureParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+	paramIndex := 0
+	for _, param := range fn.sig.Params {
+		if param.Capture {
+			continue
+		}
+		err := env.defineSignatureParam(param.Name, fn.params[paramIndex], param.Borrow, param.MutBorrow)
 		if err != nil {
 			return err
 		}
+		paramIndex++
 	}
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
@@ -1410,7 +1438,7 @@ func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
 		Body:              decl.Body,
 	}
 	return c.checkFunction(&functionType{
-		name:           fn.Name,
+		name:           decl.Name,
 		sig:            fn.FunctionSignature,
 		returnType:     "!void",
 		body:           fn.Body,
@@ -3218,6 +3246,12 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	if _, ok := c.typeArgValues[expr.Name]; ok {
 		return typeType, nil
 	}
+	if _, ok := c.runtimeCaptures[expr.Name]; ok {
+		return "", errorAt(expr.Span,
+			"type error: runtime argument capture `%s` is not a value;"+
+				" open it with `comptime for %s |T, value|`",
+			expr.Name, expr.Name)
+	}
 	if expr.Name == "void" {
 		return "", errorAt(expr.Span, "type error: void is not a value")
 	}
@@ -3539,7 +3573,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if len(fn.sig.TypeParamNames()) > 0 {
+	if len(fn.sig.StaticParams) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, expressionSpan(field), args, env, unsafe)
@@ -4619,10 +4653,11 @@ func (c *Checker) checkGenericUserTypeApply(
 	if fn == nil || len(fn.sig.StaticParams) == 0 {
 		return "", false, nil
 	}
+	fixedStaticCount := len(fn.sig.StaticParams)
 	argsText, ok := splitGenericArgs(typeArg)
-	if !ok || len(argsText) != len(fn.sig.StaticParams) {
+	if !ok || len(argsText) != fixedStaticCount {
 		return "", true, errorf("type error: `%s` expects %d static arguments",
-			name, len(fn.sig.StaticParams))
+			name, fixedStaticCount)
 	}
 	typeArgsText, fieldArgs, err := c.checkStaticArgs(name, fn, argsText)
 	if err != nil {
@@ -4635,19 +4670,15 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
 		return "", true, err
 	}
-	if len(args) != len(fn.params) {
-		return "", true, userCallArityError(name, fn, len(args))
-	}
 	subst := map[string]Type{}
 	for idx, param := range fn.sig.TypeParamNames() {
 		subst[param] = typeArgs[idx]
 	}
-	for idx, expr := range args {
-		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
-			return "", true, err
-		}
+	captureParams, err := c.checkGenericCallArgs(name, fn, subst, args, env, unsafe)
+	if err != nil {
+		return "", true, err
 	}
-	if err := c.checkGenericInstantiation(fn, subst, fieldArgs); err != nil {
+	if err := c.checkGenericInstantiation(fn, subst, fieldArgs, captureParams); err != nil {
 		return "", true, err
 	}
 	// The result the caller sees is the declaration's type with this call's
@@ -4660,6 +4691,28 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, err
 	}
 	return result, true, nil
+}
+
+// checkGenericCallArgs validates fixed arguments with their substituted types,
+// then exact-captures the uncontextualized trailing arguments.
+func (c *Checker) checkGenericCallArgs(
+	name string,
+	fn *functionType,
+	subst map[string]Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) ([]runtimeCaptureParam, error) {
+	_, hasCapture := fn.sig.RuntimeCapture()
+	if (!hasCapture && len(args) != len(fn.params)) || (hasCapture && len(args) < len(fn.params)) {
+		return nil, userCallArityError(name, fn, len(args))
+	}
+	for idx, expr := range args[:len(fn.params)] {
+		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
+			return nil, err
+		}
+	}
+	return c.checkRuntimeCaptureArgs(name, fn, args[len(fn.params):], env, unsafe)
 }
 
 // checkStaticArgs validates each `<...>` argument against what its parameter
@@ -4816,8 +4869,9 @@ func (c *Checker) checkGenericInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	captureParams []runtimeCaptureParam,
 ) error {
-	done, err := c.enterInstantiation(fn, subst, fieldArgs)
+	done, err := c.enterInstantiation(fn, subst, fieldArgs, captureParams)
 	if err != nil || done {
 		return err
 	}
@@ -4828,11 +4882,16 @@ func (c *Checker) checkGenericInstantiation(
 	if err != nil {
 		return err
 	}
-	for idx, param := range fn.sig.Params {
-		typ := c.types.substituteTypeParams(fn.params[idx], subst)
+	paramIndex := 0
+	for _, param := range fn.sig.Params {
+		if param.Capture {
+			continue
+		}
+		typ := c.types.substituteTypeParams(fn.params[paramIndex], subst)
 		if err := env.defineSignatureParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
 			return err
 		}
+		paramIndex++
 	}
 	returnType, err := c.resolveInstanceType(c.types.substituteTypeParams(fn.returnType, subst))
 	if err != nil {
@@ -4847,7 +4906,7 @@ func (c *Checker) checkGenericInstantiation(
 	if err := c.revalidateSubstituted(returnType); err != nil {
 		return err
 	}
-	defer c.enterInstanceContext(fn, subst, staticParams, returnType)()
+	defer c.enterInstanceContext(fn, subst, staticParams, returnType, captureParams)()
 	returns, err := c.checkBlock(fn.body, env, returnType, nil)
 	if err != nil {
 		return err
@@ -4880,6 +4939,7 @@ func (c *Checker) enterInstanceContext(
 	subst map[string]Type,
 	staticParams map[string]Type,
 	returnType Type,
+	captureParams []runtimeCaptureParam,
 ) func() {
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
@@ -4888,13 +4948,21 @@ func (c *Checker) enterInstanceContext(
 	previousTypeArgValues := c.typeArgValues
 	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
+	previousCaptures := c.runtimeCaptures
 	c.currentReturn = returnType
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
 	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.typeArgValues = subst
+	if c.typeArgValues == nil {
+		c.typeArgValues = map[string]Type{}
+	}
 	c.staticParams = staticParams
 	c.loopLabels = nil
+	c.runtimeCaptures = map[string][]runtimeCaptureParam{}
+	if capture, ok := fn.sig.RuntimeCapture(); ok {
+		c.runtimeCaptures[capture.Name] = captureParams
+	}
 	return func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
@@ -4903,6 +4971,7 @@ func (c *Checker) enterInstanceContext(
 		c.typeArgValues = previousTypeArgValues
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
+		c.runtimeCaptures = previousCaptures
 	}
 }
 
@@ -4921,8 +4990,9 @@ func (c *Checker) enterInstantiation(
 	fn *functionType,
 	subst map[string]Type,
 	fieldArgs map[string]metaField,
+	captureParams []runtimeCaptureParam,
 ) (bool, error) {
-	key := instanceKey(fn, subst, fieldArgs)
+	key := instanceKey(fn, subst, fieldArgs, captureParams)
 	if c.checkedInstances[key] {
 		return true, nil
 	}
@@ -4950,18 +5020,42 @@ func elideTypeText(text string) string {
 
 // instanceKey names one instantiation: the body, and what its static
 // parameters were bound to, in declaration order.
-func instanceKey(fn *functionType, subst map[string]Type, fieldArgs map[string]metaField) string {
+func instanceKey(
+	fn *functionType,
+	subst map[string]Type,
+	fieldArgs map[string]metaField,
+	captureParams []runtimeCaptureParam,
+) string {
 	args := make([]Type, 0, len(subst))
 	for _, param := range fn.sig.TypeParamNames() {
 		args = append(args, subst[param])
 	}
 	key := fn.name + "<" + joinTypes(args) + ">"
+	if _, ok := fn.sig.RuntimeCapture(); ok {
+		key += "...(" + joinRuntimeCaptureParams(captureParams) + ")"
+	}
 	for _, param := range fn.sig.StaticParams {
 		if field, ok := fieldArgs[param.Name]; ok {
 			key += "." + string(field.owner) + "." + field.name
 		}
 	}
 	return key
+}
+
+// joinRuntimeCaptureParams keeps borrow mode in an instantiation key. `T`, `&T`, and
+// `&var T` have the same element type but different ownership and ABI rules.
+func joinRuntimeCaptureParams(params []runtimeCaptureParam) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		prefix := ""
+		if param.mutBorrow {
+			prefix = "&var "
+		} else if param.borrow {
+			prefix = "&"
+		}
+		parts = append(parts, prefix+string(param.typ))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // bindMetaFields makes the `Field` arguments of one instantiation readable by
@@ -5070,18 +5164,112 @@ func (c *Checker) checkUserCall(
 			return "", err
 		}
 	}
-	if len(fn.sig.TypeParamNames()) > 0 {
+	if len(fn.sig.StaticParams) > 0 {
 		return "", errorf("type error: `%s` requires explicit static arguments", name)
 	}
-	if len(args) != len(fn.params) {
-		return "", userCallArityError(name, fn, len(args))
-	}
-	for idx, arg := range args {
-		if err := c.checkUserCallArg(name, fn, idx, arg, env, unsafe); err != nil {
-			return "", err
-		}
+	if err := c.checkUserCallArgs(name, fn, args, env, unsafe); err != nil {
+		return "", err
 	}
 	return fn.returnType, nil
+}
+
+// checkUserCallArgs validates a non-explicit call's fixed prefix and, when
+// declared, checks the exact-captured trailing instance.
+func (c *Checker) checkUserCallArgs(
+	name string,
+	fn *functionType,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	_, hasCapture := fn.sig.RuntimeCapture()
+	if (!hasCapture && len(args) != len(fn.params)) || (hasCapture && len(args) < len(fn.params)) {
+		return userCallArityError(name, fn, len(args))
+	}
+	for idx, arg := range args[:len(fn.params)] {
+		if err := c.checkUserCallArg(name, fn, idx, arg, env, unsafe); err != nil {
+			return err
+		}
+	}
+	if !hasCapture {
+		return nil
+	}
+	captureParams, err := c.checkRuntimeCaptureArgs(name, fn, args[len(fn.params):], env, unsafe)
+	if err != nil {
+		return err
+	}
+	return c.checkGenericInstantiation(fn, nil, nil, captureParams)
+}
+
+// checkRuntimeCaptureArgs captures the already-determined types of trailing
+// arguments. It supplies no expected type and performs no overload or
+// return-context inference; literals keep their ordinary standalone types.
+func (c *Checker) checkRuntimeCaptureArgs(
+	name string,
+	fn *functionType,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) ([]runtimeCaptureParam, error) {
+	if _, ok := fn.sig.RuntimeCapture(); !ok {
+		if len(args) == 0 {
+			return nil, nil
+		}
+		return nil, userCallArityError(name, fn, len(fn.params)+len(args))
+	}
+	if len(args) > ast.MaxRuntimeCaptureArguments {
+		return nil, errorf("type error: `%s` runtime argument capture has %d arguments, maximum is %d",
+			name, len(args), ast.MaxRuntimeCaptureArguments)
+	}
+	params := make([]runtimeCaptureParam, 0, len(args))
+	for _, arg := range args {
+		param, err := c.checkRuntimeCaptureArg(arg, env, unsafe)
+		if err != nil {
+			return nil, err
+		}
+		if param.typ == typeType || compileTimeOnlyType(param.typ) {
+			return nil, errorf("type error: `%s` runtime argument capture expects runtime values, got %s",
+				name, param.typ)
+		}
+		synthetic := ast.Param{
+			Name: "captured argument", Borrow: param.borrow, MutBorrow: param.mutBorrow,
+		}
+		if err := c.checkFunctionParam(synthetic, param.typ); err != nil {
+			return nil, err
+		}
+		params = append(params, param)
+	}
+	return params, nil
+}
+
+// checkRuntimeCaptureArg determines the fixed parameter shape of one captured
+// argument. Explicit borrow syntax, borrowed locals, and borrow-returning calls
+// all keep their mode; every other value becomes a by-value parameter.
+func (c *Checker) checkRuntimeCaptureArg(
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (runtimeCaptureParam, error) {
+	if prefix, ok := borrowPrefix(arg); ok {
+		typ, mutable, err := c.checkBorrowPrefix(prefix, env, unsafe)
+		if err != nil {
+			return runtimeCaptureParam{}, err
+		}
+		return runtimeCaptureParam{typ: typ, borrow: true, mutBorrow: mutable}, nil
+	}
+	valueType, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return runtimeCaptureParam{}, err
+	}
+	if _, mutable, inner, ok := explicitBorrowType(valueType); ok {
+		return runtimeCaptureParam{typ: inner, borrow: true, mutBorrow: mutable}, nil
+	}
+	if ident, ok := arg.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
+		return runtimeCaptureParam{
+			typ: valueType, borrow: true, mutBorrow: env.isMutBorrowed(ident.Name),
+		}, nil
+	}
+	return runtimeCaptureParam{typ: valueType}, nil
 }
 
 // checkUserCallArg validates one declared function argument.
@@ -6143,7 +6331,7 @@ func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) e
 	for idx, param := range method.TypeParams {
 		subst[param] = typeArgs[idx]
 	}
-	return c.checkGenericInstantiation(fn, subst, nil)
+	return c.checkGenericInstantiation(fn, subst, nil, nil)
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
