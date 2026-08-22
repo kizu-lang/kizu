@@ -58,3 +58,39 @@ func declaredTypeName(decl ast.Decl) (string, bool) {
 		return "", false
 	}
 }
+
+// isTypeName reports whether name is a compiler or program type.
+func (m *checkerMetadata) isTypeName(name string) bool {
+	if knownTypes[Type(name)] || m.declaredTypes[name] || isKnownGenericBase(name) {
+		return true
+	}
+	return m.structs[name] != nil || m.enums[name] != nil ||
+		m.unions[name] != nil || m.errorSets[name] != nil
+}
+
+// isUserDeclaredType reports whether name has retained declaration metadata.
+func (m *checkerMetadata) isUserDeclaredType(name string) bool {
+	return m.structs[name] != nil || m.enums[name] != nil ||
+		m.errorSets[name] != nil || m.unions[name] != nil ||
+		m.contracts[name] != nil
+}
+
+// isPublicType reports whether a retained declaration is externally visible.
+func (m *checkerMetadata) isPublicType(name string) bool {
+	if decl := m.structs[name]; decl != nil {
+		return decl.Public
+	}
+	if enum := m.enums[name]; enum != nil {
+		return enum.public
+	}
+	if set := m.errorSets[name]; set != nil {
+		return set.public
+	}
+	if union := m.unions[name]; union != nil {
+		return union.public
+	}
+	if contract := m.contracts[name]; contract != nil {
+		return contract.public
+	}
+	return false
+}

@@ -977,19 +977,6 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 	return typ, nil
 }
 
-// isTypeName reports whether a name is a type in this program: one the compiler
-// provides or one the program declared. Type parameters are not asked about
-// here, since they are scoped to a single declaration rather than to the
-// program. Every caller asks the same question, so a name that is a type for
-// one of them is a type for all of them.
-func (c *Checker) isTypeName(name string) bool {
-	if knownTypes[Type(name)] || c.declaredTypes[name] || isKnownGenericBase(name) {
-		return true
-	}
-	return c.structs[name] != nil || c.enums[name] != nil ||
-		c.unions[name] != nil || c.errorSets[name] != nil
-}
-
 // parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
 func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
 	if node.Err != nil {
@@ -1190,46 +1177,6 @@ func (t *typeTable) referencedTypeNames(typeName Type) []string {
 		}
 	})
 	return names
-}
-
-// isUserDeclaredType reports whether name is declared by the current program.
-func (c *Checker) isUserDeclaredType(name string) bool {
-	if c.structs[name] != nil {
-		return true
-	}
-	if c.enums[name] != nil {
-		return true
-	}
-	if c.errorSets[name] != nil {
-		return true
-	}
-	if c.unions[name] != nil {
-		return true
-	}
-	if c.contracts[name] != nil {
-		return true
-	}
-	return false
-}
-
-// isPublicType reports whether name is externally visible.
-func (c *Checker) isPublicType(name string) bool {
-	if decl := c.structs[name]; decl != nil {
-		return decl.Public
-	}
-	if enum := c.enums[name]; enum != nil {
-		return enum.public
-	}
-	if set := c.errorSets[name]; set != nil {
-		return set.public
-	}
-	if union := c.unions[name]; union != nil {
-		return union.public
-	}
-	if contract := c.contracts[name]; contract != nil {
-		return contract.public
-	}
-	return false
 }
 
 // checkMainReturnType keeps the entry point returning `void` or an error union
