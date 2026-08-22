@@ -11,9 +11,8 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Mechanical port of internal/parser/parser.go. Expression handles
-// borrow their Ast explicitly because the Kizu graph owner replaces Go node
-// pointers retained by the runtime.
+// Mechanical port of internal/parser/parser.go. Copy handles resolve through
+// a caller-owned Ast, which retains both syntax and parsed type graphs.
 
 /// Consumes tokens and builds one source file into a caller-owned AST graph.
 pub struct Parser {
@@ -79,20 +78,28 @@ fn (self: &Parser) diagnostic(index: i64) -> ?&diagnostic::Diagnostic {
     return self.diagnostics_store.at(index);
 }
 
-fn (self: &Parser) current_kind() -> token::Kind {
+fn (self: &Parser) current_token() -> &token::Token {
     let handle = self.stream.get_or_panic(self.position);
-    return self.tokens.at(handle).kind;
+    return self.tokens.at(handle);
+}
+
+fn (self: &Parser) peek_token() -> &token::Token {
+    let handle = self.stream.get_or_panic(self.position + 1);
+    return self.tokens.at(handle);
+}
+
+fn (self: &Parser) current_kind() -> token::Kind {
+    return self.current_token().kind;
 }
 
 fn (self: &Parser) peek_kind() -> token::Kind {
-    let handle = self.stream.get_or_panic(self.position + 1);
-    return self.tokens.at(handle).kind;
+    return self.peek_token().kind;
 }
 
 fn (self: &Parser) comment_text(
     lines: &array::Array<string::String>
 ) -> !string::String {
-    var separator_storage = [1]u8{};
+    var separator_storage = [1]u8 {};
     let writable = separator_storage.as_mut_bytes();
     writable[0] = cast<u8>(10);
     let separator = separator_storage.as_bytes();
@@ -101,23 +108,30 @@ fn (self: &Parser) comment_text(
     return move out;
 }
 
+fn (self: &Parser) current_comment_text() -> !string::String {
+    let current = self.current_token();
+    return self.comment_text(&current.doc_comments);
+}
+
+fn (self: &Parser) retain_current_literal(
+    tree: &var ast::Ast
+) -> !ast::Text {
+    return retain_literal(tree, self.current_token());
+}
+
 fn (self: &Parser) starts_error_set_decl() -> bool {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let literal = current.literal.as_bytes();
-    return mem::equal_bytes(literal, "error") and
+    return token_literal_equal(self.current_token(), "error") and
         self.peek_kind() == token::Kind::Ident;
 }
 
 /// Parses one complete source file into caller-owned declaration storage.
 pub fn (self: &var Parser) parse_program(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Program {
     var program = ast::new_program(self.allocator);
     errdefer program.deinit();
     while self.current_kind() != token::Kind::Eof {
-        if try self.parse_top_level_declaration(tree, types) |declaration| {
+        if try self.parse_top_level_declaration(tree) |declaration| {
             try program.add_declaration(declaration);
         }
         try self.next_token();
@@ -126,42 +140,39 @@ pub fn (self: &var Parser) parse_program(
 }
 
 fn (self: &var Parser) parse_top_level_declaration(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::Declaration {
     let kind = self.current_kind();
     if kind == token::Kind::Import {
         return try self.parse_import_decl(tree);
     }
     if kind == token::Kind::Public {
-        return try self.parse_public_decl(tree, types);
+        return try self.parse_public_decl(tree);
     }
     if kind == token::Kind::Ident {
-        return try self.parse_ident_led_decl(tree, types);
+        return try self.parse_ident_led_decl(tree);
     }
     if kind == token::Kind::Function {
-        return try self.parse_function_decl(tree, types);
+        return try self.parse_function_decl(tree);
     }
     if kind == token::Kind::Unsafe {
-        let handle = self.stream.get_or_panic(self.position);
-        let current = self.tokens.at(handle);
-        let docs = try self.comment_text(&current.doc_comments);
-        return try self.parse_unsafe_decl(tree, types, move docs, false);
+        let docs = try self.current_comment_text();
+        return try self.parse_unsafe_decl(tree, move docs, false);
     }
     if kind == token::Kind::Extern {
-        return try self.parse_extern_decl(tree, types);
+        return try self.parse_extern_decl(tree);
     }
     if kind == token::Kind::Struct {
-        return try self.parse_struct_decl(tree, types);
+        return try self.parse_struct_decl(tree);
     }
     if kind == token::Kind::Enum {
         return try self.parse_enum_decl(tree);
     }
     if kind == token::Kind::Union {
-        return try self.parse_union_decl(tree, types);
+        return try self.parse_union_decl(tree);
     }
     if kind == token::Kind::Contract {
-        return try self.parse_contract_decl(tree, types, false);
+        return try self.parse_contract_decl(tree, false);
     }
     if kind == token::Kind::Impl {
         return try self.parse_impl_decl(tree);
@@ -171,41 +182,35 @@ fn (self: &var Parser) parse_top_level_declaration(
 }
 
 fn (self: &var Parser) parse_public_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
+    let docs = try self.current_comment_text();
     errdefer docs.deinit();
     try self.next_token();
     return self.parse_top_level_decl_with_doc(
         tree,
-        types,
         move docs
     );
 }
 
 fn (self: &var Parser) parse_top_level_decl_with_doc(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String
 ) -> !ast::Declaration {
     errdefer docs.deinit();
     let kind = self.current_kind();
     if kind == token::Kind::Function {
-        return self.parse_function_decl_with_doc(tree, types, move docs, true);
+        return self.parse_function_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Unsafe {
-        return self.parse_unsafe_decl(tree, types, move docs, true);
+        return self.parse_unsafe_decl(tree, move docs, true);
     }
     if kind == token::Kind::Extern {
-        return self.parse_extern_decl_with_doc(tree, types, move docs, true);
+        return self.parse_extern_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Struct {
         let declaration = try self.parse_struct_decl_with_doc(
             tree,
-            types,
             move docs,
             true
         );
@@ -215,11 +220,11 @@ fn (self: &var Parser) parse_top_level_decl_with_doc(
         return self.parse_enum_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Union {
-        return self.parse_union_decl_with_doc(tree, types, move docs, true);
+        return self.parse_union_decl_with_doc(tree, move docs, true);
     }
     if kind == token::Kind::Contract {
         docs.deinit();
-        return self.parse_contract_decl(tree, types, true);
+        return self.parse_contract_decl(tree, true);
     }
     if kind == token::Kind::Ident and self.starts_error_set_decl() {
         return self.parse_error_set_decl_with_doc(tree, move docs, true);
@@ -234,11 +239,10 @@ fn public_declaration_message(
     allocator: Allocator,
     parser: &Parser
 ) -> !string::String {
-    let handle = parser.stream.get_or_panic(parser.position);
     return unexpected_token_message(
         allocator,
         "expected public declaration, got ",
-        parser.tokens.at(handle)
+        parser.current_token()
     );
 }
 
@@ -250,24 +254,14 @@ fn (self: &var Parser) parse_import_decl(
     if !try self.expect_peek(token::Kind::Ident) {
         return add_import_decl(tree, move path);
     }
-    let first_handle = self.stream.get_or_panic(self.position);
-    let first = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(first_handle)
-    );
+    let first = try self.retain_current_literal(tree);
     try path.append(first);
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
             return add_import_decl(tree, move path);
         }
-        let handle = self.stream.get_or_panic(self.position);
-        let part = try retain_literal(
-            self.allocator,
-            tree,
-            self.tokens.at(handle)
-        );
+        let part = try self.retain_current_literal(tree);
         try path.append(part);
     }
     let _ = try self.expect_statement_terminator("import declaration");
@@ -290,8 +284,8 @@ fn (self: &Parser) function_stub(
     public: bool,
     docs: string::String
 ) -> ast::FunctionDecl {
-    let name = tree.add_text(string::new(self.allocator));
-    let extern_abi = tree.add_text(string::new(self.allocator));
+    let name = tree.add_empty_text();
+    let extern_abi = tree.add_empty_text();
     let doc = tree.add_text(move docs);
     return ast::FunctionDecl {
         signature: ast::FunctionSignature {
@@ -312,12 +306,10 @@ fn (self: &Parser) function_stub(
 }
 
 fn (self: &var Parser) parse_ident_led_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    if token_literal_equal(self.tokens.at(handle), "test") {
-        return try self.parse_test_decl(tree, types);
+    if token_literal_equal(self.current_token(), "test") {
+        return try self.parse_test_decl(tree);
     }
     if self.starts_error_set_decl() {
         return try self.parse_error_set_decl(tree);
@@ -327,23 +319,17 @@ fn (self: &var Parser) parse_ident_led_decl(
 }
 
 fn (self: &var Parser) parse_test_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
     if !try self.expect_peek(token::Kind::String) {
-        let name = try tree.add_text_from_bytes(self.allocator, "");
+        let name = tree.add_empty_text();
         return add_test_decl(tree, name, null);
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_test_decl(tree, name, null);
     }
-    let body = try self.parse_block_stmt(tree, types);
+    let body = try self.parse_block_stmt(tree);
     return add_test_decl(tree, name, body);
 }
 
@@ -359,35 +345,29 @@ fn add_test_decl(
 }
 
 fn (self: &var Parser) parse_function_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_function_decl_with_doc(tree, types, move docs, false);
+    let docs = try self.current_comment_text();
+    return self.parse_function_decl_with_doc(tree, move docs, false);
 }
 
 fn (self: &var Parser) parse_function_decl_with_doc(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
     let function = self.function_stub(tree, public, move docs);
-    return self.parse_function_after_fn(tree, types, move function);
+    return self.parse_function_after_fn(tree, move function);
 }
 
 fn (self: &var Parser) parse_function_after_fn(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     function: ast::FunctionDecl
 ) -> !ast::Declaration {
     var value = move function;
     errdefer value.deinit();
     if !try self.parse_function_signature_after_fn(
         tree,
-        types,
         &var value.signature
     ) {
         return add_function_decl(tree, move value);
@@ -395,14 +375,13 @@ fn (self: &var Parser) parse_function_after_fn(
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_function_decl(tree, move value);
     }
-    let body = try self.parse_block_stmt(tree, types);
+    let body = try self.parse_block_stmt(tree);
     value.body = body;
     return add_function_decl(tree, move value);
 }
 
 fn (self: &var Parser) parse_unsafe_decl(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
@@ -411,7 +390,6 @@ fn (self: &var Parser) parse_unsafe_decl(
         try self.next_token();
         var declaration = try self.parse_struct_decl_with_doc(
             tree,
-            types,
             move docs,
             public
         );
@@ -423,13 +401,12 @@ fn (self: &var Parser) parse_unsafe_decl(
         errdefer function.deinit();
         function.signature.requires_unsafe = true;
         try self.next_token();
-        return self.parse_function_after_fn(tree, types, move function);
+        return self.parse_function_after_fn(tree, move function);
     }
-    let peek_handle = self.stream.get_or_panic(self.position + 1);
     let message = try unexpected_token_message(
         self.allocator,
         "expected fn or struct after unsafe, got ",
-        self.tokens.at(peek_handle)
+        self.peek_token()
     );
     try self.record_error(move message);
     let function = self.function_stub(tree, public, move docs);
@@ -437,18 +414,14 @@ fn (self: &var Parser) parse_unsafe_decl(
 }
 
 fn (self: &var Parser) parse_extern_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_extern_decl_with_doc(tree, types, move docs, false);
+    let docs = try self.current_comment_text();
+    return self.parse_extern_decl_with_doc(tree, move docs, false);
 }
 
 fn (self: &var Parser) parse_extern_decl_with_doc(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
@@ -457,19 +430,13 @@ fn (self: &var Parser) parse_extern_decl_with_doc(
     if !try self.expect_peek(token::Kind::String) {
         return add_function_decl(tree, move function);
     }
-    let abi_handle = self.stream.get_or_panic(self.position);
-    let abi = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(abi_handle)
-    );
+    let abi = try self.retain_current_literal(tree);
     function.signature.extern_abi = abi;
     if !try self.expect_peek(token::Kind::Function) {
         return add_function_decl(tree, move function);
     }
     let _ = try self.parse_function_signature_after_fn(
         tree,
-        types,
         &var function.signature
     );
     return add_function_decl(tree, move function);
@@ -487,9 +454,7 @@ fn add_function_decl(
 fn (self: &var Parser) parse_enum_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
+    let docs = try self.current_comment_text();
     return self.parse_enum_decl_with_doc(tree, move docs, false);
 }
 
@@ -500,7 +465,7 @@ fn (self: &var Parser) parse_enum_decl_with_doc(
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = tree.add_text(string::new(self.allocator));
+        let name = tree.add_empty_text();
         return add_enum_decl(
             tree,
             name,
@@ -509,12 +474,7 @@ fn (self: &var Parser) parse_enum_decl_with_doc(
             public
         );
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_enum_decl(
             tree,
@@ -547,9 +507,7 @@ fn add_enum_decl(
 fn (self: &var Parser) parse_error_set_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
+    let docs = try self.current_comment_text();
     return self.parse_error_set_decl_with_doc(tree, move docs, false);
 }
 
@@ -560,7 +518,7 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = tree.add_text(string::new(self.allocator));
+        let name = tree.add_empty_text();
         return add_error_set_decl(
             tree,
             name,
@@ -569,12 +527,7 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
             public
         );
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_error_set_decl(
             tree,
@@ -597,12 +550,12 @@ fn add_error_set_decl(
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::ErrorSet(
         ast::ErrorSetDecl {
-            name: name,
-            doc: doc,
-            members: move list.names,
-            member_docs: move list.docs,
-            public: public
-        }
+        name: name,
+        doc: doc,
+        members: move list.names,
+        member_docs: move list.docs,
+        public: public
+    }
     ));
 }
 
@@ -629,7 +582,7 @@ fn (self: &var Parser) parse_name_list(
             return finish_name_list(move names, move docs);
         }
         let current = self.tokens.at(handle);
-        let name = try retain_literal(self.allocator, tree, current);
+        let name = try retain_literal(tree, current);
         try names.append(name);
         let text = try self.comment_text(&current.doc_comments);
         if text.len() == 0 {
@@ -688,43 +641,27 @@ fn name_list_token_message(
     return move out;
 }
 
-fn (self: &Parser) comment_text_at(
-    handle: arena::Handle<token::Token>
-) -> !string::String {
-    let current = self.tokens.at(handle);
-    return self.comment_text(&current.doc_comments);
-}
-
 fn (self: &var Parser) parse_union_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_union_decl_with_doc(tree, types, move docs, false);
+    let docs = try self.current_comment_text();
+    return self.parse_union_decl_with_doc(tree, move docs, false);
 }
 
 fn (self: &var Parser) parse_union_decl_with_doc(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String,
     public: bool
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = tree.add_text(string::new(self.allocator));
+        let name = tree.add_empty_text();
         return add_empty_union_decl(self.allocator, tree, name, doc, public);
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if self.peek_kind() == token::Kind::Lt {
         try self.next_token();
-        if try self.parse_generic_param_list(tree, types) |type_params| {
+        if try self.parse_generic_param_list(tree) |type_params| {
             errdefer type_params.deinit();
             if type_params.len() == 0 or !try self.expect_type_close() {
                 return add_union_decl(
@@ -746,7 +683,7 @@ fn (self: &var Parser) parse_union_decl_with_doc(
                     public
                 );
             }
-            let variants = try self.parse_union_variants(tree, types);
+            let variants = try self.parse_union_variants(tree);
             return add_union_decl(
                 tree,
                 name,
@@ -761,7 +698,7 @@ fn (self: &var Parser) parse_union_decl_with_doc(
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_empty_union_decl(self.allocator, tree, name, doc, public);
     }
-    let variants = try self.parse_union_variants(tree, types);
+    let variants = try self.parse_union_variants(tree);
     return add_union_decl(
         tree,
         name,
@@ -773,15 +710,14 @@ fn (self: &var Parser) parse_union_decl_with_doc(
 }
 
 fn (self: &var Parser) parse_union_variants(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::UnionVariant> {
     var variants = array::new<ast::UnionVariant>(self.allocator);
     errdefer variants.deinit();
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        if try self.parse_union_variant(tree, types) |variant| {
+        if try self.parse_union_variant(tree) |variant| {
             try variants.append(variant);
         } else {
             return move variants;
@@ -795,24 +731,21 @@ fn (self: &var Parser) parse_union_variants(
 }
 
 fn (self: &var Parser) parse_union_variant(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::UnionVariant {
-    let handle = self.stream.get_or_panic(self.position);
-    let docs = try self.comment_text_at(handle);
+    let docs = try self.current_comment_text();
     let doc = tree.add_text(move docs);
+    let current = self.current_token();
     if self.current_kind() != token::Kind::Ident {
-        let actual = self.tokens.at(handle);
         let message = try name_list_token_message(
             self.allocator,
             "union variant",
-            actual
+            current
         );
         try self.record_error(move message);
         return null;
     }
-    let current = self.tokens.at(handle);
-    let name = try retain_literal(self.allocator, tree, current);
+    let name = try retain_literal(tree, current);
     if self.peek_kind() != token::Kind::LParen {
         return ast::UnionVariant {
             name: name,
@@ -822,7 +755,7 @@ fn (self: &var Parser) parse_union_variant(
     }
     try self.next_token();
     try self.next_token();
-    let payload = try self.parse_type_name(types);
+    let payload = try self.parse_type_name(tree);
     if payload |retained| {
         if !try self.expect_peek(token::Kind::RParen) {
             return null;
@@ -871,15 +804,11 @@ fn add_union_decl(
 }
 
 fn (self: &var Parser) parse_struct_decl(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Declaration {
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
-    let docs = try self.comment_text(&current.doc_comments);
+    let docs = try self.current_comment_text();
     let declaration = try self.parse_struct_decl_with_doc(
         tree,
-        types,
         move docs,
         false
     );
@@ -888,24 +817,18 @@ fn (self: &var Parser) parse_struct_decl(
 
 fn (self: &var Parser) parse_struct_decl_with_doc(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     docs: string::String,
     public: bool
 ) -> !ast::StructDecl {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = tree.add_text(string::new(self.allocator));
+        let name = tree.add_empty_text();
         return empty_struct_decl(self.allocator, name, doc, public);
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if self.peek_kind() == token::Kind::Lt {
         try self.next_token();
-        if try self.parse_generic_param_list(tree, types) |type_params| {
+        if try self.parse_generic_param_list(tree) |type_params| {
             errdefer type_params.deinit();
             if type_params.len() == 0 or !try self.expect_type_close() {
                 return make_struct_decl(
@@ -916,7 +839,7 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
                     public
                 );
             }
-            let fields = try self.parse_struct_body(tree, types);
+            let fields = try self.parse_struct_body(tree);
             return make_struct_decl(
                 name,
                 doc,
@@ -927,7 +850,7 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
         }
         return empty_struct_decl(self.allocator, name, doc, public);
     }
-    let fields = try self.parse_struct_body(tree, types);
+    let fields = try self.parse_struct_body(tree);
     return make_struct_decl(
         name,
         doc,
@@ -938,25 +861,23 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
 }
 
 fn (self: &var Parser) parse_struct_body(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::Field> {
     if !try self.expect_peek(token::Kind::LBrace) {
         return array::new<ast::Field>(self.allocator);
     }
-    return self.parse_struct_fields(tree, types);
+    return self.parse_struct_fields(tree);
 }
 
 fn (self: &var Parser) parse_struct_fields(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::Field> {
     var fields = array::new<ast::Field>(self.allocator);
     errdefer fields.deinit();
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        if try self.parse_struct_field(tree, types) |field| {
+        if try self.parse_struct_field(tree) |field| {
             try fields.append(field);
         } else {
             return move fields;
@@ -970,11 +891,9 @@ fn (self: &var Parser) parse_struct_fields(
 }
 
 fn (self: &var Parser) parse_struct_field(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::Field {
-    let doc_handle = self.stream.get_or_panic(self.position);
-    let docs = try self.comment_text_at(doc_handle);
+    let docs = try self.current_comment_text();
     let doc = tree.add_text(move docs);
     var public = false;
     if self.current_kind() == token::Kind::Public {
@@ -982,11 +901,10 @@ fn (self: &var Parser) parse_struct_field(
         try self.next_token();
     }
     if self.current_kind() != token::Kind::Ident {
-        let handle = self.stream.get_or_panic(self.position);
         let message = try name_list_token_message(
             self.allocator,
             "field name",
-            self.tokens.at(handle)
+            self.current_token()
         );
         try self.record_error(move message);
         return null;
@@ -1006,10 +924,9 @@ fn (self: &var Parser) parse_struct_field(
             try self.next_token();
         }
     }
-    let parsed = try self.parse_type_name(types);
+    let parsed = try self.parse_type_name(tree);
     if parsed |type_name| {
         let name = try retain_literal(
-            self.allocator,
             tree,
             self.tokens.at(name_handle)
         );
@@ -1068,11 +985,10 @@ fn add_struct_decl(
 
 fn (self: &var Parser) parse_function_signature_after_fn(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     signature: &var ast::FunctionSignature
 ) -> !bool {
     if self.peek_kind() == token::Kind::LParen {
-        if try self.parse_receiver(tree, types) |receiver| {
+        if try self.parse_receiver(tree) |receiver| {
             defer receiver.deinit();
             var receiver_index = 0;
             while receiver.get(receiver_index) |param| {
@@ -1087,16 +1003,11 @@ fn (self: &var Parser) parse_function_signature_after_fn(
     if !try self.expect_peek(token::Kind::Ident) {
         return false;
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     signature.name = name;
     if self.peek_kind() == token::Kind::Lt {
         try self.next_token();
-        if try self.parse_static_param_list(tree, types) |static_params| {
+        if try self.parse_static_param_list(tree) |static_params| {
             defer static_params.deinit();
             var static_index = 0;
             while static_params.get(static_index) |param| {
@@ -1114,7 +1025,7 @@ fn (self: &var Parser) parse_function_signature_after_fn(
     if !try self.expect_peek(token::Kind::LParen) {
         return false;
     }
-    let params = try self.parse_params(tree, types);
+    let params = try self.parse_params(tree);
     defer params.deinit();
     var index = 0;
     while params.get(index) |param| {
@@ -1124,16 +1035,15 @@ fn (self: &var Parser) parse_function_signature_after_fn(
     if !try self.expect_current(token::Kind::RParen) {
         return false;
     }
-    return self.parse_return_clause(types, signature);
+    return self.parse_return_clause(tree, signature);
 }
 
 fn (self: &var Parser) parse_contract_decl(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     public: bool
 ) -> !ast::Declaration {
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = tree.add_text(string::new(self.allocator));
+        let name = tree.add_empty_text();
         return add_contract_decl(
             tree,
             name,
@@ -1141,12 +1051,7 @@ fn (self: &var Parser) parse_contract_decl(
             public
         );
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::LBrace) {
         return add_contract_decl(
             tree,
@@ -1155,13 +1060,12 @@ fn (self: &var Parser) parse_contract_decl(
             public
         );
     }
-    let methods = try self.parse_contract_methods(tree, types);
+    let methods = try self.parse_contract_methods(tree);
     return add_contract_decl(tree, name, move methods, public);
 }
 
 fn (self: &var Parser) parse_contract_methods(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::FunctionDecl> {
     var methods = array::new<ast::FunctionDecl>(self.allocator);
     errdefer methods.deinit();
@@ -1169,16 +1073,15 @@ fn (self: &var Parser) parse_contract_methods(
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
         if self.current_kind() != token::Kind::Function {
-            let handle = self.stream.get_or_panic(self.position);
             let message = try name_list_token_message(
                 self.allocator,
                 "contract method",
-                self.tokens.at(handle)
+                self.current_token()
             );
             try self.record_error(move message);
             return move methods;
         }
-        if try self.parse_contract_method(tree, types) |method| {
+        if try self.parse_contract_method(tree) |method| {
             errdefer method.deinit();
             try methods.append(move method);
         } else {
@@ -1193,8 +1096,7 @@ fn (self: &var Parser) parse_contract_methods(
 }
 
 fn (self: &var Parser) parse_contract_method(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::FunctionDecl {
     var method = self.function_stub(
         tree,
@@ -1204,7 +1106,6 @@ fn (self: &var Parser) parse_contract_method(
     errdefer method.deinit();
     let _ = try self.parse_function_signature_after_fn(
         tree,
-        types,
         &var method.signature
     );
     if method.signature.receiver {
@@ -1226,15 +1127,15 @@ fn add_contract_decl(
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::Contract(
         ast::ContractDecl {
-            name: name,
-            methods: move methods,
-            public: public
-        }
+        name: name,
+        methods: move methods,
+        public: public
+    }
     ));
 }
 
 fn (self: &var Parser) parse_return_clause(
-    types: &var typ::Table,
+    tree: &var ast::Ast,
     signature: &var ast::FunctionSignature
 ) -> !bool {
     if self.peek_kind() != token::Kind::Arrow {
@@ -1242,7 +1143,7 @@ fn (self: &var Parser) parse_return_clause(
     }
     try self.next_token();
     try self.next_token();
-    let parsed = try self.parse_type_name(types);
+    let parsed = try self.parse_type_name(tree);
     signature.return_type = parsed;
     if parsed |_| {
         return true;
@@ -1251,8 +1152,7 @@ fn (self: &var Parser) parse_return_clause(
 }
 
 fn (self: &var Parser) parse_params(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::Param> {
     var params = array::new<ast::Param>(self.allocator);
     errdefer params.deinit();
@@ -1269,11 +1169,10 @@ fn (self: &var Parser) parse_params(
             return move params;
         }
         if self.current_kind() != token::Kind::Ident {
-            let handle = self.stream.get_or_panic(self.position);
             let message = try unexpected_token_message(
                 self.allocator,
                 "expected parameter name, got ",
-                self.tokens.at(handle)
+                self.current_token()
             );
             try self.record_error(move message);
             return move params;
@@ -1293,10 +1192,9 @@ fn (self: &var Parser) parse_params(
                 try self.next_token();
             }
         }
-        let parsed = try self.parse_type_name(types);
+        let parsed = try self.parse_type_name(tree);
         if parsed |type_name| {
             let name = try retain_literal(
-                self.allocator,
                 tree,
                 self.tokens.at(name_handle)
             );
@@ -1323,11 +1221,10 @@ fn (self: &var Parser) parse_params(
 }
 
 fn (self: &var Parser) parse_receiver(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?array::Array<ast::Param> {
     try self.next_token();
-    var params = try self.parse_params(tree, types);
+    var params = try self.parse_params(tree);
     errdefer params.deinit();
     if !try self.expect_current(token::Kind::RParen) {
         params.deinit();
@@ -1451,12 +1348,11 @@ fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
     if self.current_kind() == expected {
         return true;
     }
-    let handle = self.stream.get_or_panic(self.position);
     let message = try expected_token_message(
         self.allocator,
         "expected ",
         expected,
-        self.tokens.at(handle)
+        self.current_token()
     );
     try self.record_error(move message);
     return false;
@@ -1467,12 +1363,11 @@ fn (self: &var Parser) expect_peek(expected: token::Kind) -> !bool {
         try self.next_token();
         return true;
     }
-    let handle = self.stream.get_or_panic(self.position + 1);
     let message = try expected_token_message(
         self.allocator,
         "expected next token ",
         expected,
-        self.tokens.at(handle)
+        self.peek_token()
     );
     try self.record_error(move message);
     return false;
@@ -1543,15 +1438,14 @@ fn (self: &var Parser) finish_expr_stmt(
 }
 
 fn (self: &var Parser) parse_block_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Block {
     var statements = array::new<ast::Statement>(self.allocator);
     errdefer statements.deinit();
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        let statement = try self.parse_statement(tree, types);
+        let statement = try self.parse_statement(tree);
         try statements.append(statement);
         try self.next_token();
     }
@@ -1559,77 +1453,72 @@ fn (self: &var Parser) parse_block_stmt(
 }
 
 fn (self: &var Parser) parse_statement(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
     let enclosing = self.safety;
     var active = self.safety;
     active = null;
-    let handle = self.stream.get_or_panic(self.position);
-    let current = self.tokens.at(handle);
+    let current = self.current_token();
     if current.safety.len() > 0 {
         let text = try self.comment_text(&current.safety);
         active = tree.add_text(move text);
     }
     self.safety = move active;
-    let statement = self.parse_statement_form(tree, types);
+    let statement = self.parse_statement_form(tree);
     self.safety = enclosing;
     return move statement;
 }
 
 fn (self: &var Parser) parse_statement_form(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
-    if try self.parse_keyword_statement(tree, types) |statement| {
+    if try self.parse_keyword_statement(tree) |statement| {
         return statement;
     }
     if self.current_kind() == token::Kind::Ident and
         self.peek_kind() == token::Kind::Colon {
-        return self.parse_labeled_stmt(tree, types);
+        return self.parse_labeled_stmt(tree);
     }
     let expression = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if self.peek_kind() == token::Kind::Assign {
-        return self.parse_assign_stmt(tree, types, expression);
+        return self.parse_assign_stmt(tree, expression);
     }
     return self.finish_expr_stmt(tree, expression);
 }
 
 fn (self: &var Parser) parse_keyword_statement(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::Statement {
     let kind = self.current_kind();
     if kind == token::Kind::Let {
-        return try self.parse_let_stmt(tree, types, false);
+        return try self.parse_let_stmt(tree, false);
     }
     if kind == token::Kind::Var {
-        return try self.parse_let_stmt(tree, types, true);
+        return try self.parse_let_stmt(tree, true);
     }
     if kind == token::Kind::Return {
-        return try self.parse_return_stmt(tree, types);
+        return try self.parse_return_stmt(tree);
     }
     if kind == token::Kind::Defer {
-        return try self.parse_defer_stmt(tree, types, false);
+        return try self.parse_defer_stmt(tree, false);
     }
     if kind == token::Kind::ErrDefer {
-        return try self.parse_defer_stmt(tree, types, true);
+        return try self.parse_defer_stmt(tree, true);
     }
     if kind == token::Kind::If {
-        let value = try self.parse_if_stmt(tree, types);
+        let value = try self.parse_if_stmt(tree);
         return tree.add_statement(ast::StatementNode::If(value));
     }
     if kind == token::Kind::While {
-        let label = try tree.add_text_from_bytes(self.allocator, "");
-        return try self.parse_while_stmt(tree, types, label);
+        let label = tree.add_empty_text();
+        return try self.parse_while_stmt(tree, label);
     }
     if kind == token::Kind::For {
-        let label = try tree.add_text_from_bytes(self.allocator, "");
-        return try self.parse_for_stmt(tree, types, label);
+        let label = tree.add_empty_text();
+        return try self.parse_for_stmt(tree, label);
     }
     if kind == token::Kind::Break {
         return try self.parse_break_stmt(tree);
@@ -1638,46 +1527,39 @@ fn (self: &var Parser) parse_keyword_statement(
         return try self.parse_continue_stmt(tree);
     }
     if kind == token::Kind::Match {
-        let value = try self.parse_match_stmt(tree, types);
+        let value = try self.parse_match_stmt(tree);
         return tree.add_statement(ast::StatementNode::Match(move value));
     }
     if kind == token::Kind::Comptime {
-        return try self.parse_comptime_statement(tree, types);
+        return try self.parse_comptime_statement(tree);
     }
     return null;
 }
 
 fn (self: &var Parser) parse_comptime_statement(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::Statement {
     if self.peek_kind() == token::Kind::If {
-        return try self.parse_comptime_if_stmt(tree, types);
+        return try self.parse_comptime_if_stmt(tree);
     }
     if self.peek_kind() == token::Kind::For {
-        return try self.parse_comptime_for_stmt(tree, types);
+        return try self.parse_comptime_for_stmt(tree);
     }
     if self.peek_kind() == token::Kind::Match {
-        return try self.parse_comptime_match_stmt(tree, types);
+        return try self.parse_comptime_match_stmt(tree);
     }
     return null;
 }
 
 fn (self: &var Parser) parse_labeled_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
-    let handle = self.stream.get_or_panic(self.position);
-    let label = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(handle)
-    );
+    let label = try self.retain_current_literal(tree);
     try self.next_token();
     try self.next_token();
     return match self.current_kind() {
-        While => try self.parse_while_stmt(tree, types, label),
-        For => try self.parse_for_stmt(tree, types, label),
+        While => try self.parse_while_stmt(tree, label),
+        For => try self.parse_for_stmt(tree, label),
         _ => {
             var message = string::new(self.allocator);
             errdefer message.deinit();
@@ -1686,7 +1568,6 @@ fn (self: &var Parser) parse_labeled_stmt(
             try message.append_bytes("` must be attached to while or for");
             try self.record_error(move message);
             let expression = try add_error_ident(
-                self.allocator,
                 tree,
                 token_span_at(self)
             );
@@ -1699,64 +1580,52 @@ fn (self: &var Parser) parse_labeled_stmt(
 }
 
 fn (self: &var Parser) parse_comptime_if_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
-) -> !ast::Statement {
-    if !try self.expect_peek(token::Kind::If) {
-        return add_empty_comptime_if(self.allocator, tree);
-    }
-    try self.next_token();
-    let condition = try self.parse_expression(
-        tree,
-        types,
-        lowest_precedence()
-    );
-    if !try self.expect_peek(token::Kind::LBrace) {
-        let consequence = add_empty_block(self.allocator, tree);
-        return tree.add_statement(ast::StatementNode::ComptimeIf(
-            ast::ComptimeIfStmt {
-                condition: condition,
-                consequence: consequence,
-                alternative: null
-            }
-        ));
-    }
-    let consequence = try self.parse_block_stmt(tree, types);
-    var alternative = no_block();
-    if self.peek_kind() == token::Kind::Else {
-        try self.next_token();
-        if try self.expect_peek(token::Kind::LBrace) {
-            alternative = try self.parse_block_stmt(tree, types);
-        }
-    }
-    return tree.add_statement(ast::StatementNode::ComptimeIf(
-        ast::ComptimeIfStmt {
-            condition: condition,
-            consequence: consequence,
-            alternative: alternative
-        }
-    ));
-}
-
-fn add_empty_comptime_if(
-    allocator: Allocator,
     tree: &var ast::Ast
 ) -> !ast::Statement {
-    let condition = try add_error_ident(allocator, tree, zero_span());
-    let consequence = add_empty_block(allocator, tree);
-    return tree.add_statement(ast::StatementNode::ComptimeIf(
-        ast::ComptimeIfStmt {
+    if !try self.expect_peek(token::Kind::If) {
+        let condition = try add_error_ident(
+            tree,
+            zero_span()
+        );
+        let consequence = tree.add_empty_block();
+        return tree.add_statement(ast::StatementNode::ComptimeIf(
+            ast::ComptimeIfStmt {
             condition: condition,
             consequence: consequence,
             alternative: null
         }
+        ));
+    }
+    try self.next_token();
+    let condition = try self.parse_expression(
+        tree,
+        lowest_precedence()
+    );
+    if !try self.expect_peek(token::Kind::LBrace) {
+        let consequence = tree.add_empty_block();
+        return tree.add_statement(ast::StatementNode::ComptimeIf(
+            ast::ComptimeIfStmt {
+            condition: condition,
+            consequence: consequence,
+            alternative: null
+        }
+        ));
+    }
+    let consequence = try self.parse_block_stmt(tree);
+    var alternative = no_block();
+    if self.peek_kind() == token::Kind::Else {
+        try self.next_token();
+        if try self.expect_peek(token::Kind::LBrace) {
+            alternative = try self.parse_block_stmt(tree);
+        }
+    }
+    return tree.add_statement(ast::StatementNode::ComptimeIf(
+        ast::ComptimeIfStmt {
+        condition: condition,
+        consequence: consequence,
+        alternative: alternative
+    }
     ));
-}
-
-fn add_empty_block(allocator: Allocator, tree: &var ast::Ast) -> ast::Block {
-    return tree.add_block(ast::BlockStmt {
-        statements: array::new<ast::Statement>(allocator)
-    });
 }
 
 fn no_block() -> ?ast::Block {
@@ -1769,27 +1638,19 @@ fn no_expression() -> ?ast::Expression {
 
 fn (self: &var Parser) parse_let_stmt(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     mutable: bool
 ) -> !ast::Statement {
     if !try self.expect_peek(token::Kind::Ident) {
-        let name = try tree.add_text_from_bytes(self.allocator, "");
+        let name = tree.add_empty_text();
         let value = try add_error_ident(
-            self.allocator,
             tree,
             token_span_at(self)
         );
         return add_let_stmt(tree, mutable, name, value);
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::Assign) {
         let value = try add_error_ident(
-            self.allocator,
             tree,
             token_span_at(self)
         );
@@ -1798,7 +1659,6 @@ fn (self: &var Parser) parse_let_stmt(
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let _ = try self.expect_statement_terminator("let statement");
@@ -1820,14 +1680,12 @@ fn add_let_stmt(
 
 fn (self: &var Parser) parse_assign_stmt(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     target: ast::Expression
 ) -> !ast::Statement {
     try self.next_token();
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let _ = try self.expect_statement_terminator("assignment");
@@ -1838,8 +1696,7 @@ fn (self: &var Parser) parse_assign_stmt(
 }
 
 fn (self: &var Parser) parse_return_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
     if self.peek_kind() == token::Kind::Semicolon {
         try self.next_token();
@@ -1850,7 +1707,6 @@ fn (self: &var Parser) parse_return_stmt(
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let _ = try self.expect_statement_terminator("return statement");
@@ -1860,8 +1716,7 @@ fn (self: &var Parser) parse_return_stmt(
 }
 
 fn (self: &var Parser) parse_match_arm_return(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
     if self.peek_kind() == token::Kind::Comma or
         self.peek_kind() == token::Kind::RBrace {
@@ -1872,7 +1727,6 @@ fn (self: &var Parser) parse_match_arm_return(
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     return tree.add_statement(ast::StatementNode::Return(
@@ -1882,7 +1736,6 @@ fn (self: &var Parser) parse_match_arm_return(
 
 fn (self: &var Parser) parse_defer_stmt(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     error_path: bool
 ) -> !ast::Statement {
     if deferred_statement_forbidden(self.peek_kind()) {
@@ -1898,7 +1751,6 @@ fn (self: &var Parser) parse_defer_stmt(
             );
         }
         let expression = try add_error_ident(
-            self.allocator,
             tree,
             token_span_at(self)
         );
@@ -1907,7 +1759,6 @@ fn (self: &var Parser) parse_defer_stmt(
     try self.next_token();
     let expression = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if error_path {
@@ -1943,13 +1794,11 @@ fn add_defer_stmt(
 }
 
 fn (self: &var Parser) parse_if_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::IfStmt {
     try self.next_token();
     let condition = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let capture = try self.parse_payload_capture(tree);
@@ -1957,17 +1806,17 @@ fn (self: &var Parser) parse_if_stmt(
         if !try self.expect_peek(token::Kind::LBrace) {
             return ast::IfStmt {
                 condition: condition,
-                consequence: add_empty_block(self.allocator, tree),
+                consequence: tree.add_empty_block(),
                 alternative: null,
                 capture: retained_capture
             };
         }
-        let consequence = try self.parse_block_stmt(tree, types);
+        let consequence = try self.parse_block_stmt(tree);
         var alternative = no_block();
         if self.peek_kind() == token::Kind::Else {
             try self.next_token();
             if try self.expect_peek(token::Kind::LBrace) {
-                alternative = try self.parse_block_stmt(tree, types);
+                alternative = try self.parse_block_stmt(tree);
             }
         }
         return ast::IfStmt {
@@ -1979,27 +1828,25 @@ fn (self: &var Parser) parse_if_stmt(
     }
     return ast::IfStmt {
         condition: condition,
-        consequence: add_empty_block(self.allocator, tree),
+        consequence: tree.add_empty_block(),
         alternative: null,
-        capture: try tree.add_text_from_bytes(self.allocator, "")
+        capture: tree.add_empty_text()
     };
 }
 
 fn (self: &var Parser) parse_while_stmt(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     label: ast::Text
 ) -> !ast::Statement {
     try self.next_token();
     let condition = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let capture = try self.parse_payload_capture(tree);
     if capture |retained_capture| {
         if try self.expect_peek(token::Kind::LBrace) {
-            let body = try self.parse_block_stmt(tree, types);
+            let body = try self.parse_block_stmt(tree);
             return add_while_stmt(
                 tree,
                 label,
@@ -2008,11 +1855,11 @@ fn (self: &var Parser) parse_while_stmt(
                 retained_capture
             );
         }
-        let body = add_empty_block(self.allocator, tree);
+        let body = tree.add_empty_block();
         return add_while_stmt(tree, label, condition, body, retained_capture);
     }
-    let body = add_empty_block(self.allocator, tree);
-    let empty_capture = try tree.add_text_from_bytes(self.allocator, "");
+    let body = tree.add_empty_block();
+    let empty_capture = tree.add_empty_text();
     return add_while_stmt(tree, label, condition, body, empty_capture);
 }
 
@@ -2033,28 +1880,28 @@ fn add_while_stmt(
 
 fn (self: &var Parser) parse_for_stmt(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     label: ast::Text
 ) -> !ast::Statement {
     try self.next_token();
     let start = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if !try self.expect_peek(token::Kind::Range) {
-        return add_partial_for_stmt(self.allocator, tree, label, start);
+        let name = tree.add_empty_text();
+        let end = try add_error_ident(tree, zero_span());
+        let body = tree.add_empty_block();
+        return add_for_stmt(tree, label, name, start, end, body);
     }
     try self.next_token();
     let end = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if !try self.expect_peek(token::Kind::Pipe) or
         !try self.expect_peek(token::Kind::Ident) {
-        let name = try tree.add_text_from_bytes(self.allocator, "");
-        let body = add_empty_block(self.allocator, tree);
+        let name = tree.add_empty_text();
+        let body = tree.add_empty_block();
         return add_for_stmt(
             tree,
             label,
@@ -2064,18 +1911,13 @@ fn (self: &var Parser) parse_for_stmt(
             body
         );
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::Pipe) or
         !try self.expect_peek(token::Kind::LBrace) {
-        let body = add_empty_block(self.allocator, tree);
+        let body = tree.add_empty_block();
         return add_for_stmt(tree, label, name, start, end, body);
     }
-    let body = try self.parse_block_stmt(tree, types);
+    let body = try self.parse_block_stmt(tree);
     return add_for_stmt(
         tree,
         label,
@@ -2084,18 +1926,6 @@ fn (self: &var Parser) parse_for_stmt(
         end,
         body
     );
-}
-
-fn add_partial_for_stmt(
-    allocator: Allocator,
-    tree: &var ast::Ast,
-    label: ast::Text,
-    start: ast::Expression
-) -> !ast::Statement {
-    let name = try tree.add_text_from_bytes(allocator, "");
-    let end = try add_error_ident(allocator, tree, zero_span());
-    let body = add_empty_block(allocator, tree);
-    return add_for_stmt(tree, label, name, start, end, body);
 }
 
 fn add_for_stmt(
@@ -2116,16 +1946,17 @@ fn add_for_stmt(
 }
 
 fn (self: &var Parser) parse_comptime_for_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
     if !try self.expect_peek(token::Kind::For) {
-        return add_empty_comptime_for(self.allocator, tree);
+        let list = try add_error_ident(tree, zero_span());
+        let name = tree.add_empty_text();
+        let body = tree.add_empty_block();
+        return add_comptime_for(tree, list, name, body);
     }
     try self.next_token();
     let list = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let capture = try self.parse_payload_capture(tree);
@@ -2135,11 +1966,11 @@ fn (self: &var Parser) parse_comptime_for_stmt(
                 "comptime for requires a capture, as in ",
                 "`comptime for list |field| { ... }`"
             );
-            let body = add_empty_block(self.allocator, tree);
+            let body = tree.add_empty_block();
             return add_comptime_for(tree, list, name, body);
         }
         if try self.expect_peek(token::Kind::LBrace) {
-            let body = try self.parse_block_stmt(tree, types);
+            let body = try self.parse_block_stmt(tree);
             return add_comptime_for(
                 tree,
                 list,
@@ -2147,21 +1978,11 @@ fn (self: &var Parser) parse_comptime_for_stmt(
                 body
             );
         }
-        let body = add_empty_block(self.allocator, tree);
+        let body = tree.add_empty_block();
         return add_comptime_for(tree, list, name, body);
     }
-    let name = try tree.add_text_from_bytes(self.allocator, "");
-    let body = add_empty_block(self.allocator, tree);
-    return add_comptime_for(tree, list, name, body);
-}
-
-fn add_empty_comptime_for(
-    allocator: Allocator,
-    tree: &var ast::Ast
-) -> !ast::Statement {
-    let list = try add_error_ident(allocator, tree, zero_span());
-    let name = try tree.add_text_from_bytes(allocator, "");
-    let body = add_empty_block(allocator, tree);
+    let name = tree.add_empty_text();
+    let body = tree.add_empty_block();
     return add_comptime_for(tree, list, name, body);
 }
 
@@ -2181,16 +2002,18 @@ fn text_is_empty(tree: &ast::Ast, value: ast::Text) -> bool {
 }
 
 fn (self: &var Parser) parse_comptime_match_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Statement {
     if !try self.expect_peek(token::Kind::Match) {
-        return add_empty_comptime_match(self.allocator, tree);
+        let value = try add_error_ident(tree, zero_span());
+        let name = tree.add_empty_text();
+        let binding = tree.add_empty_text();
+        let body = tree.add_empty_block();
+        return add_comptime_match(tree, value, name, binding, body);
     }
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if try self.parse_variant_capture(tree) |retained_captures| {
@@ -2200,9 +2023,9 @@ fn (self: &var Parser) parse_comptime_match_stmt(
                 "comptime match requires a capture, as in ",
                 "`comptime match value |variant| { ... }`"
             );
-            let name = try tree.add_text_from_bytes(self.allocator, "");
-            let binding = try tree.add_text_from_bytes(self.allocator, "");
-            let body = add_empty_block(self.allocator, tree);
+            let name = tree.add_empty_text();
+            let binding = tree.add_empty_text();
+            let body = tree.add_empty_block();
             return add_comptime_match(tree, value, name, binding, body);
         }
         let first = retained_captures.get_or_panic(0);
@@ -2210,50 +2033,36 @@ fn (self: &var Parser) parse_comptime_match_stmt(
         if retained_captures.at(1) |second| {
             return self.finish_comptime_match(
                 tree,
-                types,
                 value,
                 name,
                 ast::Text { node: second.node }
             );
         }
-        let binding = try tree.add_text_from_bytes(self.allocator, "");
+        let binding = tree.add_empty_text();
         return self.finish_comptime_match(
             tree,
-            types,
             value,
             name,
             binding
         );
     }
-    let name = try tree.add_text_from_bytes(self.allocator, "");
-    let binding = try tree.add_text_from_bytes(self.allocator, "");
-    let body = add_empty_block(self.allocator, tree);
+    let name = tree.add_empty_text();
+    let binding = tree.add_empty_text();
+    let body = tree.add_empty_block();
     return add_comptime_match(tree, value, name, binding, body);
 }
 
 fn (self: &var Parser) finish_comptime_match(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     value: ast::Expression,
     name: ast::Text,
     binding: ast::Text
 ) -> !ast::Statement {
     if try self.expect_peek(token::Kind::LBrace) {
-        let body = try self.parse_block_stmt(tree, types);
+        let body = try self.parse_block_stmt(tree);
         return add_comptime_match(tree, value, name, binding, body);
     }
-    let body = add_empty_block(self.allocator, tree);
-    return add_comptime_match(tree, value, name, binding, body);
-}
-
-fn add_empty_comptime_match(
-    allocator: Allocator,
-    tree: &var ast::Ast
-) -> !ast::Statement {
-    let value = try add_error_ident(allocator, tree, zero_span());
-    let name = try tree.add_text_from_bytes(allocator, "");
-    let binding = try tree.add_text_from_bytes(allocator, "");
-    let body = add_empty_block(allocator, tree);
+    let body = tree.add_empty_block();
     return add_comptime_match(tree, value, name, binding, body);
 }
 
@@ -2266,26 +2075,24 @@ fn add_comptime_match(
 ) -> ast::Statement {
     return tree.add_statement(ast::StatementNode::ComptimeMatch(
         ast::ComptimeMatchStmt {
-            value: value,
-            name: name,
-            binding: binding,
-            body: body
-        }
+        value: value,
+        name: name,
+        binding: binding,
+        body: body
+    }
     ));
 }
 
 fn (self: &var Parser) parse_match_stmt(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::MatchStmt {
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
-    let empty_capture = try tree.add_text_from_bytes(self.allocator, "");
-    let empty_owner = try tree.add_text_from_bytes(self.allocator, "");
+    let empty_capture = tree.add_empty_text();
+    let empty_owner = tree.add_empty_text();
     if !try self.expect_peek(token::Kind::LBrace) {
         return ast::MatchStmt {
             value: value,
@@ -2294,7 +2101,7 @@ fn (self: &var Parser) parse_match_stmt(
             meta_owner: empty_owner
         };
     }
-    let arms = try self.parse_match_arms(tree, types);
+    let arms = try self.parse_match_arms(tree);
     return ast::MatchStmt {
         value: value,
         arms: move arms,
@@ -2304,15 +2111,14 @@ fn (self: &var Parser) parse_match_stmt(
 }
 
 fn (self: &var Parser) parse_match_arms(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !array::Array<ast::MatchArm> {
     var arms = array::new<ast::MatchArm>(self.allocator);
     errdefer arms.deinit();
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        if try self.parse_match_arm(tree, types) |arm| {
+        if try self.parse_match_arm(tree) |arm| {
             try arms.append(arm);
         } else {
             return move arms;
@@ -2326,37 +2132,25 @@ fn (self: &var Parser) parse_match_arms(
 }
 
 fn (self: &var Parser) parse_match_arm(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::MatchArm {
     if self.current_kind() != token::Kind::Ident {
-        let handle = self.stream.get_or_panic(self.position);
         let message = try unexpected_token_message(
             self.allocator,
             "expected match tag, got ",
-            self.tokens.at(handle)
+            self.current_token()
         );
         try self.record_error(move message);
         return null;
     }
-    let tag_handle = self.stream.get_or_panic(self.position);
-    let tag = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(tag_handle)
-    );
-    var binding = try tree.add_text_from_bytes(self.allocator, "");
+    let tag = try self.retain_current_literal(tree);
+    var binding = tree.add_empty_text();
     if self.peek_kind() == token::Kind::LParen {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
             return null;
         }
-        let binding_handle = self.stream.get_or_panic(self.position);
-        binding = try retain_literal(
-            self.allocator,
-            tree,
-            self.tokens.at(binding_handle)
-        );
+        binding = try self.retain_current_literal(tree);
         if !try self.expect_peek(token::Kind::RParen) {
             return null;
         }
@@ -2366,18 +2160,18 @@ fn (self: &var Parser) parse_match_arm(
     }
     try self.next_token();
     if self.current_kind() == token::Kind::Return {
-        let body = try self.parse_match_arm_return(tree, types);
+        let body = try self.parse_match_arm_return(tree);
         return ast::MatchArm { tag: tag, binding: binding, body: body };
     }
     if self.current_kind() == token::Kind::LBrace {
-        let block = try self.parse_block_stmt(tree, types);
+        let block = try self.parse_block_stmt(tree);
         return ast::MatchArm {
             tag: tag,
             binding: binding,
             body: block.as_statement()
         };
     }
-    let body = try self.parse_statement(tree, types);
+    let body = try self.parse_statement(tree);
     return ast::MatchArm { tag: tag, binding: binding, body: body };
 }
 
@@ -2403,23 +2197,21 @@ fn (self: &var Parser) parse_optional_branch_label(
     tree: &var ast::Ast
 ) -> !ast::Text {
     if self.peek_kind() != token::Kind::Colon {
-        return tree.add_text_from_bytes(self.allocator, "");
+        return tree.add_empty_text();
     }
     try self.next_token();
     if !try self.expect_peek(token::Kind::Ident) {
-        return tree.add_text_from_bytes(self.allocator, "");
+        return tree.add_empty_text();
     }
-    let handle = self.stream.get_or_panic(self.position);
-    return retain_literal(self.allocator, tree, self.tokens.at(handle));
+    return self.retain_current_literal(tree);
 }
 
 fn retain_literal(
-    allocator: Allocator,
     tree: &var ast::Ast,
     current: &token::Token
 ) -> !ast::Text {
     let bytes = current.literal.as_bytes();
-    return tree.add_text_from_bytes(allocator, bytes);
+    return tree.add_text_from_bytes(bytes);
 }
 
 fn (self: &Parser) parse_keyword_literal_expression(
@@ -2437,10 +2229,9 @@ fn (self: &Parser) parse_keyword_literal_expression(
 
 fn (self: &var Parser) parse_expression(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     binding_power: i64
 ) -> !ast::Expression {
-    var left = try self.parse_prefix_expression(tree, types);
+    var left = try self.parse_prefix_expression(tree);
     while self.peek_kind() != token::Kind::Semicolon {
         var type_apply = false;
         if self.peek_kind() == token::Kind::Lt {
@@ -2452,28 +2243,28 @@ fn (self: &var Parser) parse_expression(
         let next_kind = self.peek_kind();
         if is_binary_operator(next_kind) {
             try self.next_token();
-            left = try self.parse_binary_expr(tree, types, left);
+            left = try self.parse_binary_expr(tree, left);
             continue;
         }
         match next_kind {
             Orelse => {
                 try self.next_token();
-                left = try self.parse_orelse_expr(tree, types, left);
+                left = try self.parse_orelse_expr(tree, left);
             },
             LParen => {
                 try self.next_token();
-                left = try self.parse_call_expr(tree, types, left);
+                left = try self.parse_call_expr(tree, left);
             },
             LBracket => {
                 try self.next_token();
-                left = try self.parse_index_expr(tree, types, left);
+                left = try self.parse_index_expr(tree, left);
             },
             Lt => {
                 try self.next_token();
                 if type_apply {
-                    left = try self.parse_type_apply_expr(tree, types, left);
+                    left = try self.parse_type_apply_expr(tree, left);
                 } else {
-                    left = try self.parse_binary_expr(tree, types, left);
+                    left = try self.parse_binary_expr(tree, left);
                 }
             },
             Dot => {
@@ -2497,7 +2288,6 @@ fn (self: &var Parser) parse_expression(
         ) |type_name| {
             return self.parse_struct_literal_expr(
                 tree,
-                types,
                 move type_name
             );
         }
@@ -2522,24 +2312,21 @@ fn is_binary_operator(kind: token::Kind) -> bool {
 
 fn (self: &var Parser) parse_index_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     target: ast::Expression
 ) -> !ast::Expression {
     let span = token_span_at(self);
     try self.next_token();
     if self.current_kind() == token::Kind::Range {
-        return self.parse_open_start_slice(tree, types, target, span);
+        return self.parse_open_start_slice(tree, target, span);
     }
     let start = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     if self.peek_kind() == token::Kind::Range {
         try self.next_token();
         return self.parse_closed_start_slice(
             tree,
-            types,
             target,
             start,
             span
@@ -2551,7 +2338,6 @@ fn (self: &var Parser) parse_index_expr(
 
 fn (self: &var Parser) parse_open_start_slice(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     target: ast::Expression,
     span: ast::Span
 ) -> !ast::Expression {
@@ -2565,7 +2351,6 @@ fn (self: &var Parser) parse_open_start_slice(
     try self.next_token();
     let end = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let _ = try self.expect_peek(token::Kind::RBracket);
@@ -2574,7 +2359,6 @@ fn (self: &var Parser) parse_open_start_slice(
 
 fn (self: &var Parser) parse_closed_start_slice(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     target: ast::Expression,
     start: ast::Expression,
     span: ast::Span
@@ -2586,7 +2370,6 @@ fn (self: &var Parser) parse_closed_start_slice(
     try self.next_token();
     let end = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     let _ = try self.expect_peek(token::Kind::RBracket);
@@ -2613,8 +2396,7 @@ fn add_index_expr(
 }
 
 fn (self: &var Parser) parse_prefix_expression(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
     let kind = self.current_kind();
     if kind == token::Kind::True or
@@ -2626,55 +2408,42 @@ fn (self: &var Parser) parse_prefix_expression(
         kind == token::Kind::Try or
         kind == token::Kind::Move or
         kind == token::Kind::Unsafe {
-        return self.parse_marker_expression(tree, types);
+        return self.parse_marker_expression(tree);
     }
     if kind == token::Kind::Bang or kind == token::Kind::Minus {
-        return self.parse_unary_prefix_expression(tree, types);
+        return self.parse_unary_prefix_expression(tree);
     }
     return match kind {
-        Ident => try self.parse_ident_prefix_expression(tree, types),
-        Int => try add_retained_literal_expression(
-            self.allocator,
-            self,
-            tree,
-            false
-        ),
-        String => try add_retained_literal_expression(
-            self.allocator,
-            self,
-            tree,
-            true
-        ),
+        Ident => try self.parse_ident_prefix_expression(tree),
+        Int => try self.retain_literal_expression(tree, false),
+        String => try self.retain_literal_expression(tree, true),
         If => {
-            let value = try self.parse_if_stmt(tree, types);
+            let value = try self.parse_if_stmt(tree);
             tree.add_expression(ast::ExpressionNode::If(value))
         },
         Match => {
-            let value = try self.parse_match_stmt(tree, types);
+            let value = try self.parse_match_stmt(tree);
             tree.add_expression(ast::ExpressionNode::Match(move value))
         },
-        Amp => try self.parse_borrow_prefix_expression(tree, types),
+        Amp => try self.parse_borrow_prefix_expression(tree),
         LParen => {
             try self.next_token();
             let inner = try self.parse_expression(
                 tree,
-                types,
                 lowest_precedence()
             );
             let _ = try self.expect_peek(token::Kind::RParen);
             inner
         },
-        LBracket => try self.parse_buffer_literal_expr(tree, types),
+        LBracket => try self.parse_buffer_literal_expr(tree),
         _ => {
-            let handle = self.stream.get_or_panic(self.position);
             let message = try unexpected_token_message(
                 self.allocator,
                 "expected expression, got ",
-                self.tokens.at(handle)
+                self.current_token()
             );
             try self.record_error(move message);
             try add_error_ident(
-                self.allocator,
                 tree,
                 token_span_at(self)
             )
@@ -2682,18 +2451,11 @@ fn (self: &var Parser) parse_prefix_expression(
     };
 }
 
-fn add_retained_literal_expression(
-    allocator: Allocator,
-    parser: &Parser,
+fn (self: &Parser) retain_literal_expression(
     tree: &var ast::Ast,
     quoted: bool
 ) -> !ast::Expression {
-    let handle = parser.stream.get_or_panic(parser.position);
-    let value = try retain_literal(
-        allocator,
-        tree,
-        parser.tokens.at(handle)
-    );
+    let value = try self.retain_current_literal(tree);
     if quoted {
         return tree.add_expression(ast::ExpressionNode::String(
             ast::StringExpr { value: value }
@@ -2705,8 +2467,7 @@ fn add_retained_literal_expression(
 }
 
 fn (self: &var Parser) parse_borrow_prefix_expression(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
     try self.next_token();
     var operator = "&";
@@ -2715,10 +2476,9 @@ fn (self: &var Parser) parse_borrow_prefix_expression(
         try self.next_token();
     }
     let retained_operator = try tree.add_text_from_bytes(
-        self.allocator,
         operator
     );
-    let right = try self.parse_expression(tree, types, prefix_precedence());
+    let right = try self.parse_expression(tree, prefix_precedence());
     return tree.add_expression(ast::ExpressionNode::Prefix(ast::PrefixExpr {
         operator: retained_operator,
         right: right
@@ -2726,17 +2486,11 @@ fn (self: &var Parser) parse_borrow_prefix_expression(
 }
 
 fn (self: &var Parser) parse_unary_prefix_expression(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
-    let handle = self.stream.get_or_panic(self.position);
-    let operator = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(handle)
-    );
+    let operator = try self.retain_current_literal(tree);
     try self.next_token();
-    let right = try self.parse_expression(tree, types, prefix_precedence());
+    let right = try self.parse_expression(tree, prefix_precedence());
     return tree.add_expression(ast::ExpressionNode::Prefix(ast::PrefixExpr {
         operator: operator,
         right: right
@@ -2748,17 +2502,15 @@ fn prefix_precedence() -> i64 {
 }
 
 fn (self: &var Parser) parse_marker_expression(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
-    let marker_handle = self.stream.get_or_panic(self.position);
-    let marker_kind = self.tokens.at(marker_handle).kind;
-    let marker_span = token_span(self.tokens.at(marker_handle));
+    let marker = self.current_token();
+    let marker_kind = marker.kind;
+    let marker_span = token_span(marker);
     try self.next_token();
     if marker_kind == token::Kind::Comptime {
         let expression = try self.parse_expression(
             tree,
-            types,
             lowest_precedence()
         );
         return tree.add_expression(ast::ExpressionNode::Comptime(
@@ -2767,7 +2519,6 @@ fn (self: &var Parser) parse_marker_expression(
     }
     let expression = try self.parse_expression(
         tree,
-        types,
         prefix_precedence()
     );
     if marker_kind == token::Kind::Try {
@@ -2783,10 +2534,10 @@ fn (self: &var Parser) parse_marker_expression(
     let safety = try self.current_safety_text(tree);
     return tree.add_expression(ast::ExpressionNode::Unsafe(
         ast::UnsafeExpr {
-            value: expression,
-            safety: safety,
-            span: marker_span
-        }
+        value: expression,
+        safety: safety,
+        span: marker_span
+    }
     ));
 }
 
@@ -2796,43 +2547,41 @@ fn (self: &var Parser) current_safety_text(
     if self.safety |value| {
         return ast::Text { node: value.node };
     }
-    let empty = try tree.add_text_from_bytes(self.allocator, "");
+    let empty = tree.add_empty_text();
     self.safety = empty;
     return empty;
 }
 
 fn (self: &var Parser) parse_ident_prefix_expression(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
-    let handle = self.stream.get_or_panic(self.position);
-    let cast_name = token_literal_equal(self.tokens.at(handle), "cast");
+    let current = self.current_token();
+    let cast_name = token_literal_equal(current, "cast");
     if cast_name and
         self.peek_kind() == token::Kind::Lt {
-        return self.parse_cast_expr(tree, types);
+        return self.parse_cast_expr(tree);
     }
-    let type_name = token_literal_equal(self.tokens.at(handle), "type");
+    let type_name = token_literal_equal(current, "type");
     if type_name and
         self.peek_kind() == token::Kind::Lt {
-        return self.parse_type_expr(tree, types);
+        return self.parse_type_expr(tree);
     }
-    let starts_upper = token_literal_starts_upper(self.tokens.at(handle));
+    let starts_upper = token_literal_starts_upper(current);
     if self.peek_kind() == token::Kind::LBrace and
         starts_upper {
         let owned_name = try owned_token_literal(
             self.allocator,
-            self.tokens.at(handle)
+            current
         );
-        return self.parse_struct_literal_expr(tree, types, move owned_name);
+        return self.parse_struct_literal_expr(tree, move owned_name);
     }
     let name = try retain_literal(
-        self.allocator,
         tree,
-        self.tokens.at(handle)
+        current
     );
     return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: name,
-        span: token_span(self.tokens.at(handle))
+        span: token_span(current)
     }));
 }
 
@@ -2843,20 +2592,18 @@ fn token_literal_starts_upper(current: &token::Token) -> bool {
 }
 
 fn (self: &var Parser) parse_cast_expr(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
     let keyword_span = token_span_at(self);
     if !try self.expect_peek(token::Kind::Lt) {
-        return add_error_ident(self.allocator, tree, keyword_span);
+        return add_error_ident(tree, keyword_span);
     }
     try self.next_token();
-    let parsed = try self.parse_type_name(types);
+    let parsed = try self.parse_type_name(tree);
     if parsed |target_type| {
         if !try self.expect_peek(token::Kind::Gt) or
             !try self.expect_peek(token::Kind::LParen) {
             let value = try add_error_ident(
-                self.allocator,
                 tree,
                 token_span_at(self)
             );
@@ -2870,13 +2617,12 @@ fn (self: &var Parser) parse_cast_expr(
         try self.next_token();
         let value = try self.parse_expression(
             tree,
-            types,
             lowest_precedence()
         );
         let _ = try self.expect_peek(token::Kind::RParen);
         return add_cast_expr(tree, target_type, value, keyword_span);
     }
-    return add_error_ident(self.allocator, tree, keyword_span);
+    return add_error_ident(tree, keyword_span);
 }
 
 fn add_cast_expr(
@@ -2894,7 +2640,6 @@ fn add_cast_expr(
 
 fn (self: &var Parser) parse_orelse_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     left: ast::Expression
 ) -> !ast::Expression {
     let span = token_span_at(self);
@@ -2905,7 +2650,6 @@ fn (self: &var Parser) parse_orelse_expr(
             try self.next_token();
             value = try self.parse_expression(
                 tree,
-                types,
                 lowest_precedence()
             );
         }
@@ -2930,7 +2674,7 @@ fn (self: &var Parser) parse_orelse_expr(
         ));
         return add_orelse_guard(tree, left, exit, span);
     }
-    return self.parse_binary_expr(tree, types, left);
+    return self.parse_binary_expr(tree, left);
 }
 
 fn add_orelse_guard(
@@ -2941,41 +2685,38 @@ fn add_orelse_guard(
 ) -> ast::Expression {
     return tree.add_expression(ast::ExpressionNode::OrelseGuard(
         ast::OrelseGuardExpr {
-            condition: condition,
-            exit: exit,
-            span: span
-        }
+        condition: condition,
+        exit: exit,
+        span: span
+    }
     ));
 }
 
 fn (self: &var Parser) parse_binary_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     left: ast::Expression
 ) -> !ast::Expression {
-    let handle = self.stream.get_or_panic(self.position);
+    let current = self.current_token();
     let operator = try retain_literal(
-        self.allocator,
         tree,
-        self.tokens.at(handle)
+        current
     );
-    let operator_span = token_span(self.tokens.at(handle));
+    let operator_span = token_span(current);
     let binding_power = self.current_precedence();
     try self.next_token();
-    let right = try self.parse_expression(tree, types, binding_power);
+    let right = try self.parse_expression(tree, binding_power);
     return tree.add_expression(ast::ExpressionNode::Binary(
         ast::BinaryExpr {
-            left: left,
-            operator: operator,
-            operator_span: operator_span,
-            right: right
-        }
+        left: left,
+        operator: operator,
+        operator_span: operator_span,
+        right: right
+    }
     ));
 }
 
 fn (self: &var Parser) parse_call_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     callee: ast::Expression
 ) -> !ast::Expression {
     var args = array::new<ast::Expression>(self.allocator);
@@ -2987,7 +2728,6 @@ fn (self: &var Parser) parse_call_expr(
     try self.next_token();
     try args.append(try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     ));
     while self.peek_kind() == token::Kind::Comma {
@@ -2998,7 +2738,6 @@ fn (self: &var Parser) parse_call_expr(
         try self.next_token();
         try args.append(try self.parse_expression(
             tree,
-            types,
             lowest_precedence()
         ));
     }
@@ -3020,7 +2759,6 @@ fn add_call_expr(
 
 fn (self: &var Parser) parse_struct_literal_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     type_name: string::String
 ) -> !ast::Expression {
     let retained_type = tree.add_text(move type_name);
@@ -3031,7 +2769,7 @@ fn (self: &var Parser) parse_struct_literal_expr(
     try self.next_token();
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
-        if try self.parse_field_value(tree, types) |field| {
+        if try self.parse_field_value(tree) |field| {
             try fields.append(field);
         } else {
             return add_struct_literal(
@@ -3055,32 +2793,24 @@ fn (self: &var Parser) parse_struct_literal_expr(
 }
 
 fn (self: &var Parser) parse_field_value(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?ast::FieldValue {
     if self.current_kind() != token::Kind::Ident {
-        let handle = self.stream.get_or_panic(self.position);
         let message = try unexpected_token_message(
             self.allocator,
             "expected field name, got ",
-            self.tokens.at(handle)
+            self.current_token()
         );
         try self.record_error(move message);
         return null;
     }
-    let name_handle = self.stream.get_or_panic(self.position);
-    let name = try retain_literal(
-        self.allocator,
-        tree,
-        self.tokens.at(name_handle)
-    );
+    let name = try self.retain_current_literal(tree);
     if !try self.expect_peek(token::Kind::Colon) {
         return null;
     }
     try self.next_token();
     let value = try self.parse_expression(
         tree,
-        types,
         lowest_precedence()
     );
     return ast::FieldValue { name: name, value: value };
@@ -3094,22 +2824,21 @@ fn add_struct_literal(
 ) -> ast::Expression {
     return tree.add_expression(ast::ExpressionNode::StructLiteral(
         ast::StructLiteralExpr {
-            type_name: type_name,
-            fields: move fields,
-            span: span
-        }
+        type_name: type_name,
+        fields: move fields,
+        span: span
+    }
     ));
 }
 
 fn (self: &var Parser) parse_type_expr(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
     if !try self.expect_peek(token::Kind::Lt) {
         return add_type_expr(tree, string::new(self.allocator));
     }
     try self.next_token();
-    if try self.parse_static_type_arg(types, false) |spelling| {
+    if try self.parse_static_type_arg(tree, false) |spelling| {
         let expression = add_type_expr(tree, move spelling);
         let _ = try self.expect_type_close();
         return expression;
@@ -3129,11 +2858,10 @@ fn add_type_expr(
 
 fn (self: &var Parser) parse_type_apply_expr(
     tree: &var ast::Ast,
-    types: &var typ::Table,
     callee: ast::Expression
 ) -> !ast::Expression {
     try self.next_token();
-    if try self.parse_type_arg_list(types, false) |spelling| {
+    if try self.parse_type_arg_list(tree, false) |spelling| {
         let expression = add_type_apply_expr(
             tree,
             callee,
@@ -3183,10 +2911,9 @@ fn (self: &var Parser) parse_field_expr(
             zero_span()
         );
     }
-    let handle = self.stream.get_or_panic(self.position);
     let name = try owned_token_literal(
         self.allocator,
-        self.tokens.at(handle)
+        self.current_token()
     );
     let span = join_spans(expression_span(tree, receiver), token_span_at(self));
     return add_field_expr(tree, receiver, move name, namespace, span);
@@ -3275,18 +3002,17 @@ fn text_starts_upper(tree: &ast::Ast, value: ast::Text) -> bool {
 }
 
 fn (self: &var Parser) parse_buffer_literal_expr(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !ast::Expression {
     let span = token_span_at(self);
-    let parsed = try self.parse_type_name(types);
+    let parsed = try self.parse_type_name(tree);
     if parsed |type_name| {
-        match typ::root_node(types, type_name) {
+        match typ::root_node(&tree.types, type_name) {
             Buffer(buffer) => {
                 let elem_type = typ::child_type(type_name, buffer.elem);
                 let elem = try typ::render(
                     self.allocator,
-                    types,
+                    &tree.types,
                     elem_type
                 );
                 defer elem.deinit();
@@ -3298,11 +3024,11 @@ fn (self: &var Parser) parse_buffer_literal_expr(
                         ""
                     );
                     try self.record_error(move message);
-                    return add_error_ident(self.allocator, tree, span);
+                    return add_error_ident(tree, span);
                 }
                 if !try self.expect_peek(token::Kind::LBrace) or
                     !try self.expect_peek(token::Kind::RBrace) {
-                    return add_error_ident(self.allocator, tree, span);
+                    return add_error_ident(tree, span);
                 }
                 return tree.add_expression(ast::ExpressionNode::BufferLiteral(
                     ast::BufferLiteralExpr { size: buffer.size, span: span }
@@ -3310,7 +3036,11 @@ fn (self: &var Parser) parse_buffer_literal_expr(
             },
             _ => {},
         }
-        let rendered = try typ::render(self.allocator, types, type_name);
+        let rendered = try typ::render(
+            self.allocator,
+            &tree.types,
+            type_name
+        );
         defer rendered.deinit();
         let message = try string_value_message(
             self.allocator,
@@ -3320,15 +3050,14 @@ fn (self: &var Parser) parse_buffer_literal_expr(
         );
         try self.record_error(move message);
     }
-    return add_error_ident(self.allocator, tree, span);
+    return add_error_ident(tree, span);
 }
 
 fn add_error_ident(
-    allocator: Allocator,
     tree: &var ast::Ast,
     span: ast::Span
 ) -> !ast::Expression {
-    let name = try tree.add_text_from_bytes(allocator, "<error>");
+    let name = try tree.add_text_from_bytes("<error>");
     return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: name,
         span: span
@@ -3356,15 +3085,14 @@ fn string_value_message(
 }
 
 fn token_span_at(parser: &Parser) -> ast::Span {
-    let handle = parser.stream.get_or_panic(parser.position);
-    return token_span(parser.tokens.at(handle));
+    return token_span(parser.current_token());
 }
 
 fn (self: &var Parser) parse_payload_capture(
     tree: &var ast::Ast
 ) -> !?ast::Text {
     if self.peek_kind() != token::Kind::Pipe {
-        let empty = try tree.add_text_from_bytes(self.allocator, "");
+        let empty = tree.add_empty_text();
         return empty;
     }
     if !try self.expect_peek(token::Kind::Pipe) or
@@ -3376,7 +3104,6 @@ fn (self: &var Parser) parse_payload_capture(
     }
     let handle = self.stream.get_or_panic(self.position - 1);
     let capture = try retain_literal(
-        self.allocator,
         tree,
         self.tokens.at(handle)
     );
@@ -3406,13 +3133,11 @@ fn (self: &var Parser) parse_variant_capture(
         var captures = array::new<ast::Text>(self.allocator);
         errdefer captures.deinit();
         let first = try retain_literal(
-            self.allocator,
             tree,
             self.tokens.at(first_handle)
         );
         try captures.append(first);
         let second = try retain_literal(
-            self.allocator,
             tree,
             self.tokens.at(second_handle)
         );
@@ -3425,7 +3150,6 @@ fn (self: &var Parser) parse_variant_capture(
     var captures = array::new<ast::Text>(self.allocator);
     errdefer captures.deinit();
     let first = try retain_literal(
-        self.allocator,
         tree,
         self.tokens.at(first_handle)
     );
@@ -3434,13 +3158,13 @@ fn (self: &var Parser) parse_variant_capture(
 }
 
 fn (self: &var Parser) parse_type_name(
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?typ::Type {
     var builder = typ::new_builder(self.allocator);
     errdefer builder.deinit();
     let parsed = try self.parse_type_node(&var builder);
     if parsed |root| {
-        return typ::finish_builder(move builder, types, root);
+        return typ::finish_builder(move builder, &var tree.types, root);
     }
     builder.deinit();
     return null;
@@ -3456,11 +3180,10 @@ fn (self: &var Parser) parse_type_node(
         Question => return self.parse_optional_type(builder),
         Ident => return self.parse_named_type(builder),
         _ => {
-            let handle = self.stream.get_or_panic(self.position);
             let message = try unexpected_token_message(
                 self.allocator,
                 "expected type, got ",
-                self.tokens.at(handle)
+                self.current_token()
             );
             try self.record_error(move message);
             return null;
@@ -3563,20 +3286,18 @@ fn (self: &var Parser) parse_named_type(
 fn (self: &var Parser) parse_type_path() -> !array::Array<string::String> {
     var path = array::new<string::String>(self.allocator);
     errdefer path.deinit();
-    let first = self.stream.get_or_panic(self.position);
     try path.append(try owned_token_literal(
         self.allocator,
-        self.tokens.at(first)
+        self.current_token()
     ));
     while self.peek_kind() == token::Kind::DoubleColon {
         try self.next_token();
         if !try self.expect_peek(token::Kind::Ident) {
             return move path;
         }
-        let part = self.stream.get_or_panic(self.position);
         try path.append(try owned_token_literal(
             self.allocator,
-            self.tokens.at(part)
+            self.current_token()
         ));
     }
     return move path;
@@ -3607,14 +3328,14 @@ fn (self: &var Parser) parse_type_arguments(
 }
 
 fn (self: &var Parser) parse_type_arg_list(
-    types: &var typ::Table,
+    tree: &var ast::Ast,
     allow_const: bool
 ) -> !?string::String {
     var out = string::new(self.allocator);
     errdefer out.deinit();
     var first = true;
     while true {
-        if try self.parse_static_type_arg(types, allow_const) |arg| {
+        if try self.parse_static_type_arg(tree, allow_const) |arg| {
             defer arg.deinit();
             if !first {
                 try out.append_bytes(", ");
@@ -3639,10 +3360,9 @@ fn (self: &var Parser) parse_type_arg_list(
 }
 
 fn (self: &var Parser) parse_generic_param_list(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?array::Array<ast::Text> {
-    if try self.parse_static_param_list(tree, types) |params| {
+    if try self.parse_static_param_list(tree) |params| {
         defer params.deinit();
         var names = array::new<ast::Text>(self.allocator);
         errdefer names.deinit();
@@ -3652,7 +3372,6 @@ fn (self: &var Parser) parse_generic_param_list(
                 let message = try expected_type_param_message(
                     self.allocator,
                     tree,
-                    types,
                     param
                 );
                 try self.record_error(move message);
@@ -3668,8 +3387,7 @@ fn (self: &var Parser) parse_generic_param_list(
 }
 
 fn (self: &var Parser) parse_static_param_list(
-    tree: &var ast::Ast,
-    types: &var typ::Table
+    tree: &var ast::Ast
 ) -> !?array::Array<ast::StaticParam> {
     var params = array::new<ast::StaticParam>(self.allocator);
     errdefer params.deinit();
@@ -3677,37 +3395,36 @@ fn (self: &var Parser) parse_static_param_list(
     defer seen.deinit();
     try self.next_token();
     while true {
-        let handle = self.stream.get_or_panic(self.position);
-        if self.tokens.at(handle).kind != token::Kind::Ident {
+        let current = self.current_token();
+        if current.kind != token::Kind::Ident {
             let message = try unexpected_token_message(
                 self.allocator,
                 "expected static parameter, got ",
-                self.tokens.at(handle)
+                current
             );
             try self.record_error(move message);
             params.deinit();
             return null;
         }
-        if static_param_seen(&seen, self.tokens.at(handle)) {
+        if static_param_seen(&seen, current) {
             let message = try token_literal_message(
                 self.allocator,
                 "duplicate static parameter ",
-                self.tokens.at(handle)
+                current
             );
             try self.record_error(move message);
             params.deinit();
             return null;
         }
-        try retain_static_param_name(&var seen, self.tokens.at(handle));
+        try retain_static_param_name(&var seen, current);
         let name = try retain_literal(
-            self.allocator,
             tree,
-            self.tokens.at(handle)
+            current
         );
         if self.peek_kind() == token::Kind::Colon {
             try self.next_token();
             try self.next_token();
-            let type_name = try self.parse_type_name(types);
+            let type_name = try self.parse_type_name(tree);
             try params.append(ast::StaticParam {
                 name: name,
                 type_name: type_name
@@ -3749,13 +3466,12 @@ fn retain_static_param_name(
 fn expected_type_param_message(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     param: &ast::StaticParam
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
     try out.append_bytes("expected type parameter, got ");
-    try ast::append_static_param(&var out, tree, types, param);
+    try ast::append_static_param(&var out, tree, param);
     return move out;
 }
 
@@ -3776,7 +3492,7 @@ fn append_retained_string(
 }
 
 fn (self: &var Parser) parse_static_type_arg(
-    types: &var typ::Table,
+    tree: &var ast::Ast,
     allow_const: bool
 ) -> !?string::String {
     let kind = self.current_kind();
@@ -3792,8 +3508,16 @@ fn (self: &var Parser) parse_static_type_arg(
             allow_const
         );
         if parsed |root| {
-            let type_name = typ::finish_builder(move builder, types, root);
-            return try typ::render(self.allocator, types, type_name);
+            let type_name = typ::finish_builder(
+                move builder,
+                &var tree.types,
+                root
+            );
+            return try typ::render(
+                self.allocator,
+                &tree.types,
+                type_name
+            );
         }
         builder.deinit();
         return null;
@@ -3801,17 +3525,15 @@ fn (self: &var Parser) parse_static_type_arg(
     if kind == token::Kind::Int or
         kind == token::Kind::True or
         kind == token::Kind::False {
-        let handle = self.stream.get_or_panic(self.position);
         return try owned_token_literal(
             self.allocator,
-            self.tokens.at(handle)
+            self.current_token()
         );
     }
-    let handle = self.stream.get_or_panic(self.position);
     let message = try unexpected_token_message(
         self.allocator,
         "expected static argument, got ",
-        self.tokens.at(handle)
+        self.current_token()
     );
     try self.record_error(move message);
     return null;
@@ -3821,9 +3543,8 @@ fn (self: &var Parser) parse_type_argument(
     builder: &var typ::Builder,
     allow_const: bool
 ) -> !?arena::Handle<typ::Node> {
-    let handle = self.stream.get_or_panic(self.position);
     let is_const = self.current_kind() == token::Kind::Ident and
-        token_literal_equal(self.tokens.at(handle), "const");
+        token_literal_equal(self.current_token(), "const");
     if !is_const {
         return self.parse_type_node(builder);
     }
@@ -3863,15 +3584,15 @@ fn (self: &var Parser) parse_buffer_type(
     builder: &var typ::Builder
 ) -> !?arena::Handle<typ::Node> {
     try self.next_token();
-    let handle = self.stream.get_or_panic(self.position);
+    let current = self.current_token();
     var size = 0;
-    if positive_decimal(self.tokens.at(handle)) |parsed| {
+    if positive_decimal(current) |parsed| {
         size = parsed;
     } else {
         let message = try token_literal_message(
             self.allocator,
             "buffer size must be a positive integer, got ",
-            self.tokens.at(handle)
+            current
         );
         try self.record_error(move message);
         return null;
@@ -3933,12 +3654,11 @@ fn positive_decimal(current: &token::Token) -> ?i64 {
 }
 
 fn (self: &var Parser) error_expected_declaration() -> !void {
-    let handle = self.stream.get_or_panic(self.position);
     let prefix = "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got ";
     let message = try unexpected_token_message(
         self.allocator,
         prefix,
-        self.tokens.at(handle)
+        self.current_token()
     );
     return self.record_error(move message);
 }
@@ -3956,11 +3676,10 @@ fn (self: &var Parser) record_context_error(
 
 fn (self: &var Parser) record_error(message: string::String) -> !void {
     defer message.deinit();
-    let handle = self.stream.get_or_panic(self.position);
     let bytes = message.as_bytes();
     let entry = try diagnostic_at_token(
         self.allocator,
-        self.tokens.at(handle),
+        self.current_token(),
         bytes
     );
     errdefer entry.deinit();

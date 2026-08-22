@@ -62,21 +62,33 @@ work unit の出力は次を含みます。
 ### Size parity gate
 
 移植で同じ処理が大幅に長くなることは、単なる見た目ではなく language / std / ownership
-設計の不足を見つける signal として扱います。blank、comment、test、共用済みの基盤を除き、対象
-declaration とその移植だけが必要とする result type / helper の code LOC を Go と Kizu で
-数えます。test と document の行数は別に報告し、実装比率へ混ぜません。
+設計の不足を見つける signal として扱います。比率は work unit と module 累計の 2 段階で
+測ります。
 
-- Kizu が Go の 1.5 倍以上なら、増えた行を ownership の明示、error 処理、API shape、
-  重複処理に分類して理由を調べる
-- 2 倍以上なら、全増分を既存の原理で説明できない限り移植を止める
+- work unit は、対象 declaration と、その移植のために新設または変更した result type /
+  helper の code LOC を Go と Kizu で数える。後で共用する予定という理由では除外しない
+- work unit の完了ごとに、対象 module 全体の Go / Kizu code LOC と比率も更新する。
+  module 累計から共用 helper や先行 work unit の基盤を除外しない
+- どちらも blank、comment、test、document を実装比率へ混ぜない。改行だけで比率が動いて
+  いないことを確かめるため、空白区切りの code word 数と比率も併記する
+
+- work unit または module 累計の Kizu が Go の 1.5 倍以上なら、増えた行を ownership の
+  明示、error 処理、API shape、重複処理に分類し、それぞれの行数を報告する
+- 2 倍以上なら移植を止める。既存の原理から source に残す必要がある操作だけを不可避な
+  増分として数え、分類名を付けただけでは説明済みにしない
+- 累計 gate 違反が後から判明した module は、以前 complete と記録していても未完了へ戻し、
+  原因を閉じるまで後続 module の移植を進めない
+- 同じ ownership / error / construction の定型が複数の call site に増える場合は、個々の
+  行が必要でも local representation または API shape の問題として扱う
 - local representation や分割の問題なら target を直す
 - 複数 module で必要になる primitive がないなら std gap として切り出す
 - source で表現できない、または毎回 boilerplate を要求するなら language gap として止め、
   移植の途中で仕様を足さない
 
 LOC を揃えるために lifecycle、境界 check、意味のある名前を消しません。比率は品質目標では
-なく調査 trigger です。明示 ownership に必要な増分は、その根拠と cleanup path が説明できれば
-許容します。
+なく調査 trigger です。明示 ownership に必要な増分は、その操作を共通化しても source から
+消してはいけない理由と cleanup path を示せる場合だけ許容します。module 完了時に累計 gate を
+満たさない、または不可避と確認できない反復が残るなら complete と記録しません。
 
 ## Mechanical mapping
 

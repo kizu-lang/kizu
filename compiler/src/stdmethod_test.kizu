@@ -1,17 +1,15 @@
 import compiler::ast;
 import compiler::stdmethod;
-import compiler::typ;
 import std::array;
 import std::mem;
 import std::string;
 import std::testing;
 
 fn retained_text(
-    allocator: Allocator,
     tree: &var ast::Ast,
     bytes: []u8
 ) -> !ast::Text {
-    return tree.add_text_from_bytes(allocator, bytes);
+    return tree.add_text_from_bytes(bytes);
 }
 
 fn empty_signature(
@@ -21,12 +19,12 @@ fn empty_signature(
 ) -> !ast::FunctionSignature {
     return ast::FunctionSignature {
         receiver: false,
-        name: try retained_text(allocator, tree, name),
+        name: try retained_text(tree, name),
         static_params: array::new<ast::StaticParam>(allocator),
         params: array::new<ast::Param>(allocator),
         return_type: null,
         requires_unsafe: false,
-        extern_abi: try retained_text(allocator, tree, ""),
+        extern_abi: try retained_text(tree, ""),
         public: false,
         std: true
     };
@@ -35,7 +33,6 @@ fn empty_signature(
 fn add_method(
     allocator: Allocator,
     tree: &var ast::Ast,
-    types: &var typ::Table,
     program: &var ast::Program,
     name: []u8,
     param_type: []u8,
@@ -47,25 +44,25 @@ fn add_method(
     errdefer signature.deinit();
     signature.receiver = true;
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, tree, "T"),
+        name: try retained_text(tree, "T"),
         type_name: null
     });
     try signature.params.append(ast::Param {
-        name: try retained_text(allocator, tree, "self"),
-        type_name: try types.parse("std::array::Array<T>"),
+        name: try retained_text(tree, "self"),
+        type_name: try tree.types.parse("std::array::Array<T>"),
         borrow: false,
         mut_borrow: false
     });
     try signature.params.append(ast::Param {
-        name: try retained_text(allocator, tree, "value"),
-        type_name: try types.parse(param_type),
+        name: try retained_text(tree, "value"),
+        type_name: try tree.types.parse(param_type),
         borrow: borrow,
         mut_borrow: mut_borrow
     });
     if mem::len(return_type) > 0 {
-        signature.return_type = try types.parse(return_type);
+        signature.return_type = try tree.types.parse(return_type);
     }
-    let doc = try retained_text(allocator, tree, "");
+    let doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
         signature: move signature,
@@ -87,7 +84,7 @@ fn add_empty_function(
     var signature = try empty_signature(allocator, tree, name);
     errdefer signature.deinit();
     signature.receiver = receiver;
-    let doc = try retained_text(allocator, tree, "");
+    let doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
         signature: move signature,
@@ -102,7 +99,6 @@ fn add_empty_function(
 fn add_value_static_method(
     allocator: Allocator,
     tree: &var ast::Ast,
-    types: &var typ::Table,
     program: &var ast::Program
 ) -> !void {
     var signature = try empty_signature(
@@ -113,16 +109,16 @@ fn add_value_static_method(
     errdefer signature.deinit();
     signature.receiver = true;
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, tree, "N"),
-        type_name: try types.parse("i64")
+        name: try retained_text(tree, "N"),
+        type_name: try tree.types.parse("i64")
     });
     try signature.params.append(ast::Param {
-        name: try retained_text(allocator, tree, "self"),
-        type_name: try types.parse("std::array::Array<u8>"),
+        name: try retained_text(tree, "self"),
+        type_name: try tree.types.parse("std::array::Array<u8>"),
         borrow: false,
         mut_borrow: false
     });
-    let doc = try retained_text(allocator, tree, "");
+    let doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
         signature: move signature,
@@ -135,11 +131,10 @@ fn add_value_static_method(
 }
 
 fn add_non_function(
-    allocator: Allocator,
     tree: &var ast::Ast,
     program: &var ast::Program
 ) -> !void {
-    let name = try retained_text(allocator, tree, "ignored");
+    let name = try retained_text(tree, "ignored");
     let declaration = tree.add_declaration(ast::DeclarationNode::Test(
         ast::TestDecl { name: name, body: null }
     ));
@@ -164,8 +159,6 @@ fn expect_type_text(
 
 test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    errdefer types.deinit();
     var tree = ast::new(allocator);
     errdefer tree.deinit();
     var program = ast::new_program(allocator);
@@ -173,7 +166,6 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     try add_method(
         allocator,
         &var tree,
-        &var types,
         &var program,
         "std::array::Array.append",
         "T",
@@ -184,7 +176,6 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     try add_method(
         allocator,
         &var tree,
-        &var types,
         &var program,
         "std::array::Array.replace",
         "T",
@@ -195,7 +186,6 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     try add_method(
         allocator,
         &var tree,
-        &var types,
         &var program,
         "std::array::Array.append",
         "i64",
@@ -206,13 +196,11 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     try add_value_static_method(
         allocator,
         &var tree,
-        &var types,
         &var program
     );
     try add_method(
         allocator,
         &var tree,
-        &var types,
         &var program,
         "std::array::Array.reset",
         "T",
@@ -220,7 +208,7 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
         false,
         false
     );
-    try add_non_function(allocator, &var tree, &var program);
+    try add_non_function(&var tree, &var program);
     try add_empty_function(
         allocator,
         &var tree,
@@ -238,7 +226,6 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     try add_method(
         allocator,
         &var tree,
-        &var types,
         &var program,
         "plain",
         "u8",
@@ -249,13 +236,11 @@ test "stdmethod indexes cached signatures and overwrites duplicate methods" {
     let index = try stdmethod::index_methods(
         allocator,
         &tree,
-        &types,
         &program
     );
     defer index.deinit();
     program.deinit();
     tree.deinit();
-    types.deinit();
     if index.find("std::array::Array", "append") |method| {
         expect_string(
             &method.signature_name,

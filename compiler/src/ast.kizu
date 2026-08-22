@@ -22,8 +22,10 @@ pub struct ExpressionList {
     pub node: arena::Handle<array::Array<Expression>>
 }
 
-/// Owns the node graphs and shared values for one program.
+/// Owns the syntax and parsed type graphs for one compiler phase.
 pub struct Ast {
+    allocator: Allocator,
+    pub types: typ::Table,
     pub texts: arena::Arena<string::String>,
     pub expression_lists: arena::Arena<array::Array<Expression>>,
     pub declarations: arena::Arena<DeclarationNode>,
@@ -538,6 +540,8 @@ pub struct DerefExpr {
 /// Creates empty storage for one parsed AST.
 pub fn new(allocator: Allocator) -> Ast {
     return Ast {
+        allocator: allocator,
+        types: typ::new(allocator),
         texts: arena::new<string::String>(allocator),
         expression_lists: arena::new<array::Array<Expression>>(allocator),
         declarations: arena::new<DeclarationNode>(allocator),
@@ -558,12 +562,16 @@ fn (self: &var Ast) add_text(value: string::String) -> Text {
     return Text { node: self.texts.add(move value) };
 }
 
+/// Retains an empty text value without a fallible byte copy.
+fn (self: &var Ast) add_empty_text() -> Text {
+    return self.add_text(string::new(self.allocator));
+}
+
 /// Copies borrowed bytes into text retained for the Ast lifetime.
 fn (self: &var Ast) add_text_from_bytes(
-    allocator: Allocator,
     bytes: []u8
 ) -> !Text {
-    let value = try string::from_bytes(allocator, bytes);
+    let value = try string::from_bytes(self.allocator, bytes);
     return self.add_text(move value);
 }
 
@@ -629,6 +637,13 @@ fn (self: &var Ast) add_block(block: BlockStmt) -> Block {
     return Block {
         node: self.statements.add(StatementNode::Block(move block))
     };
+}
+
+/// Retains an empty block using the syntax graph's allocator.
+fn (self: &var Ast) add_empty_block() -> Block {
+    return self.add_block(BlockStmt {
+        statements: array::new<Statement>(self.allocator)
+    });
 }
 
 /// Views a retained block as the statement node with the same identity.
@@ -759,12 +774,11 @@ fn append_field_path(
 pub fn render_expression(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     expression: Expression
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_expression(&var out, ast, types, expression);
+    try append_expression(&var out, ast, expression);
     return move out;
 }
 
@@ -772,12 +786,11 @@ pub fn render_expression(
 pub fn render_statement(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     statement: Statement
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_statement(&var out, ast, types, statement);
+    try append_statement(&var out, ast, statement);
     return move out;
 }
 
@@ -785,19 +798,17 @@ pub fn render_statement(
 pub fn render_block(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     block: Block
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_block(&var out, ast, types, block);
+    try append_block(&var out, ast, block);
     return move out;
 }
 
 fn append_expression(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     expression: Expression
 ) -> !void {
     match ast.expressions.at(expression.node) {
@@ -811,9 +822,9 @@ fn append_expression(
         Null(_) => try out.append_bytes("null"),
         OrelseGuard(value) => {
             try out.append_byte(cast<u8>(40));
-            try append_expression(out, ast, types, value.condition);
+            try append_expression(out, ast, value.condition);
             try out.append_bytes(" orelse ");
-            try append_guard_exit(out, ast, types, value.exit);
+            try append_guard_exit(out, ast, value.exit);
             try out.append_byte(cast<u8>(41));
         },
         Bool(value) => try fmt::append_bool(out, value.value),
@@ -824,55 +835,55 @@ fn append_expression(
         },
         Comptime(value) => {
             try out.append_bytes("comptime ");
-            try append_expression(out, ast, types, value.expr);
+            try append_expression(out, ast, value.expr);
         },
         Prefix(value) => {
             try out.append_byte(cast<u8>(40));
             try append_text(out, ast, value.operator);
-            try append_expression(out, ast, types, value.right);
+            try append_expression(out, ast, value.right);
             try out.append_byte(cast<u8>(41));
         },
         Binary(value) => {
             try out.append_byte(cast<u8>(40));
-            try append_expression(out, ast, types, value.left);
+            try append_expression(out, ast, value.left);
             try out.append_byte(cast<u8>(32));
             try append_text(out, ast, value.operator);
             try out.append_byte(cast<u8>(32));
-            try append_expression(out, ast, types, value.right);
+            try append_expression(out, ast, value.right);
             try out.append_byte(cast<u8>(41));
         },
         Call(value) => {
-            try append_expression(out, ast, types, value.callee);
+            try append_expression(out, ast, value.callee);
             try out.append_byte(cast<u8>(40));
-            try append_expression_list(out, ast, types, value.args);
+            try append_expression_list(out, ast, value.args);
             try out.append_byte(cast<u8>(41));
         },
         TypeApply(value) => {
-            try append_expression(out, ast, types, value.callee);
+            try append_expression(out, ast, value.callee);
             try out.append_byte(cast<u8>(60));
             try append_text(out, ast, value.type_arg);
             try out.append_byte(cast<u8>(62));
         },
         Cast(value) => {
             try out.append_bytes("cast<");
-            try typ::append_render(out, types, value.target_type);
+            try typ::append_render(out, &ast.types, value.target_type);
             try out.append_bytes(">(");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
             try out.append_byte(cast<u8>(41));
         },
         Try(value) => {
             try out.append_bytes("try ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
         },
         Move(value) => {
             try out.append_bytes("move ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
         },
         Unsafe(value) => {
             try out.append_bytes("unsafe ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
         },
-        Index(value) => try append_index(out, ast, types, value),
+        Index(value) => try append_index(out, ast, value),
         StructLiteral(value) => {
             try append_text(out, ast, value.type_name);
             try out.append_bytes(" { ");
@@ -883,7 +894,7 @@ fn append_expression(
                 }
                 try append_text(out, ast, field.name);
                 try out.append_bytes(": ");
-                try append_expression(out, ast, types, field.value);
+                try append_expression(out, ast, field.value);
                 index = index + 1;
             }
             try out.append_bytes(" }");
@@ -893,7 +904,7 @@ fn append_expression(
             try out.append_bytes("{}");
         },
         Field(value) => {
-            try append_expression(out, ast, types, value.receiver);
+            try append_expression(out, ast, value.receiver);
             if value.namespace {
                 try out.append_bytes("::");
             } else {
@@ -902,18 +913,17 @@ fn append_expression(
             try append_text(out, ast, value.name);
         },
         Deref(value) => {
-            try append_expression(out, ast, types, value.receiver);
+            try append_expression(out, ast, value.receiver);
             try out.append_bytes(".*");
         },
         If(value) => try append_conditional(
             out,
             ast,
-            types,
             value.condition,
             value.consequence,
             value.alternative
         ),
-        Match(value) => try append_match(out, ast, types, value),
+        Match(value) => try append_match(out, ast, value),
     }
     return;
 }
@@ -921,11 +931,10 @@ fn append_expression(
 fn append_statement(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     statement: Statement
 ) -> !void {
     match ast.statements.at(statement.node) {
-        Block(value) => try append_block_value(out, ast, types, value),
+        Block(value) => try append_block_value(out, ast, value),
         Let(value) => {
             if value.mutable {
                 try out.append_bytes("var ");
@@ -934,37 +943,36 @@ fn append_statement(
             }
             try append_text(out, ast, value.name);
             try out.append_bytes(" = ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
             try out.append_byte(cast<u8>(59));
         },
         Assign(value) => {
-            try append_expression(out, ast, types, value.target);
+            try append_expression(out, ast, value.target);
             try out.append_bytes(" = ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
             try out.append_byte(cast<u8>(59));
         },
         Return(value) => {
             try out.append_bytes("return");
             if value.value |expression| {
                 try out.append_byte(cast<u8>(32));
-                try append_expression(out, ast, types, expression);
+                try append_expression(out, ast, expression);
             }
             try out.append_byte(cast<u8>(59));
         },
         Defer(value) => {
             try out.append_bytes("defer ");
-            try append_expression(out, ast, types, value.expr);
+            try append_expression(out, ast, value.expr);
             try out.append_byte(cast<u8>(59));
         },
         ErrDefer(value) => {
             try out.append_bytes("errdefer ");
-            try append_expression(out, ast, types, value.expr);
+            try append_expression(out, ast, value.expr);
             try out.append_byte(cast<u8>(59));
         },
         If(value) => try append_conditional(
             out,
             ast,
-            types,
             value.condition,
             value.consequence,
             value.alternative
@@ -972,30 +980,29 @@ fn append_statement(
         While(value) => {
             try append_label(out, ast, value.label);
             try out.append_bytes("while ");
-            try append_expression(out, ast, types, value.condition);
+            try append_expression(out, ast, value.condition);
             try out.append_byte(cast<u8>(32));
-            try append_block(out, ast, types, value.body);
+            try append_block(out, ast, value.body);
         },
         For(value) => {
             try append_label(out, ast, value.label);
             try out.append_bytes("for ");
-            try append_expression(out, ast, types, value.start);
+            try append_expression(out, ast, value.start);
             try out.append_bytes("..");
-            try append_expression(out, ast, types, value.end);
+            try append_expression(out, ast, value.end);
             try out.append_bytes(" |");
             try append_text(out, ast, value.name);
             try out.append_bytes("| ");
-            try append_block(out, ast, types, value.body);
+            try append_block(out, ast, value.body);
         },
         Break(value) => try append_jump(out, ast, "break", value.label),
         Continue(value) => try append_jump(out, ast, "continue", value.label),
-        Match(value) => try append_match(out, ast, types, value),
+        Match(value) => try append_match(out, ast, value),
         ComptimeIf(value) => {
             try out.append_bytes("comptime ");
             try append_conditional(
                 out,
                 ast,
-                types,
                 value.condition,
                 value.consequence,
                 value.alternative
@@ -1003,15 +1010,15 @@ fn append_statement(
         },
         ComptimeFor(value) => {
             try out.append_bytes("comptime for ");
-            try append_expression(out, ast, types, value.list);
+            try append_expression(out, ast, value.list);
             try out.append_bytes(" |");
             try append_text(out, ast, value.name);
             try out.append_bytes("| ");
-            try append_block(out, ast, types, value.body);
+            try append_block(out, ast, value.body);
         },
         ComptimeMatch(value) => {
             try out.append_bytes("comptime match ");
-            try append_expression(out, ast, types, value.value);
+            try append_expression(out, ast, value.value);
             try out.append_bytes(" |");
             try append_text(out, ast, value.name);
             if !text_is_empty(ast, value.binding) {
@@ -1019,10 +1026,10 @@ fn append_statement(
                 try append_text(out, ast, value.binding);
             }
             try out.append_bytes("| ");
-            try append_block(out, ast, types, value.body);
+            try append_block(out, ast, value.body);
         },
         Expr(value) => {
-            try append_expression(out, ast, types, value.expr);
+            try append_expression(out, ast, value.expr);
             try out.append_byte(cast<u8>(59));
         },
     }
@@ -1032,11 +1039,10 @@ fn append_statement(
 fn append_block(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     block: Block
 ) -> !void {
     match ast.statements.at(block.node) {
-        Block(value) => try append_block_value(out, ast, types, value),
+        Block(value) => try append_block_value(out, ast, value),
         _ => {},
     }
     return;
@@ -1045,7 +1051,6 @@ fn append_block(
 fn append_block_value(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     block: &BlockStmt
 ) -> !void {
     try out.append_bytes("{ ");
@@ -1057,7 +1062,6 @@ fn append_block_value(
         try append_statement(
             out,
             ast,
-            types,
             Statement { node: statement.node }
         );
         index = index + 1;
@@ -1069,18 +1073,17 @@ fn append_block_value(
 fn append_conditional(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     condition: Expression,
     consequence: Block,
     alternative: ?Block
 ) -> !void {
     try out.append_bytes("if ");
-    try append_expression(out, ast, types, condition);
+    try append_expression(out, ast, condition);
     try out.append_byte(cast<u8>(32));
-    try append_block(out, ast, types, consequence);
+    try append_block(out, ast, consequence);
     if alternative |other| {
         try out.append_bytes(" else ");
-        try append_block(out, ast, types, other);
+        try append_block(out, ast, other);
     }
     return;
 }
@@ -1088,18 +1091,17 @@ fn append_conditional(
 fn append_match(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     value: &MatchStmt
 ) -> !void {
     try out.append_bytes("match ");
-    try append_expression(out, ast, types, value.value);
+    try append_expression(out, ast, value.value);
     try out.append_bytes(" { ");
     var index = 0;
     while value.arms.at(index) |arm| {
         if index > 0 {
             try out.append_bytes(", ");
         }
-        try append_match_arm(out, ast, types, arm);
+        try append_match_arm(out, ast, arm);
         index = index + 1;
     }
     try out.append_bytes(" }");
@@ -1109,7 +1111,6 @@ fn append_match(
 fn append_match_arm(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     arm: &MatchArm
 ) -> !void {
     try append_text(out, ast, arm.tag);
@@ -1122,19 +1123,18 @@ fn append_match_arm(
     match ast.statements.at(arm.body.node) {
         Expr(expression) => {
             if !expression.semicolon {
-                try append_expression(out, ast, types, expression.expr);
+                try append_expression(out, ast, expression.expr);
                 return;
             }
         },
         _ => {},
     }
-    return append_statement(out, ast, types, arm.body);
+    return append_statement(out, ast, arm.body);
 }
 
 fn append_expression_list(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     expressions: ExpressionList
 ) -> !void {
     var index = 0;
@@ -1145,7 +1145,6 @@ fn append_expression_list(
         try append_expression(
             out,
             ast,
-            types,
             expressions.get_or_panic(ast, index)
         );
         index = index + 1;
@@ -1156,22 +1155,21 @@ fn append_expression_list(
 fn append_index(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     value: &IndexExpr
 ) -> !void {
-    try append_expression(out, ast, types, value.target);
+    try append_expression(out, ast, value.target);
     try out.append_byte(cast<u8>(91));
     if !value.slice {
         if value.index |index| {
-            try append_expression(out, ast, types, index);
+            try append_expression(out, ast, index);
         }
     } else {
         if value.start |start| {
-            try append_expression(out, ast, types, start);
+            try append_expression(out, ast, start);
         }
         try out.append_bytes("..");
         if value.end |end| {
-            try append_expression(out, ast, types, end);
+            try append_expression(out, ast, end);
         }
     }
     try out.append_byte(cast<u8>(93));
@@ -1181,11 +1179,10 @@ fn append_index(
 fn append_guard_exit(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     exit: Statement
 ) -> !void {
     let start = out.len();
-    try append_statement(out, ast, types, exit);
+    try append_statement(out, ast, exit);
     if out.len() > start and string_ends_with(out, cast<u8>(59)) {
         try out.truncate(out.len() - 1);
     }
@@ -1244,7 +1241,6 @@ fn string_ends_with(value: &string::String, expected: u8) -> bool {
 pub fn render_program(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     program: &Program
 ) -> !string::String {
     var out = string::new(allocator);
@@ -1257,7 +1253,6 @@ pub fn render_program(
         try append_declaration(
             &var out,
             ast,
-            types,
             Declaration { node: declaration.node }
         );
         index = index + 1;
@@ -1269,30 +1264,28 @@ pub fn render_program(
 pub fn render_declaration(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     declaration: Declaration
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try append_declaration(&var out, ast, types, declaration);
+    try append_declaration(&var out, ast, declaration);
     return move out;
 }
 
 fn append_declaration(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: Declaration
 ) -> !void {
     match ast.declarations.at(declaration.node) {
         Import(value) => try append_import_decl(out, ast, value),
-        Function(value) => try append_function_decl(out, ast, types, value),
-        Test(value) => try append_test_decl(out, ast, types, value),
-        Struct(value) => try append_struct_decl(out, ast, types, value),
+        Function(value) => try append_function_decl(out, ast, value),
+        Test(value) => try append_test_decl(out, ast, value),
+        Struct(value) => try append_struct_decl(out, ast, value),
         Enum(value) => try append_enum_decl(out, ast, value),
         ErrorSet(value) => try append_error_set_decl(out, ast, value),
-        Union(value) => try append_union_decl(out, ast, types, value),
-        Contract(value) => try append_contract_decl(out, ast, types, value),
+        Union(value) => try append_union_decl(out, ast, value),
+        Contract(value) => try append_contract_decl(out, ast, value),
         Impl(value) => try append_impl_decl(out, ast, value),
     }
     return;
@@ -1310,7 +1303,6 @@ fn append_import_decl(
 fn append_function_decl(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &FunctionDecl
 ) -> !void {
     if declaration.signature.public {
@@ -1325,14 +1317,14 @@ fn append_function_decl(
         let abi_bytes = abi.as_bytes();
         try fmt::append_bytes_literal(out, abi_bytes);
         try out.append_bytes(" fn ");
-        try append_function_name_and_signature(out, ast, types, declaration);
+        try append_function_name_and_signature(out, ast, declaration);
         return;
     }
     try out.append_bytes("fn ");
-    try append_function_name_and_signature(out, ast, types, declaration);
+    try append_function_name_and_signature(out, ast, declaration);
     if declaration.body |body| {
         try out.append_byte(cast<u8>(32));
-        try append_block(out, ast, types, body);
+        try append_block(out, ast, body);
     } else {
         try out.append_byte(cast<u8>(59));
     }
@@ -1342,14 +1334,13 @@ fn append_function_decl(
 fn append_function_name_and_signature(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &FunctionDecl
 ) -> !void {
     var param_index = 0;
     if declaration.signature.receiver {
         if declaration.signature.params.at(0) |receiver| {
             try out.append_byte(cast<u8>(40));
-            try append_param(out, ast, types, receiver);
+            try append_param(out, ast, receiver);
             try out.append_bytes(") ");
             param_index = 1;
         }
@@ -1360,7 +1351,6 @@ fn append_function_name_and_signature(
         try append_static_params(
             out,
             ast,
-            types,
             &declaration.signature.static_params
         );
         try out.append_byte(cast<u8>(62));
@@ -1371,14 +1361,14 @@ fn append_function_name_and_signature(
         if output_index > 0 {
             try out.append_bytes(", ");
         }
-        try append_param(out, ast, types, param);
+        try append_param(out, ast, param);
         param_index = param_index + 1;
         output_index = output_index + 1;
     }
     try out.append_byte(cast<u8>(41));
     if declaration.signature.return_type |return_type| {
         try out.append_bytes(" -> ");
-        try typ::append_render(out, types, return_type);
+        try typ::append_render(out, &ast.types, return_type);
     }
     return;
 }
@@ -1386,7 +1376,6 @@ fn append_function_name_and_signature(
 fn append_static_params(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     params: &array::Array<StaticParam>
 ) -> !void {
     var index = 0;
@@ -1394,7 +1383,7 @@ fn append_static_params(
         if index > 0 {
             try out.append_bytes(", ");
         }
-        try append_static_param(out, ast, types, param);
+        try append_static_param(out, ast, param);
         index = index + 1;
     }
     return;
@@ -1404,13 +1393,12 @@ fn append_static_params(
 pub fn append_static_param(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     param: &StaticParam
 ) -> !void {
     try append_text(out, ast, param.name);
     if param.type_name |type_name| {
         try out.append_bytes(": ");
-        try typ::append_render(out, types, type_name);
+        try typ::append_render(out, &ast.types, type_name);
     }
     return;
 }
@@ -1418,19 +1406,17 @@ pub fn append_static_param(
 fn append_param(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     param: &Param
 ) -> !void {
     try append_text(out, ast, param.name);
     try out.append_bytes(": ");
     try append_borrow_prefix(out, param.borrow, param.mut_borrow);
-    return typ::append_render(out, types, param.type_name);
+    return typ::append_render(out, &ast.types, param.type_name);
 }
 
 fn append_test_decl(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &TestDecl
 ) -> !void {
     try out.append_bytes("test ");
@@ -1439,7 +1425,7 @@ fn append_test_decl(
     try fmt::append_bytes_literal(out, name_bytes);
     if declaration.body |body| {
         try out.append_byte(cast<u8>(32));
-        try append_block(out, ast, types, body);
+        try append_block(out, ast, body);
     } else {
         try out.append_bytes(" <missing>");
     }
@@ -1449,7 +1435,6 @@ fn append_test_decl(
 fn append_struct_decl(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &StructDecl
 ) -> !void {
     if declaration.public {
@@ -1467,7 +1452,7 @@ fn append_struct_decl(
         if index > 0 {
             try out.append_bytes(", ");
         }
-        try append_field(out, ast, types, field);
+        try append_field(out, ast, field);
         index = index + 1;
     }
     try out.append_bytes(" }");
@@ -1477,7 +1462,6 @@ fn append_struct_decl(
 fn append_field(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     field: &Field
 ) -> !void {
     if field.public {
@@ -1486,7 +1470,7 @@ fn append_field(
     try append_text(out, ast, field.name);
     try out.append_bytes(": ");
     try append_borrow_prefix(out, field.borrow, field.mut_borrow);
-    return typ::append_render(out, types, field.type_name);
+    return typ::append_render(out, &ast.types, field.type_name);
 }
 
 fn append_enum_decl(
@@ -1524,7 +1508,6 @@ fn append_error_set_decl(
 fn append_union_decl(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &UnionDecl
 ) -> !void {
     if declaration.public {
@@ -1539,7 +1522,7 @@ fn append_union_decl(
         if index > 0 {
             try out.append_bytes(", ");
         }
-        try append_union_variant(out, ast, types, variant);
+        try append_union_variant(out, ast, variant);
         index = index + 1;
     }
     try out.append_bytes(" }");
@@ -1549,13 +1532,12 @@ fn append_union_decl(
 fn append_union_variant(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     variant: &UnionVariant
 ) -> !void {
     try append_text(out, ast, variant.name);
     if variant.payload |payload| {
         try out.append_byte(cast<u8>(40));
-        try typ::append_render(out, types, payload);
+        try typ::append_render(out, &ast.types, payload);
         try out.append_byte(cast<u8>(41));
     }
     return;
@@ -1564,7 +1546,6 @@ fn append_union_variant(
 fn append_contract_decl(
     out: &var string::String,
     ast: &Ast,
-    types: &typ::Table,
     declaration: &ContractDecl
 ) -> !void {
     if declaration.public {
@@ -1578,7 +1559,7 @@ fn append_contract_decl(
         if index > 0 {
             try out.append_bytes("; ");
         }
-        try append_function_decl(out, ast, types, method);
+        try append_function_decl(out, ast, method);
         index = index + 1;
     }
     try out.append_bytes(" }");
@@ -1696,14 +1677,13 @@ fn add_variant_path(
 
 /// Expands one reflected variant constructor into an ordinary expression.
 pub fn variant_expansion(
-    allocator: Allocator,
     ast: &var Ast,
     owner: []u8,
     variant: []u8,
     args: ExpressionList
 ) -> !Expression {
-    let owner_name = try ast.add_text_from_bytes(allocator, owner);
-    let variant_name = try ast.add_text_from_bytes(allocator, variant);
+    let owner_name = try ast.add_text_from_bytes(owner);
+    let variant_name = try ast.add_text_from_bytes(variant);
     let has_args = args.len(ast) > 0;
     if !has_args {
         return add_variant_path(ast, owner_name, variant_name);
@@ -1780,11 +1760,11 @@ fn collect_declared_deinits(
 
 fn type_holds_owner(
     allocator: Allocator,
-    types: &typ::Table,
+    type_table: &typ::Table,
     owners: &map::Map<[]u8, bool>,
     value: typ::Type
 ) -> !bool {
-    let rendered = try typ::render(allocator, types, value);
+    let rendered = try typ::render(allocator, type_table, value);
     defer rendered.deinit();
     let text = rendered.as_bytes();
     if typ::optional_elem(text) |elem| {
@@ -1796,7 +1776,6 @@ fn type_holds_owner(
 fn declared_holder(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     owners: &map::Map<[]u8, bool>,
     declaration: Declaration
 ) -> !?Text {
@@ -1806,7 +1785,7 @@ fn declared_holder(
             while value.fields.at(index) |field| {
                 if try type_holds_owner(
                     allocator,
-                    types,
+                    &ast.types,
                     owners,
                     field.type_name
                 ) {
@@ -1822,7 +1801,7 @@ fn declared_holder(
                 if variant.payload |payload| {
                     if try type_holds_owner(
                         allocator,
-                        types,
+                        &ast.types,
                         owners,
                         payload
                     ) {
@@ -1853,7 +1832,6 @@ fn add_owner_bytes(
 pub fn deinit_owners(
     allocator: Allocator,
     ast: &Ast,
-    types: &typ::Table,
     program: &Program
 ) -> !map::Map<[]u8, bool> {
     var owners = try new_owner_map(allocator);
@@ -1867,7 +1845,6 @@ pub fn deinit_owners(
             if try declared_holder(
                 allocator,
                 ast,
-                types,
                 &owners,
                 declaration
             ) |name| {
@@ -1911,10 +1888,9 @@ fn all_declared_deinits(
 pub fn add_derived_deinits(
     allocator: Allocator,
     ast: &var Ast,
-    types: &var typ::Table,
     program: &var Program
 ) -> !void {
-    let owners = try deinit_owners(allocator, ast, types, program);
+    let owners = try deinit_owners(allocator, ast, program);
     defer owners.deinit();
     let declared = try all_declared_deinits(allocator, ast, program);
     defer declared.deinit();
@@ -1926,7 +1902,6 @@ pub fn add_derived_deinits(
         if try declared_holder(
             allocator,
             ast,
-            types,
             &owners,
             declaration
         ) |name| {
@@ -1934,7 +1909,6 @@ pub fn add_derived_deinits(
                 if try derive_deinit(
                     allocator,
                     ast,
-                    types,
                     &owners,
                     declaration
                 ) |function| {
@@ -1979,17 +1953,16 @@ fn retained_map_contains(
 pub fn derive_deinit(
     allocator: Allocator,
     ast: &var Ast,
-    types: &var typ::Table,
     owners: &map::Map<[]u8, bool>,
     declaration: Declaration
 ) -> !?FunctionDecl {
     let names = try new_derived_names(allocator, ast);
     match ast.declarations.at(declaration.node) {
         Struct(value) => return derive_struct_deinit(
-            allocator, ast, types, owners, value, &names
+            allocator, ast, owners, value, &names
         ),
         Union(value) => return derive_union_deinit(
-            allocator, ast, types, owners, value, &names
+            allocator, ast, owners, value, &names
         ),
         _ => return null,
     }
@@ -1999,13 +1972,12 @@ fn new_derived_names(
     allocator: Allocator,
     ast: &var Ast
 ) -> !DerivedNames {
-    let receiver = try ast.add_text_from_bytes(allocator, "self");
-    let capture = try ast.add_text_from_bytes(allocator, "held");
+    let receiver = try ast.add_text_from_bytes("self");
+    let capture = try ast.add_text_from_bytes("held");
     let cleanup = try ast.add_text_from_bytes(
-        allocator,
         typ::cleanup_method()
     );
-    let empty = try ast.add_text_from_bytes(allocator, "");
+    let empty = ast.add_empty_text();
     let empty_args = ast.add_expression_list(
         array::new<Expression>(allocator)
     );
@@ -2021,7 +1993,6 @@ fn new_derived_names(
 fn derive_struct_deinit(
     allocator: Allocator,
     ast: &var Ast,
-    types: &var typ::Table,
     owners: &map::Map<[]u8, bool>,
     declaration: &StructDecl,
     names: &DerivedNames
@@ -2031,7 +2002,7 @@ fn derive_struct_deinit(
     try statements.reserve(declaration.fields.len());
     var index = 0;
     while declaration.fields.at(index) |field| {
-        let rendered = try typ::render(allocator, types, field.type_name);
+        let rendered = try typ::render(allocator, &ast.types, field.type_name);
         let kind = derived_member_kind(owners, &rendered);
         rendered.deinit();
         match kind {
@@ -2081,7 +2052,6 @@ fn derive_struct_deinit(
     return try derive_decl(
         allocator,
         ast,
-        types,
         declaration.name,
         &declaration.type_params,
         names,
@@ -2117,7 +2087,6 @@ fn rendered_owner_type(
 fn derive_union_deinit(
     allocator: Allocator,
     ast: &var Ast,
-    types: &var typ::Table,
     owners: &map::Map<[]u8, bool>,
     declaration: &UnionDecl,
     names: &DerivedNames
@@ -2130,7 +2099,7 @@ fn derive_union_deinit(
     while declaration.variants.at(index) |variant| {
         var payload_owned = false;
         if variant.payload |payload| {
-            let rendered = try typ::render(allocator, types, payload);
+            let rendered = try typ::render(allocator, &ast.types, payload);
             payload_owned = rendered_owner_type(owners, &rendered);
             rendered.deinit();
         }
@@ -2170,7 +2139,6 @@ fn derive_union_deinit(
     return try derive_decl(
         allocator,
         ast,
-        types,
         declaration.name,
         &declaration.type_params,
         names,
@@ -2181,7 +2149,6 @@ fn derive_union_deinit(
 fn derive_decl(
     allocator: Allocator,
     ast: &var Ast,
-    types: &var typ::Table,
     owner: Text,
     type_params: &array::Array<Text>,
     names: &DerivedNames,
@@ -2207,7 +2174,6 @@ fn derive_decl(
     let receiver_type = try derived_receiver_type(
         allocator,
         ast,
-        types,
         owner,
         type_params
     );
@@ -2231,7 +2197,7 @@ fn derive_decl(
         ".",
         typ::cleanup_method()
     );
-    let return_type = try types.parse("void");
+    let return_type = try ast.types.parse("void");
     let body_block = ast.add_block(BlockStmt { statements: move body });
     return FunctionDecl {
         signature: FunctionSignature {
@@ -2253,13 +2219,14 @@ fn derive_decl(
 
 fn derived_receiver_type(
     allocator: Allocator,
-    ast: &Ast,
-    types: &var typ::Table,
+    ast: &var Ast,
     owner: Text,
     type_params: &array::Array<Text>
 ) -> !typ::Type {
     if type_params.len() == 0 {
-        return parse_retained_type(types, ast.texts.at(owner.node));
+        let retained = ast.texts.at(owner.node);
+        let bytes = retained.as_bytes();
+        return ast.types.parse(bytes);
     }
     var text = string::new(allocator);
     defer text.deinit();
@@ -2275,15 +2242,7 @@ fn derived_receiver_type(
     }
     try text.append_byte(cast<u8>(62));
     let bytes = text.as_bytes();
-    return types.parse(bytes);
-}
-
-fn parse_retained_type(
-    types: &var typ::Table,
-    retained: &string::String
-) -> !typ::Type {
-    let bytes = retained.as_bytes();
-    return types.parse(bytes);
+    return ast.types.parse(bytes);
 }
 
 fn append_retained_text(
@@ -2435,7 +2394,7 @@ fn add_construct_field(
 ) -> !ConstructBuilt {
     let binding = try construct_binding(allocator, ast, field.name);
     let type_arg = try joined_text(allocator, ast, owner, ", ", field.name);
-    let field_name = try ast.add_text_from_bytes(allocator, field.name);
+    let field_name = try ast.add_text_from_bytes(field.name);
     let worker_expr = ast.add_expression(ExpressionNode::Ident(IdentExpr {
         name: worker_name,
         span: zero_span()
@@ -2506,10 +2465,9 @@ pub fn construct_expansion(
     var values = array::new<FieldValue>(allocator);
     errdefer values.deinit();
     try values.reserve(fields.len());
-    let type_name = try ast.add_text_from_bytes(allocator, owner);
-    let worker_name = try ast.add_text_from_bytes(allocator, worker);
+    let type_name = try ast.add_text_from_bytes(owner);
+    let worker_name = try ast.add_text_from_bytes(worker);
     let cleanup_method = try ast.add_text_from_bytes(
-        allocator,
         typ::cleanup_method()
     );
     let empty_args = ast.add_expression_list(array::new<Expression>(allocator));

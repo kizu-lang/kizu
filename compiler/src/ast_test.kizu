@@ -7,11 +7,10 @@ import std::string;
 import std::testing;
 
 fn retained_text(
-    allocator: Allocator,
     tree: &var ast::Ast,
     bytes: []u8
 ) -> !ast::Text {
-    return tree.add_text_from_bytes(allocator, bytes);
+    return tree.add_text_from_bytes(bytes);
 }
 
 fn zero_span() -> ast::Span {
@@ -37,11 +36,10 @@ fn expect_retained_text(
 }
 
 fn add_ident_expression(
-    allocator: Allocator,
     tree: &var ast::Ast,
     name: []u8
 ) -> !ast::Expression {
-    let retained = try retained_text(allocator, tree, name);
+    let retained = try retained_text(tree, name);
     return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: retained,
         span: zero_span()
@@ -49,11 +47,10 @@ fn add_ident_expression(
 }
 
 fn add_int_expression(
-    allocator: Allocator,
     tree: &var ast::Ast,
     value: []u8
 ) -> !ast::Expression {
-    let retained = try retained_text(allocator, tree, value);
+    let retained = try retained_text(tree, value);
     return tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
         value: retained
     }));
@@ -71,14 +68,12 @@ fn add_empty_block(
 fn expect_expression_render(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     expression: ast::Expression,
     expected: []u8
 ) -> !void {
     let rendered = try ast::render_expression(
         allocator,
         tree,
-        types,
         expression
     );
     defer rendered.deinit();
@@ -89,14 +84,12 @@ fn expect_expression_render(
 fn expect_statement_render(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     statement: ast::Statement,
     expected: []u8
 ) -> !void {
     let rendered = try ast::render_statement(
         allocator,
         tree,
-        types,
         statement
     );
     defer rendered.deinit();
@@ -107,11 +100,10 @@ fn expect_statement_render(
 fn expect_block_render(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     block: ast::Block,
     expected: []u8
 ) -> !void {
-    let rendered = try ast::render_block(allocator, tree, types, block);
+    let rendered = try ast::render_block(allocator, tree, block);
     defer rendered.deinit();
     expect_retained_text(&rendered, expected);
     return;
@@ -120,14 +112,12 @@ fn expect_block_render(
 fn expect_declaration_render(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     declaration: ast::Declaration,
     expected: []u8
 ) -> !void {
     let rendered = try ast::render_declaration(
         allocator,
         tree,
-        types,
         declaration
     );
     defer rendered.deinit();
@@ -138,14 +128,12 @@ fn expect_declaration_render(
 fn expect_program_render(
     allocator: Allocator,
     tree: &ast::Ast,
-    types: &typ::Table,
     program: &ast::Program,
     expected: []u8
 ) -> !void {
     let rendered = try ast::render_program(
         allocator,
         tree,
-        types,
         program
     );
     defer rendered.deinit();
@@ -158,8 +146,8 @@ fn empty_signature(
     tree: &var ast::Ast,
     name: []u8
 ) -> !ast::FunctionSignature {
-    let function_name = try retained_text(allocator, tree, name);
-    let extern_abi = try retained_text(allocator, tree, "");
+    let function_name = try retained_text(tree, name);
+    let extern_abi = try retained_text(tree, "");
     return ast::FunctionSignature {
         receiver: false,
         name: function_name,
@@ -335,15 +323,15 @@ fn add_struct_with_field(
     var fields = array::new<ast::Field>(allocator);
     errdefer fields.deinit();
     try fields.append(ast::Field {
-        name: try retained_text(allocator, tree, field_name),
-        doc: try retained_text(allocator, tree, ""),
+        name: try retained_text(tree, field_name),
+        doc: try retained_text(tree, ""),
         type_name: field_type,
         borrow: false,
         mut_borrow: false,
         public: false
     });
-    let declaration_name = try retained_text(allocator, tree, name);
-    let declaration_doc = try retained_text(allocator, tree, "");
+    let declaration_name = try retained_text(tree, name);
+    let declaration_doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Struct(
         ast::StructDecl {
         name: declaration_name,
@@ -368,12 +356,12 @@ fn add_union_with_payload(
     var variants = array::new<ast::UnionVariant>(allocator);
     errdefer variants.deinit();
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, tree, variant_name),
-        doc: try retained_text(allocator, tree, ""),
+        name: try retained_text(tree, variant_name),
+        doc: try retained_text(tree, ""),
         payload: payload
     });
-    let declaration_name = try retained_text(allocator, tree, name);
-    let declaration_doc = try retained_text(allocator, tree, "");
+    let declaration_name = try retained_text(tree, name);
+    let declaration_doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Union(
         ast::UnionDecl {
         name: declaration_name,
@@ -396,7 +384,7 @@ fn add_cleanup_function(
     var signature = try empty_signature(allocator, tree, name);
     errdefer signature.deinit();
     signature.receiver = true;
-    let doc = try retained_text(allocator, tree, "");
+    let doc = try retained_text(tree, "");
     let declaration = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
         signature: move signature,
@@ -497,23 +485,21 @@ test "span zero state follows its source position" {
 
 test "function signatures return only type parameter names" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let integer = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let integer = try tree.types.parse("i64");
     var signature = try empty_signature(allocator, &var tree, "visit");
     defer signature.deinit();
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "T"),
+        name: try retained_text(&var tree, "T"),
         type_name: null
     });
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "count"),
+        name: try retained_text(&var tree, "count"),
         type_name: integer
     });
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "U"),
+        name: try retained_text(&var tree, "U"),
         type_name: null
     });
     let names = try signature.type_param_names(allocator);
@@ -530,7 +516,6 @@ test "function signatures return only type parameter names" {
         testing::fail("missing second type parameter name");
     }
     testing::expect_equal<i64>(3, signature.static_params.len());
-
     var empty = try empty_signature(allocator, &var tree, "plain");
     defer empty.deinit();
     let empty_names = try empty.type_param_names(allocator);
@@ -546,14 +531,14 @@ test "match arms recognize only the wildcard tag" {
         statements: array::new<ast::Statement>(allocator)
     });
     let body = retained_body.as_statement();
-    let empty = try retained_text(allocator, &var tree, "");
+    let empty = try retained_text(&var tree, "");
     let wildcard = ast::MatchArm {
-        tag: try retained_text(allocator, &var tree, "_"),
+        tag: try retained_text(&var tree, "_"),
         binding: empty,
         body: body
     };
     let named = ast::MatchArm {
-        tag: try retained_text(allocator, &var tree, "Value"),
+        tag: try retained_text(&var tree, "Value"),
         binding: empty,
         body: body
     };
@@ -570,7 +555,6 @@ test "buffer literal type text preserves its stored size" {
     let positive_text = try positive.type_text(allocator);
     defer positive_text.deinit();
     expect_retained_text(&positive_text, "[12]u8");
-
     let negative = ast::BufferLiteralExpr {
         size: -2,
         span: zero_span()
@@ -589,26 +573,25 @@ test "field paths retain their root and dotted suffix" {
         start: ast::Position { line: 3, column: 4 },
         end: ast::Position { line: 3, column: 9 }
     };
-    let root_name = try retained_text(allocator, &var tree, "owner");
+    let root_name = try retained_text(&var tree, "owner");
     let root = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: root_name,
         span: root_span
     }));
-    let first_name = try retained_text(allocator, &var tree, "a");
+    let first_name = try retained_text(&var tree, "a");
     let first = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
         receiver: root,
         name: first_name,
         namespace: false,
         span: zero_span()
     }));
-    let second_name = try retained_text(allocator, &var tree, "b");
+    let second_name = try retained_text(&var tree, "b");
     let second = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
         receiver: first,
         name: second_name,
         namespace: false,
         span: zero_span()
     }));
-
     if try ast::field_path_root(allocator, &tree, first) |resolved| {
         defer resolved.deinit();
         expect_text(&tree, resolved.root.name, "owner");
@@ -631,8 +614,7 @@ test "field paths retain their root and dotted suffix" {
         resolved.deinit();
         testing::fail("identifier was accepted as a field path");
     }
-
-    let namespace_name = try retained_text(allocator, &var tree, "Item");
+    let namespace_name = try retained_text(&var tree, "Item");
     let namespaced = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
         receiver: root,
         name: namespace_name,
@@ -643,32 +625,31 @@ test "field paths retain their root and dotted suffix" {
         resolved.deinit();
         testing::fail("namespace field was accepted as a runtime path");
     }
-    let nested_name = try retained_text(allocator, &var tree, "value");
+    let nested_name = try retained_text(&var tree, "value");
     let nested_namespace = tree.add_expression(ast::ExpressionNode::Field(
         ast::FieldExpr {
-            receiver: namespaced,
-            name: nested_name,
-            namespace: false,
-            span: zero_span()
-        }
+        receiver: namespaced,
+        name: nested_name,
+        namespace: false,
+        span: zero_span()
+    }
     ));
     if try ast::field_path_root(allocator, &tree, nested_namespace) |resolved| {
         resolved.deinit();
         testing::fail("runtime field above a namespace field was accepted");
     }
-
-    let integer_text = try retained_text(allocator, &var tree, "1");
+    let integer_text = try retained_text(&var tree, "1");
     let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
         value: integer_text
     }));
-    let invalid_name = try retained_text(allocator, &var tree, "value");
+    let invalid_name = try retained_text(&var tree, "value");
     let invalid_root = tree.add_expression(ast::ExpressionNode::Field(
         ast::FieldExpr {
-            receiver: integer,
-            name: invalid_name,
-            namespace: false,
-            span: zero_span()
-        }
+        receiver: integer,
+        name: invalid_name,
+        namespace: false,
+        span: zero_span()
+    }
     ));
     if try ast::field_path_root(allocator, &tree, invalid_root) |resolved| {
         resolved.deinit();
@@ -678,51 +659,44 @@ test "field paths retain their root and dotted suffix" {
 
 test "expression rendering covers values operators calls and access" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let integer_type = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
-
-    let x = try add_ident_expression(allocator, &var tree, "x");
-    let foo = try add_ident_expression(allocator, &var tree, "foo");
-    let one = try add_int_expression(allocator, &var tree, "1");
-    let forty_one = try add_int_expression(allocator, &var tree, "41");
-    try expect_expression_render(allocator, &tree, &types, x, "x");
-    try expect_expression_render(allocator, &tree, &types, forty_one, "41");
-
-    let string_text = try retained_text(allocator, &var tree, "café");
+    let integer_type = try tree.types.parse("i64");
+    let x = try add_ident_expression(&var tree, "x");
+    let foo = try add_ident_expression(&var tree, "foo");
+    let one = try add_int_expression(&var tree, "1");
+    let forty_one = try add_int_expression(&var tree, "41");
+    try expect_expression_render(allocator, &tree, x, "x");
+    try expect_expression_render(allocator, &tree, forty_one, "41");
+    let string_text = try retained_text(&var tree, "café");
     let string_value = tree.add_expression(ast::ExpressionNode::String(
         ast::StringExpr { value: string_text }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         string_value,
         \\"caf\xC3\xA9"
     );
     let null_value = tree.add_expression(ast::ExpressionNode::Null(
         ast::NullExpr { span: zero_span() }
     ));
-    try expect_expression_render(allocator, &tree, &types, null_value, "null");
+    try expect_expression_render(allocator, &tree, null_value, "null");
     let true_value = tree.add_expression(ast::ExpressionNode::Bool(
         ast::BoolExpr { value: true }
     ));
     let false_value = tree.add_expression(ast::ExpressionNode::Bool(
         ast::BoolExpr { value: false }
     ));
-    try expect_expression_render(allocator, &tree, &types, true_value, "true");
-    try expect_expression_render(allocator, &tree, &types, false_value, "false");
-
-    let type_name = try retained_text(allocator, &var tree, "i64");
+    try expect_expression_render(allocator, &tree, true_value, "true");
+    try expect_expression_render(allocator, &tree, false_value, "false");
+    let type_name = try retained_text(&var tree, "i64");
     let type_value = tree.add_expression(ast::ExpressionNode::Type(
         ast::TypeExpr { type_name: type_name }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         type_value,
         "type<i64>"
     );
@@ -732,33 +706,29 @@ test "expression rendering covers values operators calls and access" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         comptime_value,
         "comptime x"
     );
-
-    let minus = try retained_text(allocator, &var tree, "-");
+    let minus = try retained_text(&var tree, "-");
     let prefix = tree.add_expression(ast::ExpressionNode::Prefix(
         ast::PrefixExpr { operator: minus, right: forty_one }
     ));
-    try expect_expression_render(allocator, &tree, &types, prefix, "(-41)");
-    let plus = try retained_text(allocator, &var tree, "+");
+    try expect_expression_render(allocator, &tree, prefix, "(-41)");
+    let plus = try retained_text(&var tree, "+");
     let binary = tree.add_expression(ast::ExpressionNode::Binary(
         ast::BinaryExpr {
-            left: forty_one,
-            operator: plus,
-            operator_span: zero_span(),
-            right: one
-        }
+        left: forty_one,
+        operator: plus,
+        operator_span: zero_span(),
+        right: one
+    }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         binary,
         "(41 + 1)"
     );
-
     var args = array::new<ast::Expression>(allocator);
     errdefer args.deinit();
     try args.append(x);
@@ -771,18 +741,16 @@ test "expression rendering covers values operators calls and access" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         call,
         "foo(x, 41)"
     );
-    let static_arg = try retained_text(allocator, &var tree, "i64");
+    let static_arg = try retained_text(&var tree, "i64");
     let applied = tree.add_expression(ast::ExpressionNode::TypeApply(
         ast::TypeApplyExpr { callee: foo, type_arg: static_arg }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         applied,
         "foo<i64>"
     );
@@ -794,127 +762,116 @@ test "expression rendering covers values operators calls and access" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         cast,
         "cast<i64>(x)"
     );
-
     let tried = tree.add_expression(ast::ExpressionNode::Try(
         ast::TryExpr { value: call }
     ));
     let moved = tree.add_expression(ast::ExpressionNode::Move(
         ast::MoveExpr { value: x, span: zero_span() }
     ));
-    let safety = try retained_text(allocator, &var tree, "checked by caller");
+    let safety = try retained_text(&var tree, "checked by caller");
     let unsafe_value = tree.add_expression(ast::ExpressionNode::Unsafe(
         ast::UnsafeExpr { value: x, safety: safety, span: zero_span() }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         tried,
         "try foo(x, 41)"
     );
-    try expect_expression_render(allocator, &tree, &types, moved, "move x");
+    try expect_expression_render(allocator, &tree, moved, "move x");
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         unsafe_value,
         "unsafe x"
     );
-
     let indexed = tree.add_expression(ast::ExpressionNode::Index(
         ast::IndexExpr {
-            target: x,
-            index: one,
-            start: null,
-            end: null,
-            slice: false,
-            span: zero_span()
-        }
+        target: x,
+        index: one,
+        start: null,
+        end: null,
+        slice: false,
+        span: zero_span()
+    }
     ));
     let sliced = tree.add_expression(ast::ExpressionNode::Index(
         ast::IndexExpr {
-            target: x,
-            index: null,
-            start: one,
-            end: forty_one,
-            slice: true,
-            span: zero_span()
-        }
+        target: x,
+        index: null,
+        start: one,
+        end: forty_one,
+        slice: true,
+        span: zero_span()
+    }
     ));
     let open_slice = tree.add_expression(ast::ExpressionNode::Index(
         ast::IndexExpr {
-            target: x,
-            index: null,
-            start: null,
-            end: null,
-            slice: true,
-            span: zero_span()
-        }
+        target: x,
+        index: null,
+        start: null,
+        end: null,
+        slice: true,
+        span: zero_span()
+    }
     ));
-    try expect_expression_render(allocator, &tree, &types, indexed, "x[1]");
+    try expect_expression_render(allocator, &tree, indexed, "x[1]");
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         sliced,
         "x[1..41]"
     );
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         open_slice,
         "x[..]"
     );
-
-    let field_name = try retained_text(allocator, &var tree, "value");
+    let field_name = try retained_text(&var tree, "value");
     let field = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
         receiver: x,
         name: field_name,
         namespace: false,
         span: zero_span()
     }));
-    let owner = try add_ident_expression(allocator, &var tree, "Type");
-    let variant_name = try retained_text(allocator, &var tree, "Item");
+    let owner = try add_ident_expression(&var tree, "Type");
+    let variant_name = try retained_text(&var tree, "Item");
     let namespace = tree.add_expression(ast::ExpressionNode::Field(
         ast::FieldExpr {
-            receiver: owner,
-            name: variant_name,
-            namespace: true,
-            span: zero_span()
-        }
+        receiver: owner,
+        name: variant_name,
+        namespace: true,
+        span: zero_span()
+    }
     ));
     let deref = tree.add_expression(ast::ExpressionNode::Deref(
         ast::DerefExpr { receiver: x, operator_span: zero_span() }
     ));
-    try expect_expression_render(allocator, &tree, &types, field, "x.value");
+    try expect_expression_render(allocator, &tree, field, "x.value");
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         namespace,
         "Type::Item"
     );
-    try expect_expression_render(allocator, &tree, &types, deref, "x.*");
-
+    try expect_expression_render(allocator, &tree, deref, "x.*");
     let returned = tree.add_statement(ast::StatementNode::Return(
         ast::ReturnStmt { value: x }
     ));
     let guarded = tree.add_expression(ast::ExpressionNode::OrelseGuard(
         ast::OrelseGuardExpr {
-            condition: x,
-            exit: returned,
-            span: zero_span()
-        }
+        condition: x,
+        exit: returned,
+        span: zero_span()
+    }
     ));
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         guarded,
         "(x orelse return x)"
     );
@@ -922,37 +879,34 @@ test "expression rendering covers values operators calls and access" {
 
 test "expression rendering covers composite and control forms" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let empty = try retained_text(allocator, &var tree, "");
-    let value = try add_ident_expression(allocator, &var tree, "value");
-    let payload = try add_ident_expression(allocator, &var tree, "payload");
-    let capture_name = try retained_text(allocator, &var tree, "captured");
-    let meta_owner = try retained_text(allocator, &var tree, "Option");
-    let one = try add_int_expression(allocator, &var tree, "1");
+    let empty = try retained_text(&var tree, "");
+    let value = try add_ident_expression(&var tree, "value");
+    let payload = try add_ident_expression(&var tree, "payload");
+    let capture_name = try retained_text(&var tree, "captured");
+    let meta_owner = try retained_text(&var tree, "Option");
+    let one = try add_int_expression(&var tree, "1");
     let true_value = tree.add_expression(ast::ExpressionNode::Bool(
         ast::BoolExpr { value: true }
     ));
-
     var fields = array::new<ast::FieldValue>(allocator);
     errdefer fields.deinit();
     try fields.append(ast::FieldValue {
-        name: try retained_text(allocator, &var tree, "x"),
+        name: try retained_text(&var tree, "x"),
         value: one
     });
     try fields.append(ast::FieldValue {
-        name: try retained_text(allocator, &var tree, "item"),
+        name: try retained_text(&var tree, "item"),
         value: value
     });
-    let point_name = try retained_text(allocator, &var tree, "Point");
+    let point_name = try retained_text(&var tree, "Point");
     let literal = tree.add_expression(ast::ExpressionNode::StructLiteral(
         ast::StructLiteralExpr {
-            type_name: point_name,
-            fields: move fields,
-            span: zero_span()
-        }
+        type_name: point_name,
+        fields: move fields,
+        span: zero_span()
+    }
     ));
     let buffer = tree.add_expression(ast::ExpressionNode::BufferLiteral(
         ast::BufferLiteralExpr { size: 4, span: zero_span() }
@@ -960,18 +914,15 @@ test "expression rendering covers composite and control forms" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         literal,
         "Point { x: 1, item: value }"
     );
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         buffer,
         "[4]u8{}"
     );
-
     let consequence = add_empty_block(allocator, &var tree);
     let alternative = add_empty_block(allocator, &var tree);
     let conditional = tree.add_expression(ast::ExpressionNode::If(ast::IfStmt {
@@ -983,11 +934,9 @@ test "expression rendering covers composite and control forms" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         conditional,
         "if true {  } else {  }"
     );
-
     let bare_body = tree.add_statement(ast::StatementNode::Expr(
         ast::ExprStmt { expr: payload, semicolon: false }
     ));
@@ -997,12 +946,12 @@ test "expression rendering covers composite and control forms" {
     var arms = array::new<ast::MatchArm>(allocator);
     errdefer arms.deinit();
     try arms.append(ast::MatchArm {
-        tag: try retained_text(allocator, &var tree, "Some"),
-        binding: try retained_text(allocator, &var tree, "item"),
+        tag: try retained_text(&var tree, "Some"),
+        binding: try retained_text(&var tree, "item"),
         body: bare_body
     });
     try arms.append(ast::MatchArm {
-        tag: try retained_text(allocator, &var tree, "_"),
+        tag: try retained_text(&var tree, "_"),
         binding: empty,
         body: return_body
     });
@@ -1015,7 +964,6 @@ test "expression rendering covers composite and control forms" {
     try expect_expression_render(
         allocator,
         &tree,
-        &types,
         matched,
         "match value { Some(item) => payload, _ => return; }"
     );
@@ -1023,25 +971,23 @@ test "expression rendering covers composite and control forms" {
 
 test "statement rendering covers control and compile-time forms" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let empty = try retained_text(allocator, &var tree, "");
-    let x_name = try retained_text(allocator, &var tree, "x");
-    let outer = try retained_text(allocator, &var tree, "outer");
-    let item_name = try retained_text(allocator, &var tree, "item");
-    let variant_name = try retained_text(allocator, &var tree, "Variant");
-    let payload_name = try retained_text(allocator, &var tree, "payload");
-    let x = try add_ident_expression(allocator, &var tree, "x");
-    let values = try add_ident_expression(allocator, &var tree, "values");
-    let zero = try add_int_expression(allocator, &var tree, "0");
-    let one = try add_int_expression(allocator, &var tree, "1");
-    let three = try add_int_expression(allocator, &var tree, "3");
+    let empty = try retained_text(&var tree, "");
+    let x_name = try retained_text(&var tree, "x");
+    let outer = try retained_text(&var tree, "outer");
+    let item_name = try retained_text(&var tree, "item");
+    let variant_name = try retained_text(&var tree, "Variant");
+    let payload_name = try retained_text(&var tree, "payload");
+    let x = try add_ident_expression(&var tree, "x");
+    let values = try add_ident_expression(&var tree, "values");
+    let zero = try add_int_expression(&var tree, "0");
+    let one = try add_int_expression(&var tree, "1");
+    let three = try add_int_expression(&var tree, "3");
     let true_value = tree.add_expression(ast::ExpressionNode::Bool(
         ast::BoolExpr { value: true }
     ));
-    let foo = try add_ident_expression(allocator, &var tree, "foo");
+    let foo = try add_ident_expression(&var tree, "foo");
     let no_args = tree.add_expression_list(
         array::new<ast::Expression>(allocator)
     );
@@ -1049,7 +995,6 @@ test "statement rendering covers control and compile-time forms" {
         callee: foo,
         args: no_args
     }));
-
     let let_statement = tree.add_statement(ast::StatementNode::Let(
         ast::LetStmt { mutable: false, name: x_name, value: one }
     ));
@@ -1075,30 +1020,29 @@ test "statement rendering covers control and compile-time forms" {
         ast::ExprStmt { expr: x, semicolon: false }
     ));
     try expect_statement_render(
-        allocator, &tree, &types, let_statement, "let x = 1;"
+        allocator, &tree, let_statement, "let x = 1;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, var_statement, "var x = 0;"
+        allocator, &tree, var_statement, "var x = 0;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, assignment, "x = 1;"
+        allocator, &tree, assignment, "x = 1;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, empty_return, "return;"
+        allocator, &tree, empty_return, "return;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, value_return, "return x;"
+        allocator, &tree, value_return, "return x;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, deferred, "defer foo();"
+        allocator, &tree, deferred, "defer foo();"
     );
     try expect_statement_render(
-        allocator, &tree, &types, error_deferred, "errdefer foo();"
+        allocator, &tree, error_deferred, "errdefer foo();"
     );
     try expect_statement_render(
-        allocator, &tree, &types, expression_statement, "x;"
+        allocator, &tree, expression_statement, "x;"
     );
-
     let empty_body = add_empty_block(allocator, &var tree);
     let other_body = add_empty_block(allocator, &var tree);
     let conditional = tree.add_statement(ast::StatementNode::If(ast::IfStmt {
@@ -1109,20 +1053,20 @@ test "statement rendering covers control and compile-time forms" {
     }));
     let while_statement = tree.add_statement(ast::StatementNode::While(
         ast::WhileStmt {
-            label: outer,
-            condition: true_value,
-            body: empty_body,
-            capture: payload_name
-        }
+        label: outer,
+        condition: true_value,
+        body: empty_body,
+        capture: payload_name
+    }
     ));
     let for_statement = tree.add_statement(ast::StatementNode::For(
         ast::ForStmt {
-            label: outer,
-            name: item_name,
-            start: zero,
-            end: three,
-            body: empty_body
-        }
+        label: outer,
+        name: item_name,
+        start: zero,
+        end: three,
+        body: empty_body
+    }
     ));
     let plain_break = tree.add_statement(ast::StatementNode::Break(
         ast::BreakStmt { label: empty }
@@ -1139,109 +1083,99 @@ test "statement rendering covers control and compile-time forms" {
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         conditional,
         "if true {  } else {  }"
     );
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         while_statement,
         "outer: while true {  }"
     );
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         for_statement,
         "outer: for 0..3 |item| {  }"
     );
     try expect_statement_render(
-        allocator, &tree, &types, plain_break, "break;"
+        allocator, &tree, plain_break, "break;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, named_break, "break :outer;"
+        allocator, &tree, named_break, "break :outer;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, plain_continue, "continue;"
+        allocator, &tree, plain_continue, "continue;"
     );
     try expect_statement_render(
-        allocator, &tree, &types, named_continue, "continue :outer;"
+        allocator, &tree, named_continue, "continue :outer;"
     );
-
     var arms = array::new<ast::MatchArm>(allocator);
     errdefer arms.deinit();
     let terminated_body = tree.add_statement(ast::StatementNode::Expr(
         ast::ExprStmt { expr: x, semicolon: true }
     ));
     try arms.append(ast::MatchArm {
-        tag: try retained_text(allocator, &var tree, "Ready"),
+        tag: try retained_text(&var tree, "Ready"),
         binding: empty,
         body: terminated_body
     });
     let match_statement = tree.add_statement(ast::StatementNode::Match(
         ast::MatchStmt {
-            value: x,
-            arms: move arms,
-            meta_capture: payload_name,
-            meta_owner: variant_name
-        }
+        value: x,
+        arms: move arms,
+        meta_capture: payload_name,
+        meta_owner: variant_name
+    }
     ));
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         match_statement,
         "match x { Ready => x; }"
     );
-
     let comptime_if = tree.add_statement(ast::StatementNode::ComptimeIf(
         ast::ComptimeIfStmt {
-            condition: true_value,
-            consequence: empty_body,
-            alternative: other_body
-        }
+        condition: true_value,
+        consequence: empty_body,
+        alternative: other_body
+    }
     ));
     let comptime_for = tree.add_statement(ast::StatementNode::ComptimeFor(
         ast::ComptimeForStmt {
-            list: values,
-            name: item_name,
-            body: empty_body
-        }
+        list: values,
+        name: item_name,
+        body: empty_body
+    }
     ));
     let comptime_match = tree.add_statement(ast::StatementNode::ComptimeMatch(
         ast::ComptimeMatchStmt {
-            value: x,
-            name: variant_name,
-            binding: payload_name,
-            body: empty_body
-        }
+        value: x,
+        name: variant_name,
+        binding: payload_name,
+        body: empty_body
+    }
     ));
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         comptime_if,
         "comptime if true {  } else {  }"
     );
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         comptime_for,
         "comptime for values |item| {  }"
     );
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         comptime_match,
         "comptime match x |Variant, payload| {  }"
     );
-
     let empty_block = add_empty_block(allocator, &var tree);
-    try expect_block_render(allocator, &tree, &types, empty_block, "{  }");
+    try expect_block_render(allocator, &tree, empty_block, "{  }");
     var statements = array::new<ast::Statement>(allocator);
     errdefer statements.deinit();
     try statements.append(let_statement);
@@ -1252,14 +1186,12 @@ test "statement rendering covers control and compile-time forms" {
     try expect_block_render(
         allocator,
         &tree,
-        &types,
         populated_block,
         "{ let x = 1; return x; }"
     );
     try expect_statement_render(
         allocator,
         &tree,
-        &types,
         populated_block.as_statement(),
         "{ let x = 1; return x; }"
     );
@@ -1267,25 +1199,21 @@ test "statement rendering covers control and compile-time forms" {
 
 test "declaration and program rendering cover every top level form" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let integer = try types.parse("i64");
-    let boolean = try types.parse("bool");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let integer = try tree.types.parse("i64");
+    let boolean = try tree.types.parse("bool");
     var program = ast::new_program(allocator);
     defer program.deinit();
-    try expect_program_render(allocator, &tree, &types, &program, "");
+    try expect_program_render(allocator, &tree, &program, "");
     let ignored_doc = try retained_text(
-        allocator,
         &var tree,
         "ignored documentation"
     );
-
     var import_path = array::new<ast::Text>(allocator);
     errdefer import_path.deinit();
-    try import_path.append(try retained_text(allocator, &var tree, "std"));
-    try import_path.append(try retained_text(allocator, &var tree, "mem"));
+    try import_path.append(try retained_text(&var tree, "std"));
+    try import_path.append(try retained_text(&var tree, "mem"));
     let import_decl = tree.add_declaration(ast::DeclarationNode::Import(
         ast::ImportDecl { path: move import_path }
     ));
@@ -1293,11 +1221,9 @@ test "declaration and program rendering cover every top level form" {
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         import_decl,
         "import std::mem"
     );
-
     var function_signature = try empty_signature(
         allocator,
         &var tree,
@@ -1310,33 +1236,33 @@ test "declaration and program rendering cover every top level form" {
     function_signature.public = true;
     function_signature.std = true;
     try function_signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "T"),
+        name: try retained_text(&var tree, "T"),
         type_name: null
     });
     try function_signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "n"),
+        name: try retained_text(&var tree, "n"),
         type_name: integer
     });
     try function_signature.params.append(ast::Param {
-        name: try retained_text(allocator, &var tree, "self"),
+        name: try retained_text(&var tree, "self"),
         type_name: integer,
         borrow: true,
         mut_borrow: true
     });
     try function_signature.params.append(ast::Param {
-        name: try retained_text(allocator, &var tree, "value"),
+        name: try retained_text(&var tree, "value"),
         type_name: integer,
         borrow: true,
         mut_borrow: false
     });
     try function_signature.params.append(ast::Param {
-        name: try retained_text(allocator, &var tree, "slot"),
+        name: try retained_text(&var tree, "slot"),
         type_name: boolean,
         borrow: false,
         mut_borrow: true
     });
     try function_signature.params.append(ast::Param {
-        name: try retained_text(allocator, &var tree, "plain"),
+        name: try retained_text(&var tree, "plain"),
         type_name: integer,
         borrow: false,
         mut_borrow: false
@@ -1344,21 +1270,19 @@ test "declaration and program rendering cover every top level form" {
     let function_body = add_empty_block(allocator, &var tree);
     let function_decl = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
-            signature: move function_signature,
-            doc: ignored_doc,
-            derived: true,
-            body: function_body
-        }
+        signature: move function_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: function_body
+    }
     ));
     try program.add_declaration(function_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         function_decl,
         "pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }"
     );
-
     var extern_signature = try empty_signature(
         allocator,
         &var tree,
@@ -1368,76 +1292,68 @@ test "declaration and program rendering cover every top level form" {
     extern_signature.public = true;
     extern_signature.requires_unsafe = true;
     extern_signature.extern_abi = try retained_text(
-        allocator,
         &var tree,
         "C ABI"
     );
     let extern_body = add_empty_block(allocator, &var tree);
     let extern_decl = tree.add_declaration(ast::DeclarationNode::Function(
         ast::FunctionDecl {
-            signature: move extern_signature,
-            doc: ignored_doc,
-            derived: true,
-            body: extern_body
-        }
+        signature: move extern_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: extern_body
+    }
     ));
     try program.add_declaration(extern_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         extern_decl,
         \\pub unsafe extern "C ABI" fn write()
     );
-
-    let present_test_name = try retained_text(allocator, &var tree, "check");
+    let present_test_name = try retained_text(&var tree, "check");
     let present_test_body = add_empty_block(allocator, &var tree);
     let present_test = tree.add_declaration(ast::DeclarationNode::Test(
         ast::TestDecl {
-            name: present_test_name,
-            body: present_test_body
-        }
+        name: present_test_name,
+        body: present_test_body
+    }
     ));
     try program.add_declaration(present_test);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         present_test,
         \\test "check" {  }
     );
-    let missing_test_name = try retained_text(allocator, &var tree, "検査");
+    let missing_test_name = try retained_text(&var tree, "検査");
     let missing_test = tree.add_declaration(ast::DeclarationNode::Test(
         ast::TestDecl {
-            name: missing_test_name,
-            body: null
-        }
+        name: missing_test_name,
+        body: null
+    }
     ));
     try program.add_declaration(missing_test);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         missing_test,
         \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
     );
-
     var struct_type_params = array::new<ast::Text>(allocator);
     errdefer struct_type_params.deinit();
     try struct_type_params.append(try retained_text(
-        allocator,
         &var tree,
         "T"
     ));
     try struct_type_params.append(try retained_text(
-        allocator,
         &var tree,
         "U"
     ));
     var fields = array::new<ast::Field>(allocator);
     errdefer fields.deinit();
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "value"),
+        name: try retained_text(&var tree, "value"),
         doc: ignored_doc,
         type_name: integer,
         borrow: true,
@@ -1445,7 +1361,7 @@ test "declaration and program rendering cover every top level form" {
         public: true
     });
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "slot"),
+        name: try retained_text(&var tree, "slot"),
         doc: ignored_doc,
         type_name: boolean,
         borrow: true,
@@ -1453,123 +1369,114 @@ test "declaration and program rendering cover every top level form" {
         public: false
     });
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "plain"),
+        name: try retained_text(&var tree, "plain"),
         doc: ignored_doc,
         type_name: integer,
         borrow: false,
         mut_borrow: false,
         public: false
     });
-    let struct_name = try retained_text(allocator, &var tree, "Pair");
+    let struct_name = try retained_text(&var tree, "Pair");
     let struct_decl = tree.add_declaration(ast::DeclarationNode::Struct(
         ast::StructDecl {
-            name: struct_name,
-            doc: ignored_doc,
-            type_params: move struct_type_params,
-            fields: move fields,
-            public: true,
-            requires_unsafe: true
-        }
+        name: struct_name,
+        doc: ignored_doc,
+        type_params: move struct_type_params,
+        fields: move fields,
+        public: true,
+        requires_unsafe: true
+    }
     ));
     try program.add_declaration(struct_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         struct_decl,
         "pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }"
     );
-
     var tags = array::new<ast::Text>(allocator);
     errdefer tags.deinit();
-    try tags.append(try retained_text(allocator, &var tree, "Ready"));
-    try tags.append(try retained_text(allocator, &var tree, "Done"));
+    try tags.append(try retained_text(&var tree, "Ready"));
+    try tags.append(try retained_text(&var tree, "Done"));
     var tag_docs = map::new<[]u8, ast::Text>(allocator);
     errdefer tag_docs.deinit();
     try tag_docs.insert("Ready", ignored_doc);
-    let enum_name = try retained_text(allocator, &var tree, "State");
+    let enum_name = try retained_text(&var tree, "State");
     let enum_decl = tree.add_declaration(ast::DeclarationNode::Enum(
         ast::EnumDecl {
-            name: enum_name,
-            doc: ignored_doc,
-            tags: move tags,
-            tag_docs: move tag_docs,
-            public: true
-        }
+        name: enum_name,
+        doc: ignored_doc,
+        tags: move tags,
+        tag_docs: move tag_docs,
+        public: true
+    }
     ));
     try program.add_declaration(enum_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         enum_decl,
         "pub enum State { Ready, Done }"
     );
-
     var members = array::new<ast::Text>(allocator);
     errdefer members.deinit();
-    try members.append(try retained_text(allocator, &var tree, "Missing"));
-    try members.append(try retained_text(allocator, &var tree, "Invalid"));
+    try members.append(try retained_text(&var tree, "Missing"));
+    try members.append(try retained_text(&var tree, "Invalid"));
     var member_docs = map::new<[]u8, ast::Text>(allocator);
     errdefer member_docs.deinit();
     try member_docs.insert("Missing", ignored_doc);
-    let error_name = try retained_text(allocator, &var tree, "Failure");
+    let error_name = try retained_text(&var tree, "Failure");
     let error_decl = tree.add_declaration(ast::DeclarationNode::ErrorSet(
         ast::ErrorSetDecl {
-            name: error_name,
-            doc: ignored_doc,
-            members: move members,
-            member_docs: move member_docs,
-            public: true
-        }
+        name: error_name,
+        doc: ignored_doc,
+        members: move members,
+        member_docs: move member_docs,
+        public: true
+    }
     ));
     try program.add_declaration(error_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         error_decl,
         "pub error Failure { Missing, Invalid }"
     );
-
     var union_type_params = array::new<ast::Text>(allocator);
     errdefer union_type_params.deinit();
     try union_type_params.append(try retained_text(
-        allocator,
         &var tree,
         "T"
     ));
     var variants = array::new<ast::UnionVariant>(allocator);
     errdefer variants.deinit();
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, &var tree, "Ok"),
+        name: try retained_text(&var tree, "Ok"),
         doc: ignored_doc,
         payload: integer
     });
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, &var tree, "Empty"),
+        name: try retained_text(&var tree, "Empty"),
         doc: ignored_doc,
         payload: null
     });
-    let union_name = try retained_text(allocator, &var tree, "Result");
+    let union_name = try retained_text(&var tree, "Result");
     let union_decl = tree.add_declaration(ast::DeclarationNode::Union(
         ast::UnionDecl {
-            name: union_name,
-            doc: ignored_doc,
-            type_params: move union_type_params,
-            variants: move variants,
-            public: true
-        }
+        name: union_name,
+        doc: ignored_doc,
+        type_params: move union_type_params,
+        variants: move variants,
+        public: true
+    }
     ));
     try program.add_declaration(union_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         union_decl,
         "pub union Result<T> { Ok(i64), Empty }"
     );
-
     var methods = array::new<ast::FunctionDecl>(allocator);
     errdefer methods.deinit();
     var first_signature = try empty_signature(
@@ -1597,44 +1504,39 @@ test "declaration and program rendering cover every top level form" {
         derived: false,
         body: null
     });
-    let contract_name = try retained_text(allocator, &var tree, "Visitor");
+    let contract_name = try retained_text(&var tree, "Visitor");
     let contract_decl = tree.add_declaration(ast::DeclarationNode::Contract(
         ast::ContractDecl {
-            name: contract_name,
-            methods: move methods,
-            public: true
-        }
+        name: contract_name,
+        methods: move methods,
+        public: true
+    }
     ));
     try program.add_declaration(contract_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         contract_decl,
         "pub contract Visitor { fn first();; fn second(); }"
     );
-
     let impl_contract_name = try retained_text(
-        allocator,
         &var tree,
         "Visitor"
     );
-    let impl_type_name = try retained_text(allocator, &var tree, "Walker");
+    let impl_type_name = try retained_text(&var tree, "Walker");
     let impl_decl = tree.add_declaration(ast::DeclarationNode::Impl(
         ast::ImplDecl {
-            contract_name: impl_contract_name,
-            type_name: impl_type_name
-        }
+        contract_name: impl_contract_name,
+        type_name: impl_type_name
+    }
     ));
     try program.add_declaration(impl_decl);
     try expect_declaration_render(
         allocator,
         &tree,
-        &types,
         impl_decl,
         "impl Visitor for Walker;"
     );
-
     let expected_program =
         \\import std::mem
         \\pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }
@@ -1651,7 +1553,6 @@ test "declaration and program rendering cover every top level form" {
     try expect_program_render(
         allocator,
         &tree,
-        &types,
         &program,
         expected_program
     );
@@ -1659,11 +1560,9 @@ test "declaration and program rendering cover every top level form" {
 
 test "program retains declaration handles and nested contract methods" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let integer = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let integer = try tree.types.parse("i64");
     var program = ast::new_program(allocator);
     defer program.deinit();
     var body_statements = array::new<ast::Statement>(allocator);
@@ -1674,15 +1573,14 @@ test "program retains declaration handles and nested contract methods" {
     var signature = try empty_signature(allocator, &var tree, "visit");
     errdefer signature.deinit();
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "T"),
+        name: try retained_text(&var tree, "T"),
         type_name: null
     });
     try signature.static_params.append(ast::StaticParam {
-        name: try retained_text(allocator, &var tree, "count"),
+        name: try retained_text(&var tree, "count"),
         type_name: integer
     });
     let function_doc = try retained_text(
-        allocator,
         &var tree,
         "Visits one value."
     );
@@ -1700,7 +1598,7 @@ test "program retains declaration handles and nested contract methods" {
     errdefer methods.deinit();
     let method_signature = try empty_signature(allocator, &var tree, "visit");
     errdefer method_signature.deinit();
-    let method_doc = try retained_text(allocator, &var tree, "");
+    let method_doc = try retained_text(&var tree, "");
     try methods.append(ast::FunctionDecl {
         signature: move method_signature,
         doc: method_doc,
@@ -1708,7 +1606,7 @@ test "program retains declaration handles and nested contract methods" {
         body: null
     });
     let contract_node = ast::ContractDecl {
-        name: try retained_text(allocator, &var tree, "Visitor"),
+        name: try retained_text(&var tree, "Visitor"),
         methods: move methods,
         public: true
     };
@@ -1718,15 +1616,15 @@ test "program retains declaration handles and nested contract methods" {
     try program.add_declaration(contract_decl);
     var tags = array::new<ast::Text>(allocator);
     errdefer tags.deinit();
-    try tags.append(try retained_text(allocator, &var tree, "Ready"));
+    try tags.append(try retained_text(&var tree, "Ready"));
     var tag_docs = map::new<[]u8, ast::Text>(allocator);
     errdefer tag_docs.deinit();
     try tag_docs.insert(
         "Ready",
-        try retained_text(allocator, &var tree, "The visitor may run.")
+        try retained_text(&var tree, "The visitor may run.")
     );
-    let enum_name = try retained_text(allocator, &var tree, "State");
-    let enum_doc = try retained_text(allocator, &var tree, "Visitor state.");
+    let enum_name = try retained_text(&var tree, "State");
+    let enum_doc = try retained_text(&var tree, "Visitor state.");
     let enum_node = ast::EnumDecl {
         name: enum_name,
         doc: enum_doc,
@@ -1736,8 +1634,8 @@ test "program retains declaration handles and nested contract methods" {
     };
     let enum_decl = tree.add_declaration(ast::DeclarationNode::Enum(move enum_node));
     try program.add_declaration(enum_decl);
-    let error_name = try retained_text(allocator, &var tree, "Failure");
-    let error_doc = try retained_text(allocator, &var tree, "");
+    let error_name = try retained_text(&var tree, "Failure");
+    let error_doc = try retained_text(&var tree, "");
     let error_node = ast::ErrorSetDecl {
         name: error_name,
         doc: error_doc,
@@ -1800,15 +1698,13 @@ test "program retains declaration handles and nested contract methods" {
 
 test "deinit owner discovery includes declared and transitive holders" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let outer_type = try types.parse("Outer");
-    let middle_type = try types.parse("Middle");
-    let optional_inner_type = try types.parse("?Inner");
-    let array_type = try types.parse("std::array::Array<u8>");
-    let integer_type = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let outer_type = try tree.types.parse("Outer");
+    let middle_type = try tree.types.parse("Middle");
+    let optional_inner_type = try tree.types.parse("?Inner");
+    let array_type = try tree.types.parse("std::array::Array<u8>");
+    let integer_type = try tree.types.parse("i64");
     var program = ast::new_program(allocator);
     defer program.deinit();
     try add_union_with_payload(
@@ -1872,7 +1768,7 @@ test "deinit owner discovery includes declared and transitive holders" {
         "Resource<u8>.deinit",
         false
     );
-    let owners = try ast::deinit_owners(allocator, &tree, &types, &program);
+    let owners = try ast::deinit_owners(allocator, &tree, &program);
     defer owners.deinit();
     expect_owner(&owners, "std::arena::Arena", true);
     expect_owner(&owners, "std::array::Array", true);
@@ -1894,18 +1790,16 @@ test "deinit owner discovery includes declared and transitive holders" {
 
 test "derived struct deinit consumes plain and optional owner fields" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let string_type = try types.parse("std::string::String");
-    let optional_string = try types.parse("?std::string::String");
-    let integer = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let string_type = try tree.types.parse("std::string::String");
+    let optional_string = try tree.types.parse("?std::string::String");
+    let integer = try tree.types.parse("i64");
     var fields = array::new<ast::Field>(allocator);
     errdefer fields.deinit();
-    let empty = try retained_text(allocator, &var tree, "");
+    let empty = try retained_text(&var tree, "");
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "name"),
+        name: try retained_text(&var tree, "name"),
         doc: empty,
         type_name: string_type,
         borrow: false,
@@ -1913,7 +1807,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
         public: false
     });
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "age"),
+        name: try retained_text(&var tree, "age"),
         doc: empty,
         type_name: integer,
         borrow: false,
@@ -1921,7 +1815,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
         public: false
     });
     try fields.append(ast::Field {
-        name: try retained_text(allocator, &var tree, "nick"),
+        name: try retained_text(&var tree, "nick"),
         doc: empty,
         type_name: optional_string,
         borrow: false,
@@ -1930,8 +1824,8 @@ test "derived struct deinit consumes plain and optional owner fields" {
     });
     var type_params = array::new<ast::Text>(allocator);
     errdefer type_params.deinit();
-    try type_params.append(try retained_text(allocator, &var tree, "T"));
-    let visitor_name = try retained_text(allocator, &var tree, "Visitor");
+    try type_params.append(try retained_text(&var tree, "T"));
+    let visitor_name = try retained_text(&var tree, "Visitor");
     let declaration = tree.add_declaration(ast::DeclarationNode::Struct(
         ast::StructDecl {
         name: visitor_name,
@@ -1948,7 +1842,6 @@ test "derived struct deinit consumes plain and optional owner fields" {
     if try ast::derive_deinit(
         allocator,
         &var tree,
-        &var types,
         &owners,
         declaration
     ) |function| {
@@ -1973,7 +1866,7 @@ test "derived struct deinit consumes plain and optional owner fields" {
                     expect_text(&tree, receiver.name, "self");
                     try expect_type_name(
                         allocator,
-                        &types,
+                        &tree.types,
                         receiver.type_name,
                         "Visitor<T>"
                     );
@@ -2049,31 +1942,29 @@ test "derived struct deinit consumes plain and optional owner fields" {
 
 test "derived union deinit matches every variant and consumes owner payload" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let string_type = try types.parse("std::string::String");
-    let integer = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let empty = try retained_text(allocator, &var tree, "");
+    let string_type = try tree.types.parse("std::string::String");
+    let integer = try tree.types.parse("i64");
+    let empty = try retained_text(&var tree, "");
     var variants = array::new<ast::UnionVariant>(allocator);
     errdefer variants.deinit();
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, &var tree, "Kept"),
+        name: try retained_text(&var tree, "Kept"),
         doc: empty,
         payload: string_type
     });
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, &var tree, "Count"),
+        name: try retained_text(&var tree, "Count"),
         doc: empty,
         payload: integer
     });
     try variants.append(ast::UnionVariant {
-        name: try retained_text(allocator, &var tree, "Vacant"),
+        name: try retained_text(&var tree, "Vacant"),
         doc: empty,
         payload: null
     });
-    let slot_name = try retained_text(allocator, &var tree, "std::Slot");
+    let slot_name = try retained_text(&var tree, "std::Slot");
     let declaration = tree.add_declaration(ast::DeclarationNode::Union(
         ast::UnionDecl {
         name: slot_name,
@@ -2089,7 +1980,6 @@ test "derived union deinit matches every variant and consumes owner payload" {
     if try ast::derive_deinit(
         allocator,
         &var tree,
-        &var types,
         &owners,
         declaration
     ) |function| {
@@ -2151,12 +2041,10 @@ test "derived union deinit matches every variant and consumes owner payload" {
 
 test "adding derived deinits skips copy and manually cleaned types" {
     let allocator = mem::page_allocator();
-    var types = typ::new(allocator);
-    defer types.deinit();
-    let resource = try types.parse("Resource");
-    let integer = try types.parse("i64");
     var tree = ast::new(allocator);
     defer tree.deinit();
+    let resource = try tree.types.parse("Resource");
+    let integer = try tree.types.parse("i64");
     var program = ast::new_program(allocator);
     defer program.deinit();
     try add_cleanup_function(
@@ -2200,7 +2088,6 @@ test "adding derived deinits skips copy and manually cleaned types" {
     try ast::add_derived_deinits(
         allocator,
         &var tree,
-        &var types,
         &var program
     );
     testing::expect_equal<i64>(6, program.declarations.len());
@@ -2215,7 +2102,6 @@ test "adding derived deinits skips copy and manually cleaned types" {
     try ast::add_derived_deinits(
         allocator,
         &var tree,
-        &var types,
         &var program
     );
     testing::expect_equal<i64>(6, program.declarations.len());
@@ -2225,7 +2111,7 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let subject_name = try retained_text(allocator, &var tree, "slot");
+    let subject_name = try retained_text(&var tree, "slot");
     let subject = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: subject_name,
         span: zero_span()
@@ -2235,12 +2121,12 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     let body = tree.add_block(ast::BlockStmt {
         statements: move body_statements
     });
-    let capture_name = try retained_text(allocator, &var tree, "variant");
-    let payload_name = try retained_text(allocator, &var tree, "payload");
-    let owner_name = try retained_text(allocator, &var tree, "Slot");
-    let empty_name = try retained_text(allocator, &var tree, "");
-    let vacant_name = try retained_text(allocator, &var tree, "Vacant");
-    let held_name = try retained_text(allocator, &var tree, "Held");
+    let capture_name = try retained_text(&var tree, "variant");
+    let payload_name = try retained_text(&var tree, "payload");
+    let owner_name = try retained_text(&var tree, "Slot");
+    let empty_name = try retained_text(&var tree, "");
+    let vacant_name = try retained_text(&var tree, "Vacant");
+    let held_name = try retained_text(&var tree, "Held");
     let comptime_node = ast::ComptimeMatchStmt {
         value: subject,
         name: capture_name,
@@ -2293,7 +2179,6 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
     }
     let no_args = tree.add_expression_list(array::new<ast::Expression>(allocator));
     let tag = try ast::variant_expansion(
-        allocator,
         &var tree,
         "Slot",
         "Vacant",
@@ -2312,7 +2197,6 @@ test "variant helpers preserve shared bodies and ordinary expression shape" {
         Call(source) => {
             let shared_args = source.args;
             let call = try ast::variant_expansion(
-                allocator,
                 &var tree,
                 "Slot",
                 "Held",
@@ -2341,7 +2225,7 @@ test "construct expansion builds fields in order and marks owner handoff" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let subject_name = try retained_text(allocator, &var tree, "input");
+    let subject_name = try retained_text(&var tree, "input");
     let subject = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
         name: subject_name,
         span: zero_span()
@@ -2454,7 +2338,7 @@ test "typed handles retain a shared expression graph" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    let literal_text = try retained_text(allocator, &var tree, "41");
+    let literal_text = try retained_text(&var tree, "41");
     let literal = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
         value: literal_text
     }));
@@ -2466,7 +2350,6 @@ test "typed handles retain a shared expression graph" {
         ast::ComptimeExpr { expr: literal }
     ));
     let safety = try retained_text(
-        allocator,
         &var tree,
         "integer literal has no unsafe effect"
     );
