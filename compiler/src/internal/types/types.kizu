@@ -72,18 +72,23 @@ enum WrappedKind {
     RawPointer,
     TypeValue,
     CompileTimeOnly,
+    Buffer,
+    BorrowOptional,
 }
 
 // Records whether a structural walk found the requested closed name kind.
 struct WrappedTypeVisitor {
     kind: WrappedKind,
-    found: bool
+    found: bool,
+    optional_child: bool
 }
 
 fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
     if self.found {
         return;
     }
+    let directly_optional = self.optional_child;
+    self.optional_child = false;
     match value {
         Name(node) => {
             if node.path.len() != 1 {
@@ -96,8 +101,20 @@ fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
                     TypeValue => equal(name, "type"),
                     CompileTimeOnly => equal(name, "Field") or
                         equal(name, "Function"),
+                    Buffer => false,
+                    BorrowOptional => false,
                 };
             }
+        },
+        Buffer(_) => {
+            self.found = self.kind == WrappedKind::Buffer;
+        },
+        Borrow(_) => {
+            self.found = directly_optional and
+                self.kind == WrappedKind::BorrowOptional;
+        },
+        Optional(_) => {
+            self.optional_child = true;
         },
         _ => {},
     }
@@ -338,48 +355,23 @@ pub fn (self: &TypeTable) is_text(value: Type, expected: []u8) -> bool {
 
 /// Reports whether value is a fixed-length stack buffer.
 pub fn (self: &TypeTable) is_buffer_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return mem::len(bytes) > 1 and bytes[0] == cast<u8>(91) and
-            bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
+    if self.lookup(value) |parsed| {
+        return match typ::root_node(&self.parsed, parsed) {
+            Buffer(_) => true,
+            _ => false,
+        };
     }
     return false;
 }
 
-/// Reports whether a spelling mentions a stack buffer.
+/// Reports whether a retained type graph contains a stack buffer.
 pub fn (self: &TypeTable) contains_buffer_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        var index = 0;
-        while index + 1 < mem::len(bytes) {
-            if bytes[index] == cast<u8>(91) and
-                bytes[index + 1] >= cast<u8>(48) and
-                bytes[index + 1] <= cast<u8>(57) {
-                return true;
-            }
-            index = index + 1;
-        }
-    }
-    return false;
+    return self.contains_wrapped_type(value, WrappedKind::Buffer);
 }
 
-/// Reports whether a spelling mentions the positional-only `?&T` form.
+/// Reports whether a retained graph contains the positional-only `?&T` form.
 pub fn (self: &TypeTable) contains_borrow_optional(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        var index = 0;
-        while index + 1 < mem::len(bytes) {
-            if bytes[index] == cast<u8>(63) and
-                bytes[index + 1] == cast<u8>(38) {
-                return true;
-            }
-            index = index + 1;
-        }
-    }
-    return false;
+    return self.contains_wrapped_type(value, WrappedKind::BorrowOptional);
 }
 
 /// Returns the success payload of an error union, or value unchanged.
@@ -778,7 +770,11 @@ fn (self: &TypeTable) contains_wrapped_type(
     kind: WrappedKind
 ) -> bool {
     if self.lookup(value) |parsed| {
-        var visitor = WrappedTypeVisitor { kind: kind, found: false };
+        var visitor = WrappedTypeVisitor {
+            kind: kind,
+            found: false,
+            optional_child: false
+        };
         typ::walk<WrappedTypeVisitor>(&self.parsed, parsed, &var visitor);
         return visitor.found;
     }

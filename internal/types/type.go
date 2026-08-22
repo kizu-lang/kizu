@@ -204,30 +204,38 @@ func sortedMethodNames(methods map[string]*functionType) []string {
 	return names
 }
 
-// isBufferType reports whether t is a fixed-length stack buffer (`[N]u8`).
-func isBufferType(t Type) bool {
-	s := string(t)
-	return len(s) > 1 && s[0] == '[' && s[1] >= '0' && s[1] <= '9'
+// isBufferType reports whether value is a fixed-length stack buffer (`[N]T`).
+func (t *typeTable) isBufferType(value Type) bool {
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return false
+	}
+	_, ok = parsed.(*typ.Buffer)
+	return ok
 }
 
-// containsBufferType reports whether a spelling mentions a stack buffer.
+// containsBufferType reports whether a type contains a stack buffer.
 // A stack buffer is local-only in v1 (ADR-0097): it cannot appear in
 // signatures, fields, payloads, or container elements.
-func containsBufferType(t Type) bool {
-	s := string(t)
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] == '[' && s[i+1] >= '0' && s[i+1] <= '9' {
-			return true
-		}
-	}
-	return false
+func (t *typeTable) containsBufferType(value Type) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		_, ok := node.(*typ.Buffer)
+		return ok
+	})
 }
 
-// containsBorrowOptional reports whether a spelling mentions `?&T`. A borrow
+// containsBorrowOptional reports whether a type contains `?&T`. A borrow
 // optional is positional-only: it appears as an at/at_mut capture condition
 // and never crosses a user signature.
-func containsBorrowOptional(t Type) bool {
-	return strings.Contains(string(t), "?&")
+func (t *typeTable) containsBorrowOptional(value Type) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		optional, ok := node.(*typ.Optional)
+		if !ok {
+			return false
+		}
+		_, ok = optional.Elem.(*typ.Borrow)
+		return ok
+	})
 }
 
 // isBorrowedViewReturnType reports whether typ returns a non-owned view.
@@ -465,30 +473,36 @@ func (t *typeTable) containsCompileTimeOnly(value Type) bool {
 	return t.containsNamedType(value, string(typeFunction), string(typeField))
 }
 
-// containsNamedType walks the parsed graph retained by this checker phase.
-// Structural queries do not split or allocate a second copy of type text.
-func (t *typeTable) containsNamedType(value Type, names ...string) bool {
+// containsTypeNode walks the retained graph until matches accepts one node.
+func (t *typeTable) containsTypeNode(value Type, matches func(typ.Type) bool) bool {
 	parsed, ok := t.lookup(value)
 	if !ok {
 		return false
 	}
 	found := false
-	typ.Walk(parsed, func(value typ.Type) {
-		if found {
-			return
-		}
-		name, ok := value.(*typ.Name)
-		if !ok || len(name.Path) != 1 {
-			return
-		}
-		for _, expected := range names {
-			if name.Path[0] == expected {
-				found = true
-				return
-			}
+	typ.Walk(parsed, func(node typ.Type) {
+		if !found {
+			found = matches(node)
 		}
 	})
 	return found
+}
+
+// containsNamedType walks the parsed graph retained by this checker phase.
+// Structural queries do not split or allocate a second copy of type text.
+func (t *typeTable) containsNamedType(value Type, names ...string) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		name, ok := node.(*typ.Name)
+		if !ok || len(name.Path) != 1 {
+			return false
+		}
+		for _, expected := range names {
+			if name.Path[0] == expected {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // methodMatches checks a method against the contract method it stands for. The

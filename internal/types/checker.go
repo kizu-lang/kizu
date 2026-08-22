@@ -548,7 +548,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
 				decl.Name, field.Name)
 		}
-		if containsBufferType(typ) {
+		if c.types.containsBufferType(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
 				decl.Name, field.Name)
 		}
@@ -805,7 +805,7 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if compileTimeOnlyType(&c.types, ret) {
 		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
 	}
-	if containsBufferType(ret) {
+	if c.types.containsBufferType(ret) {
 		return nil, errorf(
 			"type error: function `%s` cannot return a stack buffer; "+
 				"return an owned buffer or write through a view", fn.Name)
@@ -813,7 +813,7 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 	if c.types.containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
-	if !fn.Std && containsBorrowOptional(ret) {
+	if !fn.Std && c.types.containsBorrowOptional(ret) {
 		if _, _, bare := typ.BorrowOptionalElem(string(ret)); !bare {
 			return nil, errorf(
 				"type error: function `%s` cannot nest a borrow optional in its"+
@@ -840,7 +840,7 @@ func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParam
 		if err != nil {
 			return functionParamInfo{}, err
 		}
-		if !fn.Std && containsBorrowOptional(paramType) {
+		if !fn.Std && c.types.containsBorrowOptional(paramType) {
 			return functionParamInfo{}, errorf(
 				"type error: parameter `%s` cannot hold a borrow optional;"+
 					" `?&T` exists only as a capture condition", param.Name)
@@ -866,7 +866,7 @@ func (c *Checker) checkFunctionParam(
 	if c.types.containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
 	}
-	if containsBufferType(paramType) {
+	if c.types.containsBufferType(paramType) {
 		return errorf(
 			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
 			param.Name)
@@ -1624,12 +1624,12 @@ func (c *Checker) checkStringViewInitializer(
 	if err != nil {
 		return nil, mutable, true, err
 	}
-	if receiver != "std::string::String" && !isBufferType(receiver) {
+	if receiver != "std::string::String" && !c.types.isBufferType(receiver) {
 		return nil, mutable, true, errorf(
 			"type error: `%s` expects String or stack buffer receiver", field.Name)
 	}
 	kind := "String"
-	if isBufferType(receiver) {
+	if c.types.isBufferType(receiver) {
 		kind = "buffer"
 	}
 	if len(call.Args) != 0 {
@@ -3201,7 +3201,7 @@ func (c *Checker) checkBorrowPrefix(
 	if err != nil {
 		return "", false, err
 	}
-	if isBufferType(typ) {
+	if c.types.isBufferType(typ) {
 		return "", false, errorf(
 			"type error: cannot borrow a stack buffer; use `as_bytes()` / `as_mut_bytes()`")
 	}
@@ -3825,7 +3825,7 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return errorf("type error: Array element cannot be raw pointer")
 	}
-	if containsBufferType(typ) {
+	if c.types.containsBufferType(typ) {
 		return errorf("type error: Array element cannot be stack buffer")
 	}
 	if base, arg, ok := splitGenericType(string(typ)); ok && base == "option" {
