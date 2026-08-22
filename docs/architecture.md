@@ -27,7 +27,7 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
   unsafecap                     unsafe が覆う操作の種類と診断文言
-  fmt, diagnostic, buildcache, cimport, lsp
+  fmt, diagnostic, quote, buildcache, cimport, lsp
 compiler/            non-shipping の Kizu compiler 移植先(cutover まで CLI 非接続)
 lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
