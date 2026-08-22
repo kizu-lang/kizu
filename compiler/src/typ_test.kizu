@@ -30,6 +30,14 @@ fn expect_part(
     return;
 }
 
+fn expect_invalid_split(allocator: Allocator, text: []u8) -> !void {
+    if try typ::split_args_optional(allocator, text) |parts| {
+        parts.deinit();
+        testing::fail("malformed static arguments were accepted");
+    }
+    return;
+}
+
 test "type parse renders every compiler spelling back" {
     let allocator = mem::page_allocator();
     try expect_round_trip(allocator, "i64");
@@ -129,6 +137,20 @@ test "split args trims canonical space and keeps nested types whole" {
     expect_part(&parts, 0, "[]u8");
     expect_part(&parts, 1, "std::map::Map<[]u8, i64>");
     expect_part(&parts, 2, "bool");
+}
+
+test "optional split keeps malformed text separate from allocation failure" {
+    let allocator = mem::page_allocator();
+    if try typ::split_args_optional(allocator, "i64, Pair<bool, u8>") |parts| {
+        defer parts.deinit();
+        testing::expect_equal<i64>(2, parts.len());
+    } else {
+        testing::fail("valid static arguments were rejected");
+    }
+    try expect_invalid_split(allocator, "i64, Pair<bool");
+    try expect_invalid_split(allocator, "i64>, bool");
+    try expect_invalid_split(allocator, "i64, , bool");
+    try expect_invalid_split(allocator, "");
 }
 
 pub struct Counter {
@@ -301,4 +323,28 @@ test "substitute owned text reads dynamic parallel arrays without retaining view
     defer replaced.deinit();
     let bytes = replaced.as_bytes();
     testing::expect(mem::equal_bytes(bytes, "Error!?&u8"));
+}
+
+test "substitute retains a structural graph without rewriting replacements" {
+    let allocator = mem::page_allocator();
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let declared = try table.parse("Error!?&var Pair<T, Timer, []T>");
+    let replacement = try table.parse("Pair<U, bool>");
+    var substitutions = map::new<[]u8, typ::Type>(allocator);
+    defer substitutions.deinit();
+    try substitutions.insert("T", replacement);
+    try substitutions.insert("U", try table.parse("i64"));
+    let replaced = try typ::substitute(
+        &var table,
+        declared,
+        &substitutions
+    );
+    let rendered = try typ::render(allocator, &table, replaced);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    testing::expect_equal<[]u8>(
+        "Error!?&var Pair<Pair<U, bool>, Timer, []Pair<U, bool>>",
+        bytes
+    );
 }

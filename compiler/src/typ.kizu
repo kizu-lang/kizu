@@ -395,6 +395,32 @@ pub fn split_args(
 ) -> !array::Array<string::String> {
     var parts = array::new<string::String>(allocator);
     errdefer parts.deinit();
+    if try split_args_into(allocator, text, &var parts) |reason| {
+        return reason;
+    }
+    return move parts;
+}
+
+/// Splits a valid static argument list, or returns null for malformed text.
+pub fn split_args_optional(
+    allocator: Allocator,
+    text: []u8
+) -> !?array::Array<string::String> {
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    if try split_args_into(allocator, text, &var parts) |_| {
+        parts.deinit();
+        return null;
+    }
+    return move parts;
+}
+
+// Returns a parse reason as data while allocation failures stay errors.
+fn split_args_into(
+    allocator: Allocator,
+    text: []u8,
+    parts: &var array::Array<string::String>
+) -> !?Error {
     var depth = 0;
     var start = 0;
     var index = 0;
@@ -435,7 +461,7 @@ pub fn split_args(
     if has_empty {
         return Error::EmptyStaticArgument;
     }
-    return move parts;
+    return null;
 }
 
 /// Returns T for the optional value spelling `?T`.
@@ -848,6 +874,188 @@ fn map_error_union_names<M>(
     let ok = try map_names_node<M>(builder, value, node.ok, mapper);
     if node.err |source_err| {
         let err = try map_names_node<M>(builder, value, source_err, mapper);
+        return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
+    }
+    return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
+}
+
+/// Replaces whole-name type parameters and retains the resulting graph.
+pub fn substitute(
+    table: &var Table,
+    value: Type,
+    substitutions: &map::Map<[]u8, Type>
+) -> !Type {
+    if substitutions.len() == 0 {
+        return value;
+    }
+    var builder = new_builder(table.allocator);
+    errdefer builder.deinit();
+    let root = try substitute_node(
+        &var builder,
+        table,
+        table.trees.at(value.tree),
+        value.root,
+        substitutions,
+        true
+    );
+    return finish_builder(move builder, table, root);
+}
+
+/// Retains one parsed type wrapped in an explicit borrow node.
+pub fn wrap_borrow(
+    table: &var Table,
+    value: Type,
+    mutable: bool
+) -> !Type {
+    var substitutions = map::new<[]u8, Type>(table.allocator);
+    defer substitutions.deinit();
+    var builder = new_builder(table.allocator);
+    errdefer builder.deinit();
+    let elem = try substitute_node(
+        &var builder,
+        table,
+        table.trees.at(value.tree),
+        value.root,
+        &substitutions,
+        false
+    );
+    let root = builder.nodes.add(Node::Borrow(Borrow {
+        elem: elem,
+        mutable: mutable
+    }));
+    return finish_builder(move builder, table, root);
+}
+
+fn substitute_node(
+    builder: &var Builder,
+    table: &Table,
+    tree: &TypeTree,
+    handle: arena::Handle<Node>,
+    substitutions: &map::Map<[]u8, Type>,
+    replace_names: bool
+) -> !arena::Handle<Node> {
+    return match tree.nodes.at(handle) {
+        Name(node) => try substitute_name(
+            builder,
+            table,
+            tree,
+            node,
+            substitutions,
+            replace_names
+        ),
+        Slice(node) => {
+            let elem = try substitute_node(
+                builder, table, tree, node.elem, substitutions, replace_names
+            );
+            builder.nodes.add(Node::Slice(Slice { elem: elem }))
+        },
+        Buffer(node) => {
+            let elem = try substitute_node(
+                builder, table, tree, node.elem, substitutions, replace_names
+            );
+            builder.nodes.add(Node::Buffer(Buffer { size: node.size, elem: elem }))
+        },
+        Borrow(node) => {
+            let elem = try substitute_node(
+                builder, table, tree, node.elem, substitutions, replace_names
+            );
+            builder.nodes.add(Node::Borrow(Borrow {
+                elem: elem,
+                mutable: node.mutable
+            }))
+        },
+        Optional(node) => {
+            let elem = try substitute_node(
+                builder, table, tree, node.elem, substitutions, replace_names
+            );
+            builder.nodes.add(Node::Optional(Optional { elem: elem }))
+        },
+        Const(node) => {
+            let elem = try substitute_node(
+                builder, table, tree, node.elem, substitutions, replace_names
+            );
+            builder.nodes.add(Node::Const(Const { elem: elem }))
+        },
+        ErrorUnion(node) => try substitute_error_union(
+            builder,
+            table,
+            tree,
+            node,
+            substitutions,
+            replace_names
+        ),
+    };
+}
+
+fn substitute_name(
+    builder: &var Builder,
+    table: &Table,
+    tree: &TypeTree,
+    node: &Name,
+    substitutions: &map::Map<[]u8, Type>,
+    replace_names: bool
+) -> !arena::Handle<Node> {
+    if replace_names and node.path.len() == 1 and node.args.len() == 0 {
+        if node.path.at(0) |part| {
+            let name = part.as_bytes();
+            if substitutions.get(name) |replacement| {
+                return substitute_node(
+                    builder,
+                    table,
+                    table.trees.at(replacement.tree),
+                    replacement.root,
+                    substitutions,
+                    false
+                );
+            }
+        }
+    }
+    var path = array::new<string::String>(builder.allocator);
+    errdefer path.deinit();
+    var index = 0;
+    while node.path.at(index) |part| {
+        let bytes = part.as_bytes();
+        let copied = try owned_text(builder.allocator, bytes);
+        errdefer copied.deinit();
+        try path.append(move copied);
+        index = index + 1;
+    }
+    var args = array::new<arena::Handle<Node>>(builder.allocator);
+    errdefer args.deinit();
+    index = 0;
+    while node.args.get(index) |arg| {
+        try args.append(try substitute_node(
+            builder,
+            table,
+            tree,
+            arg,
+            substitutions,
+            replace_names
+        ));
+        index = index + 1;
+    }
+    return builder.nodes.add(Node::Name(Name {
+        path: move path,
+        args: move args
+    }));
+}
+
+// substitute_error_union keeps Go's traversal order: success before error.
+fn substitute_error_union(
+    builder: &var Builder,
+    table: &Table,
+    tree: &TypeTree,
+    node: &ErrorUnion,
+    substitutions: &map::Map<[]u8, Type>,
+    replace_names: bool
+) -> !arena::Handle<Node> {
+    let ok = try substitute_node(
+        builder, table, tree, node.ok, substitutions, replace_names
+    );
+    if node.err |source_err| {
+        let err = try substitute_node(
+            builder, table, tree, source_err, substitutions, replace_names
+        );
         return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
     return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
