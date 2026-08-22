@@ -523,6 +523,12 @@ pub struct FieldExpr {
     pub span: Span
 }
 
+/// Holds the root identifier and dotted suffix of one runtime field path.
+pub struct FieldPath {
+    pub root: IdentExpr,
+    pub path: string::String
+}
+
 /// Represents explicit postfix dereference.
 pub struct DerefExpr {
     pub receiver: Expression,
@@ -685,6 +691,61 @@ fn (self: &BufferLiteralExpr) type_text(
     try fmt::append_i64(&var out, self.size);
     try out.append_bytes("]u8");
     return move out;
+}
+
+/// Resolves a runtime field chain to its root and dotted relative path.
+pub fn field_path_root(
+    allocator: Allocator,
+    ast: &Ast,
+    expression: Expression
+) -> !?FieldPath {
+    var path = string::new(allocator);
+    errdefer path.deinit();
+    if try append_field_path(ast, expression, &var path) |root| {
+        return FieldPath { root: root, path: move path };
+    }
+    path.deinit();
+    return null;
+}
+
+fn append_field_path(
+    ast: &Ast,
+    expression: Expression,
+    path: &var string::String
+) -> !?IdentExpr {
+    match ast.expressions.at(expression.node) {
+        Field(field) => {
+            if field.namespace {
+                return null;
+            }
+            match ast.expressions.at(field.receiver.node) {
+                Ident(root) => {
+                    try append_retained_text(
+                        path,
+                        ast.texts.at(field.name.node)
+                    );
+                    return IdentExpr { name: root.name, span: root.span };
+                },
+                Field(_) => {
+                    if try append_field_path(
+                        ast,
+                        field.receiver,
+                        path
+                    ) |root| {
+                        try path.append_byte(cast<u8>(46));
+                        try append_retained_text(
+                            path,
+                            ast.texts.at(field.name.node)
+                        );
+                        return root;
+                    }
+                    return null;
+                },
+                _ => return null,
+            }
+        },
+        _ => return null,
+    }
 }
 
 /// Expands one compile-time match into the ordinary match every phase reads.

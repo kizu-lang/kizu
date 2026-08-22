@@ -463,6 +463,102 @@ test "buffer literal type text preserves its stored size" {
     expect_retained_text(&negative_text, "[-2]u8");
 }
 
+test "field paths retain their root and dotted suffix" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let root_span = ast::Span {
+        source: null,
+        start: ast::Position { line: 3, column: 4 },
+        end: ast::Position { line: 3, column: 9 }
+    };
+    let root_name = try retained_text(allocator, &var tree, "owner");
+    let root = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: root_name,
+        span: root_span
+    }));
+    let first_name = try retained_text(allocator, &var tree, "a");
+    let first = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: root,
+        name: first_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let second_name = try retained_text(allocator, &var tree, "b");
+    let second = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: first,
+        name: second_name,
+        namespace: false,
+        span: zero_span()
+    }));
+
+    if try ast::field_path_root(allocator, &tree, first) |resolved| {
+        defer resolved.deinit();
+        expect_text(&tree, resolved.root.name, "owner");
+        testing::expect_equal<i64>(3, resolved.root.span.start.line);
+        testing::expect_equal<i64>(4, resolved.root.span.start.column);
+        testing::expect_equal<i64>(3, resolved.root.span.end.line);
+        testing::expect_equal<i64>(9, resolved.root.span.end.column);
+        expect_retained_text(&resolved.path, "a");
+    } else {
+        testing::fail("direct field path was not recognized");
+    }
+    if try ast::field_path_root(allocator, &tree, second) |resolved| {
+        defer resolved.deinit();
+        expect_text(&tree, resolved.root.name, "owner");
+        expect_retained_text(&resolved.path, "a.b");
+    } else {
+        testing::fail("nested field path was not recognized");
+    }
+    if try ast::field_path_root(allocator, &tree, root) |resolved| {
+        resolved.deinit();
+        testing::fail("identifier was accepted as a field path");
+    }
+
+    let namespace_name = try retained_text(allocator, &var tree, "Item");
+    let namespaced = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: root,
+        name: namespace_name,
+        namespace: true,
+        span: zero_span()
+    }));
+    if try ast::field_path_root(allocator, &tree, namespaced) |resolved| {
+        resolved.deinit();
+        testing::fail("namespace field was accepted as a runtime path");
+    }
+    let nested_name = try retained_text(allocator, &var tree, "value");
+    let nested_namespace = tree.add_expression(ast::ExpressionNode::Field(
+        ast::FieldExpr {
+            receiver: namespaced,
+            name: nested_name,
+            namespace: false,
+            span: zero_span()
+        }
+    ));
+    if try ast::field_path_root(allocator, &tree, nested_namespace) |resolved| {
+        resolved.deinit();
+        testing::fail("runtime field above a namespace field was accepted");
+    }
+
+    let integer_text = try retained_text(allocator, &var tree, "1");
+    let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: integer_text
+    }));
+    let invalid_name = try retained_text(allocator, &var tree, "value");
+    let invalid_root = tree.add_expression(ast::ExpressionNode::Field(
+        ast::FieldExpr {
+            receiver: integer,
+            name: invalid_name,
+            namespace: false,
+            span: zero_span()
+        }
+    ));
+    if try ast::field_path_root(allocator, &tree, invalid_root) |resolved| {
+        resolved.deinit();
+        testing::fail("non-identifier field root was accepted");
+    }
+}
+
 test "program retains declaration handles and nested contract methods" {
     let allocator = mem::page_allocator();
     var types = typ::new(allocator);
