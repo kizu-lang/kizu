@@ -724,6 +724,185 @@ test "function recovery stub retains visibility docs and empty defaults" {
     testing::expect(documented.signature.requires_unsafe);
 }
 
+test "parser retains extern docs ABI and signature after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let input =
+        \\/// Calls the host runtime.
+        \\extern "c" fn host<T>(value: &T) -> !i64 next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_extern_decl(&var tree, &var types);
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                "host"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.doc.node),
+                "Calls the host runtime."
+            );
+            testing::expect(!function.signature.receiver);
+            testing::expect_equal<i64>(1, function.signature.static_params.len());
+            testing::expect_equal<i64>(1, function.signature.params.len());
+            testing::expect(!function.signature.requires_unsafe);
+            testing::expect(!function.signature.public);
+            testing::expect(!function.signature.std);
+            testing::expect(!function.derived);
+            if function.body |_| {
+                testing::fail("extern declaration gained a body");
+            }
+            if function.signature.static_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.name.node), "T");
+                if param.type_name |_| {
+                    testing::fail("extern type parameter gained a value type");
+                }
+            } else {
+                testing::fail("missing extern static parameter");
+            }
+            try expect_param(
+                allocator,
+                &tree,
+                &types,
+                &function.signature.params,
+                0,
+                "value",
+                "T",
+                true,
+                false
+            );
+            if function.signature.return_type |return_type| {
+                let rendered = try typ::render(
+                    allocator,
+                    &types,
+                    return_type
+                );
+                defer rendered.deinit();
+                expect_retained_bytes(&rendered, "!i64");
+            } else {
+                testing::fail("missing extern return type");
+            }
+        },
+        _ => testing::fail("parser did not retain an extern declaration"),
+    }
+}
+
+test "parser keeps partial extern declarations" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+
+    let abi_scanner = lexer::new(allocator, "extern ;");
+    var missing_abi = try parser::new(allocator, move abi_scanner);
+    errdefer missing_abi.deinit();
+    let abi_decl = try missing_abi.parse_extern_decl(&var tree, &var types);
+    testing::expect(missing_abi.current_kind() == token::Kind::Extern);
+    testing::expect(missing_abi.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &missing_abi,
+        0,
+        "expected next token string, got `;`",
+        1,
+        7
+    );
+    missing_abi.deinit();
+    match tree.declarations.at(abi_decl.node) {
+        Function(function) => expect_function_stub(&tree, function, false, ""),
+        _ => testing::fail("parser lost an ABI-partial extern declaration"),
+    }
+
+    let function_input =
+        \\extern "c" ;
+    ;
+    let function_scanner = lexer::new(allocator, function_input);
+    var missing_function = try parser::new(allocator, move function_scanner);
+    errdefer missing_function.deinit();
+    let docs = try string::from_bytes(allocator, "Injected docs.");
+    let function_decl = try missing_function.parse_extern_decl_with_doc(
+        &var tree,
+        &var types,
+        move docs
+    );
+    testing::expect(missing_function.current_kind() == token::Kind::String);
+    testing::expect(missing_function.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &missing_function,
+        0,
+        "expected next token `fn`, got `;`",
+        8,
+        9
+    );
+    missing_function.deinit();
+    match tree.declarations.at(function_decl.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                ""
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.doc.node),
+                "Injected docs."
+            );
+        },
+        _ => testing::fail("parser lost a function-partial extern declaration"),
+    }
+
+    let signature_input =
+        \\extern "c" fn host ;
+    ;
+    let signature_scanner = lexer::new(allocator, signature_input);
+    var partial_signature = try parser::new(allocator, move signature_scanner);
+    errdefer partial_signature.deinit();
+    let signature_decl = try partial_signature.parse_extern_decl(
+        &var tree,
+        &var types
+    );
+    testing::expect(partial_signature.current_kind() == token::Kind::Ident);
+    testing::expect(partial_signature.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &partial_signature,
+        0,
+        "expected next token `(`, got `;`",
+        15,
+        19
+    );
+    partial_signature.deinit();
+    match tree.declarations.at(signature_decl.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                "host"
+            );
+            testing::expect_equal<i64>(0, function.signature.params.len());
+        },
+        _ => testing::fail("parser lost a signature-partial extern declaration"),
+    }
+}
+
 test "parser recognizes identifier-led error set declarations" {
     let allocator = mem::page_allocator();
     let declaration_scanner = lexer::new(allocator, "error Parse { Failed }");

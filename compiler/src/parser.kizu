@@ -178,6 +178,53 @@ fn (self: &Parser) function_stub(
     };
 }
 
+fn (self: &var Parser) parse_extern_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    return self.parse_extern_decl_with_doc(tree, types, move docs);
+}
+
+fn (self: &var Parser) parse_extern_decl_with_doc(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String
+) -> !ast::Declaration {
+    var function = self.function_stub(tree, false, move docs);
+    errdefer function.deinit();
+    if !try self.expect_peek(token::Kind::String) {
+        return add_function_decl(tree, move function);
+    }
+    let abi_handle = self.stream.get_or_panic(self.position);
+    let abi = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(abi_handle)
+    );
+    function.signature.extern_abi = abi;
+    if !try self.expect_peek(token::Kind::Function) {
+        return add_function_decl(tree, move function);
+    }
+    let _ = try self.parse_function_signature_after_fn(
+        tree,
+        types,
+        &var function.signature
+    );
+    return add_function_decl(tree, move function);
+}
+
+fn add_function_decl(
+    tree: &var ast::Ast,
+    function: ast::FunctionDecl
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Function(
+        move function
+    ));
+}
+
 fn (self: &var Parser) parse_enum_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
