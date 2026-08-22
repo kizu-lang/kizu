@@ -4964,3 +4964,37 @@ test "parser program retains malformed top-level recovery stubs" {
     ;
     expect_retained_bytes(&rendered, expected);
 }
+
+test "parser rendered errors outlive parser diagnostics" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path = try string::from_bytes(allocator, "sample.kizu");
+    errdefer path.deinit();
+    let text = try string::from_bytes(allocator, "foo");
+    errdefer text.deinit();
+    let id = try sources.add(move path, move text);
+    if sources.at(id) |file| {
+        let input = file.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, input);
+        var value = try parser::new(allocator, move scanner);
+        errdefer value.deinit();
+        try value.error_expected_declaration();
+        let errors = try value.errors(allocator, &sources);
+        defer errors.deinit();
+        value.deinit();
+
+        testing::expect_equal<i64>(1, errors.len());
+        if errors.at(0) |rendered| {
+            let bytes = rendered.as_bytes();
+            let expected =
+                \\expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got identifier "foo" at sample.kizu:1:1
+            ;
+            testing::expect_equal<[]u8>(expected, bytes);
+        } else {
+            testing::fail("parser did not render its diagnostic");
+        }
+    } else {
+        testing::fail("parser source was not retained");
+    }
+}
