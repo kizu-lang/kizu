@@ -53,18 +53,13 @@ fn expect_collection_issue_source(
     defer source_parser.deinit();
     let program = try source_parser.parse_program(&var tree);
     defer program.deinit();
-    var metadata = new_checker_metadata(allocator);
-    defer metadata.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
     var index = 0;
     while program.declarations.get(index) |declaration| {
         match tree.declarations.at(declaration.node) {
             Enum(value) => {
-                if try collect_enum_decision(
-                    allocator,
-                    &tree,
-                    value,
-                    &var metadata
-                ) |issue| {
+                if try state.collect_enum_decision(&tree, value) |issue| {
                     expect_collection_issue(
                         &tree,
                         issue,
@@ -77,11 +72,9 @@ fn expect_collection_issue_source(
                 }
             },
             ErrorSet(value) => {
-                if try collect_error_set_decision(
-                    allocator,
+                if try state.collect_error_set_decision(
                     &tree,
-                    value,
-                    &var metadata
+                    value
                 ) |issue| {
                     expect_collection_issue(
                         &tree,
@@ -106,7 +99,7 @@ fn collect_enum_source(
     allocator: Allocator,
     input: []u8,
     tree: &var ast::Ast,
-    metadata: &var CheckerMetadata
+    state: &var Checker
 ) -> !void {
     let scanner = lexer::new(allocator, input);
     var source_parser = try parser::new(allocator, move scanner);
@@ -117,21 +110,14 @@ fn collect_enum_source(
     while program.declarations.get(index) |declaration| {
         match tree.declarations.at(declaration.node) {
             Enum(value) => {
-                if try collect_enum_decision(
-                    allocator,
-                    tree,
-                    value,
-                    metadata
-                ) |issue| {
+                if try state.collect_enum_decision(tree, value) |issue| {
                     testing::fail("valid enum declaration was rejected");
                 }
             },
             ErrorSet(value) => {
-                if try collect_error_set_decision(
-                    allocator,
+                if try state.collect_error_set_decision(
                     tree,
-                    value,
-                    metadata
+                    value
                 ) |issue| {
                     testing::fail("valid error set was rejected");
                 }
@@ -143,19 +129,47 @@ fn collect_enum_source(
     return;
 }
 
-test "checker metadata owns enums and error sets once" {
+fn expect_collected_type(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    name: []u8
+) -> !void {
+    match try state.resolve_type(tree, name) {
+        Value(value) => {
+            let text = try state.copy_resolution_text(allocator, value);
+            defer text.deinit();
+            let bytes = text.as_bytes();
+            testing::expect_equal<[]u8>(name, bytes);
+        },
+        Issue(_) => testing::fail("collected type did not resolve"),
+    }
+    return;
+}
+
+test "checker owns collected enums and error sets once" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
     defer tree.deinit();
-    var metadata = new_checker_metadata(allocator);
-    defer metadata.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
     let input =
         \\enum Choice { First, Second }
         \\error Problem { Failed, Missing }
     ;
-    try collect_enum_source(allocator, input, &var tree, &var metadata);
-    testing::expect(metadata.has_collected_type("Choice"));
-    testing::expect(metadata.has_collected_type("Problem"));
+    try collect_enum_source(allocator, input, &var tree, &var state);
+    try expect_collected_type(
+        allocator,
+        &var state,
+        &tree,
+        "Choice"
+    );
+    try expect_collected_type(
+        allocator,
+        &var state,
+        &tree,
+        "Problem!i64"
+    );
 }
 
 test "enum-shaped collectors return copy-only duplicate details" {

@@ -4,7 +4,33 @@ import compiler::internal::parser;
 import std::mem;
 import std::testing;
 
-test "checker metadata predeclares every type name" {
+fn expect_type_name(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    name: []u8,
+    expected: bool
+) -> !void {
+    match try state.resolve_type(tree, name) {
+        Value(value) => {
+            if !expected {
+                testing::fail("non-type name resolved as a type");
+            }
+            let text = try state.copy_resolution_text(allocator, value);
+            defer text.deinit();
+            let bytes = text.as_bytes();
+            testing::expect_equal<[]u8>(name, bytes);
+        },
+        Issue(_) => {
+            if expected {
+                testing::fail("predeclared type name did not resolve");
+            }
+        },
+    }
+    return;
+}
+
+test "checker predeclares every type name" {
     let allocator = mem::page_allocator();
     let input =
         \\struct Later { value: i64 }
@@ -21,50 +47,22 @@ test "checker metadata predeclares every type name" {
     defer source_parser.deinit();
     let program = try source_parser.parse_program(&var tree);
     defer program.deinit();
-    var metadata = new_checker_metadata(allocator);
-    defer metadata.deinit();
-    try predeclare_type_names(&tree, &program, &var metadata);
-    testing::expect(metadata.has_declared_type("Later"));
-    testing::expect(metadata.has_declared_type("Choice"));
-    testing::expect(metadata.has_declared_type("Problem"));
-    testing::expect(metadata.has_declared_type("Maybe"));
-    testing::expect(metadata.has_declared_type("Readable"));
-    testing::expect(!metadata.has_declared_type("run"));
-    testing::expect(metadata.is_type_name("i64"));
-    testing::expect(metadata.is_type_name("Choice"));
-    testing::expect(metadata.is_type_name("std::array::Array"));
-    testing::expect(!metadata.is_type_name("Missing"));
-    var index = 0;
-    while program.declarations.get(index) |declaration| {
-        match tree.declarations.at(declaration.node) {
-            Enum(value) => {
-                if try collect_enum_decision(
-                    allocator,
-                    &tree,
-                    value,
-                    &var metadata
-                ) |_| {
-                    testing::fail("enum metadata collection failed");
-                }
-            },
-            ErrorSet(value) => {
-                if try collect_error_set_decision(
-                    allocator,
-                    &tree,
-                    value,
-                    &var metadata
-                ) |_| {
-                    testing::fail("error-set metadata collection failed");
-                }
-            },
-            _ => {},
-        }
-        index = index + 1;
-    }
-    testing::expect(metadata.is_user_declared_type("Choice"));
-    testing::expect(metadata.is_user_declared_type("Problem"));
-    testing::expect(!metadata.is_user_declared_type("Missing"));
-    testing::expect(metadata.is_public_type(&tree, "Choice"));
-    testing::expect(!metadata.is_public_type(&tree, "Problem"));
-    testing::expect(!metadata.is_public_type(&tree, "Missing"));
+    var state = new_checker(allocator);
+    defer state.deinit();
+    try state.predeclare_type_names(&tree, &program);
+    try expect_type_name(allocator, &var state, &tree, "Later", true);
+    try expect_type_name(allocator, &var state, &tree, "Choice", true);
+    try expect_type_name(allocator, &var state, &tree, "Problem", true);
+    try expect_type_name(allocator, &var state, &tree, "Maybe", true);
+    try expect_type_name(allocator, &var state, &tree, "Readable", true);
+    try expect_type_name(allocator, &var state, &tree, "run", false);
+    try expect_type_name(allocator, &var state, &tree, "i64", true);
+    try expect_type_name(
+        allocator,
+        &var state,
+        &tree,
+        "std::array::Array",
+        true
+    );
+    try expect_type_name(allocator, &var state, &tree, "Missing", false);
 }
