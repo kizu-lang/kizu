@@ -687,10 +687,17 @@ fn (self: &BufferLiteralExpr) type_text(
 ) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try out.append_byte(cast<u8>(91));
-    try fmt::append_i64(&var out, self.size);
-    try out.append_bytes("]u8");
+    try self.append_type_text(&var out);
     return move out;
+}
+
+fn (self: &BufferLiteralExpr) append_type_text(
+    out: &var string::String
+) -> !void {
+    try out.append_byte(cast<u8>(91));
+    try fmt::append_i64(out, self.size);
+    try out.append_bytes("]u8");
+    return;
 }
 
 /// Resolves a runtime field chain to its root and dotted relative path.
@@ -746,6 +753,491 @@ fn append_field_path(
         },
         _ => return null,
     }
+}
+
+/// Renders one retained expression in the compact compiler diagnostic form.
+pub fn render_expression(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    expression: Expression
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_expression(&var out, ast, types, expression);
+    return move out;
+}
+
+/// Renders one retained statement in the compact compiler diagnostic form.
+pub fn render_statement(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    statement: Statement
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_statement(&var out, ast, types, statement);
+    return move out;
+}
+
+/// Renders one retained block in the compact compiler diagnostic form.
+pub fn render_block(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    block: Block
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_block(&var out, ast, types, block);
+    return move out;
+}
+
+fn append_expression(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    expression: Expression
+) -> !void {
+    match ast.expressions.at(expression.node) {
+        Ident(value) => try append_text(out, ast, value.name),
+        Int(value) => try append_text(out, ast, value.value),
+        String(value) => {
+            let retained = ast.texts.at(value.value.node);
+            let bytes = retained.as_bytes();
+            try fmt::append_bytes_literal(out, bytes);
+        },
+        Null(_) => try out.append_bytes("null"),
+        OrelseGuard(value) => {
+            try out.append_byte(cast<u8>(40));
+            try append_expression(out, ast, types, value.condition);
+            try out.append_bytes(" orelse ");
+            try append_guard_exit(out, ast, types, value.exit);
+            try out.append_byte(cast<u8>(41));
+        },
+        Bool(value) => try fmt::append_bool(out, value.value),
+        Type(value) => {
+            try out.append_bytes("type<");
+            try append_text(out, ast, value.type_name);
+            try out.append_byte(cast<u8>(62));
+        },
+        Comptime(value) => {
+            try out.append_bytes("comptime ");
+            try append_expression(out, ast, types, value.expr);
+        },
+        Prefix(value) => {
+            try out.append_byte(cast<u8>(40));
+            try append_text(out, ast, value.operator);
+            try append_expression(out, ast, types, value.right);
+            try out.append_byte(cast<u8>(41));
+        },
+        Binary(value) => {
+            try out.append_byte(cast<u8>(40));
+            try append_expression(out, ast, types, value.left);
+            try out.append_byte(cast<u8>(32));
+            try append_text(out, ast, value.operator);
+            try out.append_byte(cast<u8>(32));
+            try append_expression(out, ast, types, value.right);
+            try out.append_byte(cast<u8>(41));
+        },
+        Call(value) => {
+            try append_expression(out, ast, types, value.callee);
+            try out.append_byte(cast<u8>(40));
+            try append_expression_list(out, ast, types, value.args);
+            try out.append_byte(cast<u8>(41));
+        },
+        TypeApply(value) => {
+            try append_expression(out, ast, types, value.callee);
+            try out.append_byte(cast<u8>(60));
+            try append_text(out, ast, value.type_arg);
+            try out.append_byte(cast<u8>(62));
+        },
+        Cast(value) => {
+            try out.append_bytes("cast<");
+            try typ::append_render(out, types, value.target_type);
+            try out.append_bytes(">(");
+            try append_expression(out, ast, types, value.value);
+            try out.append_byte(cast<u8>(41));
+        },
+        Try(value) => {
+            try out.append_bytes("try ");
+            try append_expression(out, ast, types, value.value);
+        },
+        Move(value) => {
+            try out.append_bytes("move ");
+            try append_expression(out, ast, types, value.value);
+        },
+        Unsafe(value) => {
+            try out.append_bytes("unsafe ");
+            try append_expression(out, ast, types, value.value);
+        },
+        Index(value) => try append_index(out, ast, types, value),
+        StructLiteral(value) => {
+            try append_text(out, ast, value.type_name);
+            try out.append_bytes(" { ");
+            var index = 0;
+            while value.fields.at(index) |field| {
+                if index > 0 {
+                    try out.append_bytes(", ");
+                }
+                try append_text(out, ast, field.name);
+                try out.append_bytes(": ");
+                try append_expression(out, ast, types, field.value);
+                index = index + 1;
+            }
+            try out.append_bytes(" }");
+        },
+        BufferLiteral(value) => {
+            try value.append_type_text(out);
+            try out.append_bytes("{}");
+        },
+        Field(value) => {
+            try append_expression(out, ast, types, value.receiver);
+            if value.namespace {
+                try out.append_bytes("::");
+            } else {
+                try out.append_byte(cast<u8>(46));
+            }
+            try append_text(out, ast, value.name);
+        },
+        Deref(value) => {
+            try append_expression(out, ast, types, value.receiver);
+            try out.append_bytes(".*");
+        },
+        If(value) => try append_conditional(
+            out,
+            ast,
+            types,
+            value.condition,
+            value.consequence,
+            value.alternative
+        ),
+        Match(value) => try append_match(out, ast, types, value),
+    }
+    return;
+}
+
+fn append_statement(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    statement: Statement
+) -> !void {
+    match ast.statements.at(statement.node) {
+        Block(value) => try append_block_value(out, ast, types, value),
+        Let(value) => {
+            if value.mutable {
+                try out.append_bytes("var ");
+            } else {
+                try out.append_bytes("let ");
+            }
+            try append_text(out, ast, value.name);
+            try out.append_bytes(" = ");
+            try append_expression(out, ast, types, value.value);
+            try out.append_byte(cast<u8>(59));
+        },
+        Assign(value) => {
+            try append_expression(out, ast, types, value.target);
+            try out.append_bytes(" = ");
+            try append_expression(out, ast, types, value.value);
+            try out.append_byte(cast<u8>(59));
+        },
+        Return(value) => {
+            try out.append_bytes("return");
+            if value.value |expression| {
+                try out.append_byte(cast<u8>(32));
+                try append_expression(out, ast, types, expression);
+            }
+            try out.append_byte(cast<u8>(59));
+        },
+        Defer(value) => {
+            try out.append_bytes("defer ");
+            try append_expression(out, ast, types, value.expr);
+            try out.append_byte(cast<u8>(59));
+        },
+        ErrDefer(value) => {
+            try out.append_bytes("errdefer ");
+            try append_expression(out, ast, types, value.expr);
+            try out.append_byte(cast<u8>(59));
+        },
+        If(value) => try append_conditional(
+            out,
+            ast,
+            types,
+            value.condition,
+            value.consequence,
+            value.alternative
+        ),
+        While(value) => {
+            try append_label(out, ast, value.label);
+            try out.append_bytes("while ");
+            try append_expression(out, ast, types, value.condition);
+            try out.append_byte(cast<u8>(32));
+            try append_block(out, ast, types, value.body);
+        },
+        For(value) => {
+            try append_label(out, ast, value.label);
+            try out.append_bytes("for ");
+            try append_expression(out, ast, types, value.start);
+            try out.append_bytes("..");
+            try append_expression(out, ast, types, value.end);
+            try out.append_bytes(" |");
+            try append_text(out, ast, value.name);
+            try out.append_bytes("| ");
+            try append_block(out, ast, types, value.body);
+        },
+        Break(value) => try append_jump(out, ast, "break", value.label),
+        Continue(value) => try append_jump(out, ast, "continue", value.label),
+        Match(value) => try append_match(out, ast, types, value),
+        ComptimeIf(value) => {
+            try out.append_bytes("comptime ");
+            try append_conditional(
+                out,
+                ast,
+                types,
+                value.condition,
+                value.consequence,
+                value.alternative
+            );
+        },
+        ComptimeFor(value) => {
+            try out.append_bytes("comptime for ");
+            try append_expression(out, ast, types, value.list);
+            try out.append_bytes(" |");
+            try append_text(out, ast, value.name);
+            try out.append_bytes("| ");
+            try append_block(out, ast, types, value.body);
+        },
+        ComptimeMatch(value) => {
+            try out.append_bytes("comptime match ");
+            try append_expression(out, ast, types, value.value);
+            try out.append_bytes(" |");
+            try append_text(out, ast, value.name);
+            if !text_is_empty(ast, value.binding) {
+                try out.append_bytes(", ");
+                try append_text(out, ast, value.binding);
+            }
+            try out.append_bytes("| ");
+            try append_block(out, ast, types, value.body);
+        },
+        Expr(value) => {
+            try append_expression(out, ast, types, value.expr);
+            try out.append_byte(cast<u8>(59));
+        },
+    }
+    return;
+}
+
+fn append_block(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    block: Block
+) -> !void {
+    match ast.statements.at(block.node) {
+        Block(value) => try append_block_value(out, ast, types, value),
+        _ => {},
+    }
+    return;
+}
+
+fn append_block_value(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    block: &BlockStmt
+) -> !void {
+    try out.append_bytes("{ ");
+    var index = 0;
+    while block.statements.at(index) |statement| {
+        if index > 0 {
+            try out.append_byte(cast<u8>(32));
+        }
+        try append_statement(
+            out,
+            ast,
+            types,
+            Statement { node: statement.node }
+        );
+        index = index + 1;
+    }
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_conditional(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    condition: Expression,
+    consequence: Block,
+    alternative: ?Block
+) -> !void {
+    try out.append_bytes("if ");
+    try append_expression(out, ast, types, condition);
+    try out.append_byte(cast<u8>(32));
+    try append_block(out, ast, types, consequence);
+    if alternative |other| {
+        try out.append_bytes(" else ");
+        try append_block(out, ast, types, other);
+    }
+    return;
+}
+
+fn append_match(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    value: &MatchStmt
+) -> !void {
+    try out.append_bytes("match ");
+    try append_expression(out, ast, types, value.value);
+    try out.append_bytes(" { ");
+    var index = 0;
+    while value.arms.at(index) |arm| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_match_arm(out, ast, types, arm);
+        index = index + 1;
+    }
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_match_arm(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    arm: &MatchArm
+) -> !void {
+    try append_text(out, ast, arm.tag);
+    if !text_is_empty(ast, arm.binding) {
+        try out.append_byte(cast<u8>(40));
+        try append_text(out, ast, arm.binding);
+        try out.append_byte(cast<u8>(41));
+    }
+    try out.append_bytes(" => ");
+    match ast.statements.at(arm.body.node) {
+        Expr(expression) => {
+            if !expression.semicolon {
+                try append_expression(out, ast, types, expression.expr);
+                return;
+            }
+        },
+        _ => {},
+    }
+    return append_statement(out, ast, types, arm.body);
+}
+
+fn append_expression_list(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    expressions: ExpressionList
+) -> !void {
+    var index = 0;
+    while index < expressions.len(ast) {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_expression(
+            out,
+            ast,
+            types,
+            expressions.get_or_panic(ast, index)
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_index(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    value: &IndexExpr
+) -> !void {
+    try append_expression(out, ast, types, value.target);
+    try out.append_byte(cast<u8>(91));
+    if !value.slice {
+        if value.index |index| {
+            try append_expression(out, ast, types, index);
+        }
+    } else {
+        if value.start |start| {
+            try append_expression(out, ast, types, start);
+        }
+        try out.append_bytes("..");
+        if value.end |end| {
+            try append_expression(out, ast, types, end);
+        }
+    }
+    try out.append_byte(cast<u8>(93));
+    return;
+}
+
+fn append_guard_exit(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    exit: Statement
+) -> !void {
+    let start = out.len();
+    try append_statement(out, ast, types, exit);
+    if out.len() > start and string_ends_with(out, cast<u8>(59)) {
+        try out.truncate(out.len() - 1);
+    }
+    return;
+}
+
+fn append_label(
+    out: &var string::String,
+    ast: &Ast,
+    label: Text
+) -> !void {
+    if !text_is_empty(ast, label) {
+        try append_text(out, ast, label);
+        try out.append_bytes(": ");
+    }
+    return;
+}
+
+fn append_jump(
+    out: &var string::String,
+    ast: &Ast,
+    keyword: []u8,
+    label: Text
+) -> !void {
+    try out.append_bytes(keyword);
+    if !text_is_empty(ast, label) {
+        try out.append_bytes(" :");
+        try append_text(out, ast, label);
+    }
+    try out.append_byte(cast<u8>(59));
+    return;
+}
+
+fn append_text(
+    out: &var string::String,
+    ast: &Ast,
+    value: Text
+) -> !void {
+    return append_retained_text(out, ast.texts.at(value.node));
+}
+
+fn text_is_empty(ast: &Ast, value: Text) -> bool {
+    return ast.texts.at(value.node).len() == 0;
+}
+
+fn string_ends_with(value: &string::String, expected: u8) -> bool {
+    let length = value.len();
+    if length == 0 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    return bytes[length - 1] == expected;
 }
 
 /// Expands one compile-time match into the ordinary match every phase reads.

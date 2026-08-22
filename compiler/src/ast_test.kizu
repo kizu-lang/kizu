@@ -36,6 +36,87 @@ fn expect_retained_text(
     return;
 }
 
+fn add_ident_expression(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    name: []u8
+) -> !ast::Expression {
+    let retained = try retained_text(allocator, tree, name);
+    return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: retained,
+        span: zero_span()
+    }));
+}
+
+fn add_int_expression(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    value: []u8
+) -> !ast::Expression {
+    let retained = try retained_text(allocator, tree, value);
+    return tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: retained
+    }));
+}
+
+fn add_empty_block(
+    allocator: Allocator,
+    tree: &var ast::Ast
+) -> ast::Block {
+    return tree.add_block(ast::BlockStmt {
+        statements: array::new<ast::Statement>(allocator)
+    });
+}
+
+fn expect_expression_render(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    expression: ast::Expression,
+    expected: []u8
+) -> !void {
+    let rendered = try ast::render_expression(
+        allocator,
+        tree,
+        types,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_statement_render(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    statement: ast::Statement,
+    expected: []u8
+) -> !void {
+    let rendered = try ast::render_statement(
+        allocator,
+        tree,
+        types,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_block_render(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    block: ast::Block,
+    expected: []u8
+) -> !void {
+    let rendered = try ast::render_block(allocator, tree, types, block);
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
 fn empty_signature(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -557,6 +638,595 @@ test "field paths retain their root and dotted suffix" {
         resolved.deinit();
         testing::fail("non-identifier field root was accepted");
     }
+}
+
+test "expression rendering covers values operators calls and access" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let integer_type = try types.parse("i64");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+
+    let x = try add_ident_expression(allocator, &var tree, "x");
+    let foo = try add_ident_expression(allocator, &var tree, "foo");
+    let one = try add_int_expression(allocator, &var tree, "1");
+    let forty_one = try add_int_expression(allocator, &var tree, "41");
+    try expect_expression_render(allocator, &tree, &types, x, "x");
+    try expect_expression_render(allocator, &tree, &types, forty_one, "41");
+
+    let string_text = try retained_text(allocator, &var tree, "café");
+    let string_value = tree.add_expression(ast::ExpressionNode::String(
+        ast::StringExpr { value: string_text }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        string_value,
+        \\"caf\xC3\xA9"
+    );
+    let null_value = tree.add_expression(ast::ExpressionNode::Null(
+        ast::NullExpr { span: zero_span() }
+    ));
+    try expect_expression_render(allocator, &tree, &types, null_value, "null");
+    let true_value = tree.add_expression(ast::ExpressionNode::Bool(
+        ast::BoolExpr { value: true }
+    ));
+    let false_value = tree.add_expression(ast::ExpressionNode::Bool(
+        ast::BoolExpr { value: false }
+    ));
+    try expect_expression_render(allocator, &tree, &types, true_value, "true");
+    try expect_expression_render(allocator, &tree, &types, false_value, "false");
+
+    let type_name = try retained_text(allocator, &var tree, "i64");
+    let type_value = tree.add_expression(ast::ExpressionNode::Type(
+        ast::TypeExpr { type_name: type_name }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        type_value,
+        "type<i64>"
+    );
+    let comptime_value = tree.add_expression(ast::ExpressionNode::Comptime(
+        ast::ComptimeExpr { expr: x }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        comptime_value,
+        "comptime x"
+    );
+
+    let minus = try retained_text(allocator, &var tree, "-");
+    let prefix = tree.add_expression(ast::ExpressionNode::Prefix(
+        ast::PrefixExpr { operator: minus, right: forty_one }
+    ));
+    try expect_expression_render(allocator, &tree, &types, prefix, "(-41)");
+    let plus = try retained_text(allocator, &var tree, "+");
+    let binary = tree.add_expression(ast::ExpressionNode::Binary(
+        ast::BinaryExpr {
+            left: forty_one,
+            operator: plus,
+            operator_span: zero_span(),
+            right: one
+        }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        binary,
+        "(41 + 1)"
+    );
+
+    var args = array::new<ast::Expression>(allocator);
+    errdefer args.deinit();
+    try args.append(x);
+    try args.append(forty_one);
+    let retained_args = tree.add_expression_list(move args);
+    let call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
+        callee: foo,
+        args: retained_args
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        call,
+        "foo(x, 41)"
+    );
+    let static_arg = try retained_text(allocator, &var tree, "i64");
+    let applied = tree.add_expression(ast::ExpressionNode::TypeApply(
+        ast::TypeApplyExpr { callee: foo, type_arg: static_arg }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        applied,
+        "foo<i64>"
+    );
+    let cast = tree.add_expression(ast::ExpressionNode::Cast(ast::CastExpr {
+        target_type: integer_type,
+        value: x,
+        keyword_span: zero_span()
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        cast,
+        "cast<i64>(x)"
+    );
+
+    let tried = tree.add_expression(ast::ExpressionNode::Try(
+        ast::TryExpr { value: call }
+    ));
+    let moved = tree.add_expression(ast::ExpressionNode::Move(
+        ast::MoveExpr { value: x, span: zero_span() }
+    ));
+    let safety = try retained_text(allocator, &var tree, "checked by caller");
+    let unsafe_value = tree.add_expression(ast::ExpressionNode::Unsafe(
+        ast::UnsafeExpr { value: x, safety: safety, span: zero_span() }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        tried,
+        "try foo(x, 41)"
+    );
+    try expect_expression_render(allocator, &tree, &types, moved, "move x");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        unsafe_value,
+        "unsafe x"
+    );
+
+    let indexed = tree.add_expression(ast::ExpressionNode::Index(
+        ast::IndexExpr {
+            target: x,
+            index: one,
+            start: null,
+            end: null,
+            slice: false,
+            span: zero_span()
+        }
+    ));
+    let sliced = tree.add_expression(ast::ExpressionNode::Index(
+        ast::IndexExpr {
+            target: x,
+            index: null,
+            start: one,
+            end: forty_one,
+            slice: true,
+            span: zero_span()
+        }
+    ));
+    let open_slice = tree.add_expression(ast::ExpressionNode::Index(
+        ast::IndexExpr {
+            target: x,
+            index: null,
+            start: null,
+            end: null,
+            slice: true,
+            span: zero_span()
+        }
+    ));
+    try expect_expression_render(allocator, &tree, &types, indexed, "x[1]");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        sliced,
+        "x[1..41]"
+    );
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        open_slice,
+        "x[..]"
+    );
+
+    let field_name = try retained_text(allocator, &var tree, "value");
+    let field = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: x,
+        name: field_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let owner = try add_ident_expression(allocator, &var tree, "Type");
+    let variant_name = try retained_text(allocator, &var tree, "Item");
+    let namespace = tree.add_expression(ast::ExpressionNode::Field(
+        ast::FieldExpr {
+            receiver: owner,
+            name: variant_name,
+            namespace: true,
+            span: zero_span()
+        }
+    ));
+    let deref = tree.add_expression(ast::ExpressionNode::Deref(
+        ast::DerefExpr { receiver: x, operator_span: zero_span() }
+    ));
+    try expect_expression_render(allocator, &tree, &types, field, "x.value");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        namespace,
+        "Type::Item"
+    );
+    try expect_expression_render(allocator, &tree, &types, deref, "x.*");
+
+    let returned = tree.add_statement(ast::StatementNode::Return(
+        ast::ReturnStmt { value: x }
+    ));
+    let guarded = tree.add_expression(ast::ExpressionNode::OrelseGuard(
+        ast::OrelseGuardExpr {
+            condition: x,
+            exit: returned,
+            span: zero_span()
+        }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        guarded,
+        "(x orelse return x)"
+    );
+}
+
+test "expression rendering covers composite and control forms" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty = try retained_text(allocator, &var tree, "");
+    let value = try add_ident_expression(allocator, &var tree, "value");
+    let payload = try add_ident_expression(allocator, &var tree, "payload");
+    let capture_name = try retained_text(allocator, &var tree, "captured");
+    let meta_owner = try retained_text(allocator, &var tree, "Option");
+    let one = try add_int_expression(allocator, &var tree, "1");
+    let true_value = tree.add_expression(ast::ExpressionNode::Bool(
+        ast::BoolExpr { value: true }
+    ));
+
+    var fields = array::new<ast::FieldValue>(allocator);
+    errdefer fields.deinit();
+    try fields.append(ast::FieldValue {
+        name: try retained_text(allocator, &var tree, "x"),
+        value: one
+    });
+    try fields.append(ast::FieldValue {
+        name: try retained_text(allocator, &var tree, "item"),
+        value: value
+    });
+    let point_name = try retained_text(allocator, &var tree, "Point");
+    let literal = tree.add_expression(ast::ExpressionNode::StructLiteral(
+        ast::StructLiteralExpr {
+            type_name: point_name,
+            fields: move fields,
+            span: zero_span()
+        }
+    ));
+    let buffer = tree.add_expression(ast::ExpressionNode::BufferLiteral(
+        ast::BufferLiteralExpr { size: 4, span: zero_span() }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        literal,
+        "Point { x: 1, item: value }"
+    );
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        buffer,
+        "[4]u8{}"
+    );
+
+    let consequence = add_empty_block(allocator, &var tree);
+    let alternative = add_empty_block(allocator, &var tree);
+    let conditional = tree.add_expression(ast::ExpressionNode::If(ast::IfStmt {
+        condition: true_value,
+        consequence: consequence,
+        alternative: alternative,
+        capture: capture_name
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        conditional,
+        "if true {  } else {  }"
+    );
+
+    let bare_body = tree.add_statement(ast::StatementNode::Expr(
+        ast::ExprStmt { expr: payload, semicolon: false }
+    ));
+    let return_body = tree.add_statement(ast::StatementNode::Return(
+        ast::ReturnStmt { value: null }
+    ));
+    var arms = array::new<ast::MatchArm>(allocator);
+    errdefer arms.deinit();
+    try arms.append(ast::MatchArm {
+        tag: try retained_text(allocator, &var tree, "Some"),
+        binding: try retained_text(allocator, &var tree, "item"),
+        body: bare_body
+    });
+    try arms.append(ast::MatchArm {
+        tag: try retained_text(allocator, &var tree, "_"),
+        binding: empty,
+        body: return_body
+    });
+    let matched = tree.add_expression(ast::ExpressionNode::Match(ast::MatchStmt {
+        value: value,
+        arms: move arms,
+        meta_capture: capture_name,
+        meta_owner: meta_owner
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        &types,
+        matched,
+        "match value { Some(item) => payload, _ => return; }"
+    );
+}
+
+test "statement rendering covers control and compile-time forms" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty = try retained_text(allocator, &var tree, "");
+    let x_name = try retained_text(allocator, &var tree, "x");
+    let outer = try retained_text(allocator, &var tree, "outer");
+    let item_name = try retained_text(allocator, &var tree, "item");
+    let variant_name = try retained_text(allocator, &var tree, "Variant");
+    let payload_name = try retained_text(allocator, &var tree, "payload");
+    let x = try add_ident_expression(allocator, &var tree, "x");
+    let values = try add_ident_expression(allocator, &var tree, "values");
+    let zero = try add_int_expression(allocator, &var tree, "0");
+    let one = try add_int_expression(allocator, &var tree, "1");
+    let three = try add_int_expression(allocator, &var tree, "3");
+    let true_value = tree.add_expression(ast::ExpressionNode::Bool(
+        ast::BoolExpr { value: true }
+    ));
+    let foo = try add_ident_expression(allocator, &var tree, "foo");
+    let no_args = tree.add_expression_list(
+        array::new<ast::Expression>(allocator)
+    );
+    let call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
+        callee: foo,
+        args: no_args
+    }));
+
+    let let_statement = tree.add_statement(ast::StatementNode::Let(
+        ast::LetStmt { mutable: false, name: x_name, value: one }
+    ));
+    let var_statement = tree.add_statement(ast::StatementNode::Let(
+        ast::LetStmt { mutable: true, name: x_name, value: zero }
+    ));
+    let assignment = tree.add_statement(ast::StatementNode::Assign(
+        ast::AssignStmt { target: x, value: one }
+    ));
+    let empty_return = tree.add_statement(ast::StatementNode::Return(
+        ast::ReturnStmt { value: null }
+    ));
+    let value_return = tree.add_statement(ast::StatementNode::Return(
+        ast::ReturnStmt { value: x }
+    ));
+    let deferred = tree.add_statement(ast::StatementNode::Defer(
+        ast::DeferStmt { expr: call }
+    ));
+    let error_deferred = tree.add_statement(ast::StatementNode::ErrDefer(
+        ast::ErrDeferStmt { expr: call }
+    ));
+    let expression_statement = tree.add_statement(ast::StatementNode::Expr(
+        ast::ExprStmt { expr: x, semicolon: false }
+    ));
+    try expect_statement_render(
+        allocator, &tree, &types, let_statement, "let x = 1;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, var_statement, "var x = 0;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, assignment, "x = 1;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, empty_return, "return;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, value_return, "return x;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, deferred, "defer foo();"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, error_deferred, "errdefer foo();"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, expression_statement, "x;"
+    );
+
+    let empty_body = add_empty_block(allocator, &var tree);
+    let other_body = add_empty_block(allocator, &var tree);
+    let conditional = tree.add_statement(ast::StatementNode::If(ast::IfStmt {
+        condition: true_value,
+        consequence: empty_body,
+        alternative: other_body,
+        capture: payload_name
+    }));
+    let while_statement = tree.add_statement(ast::StatementNode::While(
+        ast::WhileStmt {
+            label: outer,
+            condition: true_value,
+            body: empty_body,
+            capture: payload_name
+        }
+    ));
+    let for_statement = tree.add_statement(ast::StatementNode::For(
+        ast::ForStmt {
+            label: outer,
+            name: item_name,
+            start: zero,
+            end: three,
+            body: empty_body
+        }
+    ));
+    let plain_break = tree.add_statement(ast::StatementNode::Break(
+        ast::BreakStmt { label: empty }
+    ));
+    let named_break = tree.add_statement(ast::StatementNode::Break(
+        ast::BreakStmt { label: outer }
+    ));
+    let plain_continue = tree.add_statement(ast::StatementNode::Continue(
+        ast::ContinueStmt { label: empty }
+    ));
+    let named_continue = tree.add_statement(ast::StatementNode::Continue(
+        ast::ContinueStmt { label: outer }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        conditional,
+        "if true {  } else {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        while_statement,
+        "outer: while true {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        for_statement,
+        "outer: for 0..3 |item| {  }"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, plain_break, "break;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, named_break, "break :outer;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, plain_continue, "continue;"
+    );
+    try expect_statement_render(
+        allocator, &tree, &types, named_continue, "continue :outer;"
+    );
+
+    var arms = array::new<ast::MatchArm>(allocator);
+    errdefer arms.deinit();
+    let terminated_body = tree.add_statement(ast::StatementNode::Expr(
+        ast::ExprStmt { expr: x, semicolon: true }
+    ));
+    try arms.append(ast::MatchArm {
+        tag: try retained_text(allocator, &var tree, "Ready"),
+        binding: empty,
+        body: terminated_body
+    });
+    let match_statement = tree.add_statement(ast::StatementNode::Match(
+        ast::MatchStmt {
+            value: x,
+            arms: move arms,
+            meta_capture: payload_name,
+            meta_owner: variant_name
+        }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        match_statement,
+        "match x { Ready => x; }"
+    );
+
+    let comptime_if = tree.add_statement(ast::StatementNode::ComptimeIf(
+        ast::ComptimeIfStmt {
+            condition: true_value,
+            consequence: empty_body,
+            alternative: other_body
+        }
+    ));
+    let comptime_for = tree.add_statement(ast::StatementNode::ComptimeFor(
+        ast::ComptimeForStmt {
+            list: values,
+            name: item_name,
+            body: empty_body
+        }
+    ));
+    let comptime_match = tree.add_statement(ast::StatementNode::ComptimeMatch(
+        ast::ComptimeMatchStmt {
+            value: x,
+            name: variant_name,
+            binding: payload_name,
+            body: empty_body
+        }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        comptime_if,
+        "comptime if true {  } else {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        comptime_for,
+        "comptime for values |item| {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        comptime_match,
+        "comptime match x |Variant, payload| {  }"
+    );
+
+    let empty_block = add_empty_block(allocator, &var tree);
+    try expect_block_render(allocator, &tree, &types, empty_block, "{  }");
+    var statements = array::new<ast::Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.append(let_statement);
+    try statements.append(value_return);
+    let populated_block = tree.add_block(ast::BlockStmt {
+        statements: move statements
+    });
+    try expect_block_render(
+        allocator,
+        &tree,
+        &types,
+        populated_block,
+        "{ let x = 1; return x; }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        &types,
+        populated_block.as_statement(),
+        "{ let x = 1; return x; }"
+    );
 }
 
 test "program retains declaration handles and nested contract methods" {
