@@ -1,0 +1,249 @@
+import compiler::ast;
+import compiler::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/stdmethod/methods.go. MethodIndex owns cached
+// signature text once; nested maps retain only copy indexes into its Array.
+
+/// Owns one rendered type spelling, or empty text for an omitted return.
+pub struct TypeText {
+    value: string::String
+}
+
+/// Copies this cached type text for a caller.
+pub fn (self: &TypeText) copy(
+    allocator: Allocator
+) -> !string::String {
+    let bytes = self.value.as_bytes();
+    return string::from_bytes(allocator, bytes);
+}
+
+/// Is one declared parameter after the receiver.
+pub struct ParamType {
+    pub type_name: TypeText,
+    pub borrow: bool,
+    pub mut_borrow: bool
+}
+
+/// Is one std method signature cached independently of its source Ast.
+pub struct Method {
+    pub signature_name: string::String,
+    pub type_params: array::Array<string::String>,
+    pub params: array::Array<ParamType>,
+    pub return_type: TypeText
+}
+
+/// Substitutes this method's declared type parameters in one cached type.
+pub fn (self: &Method) substitute(
+    allocator: Allocator,
+    type_name: &TypeText,
+    type_args: &array::Array<string::String>
+) -> !string::String {
+    let source = type_name.value.as_bytes();
+    if mem::len(source) == 0 or self.type_params.len() == 0 or
+        type_args.len() != self.type_params.len() {
+        return string::from_bytes(allocator, source);
+    }
+    // Non-empty TypeText values come from typ::render below, and caller
+    // arguments are rendered checker types. Parsing therefore cannot fail;
+    // allocation failures remain explicit through this error union.
+    return typ::substitute_owned_text(
+        allocator,
+        source,
+        &self.type_params,
+        type_args
+    );
+}
+
+// Identifies one Method retained by a MethodIndex.
+struct MethodHandle {
+    index: i64
+}
+
+/// Owns std methods by receiver base and call name.
+pub struct MethodIndex {
+    methods: array::Array<Method>,
+    by_receiver: map::Map<[]u8, map::Map<[]u8, MethodHandle>>,
+    allocator: Allocator
+}
+
+/// Borrows a method, or returns null when the receiver has no such method.
+pub fn (self: &MethodIndex) find(
+    receiver: []u8,
+    name: []u8
+) -> ?&Method {
+    if self.by_receiver.at(receiver) |methods| {
+        if methods.get(name) |handle| {
+            return self.methods.at(handle.index);
+        }
+    }
+    return null;
+}
+
+/// Collects the std method declarations reachable in program.
+pub fn index_methods(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    program: &ast::Program
+) -> !MethodIndex {
+    var index = MethodIndex {
+        methods: array::new<Method>(allocator),
+        by_receiver: map::new<[]u8, map::Map<[]u8, MethodHandle>>(allocator),
+        allocator: allocator
+    };
+    errdefer index.deinit();
+    var position = 0;
+    while program.declarations.get(position) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Function(function) => try index_function(
+                allocator,
+                &var index,
+                tree,
+                types,
+                function
+            ),
+            _ => {},
+        }
+        position = position + 1;
+    }
+    return move index;
+}
+
+fn index_function(
+    allocator: Allocator,
+    index: &var MethodIndex,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    function: &ast::FunctionDecl
+) -> !void {
+    if !function.signature.receiver or function.signature.params.len() == 0 {
+        return;
+    }
+    let retained_name = tree.texts.at(function.signature.name.node);
+    let full_name = retained_name.as_bytes();
+    if split_method_name(full_name) |parts| {
+        let method = try method_from_decl(allocator, tree, types, function);
+        errdefer method.deinit();
+        let handle = MethodHandle {
+            index: index.methods.len()
+        };
+        try index.methods.append(move method);
+        try insert_method(index, parts.receiver, parts.method, handle);
+    }
+    return;
+}
+
+fn insert_method(
+    index: &var MethodIndex,
+    receiver: []u8,
+    name: []u8,
+    handle: MethodHandle
+) -> !void {
+    if index.by_receiver.at_mut(receiver) |methods| {
+        return methods.insert(name, handle);
+    }
+    var methods = map::new<[]u8, MethodHandle>(index.allocator);
+    errdefer methods.deinit();
+    try methods.insert(name, handle);
+    return index.by_receiver.insert(receiver, move methods);
+}
+
+fn method_from_decl(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    function: &ast::FunctionDecl
+) -> !Method {
+    let signature_name = try copy_text(
+        allocator,
+        tree,
+        function.signature.name
+    );
+    errdefer signature_name.deinit();
+    let return_text = try render_return(
+        allocator,
+        types,
+        function.signature.return_type
+    );
+    errdefer return_text.deinit();
+    var method = Method {
+        signature_name: move signature_name,
+        type_params: array::new<string::String>(allocator),
+        params: array::new<ParamType>(allocator),
+        return_type: TypeText { value: move return_text }
+    };
+    errdefer method.deinit();
+    var index = 0;
+    while function.signature.static_params.at(index) |param| {
+        if param.type_name |_| {} else {
+            let name = try copy_text(allocator, tree, param.name);
+            errdefer name.deinit();
+            try method.type_params.append(move name);
+        }
+        index = index + 1;
+    }
+    index = 1;
+    while function.signature.params.at(index) |param| {
+        let rendered = try typ::render(allocator, types, param.type_name);
+        errdefer rendered.deinit();
+        try method.params.append(ParamType {
+            type_name: TypeText { value: move rendered },
+            borrow: param.borrow,
+            mut_borrow: param.mut_borrow
+        });
+        index = index + 1;
+    }
+    return move method;
+}
+
+fn copy_text(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    text: ast::Text
+) -> !string::String {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return string::from_bytes(allocator, bytes);
+}
+
+fn render_return(
+    allocator: Allocator,
+    types: &typ::Table,
+    value: ?typ::Type
+) -> !string::String {
+    if value |present| {
+        return typ::render(allocator, types, present);
+    }
+    return string::new(allocator);
+}
+
+/// Joins a receiver base and method call name.
+pub fn method_name(
+    allocator: Allocator,
+    receiver: []u8,
+    name: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(receiver);
+    try out.append_byte(cast<u8>(46));
+    try out.append_bytes(name);
+    return move out;
+}
+
+/// Splits a receiver-qualified method name at its last dot.
+pub fn split_method_name(name: []u8) -> ?typ::MethodNameParts {
+    return typ::split_method_name(name);
+}
+
+/// Returns the name a call spells for a declared function.
+pub fn call_name(name: []u8) -> []u8 {
+    if split_method_name(name) |parts| {
+        return parts.method;
+    }
+    return name;
+}

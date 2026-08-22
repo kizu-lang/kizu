@@ -1,0 +1,380 @@
+import compiler::ast;
+import compiler::stdmethod;
+import compiler::typ;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn retained_text(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    bytes: []u8
+) -> !ast::Text {
+    return tree.add_text_from_bytes(allocator, bytes);
+}
+
+fn empty_signature(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    name: []u8
+) -> !ast::FunctionSignature {
+    return ast::FunctionSignature {
+        receiver: false,
+        name: try retained_text(allocator, tree, name),
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: array::new<ast::Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: try retained_text(allocator, tree, ""),
+        public: false,
+        std: true
+    };
+}
+
+fn add_method(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    program: &var ast::Program,
+    name: []u8,
+    param_type: []u8,
+    return_type: []u8,
+    borrow: bool,
+    mut_borrow: bool
+) -> !void {
+    var signature = try empty_signature(allocator, tree, name);
+    errdefer signature.deinit();
+    signature.receiver = true;
+    try signature.static_params.append(ast::StaticParam {
+        name: try retained_text(allocator, tree, "T"),
+        type_name: null
+    });
+    try signature.params.append(ast::Param {
+        name: try retained_text(allocator, tree, "self"),
+        type_name: try types.parse("std::array::Array<T>"),
+        borrow: false,
+        mut_borrow: false
+    });
+    try signature.params.append(ast::Param {
+        name: try retained_text(allocator, tree, "value"),
+        type_name: try types.parse(param_type),
+        borrow: borrow,
+        mut_borrow: mut_borrow
+    });
+    if mem::len(return_type) > 0 {
+        signature.return_type = try types.parse(return_type);
+    }
+    let doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: false,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_empty_function(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    name: []u8,
+    receiver: bool
+) -> !void {
+    var signature = try empty_signature(allocator, tree, name);
+    errdefer signature.deinit();
+    signature.receiver = receiver;
+    let doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: false,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_value_static_method(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    program: &var ast::Program
+) -> !void {
+    var signature = try empty_signature(
+        allocator,
+        tree,
+        "std::array::Array.clear"
+    );
+    errdefer signature.deinit();
+    signature.receiver = true;
+    try signature.static_params.append(ast::StaticParam {
+        name: try retained_text(allocator, tree, "N"),
+        type_name: try types.parse("i64")
+    });
+    try signature.params.append(ast::Param {
+        name: try retained_text(allocator, tree, "self"),
+        type_name: try types.parse("std::array::Array<u8>"),
+        borrow: false,
+        mut_borrow: false
+    });
+    let doc = try retained_text(allocator, tree, "");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: false,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_non_function(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program
+) -> !void {
+    let name = try retained_text(allocator, tree, "ignored");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Test(
+        ast::TestDecl { name: name, body: null }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn expect_string(value: &string::String, expected: []u8) -> void {
+    let bytes = value.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+fn expect_type_text(
+    allocator: Allocator,
+    value: &stdmethod::TypeText,
+    expected: []u8
+) -> !void {
+    let copied = try value.copy(allocator);
+    defer copied.deinit();
+    expect_string(&copied, expected);
+    return;
+}
+
+test "stdmethod indexes cached signatures and overwrites duplicate methods" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    errdefer types.deinit();
+    var tree = ast::new(allocator);
+    errdefer tree.deinit();
+    var program = ast::new_program(allocator);
+    errdefer program.deinit();
+    try add_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program,
+        "std::array::Array.append",
+        "T",
+        "?T",
+        true,
+        true
+    );
+    try add_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program,
+        "std::array::Array.replace",
+        "T",
+        "?T",
+        true,
+        true
+    );
+    try add_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program,
+        "std::array::Array.append",
+        "i64",
+        "i64",
+        false,
+        false
+    );
+    try add_value_static_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program
+    );
+    try add_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program,
+        "std::array::Array.reset",
+        "T",
+        "",
+        false,
+        false
+    );
+    try add_non_function(allocator, &var tree, &var program);
+    try add_empty_function(
+        allocator,
+        &var tree,
+        &var program,
+        "std::array::Array.free",
+        false
+    );
+    try add_empty_function(
+        allocator,
+        &var tree,
+        &var program,
+        "std::array::Array.empty",
+        true
+    );
+    try add_method(
+        allocator,
+        &var tree,
+        &var types,
+        &var program,
+        "plain",
+        "u8",
+        "u8",
+        false,
+        false
+    );
+    let index = try stdmethod::index_methods(
+        allocator,
+        &tree,
+        &types,
+        &program
+    );
+    defer index.deinit();
+    program.deinit();
+    tree.deinit();
+    types.deinit();
+    if index.find("std::array::Array", "append") |method| {
+        expect_string(
+            &method.signature_name,
+            "std::array::Array.append"
+        );
+        testing::expect_equal<i64>(1, method.params.len());
+        if method.params.at(0) |param| {
+            try expect_type_text(allocator, &param.type_name, "i64");
+            testing::expect(!param.borrow);
+            testing::expect(!param.mut_borrow);
+        } else {
+            testing::fail("duplicate method parameter was not retained");
+        }
+        try expect_type_text(allocator, &method.return_type, "i64");
+    } else {
+        testing::fail("indexed method was not found");
+    }
+    if index.find("std::array::Array", "replace") |method| {
+        testing::expect_equal<i64>(1, method.type_params.len());
+        if method.type_params.at(0) |param| {
+            expect_string(param, "T");
+        } else {
+            testing::fail("method type parameter was not retained");
+        }
+        if method.params.at(0) |param| {
+            try expect_type_text(allocator, &param.type_name, "T");
+            testing::expect(param.borrow);
+            testing::expect(param.mut_borrow);
+            var arguments = array::new<string::String>(allocator);
+            defer arguments.deinit();
+            try arguments.append(try string::from_bytes(allocator, "i64"));
+            let substituted = try method.substitute(
+                allocator,
+                &method.return_type,
+                &arguments
+            );
+            defer substituted.deinit();
+            expect_string(&substituted, "?i64");
+            var missing = array::new<string::String>(allocator);
+            defer missing.deinit();
+            let unchanged = try method.substitute(
+                allocator,
+                &method.return_type,
+                &missing
+            );
+            defer unchanged.deinit();
+            expect_string(&unchanged, "?T");
+        } else {
+            testing::fail("method parameter was not retained");
+        }
+    } else {
+        testing::fail("second indexed method was not found");
+    }
+    if index.find("std::array::Array", "clear") |method| {
+        testing::expect_equal<i64>(0, method.type_params.len());
+        testing::expect_equal<i64>(0, method.params.len());
+        try expect_type_text(allocator, &method.return_type, "");
+        var no_arguments = array::new<string::String>(allocator);
+        defer no_arguments.deinit();
+        let copied = try method.substitute(
+            allocator,
+            &method.return_type,
+            &no_arguments
+        );
+        defer copied.deinit();
+        expect_string(&copied, "");
+    } else {
+        testing::fail("value-static method was not indexed");
+    }
+    if index.find("std::array::Array", "reset") |method| {
+        try expect_type_text(allocator, &method.return_type, "");
+        var arguments = array::new<string::String>(allocator);
+        defer arguments.deinit();
+        try arguments.append(try string::from_bytes(allocator, "i64"));
+        let unchanged = try method.substitute(
+            allocator,
+            &method.return_type,
+            &arguments
+        );
+        defer unchanged.deinit();
+        expect_string(&unchanged, "");
+    } else {
+        testing::fail("generic method without a return was not indexed");
+    }
+    if index.find("std::array::Array", "missing") |_| {
+        testing::fail("unknown method was found");
+    }
+    if index.find("std::array::Array", "free") |_| {
+        testing::fail("non-receiver function was indexed");
+    }
+    if index.find("std::array::Array", "empty") |_| {
+        testing::fail("method without a receiver parameter was indexed");
+    }
+    if index.find("", "plain") |_| {
+        testing::fail("unqualified receiver declaration was indexed");
+    }
+}
+
+test "stdmethod name helpers share one last-dot seam" {
+    let allocator = mem::page_allocator();
+    let joined = try stdmethod::method_name(
+        allocator,
+        "std::array::Array",
+        "append"
+    );
+    defer joined.deinit();
+    expect_string(&joined, "std::array::Array.append");
+    if stdmethod::split_method_name("std::array::Array.append") |parts| {
+        testing::expect_equal<[]u8>("std::array::Array", parts.receiver);
+        testing::expect_equal<[]u8>("append", parts.method);
+    } else {
+        testing::fail("qualified method name was not split");
+    }
+    testing::expect_equal<[]u8>(
+        "append",
+        stdmethod::call_name("std::array::Array.append")
+    );
+    testing::expect_equal<[]u8>("append", stdmethod::call_name("append"));
+    if stdmethod::split_method_name("append") |_| {
+        testing::fail("plain call name was split as a method");
+    }
+}

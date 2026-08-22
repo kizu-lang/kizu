@@ -878,13 +878,75 @@ pub fn substitute_text(
         }
         index = index + 1;
     }
+    return render_substituted(
+        allocator,
+        &table,
+        parsed,
+        &rendered_substitutions
+    );
+}
+
+/// Replaces type parameters supplied as parallel owned text arrays.
+pub fn substitute_owned_text(
+    allocator: Allocator,
+    text: []u8,
+    names: &array::Array<string::String>,
+    replacements: &array::Array<string::String>
+) -> !string::String {
+    if names.len() == 0 or names.len() != replacements.len() {
+        return owned_text(allocator, text);
+    }
+    var table = new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(text);
+    var rendered_substitutions = RenderedSubstitutions {
+        values: map::new<[]u8, string::String>(allocator)
+    };
+    defer rendered_substitutions.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        if replacements.at(index) |replacement| {
+            let name_bytes = name.as_bytes();
+            let replacement_bytes = replacement.as_bytes();
+            let replacement_type = try table.parse(replacement_bytes);
+            if rendered_substitutions.values.at_mut(name_bytes) |existing| {
+                existing.clear();
+                try append_render(existing, &table, replacement_type);
+            } else {
+                let replacement_text = try render(
+                    allocator,
+                    &table,
+                    replacement_type
+                );
+                try rendered_substitutions.values.insert(
+                    name_bytes,
+                    move replacement_text
+                );
+            }
+        }
+        index = index + 1;
+    }
+    return render_substituted(
+        allocator,
+        &table,
+        parsed,
+        &rendered_substitutions
+    );
+}
+
+fn render_substituted(
+    allocator: Allocator,
+    table: &Table,
+    parsed: Type,
+    substitutions: &RenderedSubstitutions
+) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
     try append_tree_node_with<RenderedSubstitutions>(
         &var out,
         table.trees.at(parsed.tree),
         parsed.root,
-        &rendered_substitutions
+        substitutions
     );
     return move out;
 }
