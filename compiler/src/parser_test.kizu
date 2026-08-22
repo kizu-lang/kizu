@@ -1120,6 +1120,278 @@ test "parser keeps partial error set declarations after syntax errors" {
     }
 }
 
+test "parser retains generic union variants docs and payload types" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let input =
+        \\/// Shape docs.
+        \\union Shape<T> {
+        \\    /// Point docs.
+        \\    Point,
+        \\    /// Value docs.
+        \\    Value(T),
+        \\    Bytes([]u8),
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_union_decl(&var tree, &var types);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Shape");
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "Shape docs."
+            );
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            if retained.type_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.node), "T");
+            } else {
+                testing::fail("missing union type parameter");
+            }
+            testing::expect_equal<i64>(3, retained.variants.len());
+            if retained.variants.at(0) |point| {
+                expect_retained_bytes(tree.texts.at(point.name.node), "Point");
+                expect_retained_bytes(
+                    tree.texts.at(point.doc.node),
+                    "Point docs."
+                );
+                if point.payload |_| {
+                    testing::fail("payload-free union variant gained a type");
+                }
+            } else {
+                testing::fail("missing payload-free union variant");
+            }
+            if retained.variants.at(1) |variant| {
+                expect_retained_bytes(tree.texts.at(variant.name.node), "Value");
+                expect_retained_bytes(
+                    tree.texts.at(variant.doc.node),
+                    "Value docs."
+                );
+                if variant.payload |payload| {
+                    let rendered = try typ::render(allocator, &types, payload);
+                    defer rendered.deinit();
+                    expect_retained_bytes(&rendered, "T");
+                } else {
+                    testing::fail("missing named union payload type");
+                }
+            } else {
+                testing::fail("missing named-payload union variant");
+            }
+            if retained.variants.at(2) |variant| {
+                expect_retained_bytes(tree.texts.at(variant.name.node), "Bytes");
+                expect_retained_bytes(tree.texts.at(variant.doc.node), "");
+                if variant.payload |payload| {
+                    let rendered = try typ::render(allocator, &types, payload);
+                    defer rendered.deinit();
+                    expect_retained_bytes(&rendered, "[]u8");
+                } else {
+                    testing::fail("missing slice union payload type");
+                }
+            } else {
+                testing::fail("missing slice-payload union variant");
+            }
+            testing::expect(!retained.public);
+        },
+        _ => testing::fail("parser did not retain a union declaration"),
+    }
+}
+
+test "parser keeps partial union declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let name_scanner = lexer::new(allocator, "union ;");
+    var name = try parser::new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_union_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        6
+    );
+    match tree.declarations.at(name_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain a partial union"),
+    }
+
+    let generic_scanner = lexer::new(allocator, "union Box<T {");
+    var generic = try parser::new(allocator, move generic_scanner);
+    defer generic.deinit();
+    let generic_decl = try generic.parse_union_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &generic,
+        0,
+        "expected next token `>`, got `{`",
+        11,
+        12
+    );
+    match tree.declarations.at(generic_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Box");
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain partial generic union"),
+    }
+
+    let empty_generic_scanner = lexer::new(allocator, "union Box<> { Value }");
+    var empty_generic = try parser::new(
+        allocator,
+        move empty_generic_scanner
+    );
+    defer empty_generic.deinit();
+    let empty_generic_decl = try empty_generic.parse_union_decl(
+        &var tree,
+        &var types
+    );
+    testing::expect(empty_generic.current_kind() == token::Kind::Gt);
+    testing::expect(empty_generic.peek_kind() == token::Kind::LBrace);
+    expect_parser_diagnostic(
+        &empty_generic,
+        0,
+        "expected static parameter, got `>`",
+        11,
+        12
+    );
+    match tree.declarations.at(empty_generic_decl.node) {
+        Union(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser accepted an empty union generic list"),
+    }
+
+    let value_param_scanner = lexer::new(
+        allocator,
+        "union Box<n: i64> { Value }"
+    );
+    var value_param = try parser::new(allocator, move value_param_scanner);
+    defer value_param.deinit();
+    let value_param_decl = try value_param.parse_union_decl(
+        &var tree,
+        &var types
+    );
+    testing::expect(value_param.current_kind() == token::Kind::Ident);
+    testing::expect(value_param.peek_kind() == token::Kind::Gt);
+    expect_parser_diagnostic(
+        &value_param,
+        0,
+        "expected type parameter, got n: i64",
+        14,
+        17
+    );
+    match tree.declarations.at(value_param_decl.node) {
+        Union(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser accepted a union value parameter"),
+    }
+
+    let brace_scanner = lexer::new(allocator, "union Shape ;");
+    var brace = try parser::new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_union_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        7,
+        12
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Shape");
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain a partial union"),
+    }
+
+    let item_scanner = lexer::new(allocator, "union Shape { 1 }");
+    var item = try parser::new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_union_decl(&var tree, &var types);
+    let item_message =
+        \\expected union variant, got integer "1"
+    ;
+    expect_parser_diagnostic(&item, 0, item_message, 15, 16);
+    match tree.declarations.at(item_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(0, retained.variants.len()),
+        _ => testing::fail("parser did not retain invalid union prefix"),
+    }
+
+    let payload_scanner = lexer::new(
+        allocator,
+        "union Shape { Circle(i64, Next }"
+    );
+    var payload = try parser::new(allocator, move payload_scanner);
+    defer payload.deinit();
+    let payload_decl = try payload.parse_union_decl(&var tree, &var types);
+    testing::expect(payload.current_kind() == token::Kind::Ident);
+    testing::expect(payload.peek_kind() == token::Kind::Comma);
+    expect_parser_diagnostic(
+        &payload,
+        0,
+        "expected next token `)`, got `,`",
+        22,
+        25
+    );
+    match tree.declarations.at(payload_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(0, retained.variants.len()),
+        _ => testing::fail("parser retained malformed union payload"),
+    }
+
+    let comma_scanner = lexer::new(
+        allocator,
+        "union Shape { Point Circle(i64) }"
+    );
+    var comma = try parser::new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_union_decl(&var tree, &var types);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after union variant",
+        15,
+        20
+    );
+    match tree.declarations.at(comma_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(1, retained.variants.len()),
+        _ => testing::fail("parser lost partial union variants"),
+    }
+
+    let eof_scanner = lexer::new(allocator, "union Shape { Point");
+    var eof = try parser::new(allocator, move eof_scanner);
+    defer eof.deinit();
+    let eof_decl = try eof.parse_union_decl(&var tree, &var types);
+    testing::expect(eof.current_kind() == token::Kind::Eof);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, eof.diagnostics_len());
+    match tree.declarations.at(eof_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(1, retained.variants.len()),
+        _ => testing::fail("parser lost an EOF-partial union"),
+    }
+}
+
 test "parser retains import paths after token cleanup" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);

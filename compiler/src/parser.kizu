@@ -374,6 +374,180 @@ fn name_list_token_message(
     return move out;
 }
 
+fn (self: &Parser) comment_text_at(
+    handle: arena::Handle<token::Token>
+) -> !string::String {
+    let current = self.tokens.at(handle);
+    return self.comment_text(&current.doc_comments);
+}
+
+fn (self: &var Parser) parse_union_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    return self.parse_union_decl_with_doc(tree, types, move docs);
+}
+
+fn (self: &var Parser) parse_union_decl_with_doc(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String
+) -> !ast::Declaration {
+    let doc = tree.add_text(move docs);
+    if !try self.expect_peek(token::Kind::Ident) {
+        let name = tree.add_text(string::new(self.allocator));
+        return add_empty_union_decl(self.allocator, tree, name, doc);
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    if self.peek_kind() == token::Kind::Lt {
+        try self.next_token();
+        if try self.parse_generic_param_list(tree, types) |type_params| {
+            errdefer type_params.deinit();
+            if type_params.len() == 0 or !try self.expect_type_close() {
+                return add_union_decl(
+                    tree,
+                    name,
+                    doc,
+                    move type_params,
+                    array::new<ast::UnionVariant>(self.allocator)
+                );
+            }
+            if !try self.expect_peek(token::Kind::LBrace) {
+                return add_union_decl(
+                    tree,
+                    name,
+                    doc,
+                    move type_params,
+                    array::new<ast::UnionVariant>(self.allocator)
+                );
+            }
+            let variants = try self.parse_union_variants(tree, types);
+            return add_union_decl(
+                tree,
+                name,
+                doc,
+                move type_params,
+                move variants
+            );
+        }
+        return add_empty_union_decl(self.allocator, tree, name, doc);
+    }
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return add_empty_union_decl(self.allocator, tree, name, doc);
+    }
+    let variants = try self.parse_union_variants(tree, types);
+    return add_union_decl(
+        tree,
+        name,
+        doc,
+        array::new<ast::Text>(self.allocator),
+        move variants
+    );
+}
+
+fn (self: &var Parser) parse_union_variants(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !array::Array<ast::UnionVariant> {
+    var variants = array::new<ast::UnionVariant>(self.allocator);
+    errdefer variants.deinit();
+    try self.next_token();
+    while self.current_kind() != token::Kind::RBrace and
+        self.current_kind() != token::Kind::Eof {
+        if try self.parse_union_variant(tree, types) |variant| {
+            try variants.append(variant);
+        } else {
+            return move variants;
+        }
+        if !try self.consume_list_delimiter("union variant") {
+            return move variants;
+        }
+        try self.next_token();
+    }
+    return move variants;
+}
+
+fn (self: &var Parser) parse_union_variant(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?ast::UnionVariant {
+    let handle = self.stream.get_or_panic(self.position);
+    let docs = try self.comment_text_at(handle);
+    let doc = tree.add_text(move docs);
+    if self.current_kind() != token::Kind::Ident {
+        let actual = self.tokens.at(handle);
+        let message = try name_list_token_message(
+            self.allocator,
+            "union variant",
+            actual
+        );
+        try self.record_error(move message);
+        return null;
+    }
+    let current = self.tokens.at(handle);
+    let name = try retain_literal(self.allocator, tree, current);
+    if self.peek_kind() != token::Kind::LParen {
+        return ast::UnionVariant {
+            name: name,
+            doc: doc,
+            payload: null
+        };
+    }
+    try self.next_token();
+    try self.next_token();
+    let payload = try self.parse_type_name(types);
+    if payload |retained| {
+        if !try self.expect_peek(token::Kind::RParen) {
+            return null;
+        }
+        return ast::UnionVariant {
+            name: name,
+            doc: doc,
+            payload: retained
+        };
+    }
+    return null;
+}
+
+fn add_empty_union_decl(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    name: ast::Text,
+    doc: ast::Text
+) -> ast::Declaration {
+    return add_union_decl(
+        tree,
+        name,
+        doc,
+        array::new<ast::Text>(allocator),
+        array::new<ast::UnionVariant>(allocator)
+    );
+}
+
+fn add_union_decl(
+    tree: &var ast::Ast,
+    name: ast::Text,
+    doc: ast::Text,
+    type_params: array::Array<ast::Text>,
+    variants: array::Array<ast::UnionVariant>
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Union(ast::UnionDecl {
+        name: name,
+        doc: doc,
+        type_params: move type_params,
+        variants: move variants,
+        public: false
+    }));
+}
+
 fn (self: &var Parser) parse_return_clause(
     types: &var typ::Table,
     signature: &var ast::FunctionSignature
