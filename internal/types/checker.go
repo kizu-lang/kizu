@@ -100,24 +100,6 @@ type Checker struct {
 	captureCondition bool
 }
 
-type scope struct {
-	types     *typeTable
-	parent    *scope
-	values    map[string]Type
-	mutable   map[string]bool
-	borrowed  map[string]bool
-	mutBorrow map[string]bool
-	// param marks the names bound by the function signature. A `&var` among
-	// them is the caller's storage, which a local mut borrow binding is not.
-	param        map[string]bool
-	borrowSource map[string][]string
-	// unread holds the locals this scope declared that nothing has read yet. A
-	// read removes one; whatever is left when the scope closes was never needed.
-	// Parameters are not in here: they are part of a signature, and a caller can
-	// require one the body has no use for.
-	unread map[string]ast.Span
-}
-
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
@@ -1347,17 +1329,56 @@ func checkMainReturnType(fn *functionType) error {
 	return errorf("type error: `main` returns `%s`, expected `void` or `!void`", returned)
 }
 
+// defineScopeParam binds a parameter and derives its root provenance from the
+// type policy owned by the checker type table.
+func defineScopeParam(
+	types *typeTable,
+	s *scope,
+	name string,
+	typ Type,
+	borrowed bool,
+	mutBorrow bool,
+) bool {
+	var sources []string
+	if borrowed || types.isBorrowedViewReturnType(typ) {
+		sources = []string{name}
+	}
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources, false)
+}
+
+// defineSignatureParam binds one function parameter. Only these bindings are
+// the caller's storage, which lets assignment through a `&var` one store there.
+func defineSignatureParam(
+	types *typeTable,
+	s *scope,
+	name string,
+	typ Type,
+	borrowed bool,
+	mutBorrow bool,
+) bool {
+	var sources []string
+	if borrowed || types.isBorrowedViewReturnType(typ) {
+		sources = []string{name}
+	}
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources, true)
+}
+
 // defineStaticValueParams puts the compile-time values a `<...>` list declares
 // into scope, and returns them by declared type. A body reads them like any
 // other name, and a static argument list needs to tell them apart from a
 // runtime local, so both callers set up a generic body through here.
-func defineStaticValueParams(env *scope, sig ast.FunctionSignature) (map[string]Type, error) {
+func defineStaticValueParams(
+	types *typeTable,
+	env *scope,
+	sig ast.FunctionSignature,
+) (map[string]Type, error) {
 	staticParams := map[string]Type{}
 	for _, param := range sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
-		if err := env.defineParam(param.Name, Type(typ.Text(param.Type)), false, false); err != nil {
+		defined := defineScopeParam(types, env, param.Name, Type(typ.Text(param.Type)), false, false)
+		if err := requireScopeDefinition(param.Name, defined); err != nil {
 			return nil, err
 		}
 		staticParams[param.Name] = Type(typ.Text(param.Type))
@@ -1373,13 +1394,15 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if err := checkMainReturnType(fn); err != nil {
 		return err
 	}
-	env := newScope(nil, &c.types)
-	staticParams, err := defineStaticValueParams(env, fn.sig)
+	env := newScope(nil)
+	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
-		err := env.defineSignatureParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+		defined := defineSignatureParam(
+			&c.types, env, param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+		err := requireScopeDefinition(param.Name, defined)
 		if err != nil {
 			return err
 		}
@@ -1444,10 +1467,37 @@ func (c *Checker) checkBlock(
 		if returns {
 			// A block that returns still has to account for what it bound: an
 			// early return does not make the bindings before it needed.
-			return true, env.checkAllRead()
+			return true, unreadLocalError(env)
 		}
 	}
-	return false, env.checkAllRead()
+	return false, unreadLocalError(env)
+}
+
+// requireScopeDefinition turns the scope's copy-only duplicate decision into
+// the source-facing checker diagnostic.
+func requireScopeDefinition(name string, defined bool) error {
+	if defined {
+		return nil
+	}
+	return errorf("type error: duplicate variable `%s`", name)
+}
+
+// unreadLocalError turns the stable first unread binding into its diagnostic.
+func unreadLocalError(env *scope) error {
+	names := make([]string, 0, len(env.bindings))
+	for name, binding := range env.bindings {
+		if binding.unread {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	name := names[0]
+	return errorAtCode(env.bindings[name].declaration, "type.unused_local",
+		"type error: local `%s` is never read"+
+			"\nhelp: remove it, or write `let _ = ...` to drop the value on purpose", name)
 }
 
 // checkStmt validates a statement and reports explicit return flow.
@@ -1599,15 +1649,17 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
-		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources)
+		return false, requireScopeDefinition(
+			stmt.Name, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources, false))
 	}
 	if c.types.isBorrowedViewReturnType(typ) {
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
 		if len(sources) > 0 {
-			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources)
+			return false, requireScopeDefinition(
+				stmt.Name, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources))
 		}
 	}
-	return false, env.define(stmt.Name, typ, stmt.Mutable)
+	return false, requireScopeDefinition(stmt.Name, env.define(stmt.Name, typ, stmt.Mutable))
 }
 
 // defineSpecialLetInitializer records local borrow/view initializers with source data.
@@ -1622,21 +1674,24 @@ func (c *Checker) defineSpecialLetInitializer(
 			return true, err
 		}
 		sources := c.exprBorrowSourceList(borrow.Right, env, unsafe)
-		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
+		return true, requireScopeDefinition(
+			stmt.Name, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources, false))
 	}
 	typ, mutable, ok, err := c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParam(stmt.Name, typ, true, mutable)
+		return true, requireScopeDefinition(
+			stmt.Name, defineScopeParam(&c.types, env, stmt.Name, typ, true, mutable))
 	}
 	sources, mutable, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources)
+		return true, requireScopeDefinition(stmt.Name,
+			env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources, false))
 	}
 	return false, nil
 }
@@ -2089,12 +2144,12 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 			continue
 		}
 		seen[source] = true
-		next, ok := env.lookupBorrowSource(source)
-		if !ok {
+		binding, ok := env.binding(source)
+		if !ok || len(binding.borrowSources) == 0 {
 			roots[source] = true
 			continue
 		}
-		for _, n := range next {
+		for _, n := range binding.borrowSources {
 			if n == source {
 				// A name whose recorded provenance includes itself is a root.
 				roots[source] = true
@@ -2412,7 +2467,7 @@ func (c *Checker) bindConditionCapture(
 			"type error: %s capture `|%s|` requires an optional condition, got %s",
 			kind, capture, cond)
 	}
-	return scope.define(capture, elem, false)
+	return requireScopeDefinition(capture, scope.define(capture, elem, false))
 }
 
 // bindContainerBorrowCapture handles an array/map at/at_mut capture condition:
@@ -2436,7 +2491,8 @@ func (c *Checker) bindContainerBorrowCapture(
 	if len(sources) == 0 {
 		sources = []string{capture}
 	}
-	return true, branch.defineParamWithSource(capture, elem, true, mutable, sources)
+	return true, requireScopeDefinition(
+		capture, branch.defineParamWithSource(capture, elem, true, mutable, sources, false))
 }
 
 // checkWhileStmt validates loop condition and body types.
@@ -2485,7 +2541,7 @@ func (c *Checker) checkForStmt(
 	}
 	defer leave()
 	child := env.child()
-	if err := child.define(stmt.Name, typeI64, false); err != nil {
+	if err := requireScopeDefinition(stmt.Name, child.define(stmt.Name, typeI64, false)); err != nil {
 		return false, err
 	}
 	_, err = c.checkBlock(stmt.Body, child, wantReturn, unsafe)
@@ -2616,7 +2672,8 @@ func (c *Checker) checkMatchArms(
 		}
 		armEnv := env.child()
 		if payload != "" && arm.Binding != "" {
-			if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+			if err := requireScopeDefinition(
+				arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
 				return false, err
 			}
 		}
@@ -3024,7 +3081,8 @@ func (c *Checker) checkMatchExprArm(
 	}
 	armEnv := env.child()
 	if payload != "" && arm.Binding != "" {
-		if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+		if err := requireScopeDefinition(
+			arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
 			return "", err
 		}
 	}
@@ -4834,14 +4892,16 @@ func (c *Checker) checkGenericInstantiation(
 	}
 	defer func() { c.instantiationDepth-- }()
 	defer c.bindMetaFields(fieldArgs)()
-	env := newScope(nil, &c.types)
-	staticParams, err := defineStaticValueParams(env, fn.sig)
+	env := newScope(nil)
+	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
 		typ := c.types.substituteTypeParams(fn.params[idx], subst)
-		if err := env.defineSignatureParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
+		defined := defineSignatureParam(
+			&c.types, env, param.Name, typ, param.Borrow, param.MutBorrow)
+		if err := requireScopeDefinition(param.Name, defined); err != nil {
 			return err
 		}
 	}
@@ -6993,175 +7053,4 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMa
 		return "", errorf("type error: `print` cannot print void")
 	}
 	return typeVoid, nil
-}
-
-// newScope creates a lexical type scope.
-func newScope(parent *scope, types *typeTable) *scope {
-	return &scope{
-		types: types, parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
-		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
-		param:        map[string]bool{},
-		borrowSource: map[string][]string{}, unread: map[string]ast.Span{},
-	}
-}
-
-// child creates a nested lexical type scope.
-func (s *scope) child() *scope {
-	return newScope(s, s.types)
-}
-
-// declareLocal records a binding this scope will be asked about. `_` is the
-// name for a value that is deliberately dropped, so it is never asked about.
-func (s *scope) declareLocal(name string, span ast.Span) {
-	if name == discardName {
-		return
-	}
-	s.unread[name] = span
-}
-
-// discardName is written where a value is produced on purpose and not kept.
-const discardName = "_"
-
-// checkAllRead reports a local this scope declared and nothing read.
-func (s *scope) checkAllRead() error {
-	names := make([]string, 0, len(s.unread))
-	for name := range s.unread {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		return errorAtCode(s.unread[name], "type.unused_local",
-			"type error: local `%s` is never read"+
-				"\nhelp: remove it, or write `let _ = ...` to drop the value on purpose", name)
-	}
-	return nil
-}
-
-// define binds a local name to a type in the current scope.
-func (s *scope) define(name string, typ Type, mutable bool) error {
-	if name == discardName {
-		// `_` is where a value is dropped, not a name anything can read. Binding
-		// it twice in one scope is two drops, not a redeclaration.
-		return nil
-	}
-	if _, exists := s.values[name]; exists {
-		return errorf("type error: duplicate variable `%s`", name)
-	}
-	s.values[name] = typ
-	s.mutable[name] = mutable
-	return nil
-}
-
-// defineWithSource binds a non-borrow local while preserving view provenance.
-func (s *scope) defineWithSource(name string, typ Type, mutable bool, sources []string) error {
-	if err := s.define(name, typ, mutable); err != nil {
-		return err
-	}
-	if len(sources) > 0 {
-		s.borrowSource[name] = sources
-	}
-	return nil
-}
-
-// defineParam binds a function parameter and records borrow capabilities.
-func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
-	var sources []string
-	if borrowed || s.types.isBorrowedViewReturnType(typ) {
-		sources = []string{name}
-	}
-	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources)
-}
-
-// defineSignatureParam binds one function parameter. Only these bindings are
-// the caller's storage, which is what lets assignment through a `&var` one
-// reach the caller.
-func (s *scope) defineSignatureParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
-	if err := s.defineParam(name, typ, borrowed, mutBorrow); err != nil {
-		return err
-	}
-	s.param[name] = true
-	return nil
-}
-
-// defineParamWithSource binds a borrowed local and records its source owners.
-func (s *scope) defineParamWithSource(
-	name string,
-	typ Type,
-	borrowed bool,
-	mutBorrow bool,
-	sources []string,
-) error {
-	if err := s.define(name, typ, false); err != nil {
-		return err
-	}
-	s.borrowed[name] = borrowed
-	s.mutBorrow[name] = mutBorrow
-	if len(sources) > 0 {
-		s.borrowSource[name] = sources
-	}
-	return nil
-}
-
-// lookup resolves a local name by walking parent scopes.
-func (s *scope) lookup(name string) (Type, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		if typ, ok := cur.values[name]; ok {
-			delete(cur.unread, name)
-			return typ, true
-		}
-	}
-	return "", false
-}
-
-// isMutable reports whether a resolved local name may be assigned.
-func (s *scope) isMutable(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutable[name]
-		}
-	}
-	return false
-}
-
-// isMutBorrowedParam reports whether a resolved local name is a `&var`
-// parameter: the one mut-borrow binding that is the caller's storage, so
-// assigning it stores there. A local mut borrow binding or capture is not.
-func (s *scope) isMutBorrowedParam(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutBorrow[name] && cur.param[name]
-		}
-	}
-	return false
-}
-
-// isBorrowed reports whether a local name is an &T or &var T parameter.
-func (s *scope) isBorrowed(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.borrowed[name]
-		}
-	}
-	return false
-}
-
-// isMutBorrowed reports whether a local name is an &var T parameter.
-func (s *scope) isMutBorrowed(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutBorrow[name]
-		}
-	}
-	return false
-}
-
-// lookupBorrowSource resolves the provenance sources for a borrowed local.
-func (s *scope) lookupBorrowSource(name string) ([]string, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			sources := cur.borrowSource[name]
-			return sources, len(sources) > 0
-		}
-	}
-	return nil, false
 }
