@@ -29,6 +29,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   unsafecap                     unsafe が覆う操作の種類と診断文言
   fmt, diagnostic, quote, buildcache, cimport, lsp
 compiler/            non-shipping の Kizu compiler 移植先(cutover まで CLI 非接続)
+  src/main.kizu      package root。cutover までは user-facing entrypoint にしない
+  src/internal/      compiler package の外へ公開しない移植済み実装 module
 lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの

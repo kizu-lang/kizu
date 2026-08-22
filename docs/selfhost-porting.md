@@ -68,6 +68,7 @@ work unit の出力は次を含みます。
 - work unit は、対象 declaration と、その移植のために新設または変更した result type /
   helper の code LOC を Go と Kizu で数える。後で共用する予定という理由では除外しない
 - work unit の完了ごとに、対象 module 全体の Go / Kizu code LOC と比率も更新する。
+  Kizu module に production の internal submodule がある場合はその subtree も合算し、
   module 累計から共用 helper や先行 work unit の基盤を除外しない
 - どちらも blank、comment、test、document を実装比率へ混ぜない。改行だけで比率が動いて
   いないことを確かめるため、空白区切りの code word 数と比率も併記する
@@ -119,23 +120,30 @@ Go の `panic`、reflection、goroutine、shared mutable global、unsafe pointer
 Kizu の通常の snake_case と module namespace へ機械的に変換します。名前変更で
 意味を整理し直しません。
 
+compiler package の外へ見せる module は root の `compiler` だけです。実装 module は
+`src/internal/` に置き、Go の `internal/x` を `compiler::internal::x` に対応させます。
+module 本体は `src/internal/parser.kizu`、その test は
+`src/internal/parser/test.kizu` に置きます。`mod.kizu` は使いません。実装を子 module
+へ分ける場合は `src/internal/parser/internal/x.kizu` に置き、parser subtree の外へ
+公開しません。
+
 | Go | Kizu |
 | --- | --- |
-| `internal/source` | `compiler::source` |
-| `internal/token` | `compiler::token` |
-| `internal/lexer` | `compiler::lexer` |
-| `internal/parser` | `compiler::parser` |
-| `internal/ast` | `compiler::ast` |
-| `internal/diagnostic` | `compiler::diagnostic` |
-| `internal/typ` | `compiler::typ` |
-| `internal/types` | `compiler::types` |
-| `internal/ownership` | `compiler::ownership` |
-| `internal/ir` | `compiler::ir` |
-| `internal/llvm` | `compiler::llvm` |
-| `internal/wasm` | `compiler::wasm` |
-| `internal/project` | `compiler::project` |
-| `internal/fmt` | `compiler::fmt` |
-| `cmd/kizu` | `compiler::cli` |
+| `internal/source` | `compiler::internal::source` |
+| `internal/token` | `compiler::internal::token` |
+| `internal/lexer` | `compiler::internal::lexer` |
+| `internal/parser` | `compiler::internal::parser` |
+| `internal/ast` | `compiler::internal::ast` |
+| `internal/diagnostic` | `compiler::internal::diagnostic` |
+| `internal/typ` | `compiler::internal::typ` |
+| `internal/types` | `compiler::internal::types` |
+| `internal/ownership` | `compiler::internal::ownership` |
+| `internal/ir` | `compiler::internal::ir` |
+| `internal/llvm` | `compiler::internal::llvm` |
+| `internal/wasm` | `compiler::internal::wasm` |
+| `internal/project` | `compiler::internal::project` |
+| `internal/fmt` | `compiler::internal::fmt` |
+| `cmd/kizu` | `compiler` |
 
 package cycle を hook、global registry、extern call、duplicate type で迂回しません。
 cycle が出たら Go 側の実際の ownership を調べ、共有型の owner を一つに決めます。
