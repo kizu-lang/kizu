@@ -23,16 +23,6 @@ type metaField struct {
 // the body is a move in every expansion -- which is what makes moving an owner
 // inside a multi-field loop the error it should be.
 func (c *Checker) checkComptimeForStmt(stmt *ast.ComptimeForStmt, env *scope) error {
-	if ident, ok := stmt.List.(*ast.IdentExpr); ok {
-		if captureParams, exists := c.runtimeCaptures[ident.Name]; exists {
-			return c.checkRuntimeCaptureFor(stmt, captureParams, env)
-		}
-	}
-	if stmt.Binding != "" {
-		return errorf(
-			"move error: structural comptime for has one capture, got `|%s, %s|`",
-			stmt.Name, stmt.Binding)
-	}
 	fields, err := c.comptimeForFields(stmt.List)
 	if err != nil {
 		return err
@@ -48,40 +38,6 @@ func (c *Checker) checkComptimeForStmt(stmt *ast.ComptimeForStmt, env *scope) er
 	for _, field := range fields {
 		c.metaFields[stmt.Name] = field
 		if err := c.checkBlock(stmt.Body, env.child()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// checkRuntimeCaptureFor applies the body once to each concrete by-value
-// parameter. Views are borrowed for the callee frame; owners remain owned and
-// must be consumed by their expansion.
-func (c *Checker) checkRuntimeCaptureFor(
-	stmt *ast.ComptimeForStmt,
-	elements []runtimeCaptureElement,
-	env *scope,
-) error {
-	if stmt.Binding == "" {
-		return errorf(
-			"move error: runtime argument capture needs type and value captures, as in `|T, value|`")
-	}
-	if c.typeArgValues == nil {
-		c.typeArgValues = map[string]string{}
-	}
-	previousType, hadType := c.typeArgValues[stmt.Name]
-	defer func() {
-		if hadType {
-			c.typeArgValues[stmt.Name] = previousType
-		} else {
-			delete(c.typeArgValues, stmt.Name)
-		}
-	}()
-	for _, element := range elements {
-		c.typeArgValues[stmt.Name] = element.typeName
-		child := env.child()
-		child.defineAlias(stmt.Binding, element.binding)
-		if err := c.checkBlock(stmt.Body, child); err != nil {
 			return err
 		}
 	}
@@ -115,7 +71,7 @@ func (c *Checker) comptimeForFields(list ast.Expression) ([]metaField, error) {
 // errComptimeForList names the lists a `comptime for` accepts.
 var errComptimeForList = errorf(
 	"move error: comptime for expects `std::meta::public_fields<T>()` or " +
-		"`std::meta::variants<T>()`, or a runtime argument capture")
+		"`std::meta::variants<T>()`")
 
 // variants lists an enum's tags or a union's variants in declaration order.
 func (c *Checker) variants(typeArg string) ([]metaField, error) {

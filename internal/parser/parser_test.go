@@ -30,40 +30,6 @@ func TestParseHello(t *testing.T) {
 	}
 }
 
-// TestParseRuntimeCapture records one trailing runtime capture and the two
-// captures that open each fixed argument.
-func TestParseRuntimeCapture(t *testing.T) {
-	p := New(lexer.New(`fn append(
-    parts: ...,
-) {
-    comptime for parts |T, part| { print(part); }
-}`))
-	program := p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors: %v", p.Errors())
-	}
-	fn := program.Decls[0].(*ast.FunctionDecl)
-	if len(fn.StaticParams) != 0 || len(fn.Params) != 1 || !fn.Params[0].Capture {
-		t.Fatalf("capture signature = %#v / %#v", fn.StaticParams, fn.Params)
-	}
-	loop := fn.Body.Statements[0].(*ast.ComptimeForStmt)
-	if loop.Name != "T" || loop.Binding != "part" {
-		t.Fatalf("captures = (%q, %q)", loop.Name, loop.Binding)
-	}
-	if got := fn.String(); !strings.Contains(got, "append(parts: ...)") {
-		t.Fatalf("function string = %q", got)
-	}
-}
-
-// TestParseRejectsNonTrailingRuntimeCapture keeps the expansion boundary unambiguous.
-func TestParseRejectsNonTrailingRuntimeCapture(t *testing.T) {
-	p := New(lexer.New(`fn bad(parts: ..., after: i64) {}`))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 || !strings.Contains(p.Errors()[0], "must be last") {
-		t.Fatalf("errors = %v, want trailing-capture diagnostic", p.Errors())
-	}
-}
-
 // TestParseTopLevelErrorNamesAllowedDeclarations keeps top-level diagnostics useful.
 func TestParseTopLevelErrorNamesAllowedDeclarations(t *testing.T) {
 	p := New(lexer.New(`foo`))
@@ -506,20 +472,6 @@ fn (self: &File) write() -> !i64 { return 1; }
 impl Writer for File;`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// TestParseQualifiedContractImpl lets a module explicitly assert an imported
-// structural contract without flattening either namespace into a local name.
-func TestParseQualifiedContractImpl(t *testing.T) {
-	p := New(lexer.New(`impl fmt::Display for app::User;`))
-	program := p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors: %v", p.Errors())
-	}
-	decl := program.Decls[0].(*ast.ImplDecl)
-	if decl.ContractName != "fmt::Display" || decl.TypeName != "app::User" {
-		t.Fatalf("impl = %#v", decl)
 	}
 }
 

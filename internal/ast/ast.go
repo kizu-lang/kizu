@@ -153,27 +153,6 @@ func (s *FunctionSignature) TypeParamNames() []string {
 	return names
 }
 
-// RuntimeCapture returns the trailing runtime argument capture, when present.
-func (s *FunctionSignature) RuntimeCapture() (Param, bool) {
-	for _, param := range s.Params {
-		if param.Capture {
-			return param, true
-		}
-	}
-	return Param{}, false
-}
-
-// IsGeneric reports whether calls instantiate the declaration before checking
-// and lowering its body. A runtime capture is generic even without a written
-// static parameter because its fixed parameter list comes from each call.
-func (s *FunctionSignature) IsGeneric() bool {
-	if len(s.StaticParams) > 0 {
-		return true
-	}
-	_, ok := s.RuntimeCapture()
-	return ok
-}
-
 // declNode marks FunctionDecl as a declaration node.
 func (*FunctionDecl) declNode() {}
 
@@ -434,18 +413,10 @@ type Param struct {
 	TypeName  typ.Type
 	Borrow    bool
 	MutBorrow bool
-	// Capture marks the one trailing heterogeneous runtime argument capture.
-	Capture bool
 }
-
-// MaxRuntimeCaptureArguments bounds one exact compile-time expansion.
-const MaxRuntimeCaptureArguments = 64
 
 // String returns a compact debug representation of the parameter.
 func (p Param) String() string {
-	if p.Capture {
-		return p.Name + ": ..."
-	}
 	prefix := ""
 	if p.MutBorrow {
 		prefix = borrowPrefix(true)
@@ -744,13 +715,11 @@ func (s *ComptimeIfStmt) String() string {
 }
 
 // ComptimeForStmt repeats a body once per element of a compile-time list.
-// A structural list uses Name as its one compile-time capture. A trailing
-// runtime capture uses Name for the element type and Binding for the value.
+// The list is a `std::meta` form, and Name binds one element per expansion.
 type ComptimeForStmt struct {
-	List    Expression
-	Name    string
-	Binding string
-	Body    *BlockStmt
+	List Expression
+	Name string
+	Body *BlockStmt
 }
 
 // statementNode marks ComptimeForStmt as a statement node.
@@ -758,11 +727,7 @@ func (*ComptimeForStmt) statementNode() {}
 
 // String returns a compact debug representation of the comptime loop.
 func (s *ComptimeForStmt) String() string {
-	capture := s.Name
-	if s.Binding != "" {
-		capture += ", " + s.Binding
-	}
-	return fmt.Sprintf("comptime for %s |%s| %s", s.List.String(), capture, s.Body.String())
+	return fmt.Sprintf("comptime for %s |%s| %s", s.List.String(), s.Name, s.Body.String())
 }
 
 // ComptimeMatchStmt runs a body against whichever variant a value holds, with

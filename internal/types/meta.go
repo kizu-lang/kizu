@@ -30,16 +30,6 @@ func (c *Checker) checkComptimeForStmt(
 	wantReturn Type,
 	unsafe unsafeMark,
 ) (bool, error) {
-	if ident, ok := stmt.List.(*ast.IdentExpr); ok {
-		if captureParams, exists := c.runtimeCaptures[ident.Name]; exists {
-			return c.checkRuntimeCaptureFor(stmt, captureParams, env, wantReturn, unsafe)
-		}
-	}
-	if stmt.Binding != "" {
-		return false, errorf(
-			"comptime error: structural comptime for has one capture, got `|%s, %s|`",
-			stmt.Name, stmt.Binding)
-	}
 	fields, err := c.comptimeForFields(stmt.List)
 	if err != nil {
 		return false, err
@@ -63,63 +53,6 @@ func (c *Checker) checkComptimeForStmt(
 	}
 	// An empty struct expands to nothing, and nothing cannot return.
 	return returns && len(fields) > 0, nil
-}
-
-// checkRuntimeCaptureFor checks one ordinary body expansion for each captured
-// runtime argument. The first capture is a compile-time type value; the second
-// is an ordinary runtime binding of that concrete type.
-func (c *Checker) checkRuntimeCaptureFor(
-	stmt *ast.ComptimeForStmt,
-	captureParams []runtimeCaptureParam,
-	env *scope,
-	wantReturn Type,
-	unsafe unsafeMark,
-) (bool, error) {
-	if stmt.Binding == "" {
-		return false, errorf(
-			"comptime error: runtime argument capture needs type and value captures, as in `|T, value|`")
-	}
-	if stmt.Name == stmt.Binding {
-		return false, errorf(
-			"comptime error: runtime argument type and value captures must use different names")
-	}
-	if c.typeArgValues == nil {
-		c.typeArgValues = map[string]Type{}
-	}
-	if c.typeParams == nil {
-		c.typeParams = map[string]bool{}
-	}
-	previousType, hadType := c.typeArgValues[stmt.Name]
-	previousParam := c.typeParams[stmt.Name]
-	defer func() {
-		if hadType {
-			c.typeArgValues[stmt.Name] = previousType
-		} else {
-			delete(c.typeArgValues, stmt.Name)
-		}
-		if previousParam {
-			c.typeParams[stmt.Name] = true
-		} else {
-			delete(c.typeParams, stmt.Name)
-		}
-	}()
-	returns := true
-	for _, captured := range captureParams {
-		c.typeArgValues[stmt.Name] = captured.typ
-		c.typeParams[stmt.Name] = true
-		child := env.child()
-		if err := child.defineSignatureParam(
-			stmt.Binding, captured.typ, captured.borrow, captured.mutBorrow,
-		); err != nil {
-			return false, err
-		}
-		expansionReturns, err := c.checkBlock(stmt.Body, child, wantReturn, unsafe)
-		if err != nil {
-			return false, err
-		}
-		returns = returns && expansionReturns
-	}
-	return returns && len(captureParams) > 0, nil
 }
 
 // comptimeForFields reads the list a `comptime for` walks. Only the two
@@ -154,7 +87,7 @@ func (c *Checker) comptimeForFields(list ast.Expression) ([]metaField, error) {
 // errComptimeForList names the lists a `comptime for` accepts.
 var errComptimeForList = errorf(
 	"comptime error: comptime for expects `std::meta::public_fields<T>()` or " +
-		"`std::meta::variants<T>()`, or a runtime argument capture")
+		"`std::meta::variants<T>()`")
 
 // variants lists an enum's tags or a union's variants in declaration order.
 func (c *Checker) variants(typeArg string) ([]metaField, error) {

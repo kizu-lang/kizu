@@ -212,10 +212,6 @@ func (c *graphChecker) qualifyTestDecl(
 	decl *ast.TestDecl,
 ) (*ast.TestDecl, error) {
 	cp := *decl
-	// A test is a synthetic function during checking and lowering. Qualifying
-	// its name preserves this module's private-field access and keeps test
-	// symbols from different files distinct.
-	cp.Name = module.qualify(decl.Name)
 	body, err := c.qualifyBlock(module, decl.Body)
 	cp.Body = body
 	return &cp, err

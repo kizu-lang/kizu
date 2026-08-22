@@ -105,7 +105,6 @@ go test ./...
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
 | minimal explicit generics | `minimal_generics.kizu` | checks explicit static type arguments and `comptime if T == type<i64>` |
-| trailing runtime capture | `runtime_argument_capture.kizu` | expands ordered heterogeneous arguments and displays a user-defined type with `std::fmt` |
 
 ## Package-Shaped Examples
 

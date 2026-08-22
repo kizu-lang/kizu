@@ -77,27 +77,6 @@ func TestNextToken(t *testing.T) {
 	}
 }
 
-// TestRuntimeCaptureEllipsisIsOneToken keeps `...` distinct from a range and dot.
-func TestRuntimeCaptureEllipsisIsOneToken(t *testing.T) {
-	l := New(`fn append(parts: ...) {}`)
-	var ellipses int
-	for {
-		tok := l.NextToken()
-		if tok.Type == token.Ellipsis {
-			ellipses++
-			if tok.Literal != "..." {
-				t.Fatalf("ellipsis literal = %q", tok.Literal)
-			}
-		}
-		if tok.Type == token.EOF {
-			break
-		}
-	}
-	if ellipses != 1 {
-		t.Fatalf("ellipsis tokens = %d, want 1", ellipses)
-	}
-}
-
 // TestTokensShareSourceID checks file identity is copied without copying its path.
 func TestTokensShareSourceID(t *testing.T) {
 	sources := source.NewMap()

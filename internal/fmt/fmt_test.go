@@ -534,18 +534,3 @@ func TestFormatComptimeMatchDoesNotAddArmComma(t *testing.T) {
 		t.Fatalf("Format(comptime match):\n--- got ---\n%s\n--- want ---\n%s", got, src)
 	}
 }
-
-// TestFormatRuntimeCaptureKeepsEllipsisTight pins the public capture spelling.
-func TestFormatRuntimeCaptureKeepsEllipsisTight(t *testing.T) {
-	src := "fn append(parts: ...) -> void {\n" +
-		"    comptime for parts |T, part| { print(part); }\n" +
-		"}\n"
-	want := "fn append(parts: ...) -> void {\n" +
-		"    comptime for parts |T, part| {\n" +
-		"        print(part);\n" +
-		"    }\n" +
-		"}\n"
-	if got := Format(src); got != want {
-		t.Fatalf("Format(runtime capture):\n--- got ---\n%s\n--- want ---\n%s", got, want)
-	}
-}

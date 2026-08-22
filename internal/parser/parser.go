@@ -333,7 +333,7 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
-	firstName := strings.Join(p.parseTypeBaseName(), "::")
+	firstName := p.cur.Literal
 	if p.peek.Type != token.For {
 		p.errorf("expected `impl <contract> for %s;`;"+
 			" a method on a type is `fn (self: %s) name(...)`", firstName, firstName)
@@ -344,7 +344,7 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
-	decl.TypeName = strings.Join(p.parseTypeBaseName(), "::")
+	decl.TypeName = p.cur.Literal
 	if p.peek.Type == token.LBrace {
 		p.errorf("`impl %s for %s` takes no body;"+
 			" write the methods as `fn (self: %s) name(...)` and end this with `;`",
@@ -643,17 +643,6 @@ func (p *Parser) parseParams() []ast.Param {
 			return params
 		}
 		p.nextToken()
-		if p.cur.Type == token.Ellipsis {
-			param.Capture = true
-			params = append(params, param)
-			if p.peek.Type == token.Comma {
-				p.nextToken()
-				if p.peek.Type != token.RParen {
-					p.errorf("runtime argument capture `%s: ...` must be last", param.Name)
-				}
-			}
-			break
-		}
 		if p.cur.Type == token.Amp {
 			param.Borrow = true
 			p.nextToken()
@@ -1004,18 +993,15 @@ func (p *Parser) parseComptimeForStmt() ast.Statement {
 	}
 	p.nextToken()
 	stmt.List = p.parseExpression(lowest)
-	captures, ok := p.parseOneOrTwoCaptures()
+	capture, ok := p.parsePayloadCapture()
 	if !ok {
 		return stmt
 	}
-	if len(captures) == 0 {
+	if capture == "" {
 		p.errorf("comptime for requires a capture, as in `comptime for list |field| { ... }`")
 		return stmt
 	}
-	stmt.Name = captures[0]
-	if len(captures) > 1 {
-		stmt.Binding = captures[1]
-	}
+	stmt.Name = capture
 	if !p.expectPeek(token.LBrace) {
 		return stmt
 	}
@@ -1033,7 +1019,7 @@ func (p *Parser) parseComptimeMatchStmt() ast.Statement {
 	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
-	captures, ok := p.parseOneOrTwoCaptures()
+	captures, ok := p.parseVariantCapture()
 	if !ok {
 		return stmt
 	}
@@ -1053,9 +1039,9 @@ func (p *Parser) parseComptimeMatchStmt() ast.Statement {
 	return stmt
 }
 
-// parseOneOrTwoCaptures parses `|name|` or `|name, binding|`. The callers are
-// the two compile-time forms whose source has at most one associated value.
-func (p *Parser) parseOneOrTwoCaptures() ([]string, bool) {
+// parseVariantCapture parses `|variant|` or `|variant, payload|`. A third name
+// has nothing to bind: a variant carries at most one payload (SPEC §6.8).
+func (p *Parser) parseVariantCapture() ([]string, bool) {
 	if p.peek.Type != token.Pipe {
 		return nil, true
 	}

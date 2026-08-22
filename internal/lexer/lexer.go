@@ -110,12 +110,6 @@ func (l *Lexer) scanToken() token.Token {
 			break
 		}
 		tok = l.readCompoundToken(compoundTokens[l.ch])
-	case '.':
-		if l.peekChar() == '.' && l.peekRune(2) == '.' {
-			tok = l.threeCharToken(token.Ellipsis)
-			break
-		}
-		tok = l.readCompoundToken(compoundTokens[l.ch])
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()
@@ -184,23 +178,6 @@ func (l *Lexer) twoCharToken(t token.Type) token.Token {
 	return token.Token{
 		Type:    t,
 		Literal: string([]rune{ch, l.ch}),
-		Source:  l.source,
-		Line:    line,
-		Column:  column,
-	}
-}
-
-// threeCharToken returns a token spanning the current rune and the next two runes.
-func (l *Lexer) threeCharToken(t token.Type) token.Token {
-	first := l.ch
-	line := l.line
-	column := l.column
-	l.readChar()
-	second := l.ch
-	l.readChar()
-	return token.Token{
-		Type:    t,
-		Literal: string([]rune{first, second, l.ch}),
 		Source:  l.source,
 		Line:    line,
 		Column:  column,

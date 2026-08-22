@@ -36,13 +36,17 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
-	previous, hadPrevious, restoreCapture := l.bindIfCapture(stmt.Capture, payload)
+	var previous Value
+	var hadPrevious bool
+	if stmt.Capture != "" {
+		previous, hadPrevious = l.env.get(stmt.Capture)
+		l.env.set(stmt.Capture, payload)
+	}
 	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, false)
 	if stmt.Capture != "" {
 		// The capture is scoped to the consequence; the else branch and the
 		// merged environment see whatever the name meant outside.
 		l.restoreLoopVar(stmt.Capture, previous, hadPrevious)
-		restoreCapture()
 		if err == nil {
 			restoreBranchVar(thenResult.env, stmt.Capture, previous, hadPrevious)
 		}
@@ -70,18 +74,6 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 		mergeBlock.Terminator = Terminator{Op: "unreachable"}
 	}
 	return nil
-}
-
-// bindIfCapture gives the consequence its optional payload and returns the
-// outer value and source-mode restoration needed before lowering the else arm.
-func (l *lowerer) bindIfCapture(name string, payload Value) (Value, bool, func()) {
-	if name == "" {
-		return Value{}, false, func() {}
-	}
-	previous, hadPrevious := l.env.get(name)
-	restoreCapture := l.shadowActiveCapture(name)
-	l.env.set(name, payload)
-	return previous, hadPrevious, restoreCapture
 }
 
 // restoreBranchVar puts a scoped capture's outer meaning back into a branch
@@ -425,8 +417,6 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	if stmt.Capture != "" {
 		previous, hadPrevious := l.env.get(stmt.Capture)
 		defer l.restoreLoopVar(stmt.Capture, previous, hadPrevious)
-		restoreCapture := l.shadowActiveCapture(stmt.Capture)
-		defer restoreCapture()
 	}
 	return l.lowerLoop(loopShape{
 		name:  "while",
@@ -461,8 +451,6 @@ func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
 	}
 	previous, hadPrevious := l.env.get(stmt.Name)
 	defer l.restoreLoopVar(stmt.Name, previous, hadPrevious)
-	restoreCapture := l.shadowActiveCapture(stmt.Name)
-	defer restoreCapture()
 	var index *Instr
 	return l.lowerLoop(loopShape{
 		name:  "for",

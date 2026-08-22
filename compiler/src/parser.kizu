@@ -679,7 +679,13 @@ fn name_list_token_message(
     label: []u8,
     actual: &token::Token
 ) -> !string::String {
-    return fmt::format(allocator, "expected ", label, ", got ", actual);
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("expected ");
+    try out.append_bytes(label);
+    try out.append_bytes(", got ");
+    try append_token_description(&var out, actual);
+    return move out;
 }
 
 fn (self: &Parser) comment_text_at(
@@ -1328,11 +1334,10 @@ fn (self: &var Parser) parse_receiver(
         return null;
     }
     if params.len() != 1 {
-        let message = try fmt::format(
-            self.allocator,
-            "expected one receiver in `fn (...)`, got ",
-            params.len()
-        );
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("expected one receiver in `fn (...)`, got ");
+        try fmt::append_i64(&var message, params.len());
         try self.record_error(move message);
         params.deinit();
         return null;
@@ -1410,15 +1415,17 @@ fn impl_missing_for_message(
     allocator: Allocator,
     contract_token: &token::Token
 ) -> !string::String {
+    var message = string::new(allocator);
+    errdefer message.deinit();
+    try message.append_bytes("expected `impl <contract> for ");
     let name = contract_token.literal.as_bytes();
-    return fmt::format(
-        allocator,
-        "expected `impl <contract> for ",
-        name,
-        ";`; a method on a type is `fn (self: ",
-        name,
-        ") name(...)`"
+    try message.append_bytes(name);
+    try message.append_bytes(
+        ";`; a method on a type is `fn (self: "
     );
+    try message.append_bytes(name);
+    try message.append_bytes(") name(...)`");
+    return move message;
 }
 
 fn impl_body_message(
@@ -1426,16 +1433,18 @@ fn impl_body_message(
     contract_name: &string::String,
     type_name: &string::String
 ) -> !string::String {
-    return fmt::format(
-        allocator,
-        "`impl ",
-        contract_name,
-        " for ",
-        type_name,
-        "` takes no body; write the methods as `fn (self: ",
-        type_name,
-        ") name(...)` and end this with `;`"
+    var message = string::new(allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`impl ");
+    try append_retained_string(&var message, contract_name);
+    try message.append_bytes(" for ");
+    try append_retained_string(&var message, type_name);
+    try message.append_bytes(
+        "` takes no body; write the methods as `fn (self: "
     );
+    try append_retained_string(&var message, type_name);
+    try message.append_bytes(") name(...)` and end this with `;`");
+    return move message;
 }
 
 fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
@@ -1670,12 +1679,11 @@ fn (self: &var Parser) parse_labeled_stmt(
         While => try self.parse_while_stmt(tree, types, label),
         For => try self.parse_for_stmt(tree, types, label),
         _ => {
-            let message = try fmt::format(
-                self.allocator,
-                "label `",
-                tree.texts.at(label.node),
-                "` must be attached to while or for"
-            );
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes("label `");
+            try append_retained_text(&var message, tree, label);
+            try message.append_bytes("` must be attached to while or for");
             try self.record_error(move message);
             let expression = try add_error_ident(
                 self.allocator,
@@ -3338,7 +3346,13 @@ fn string_value_message(
     value: &string::String,
     suffix: []u8
 ) -> !string::String {
-    return fmt::format(allocator, prefix, value, suffix);
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    let bytes = value.as_bytes();
+    try out.append_bytes(bytes);
+    try out.append_bytes(suffix);
+    return move out;
 }
 
 fn token_span_at(parser: &Parser) -> ast::Span {
@@ -3933,16 +3947,21 @@ fn (self: &var Parser) record_context_error(
     prefix: []u8,
     context: []u8
 ) -> !void {
-    let message = try fmt::format(self.allocator, prefix, context);
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes(prefix);
+    try message.append_bytes(context);
     return self.record_error(move message);
 }
 
 fn (self: &var Parser) record_error(message: string::String) -> !void {
+    defer message.deinit();
     let handle = self.stream.get_or_panic(self.position);
+    let bytes = message.as_bytes();
     let entry = try diagnostic_at_token(
         self.allocator,
         self.tokens.at(handle),
-        move message
+        bytes
     );
     errdefer entry.deinit();
     return self.diagnostics_store.append(move entry);
@@ -3954,7 +3973,13 @@ fn expected_token_message(
     expected: token::Kind,
     actual: &token::Token
 ) -> !string::String {
-    return fmt::format(allocator, prefix, expected, ", got ", actual);
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    try append_token_type_description(&var out, expected);
+    try out.append_bytes(", got ");
+    try append_token_description(&var out, actual);
+    return move out;
 }
 
 fn unexpected_token_message(
@@ -3962,7 +3987,11 @@ fn unexpected_token_message(
     prefix: []u8,
     actual: &token::Token
 ) -> !string::String {
-    return fmt::format(allocator, prefix, actual);
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
+    try append_token_description(&var out, actual);
+    return move out;
 }
 
 fn token_literal_message(
@@ -3970,21 +3999,13 @@ fn token_literal_message(
     prefix: []u8,
     actual: &token::Token
 ) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(prefix);
     let bytes = actual.literal.as_bytes();
-    return fmt::format(allocator, prefix, bytes);
+    try out.append_bytes(bytes);
+    return move out;
 }
-
-fn (self: &token::Token) append_display(out: &var string::String) -> !void {
-    return append_token_description(out, self);
-}
-
-impl fmt::Display for token::Token;
-
-fn (self: &token::Kind) append_display(out: &var string::String) -> !void {
-    return append_token_type_description(out, self.*);
-}
-
-impl fmt::Display for token::Kind;
 
 fn append_token_description(
     out: &var string::String,
@@ -4172,14 +4193,14 @@ fn retained_string_has_bytes(value: &string::String) -> bool {
 fn diagnostic_at_token(
     allocator: Allocator,
     current: &token::Token,
-    message: string::String
+    message: []u8
 ) -> !diagnostic::Diagnostic {
-    return diagnostic::new_owned(
+    return diagnostic::new(
         allocator,
         diagnostic::Severity::Error,
         "",
         token_span(current),
-        move message
+        message
     );
 }
 

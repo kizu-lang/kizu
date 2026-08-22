@@ -82,46 +82,6 @@ func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 	return nil
 }
 
-// checkRuntimeCapturePolicy keeps the variadic surface to one user-visible
-// trailing runtime capture. Its element types and borrow modes come from each
-// call, so the declaration needs no paired static type list.
-func checkRuntimeCapturePolicy(fn *ast.FunctionDecl) error {
-	runtimeCapture, hasRuntimeCapture := fn.RuntimeCapture()
-	if !hasRuntimeCapture {
-		return nil
-	}
-	last := fn.Params[len(fn.Params)-1]
-	if last.Name != runtimeCapture.Name || !last.Capture {
-		return errorf("type error: runtime argument capture `%s: ...` must be last", runtimeCapture.Name)
-	}
-	for _, param := range fn.Params[:len(fn.Params)-1] {
-		if param.Name == runtimeCapture.Name {
-			return errorf(
-				"type error: runtime argument capture name `%s` duplicates a parameter",
-				runtimeCapture.Name)
-		}
-	}
-	for _, param := range fn.StaticParams {
-		if param.Name == runtimeCapture.Name {
-			return errorf(
-				"type error: runtime argument capture name `%s` duplicates a static parameter",
-				runtimeCapture.Name)
-		}
-	}
-	if fn.Receiver {
-		return errorf("type error: runtime argument captures are supported only on free functions")
-	}
-	if fn.ExternABI != "" {
-		return errorf(
-			"type error: extern function `%s` cannot declare a runtime argument capture",
-			fn.Name)
-	}
-	if fn.Body == nil {
-		return errorf("type error: runtime argument captures require a function body")
-	}
-	return nil
-}
-
 // compileTimeOnlyType reports whether a spelling holds a compile-time token
 // rather than a type values can have. `Function` names a function and `Field`
 // names one field of a struct; both are read where they are written and have
