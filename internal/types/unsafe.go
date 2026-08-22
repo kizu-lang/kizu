@@ -32,6 +32,16 @@ type unsafeScope struct {
 // whether or not the function itself is declared `unsafe fn`.
 type unsafeMark = *unsafeScope
 
+// unsafeInvariantRequirement is the copy-only policy result for an operation
+// that establishes or mutates an unsafe struct invariant.
+type unsafeInvariantRequirement uint8
+
+const (
+	unsafeInvariantNone unsafeInvariantRequirement = iota
+	unsafeInvariantMarker
+	unsafeInvariantFileBoundary
+)
+
 // requireUnsafeCapabilityAt rejects an operation the compiler cannot prove when
 // no `unsafe` marker covers it. Source no longer spells capability names, but
 // the diagnostic still names the kind of operation so the reader learns what
@@ -66,14 +76,15 @@ func requireUnsafeStructInvariant(
 	fieldName string,
 	span ast.Span,
 ) error {
-	if decl == nil || !decl.RequiresUnsafe {
+	requirement := unsafeStructInvariantRequirement(decl, span)
+	if requirement == unsafeInvariantNone {
 		return nil
 	}
 	target := "`unsafe struct " + decl.Name + "`"
 	if fieldName != "" {
 		target = "`" + decl.Name + "." + fieldName + "`"
 	}
-	if !decl.Span.Source.IsZero() && !span.Source.IsZero() && decl.Span.Source != span.Source {
+	if requirement == unsafeInvariantFileBoundary {
 		return errorAtCode(span, "unsafe.invariant_file_boundary",
 			"unsafe error: %s %s is confined to its declaration file `%s`",
 			action, target, decl.Span.Source.Path())
@@ -81,14 +92,35 @@ func requireUnsafeStructInvariant(
 	return requireUnsafeCapabilityAt(mark, unsafeStructInvariant, action+" "+target, span)
 }
 
+// unsafeStructInvariantRequirement separates the closed policy decision from
+// the diagnostic text owned by the surrounding checker operation.
+func unsafeStructInvariantRequirement(
+	decl *ast.StructDecl,
+	span ast.Span,
+) unsafeInvariantRequirement {
+	if decl == nil || !decl.RequiresUnsafe {
+		return unsafeInvariantNone
+	}
+	if !decl.Span.Source.IsZero() && !span.Source.IsZero() && decl.Span.Source != span.Source {
+		return unsafeInvariantFileBoundary
+	}
+	return unsafeInvariantMarker
+}
+
 // requireObligationDoc requires a `///` comment where an obligation is created.
 // What the obligation says cannot be written in code, so a comment is the only
 // place it can live; the compiler cannot judge what is written there, but it
 // can tell that nothing was.
 func requireObligationDoc(requiresUnsafe bool, doc string, subject string, want string) error {
-	if !requiresUnsafe || doc != "" {
+	if !obligationDocMissing(requiresUnsafe, doc) {
 		return nil
 	}
 	return errorf("unsafe error: `%s` needs a `///` comment stating %s"+
 		"\nhelp: write `/// <%s>` above the declaration", subject, want, want)
+}
+
+// obligationDocMissing reports whether a declaration created an undocumented
+// unsafe obligation. The checker caller owns the subject-specific diagnostic.
+func obligationDocMissing(requiresUnsafe bool, doc string) bool {
+	return requiresUnsafe && doc == ""
 }
