@@ -445,58 +445,30 @@ func (c *Checker) checkSatisfies(contractName string, typeName Type) error {
 	return nil
 }
 
-// collectEnum registers and validates a tag enum declaration.
-func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
-	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
-		return err
-	}
-	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
-	for _, tag := range decl.Tags {
-		if enum.tags[tag] {
-			return errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
-		}
-		enum.tags[tag] = true
-		enum.order = append(enum.order, tag)
-	}
-	c.enums[decl.Name] = enum
-	return nil
-}
-
-// collectErrorSet registers and validates an error set declaration.
-func (c *Checker) collectErrorSet(decl *ast.ErrorSetDecl) error {
-	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
-		return err
-	}
-	set := &errorSetType{name: decl.Name, members: map[string]bool{}, public: decl.Public}
-	for _, member := range decl.Members {
-		if set.members[member] {
-			return errorf("type error: duplicate error `%s::%s`", decl.Name, member)
-		}
-		set.members[member] = true
-	}
-	set.tagged = &enumType{name: set.name, tags: set.members, public: set.public}
-	c.errorSets[decl.Name] = set
-	return nil
-}
-
 // rejectDuplicateTypeName reports a name already taken by another declaration.
 // Every declaration asks here, so a name is taken whichever kind claimed it
 // first: checking only the kinds that came before leaves the answer depending
 // on the order two declarations were written in.
 func (c *Checker) rejectDuplicateTypeName(name string) error {
-	if _, exists := c.errorSets[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.enums[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.structs[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.unions[name]; exists {
+	if c.hasDuplicateTypeName(name) {
 		return errorf("type error: duplicate type `%s`", name)
 	}
 	return nil
+}
+
+// hasDuplicateTypeName reports a name already retained by a concrete type.
+func (c *Checker) hasDuplicateTypeName(name string) bool {
+	if _, exists := c.errorSets[name]; exists {
+		return true
+	}
+	if _, exists := c.enums[name]; exists {
+		return true
+	}
+	if _, exists := c.structs[name]; exists {
+		return true
+	}
+	_, exists := c.unions[name]
+	return exists
 }
 
 // collectUnion registers and validates a tagged union declaration.

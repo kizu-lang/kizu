@@ -905,6 +905,16 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckRejectsDuplicateErrorMembers pins the source-facing wrapper around
+// the copy-only error-set collection decision.
+func TestCheckRejectsDuplicateErrorMembers(t *testing.T) {
+	err := checkSource(`error Problem { Failed, Failed }
+fn main() {}`)
+	if err == nil || !strings.Contains(err.Error(), "duplicate error `Problem::Failed`") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 // TestCheckBinaryMismatchReportsOperatorSpan keeps checker diagnostics location-aware.
 func TestCheckBinaryMismatchReportsOperatorSpan(t *testing.T) {
 	source := `enum Color { Red, Green }

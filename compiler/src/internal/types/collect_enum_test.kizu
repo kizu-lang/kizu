@@ -1,0 +1,187 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::mem;
+import std::testing;
+
+fn expect_text(
+    tree: &ast::Ast,
+    value: ast::Text,
+    expected: []u8
+) -> void {
+    let retained = tree.texts.at(value.node);
+    let bytes = retained.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_collection_issue(
+    tree: &ast::Ast,
+    issue: EnumCollectionIssue,
+    kind: EnumCollectionIssueKind,
+    owner: []u8,
+    member: []u8,
+    has_member: bool
+) -> void {
+    testing::expect_equal<EnumCollectionIssueKind>(kind, issue.kind);
+    expect_text(tree, issue.owner, owner);
+    if issue.member |value| {
+        if !has_member {
+            testing::fail("collection issue unexpectedly has a member");
+        }
+        expect_text(tree, value, member);
+    } else {
+        if has_member {
+            testing::fail("collection issue lost its member");
+        }
+    }
+    return;
+}
+
+fn expect_collection_issue_source(
+    allocator: Allocator,
+    input: []u8,
+    kind: EnumCollectionIssueKind,
+    owner: []u8,
+    member: []u8,
+    has_member: bool
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var metadata = new_checker_metadata(allocator);
+    defer metadata.deinit();
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Enum(value) => {
+                if try collect_enum_decision(
+                    allocator,
+                    &tree,
+                    value,
+                    &var metadata
+                ) |issue| {
+                    expect_collection_issue(
+                        &tree,
+                        issue,
+                        kind,
+                        owner,
+                        member,
+                        has_member
+                    );
+                    return;
+                }
+            },
+            ErrorSet(value) => {
+                if try collect_error_set_decision(
+                    allocator,
+                    &tree,
+                    value,
+                    &var metadata
+                ) |issue| {
+                    expect_collection_issue(
+                        &tree,
+                        issue,
+                        kind,
+                        owner,
+                        member,
+                        has_member
+                    );
+                    return;
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    testing::fail("source did not produce a collection issue");
+    return;
+}
+
+fn collect_enum_source(
+    allocator: Allocator,
+    input: []u8,
+    tree: &var ast::Ast,
+    metadata: &var CheckerMetadata
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(tree);
+    defer program.deinit();
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Enum(value) => {
+                if try collect_enum_decision(
+                    allocator,
+                    tree,
+                    value,
+                    metadata
+                ) |issue| {
+                    testing::fail("valid enum declaration was rejected");
+                }
+            },
+            ErrorSet(value) => {
+                if try collect_error_set_decision(
+                    allocator,
+                    tree,
+                    value,
+                    metadata
+                ) |issue| {
+                    testing::fail("valid error set was rejected");
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+test "checker metadata owns enums and error sets once" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var metadata = new_checker_metadata(allocator);
+    defer metadata.deinit();
+    let input =
+        \\enum Choice { First, Second }
+        \\error Problem { Failed, Missing }
+    ;
+    try collect_enum_source(allocator, input, &var tree, &var metadata);
+    testing::expect(metadata.has_collected_type("Choice"));
+    testing::expect(metadata.has_collected_type("Problem"));
+}
+
+test "enum-shaped collectors return copy-only duplicate details" {
+    let allocator = mem::page_allocator();
+    try expect_collection_issue_source(
+        allocator,
+        "enum Choice { First, First }",
+        EnumCollectionIssueKind::DuplicateTag,
+        "Choice",
+        "First",
+        true
+    );
+    try expect_collection_issue_source(
+        allocator,
+        "error Problem { Failed, Failed }",
+        EnumCollectionIssueKind::DuplicateError,
+        "Problem",
+        "Failed",
+        true
+    );
+    try expect_collection_issue_source(
+        allocator,
+        "enum Choice { First } error Choice { Failed }",
+        EnumCollectionIssueKind::DuplicateType,
+        "Choice",
+        "",
+        false
+    );
+}

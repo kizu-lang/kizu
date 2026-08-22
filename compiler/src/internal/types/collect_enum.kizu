@@ -1,0 +1,113 @@
+import compiler::internal::ast;
+import std::array;
+import std::map;
+
+// Mechanical port of the enum-shaped declaration collection decisions. The
+// Checker caller owns source-facing diagnostic construction; this file only
+// returns copy handles into its Ast and transfers successful metadata owners.
+
+enum EnumCollectionIssueKind {
+    DuplicateType,
+    DuplicateTag,
+    DuplicateError,
+}
+
+struct EnumCollectionIssue {
+    kind: EnumCollectionIssueKind,
+    owner: ast::Text,
+    member: ?ast::Text
+}
+
+fn collect_enum_decision(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declaration: &ast::EnumDecl,
+    metadata: &var CheckerMetadata
+) -> !?EnumCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if metadata.has_collected_type(name) {
+        return EnumCollectionIssue {
+            kind: EnumCollectionIssueKind::DuplicateType,
+            owner: declaration.name,
+            member: null
+        };
+    }
+    var value = EnumType {
+        name: declaration.name,
+        tags: map::new<[]u8, bool>(allocator),
+        order: array::new<ast::Text>(allocator),
+        public: declaration.public
+    };
+    errdefer value.deinit();
+    var index = 0;
+    while declaration.tags.at(index) |tag| {
+        let retained_tag = tree.texts.at(tag.node);
+        let tag_name = retained_tag.as_bytes();
+        if value.tags.contains(tag_name) {
+            value.deinit();
+            return EnumCollectionIssue {
+                kind: EnumCollectionIssueKind::DuplicateTag,
+                owner: declaration.name,
+                member: ast::Text { node: tag.node }
+            };
+        }
+        try value.order.append(ast::Text { node: tag.node });
+        try value.tags.insert(tag_name, true);
+        index = index + 1;
+    }
+    let handle = EnumHandle { index: metadata.enums.len() };
+    try metadata.enums.append(move value);
+    try metadata.enums_by_name.insert(name, handle);
+    return null;
+}
+
+fn collect_error_set_decision(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    declaration: &ast::ErrorSetDecl,
+    metadata: &var CheckerMetadata
+) -> !?EnumCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if metadata.has_collected_type(name) {
+        return EnumCollectionIssue {
+            kind: EnumCollectionIssueKind::DuplicateType,
+            owner: declaration.name,
+            member: null
+        };
+    }
+    var tagged = EnumType {
+        name: declaration.name,
+        tags: map::new<[]u8, bool>(allocator),
+        order: array::new<ast::Text>(allocator),
+        public: declaration.public
+    };
+    errdefer tagged.deinit();
+    var index = 0;
+    while declaration.members.at(index) |member| {
+        let retained_member = tree.texts.at(member.node);
+        let member_name = retained_member.as_bytes();
+        if tagged.tags.contains(member_name) {
+            tagged.deinit();
+            return EnumCollectionIssue {
+                kind: EnumCollectionIssueKind::DuplicateError,
+                owner: declaration.name,
+                member: ast::Text { node: member.node }
+            };
+        }
+        try tagged.tags.insert(member_name, true);
+        index = index + 1;
+    }
+    let tagged_handle = EnumHandle { index: metadata.enums.len() };
+    try metadata.enums.append(move tagged);
+    let set = ErrorSetType {
+        name: declaration.name,
+        public: declaration.public,
+        tagged: tagged_handle
+    };
+    let set_handle = ErrorSetHandle { index: metadata.error_sets.len() };
+    try metadata.error_sets.append(set);
+    try metadata.error_sets_by_name.insert(name, set_handle);
+    return null;
+}
