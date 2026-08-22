@@ -35,8 +35,8 @@ func llvmPrimitiveType(typ string) string {
 
 // llvmType maps Kizu IR types to LLVM IR types.
 func (e *emitter) llvmType(typ string) string {
-	if _, ok := errorUnionSuccessType(typ); ok {
-		return llvmErrorUnionTypeName(typ)
+	if _, ok := e.errorUnionSuccessType(typ); ok {
+		return e.llvmErrorUnionTypeName(typ)
 	}
 	if _, ok := optionalElemLLVM(typ); ok {
 		return llvmOptionalTypeName(typ)
@@ -217,8 +217,8 @@ func llvmStructTypeName(name string) string {
 }
 
 // llvmErrorUnionTypeName returns a stable named LLVM type for a recoverable result.
-func llvmErrorUnionTypeName(name string) string {
-	errorName, success, ok := errorUnionParts(name)
+func (e *emitter) llvmErrorUnionTypeName(name string) string {
+	errorName, success, ok := e.errorUnionParts(name)
 	if !ok {
 		return "%kizu.error.unknown"
 	}
@@ -269,14 +269,19 @@ func llvmNamePart(name string) string {
 }
 
 // errorUnionSuccessType returns T for !T or Error!T.
-func errorUnionSuccessType(typ string) (string, bool) {
-	_, success, ok := errorUnionParts(typ)
+func (e *emitter) errorUnionSuccessType(typeName string) (string, bool) {
+	_, success, ok := e.errorUnionParts(typeName)
 	return success, ok
 }
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
-func errorUnionParts(name string) (string, string, bool) {
-	return typ.ErrorUnionParts(name)
+func (e *emitter) errorUnionParts(name string) (string, string, bool) {
+	parsed, err := e.types.Parse(name)
+	if err != nil {
+		return "", "", false
+	}
+	errorType, success, ok := typ.ErrorUnionParts(parsed)
+	return typ.Text(errorType), typ.Text(success), ok
 }
 
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.

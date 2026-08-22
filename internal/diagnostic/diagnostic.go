@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/quote"
 )
 
 // Severity identifies whether a diagnostic blocks compilation or is advisory.
@@ -26,6 +27,12 @@ type Diagnostic struct {
 	Span     ast.Span
 	Notes    []string
 	Help     string
+}
+
+// QuoteBytes returns the deterministic ASCII byte-literal form used by
+// std::fmt::append_bytes_literal in the self-hosted compiler.
+func QuoteBytes(text string) string {
+	return quote.Bytes(text)
 }
 
 // New constructs one structured diagnostic from its summary fields.
@@ -81,8 +88,8 @@ func (d *Diagnostic) Error() string {
 		first = "warning: " + d.Message
 	}
 	if !d.Span.IsZero() {
-		if d.Span.File != "" {
-			first += fmt.Sprintf(" at %s:%d:%d", d.Span.File, d.Span.Start.Line, d.Span.Start.Column)
+		if path := d.Span.Source.Path(); path != "" {
+			first += fmt.Sprintf(" at %s:%d:%d", path, d.Span.Start.Line, d.Span.Start.Column)
 		} else {
 			first += fmt.Sprintf(" at %d:%d", d.Span.Start.Line, d.Span.Start.Column)
 		}

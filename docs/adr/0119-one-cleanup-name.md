@@ -102,7 +102,7 @@ defer grid.deinit();
 - `internal/ownership`: 同上
 - `internal/ir`: owner 要素の container だけ std wrapper を呼ぶ。plain 要素は
   従来どおり runtime op 1 つ
-- `lib/kizu/std/src/{array,mem}.kizu`: `deinit` body の comptime 分岐
+- `lib/kizu/std/src/{array/array,mem/mem}.kizu`: `deinit` body の comptime 分岐
 - negative example 3 本が合法になり削除(shallow deinit 2、入れ子 1)。入れ子は
   positive example に置き換え
 - `.kizu` 26 file の `deinit_all` を `deinit` に書き換え

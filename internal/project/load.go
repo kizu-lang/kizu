@@ -10,12 +10,14 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // LoadProgram parses every module in graph and returns a qualified package program.
 func LoadProgram(graph Graph) (*ast.Program, error) {
-	return LoadProgramWithSources(graph, nil)
+	return loadProgramWithSources(graph, nil, false)
 }
 
 // LoadProgramWithSources parses graph using source overrides keyed by module file path.
@@ -24,14 +26,35 @@ func LoadProgram(graph Graph) (*ast.Program, error) {
 // program comes through this, so a program means the same thing whichever one
 // read it, and std needs no loader of its own.
 func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Program, error) {
+	return loadProgramWithSources(graph, sources, false)
+}
+
+// LoadTestProgram parses production and test files into one qualified package program.
+func LoadTestProgram(graph Graph) (*ast.Program, error) {
+	return loadProgramWithSources(graph, nil, true)
+}
+
+// LoadTestProgramWithSources parses a test graph with source overrides by file path.
+func LoadTestProgramWithSources(graph Graph, sources map[string]string) (*ast.Program, error) {
+	return loadProgramWithSources(graph, sources, true)
+}
+
+// loadProgramWithSources parses the selected package view and its reachable std modules.
+func loadProgramWithSources(
+	graph Graph,
+	sources map[string]string,
+	includeTests bool,
+) (*ast.Program, error) {
 	checker := &graphChecker{
-		modules:         map[string]*moduleUnit{},
+		modules:         map[string]*moduleGroup{},
 		packages:        map[string]bool{},
 		types:           map[string]typeExport{},
 		functions:       map[string]functionExport{},
+		parsedTypes:     typ.NewTable(),
 		sourceOverrides: cleanSourceOverrides(sources),
+		sources:         source.NewMap(),
 	}
-	if err := checker.loadPackage(graph); err != nil {
+	if err := checker.loadPackage(graph, includeTests); err != nil {
 		return nil, err
 	}
 	if err := checker.loadStd(); err != nil {
@@ -51,12 +74,12 @@ func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Progra
 // on a graph of one module with no path to qualify by. A single file and a
 // package module read the same, so they are read by the same code.
 func LoadSource(file string, source string) (*ast.Program, error) {
-	graph := Graph{Modules: []Module{{Path: "", File: file}}}
+	graph := Graph{Modules: []Module{{Path: "", Files: []string{file}}}}
 	return LoadProgramWithSources(graph, map[string]string{file: source})
 }
 
 type graphChecker struct {
-	modules map[string]*moduleUnit
+	modules map[string]*moduleGroup
 	// packages names every package in this program, so an import of a package
 	// root can be told from one that names nothing.
 	packages map[string]bool
@@ -65,12 +88,24 @@ type graphChecker struct {
 	order           []string
 	types           map[string]typeExport
 	functions       map[string]functionExport
+	parsedTypes     *typ.Table
 	sourceOverrides map[string]string
+	// sources owns each input once while syntax records carry IDs.
+	sources *source.Map
 }
 
-type moduleUnit struct {
-	// pkg is the package this module belongs to, and the namespace its siblings
-	// reach it through.
+// moduleGroup owns the files that share one directory-derived module namespace.
+type moduleGroup struct {
+	path  string
+	files []*moduleFile
+	// imports is the union of file-local imports used for dependency ordering.
+	imports map[string]string
+}
+
+// moduleFile is one source file and its file-local import scope.
+type moduleFile struct {
+	// pkg is the package this file's module belongs to, and the namespace its
+	// siblings reach it through.
 	pkg     string
 	path    string
 	file    string
@@ -87,7 +122,7 @@ type moduleUnit struct {
 }
 
 // use records that a name was reached through one of this module's namespaces.
-func (m *moduleUnit) use(name string) {
+func (m *moduleFile) use(name string) {
 	if m.used == nil {
 		m.used = map[string]bool{}
 	}
@@ -96,7 +131,7 @@ func (m *moduleUnit) use(name string) {
 
 // name is what a diagnostic calls this module. A program that is not part of a
 // package has no module path, so it is named by the file it was read from.
-func (m *moduleUnit) name() string {
+func (m *moduleFile) name() string {
 	if m.path == "" {
 		return m.file
 	}
@@ -106,27 +141,27 @@ func (m *moduleUnit) name() string {
 // qualify returns what a name declared in this module is filed under. A module
 // with no path is a program that is not part of a package: there is nothing to
 // qualify it by, and its declarations keep the names they are written with.
-func (m *moduleUnit) qualify(name string) string {
+func (m *moduleFile) qualify(name string) string {
 	if m.path == "" {
 		return name
 	}
 	return m.path + "::" + name
 }
 
-// moduleNamespaces returns the namespaces module can name. ADR-0049 makes
-// [package].name the package root namespace, so a module reaches its siblings
-// by that name whether or not a module answers to it -- a module cannot import
-// the package it is part of, and treating the root as an import edge would make
+// moduleNamespaces returns the namespaces a file can name. ADR-0049 makes
+// [package].name an implicit package namespace in every module, including the
+// root module. It is not an import edge: an explicit import still records its
+// own dependency, while an implicit fully qualified reference does not make
 // every package a cycle.
 func (c *graphChecker) moduleNamespaces(
-	module *moduleUnit,
+	module *moduleFile,
 	imports map[string]string,
 ) map[string]string {
 	namespaces := make(map[string]string, len(imports)+1)
 	for alias, path := range imports {
 		namespaces[alias] = path
 	}
-	if module.pkg != "" && module.path != module.pkg {
+	if module.pkg != "" {
 		if _, taken := namespaces[module.pkg]; !taken {
 			namespaces[module.pkg] = module.pkg
 		}
@@ -144,22 +179,33 @@ type functionExport struct {
 	public bool
 }
 
-// loadPackage parses one package's modules and records what they belong to.
-func (c *graphChecker) loadPackage(graph Graph) error {
+// loadPackage parses one package's selected module files and records their groups.
+func (c *graphChecker) loadPackage(graph Graph, includeTests bool) error {
 	if graph.PackageName != "" {
 		c.packages[graph.PackageName] = true
 	}
 	for _, module := range graph.Modules {
-		program, err := c.parseModule(module)
-		if err != nil {
-			return err
+		files := module.SourceFiles(includeTests)
+		if len(files) == 0 {
+			continue
 		}
-		c.modules[module.Path] = &moduleUnit{
-			pkg:     graph.PackageName,
+		group := &moduleGroup{
 			path:    module.Path,
-			file:    module.File,
-			program: program,
+			imports: map[string]string{},
 		}
+		for _, file := range files {
+			program, err := c.parseModuleFile(file)
+			if err != nil {
+				return err
+			}
+			group.files = append(group.files, &moduleFile{
+				pkg:     graph.PackageName,
+				path:    module.Path,
+				file:    file,
+				program: program,
+			})
+		}
+		c.modules[module.Path] = group
 		c.order = append(c.order, module.Path)
 	}
 	return nil
@@ -182,7 +228,8 @@ func (c *graphChecker) loadStd() error {
 	c.addSourceOverrides(sources)
 	before := c.order
 	c.order = nil
-	if err := c.loadPackage(Graph{PackageName: graph.PackageName, Modules: modules}); err != nil {
+	std := Graph{PackageName: graph.PackageName, Modules: modules}
+	if err := c.loadPackage(std, false); err != nil {
 		return err
 	}
 	c.order = append(c.order, before...)
@@ -194,42 +241,40 @@ func (c *graphChecker) loadStd() error {
 func (c *graphChecker) stdImportPaths() []string {
 	seen := map[string]bool{}
 	paths := []string{}
-	for _, module := range sortedModuleUnits(c.modules) {
-		for _, decl := range module.program.Decls {
-			importDecl, ok := decl.(*ast.ImportDecl)
-			if !ok || importDecl.Path[0] != stdlib.Root {
-				continue
-			}
-			path := strings.Join(importDecl.Path, "::")
-			if !seen[path] {
-				seen[path] = true
-				paths = append(paths, path)
+	for _, group := range sortedModuleGroups(c.modules) {
+		for _, module := range group.files {
+			for _, decl := range module.program.Decls {
+				importDecl, ok := decl.(*ast.ImportDecl)
+				if !ok || importDecl.Path[0] != stdlib.Root {
+					continue
+				}
+				path := strings.Join(importDecl.Path, "::")
+				if !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
 			}
 		}
 	}
 	return paths
 }
 
-// parseModule parses one graph module from an override or its source file.
-func (c *graphChecker) parseModule(module Module) (*ast.Program, error) {
-	if source, ok := c.sourceOverrides[filepath.Clean(module.File)]; ok {
-		return parseModuleSource(module.File, source)
+// parseModuleFile parses one module source file from an override or disk.
+func (c *graphChecker) parseModuleFile(file string) (*ast.Program, error) {
+	if source, ok := c.sourceOverrides[filepath.Clean(file)]; ok {
+		return c.parseModuleSource(file, source)
 	}
-	return parseModuleFile(module)
-}
-
-// parseModuleFile parses one graph module source.
-func parseModuleFile(module Module) (*ast.Program, error) {
-	source, err := os.ReadFile(module.File)
+	source, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
-	return parseModuleSource(module.File, string(source))
+	return c.parseModuleSource(file, string(source))
 }
 
 // parseModuleSource parses one graph module source string.
-func parseModuleSource(file string, source string) (*ast.Program, error) {
-	p := parser.New(lexer.NewFile(file, source))
+func (c *graphChecker) parseModuleSource(file string, text string) (*ast.Program, error) {
+	input := c.sources.Add(file, text)
+	p := parser.New(lexer.NewSource(input))
 	program := p.ParseProgram()
 	if diagnostics := p.Diagnostics(); len(diagnostics) > 0 {
 		return nil, &diagnostics[0]
@@ -262,17 +307,19 @@ func cleanSourceOverrides(sources map[string]string) map[string]string {
 
 // collectTypes indexes user-declared module types before resolving references.
 func (c *graphChecker) collectTypes() error {
-	for _, module := range c.modules {
-		for _, decl := range module.program.Decls {
-			name, public, ok := declaredType(decl)
-			if !ok {
-				continue
+	for _, group := range sortedModuleGroups(c.modules) {
+		for _, module := range group.files {
+			for _, decl := range module.program.Decls {
+				name, public, ok := declaredType(decl)
+				if !ok {
+					continue
+				}
+				qualified := module.qualify(name)
+				if _, exists := c.types[qualified]; exists {
+					return fmt.Errorf("module error: duplicate type `%s`", qualified)
+				}
+				c.types[qualified] = typeExport{module: module.path, public: public}
 			}
-			qualified := module.qualify(name)
-			if _, exists := c.types[qualified]; exists {
-				return fmt.Errorf("module error: duplicate type `%s`", qualified)
-			}
-			c.types[qualified] = typeExport{module: module.path, public: public}
 		}
 	}
 	return nil
@@ -280,19 +327,21 @@ func (c *graphChecker) collectTypes() error {
 
 // collectFunctions indexes user-declared module functions before resolving calls.
 func (c *graphChecker) collectFunctions() error {
-	for _, module := range c.modules {
-		for _, decl := range module.program.Decls {
-			fn, ok := decl.(*ast.FunctionDecl)
-			if !ok || fn.Receiver {
-				// A method is filed under its receiver's type, not in this
-				// module, so it is not a name a path can reach.
-				continue
+	for _, group := range sortedModuleGroups(c.modules) {
+		for _, module := range group.files {
+			for _, decl := range module.program.Decls {
+				fn, ok := decl.(*ast.FunctionDecl)
+				if !ok || fn.Receiver {
+					// A method is filed under its receiver's type, not in this
+					// module, so it is not a name a path can reach.
+					continue
+				}
+				qualified := module.qualify(fn.Name)
+				if _, exists := c.functions[qualified]; exists {
+					return fmt.Errorf("module error: duplicate function `%s`", qualified)
+				}
+				c.functions[qualified] = functionExport{module: module.path, public: fn.Public}
 			}
-			qualified := module.qualify(fn.Name)
-			if _, exists := c.functions[qualified]; exists {
-				return fmt.Errorf("module error: duplicate function `%s`", qualified)
-			}
-			c.functions[qualified] = functionExport{module: module.path, public: fn.Public}
 		}
 	}
 	return nil
@@ -319,27 +368,34 @@ func declaredType(decl ast.Decl) (string, bool, bool) {
 // program validates imports and returns package-qualified declarations.
 func (c *graphChecker) program() (*ast.Program, error) {
 	merged := &ast.Program{}
-	for _, module := range sortedModuleUnits(c.modules) {
-		imports, err := c.resolveImports(module)
-		if err != nil {
-			return nil, err
+	for _, group := range sortedModuleGroups(c.modules) {
+		for _, module := range group.files {
+			imports, err := c.resolveImports(group, module)
+			if err != nil {
+				return nil, err
+			}
+			module.imports = imports
+			module.namespaces = c.moduleNamespaces(module, imports)
+			for _, path := range imports {
+				group.imports[path] = path
+			}
 		}
-		module.imports = imports
-		module.namespaces = c.moduleNamespaces(module, imports)
 	}
 	modules, err := c.orderedModules()
 	if err != nil {
 		return nil, err
 	}
-	for _, module := range modules {
-		qualified, err := c.qualifyModule(module)
-		if err != nil {
-			return nil, err
+	for _, group := range modules {
+		for _, module := range group.files {
+			qualified, err := c.qualifyModule(module)
+			if err != nil {
+				return nil, err
+			}
+			if err := module.rejectUnusedImports(); err != nil {
+				return nil, err
+			}
+			merged.Decls = append(merged.Decls, qualified.Decls...)
 		}
-		if err := module.rejectUnusedImports(); err != nil {
-			return nil, err
-		}
-		merged.Decls = append(merged.Decls, qualified.Decls...)
 	}
 	// Owner-ness is a whole-program question -- holding an owner makes a type
 	// one -- so the derived cleanups are filled in once the modules are merged,
@@ -348,11 +404,11 @@ func (c *graphChecker) program() (*ast.Program, error) {
 	return merged, nil
 }
 
-// orderedUnits returns modules in the order they were loaded: std before the
-// package that imports it, and inside each package a module after the ones it
-// is built on.
-func (c *graphChecker) orderedUnits() []*moduleUnit {
-	out := make([]*moduleUnit, 0, len(c.order))
+// modulesInLoadOrder returns modules in the order they were loaded: std before
+// the package that imports it, and inside each package a module after the ones
+// it is built on.
+func (c *graphChecker) modulesInLoadOrder() []*moduleGroup {
+	out := make([]*moduleGroup, 0, len(c.order))
 	for _, path := range c.order {
 		out = append(out, c.modules[path])
 	}
@@ -360,11 +416,11 @@ func (c *graphChecker) orderedUnits() []*moduleUnit {
 }
 
 // orderedModules returns dependency modules before modules that import them.
-func (c *graphChecker) orderedModules() ([]*moduleUnit, error) {
-	out := []*moduleUnit{}
+func (c *graphChecker) orderedModules() ([]*moduleGroup, error) {
+	out := []*moduleGroup{}
 	visiting := map[string]bool{}
 	visited := map[string]bool{}
-	for _, module := range c.orderedUnits() {
+	for _, module := range c.modulesInLoadOrder() {
 		if err := c.visitModule(module, visiting, visited, &out); err != nil {
 			return nil, err
 		}
@@ -374,10 +430,10 @@ func (c *graphChecker) orderedModules() ([]*moduleUnit, error) {
 
 // visitModule performs a deterministic DFS over explicit module imports.
 func (c *graphChecker) visitModule(
-	module *moduleUnit,
+	module *moduleGroup,
 	visiting map[string]bool,
 	visited map[string]bool,
-	out *[]*moduleUnit,
+	out *[]*moduleGroup,
 ) error {
 	if visited[module.path] {
 		return nil
@@ -404,7 +460,10 @@ func (c *graphChecker) visitModule(
 }
 
 // resolveImports validates imports and returns last-segment aliases.
-func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, error) {
+func (c *graphChecker) resolveImports(
+	group *moduleGroup,
+	module *moduleFile,
+) (map[string]string, error) {
 	imports := map[string]string{}
 	for _, decl := range module.program.Decls {
 		importDecl, ok := decl.(*ast.ImportDecl)
@@ -421,13 +480,13 @@ func (c *graphChecker) resolveImports(module *moduleUnit) (map[string]string, er
 		}
 		imports[alias] = path
 	}
-	return imports, rejectImportShadowing(module, imports)
+	return imports, rejectImportShadowing(group, module, imports)
 }
 
 // bindImport rejects an import that names nothing or names something the module
 // may not reach. An import that resolves to no module and no package has
 // nothing behind it, so the name it would bind would stand for nothing.
-func (c *graphChecker) bindImport(module *moduleUnit, path string) error {
+func (c *graphChecker) bindImport(module *moduleFile, path string) error {
 	if _, ok := c.modules[path]; !ok && !c.packages[path] {
 		return fmt.Errorf("module error: missing import `%s` in `%s`", path, module.name())
 	}
@@ -438,7 +497,7 @@ func (c *graphChecker) bindImport(module *moduleUnit, path string) error {
 }
 
 // duplicateImport reports two imports competing for one name.
-func duplicateImport(alias string, module *moduleUnit) error {
+func duplicateImport(alias string, module *moduleFile) error {
 	return fmt.Errorf("module error: duplicate import alias `%s` in `%s`", alias, module.path)
 }
 
@@ -447,7 +506,7 @@ func duplicateImport(alias string, module *moduleUnit) error {
 // name stands for, and a line that stands for nothing sends them somewhere the
 // program never goes. It runs after resolution, so what counts as used is what
 // resolution actually went through rather than a second reading of the source.
-func (m *moduleUnit) rejectUnusedImports() error {
+func (m *moduleFile) rejectUnusedImports() error {
 	for _, alias := range sortedAliases(m.imports) {
 		if m.used[alias] {
 			continue
@@ -469,14 +528,21 @@ func sortedAliases(imports map[string]string) []string {
 }
 
 // rejectImportShadowing checks local declarations do not shadow import aliases.
-func rejectImportShadowing(module *moduleUnit, imports map[string]string) error {
-	for _, decl := range module.program.Decls {
-		name, ok := declaredTopLevelName(decl)
-		if !ok {
-			continue
-		}
-		if _, exists := imports[name]; exists {
-			return fmt.Errorf("module error: declaration `%s` shadows import in `%s`", name, module.path)
+func rejectImportShadowing(
+	group *moduleGroup,
+	module *moduleFile,
+	imports map[string]string,
+) error {
+	for _, file := range group.files {
+		for _, decl := range file.program.Decls {
+			name, ok := declaredTopLevelName(decl)
+			if !ok {
+				continue
+			}
+			if _, exists := imports[name]; exists {
+				return fmt.Errorf("module error: declaration `%s` shadows import in `%s`",
+					name, module.path)
+			}
 		}
 	}
 	return nil

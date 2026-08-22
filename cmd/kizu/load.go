@@ -60,11 +60,26 @@ func loadPackageGraph(path string) (project.Graph, error) {
 
 // loadPackageProgram resolves a package root and loads its merged program.
 func loadPackageProgram(path string) (project.Graph, *ast.Program, error) {
+	return loadPackageProgramMode(path, false)
+}
+
+// loadPackageTestProgram includes package test files in their directory modules.
+func loadPackageTestProgram(path string) (project.Graph, *ast.Program, error) {
+	return loadPackageProgramMode(path, true)
+}
+
+// loadPackageProgramMode loads the production or test view of a package graph.
+func loadPackageProgramMode(path string, includeTests bool) (project.Graph, *ast.Program, error) {
 	graph, err := loadPackageGraph(path)
 	if err != nil {
 		return project.Graph{}, nil, err
 	}
-	program, err := project.LoadProgram(graph)
+	var program *ast.Program
+	if includeTests {
+		program, err = project.LoadTestProgram(graph)
+	} else {
+		program, err = project.LoadProgram(graph)
+	}
 	if err != nil {
 		return project.Graph{}, nil, err
 	}
@@ -77,10 +92,11 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProgram(program); err != nil {
+	ownershipResult, err := checkProgram(program)
+	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program)
+	module, err := ir.Lower(program, ownershipResult)
 	if err != nil {
 		return nil, err
 	}
@@ -94,14 +110,32 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 
 // lowerPackage resolves a package graph and lowers its qualified program to typed SSA IR.
 func lowerPackage(path string, opt bool) (*ir.Module, error) {
-	graph, program, err := loadPackageProgram(path)
+	return lowerPackageMode(path, opt, false)
+}
+
+// lowerTestPackage includes package test files before checking and lowering.
+func lowerTestPackage(path string, opt bool) (*ir.Module, error) {
+	return lowerPackageMode(path, opt, true)
+}
+
+// lowerPackageMode lowers the production or test view of a package graph.
+func lowerPackageMode(path string, opt bool, includeTests bool) (*ir.Module, error) {
+	var graph project.Graph
+	var program *ast.Program
+	var err error
+	if includeTests {
+		graph, program, err = loadPackageTestProgram(path)
+	} else {
+		graph, program, err = loadPackageProgram(path)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if err := checkProgram(program); err != nil {
+	ownershipResult, err := checkProgram(program)
+	if err != nil {
 		return nil, err
 	}
-	module, err := ir.Lower(program)
+	module, err := ir.Lower(program, ownershipResult)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +143,9 @@ func lowerPackage(path string, opt bool) (*ir.Module, error) {
 		if err := ir.Optimize(module); err != nil {
 			return nil, err
 		}
+	}
+	if includeTests {
+		return module, nil
 	}
 	if err := addPackageMain(module, graph.PackageName+"::main"); err != nil {
 		return nil, err
@@ -155,14 +192,15 @@ func moduleFunction(module *ir.Module, name string) *ir.Function {
 }
 
 // checkProgram runs static checks required before compilation or execution.
-func checkProgram(program *ast.Program) error {
+func checkProgram(program *ast.Program) (ownership.Result, error) {
 	if err := types.New().Check(program); err != nil {
-		return err
+		return ownership.Result{}, err
 	}
-	if err := ownership.New().Check(program); err != nil {
-		return err
+	checker := ownership.New()
+	if err := checker.Check(program); err != nil {
+		return ownership.Result{}, err
 	}
-	return nil
+	return checker.Result(), nil
 }
 
 // parsePath reads and parses a source file.

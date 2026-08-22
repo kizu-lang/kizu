@@ -28,7 +28,7 @@ string.clear() -> void
 string.deinit() -> void
 ```
 
-ADR 0057 moves this behavior into `std/src/string.kizu` over private
+ADR 0057 moves this behavior into `std/src/string/string.kizu` over private
 `std::array::Array<u8>` storage. Go no longer owns string-specific runtime
 behavior.
 

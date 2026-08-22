@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/source"
 )
 
 // TestFromTextKeepsADRPartsStructured keeps category, note, and help split for renderers.
@@ -44,6 +45,21 @@ func TestFromTextKeepsADRPartsStructured(t *testing.T) {
 	}
 }
 
+// TestDiagnosticResolvesSourcePath checks rendering resolves an ID at the output boundary.
+func TestDiagnosticResolvesSourcePath(t *testing.T) {
+	sources := source.NewMap()
+	id := sources.Add("src/main.kizu", "fn main( {}")
+	diag := New(SeverityError, "", ast.Span{
+		Source: id,
+		Start:  ast.Position{Line: 1, Column: 9},
+		End:    ast.Position{Line: 1, Column: 10},
+	}, "expected parameter")
+	want := "expected parameter at src/main.kizu:1:9"
+	if got := diag.Error(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestWarningRendersSeverity keeps warning diagnostics user-facing without error wrapping.
 func TestWarningRendersSeverity(t *testing.T) {
 	diag := New(
@@ -58,5 +74,15 @@ func TestWarningRendersSeverity(t *testing.T) {
 	}
 	if diag.CLIError() != want {
 		t.Fatalf("got %q, want %q", diag.CLIError(), want)
+	}
+}
+
+// TestQuoteBytesMatchesSelfhostFmt keeps shipping diagnostics on the same
+// deterministic ASCII contract as std::fmt::append_bytes_literal.
+func TestQuoteBytesMatchesSelfhostFmt(t *testing.T) {
+	input := string([]byte{'A', 0x20, 0x7e, '"', '\\', '\n', '\r', '\t', 0x00, 0x1f, 0x7f, 0xc3, 0xa9})
+	want := `"A ~\"\\\n\r\t\x00\x1F\x7F\xC3\xA9"`
+	if got := QuoteBytes(input); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

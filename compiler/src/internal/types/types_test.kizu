@@ -1,0 +1,760 @@
+import compiler::internal::ast;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn expect_type_text(
+    allocator: Allocator,
+    table: &TypeTable,
+    value: Type,
+    expected: []u8
+) -> !void {
+    let text = try table.copy_text(allocator, value);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_pointer_value(
+    allocator: Allocator,
+    table: &TypeTable,
+    result: PointerDerefResult,
+    expected: []u8
+) -> !void {
+    match result {
+        Value(value) => try expect_type_text(allocator, table, value, expected),
+        Error(_) => testing::fail("pointer dereference returned an error"),
+    }
+    return;
+}
+
+fn expect_pointer_error(
+    result: PointerDerefResult,
+    expected: PointerDerefError
+) -> void {
+    match result {
+        Value(_) => testing::fail("pointer dereference unexpectedly succeeded"),
+        Error(actual) => testing::expect(actual == expected),
+    }
+    return;
+}
+
+fn expect_invalid_generic_args(
+    allocator: Allocator,
+    text: []u8
+) -> !void {
+    if try split_generic_args(allocator, text) |parts| {
+        parts.deinit();
+        testing::fail("malformed generic arguments were accepted");
+    }
+    return;
+}
+
+fn empty_function_type(
+    allocator: Allocator,
+    name: []u8,
+    return_type: Type
+) -> !FunctionType {
+    let owned_name = try string::from_bytes(allocator, name);
+    return FunctionType {
+        name: move owned_name,
+        signature: FunctionSignatureType {
+            extern_abi: string::new(allocator),
+            static_params: array::new<StaticParamType>(allocator),
+            params: array::new<SignatureParamType>(allocator),
+            return_type: return_type,
+            requires_unsafe: false,
+            std: false
+        },
+        params: array::new<Type>(allocator),
+        borrow_params: array::new<bool>(allocator),
+        mut_borrow_params: array::new<bool>(allocator),
+        return_type: return_type,
+        body: null,
+        implicit_return: false
+    };
+}
+
+fn append_function_param(
+    function: &var FunctionType,
+    type_name: Type,
+    borrow: bool,
+    mutable: bool
+) -> !void {
+    try function.params.append(type_name);
+    try function.borrow_params.append(borrow);
+    try function.mut_borrow_params.append(mutable);
+    return;
+}
+
+test "type table interns canonical identities and owns source copies" {
+    let allocator = mem::page_allocator();
+    var source = typ::new(allocator);
+    errdefer source.deinit();
+    let parsed = try source.parse("ParseError!Array<i64>");
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let first = try table.remember(&source, parsed);
+    source.deinit();
+    let second = try table.intern("ParseError!Array<i64>");
+    testing::expect(same_type(first, second));
+    let first_text = try table.copy_text(allocator, first);
+    defer first_text.deinit();
+    let first_bytes = first_text.as_bytes();
+    testing::expect_equal<[]u8>("ParseError!Array<i64>", first_bytes);
+    if table.lookup(first) |_| {} else {
+        testing::fail("canonical checker type lost its parsed structure");
+    }
+    let empty = empty_type();
+    let empty_text = try table.copy_text(allocator, empty);
+    defer empty_text.deinit();
+    let empty_bytes = empty_text.as_bytes();
+    testing::expect_equal<[]u8>("", empty_bytes);
+    if table.lookup(empty) |_| {
+        testing::fail("empty checker type had parsed structure");
+    }
+    testing::expect(same_type(empty, empty_type()));
+    testing::expect(!same_type(first, empty));
+    let i64_type = try table.i64_type();
+    testing::expect(same_type(i64_type, try table.intern("i64")));
+    let bool_type = try table.bool_type();
+    try expect_type_text(allocator, &table, bool_type, "bool");
+    let field_type = try table.field_type();
+    try expect_type_text(allocator, &table, field_type, "Field");
+    let function_type = try table.function_type();
+    try expect_type_text(
+        allocator,
+        &table,
+        function_type,
+        "Function"
+    );
+    let u8_type = try table.u8_type();
+    try expect_type_text(allocator, &table, u8_type, "u8");
+    let byte_string_type = try table.byte_string_type();
+    try expect_type_text(
+        allocator,
+        &table,
+        byte_string_type,
+        "[]u8"
+    );
+    let type_value_type = try table.type_value_type();
+    try expect_type_text(
+        allocator,
+        &table,
+        type_value_type,
+        "type"
+    );
+    let void_type = try table.void_type();
+    try expect_type_text(allocator, &table, void_type, "void");
+}
+
+test "type registries retain the exact closed Go vocabularies" {
+    testing::expect(is_known_type("std::string::String"));
+    testing::expect(is_known_type("Field"));
+    testing::expect(!is_known_type("Timer"));
+    testing::expect(is_numeric_type("f64"));
+    testing::expect(is_numeric_type("u8"));
+    testing::expect(!is_numeric_type("bool"));
+    testing::expect(is_builtin_copy_type("Allocator"));
+    testing::expect(!is_builtin_copy_type("std::string::String"));
+    testing::expect(is_signed_numeric_type("isize"));
+    testing::expect(!is_signed_numeric_type("u64"));
+    testing::expect(is_integer_type("usize"));
+    testing::expect(!is_integer_type("f32"));
+    testing::expect(is_known_generic_base("std::arena::Handle"));
+    testing::expect(!is_known_generic_base("Pair"));
+}
+
+test "type table preserves structural queries and substitutions" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let buffer = try table.intern("Pair<?T, [4]u8>");
+    testing::expect(!table.is_buffer_type(buffer));
+    testing::expect(table.contains_buffer_type(buffer));
+    testing::expect(!table.contains_borrow_optional(buffer));
+    let borrow_optional = try table.intern("Pair<?&T, bool>");
+    testing::expect(table.contains_borrow_optional(borrow_optional));
+    let declared = try table.intern("Error!?&var Pair<T, Timer>");
+    let replacement = try table.intern("Pair<U, bool>");
+    let concrete_u = try table.intern("i64");
+    var substitutions = map::new<[]u8, Type>(allocator);
+    defer substitutions.deinit();
+    try substitutions.insert("T", replacement);
+    try substitutions.insert("U", concrete_u);
+    let replaced = try table.substitute_type_params(
+        declared,
+        &substitutions
+    );
+    try expect_type_text(
+        allocator,
+        &table,
+        replaced,
+        "Error!?&var Pair<Pair<U, bool>, Timer>"
+    );
+    let parameter = try table.intern("T");
+    let direct = try table.substitute_type_params(parameter, &substitutions);
+    testing::expect(same_type(direct, replacement));
+    var parsed_args = array::new<typ::Type>(allocator);
+    defer parsed_args.deinit();
+    var source = typ::new(allocator);
+    defer source.deinit();
+    try parsed_args.append(try source.parse("[]u8"));
+    try parsed_args.append(try source.parse("Pair<i64, bool>"));
+    let texts = try arg_texts(allocator, &source, &parsed_args);
+    defer texts.deinit();
+    testing::expect_equal<i64>(2, texts.len());
+    if texts.at(1) |text| {
+        let bytes = text.as_bytes();
+        testing::expect_equal<[]u8>("Pair<i64, bool>", bytes);
+    } else {
+        testing::fail("rendered static argument was missing");
+    }
+}
+
+test "borrow and error-union helpers retain copy Type identities" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let value = try table.intern("[]u8");
+    let mutable = try table.borrow_wrapped_type(true, true, value);
+    try expect_type_text(allocator, &table, mutable, "&var []u8");
+    if try table.explicit_borrow_type(mutable) |parts| {
+        testing::expect(parts.mutable);
+        testing::expect(same_type(parts.inner, value));
+    } else {
+        testing::fail("explicit borrow was not recognized");
+    }
+    testing::expect(same_type(
+        try table.borrowed_value_type(mutable),
+        value
+    ));
+    let returned = try table.intern("ParseError!&[]u8");
+    testing::expect(try table.is_borrowed_view_return_type(returned));
+    let shared_bytes = try table.intern("&[]u8");
+    testing::expect(same_type(
+        try table.unwrap_return_success_type(returned),
+        shared_bytes
+    ));
+    if try table.error_union_parts(returned) |parts| {
+        try expect_type_text(allocator, &table, parts.err, "ParseError");
+        try expect_type_text(allocator, &table, parts.success, "&[]u8");
+    } else {
+        testing::fail("declared error union was not split");
+    }
+    let inferred = try table.intern("!i64");
+    let declared = try table.intern("ParseError!i64");
+    testing::expect(try table.absorbs_error_union(inferred, declared));
+    testing::expect(!try table.absorbs_error_union(declared, inferred));
+    let optional = try table.intern("?i64");
+    if try table.optional_elem(optional) |element| {
+        try expect_type_text(allocator, &table, element, "i64");
+    } else {
+        testing::fail("optional element was not retained");
+    }
+    let nullable_pointer = try table.intern("?ptr<i64>");
+    if try table.optional_elem(nullable_pointer) |_| {
+        testing::fail("nullable pointer was treated as value optional");
+    }
+}
+
+test "borrow coercion and raw pointer classifications keep failure reasons" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let value = try table.intern("i64");
+    let shared = try table.intern("&i64");
+    let mutable = try table.intern("&var i64");
+    match try table.coerce_returned_borrow_argument(
+        shared, value, true, false
+    ) {
+        Value(coerced) => testing::expect(same_type(coerced, value)),
+        Error(_) => testing::fail("shared borrow was not coerced"),
+    }
+    match try table.coerce_returned_borrow_argument(
+        mutable, value, true, false
+    ) {
+        Value(_) => testing::fail("mutable borrow entered a shared parameter"),
+        Error(reason) => testing::expect(
+            reason == BorrowCoercionError::WantsShared
+        ),
+    }
+    match try table.coerce_returned_borrow_argument(
+        shared, value, false, false
+    ) {
+        Value(_) => testing::fail("borrow entered an owning parameter"),
+        Error(reason) => testing::expect(
+            reason == BorrowCoercionError::OwningParameter
+        ),
+    }
+    let pointer = try table.intern("ptr<const i64>");
+    testing::expect(table.is_pointer_type(pointer));
+    if try table.pointer_element(pointer) |element| {
+        try expect_type_text(allocator, &table, element, "const i64");
+    } else {
+        testing::fail("raw pointer element was not retained");
+    }
+    let dereferenced = try table.raw_pointer_deref_type(pointer);
+    try expect_pointer_value(
+        allocator,
+        &table,
+        dereferenced,
+        "i64"
+    );
+    expect_pointer_error(
+        try table.assignable_raw_pointer_deref_type(pointer),
+        PointerDerefError::Const
+    );
+    let nullable = try table.intern("?ptr<i64>");
+    expect_pointer_error(
+        try table.raw_pointer_deref_type(nullable),
+        PointerDerefError::Nullable
+    );
+    expect_pointer_error(
+        try table.raw_pointer_deref_type(value),
+        PointerDerefError::NotPointer
+    );
+}
+
+test "wrapped predicates and generic text helpers preserve Go seams" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let nested_pointer = try table.intern("Pair<?[]ptr<i64>, bool>");
+    testing::expect(try table.contains_raw_pointer(
+        allocator,
+        nested_pointer
+    ));
+    let nested_type = try table.intern("std::array::Array<const type>");
+    testing::expect(try table.contains_type_value(
+        allocator,
+        nested_type
+    ));
+    let compile_time_only = try table.intern("Pair<Field, Function>");
+    testing::expect(try table.contains_compile_time_only(
+        allocator,
+        compile_time_only
+    ));
+    let runtime_only = try table.intern("Pair<i64, bool>");
+    testing::expect(!try table.contains_compile_time_only(
+        allocator,
+        runtime_only
+    ));
+    var joined_values = array::new<Type>(allocator);
+    defer joined_values.deinit();
+    let joined_i64 = try table.intern("i64");
+    try joined_values.append(joined_i64);
+    let joined_bytes_type = try table.intern("[]u8");
+    try joined_values.append(joined_bytes_type);
+    let joined = try table.join_types(allocator, &joined_values);
+    defer joined.deinit();
+    let joined_bytes = joined.as_bytes();
+    testing::expect_equal<[]u8>("i64, []u8", joined_bytes);
+    if split_generic_type("Pair<i64, []u8>") |parts| {
+        testing::expect_equal<[]u8>("Pair", parts.base);
+        if try split_generic_args(allocator, parts.args) |args| {
+            defer args.deinit();
+            testing::expect_equal<i64>(2, args.len());
+            if single_generic_arg(&args) |_| {
+                testing::fail("two generic arguments were accepted as one");
+            }
+        } else {
+            testing::fail("valid generic arguments were rejected");
+        }
+    } else {
+        testing::fail("generic type was not split");
+    }
+    try expect_invalid_generic_args(allocator, "i64, Pair<bool");
+    try expect_invalid_generic_args(allocator, "i64>, bool");
+    try expect_invalid_generic_args(allocator, "i64, , bool");
+    try expect_invalid_generic_args(allocator, "");
+    var one = array::new<string::String>(allocator);
+    defer one.deinit();
+    try one.append(try string::from_bytes(allocator, "i64"));
+    if single_generic_arg(&one) |argument| {
+        let bytes = argument.as_bytes();
+        testing::expect_equal<[]u8>("i64", bytes);
+    } else {
+        testing::fail("single generic argument was rejected");
+    }
+}
+
+test "checker metadata sorts methods and compares receiver-less contracts" {
+    let allocator = mem::page_allocator();
+    var methods = map::new<[]u8, FunctionHandle>(allocator);
+    defer methods.deinit();
+    try methods.insert("zeta", FunctionHandle { index: 0 });
+    try methods.insert("alpha", FunctionHandle { index: 1 });
+    try methods.insert("middle", FunctionHandle { index: 2 });
+    let names = try sorted_method_names(allocator, &methods);
+    defer names.deinit();
+    testing::expect_equal<i64>(3, names.len());
+    if names.at(0) |first| {
+        let bytes = first.as_bytes();
+        testing::expect_equal<[]u8>("alpha", bytes);
+    } else {
+        testing::fail("sorted method list was empty");
+    }
+    if names.at(2) |last| {
+        let bytes = last.as_bytes();
+        testing::expect_equal<[]u8>("zeta", bytes);
+    } else {
+        testing::fail("sorted method list lost its last entry");
+    }
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    let void_type = try table.intern("void");
+    let receiver_type = try table.intern("Widget");
+    let value_type = try table.intern("i64");
+    var want = try empty_function_type(allocator, "write", void_type);
+    defer want.deinit();
+    try append_function_param(&var want, value_type, true, false);
+    var got = try empty_function_type(allocator, "Widget.write", void_type);
+    defer got.deinit();
+    try append_function_param(&var got, receiver_type, false, false);
+    try append_function_param(&var got, value_type, true, false);
+    testing::expect(method_matches(&want, &got));
+    if got.borrow_params.at_mut(1) |borrow| {
+        borrow.* = false;
+    }
+    testing::expect(!method_matches(&want, &got));
+}
+
+test "checker signature metadata owns copied type parameter names" {
+    let allocator = mem::page_allocator();
+    var signature = try empty_function_type(
+        allocator,
+        "visit",
+        empty_type()
+    );
+    errdefer signature.deinit();
+    try signature.signature.static_params.append(StaticParamType {
+        name: try string::from_bytes(allocator, "T"),
+        type_name: empty_type(),
+        is_type: true
+    });
+    try signature.signature.static_params.append(StaticParamType {
+        name: try string::from_bytes(allocator, "count"),
+        type_name: empty_type(),
+        is_type: false
+    });
+    try signature.signature.static_params.append(StaticParamType {
+        name: try string::from_bytes(allocator, "U"),
+        type_name: empty_type(),
+        is_type: true
+    });
+    let names = try signature.signature.type_param_names(allocator);
+    defer names.deinit();
+    signature.deinit();
+    testing::expect_equal<i64>(2, names.len());
+    if names.at(0) |first| {
+        let bytes = first.as_bytes();
+        testing::expect_equal<[]u8>("T", bytes);
+    } else {
+        testing::fail("missing first copied type parameter name");
+    }
+    if names.at(1) |last| {
+        let bytes = last.as_bytes();
+        testing::expect_equal<[]u8>("U", bytes);
+    } else {
+        testing::fail("missing last copied type parameter name");
+    }
+}
+
+fn policy_zero_span() -> ast::Span {
+    return ast::Span {
+        source: null,
+        start: ast::Position { line: 0, column: 0 },
+        end: ast::Position { line: 0, column: 0 }
+    };
+}
+
+fn policy_ident(
+    tree: &var ast::Ast,
+    name: []u8
+) -> !ast::Expression {
+    let retained = try tree.add_text_from_bytes(name);
+    return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: retained,
+        span: policy_zero_span()
+    }));
+}
+
+fn policy_expression_statement(
+    tree: &var ast::Ast,
+    expression: ast::Expression
+) -> ast::Statement {
+    return tree.add_statement(ast::StatementNode::Expr(ast::ExprStmt {
+        expr: expression,
+        semicolon: false
+    }));
+}
+
+fn policy_deinit_statement(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    receiver_name: []u8,
+    method_name: []u8,
+    namespace: bool
+) -> !ast::Statement {
+    let receiver = try policy_ident(tree, receiver_name);
+    let method = try tree.add_text_from_bytes(method_name);
+    let callee = tree.add_expression(ast::ExpressionNode::Field(
+        ast::FieldExpr {
+        receiver: receiver,
+        name: method,
+        namespace: namespace,
+        span: policy_zero_span()
+    }
+    ));
+    let arguments = tree.add_expression_list(
+        array::new<ast::Expression>(allocator)
+    );
+    let call = tree.add_expression(ast::ExpressionNode::Call(ast::CallExpr {
+        callee: callee,
+        args: arguments
+    }));
+    return policy_expression_statement(tree, call);
+}
+
+fn policy_match_arms(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    body: ast::Statement
+) -> !array::Array<ast::MatchArm> {
+    var arms = array::new<ast::MatchArm>(allocator);
+    errdefer arms.deinit();
+    let tag = try tree.add_text_from_bytes("Value");
+    let binding = try tree.add_text_from_bytes("payload");
+    try arms.append(ast::MatchArm {
+        tag: tag,
+        binding: binding,
+        body: body
+    });
+    return move arms;
+}
+
+fn policy_match_statement(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    value_name: []u8,
+    body: ast::Statement
+) -> !ast::Statement {
+    let value = try policy_ident(tree, value_name);
+    let arms = try policy_match_arms(allocator, tree, body);
+    errdefer arms.deinit();
+    let capture = tree.add_empty_text();
+    let owner = tree.add_empty_text();
+    return tree.add_statement(ast::StatementNode::Match(ast::MatchStmt {
+        value: value,
+        arms: move arms,
+        meta_capture: capture,
+        meta_owner: owner
+    }));
+}
+
+fn policy_match_expression_statement(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    value_name: []u8,
+    body: ast::Statement
+) -> !ast::Statement {
+    let value = try policy_ident(tree, value_name);
+    let arms = try policy_match_arms(allocator, tree, body);
+    errdefer arms.deinit();
+    let capture = tree.add_empty_text();
+    let owner = tree.add_empty_text();
+    let expression = tree.add_expression(ast::ExpressionNode::Match(
+        ast::MatchStmt {
+        value: value,
+        arms: move arms,
+        meta_capture: capture,
+        meta_owner: owner
+    }
+    ));
+    return policy_expression_statement(tree, expression);
+}
+
+fn policy_block(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    first: ast::Statement,
+    second: ?ast::Statement
+) -> !ast::Block {
+    var statements = array::new<ast::Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.append(first);
+    if second |statement| {
+        try statements.append(statement);
+    }
+    return tree.add_block(ast::BlockStmt { statements: move statements });
+}
+
+test "owner union cleanup finds only a leading match on self" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    if owner_union_self_match(&tree, null, "self") |_| {
+        testing::fail("a missing cleanup body returned a match");
+    }
+    let cleanup = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "deinit",
+        false
+    );
+    let direct = try policy_match_statement(
+        allocator,
+        &var tree,
+        "self",
+        cleanup
+    );
+    let direct_block = try policy_block(
+        allocator,
+        &var tree,
+        direct,
+        null
+    );
+    if owner_union_self_match(&tree, direct_block, "self") |matched| {
+        match matched {
+            Statement(statement) => testing::expect(
+                statement.node == direct.node
+            ),
+            Expression(_) => testing::fail(
+                "direct match returned an expression handle"
+            ),
+        }
+    } else {
+        testing::fail("leading match self was not found");
+    }
+    if owner_union_self_match(&tree, direct_block, "other") |_| {
+        testing::fail("match on a different binding was accepted");
+    }
+    let expression_cleanup = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "deinit",
+        false
+    );
+    let expression = try policy_match_expression_statement(
+        allocator,
+        &var tree,
+        "self",
+        expression_cleanup
+    );
+    let expression_block = try policy_block(
+        allocator,
+        &var tree,
+        expression,
+        null
+    );
+    if owner_union_self_match(
+        &tree,
+        expression_block,
+        "self"
+    ) |matched| {
+        match matched {
+            Statement(_) => testing::fail(
+                "expression match returned a statement handle"
+            ),
+            Expression(_) => {},
+        }
+    } else {
+        testing::fail("expression-wrapped match self was not found");
+    }
+    let before = try policy_ident(&var tree, "before");
+    let prefix = policy_expression_statement(&var tree, before);
+    let late_cleanup = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "deinit",
+        false
+    );
+    let late_match = try policy_match_statement(
+        allocator,
+        &var tree,
+        "self",
+        late_cleanup
+    );
+    let late_block = try policy_block(
+        allocator,
+        &var tree,
+        prefix,
+        late_match
+    );
+    if owner_union_self_match(&tree, late_block, "self") |_| {
+        testing::fail("a non-leading match self was accepted");
+    }
+}
+
+test "owner union cleanup requires a direct binding deinit call" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let cleanup = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "deinit",
+        false
+    );
+    testing::expect(match_arm_cleans_payload(
+        &tree,
+        cleanup,
+        "payload"
+    ));
+    testing::expect(!match_arm_cleans_payload(
+        &tree,
+        cleanup,
+        "other"
+    ));
+    let wrong_method = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "clear",
+        false
+    );
+    testing::expect(!match_arm_cleans_payload(
+        &tree,
+        wrong_method,
+        "payload"
+    ));
+    let namespaced = try policy_deinit_statement(
+        allocator,
+        &var tree,
+        "payload",
+        "deinit",
+        true
+    );
+    testing::expect(!match_arm_cleans_payload(
+        &tree,
+        namespaced,
+        "payload"
+    ));
+    let payload = try policy_ident(&var tree, "payload");
+    let bare_identifier = policy_expression_statement(&var tree, payload);
+    testing::expect(!match_arm_cleans_payload(
+        &tree,
+        bare_identifier,
+        "payload"
+    ));
+    var nested = array::new<ast::Statement>(allocator);
+    errdefer nested.deinit();
+    try nested.append(cleanup);
+    let block = tree.add_statement(ast::StatementNode::Block(
+        ast::BlockStmt { statements: move nested }
+    ));
+    testing::expect(!match_arm_cleans_payload(
+        &tree,
+        block,
+        "payload"
+    ));
+}

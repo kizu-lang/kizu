@@ -1,0 +1,64 @@
+import compiler::internal::unsafecap;
+import std::array;
+import std::mem;
+import std::testing;
+
+fn expect_capability_name(
+    capability: UnsafeCapability,
+    expected: []u8
+) -> void {
+    let name = unsafe_capability_name(capability);
+    testing::expect_equal<[]u8>(expected, name);
+    if unsafecap::lookup(name) |_| {} else {
+        testing::fail("checker unsafe capability is missing metadata");
+    }
+    return;
+}
+
+test "unsafe capability names have exact metadata coverage" {
+    let allocator = mem::page_allocator();
+    var capabilities = array::new<UnsafeCapability>(allocator);
+    defer capabilities.deinit();
+    try capabilities.append(UnsafeCapability::PtrRead);
+    try capabilities.append(UnsafeCapability::PtrWrite);
+    try capabilities.append(UnsafeCapability::PtrDeref);
+    try capabilities.append(UnsafeCapability::PtrCast);
+    try capabilities.append(UnsafeCapability::PtrIntCast);
+    try capabilities.append(UnsafeCapability::ExternCall);
+    try capabilities.append(UnsafeCapability::UnsafeCall);
+    try capabilities.append(UnsafeCapability::StructInvariant);
+    try capabilities.append(UnsafeCapability::Volatile);
+    expect_capability_name(UnsafeCapability::PtrRead, "ptr_read");
+    expect_capability_name(UnsafeCapability::PtrWrite, "ptr_write");
+    expect_capability_name(UnsafeCapability::PtrDeref, "ptr_deref");
+    expect_capability_name(UnsafeCapability::PtrCast, "ptr_cast");
+    expect_capability_name(
+        UnsafeCapability::PtrIntCast,
+        "ptr_int_cast"
+    );
+    expect_capability_name(UnsafeCapability::ExternCall, "extern_call");
+    expect_capability_name(UnsafeCapability::UnsafeCall, "unsafe_call");
+    expect_capability_name(
+        UnsafeCapability::StructInvariant,
+        "struct_invariant"
+    );
+    expect_capability_name(UnsafeCapability::Volatile, "volatile");
+    let metadata = try unsafecap::all(allocator);
+    defer metadata.deinit();
+    testing::expect_equal<i64>(capabilities.len(), metadata.len());
+}
+
+test "unsafe marker use mutates only the explicit current state" {
+    var unmarked = UnsafeMark { used: null };
+    testing::expect(!use_unsafe_mark(&var unmarked));
+    if unmarked.used |_| {
+        testing::fail("unmarked checker state became present");
+    }
+    var outer = UnsafeMark { used: false };
+    var inner = UnsafeMark { used: false };
+    testing::expect(!(outer.used orelse true));
+    testing::expect(!(inner.used orelse true));
+    testing::expect(use_unsafe_mark(&var inner));
+    testing::expect(!(outer.used orelse true));
+    testing::expect(inner.used orelse false);
+}

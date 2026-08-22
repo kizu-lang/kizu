@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -12,13 +13,13 @@ import (
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
-func Lower(program *ast.Program) (*Module, error) {
-	l := newLowerer(program)
+func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, error) {
+	l := newLowerer(program, ownershipResult)
 	module, err := l.lower()
 	if err != nil {
 		return nil, err
 	}
-	if err := Verify(module); err != nil {
+	if err := verifyWithTypes(module, l.types); err != nil {
 		return nil, err
 	}
 	return module, nil
@@ -27,6 +28,7 @@ func Lower(program *ast.Program) (*Module, error) {
 type lowerer struct {
 	program     *ast.Program
 	module      *Module
+	types       *typ.Table
 	signatures  map[string]Signature
 	current     *Function
 	block       *Block
@@ -76,6 +78,9 @@ type lowerer struct {
 	// deinitOwners names the types that carry a deinit contract, seeded from
 	// ast.DeinitOwners so lowering reads the same owner-ness the checkers do.
 	deinitOwners map[string]bool
+	// ownership is the preceding phase's output. Keeping it beside the syntax
+	// tree makes the phase boundary explicit and leaves AST nodes immutable.
+	ownership ownership.Result
 }
 
 // genericInstance is one generic function with its static parameters bound.
@@ -113,7 +118,7 @@ type loopPhi struct {
 }
 
 // newLowerer prepares lookup tables used during lowering.
-func newLowerer(program *ast.Program) *lowerer {
+func newLowerer(program *ast.Program, ownershipResult ownership.Result) *lowerer {
 	generics := map[string]*ast.FunctionDecl{}
 	structs := map[string]*ast.StructDecl{}
 	enums := map[string]*ast.EnumDecl{}
@@ -133,6 +138,7 @@ func newLowerer(program *ast.Program) *lowerer {
 	}
 	return &lowerer{
 		program: program,
+		types:   typ.NewTable(),
 		module: &Module{
 			Structs:   map[string]Struct{},
 			Enums:     map[string]Enum{},
@@ -150,6 +156,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		unionDecls:    unions,
 		metaFields:    map[string]metaField{},
 		deinitOwners:  ast.DeinitOwners(program),
+		ownership:     ownershipResult,
 	}
 }
 
@@ -699,7 +706,7 @@ func (l *lowerer) borrowIRType(elem string, mutable bool) (string, Passing) {
 // lowerReturnType gives a function's result the type it travels as, so a
 // returned borrow follows the same rule a borrowed parameter does.
 func (l *lowerer) lowerReturnType(name string) string {
-	parsed, err := typ.Parse(name)
+	parsed, err := l.types.Parse(name)
 	if err != nil {
 		return returnType(name)
 	}
@@ -1041,7 +1048,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		return err
 	}
 	errorReturn := l.producesErrorValue(value)
-	if _, success, ok := errorUnionParts(l.current.Return); ok {
+	if _, success, ok := errorUnionParts(l.types, l.current.Return); ok {
 		if value.Type == success {
 			// A `!void` success carries no payload, so its wrap takes no operand.
 			// `return try f();` on a `!void` callee unwraps to a void value, and
@@ -1058,7 +1065,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 		}
 	}
 	if errorReturn {
-		l.emitErrorCleanups(stmt.RetiredErrDefers)
+		l.emitErrorCleanups(l.ownership.RetiredErrDefersForReturn(stmt))
 	} else {
 		l.emitNormalCleanups()
 	}
@@ -1081,7 +1088,7 @@ func (l *lowerer) producesErrorValue(v Value) bool {
 // returnValueType returns the type a returned value has to have: the success
 // type of a `!T` function, or the return type itself.
 func (l *lowerer) returnValueType() string {
-	if success, ok := errorUnionSuccessType(l.current.Return); ok {
+	if success, ok := errorUnionSuccessType(l.types, l.current.Return); ok {
 		return success
 	}
 	return l.current.Return
@@ -1089,7 +1096,7 @@ func (l *lowerer) returnValueType() string {
 
 // returnVoidValue returns the correct SSA return value for void-like returns.
 func (l *lowerer) returnVoidValue() Value {
-	if success, ok := errorUnionSuccessType(l.current.Return); ok && success == "void" {
+	if success, ok := errorUnionSuccessType(l.types, l.current.Return); ok && success == "void" {
 		return l.emit("error.ok", l.current.Return, nil, "")
 	}
 	return Value{Name: "void", Type: "void"}
@@ -1539,6 +1546,9 @@ func (l *lowerer) functionCalleeName(callee ast.Expression) (string, bool) {
 	if _, ok := boxPrimitives[qualified]; ok {
 		return qualified, true
 	}
+	if _, ok := arenaPrimitives[qualified]; ok {
+		return qualified, true
+	}
 	return "", false
 }
 
@@ -1580,28 +1590,9 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 	typeArg string,
 	rawArgs []ast.Expression,
 ) (Value, error) {
-	// An array or map primitive carries its element type as an immediate the
-	// backend reads, so the call itself declares no parameter types to hand over.
-	if method, ok := arrayPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerArrayMethod(method, l.resolveType(typeArg), args)
-	}
-	if method, ok := mapPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerMapMethod(method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
-	}
-	if method, ok := boxPrimitives[name]; ok {
-		args, err := l.lowerCallArgsAs(nil, rawArgs)
-		if err != nil {
-			return Value{}, err
-		}
-		return l.lowerBoxMethod(method, l.resolveType(typeArg), args)
+	value, handled, err := l.lowerTypedContainerPrimitive(name, typeArg, rawArgs)
+	if handled || err != nil {
+		return value, err
 	}
 	// expect_equal lowers to its own instruction, so its std wrapper body is
 	// never called. Its arguments still arrive at the types that wrapper
@@ -1636,6 +1627,51 @@ func (l *lowerer) lowerTypedNamedCallExpr(
 		return Value{}, err
 	}
 	return l.emit("call."+symbol, sig.Return, args, ""), nil
+}
+
+// lowerTypedContainerPrimitive lowers private storage operations whose static
+// element type is carried as an instruction immediate.
+func (l *lowerer) lowerTypedContainerPrimitive(
+	name string,
+	typeArg string,
+	rawArgs []ast.Expression,
+) (Value, bool, error) {
+	// A container primitive carries its element type as an immediate the backend
+	// reads, so the call itself declares no parameter types to hand over.
+	if method, ok := arrayPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerArrayMethod(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	if method, ok := mapPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerMapMethod(
+			method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
+		return value, true, err
+	}
+	if method, ok := boxPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerBoxMethod(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	if method, ok := arenaPrimitives[name]; ok {
+		args, err := l.lowerCallArgsAs(nil, rawArgs)
+		if err != nil {
+			return Value{}, true, err
+		}
+		value, err := l.lowerArenaPrimitive(method, l.resolveType(typeArg), args)
+		return value, true, err
+	}
+	return Value{}, false, nil
 }
 
 // lowerArenaConstructor lowers std::arena::new<T>(allocator).
@@ -1693,11 +1729,14 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	// The attached cleanups run at this same program point, so a slot-backed
 	// receiver is loaded here: Cleanup args are always values, never `&var`
 	// slots, and no backend has to re-derive that rule.
-	cleanups := retireCleanups(l.errorCleanups(), expr.RetiredErrDefers)
+	cleanups := retireCleanups(
+		l.errorCleanups(),
+		l.ownership.RetiredErrDefersForTry(expr),
+	)
 	for index := range cleanups {
 		cleanups[index].Args = l.loadCleanupArgs(cleanups[index].Args)
 	}
-	result := l.emit("error.try", errorUnionElementType(value.Type), []Value{value}, "")
+	result := l.emit("error.try", errorUnionElementType(l.types, value.Type), []Value{value}, "")
 	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = cleanups
 	return result, nil
 }
@@ -1718,7 +1757,7 @@ func (l *lowerer) lowerMethodReceiver(field *ast.FieldExpr) (Value, error) {
 	return l.lowerReceiverAddress(field.Receiver)
 }
 
-// lowerMethodCallExpr lowers arena method calls.
+// lowerMethodCallExpr lowers receiver method calls.
 func (l *lowerer) lowerMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
@@ -1753,19 +1792,35 @@ func (l *lowerer) lowerMethodCallExpr(
 		return Value{}, err
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
-	if elem, ok := arrayElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(arrayTypeName, field.Name, elem, allArgs)
+	return l.lowerResolvedMethod(receiver.Type, field.Name, allArgs)
+}
+
+// lowerResolvedMethod dispatches a checked receiver to its std wrapper,
+// declared implementation, or compiler-known arena operation.
+func (l *lowerer) lowerResolvedMethod(
+	receiverType string,
+	method string,
+	allArgs []Value,
+) (Value, error) {
+	if elem, ok := arrayElementType(receiverType); ok {
+		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
 	}
-	if valueType, ok := mapValueType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(mapTypeName, field.Name, valueType, allArgs)
+	if valueType, ok := mapValueType(receiverType); ok {
+		return l.lowerStdContainerMethod(mapTypeName, method, valueType, allArgs)
 	}
-	if elem, ok := boxElementType(receiver.Type); ok {
-		return l.lowerStdContainerMethod(boxTypeName, field.Name, elem, allArgs)
+	if elem, ok := boxElementType(receiverType); ok {
+		return l.lowerStdContainerMethod(boxTypeName, method, elem, allArgs)
 	}
-	if methodName, ok := l.implMethodCalleeName(receiver.Type, field.Name); ok {
+	if elem := arenaElementType(receiverType); elem != "unknown" && method == typ.CleanupMethod {
+		if ast.OwnerType(l.deinitOwners, elem) {
+			return l.lowerStdContainerMethod(arenaTypeName, method, elem, allArgs)
+		}
+		return l.lowerArenaMethod(method, receiverType, allArgs)
+	}
+	if methodName, ok := l.implMethodCalleeName(receiverType, method); ok {
 		return l.lowerImplMethodCall(methodName, allArgs)
 	}
-	return l.lowerArenaMethod(field.Name, receiver.Type, allArgs)
+	return l.lowerArenaMethod(method, receiverType, allArgs)
 }
 
 // lowerArenaMethod lowers the compiler-known arena methods.
@@ -1778,7 +1833,9 @@ func (l *lowerer) lowerArenaMethod(
 	case "add":
 		return l.emit("arena.add", handleType(receiverType), allArgs, ""), nil
 	case "at":
-		return l.emit("arena.at", arenaElementType(receiverType), allArgs, ""), nil
+		elem := arenaElementType(receiverType)
+		resultType, _ := l.borrowIRType(elem, false)
+		return l.emit("arena.at", resultType, allArgs, ""), nil
 	case "at_mut":
 		return l.emit("arena.at_mut", "?&var "+arenaElementType(receiverType), allArgs, ""), nil
 	case "deinit":
@@ -1857,7 +1914,7 @@ func paramsAfterSelf(params []Param) []Param {
 }
 
 // lowerStdContainerMethod runs the wrapper std declares for a container method,
-// so the body in std/src/*.kizu is what the call does rather than a description
+// so the body in std/src/*/*.kizu is what the call does rather than a description
 // of it. There is no second answer to fall back on: a lookup that stops finding
 // the declaration fails here, instead of quietly lowering to an instruction the
 // lowerer picked out of a list of its own.
@@ -1919,7 +1976,7 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 }
 
 // arrayPrimitives maps a std::internal::builtin Array primitive to the method it lowers
-// as. std/src/array.kizu forwards each method to one of these, and lowering the
+// as. std/src/array/array.kizu forwards each method to one of these, and lowering the
 // forward is what makes that line the implementation rather than a description
 // of one.
 var arrayPrimitives = map[string]string{
@@ -1938,6 +1995,7 @@ var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_pop_or_panic": "pop_or_panic",
 	"std::internal::builtin::array_reserve":      "reserve",
 	"std::internal::builtin::array_set":          "set",
+	"std::internal::builtin::array_swap":         "swap",
 	"std::internal::builtin::array_truncate":     "truncate",
 }
 
@@ -1956,7 +2014,7 @@ var mapPrimitives = map[string]string{
 }
 
 // boxPrimitives maps a std::internal::builtin Box primitive to the operation it
-// lowers as. std/src/mem.kizu forwards the constructor and each method to one
+// lowers as. std/src/mem/mem.kizu forwards the constructor and each method to one
 // of these, reached the same way the Array and Map primitives are.
 var boxPrimitives = map[string]string{
 	"std::internal::builtin::box":            "new",
@@ -1966,8 +2024,31 @@ var boxPrimitives = map[string]string{
 	"std::internal::builtin::box_take":       "take",
 }
 
+// arenaPrimitives maps the storage operations used only by std::arena's
+// owner-element cleanup wrapper to their IR instruction names.
+var arenaPrimitives = map[string]string{
+	"std::internal::builtin::arena_len":          "len",
+	"std::internal::builtin::arena_pop_or_panic": "pop_or_panic",
+	"std::internal::builtin::arena_deinit":       "deinit",
+}
+
+// lowerArenaPrimitive lowers the private storage operations std::arena uses to
+// consume owner elements before releasing the arena itself.
+func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (Value, error) {
+	switch name {
+	case "len":
+		return l.emit("arena.len", "i64", args, elem), nil
+	case "pop_or_panic":
+		return l.emit("arena.pop_or_panic", elem, args, elem), nil
+	case "deinit":
+		return l.emit("arena.deinit", "void", args, elem), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown arena primitive `%s`", name)
+	}
+}
+
 // lowerBoxMethod lowers the runtime primitive one std::mem::Box<T> wrapper
-// forwards to. Only a wrapper body in std/src/mem.kizu reaches it.
+// forwards to. Only a wrapper body in std/src/mem/mem.kizu reaches it.
 func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "new":
@@ -2004,7 +2085,7 @@ func mapPrimitiveValueType(typeArg string) string {
 }
 
 // lowerMapMethod lowers the runtime primitive one std::map::Map<[]u8, V> method
-// forwards to. Only a wrapper body in std/src/map.kizu reaches it: a `m.get(k)`
+// forwards to. Only a wrapper body in std/src/map/map.kizu reaches it: a `m.get(k)`
 // call lowers as a call to that wrapper, and this is what the wrapper does.
 func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (Value, error) {
 	switch name {
@@ -2071,7 +2152,7 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 // path rather than lowering them to an instruction.
 func arrayMethodResultType(name string) (string, bool) {
 	switch name {
-	case "append", "reserve", "set", "truncate":
+	case "append", "reserve", "set", "swap", "truncate":
 		return "!void", true
 	case "len", "capacity":
 		return "i64", true
@@ -2103,7 +2184,7 @@ func (l *lowerer) releaseOwnerOnFailure(result Value, owner Value) (Value, error
 		return Value{}, err
 	}
 	cleanup.OnError = true
-	success := errorUnionElementType(result.Type)
+	success := errorUnionElementType(l.types, result.Type)
 	value := l.emit("error.try", success, []Value{result}, "")
 	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = []Cleanup{cleanup}
 	args := []Value{value}

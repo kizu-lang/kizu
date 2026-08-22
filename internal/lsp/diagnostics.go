@@ -63,10 +63,17 @@ func (s *Server) analyzeDocument(uri string) []Diagnostic {
 	if err != nil {
 		return []Diagnostic{diagnosticAtStart(err.Error())}
 	}
-	if !graphContainsFile(graph, path) {
+	includeTests := project.IsTestFile(path)
+	if !graph.ContainsFile(path, includeTests) {
 		return Analyze(source)
 	}
-	program, err := project.LoadProgramWithSources(graph, s.packageSourceOverrides(graph))
+	overrides := s.packageSourceOverrides(graph, includeTests)
+	var program *ast.Program
+	if includeTests {
+		program, err = project.LoadTestProgramWithSources(graph, overrides)
+	} else {
+		program, err = project.LoadProgramWithSources(graph, overrides)
+	}
 	if err != nil {
 		return []Diagnostic{diagnosticAtStart(err.Error())}
 	}
@@ -130,10 +137,13 @@ func loadPackageGraph(root string) (project.Graph, error) {
 }
 
 // packageSourceOverrides returns open buffers that correspond to graph modules.
-func (s *Server) packageSourceOverrides(graph project.Graph) map[string]string {
+func (s *Server) packageSourceOverrides(
+	graph project.Graph,
+	includeTests bool,
+) map[string]string {
 	moduleFiles := map[string]bool{}
-	for _, module := range graph.Modules {
-		moduleFiles[filepath.Clean(module.File)] = true
+	for _, file := range graph.SourceFiles(includeTests) {
+		moduleFiles[filepath.Clean(file)] = true
 	}
 	sources := map[string]string{}
 	for uri, source := range s.documents {
@@ -175,17 +185,6 @@ func findPackageRoot(path string) (string, bool, error) {
 // errPackageManifestIsDir reports an invalid manifest path shape.
 func errPackageManifestIsDir(path string) error {
 	return &os.PathError{Op: "open", Path: path, Err: os.ErrInvalid}
-}
-
-// graphContainsFile reports whether path is one of the resolved graph modules.
-func graphContainsFile(graph project.Graph, path string) bool {
-	cleanPath := filepath.Clean(path)
-	for _, module := range graph.Modules {
-		if filepath.Clean(module.File) == cleanPath {
-			return true
-		}
-	}
-	return false
 }
 
 // filePathFromURI converts local file URIs into file system paths.

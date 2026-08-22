@@ -8,7 +8,7 @@ import (
 
 // testFile runs Kizu test blocks and reports a minimal test result.
 func testFile(path string, args []string) error {
-	module, err := lowerRunTarget(path)
+	module, err := lowerTestTarget(path)
 	if err != nil {
 		return err
 	}
@@ -26,6 +26,14 @@ func testFile(path string, args []string) error {
 	return nil
 }
 
+// lowerTestTarget includes package-only test files while loose files remain explicit.
+func lowerTestTarget(path string) (*ir.Module, error) {
+	if isPackageRoot(path) {
+		return lowerTestPackage(path, false)
+	}
+	return lowerFile(path, false)
+}
+
 // addTestMain builds an entry that runs every lowered test block in order. It
 // writes IR by hand, so it ends by verifying what it produced, the same way
 // `internal/ir` verifies what it returns.
@@ -34,7 +42,7 @@ func addTestMain(module *ir.Module) error {
 	if len(names) == 0 {
 		return fmt.Errorf("test error: no tests found")
 	}
-	// A package lowering supplies its own entry; a test run replaces it.
+	// Loose-file lowering may already contain a native main; tests replace it.
 	kept := module.Functions[:0]
 	for _, fn := range module.Functions {
 		if fn.Name != "main" {

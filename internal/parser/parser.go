@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -196,7 +197,7 @@ func (p *Parser) parseUnsafeDecl(docs string) ast.Decl {
 		fn := functionStub(false, docs)
 		fn.RequiresUnsafe = true
 		p.nextToken()
-		return p.parseFunctionAfterFn(fn, true)
+		return p.parseFunctionAfterFn(fn)
 	default:
 		p.errorf("expected fn or struct after unsafe, got %s", tokenDescription(p.peek))
 		return functionStub(false, docs)
@@ -218,7 +219,8 @@ func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
 	if !p.expectPeek(token.Function) {
 		return fn
 	}
-	return p.parseFunctionAfterFn(fn, false)
+	p.parseFunctionSignatureAfterFn(fn)
+	return fn
 }
 
 // parseFunctionDecl parses a top-level function declaration.
@@ -228,7 +230,7 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 
 // parseFunctionDeclWithDoc parses a top-level function declaration with attached docs.
 func (p *Parser) parseFunctionDeclWithDoc(docs string) ast.Decl {
-	return p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docs}, true)
+	return p.parseFunctionAfterFn(&ast.FunctionDecl{Doc: docs})
 }
 
 // parseTestDecl parses a top-level test block.
@@ -245,35 +247,9 @@ func (p *Parser) parseTestDecl() ast.Decl {
 	return decl
 }
 
-// parseFunctionAfterFn parses a function declaration after the fn token. It is
-// not named for ast.FunctionSignature: it parses the body too, which is the one
-// thing that type does not hold.
-func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
-	if p.peek.Type == token.LParen && !p.parseReceiver(fn) {
-		return fn
-	}
-	if !p.expectPeek(token.Ident) {
-		return fn
-	}
-	fn.Name = p.cur.Literal
-	if p.peek.Type == token.LT {
-		p.nextToken()
-		fn.StaticParams = p.parseStaticParamList()
-		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
-			return fn
-		}
-	}
-	if !p.expectPeek(token.LParen) {
-		return fn
-	}
-	fn.Params = append(fn.Params, p.parseParams()...)
-	if !p.expectCur(token.RParen) {
-		return fn
-	}
-	if !p.parseReturnClause(fn) {
-		return fn
-	}
-	if !requireBody {
+// parseFunctionAfterFn parses a body-bearing function after the fn token.
+func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl) ast.Decl {
+	if !p.parseFunctionSignatureAfterFn(fn) {
 		return fn
 	}
 	if !p.expectPeek(token.LBrace) {
@@ -281,6 +257,33 @@ func (p *Parser) parseFunctionAfterFn(fn *ast.FunctionDecl, requireBody bool) as
 	}
 	fn.Body = p.parseBlockStmt()
 	return fn
+}
+
+// parseFunctionSignatureAfterFn parses the declaration information shared by
+// body-bearing functions, extern declarations, and contract requirements.
+func (p *Parser) parseFunctionSignatureAfterFn(fn *ast.FunctionDecl) bool {
+	if p.peek.Type == token.LParen && !p.parseReceiver(fn) {
+		return false
+	}
+	if !p.expectPeek(token.Ident) {
+		return false
+	}
+	fn.Name = p.cur.Literal
+	if p.peek.Type == token.LT {
+		p.nextToken()
+		fn.StaticParams = p.parseStaticParamList()
+		if len(fn.StaticParams) == 0 || !p.expectTypeClose() {
+			return false
+		}
+	}
+	if !p.expectPeek(token.LParen) {
+		return false
+	}
+	fn.Params = append(fn.Params, p.parseParams()...)
+	if !p.expectCur(token.RParen) {
+		return false
+	}
+	return p.parseReturnClause(fn)
 }
 
 // parseContractDecl parses a contract with method requirements.
@@ -306,15 +309,14 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 			p.errorf("expected contract method, got %s", tokenDescription(p.cur))
 			return methods
 		}
-		method := p.parseFunctionAfterFn(&ast.FunctionDecl{}, false)
-		if fn, ok := method.(*ast.FunctionDecl); ok {
-			if fn.Receiver {
-				p.errorf("a contract method takes no receiver;" +
-					" it says what a method looks like, not what it is on")
-				return methods
-			}
-			methods = append(methods, fn)
+		method := &ast.FunctionDecl{}
+		p.parseFunctionSignatureAfterFn(method)
+		if method.Receiver {
+			p.errorf("a contract method takes no receiver;" +
+				" it says what a method looks like, not what it is on")
+			return methods
 		}
+		methods = append(methods, method)
 		if p.peek.Type == token.Semicolon {
 			p.nextToken()
 		}
@@ -399,6 +401,7 @@ func (p *Parser) parseStructDeclWithDoc(docs string) *ast.StructDecl {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span = tokenSpan(p.cur)
 	if p.peek.Type == token.LT {
 		p.nextToken()
 		decl.TypeParams = p.parseGenericParamList()
@@ -1315,12 +1318,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Ident:
 		return p.parseIdentPrefixExpression()
 	case token.Int:
-		expr := &ast.IntExpr{Value: p.cur.Literal}
-		if v, err := strconv.ParseInt(expr.Value, 10, 64); err == nil {
-			expr.Parsed = v
-			expr.ParseOK = true
-		}
-		return expr
+		return &ast.IntExpr{Value: p.cur.Literal}
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
 	case token.True, token.False, token.Null:
@@ -1755,7 +1753,6 @@ func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 		Left:         left,
 		Operator:     p.cur.Literal,
 		OperatorSpan: tokenSpan(p.cur),
-		Op:           ast.ClassifyBinaryOp(p.cur.Literal),
 	}
 	precedence := p.curPrecedence()
 	p.nextToken()
@@ -1770,9 +1767,9 @@ func tokenSpan(tok token.Token) ast.Span {
 		width = 1
 	}
 	return ast.Span{
-		File:  tok.File,
-		Start: ast.Position{Line: tok.Line, Column: tok.Column},
-		End:   ast.Position{Line: tok.Line, Column: tok.Column + width},
+		Source: tok.Source,
+		Start:  ast.Position{Line: tok.Line, Column: tok.Column},
+		End:    ast.Position{Line: tok.Line, Column: tok.Column + width},
 	}
 }
 
@@ -1806,7 +1803,7 @@ func joinSpans(first ast.Span, last ast.Span) ast.Span {
 	if last.IsZero() {
 		return first
 	}
-	return ast.Span{File: first.File, Start: first.Start, End: last.End}
+	return ast.Span{Source: first.Source, Start: first.Start, End: last.End}
 }
 
 // parseCallExpr parses a function call expression.
@@ -1981,14 +1978,14 @@ func (p *Parser) errorExpectedDeclaration() {
 func tokenDescription(tok token.Token) string {
 	switch tok.Type {
 	case token.Ident:
-		return fmt.Sprintf("identifier %q", tok.Literal)
+		return "identifier " + diag.QuoteBytes(tok.Literal)
 	case token.Int:
-		return fmt.Sprintf("integer %q", tok.Literal)
+		return "integer " + diag.QuoteBytes(tok.Literal)
 	case token.String:
-		return fmt.Sprintf("string %q", tok.Literal)
+		return "string " + diag.QuoteBytes(tok.Literal)
 	case token.Illegal:
 		if tok.Literal != "" {
-			return fmt.Sprintf("illegal token %q", tok.Literal)
+			return "illegal token " + diag.QuoteBytes(tok.Literal)
 		}
 		return "illegal token"
 	case token.EOF:

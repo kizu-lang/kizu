@@ -23,7 +23,7 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
 ## 決定
 
 1. **`Arena.get(handle)` を `Arena.at(handle)` に改名する。** シグネチャは
-   `&T` 相当のローカル borrow のまま変えない。handle の存在は静的
+   明示的に `&T` とする。handle の存在は静的
    provenance 検査が保証するため、Array / Map と違って不在がなく、
    `?` は付かない。optional の有無は不在意味論の差で、`at` の意味
    「位置への borrow read」は 3 container で揃う。
@@ -33,6 +33,10 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
    method を鏡写しにする(`arena.at_mut` と同じ規約)。runtime 記号
    `kizu_arena_get` は `at` / `at_mut` が共有する handle 解決の primitive
    なので改名しない。
+4. **`at` の結果は通常の shared borrow と同じ lifetime 規則に従う。** 直接の
+   field / method / match read と local binding を許可し、binding は arena を
+   最終使用まで borrow する。borrow parameter を根に持つ arena からは `&T` を
+   返せるが、local arena を根に持つ結果は frame から escape できない。
 
 ## 却下した代替
 
@@ -51,6 +55,8 @@ Array と Map はこの表に従うが、Arena だけは borrow を返す read a
 
 - 読み取りの綴りが 3 container で `at` に揃い、`users.at(handle)` という
   自然な推測が通る。
+- checker 内だけの「borrow-like T」という例外を持たず、signature、call、return、
+  local lifetime のすべてを `&T` の既存規則でレビューできる。
 - breaking change だが、`Arena.get` の使用箇所は examples / tests のみ。
 - 却下判断により `at` / `at_mut` / `&var` / `_mut` suffix の組は言語の
   確定綴りになる。

@@ -6,7 +6,8 @@
 // manifest and a source tree, so it comes through here rather than through a
 // loader of its own.
 //
-// Reading a module is then three jobs, one per file: load.go turns sources into
-// declarations and collects what each module exports, qualify.go rewrites every
-// name to its module path, and resolve.go answers what a written name refers to.
+// Reading a directory module is then three jobs: load.go parses each file and
+// merges declarations while retaining file-local imports, qualify.go rewrites
+// every name to its module path, and resolve.go answers what a written name
+// refers to.
 package project

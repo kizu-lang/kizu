@@ -147,8 +147,11 @@ func commentStart(line string) int {
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
 		case '\\':
-			if inString {
-				i++
+			// Two backslashes outside a quoted string open a multiline
+			// literal segment. Everything after them is payload, including
+			// `//`; Kizu strings have no escape syntax inside quotes.
+			if !inString && i+1 < len(line) && line[i+1] == '\\' {
+				return -1
 			}
 		case '"':
 			inString = !inString
@@ -244,21 +247,23 @@ func isTrailingCommaBeforeClose(tokens []token.Token, i int) bool {
 
 // builder accumulates formatted output and tracks layout state.
 type builder struct {
-	out          strings.Builder
-	depth        int
-	atLineStart  bool
-	prev         token.Token
-	hasPrev      bool
-	prevIndex    int
-	index        int
-	tokens       []token.Token
-	generic      []bool
-	sourceLine   int
-	lastTopDecl  token.Type
-	comments     []lineComment
-	commentIdx   int
-	blockStack   []blockKind
-	afterComment bool
+	out            strings.Builder
+	depth          int
+	delimiterLines []int
+	continuation   int
+	atLineStart    bool
+	prev           token.Token
+	hasPrev        bool
+	prevIndex      int
+	index          int
+	tokens         []token.Token
+	generic        []bool
+	sourceLine     int
+	lastTopDecl    token.Type
+	comments       []lineComment
+	commentIdx     int
+	blockStack     []blockState
+	afterComment   bool
 	// inCapture is true between the pipes of a `|name|` payload capture, the
 	// only place `|` appears; the name hugs both pipes.
 	inCapture bool
@@ -266,8 +271,17 @@ type builder struct {
 
 type blockKind int
 
+type blockState struct {
+	kind          blockKind
+	delimiterBase int
+}
+
 const (
 	normalBlock blockKind = iota
+	// inlineLiteralBlock keeps a same-line aggregate literal compact. It does
+	// not change structural indentation because all of its tokens stay on the
+	// line that opened it.
+	inlineLiteralBlock
 	// commaTerminatedBlock is a block whose entries the grammar requires to end
 	// with a comma, so dropping the trailing one produces source that no longer
 	// parses. Enum variants and match arms are both written this way.
@@ -280,7 +294,10 @@ func (b *builder) emit(t token.Token, next token.Token) {
 		b.emitRBrace(t, next)
 		return
 	}
-	if t.Type == token.String && strings.ContainsRune(t.Literal, '\n') {
+	// Kizu single-line strings have no escape syntax. A literal containing a
+	// quote therefore has to stay in the multiline form even when its value
+	// contains no newline, or formatting would emit invalid source.
+	if t.Type == token.String && strings.ContainsAny(t.Literal, "\"\n") {
 		b.emitMultilineString(t)
 		return
 	}
@@ -324,6 +341,9 @@ func (b *builder) writeCommentLine(comment lineComment) {
 		b.out.WriteByte('\n')
 		b.atLineStart = true
 	}
+	if b.hasPrev {
+		b.continuation = b.continuationIndent(token.Token{})
+	}
 	b.writeIndent()
 	b.out.WriteString(comment.text)
 	b.out.WriteByte('\n')
@@ -362,11 +382,65 @@ func (b *builder) isConsecutiveImport(t token.Token) bool {
 
 // maybePreserveSourceLineBreak inserts a newline when the source had one between tokens.
 func (b *builder) maybePreserveSourceLineBreak(t token.Token) {
-	if b.atLineStart || !b.hasPrev || b.sourceLine == 0 || t.Line <= b.sourceLine {
+	if !b.hasPrev || b.sourceLine == 0 || t.Line <= b.sourceLine {
+		return
+	}
+	if b.atLineStart {
+		if b.afterComment {
+			b.continuation = b.continuationIndent(t)
+		}
 		return
 	}
 	b.out.WriteByte('\n')
 	b.atLineStart = true
+	b.continuation = b.continuationIndent(t)
+}
+
+// continuationIndent reports the indentation beyond the surrounding brace
+// depth for one source-preserved line break. Group delimiters nest naturally;
+// a broken expression outside delimiters gets one visible continuation level.
+func (b *builder) continuationIndent(t token.Token) int {
+	end := len(b.delimiterLines)
+	if b.closesContinuationGroup(t) {
+		closedLine := -1
+		if end > b.currentDelimiterBase() {
+			closedLine = b.delimiterLines[end-1]
+			end--
+		}
+		groups := b.distinctDelimiterLines(end)
+		if end > b.currentDelimiterBase() && b.delimiterLines[end-1] == closedLine {
+			groups--
+		}
+		return groups
+	}
+	groups := b.distinctDelimiterLines(end)
+	if groups > 0 {
+		return groups
+	}
+	switch b.prev.Type {
+	case token.LBrace, token.RBrace, token.Semicolon, token.Comma:
+		return 0
+	}
+	return 1
+}
+
+// distinctDelimiterLines counts visible nesting rather than raw delimiters.
+// `outer(inner(` opened on one line is one continuation level, while an inner
+// call that starts on its own line adds another level.
+func (b *builder) distinctDelimiterLines(end int) int {
+	base := b.currentDelimiterBase()
+	if end <= base {
+		return 0
+	}
+	count := 0
+	lastLine := -1
+	for _, line := range b.delimiterLines[base:end] {
+		if line != lastLine {
+			count++
+			lastLine = line
+		}
+	}
+	return count
 }
 
 // writeSeparator emits the indent (line start) or a single space between tokens.
@@ -393,13 +467,42 @@ func (b *builder) recordEmitted(t token.Token) {
 	if t.Type == token.Pipe {
 		b.inCapture = !b.inCapture
 	}
+	if b.opensContinuationGroup(t) {
+		b.delimiterLines = append(b.delimiterLines, t.Line)
+	} else if b.closesContinuationGroup(t) && len(b.delimiterLines) > 0 {
+		b.delimiterLines = b.delimiterLines[:len(b.delimiterLines)-1]
+	}
+}
+
+// opensContinuationGroup reports whether t adds one grouping delimiter to the
+// continuation stack.
+func (b *builder) opensContinuationGroup(t token.Token) bool {
+	if t.Type == token.LParen || t.Type == token.LBracket {
+		return true
+	}
+	return t.Type == token.LT && b.index < len(b.generic) && b.generic[b.index]
+}
+
+// closesContinuationGroup reports whether t retires one grouping delimiter.
+func (b *builder) closesContinuationGroup(t token.Token) bool {
+	if t.Type == token.RParen || t.Type == token.RBracket {
+		return true
+	}
+	return t.Type == token.GT && b.index < len(b.generic) && b.generic[b.index]
 }
 
 // maybeTrailingNewline handles structural tokens that always force a line break.
 func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 	switch t.Type {
 	case token.LBrace:
-		b.blockStack = append(b.blockStack, b.currentOpenBlockKind())
+		kind := b.currentOpenBlockKind()
+		b.blockStack = append(b.blockStack, blockState{
+			kind:          kind,
+			delimiterBase: len(b.delimiterLines),
+		})
+		if kind == inlineLiteralBlock {
+			return
+		}
 		b.depth++
 		if next.Type == token.RBrace {
 			return
@@ -409,12 +512,17 @@ func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 	case token.Semicolon:
 		b.out.WriteByte('\n')
 		b.atLineStart = true
+		b.continuation = 0
 	}
 }
 
 // emitRBrace closes a block, deciding whether to emit a trailing newline.
 func (b *builder) emitRBrace(t token.Token, next token.Token) {
-	b.popBlockKind()
+	block := b.popBlock()
+	if block.kind == inlineLiteralBlock {
+		b.emitInlineRBrace(t, next)
+		return
+	}
 	if b.depth > 0 {
 		b.depth--
 	}
@@ -445,6 +553,28 @@ func (b *builder) emitRBrace(t token.Token, next token.Token) {
 	}
 }
 
+// emitInlineRBrace closes a compact aggregate literal without treating it as
+// a statement block.
+func (b *builder) emitInlineRBrace(t token.Token, next token.Token) {
+	if b.hasPrev && b.prev.Type != token.LBrace {
+		b.out.WriteByte(' ')
+	}
+	b.writeToken(t)
+	b.prev = t
+	b.prevIndex = b.index
+	b.hasPrev = true
+	b.atLineStart = false
+	if t.Line > 0 {
+		b.sourceLine = t.Line
+	}
+	b.afterComment = false
+	if rbraceWantsNewline(next) {
+		b.out.WriteByte('\n')
+		b.atLineStart = true
+		b.continuation = 0
+	}
+}
+
 // emitTrailingCommaBeforeClose restores the comma that isTrailingCommaBeforeClose
 // dropped, for the blocks whose grammar requires it on the last entry.
 func (b *builder) emitTrailingCommaBeforeClose() {
@@ -467,6 +597,9 @@ func (b *builder) currentOpenBlockKind() blockKind {
 	if opensCommaTerminatedBlockAtCurrentIndex(b.tokens, b.index) {
 		return commaTerminatedBlock
 	}
+	if opensInlineLiteralAtCurrentIndex(b.tokens, b.index) {
+		return inlineLiteralBlock
+	}
 	return normalBlock
 }
 
@@ -475,32 +608,121 @@ func (b *builder) currentBlockKind() blockKind {
 	if len(b.blockStack) == 0 {
 		return normalBlock
 	}
-	return b.blockStack[len(b.blockStack)-1]
+	return b.blockStack[len(b.blockStack)-1].kind
 }
 
-// popBlockKind removes and returns the current closing block kind.
-func (b *builder) popBlockKind() blockKind {
+// popBlock removes and returns the current closing block state.
+func (b *builder) popBlock() blockState {
 	if len(b.blockStack) == 0 {
-		return normalBlock
+		return blockState{}
 	}
 	idx := len(b.blockStack) - 1
-	kind := b.blockStack[idx]
+	block := b.blockStack[idx]
 	b.blockStack = b.blockStack[:idx]
-	return kind
+	return block
 }
 
-// opensEnumBlockAtCurrentIndex reports whether tokens[index] opens an enum body.
+// currentDelimiterBase returns the grouping depth already present when the
+// current brace block opened.
+func (b *builder) currentDelimiterBase() int {
+	if len(b.blockStack) == 0 {
+		return 0
+	}
+	return b.blockStack[len(b.blockStack)-1].delimiterBase
+}
+
+// opensCommaTerminatedBlockAtCurrentIndex reports whether tokens[index] opens
+// a tagged declaration or runtime match arm list.
 func opensCommaTerminatedBlockAtCurrentIndex(tokens []token.Token, index int) bool {
 	if index < 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
 		return false
+	}
+	if opensErrorSetBlock(tokens, index) {
+		return true
 	}
 	// Walk back to the keyword that introduced this `{`. Another brace or a
 	// semicolon means the keyword belongs to an enclosing construct, not this
 	// block, which is what keeps a match arm's own `{ ... }` body normal.
 	for cursor := index - 1; cursor >= 0; cursor-- {
 		switch tokens[cursor].Type {
-		case token.Enum, token.Match:
+		case token.Enum, token.Union:
 			return true
+		case token.Match:
+			return cursor == 0 || tokens[cursor-1].Type != token.Comptime
+		case token.LBrace, token.RBrace, token.Semicolon:
+			return false
+		}
+	}
+	return false
+}
+
+// opensErrorSetBlock reports whether the current brace follows `error Name`.
+// Looking for any earlier identifier spelled `error` also catches an ordinary
+// function or method named error and incorrectly adds an enum-style comma to
+// its final statement.
+func opensErrorSetBlock(tokens []token.Token, index int) bool {
+	return index >= 2 &&
+		tokens[index-1].Type == token.Ident &&
+		tokens[index-2].Type == token.Ident &&
+		tokens[index-2].Literal == "error"
+}
+
+// opensInlineLiteralAtCurrentIndex recognizes a same-line aggregate literal.
+// A top-level colon distinguishes fields from an ordinary statement block;
+// declaration and control-flow keywords keep their braces structural.
+func opensInlineLiteralAtCurrentIndex(tokens []token.Token, index int) bool {
+	if index <= 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
+		return false
+	}
+	if !canOpenAggregateLiteral(tokens[index-1]) || braceStartsBody(tokens, index) {
+		return false
+	}
+	line := tokens[index].Line
+	depth := 0
+	hasField := false
+	for cursor := index + 1; cursor < len(tokens); cursor++ {
+		t := tokens[cursor]
+		switch t.Type {
+		case token.LBrace:
+			depth++
+		case token.RBrace:
+			if depth == 0 {
+				return hasField && t.Line == line
+			}
+			depth--
+		case token.Colon:
+			if depth == 0 {
+				hasField = true
+			}
+		case token.Semicolon, token.EOF:
+			if depth == 0 {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// canOpenAggregateLiteral reports whether t can name an aggregate constructor.
+func canOpenAggregateLiteral(t token.Token) bool {
+	return t.Type == token.Ident || t.Type == token.GT
+}
+
+// braceStartsBody distinguishes declaration and control-flow bodies from
+// aggregate literals whose opening token also follows an identifier.
+func braceStartsBody(tokens []token.Token, index int) bool {
+	if opensErrorSetBlock(tokens, index) {
+		return true
+	}
+	for cursor := index - 1; cursor >= 0; cursor-- {
+		switch tokens[cursor].Type {
+		case token.Function, token.Struct, token.Enum, token.Union, token.Contract,
+			token.Impl, token.If, token.Else, token.While, token.For, token.Match:
+			return true
+		case token.Ident:
+			if tokens[cursor].Literal == "test" {
+				return true
+			}
 		case token.LBrace, token.RBrace, token.Semicolon:
 			return false
 		}
@@ -533,9 +755,10 @@ func (b *builder) finish() string {
 
 // writeIndent emits the indent string for the current block depth.
 func (b *builder) writeIndent() {
-	for i := 0; i < b.depth; i++ {
+	for i := 0; i < b.depth+b.continuation; i++ {
 		b.out.WriteString(indentUnit)
 	}
+	b.continuation = 0
 }
 
 // writeToken emits the canonical spelling of t.
@@ -602,19 +825,11 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 	if b.tightGenericBracket(curr) {
 		return false
 	}
-	// A receiver slot follows `fn` with a space: `fn (self: T) name()`. It is
-	// the one `(` that opens a declaration rather than a call or a group.
-	if curr.Type == token.LParen && prev.Type == token.Function {
-		return true
-	}
-	// `(` hugs a callee -- a name, a call or index result, or a closing
-	// generic bracket -- and takes a space when it groups: `x = (a + b)`.
 	if curr.Type == token.LParen {
-		switch prev.Type {
-		case token.Ident, token.RParen, token.RBracket, token.GT:
-			return false
-		}
-		return !noSpaceAfter(prev)
+		return b.parenTakesSpace(prev)
+	}
+	if b.attachedTokenHugsLeft(curr, prev) {
+		return false
 	}
 	if noSpaceBefore(curr) {
 		return false
@@ -634,6 +849,43 @@ func (b *builder) shouldInsertSpace(curr token.Token) bool {
 		return false
 	}
 	return true
+}
+
+// parenTakesSpace distinguishes a receiver or grouping parenthesis from a
+// call parenthesis. A generic `>` ends a callee; a comparison `>` does not.
+func (b *builder) parenTakesSpace(prev token.Token) bool {
+	if prev.Type == token.Function {
+		return true
+	}
+	switch prev.Type {
+	case token.Ident, token.RParen, token.RBracket:
+		return false
+	case token.GT:
+		return b.prevIndex >= len(b.generic) || !b.generic[b.prevIndex]
+	}
+	return !noSpaceAfter(prev)
+}
+
+// attachedTokenHugsLeft reports whether curr is postfix indexing or the `!`
+// between the two sides of a named error union.
+func (b *builder) attachedTokenHugsLeft(curr token.Token, prev token.Token) bool {
+	switch curr.Type {
+	case token.LBracket, token.Bang:
+		return b.attachedLeftOperand(prev)
+	}
+	return false
+}
+
+// attachedLeftOperand reports whether postfix syntax can hug the preceding
+// value. A generic `>` qualifies; a comparison `>` does not.
+func (b *builder) attachedLeftOperand(prev token.Token) bool {
+	switch prev.Type {
+	case token.Ident, token.String, token.RParen, token.RBracket, token.RBrace:
+		return true
+	case token.GT:
+		return b.prevIndex < len(b.generic) && b.generic[b.prevIndex]
+	}
+	return false
 }
 
 // tightGenericBracket reports the `<` and `>` of a static argument list, which
@@ -708,7 +960,7 @@ func isTopLevelDeclStart(t token.Token) bool {
 		token.Function, token.Struct, token.Enum, token.Union, token.Contract, token.Impl:
 		return true
 	case token.Ident:
-		return t.Literal == "test"
+		return t.Literal == "test" || t.Literal == "error"
 	}
 	return false
 }

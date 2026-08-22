@@ -1,0 +1,262 @@
+pub error Error {
+    InvalidLength,
+}
+
+// The C runtime mirrors this layout as KizuString (internal/native/build.go);
+// changing the fields means changing it there too.
+pub struct String {
+    bytes: std::array::Array<u8>
+}
+
+struct Scalar {
+    value: i64,
+    width: i64
+}
+
+struct TrimBounds {
+    start: i64,
+    end: i64
+}
+
+pub fn new(allocator: Allocator) -> std::string::String {
+    return String {
+        bytes: std::array::new<u8>(allocator)
+    };
+}
+
+pub fn from_bytes(
+    allocator: Allocator,
+    bytes: []u8
+) -> !std::string::String {
+    var out = new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(bytes);
+    return move out;
+}
+
+// join copies parts into one owned String with separator between adjacent
+// parts. The explicit allocator owns the returned storage; parts and separator
+// remain borrowed. Computing the full length before reserve both avoids growth
+// reallocations and prevents an i64 overflow from reaching Array storage.
+pub fn join(
+    allocator: Allocator,
+    parts: &std::array::Array<std::string::String>,
+    separator: []u8
+) -> !std::string::String {
+    let total = join_length(parts, separator) orelse
+        return std::string::Error::InvalidLength;
+    var out = new(allocator);
+    errdefer out.deinit();
+    try out.reserve(total);
+    var index = 0;
+    while parts.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes(separator);
+        }
+        try out.append_string(part);
+        index = index + 1;
+    }
+    return move out;
+}
+
+// trim_space_in_place removes the fixed Unicode White_Space set from both
+// ends of value without allocating or changing capacity. Invalid UTF-8 bytes
+// decode as one non-space byte and are retained. Forward copying is safe for
+// overlap because every destination index is at or before its source index.
+pub fn trim_space_in_place(value: &var std::string::String) -> void {
+    let bytes = value.as_bytes();
+    let bounds = trim_space_bounds(bytes);
+    let length = bounds.end - bounds.start;
+    if length == 0 {
+        value.bytes.clear();
+        return;
+    }
+    if bounds.start > 0 {
+        let writable = value.as_mut_bytes();
+        var source = bounds.start;
+        var destination = 0;
+        while source < bounds.end {
+            writable[destination] = writable[source];
+            source = source + 1;
+            destination = destination + 1;
+        }
+    }
+    // length was computed from this buffer, so pop_or_panic cannot observe an
+    // empty Array. Popping keeps capacity and avoids a caller-visible failure
+    // for an operation whose bounds are internal invariants.
+    while value.bytes.len() > length {
+        let _ = value.bytes.pop_or_panic();
+    }
+    return;
+}
+
+fn join_length(
+    parts: &std::array::Array<std::string::String>,
+    separator: []u8
+) -> ?i64 {
+    var total = 0;
+    var index = 0;
+    let separator_length = std::mem::len(separator);
+    while parts.at(index) |part| {
+        if index > 0 {
+            if separator_length > 9223372036854775807 - total {
+                return null;
+            }
+            total = total + separator_length;
+        }
+        let part_length = part.len();
+        if part_length > 9223372036854775807 - total {
+            return null;
+        }
+        total = total + part_length;
+        index = index + 1;
+    }
+    return total;
+}
+
+fn (self: String) append_bytes(bytes: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length {
+        try self.bytes.append(bytes[index]);
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: String) append_byte(byte: u8) -> !void {
+    try self.bytes.append(byte);
+    return;
+}
+
+fn (self: String) append_string(other: &std::string::String) -> !void {
+    let view = other.as_bytes();
+    try self.append_bytes(view);
+    return;
+}
+
+fn (self: String) reserve(additional: i64) -> !void {
+    if additional < 0 {
+        return std::string::Error::InvalidLength;
+    }
+    try self.bytes.reserve(additional);
+    return;
+}
+
+fn (self: String) len() -> i64 {
+    return self.bytes.len();
+}
+
+fn (self: String) capacity() -> i64 {
+    return self.bytes.capacity();
+}
+
+fn (self: String) as_bytes() -> []u8 {
+    return self.bytes.as_bytes();
+}
+
+fn (self: String) as_mut_bytes() -> &var []u8 {
+    return self.bytes.as_mut_bytes();
+}
+
+fn (self: String) clear() -> void {
+    self.bytes.clear();
+}
+
+fn (self: String) truncate(length: i64) -> !void {
+    if length < 0 or length > self.len() {
+        return std::string::Error::InvalidLength;
+    }
+    try self.bytes.truncate(length);
+    return;
+}
+
+fn trim_space_bounds(bytes: []u8) -> TrimBounds {
+    var position = 0;
+    var start = std::mem::len(bytes);
+    var end = start;
+    var found = false;
+    while position < std::mem::len(bytes) {
+        let scalar = decode_scalar(bytes, position);
+        if !is_unicode_space(scalar.value) {
+            if !found {
+                start = position;
+                found = true;
+            }
+            end = position + scalar.width;
+        }
+        position = position + scalar.width;
+    }
+    return TrimBounds { start: start, end: end };
+}
+
+// decode_scalar follows Go's utf8.DecodeRune width rules. Malformed input is
+// one U+FFFD scalar of width one; U+FFFD is not White_Space, so trimming keeps
+// the original malformed byte rather than normalizing it.
+fn decode_scalar(bytes: []u8, position: i64) -> Scalar {
+    let length = std::mem::len(bytes);
+    if position < 0 or position >= length {
+        return Scalar { value: 65533, width: 1 };
+    }
+    let first = bytes[position];
+    if first < cast<u8>(128) {
+        return Scalar { value: cast<i64>(first), width: 1 };
+    }
+    if first >= cast<u8>(194) and first <= cast<u8>(223) and position + 1 < length {
+        let second = bytes[position + 1];
+        if is_continuation(second) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(192)) * 64 +
+                    cast<i64>(second - cast<u8>(128)),
+                width: 2
+            };
+        }
+    }
+    if first >= cast<u8>(224) and first <= cast<u8>(239) and position + 2 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(224) and second < cast<u8>(160)) and
+            !(first == cast<u8>(237) and second > cast<u8>(159));
+        if second_valid and is_continuation(third) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(224)) * 4096 +
+                    cast<i64>(second - cast<u8>(128)) * 64 +
+                    cast<i64>(third - cast<u8>(128)),
+                width: 3
+            };
+        }
+    }
+    if first >= cast<u8>(240) and first <= cast<u8>(244) and position + 3 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let fourth = bytes[position + 3];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(240) and second < cast<u8>(144)) and
+            !(first == cast<u8>(244) and second > cast<u8>(143));
+        if second_valid and is_continuation(third) and is_continuation(fourth) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(240)) * 262144 +
+                    cast<i64>(second - cast<u8>(128)) * 4096 +
+                    cast<i64>(third - cast<u8>(128)) * 64 +
+                    cast<i64>(fourth - cast<u8>(128)),
+                width: 4
+            };
+        }
+    }
+    return Scalar { value: 65533, width: 1 };
+}
+
+fn is_continuation(byte: u8) -> bool {
+    return byte >= cast<u8>(128) and byte <= cast<u8>(191);
+}
+
+// This is the 25-code-point Unicode 15.0 White_Space set used by Go 1.22.
+// U+180E and U+FEFF are intentionally not members. Changing the set is an API
+// contract change rather than an implicit Unicode-table update.
+fn is_unicode_space(value: i64) -> bool {
+    return value == 9 or value == 10 or value == 11 or value == 12 or value == 13 or
+        value == 32 or value == 133 or value == 160 or value == 5760 or
+        (value >= 8192 and value <= 8202) or value == 8232 or value == 8233 or
+        value == 8239 or value == 8287 or value == 12288;
+}

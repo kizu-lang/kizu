@@ -44,7 +44,7 @@ borrow 中の値の move を許さない
 borrow escape を許さない
 borrow を struct field に保存させない
 borrow を comptime / unsafe 境界で延命させない
-arena.at(handle) は local borrow だけを返す
+arena.at(handle) は arena に tied な `&T` だけを返す
 borrow 中の arena の add / deinit、可変 borrow 中の at を許さない
 別 arena の handle 使用を許さない
 handle を raw pointer として扱わせない
@@ -157,26 +157,34 @@ name = "app"
 version = "0.1.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 ```
 
 `package.name` は user module の root namespace になります。
-たとえば `name = "app"` の package では、`src/lexer.kizu` を
-`app::lexer` として import します。
-
-`[modules].root` は package 名そのものになる file を指します。省略できます。
-library package はその module を持つ理由が無いことがあり、std は持ちません
-(std の module はすべて `std::mem` 以下で、裸の `std` はありません)。
-
-module path は file path から決まります。
+module path は、`[modules].paths` に指定した source root からの directory path で
+決まります。source root 直下が package root module、子 directory が child module
+です。同じ directory の production `.kizu` file はすべて同じ module に属し、file
+名は module path に影響しません。
 
 ```text
-src/main.kizu       -> app
-src/lexer.kizu      -> app::lexer
-src/parser/mod.kizu -> app::parser
-src/parser/ast.kizu -> app::parser::ast
+src/main.kizu                 -> app
+src/cli.kizu                  -> app
+src/lexer/lexer.kizu          -> app::lexer
+src/parser/ast/ast.kizu       -> app::parser::ast
 ```
+
+`main.kizu` と `mod.kizu` に特別な module 意味はありません。production file が無い
+directory は production module を作りません。したがって library package は package
+root module を持たなくてもよく、std の source root 直下には production file を
+置きません。
+
+package graph 内で suffix が `_test.kizu` の file は `kizu test <package>` のときだけ、
+同じ directory の module に加わります。package を対象にした `run` / `check` / `build`
+からは除外します。file path を直接指定した loose-source command は、その1fileを明示的に
+選んだものなので通常どおり読みます。
+対象 module の private 宣言を見る white-box test はその directory に置きます。依存方向を
+逆向きにする integration test は別の test-only directory module に置き、対象の public API
+を import します。通常の module cycle 規則を test だけ緩めることはしません。
 
 ## 4. 設計概要
 
@@ -622,16 +630,19 @@ package の内部 module は `internal` ディレクトリで隠します。mani
 書きません。どこに置いたかが規則そのものです。
 
 ```text
-src/lexer.kizu                   -> app::lexer                    公開
-src/internal/table.kizu          -> app::internal::table          app 配下からだけ
-src/parser/internal/state.kizu   -> app::parser::internal::state  app::parser 配下からだけ
+src/lexer/lexer.kizu                    -> app::lexer                    公開
+src/internal/table/table.kizu           -> app::internal::table          app 配下からだけ
+src/parser/internal/state/state.kizu    -> app::parser::internal::state  app::parser 配下からだけ
 ```
 
 `internal` は階層のどこにでも置けます。`X::internal::Y` は `X` とその下の module
 からだけ import / 参照できます。部分木の中だけで使う内部 module を、package 全体に
 見せずに置けます。
 
-visibility は default private です。
+visibility は default private です。同じ directory の file は一つの module を構成する
+ため、private な top-level declaration と field はその module の全fileから使えます。
+import はfile-localで、各fileが自分の外部依存を明示します。同じmoduleの宣言を使う
+ためのimportは不要です。
 
 ```kizu
 import std::array;
@@ -1405,8 +1416,8 @@ cleanup の名前は `deinit` 1 つです。`deinit` は値と、値が保持し
 解放し、何も保持しない要素ではその consume が空になるだけです。要素型が決まって
 いない generic code も同じ 1 つを書きます。名前が 1 つなので任意の深さに合成でき、
 owner 要素の container を要素にする入れ子も書けます。owner 要素の `set` は、置き換え
-前の要素を leak するため型 error です。Arena は要素の deinit を実行しないため、
-owner 型を要素にできません。
+前の要素を leak するため型 error です。Arena も owner 要素を持てて、arena の
+storage を解放する前に各 initialized element を consume します。
 
 owner payload を持つ `union` も owner aggregate です。宣言しなければ、active variant の
 payload を consume する `match` が導出されます。その `deinit` は active variant の
@@ -1492,9 +1503,9 @@ fn pick(a: []u8, b: []u8, f: bool) -> []u8   // 戻り値は a と b の両方�
 * `Allocator` も tie を運びます。tied な `Allocator` 引数(§15.3)を受けて
   scalar 以外を返す関数の戻り値は、その allocator の tie を継承します。
   tie のない allocator からは何も継承せず、既存コードの意味は変わりません
-* **view を持てる struct** も tie を運びます(ADR-0100)。全 field が
-  copy 値・view・そのような struct で、transitively `[]u8` field を含む
-  型がこれに当たります。この型を返す関数の戻り値は、borrow-class な
+* **view を持てる struct** も tie を運びます(ADR-0100)。field を
+  transitively 辿って `[]u8` を含む型がこれに当たり、別の field が owner
+  でも同じです。この型を返す関数の戻り値は、borrow-class な
   view 引数(local view binding、または捕捉済み struct の view field)の
   保守的統合に tied です。source が無ければ通常の値で、既存コードの
   意味は変わりません
@@ -1508,14 +1519,15 @@ let it = BytesIter { bytes: view, index: 0 };   // it は view の source に ti
 var it2 = iter(view);                            // 関数経由でも同じ
 ```
 
-捕捉した binding は borrow class に入ります: frame から escape できず
-(return、move、struct への再格納は拒否)、source が生きている間
-source は borrow 中で、binding は最後の使用で終了します。owner field を
-持つ struct は捕捉できません(borrow class は deinit 義務を運ばない
-ため)。borrow-class 値の `[]u8` field 読みは let では同じ tie を継ぎ、
-move 文脈では escape として拒否します。source が関数 parameter だけの
-捕捉は自由な値のままです: parameter は frame より長生きし、呼び出し側が
-署名から tie を再導出します。
+owner field を持たない捕捉 binding は borrow class に入ります。owner field
+を持つ捕捉 binding は通常の owner のまま source への tie も持ち、明示
+`deinit` 義務を失いません。どちらも frame から escape できず(return、move、
+struct への再格納は拒否)、source は binding の最後の使用まで borrow 中です。
+owner の通常の最後の使用は、その義務を消費する `deinit` です。
+borrow-class 値の `[]u8` field 読みは let では同じ tie を継ぎ、move 文脈では
+escape として拒否します。source が関数 parameter だけの捕捉は自由な値の
+ままです: parameter は frame より長生きし、呼び出し側が署名から tie を
+再導出します。
 
 契約は署名だけから導出され、body は参照されません。
 名前付き lifetime parameter、lifetime bounds、anonymous lifetime は
@@ -1645,9 +1657,14 @@ core arena の構築は明示 allocator capability を要求し、
 * `std::arena::new<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
 * `std::arena::Arena<T>.add(value)` は value を arena に move する
 * `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
-* `std::arena::Arena<T>.at(handle)` はローカル borrow を返す
+* `std::arena::Arena<T>.at(handle)` は arena に tied な shared borrow `&T` を返す。
+  直接 field / method / match を読め、local binding に束縛した場合は最後の使用まで
+  arena を borrow する。その間は `add` / `deinit` を実行できず、要素を move
+  できない。borrow parameter を根に持つ arena からは返せるが、local arena 由来の
+  borrow は function から escape できない
 * `std::arena::Arena<T>.at_mut(handle)` は borrow optional `?&var T` を返す
-* `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
+* `std::arena::Arena<T>.deinit()` は initialized element を各要素の `deinit()` で
+  consume してから arena storage を解放し、binding を無効化する
 * `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * `owner.field.deinit()` は値を保持している場所の direct field だけ許可する(§8)
 * handle は copy 型で、代入・値渡し・格納しても元の binding は使い続けられる。
@@ -1832,9 +1849,10 @@ unsafe struct Bytes {
 }
 ```
 
-`unsafe struct` は field を `pub` にできません。Kizu の module は 1 file で
-`pub(crate)` / `pub(super)` を持たないため(§6.6)、不変条件を壊しうるコードは
-宣言と同じ file の中だけに閉じます。
+`unsafe struct` は field を `pub` にできません。通常のprivate fieldは同じmoduleの
+全fileから使えますが、`unsafe struct` の構築とfieldへの書き込みは、その宣言がある
+fileの中だけに閉じます。別fileでは `unsafe` を付けても拒否します。これにより、
+不変条件を作り変えられる監査範囲はmoduleの大きさにかかわらず1fileに固定されます。
 
 不変条件を作る操作 —— 構築と field への書き込み —— には `unsafe` が要ります。
 field の読みには要りません。読み出した raw pointer は、それを使う操作の側が
@@ -2162,7 +2180,7 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-// lib/kizu/std/src/array.kizu
+// lib/kizu/std/src/array/array.kizu
 pub fn new<T>(allocator: Allocator) -> std::array::Array<T> {
     return std::internal::builtin::array<T>(allocator);
 }
@@ -2518,10 +2536,13 @@ length と capacity は変わりません。
 `&var std::string::String` から呼べます。method receiver は by-value の
 parameter として書きますが、consuming transfer ではありません。
 
-**element / value borrow.** `Array.get` / `get_or_panic` と `Map.get` は
-copy element / copy value 限定です。owner を copy すると持ち主が 2 つに
-なるためで、owner は `at` / `at_mut` で local borrow として読み書き
-します。`Array.at` / `at_mut` は borrow optional
+**element / value copy と container clone.** `Array.get` / `get_or_panic` と
+`Map.get` は copy element / copy value 限定です。`Array.clone(allocator)` も
+copy element 限定で、receiver を consume せず、指定した allocator 上に独立した
+Array storage を持つ新しい owner を返します。owner element の再帰的な複製は
+要素型ごとの明示的な関数で書き、汎用 clone は行いません。owner を単純に copy
+すると持ち主が 2 つになるためで、owner は `at` / `at_mut` で local borrow として
+読み書きします。`Array.at` / `at_mut` は borrow optional
 `?&T` / `?&var T` を、`Map.at` / `at_mut` は `?&V` / `?&var V` を返します。
 これを消費できるのは **capture 条件だけ**です(`if array.at(i) |elem|` /
 `while m.at(key) |v|`)。binding への保存も `orelse` も拒否します。element
@@ -2532,7 +2553,14 @@ container は borrow され、shared borrow 中は `insert` / `deinit` が、
 mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
 `Map.key_at` が返す key も map storage への view なので capture 限定です。
 
-**cleanup の義務.** `Array.deinit` は残っている initialized element を、
+`Arena.at(handle)` は handle provenance により要素の存在を静的に扱えるため、
+optional ではない `&T` を返します。直接 read するほか local binding に保存でき、
+その binding の最後の使用まで arena を shared borrow します。borrow 中の `add` と
+`deinit`、および borrow からの owner move は拒否します。borrow parameter を根に
+持つ arena からの `&T` return はその structural provenance を caller へ引き継ぎ、
+local arena からの return は borrow escape として拒否します。
+
+**cleanup の義務.** `Array.deinit` と `Arena.deinit` は残っている initialized element を、
 `Map.deinit` は保持している value を cleanup してから storage を解放します。
 element / value cleanup は `T` の `deinit(self: T) -> void` を呼びます。
 owner はすべてそれを持つので(§8)、場合分けはありません。
@@ -2542,7 +2570,12 @@ owner はすべてそれを持つので(§8)、場合分けはありません。
 `Map.insert` は owner value に対して trap です(占有しているかは実行時に
 しか分からないため)。置き換えは `at_mut` で in-place に行います。
 
-`String.deinit` / `Box.deinit` / `Map.deinit` は caller 側の binding を
+`Array.swap` は例外です。両方の initialized slot を storage 上で交換するだけで、
+どちらの owner も copy・replace・cleanup しないため、owner element に使えます。
+receiver は owned local または `&var Array<T>` に限り、shared borrow 越しの
+呼び出しは拒否します。
+
+`String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している
 場所では `owner.field.deinit()` の direct field cleanup も同じで、その field は
 以後使用できません(§8)。`deinit` 後の container 使用は safe Kizu では
@@ -2581,7 +2614,8 @@ storage を読むので、1 周目が解放した payload を 2 周目が解放�
 struct / union は non-copy です。`borrow` / `borrow_mut` は local borrow
 source であり、戻り値は local binding に束縛します。戻り値の由来は署名から
 構造的に self に tied と導出されます(ADR-0098)。borrow field は許可しません。
-borrow が生きている間は対象 `Box<T>` の move / deinit を禁止します。
+`take()` は local な Box を consume し、cell を解放して payload `T` を返します。
+borrow が生きている間は対象 `Box<T>` の move / `take` / `deinit` を禁止します。
 
 **element に置ける型.** `Array<T>` の element には arena、handle、nested
 array、`std::map::Map<K, V>` を置けます。raw pointer と stack buffer は
@@ -2604,9 +2638,14 @@ test "parser accepts minimal function" {
 
 `kizu test <path>` は file または package root を受け取り、check 後に
 top-level `test` block だけを source order で実行します。`main` は実行しません。
+package 内では dependency を先にした resolved module order、同じmodule内のfile path
+order、各file内のdeclaration orderで実行します。
 test block は parameterless `!void` body として扱うため、helper が返す `!T` には
 `try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
 `test: ok` を表示します。
+package test では、production fileに加えて `_test.kizu` fileを同じdirectoryのmodule
+へ加えます。test fileは同じmoduleのprivate宣言を使え、test helperも同じmoduleの
+他のtest fileから使えます。file-local importの規則はtest fileにも適用します。
 filesystem-wide test discovery、test filter、test attribute、async test、location-aware
 diagnostics、message builder helper は後続で扱います。
 

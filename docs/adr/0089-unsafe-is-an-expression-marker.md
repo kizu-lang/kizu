@@ -210,11 +210,10 @@ fn (self: &Array<T>) get<T>(i: usize) -> T { if i >= self.len { ... }
 fn (self: &var Array<T>) append<T>(v: T)   { unsafe self.len = self.len + 1; }
 ```
 
-`pub` 禁止と組み合わせると、監査範囲が言語規則として file 1 枚に固定される。
-Kizu の module は 1 file で、`pub(crate)` / `pub(super)` を採用していないため
-(SPEC §6.6)、非 `pub` field を書けるのはその file の中だけである。子 module から
-親 module の private field は書けない。Rust は privacy が module 木に広がるので
-この固定ができない。
+`pub` 禁止に加え、`unsafe struct` の構築とfield書き込みを宣言fileに限定すると、
+監査範囲が言語規則としてfile 1枚に固定される。Kizuの通常のprivate宣言は同じ
+directory moduleの全fileから使えるが、別fileは `unsafe` を付けてもその型の不変条件を
+作り変えられない。読み出したraw pointerを使う操作には従来どおり `unsafe` が要る。
 
 ### 5. 義務を作る場所と果たす場所の両方で、理由の記述を必須にする
 
@@ -318,7 +317,7 @@ Rust では規約と lint だが、Kizu は言語規則にする。理由は 2 �
 | capability を値として渡す(Austral 方式) | 偽造不能性が前提。Kizu の `std::io::blocking()` / `std::mem::page_allocator()` は引数なしで呼べ、`main` に capability を受け取る口も無い |
 | capability を関数境界で伝播させる | 伝播は宣言に書く言語の性質だが、Kizu の正例は 19 箇所すべて深さ 1 で終端しており、`@requires_unsafe()` の正例は 1 つだけ。適用対象が 0 |
 | 効果を推論する(Nim 方式) | 源泉が source から消える。明示性と衝突する |
-| unsafe module の印(Austral `Unsafe_Module` 方式) | 不要。`grep 'ptr<'` が正確な監査集合を返す。safe なコードが unsafe の不変条件を壊せるのは不変条件が raw pointer を持つ struct にあるときだけで、その struct は grep に出て、privacy が同じ file に閉じ込める |
+| unsafe module の印(Austral `Unsafe_Module` 方式) | 不要。`grep 'ptr<'` が監査対象の型を示し、`unsafe struct` の不変条件を作り変える操作は宣言 file に閉じるため、module 全体へ印を広げる必要がない |
 | 契約側の関数名に印を強制する | `import-c-header` は C の名前をそのまま Kizu 名にする。改名を課すと man page にも header にも無い名前が生まれる |
 | field 単位の印(Rust RFC 3458 方式) | 読み・copy・参照すべてに `unsafe` を要求するため、pointer 容器で `unsafe` が全行に出て grep が絞り込みにならない。決定 3/4 は型に印を付けて読みを解放する |
 | 実行時の不変条件検査(Ada `Type_Invariant` / D `invariant`) | public method の出入りに自動で検査が挿入されるのは隠れた制御フローである。静的証明版(SPARK)は SPEC §2 の非目標 |

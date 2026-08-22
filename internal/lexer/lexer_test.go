@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -73,6 +74,22 @@ func TestNextToken(t *testing.T) {
 		if tok.Type != tt.typ || tok.Literal != tt.lit {
 			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
 		}
+	}
+}
+
+// TestTokensShareSourceID checks file identity is copied without copying its path.
+func TestTokensShareSourceID(t *testing.T) {
+	sources := source.NewMap()
+	input := sources.Add("sample.kizu", "first second")
+	l := NewSource(input)
+	first := l.NextToken()
+	second := l.NextToken()
+
+	if first.Source != input || second.Source != input {
+		t.Fatalf("token sources = (%v, %v), want %v", first.Source, second.Source, input)
+	}
+	if first.Source.Path() != "sample.kizu" || second.Source.Path() != "sample.kizu" {
+		t.Fatalf("token paths = (%q, %q)", first.Source.Path(), second.Source.Path())
 	}
 }
 

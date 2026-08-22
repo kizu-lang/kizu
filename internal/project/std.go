@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/manifest"
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/token"
 )
@@ -52,7 +53,7 @@ func stdModule(path string) (bool, error) {
 		return false, err
 	}
 	for _, module := range graph.Modules {
-		if module.Path == path {
+		if module.Path == path && len(module.Files) > 0 {
 			return true, nil
 		}
 	}
@@ -65,12 +66,15 @@ func stdModule(path string) (bool, error) {
 // check and twenty kilobytes of every binary.
 func stdModulesFor(graph Graph, imports []string) ([]Module, map[string]string, error) {
 	loader := &stdLoader{
-		files:   map[string]string{},
+		modules: map[string]Module{},
 		visited: map[string]bool{},
 		sources: map[string]string{},
 	}
 	for _, module := range graph.Modules {
-		loader.files[module.Path] = module.File
+		if len(module.Files) == 0 {
+			continue
+		}
+		loader.modules[module.Path] = module
 		loader.paths = append(loader.paths, module.Path)
 	}
 	sort.Strings(loader.paths)
@@ -86,7 +90,7 @@ func stdModulesFor(graph Graph, imports []string) ([]Module, map[string]string, 
 
 // stdLoader walks std modules, pulling in what each one names.
 type stdLoader struct {
-	files   map[string]string
+	modules map[string]Module
 	paths   []string
 	visited map[string]bool
 	out     []Module
@@ -108,7 +112,7 @@ func (l *stdLoader) named(path string) []string {
 		}
 		return wanted
 	}
-	if _, ok := l.files[path]; ok {
+	if _, ok := l.modules[path]; ok {
 		return []string{path}
 	}
 	return nil
@@ -122,17 +126,20 @@ func (l *stdLoader) visit(path string) error {
 		return nil
 	}
 	l.visited[path] = true
-	source, err := os.ReadFile(l.files[path])
-	if err != nil {
-		return err
-	}
-	l.sources[l.files[path]] = string(source)
-	for _, dependency := range l.references(string(source)) {
-		if err := l.visit(dependency); err != nil {
+	module := l.modules[path]
+	for _, file := range module.Files {
+		source, err := os.ReadFile(file)
+		if err != nil {
 			return err
 		}
+		l.sources[file] = string(source)
+		for _, dependency := range l.references(string(source)) {
+			if err := l.visit(dependency); err != nil {
+				return err
+			}
+		}
 	}
-	l.out = append(l.out, Module{Path: path, File: l.files[path]})
+	l.out = append(l.out, module)
 	return nil
 }
 
@@ -218,31 +225,34 @@ var stdErrors struct {
 }
 
 // readStdErrorSets parses std once for the numbers its error set members lower
-// to. Modules are read in module-path order, so the numbers a build assigns
-// depend on what std declares and on nothing else.
+// to. Modules are read in module-path order and files in path order, so the
+// numbers a build assigns depend on what std declares and on nothing else.
 func readStdErrorSets() (map[string]map[string]int, int, error) {
 	graph, err := StdGraph()
 	if err != nil {
 		return nil, 0, err
 	}
+	parser := &graphChecker{sources: source.NewMap()}
 	sets := map[string]map[string]int{}
 	code := 1
 	for _, module := range graph.Modules {
-		program, err := parseModuleFile(module)
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, decl := range program.Decls {
-			set, ok := decl.(*ast.ErrorSetDecl)
-			if !ok {
-				continue
+		for _, file := range module.Files {
+			program, err := parser.parseModuleFile(file)
+			if err != nil {
+				return nil, 0, err
 			}
-			members := map[string]int{}
-			for _, member := range set.Members {
-				members[member] = code
-				code++
+			for _, decl := range program.Decls {
+				set, ok := decl.(*ast.ErrorSetDecl)
+				if !ok {
+					continue
+				}
+				members := map[string]int{}
+				for _, member := range set.Members {
+					members[member] = code
+					code++
+				}
+				sets[module.Path+"::"+set.Name] = members
 			}
-			sets[module.Path+"::"+set.Name] = members
 		}
 	}
 	return sets, code, nil

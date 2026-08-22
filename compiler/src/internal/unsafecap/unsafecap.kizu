@@ -1,0 +1,106 @@
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/unsafecap/unsafecap.go. Metadata is static
+// borrowed text. Functions allocate only when their return type owns storage.
+
+/// Describes one kind of operation the compiler cannot prove.
+pub struct Info {
+    pub name: []u8,
+    pub short_permit: []u8
+}
+
+/// Returns the reserved unsafe capabilities in display order.
+pub fn all(allocator: Allocator) -> !array::Array<Info> {
+    var out = array::new<Info>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while capability(index) |info| {
+        try out.append(move info);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Returns metadata for a reserved unsafe capability.
+pub fn lookup(name: []u8) -> ?Info {
+    var index = 0;
+    while capability(index) |info| {
+        if mem::equal_bytes(info.name, name) {
+            return move info;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Renders a one-line help note naming what the unsafe would cover.
+pub fn hint(allocator: Allocator, info: &Info) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("`unsafe` here ");
+    try out.append_bytes(info.short_permit);
+    try out.append_bytes(".");
+    return move out;
+}
+
+fn capability(index: i64) -> ?Info {
+    if index == 0 {
+        let permit =
+            \\covers calls to `extern "c" fn` declarations
+        ;
+        return Info {
+            name: "extern_call", short_permit: permit
+        };
+    }
+    if index == 1 {
+        return Info {
+            name: "ptr_cast",
+            short_permit: "covers raw pointer casts with `cast<ptr<...>>(value)`"
+        };
+    }
+    if index == 2 {
+        return Info {
+            name: "ptr_deref",
+            short_permit: "covers raw pointer dereference such as `p.*` and `p.*.field`"
+        };
+    }
+    if index == 3 {
+        return Info {
+            name: "ptr_int_cast",
+            short_permit: "covers `ptr_from_int<ptr<...>>(value)` and `int_from_ptr<usize>(value)`"
+        };
+    }
+    if index == 4 {
+        return Info {
+            name: "ptr_read",
+            short_permit: "covers raw pointer reads with `ptr_read(p)`"
+        };
+    }
+    if index == 5 {
+        return Info {
+            name: "ptr_write",
+            short_permit: "covers mutable raw pointer writes with `ptr_write(p, value)`"
+        };
+    }
+    if index == 6 {
+        return Info {
+            name: "struct_invariant",
+            short_permit: "covers establishing or changing the invariant of an `unsafe struct`, which is its construction and its field writes"
+        };
+    }
+    if index == 7 {
+        return Info {
+            name: "unsafe_call",
+            short_permit: "covers calls to functions or methods declared `unsafe fn`"
+        };
+    }
+    if index == 8 {
+        return Info {
+            name: "volatile",
+            short_permit: "covers volatile reads and writes with `volatile_read` / `volatile_write`"
+        };
+    }
+    return null;
+}

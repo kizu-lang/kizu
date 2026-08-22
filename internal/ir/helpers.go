@@ -73,7 +73,7 @@ func (l *lowerer) fieldType(structName string, fieldName string) string {
 	return "unknown"
 }
 
-// arrayTypeName and mapTypeName are the containers std declares methods on.
+// These are the containers std declares methods on.
 //
 // A method is filed under the type it is a method on, so the name that reads a
 // receiver's element type and the name that looks the method up have to be one
@@ -83,6 +83,7 @@ const (
 	arrayTypeName = "std::array::Array"
 	mapTypeName   = "std::map::Map"
 	boxTypeName   = "std::mem::Box"
+	arenaTypeName = "std::arena::Arena"
 )
 
 // arrayElementType returns T for std::array::Array<T>.
@@ -204,7 +205,7 @@ func handleType(arena string) string {
 
 // arenaElementType returns T for std::arena::Arena<T>.
 func arenaElementType(arena string) string {
-	const prefix = "std::arena::Arena<"
+	const prefix = arenaTypeName + "<"
 	if !strings.HasPrefix(arena, prefix) || !strings.HasSuffix(arena, ">") {
 		return "unknown"
 	}
@@ -212,8 +213,8 @@ func arenaElementType(arena string) string {
 }
 
 // errorUnionElementType returns T for !T or Error!T.
-func errorUnionElementType(result string) string {
-	success, ok := errorUnionSuccessType(result)
+func errorUnionElementType(types *typ.Table, result string) string {
+	success, ok := errorUnionSuccessType(types, result)
 	if !ok {
 		return "unknown"
 	}
@@ -221,12 +222,17 @@ func errorUnionElementType(result string) string {
 }
 
 // errorUnionSuccessType returns T for !T or Error!T.
-func errorUnionSuccessType(result string) (string, bool) {
-	_, success, ok := errorUnionParts(result)
+func errorUnionSuccessType(types *typ.Table, result string) (string, bool) {
+	_, success, ok := errorUnionParts(types, result)
 	return success, ok
 }
 
 // errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
-func errorUnionParts(result string) (string, string, bool) {
-	return typ.ErrorUnionParts(result)
+func errorUnionParts(types *typ.Table, result string) (string, string, bool) {
+	parsed, err := types.Parse(result)
+	if err != nil {
+		return "", "", false
+	}
+	errorType, success, ok := typ.ErrorUnionParts(parsed)
+	return typ.Text(errorType), typ.Text(success), ok
 }

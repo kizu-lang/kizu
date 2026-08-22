@@ -544,6 +544,7 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
 
 void *kizu_array_new(void *allocator, int64_t elem_size);
 _Bool kizu_array_append(void *handle, const void *elem);
+_Bool kizu_array_swap(void *handle, int64_t left, int64_t right);
 _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
 
@@ -800,6 +801,11 @@ void kizu_panic_range(int64_t start, int64_t end, int64_t length,
 
 void kizu_panic_array_empty(int64_t line, int64_t column) {
     kizu_panic_summary("array pop from empty", line, column);
+    abort();
+}
+
+void kizu_panic_arena_empty(int64_t line, int64_t column) {
+    kizu_panic_summary("arena pop from empty", line, column);
     abort();
 }
 
@@ -1476,6 +1482,20 @@ void *kizu_arena_get(void *handle, int64_t index) {
     return arena->data + index * arena->elem_size;
 }
 
+int64_t kizu_arena_len(void *handle) {
+    KizuArena *arena = (KizuArena *)handle;
+    return arena ? arena->len : 0;
+}
+
+void *kizu_arena_pop(void *handle) {
+    KizuArena *arena = (KizuArena *)handle;
+    if (!arena || arena->len <= 0) {
+        return NULL;
+    }
+    arena->len -= 1;
+    return arena->data + arena->len * arena->elem_size;
+}
+
 void kizu_arena_deinit(void *handle) {
     KizuArena *arena = (KizuArena *)handle;
     if (!arena) {
@@ -1609,6 +1629,24 @@ _Bool kizu_array_set(void *handle, int64_t index, const void *elem) {
         return 0;
     }
     memcpy(array->data + index * array->elem_size, elem, (size_t)array->elem_size);
+    return 1;
+}
+
+_Bool kizu_array_swap(void *handle, int64_t left, int64_t right) {
+    KizuArray *array = (KizuArray *)handle;
+    if (!array || left < 0 || right < 0 || left >= array->len || right >= array->len) {
+        return 0;
+    }
+    if (left == right) {
+        return 1;
+    }
+    unsigned char *left_elem = array->data + left * array->elem_size;
+    unsigned char *right_elem = array->data + right * array->elem_size;
+    for (int64_t index = 0; index < array->elem_size; index++) {
+        unsigned char byte = left_elem[index];
+        left_elem[index] = right_elem[index];
+        right_elem[index] = byte;
+    }
     return 1;
 }
 

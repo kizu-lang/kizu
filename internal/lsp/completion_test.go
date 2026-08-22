@@ -239,8 +239,8 @@ func TestServerCompletionReturnsPackageModuleImportPaths(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	mainSource := "import app::\n\nfn main() {}\n"
 	writeLSPPackage(t, root, map[string]string{
-		"src/main.kizu":  mainSource,
-		"src/token.kizu": "pub struct Token { pub kind: i64, }",
+		"src/main.kizu":        mainSource,
+		"src/token/token.kizu": "pub struct Token { pub kind: i64, }",
 	})
 	uri := fileURI(filepath.Join(root, "src", "main.kizu"))
 	server := NewServer(nil, nil)

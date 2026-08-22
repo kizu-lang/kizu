@@ -1,0 +1,295 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn expect_core(name: []u8, args_len: i64, return_type: []u8) -> void {
+    if simple_core_signature(name) |signature| {
+        testing::expect_equal<i64>(args_len, signature.args_len());
+        testing::expect_equal<[]u8>(return_type, signature.return_type);
+        if signature.arg_at(args_len) |_| {
+            testing::fail("core signature exposes an argument past its end");
+        }
+        if signature.arg_at(-1) |_| {
+            testing::fail("core signature exposes a negative argument index");
+        }
+    } else {
+        testing::fail("core signature was not found");
+    }
+}
+
+fn expect_core_arg(name: []u8, index: i64, expected: ArgKind) -> void {
+    if simple_core_signature(name) |signature| {
+        if signature.arg_at(index) |actual| {
+            testing::expect(actual == expected);
+        } else {
+            testing::fail("core signature argument was not found");
+        }
+    } else {
+        testing::fail("core signature was not found");
+    }
+}
+
+fn expect_builtin_name(
+    names: &array::Array<string::String>,
+    index: i64,
+    expected: []u8
+) -> void {
+    if names.at(index) |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+        testing::expect(primitive(bytes));
+    } else {
+        testing::fail("builtin name was not found");
+    }
+}
+
+test "stdprim exposes exact declarative core signatures" {
+    testing::expect_equal<[]u8>(
+        "[]u8",
+        arg_kind_spelling(ArgKind::Bytes)
+    );
+    testing::expect_equal<[]u8>(
+        "i64",
+        arg_kind_spelling(ArgKind::I64)
+    );
+    testing::expect_equal<[]u8>(
+        "Io",
+        arg_kind_spelling(ArgKind::Io)
+    );
+    testing::expect_equal<[]u8>(
+        "&var std::string::String",
+        arg_kind_spelling(ArgKind::StringOut)
+    );
+
+    expect_core("std::internal::builtin::mem_page_allocator", 0, "Allocator");
+    expect_core("std::internal::builtin::mem_fixed_buffer", 1, "Allocator");
+    expect_core("std::internal::builtin::mem_len", 1, "i64");
+    expect_core(
+        "std::internal::builtin::io_write_stdout",
+        2,
+        "std::io::Error!void"
+    );
+    expect_core(
+        "std::internal::builtin::io_write_stderr",
+        2,
+        "std::io::Error!void"
+    );
+    expect_core(
+        "std::internal::builtin::fs_read_file_into",
+        4,
+        "std::fs::Error!void"
+    );
+    expect_core(
+        "std::internal::builtin::io_read_stdin_into",
+        3,
+        "std::io::Error!void"
+    );
+    expect_core("std::internal::builtin::process_arg_count", 0, "i64");
+    expect_core(
+        "std::internal::builtin::process_arg",
+        1,
+        "std::process::Error![]u8"
+    );
+    expect_core("std::internal::builtin::process_env", 1, "?[]u8");
+    expect_core(
+        "std::internal::builtin::process_monotonic_millis",
+        0,
+        "i64"
+    );
+    expect_core(
+        "std::internal::builtin::process_spawn_wait8",
+        9,
+        "std::process::Error!i64"
+    );
+    expect_core("std::internal::builtin::test_fail", 1, "void");
+    expect_core("std::internal::builtin::panic", 1, "void");
+
+    expect_core_arg(
+        "std::internal::builtin::mem_fixed_buffer",
+        0,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::mem_len",
+        0,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_write_stdout",
+        0,
+        ArgKind::Io
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_write_stdout",
+        1,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_write_stderr",
+        0,
+        ArgKind::Io
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_write_stderr",
+        1,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::fs_read_file_into",
+        0,
+        ArgKind::Io
+    );
+    expect_core_arg(
+        "std::internal::builtin::fs_read_file_into",
+        1,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::fs_read_file_into",
+        2,
+        ArgKind::StringOut
+    );
+    expect_core_arg(
+        "std::internal::builtin::fs_read_file_into",
+        3,
+        ArgKind::I64
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_read_stdin_into",
+        0,
+        ArgKind::Io
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_read_stdin_into",
+        1,
+        ArgKind::StringOut
+    );
+    expect_core_arg(
+        "std::internal::builtin::io_read_stdin_into",
+        2,
+        ArgKind::I64
+    );
+    expect_core_arg(
+        "std::internal::builtin::process_arg",
+        0,
+        ArgKind::I64
+    );
+    expect_core_arg(
+        "std::internal::builtin::process_env",
+        0,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::process_spawn_wait8",
+        0,
+        ArgKind::I64
+    );
+    var index = 1;
+    while index <= 8 {
+        expect_core_arg(
+            "std::internal::builtin::process_spawn_wait8",
+            index,
+            ArgKind::Bytes
+        );
+        index = index + 1;
+    }
+    expect_core_arg(
+        "std::internal::builtin::test_fail",
+        0,
+        ArgKind::Bytes
+    );
+    expect_core_arg(
+        "std::internal::builtin::panic",
+        0,
+        ArgKind::Bytes
+    );
+    if simple_core_signature("std::internal::builtin::missing") |_| {
+        testing::fail("unknown core signature was accepted");
+    }
+}
+
+test "stdprim exposes the typed primitive wrapper" {
+    if typed_core_builtin(
+        "std::internal::builtin::test_fail_equal"
+    ) |wrapper| {
+        testing::expect_equal<[]u8>("std::testing::expect_equal", wrapper);
+    } else {
+        testing::fail("typed primitive wrapper was not found");
+    }
+    if typed_core_builtin("std::internal::builtin::missing") |_| {
+        testing::fail("unknown typed primitive was accepted");
+    }
+}
+
+test "stdprim lists every primitive in lexical order" {
+    let allocator = mem::page_allocator();
+    let names = try builtin_names(allocator);
+    defer names.deinit();
+    testing::expect_equal<i64>(63, names.len());
+    expect_builtin_name(&names, 0, "std::internal::builtin::arena");
+    expect_builtin_name(&names, 1, "std::internal::builtin::arena_deinit");
+    expect_builtin_name(&names, 2, "std::internal::builtin::arena_len");
+    expect_builtin_name(&names, 3, "std::internal::builtin::arena_pop_or_panic");
+    expect_builtin_name(&names, 4, "std::internal::builtin::array");
+    expect_builtin_name(&names, 5, "std::internal::builtin::array_append");
+    expect_builtin_name(&names, 6, "std::internal::builtin::array_as_bytes");
+    expect_builtin_name(&names, 7, "std::internal::builtin::array_as_mut_bytes");
+    expect_builtin_name(&names, 8, "std::internal::builtin::array_at");
+    expect_builtin_name(&names, 9, "std::internal::builtin::array_at_mut");
+    expect_builtin_name(&names, 10, "std::internal::builtin::array_capacity");
+    expect_builtin_name(&names, 11, "std::internal::builtin::array_clear");
+    expect_builtin_name(&names, 12, "std::internal::builtin::array_deinit");
+    expect_builtin_name(&names, 13, "std::internal::builtin::array_get");
+    expect_builtin_name(&names, 14, "std::internal::builtin::array_get_or_panic");
+    expect_builtin_name(&names, 15, "std::internal::builtin::array_len");
+    expect_builtin_name(&names, 16, "std::internal::builtin::array_pop");
+    expect_builtin_name(&names, 17, "std::internal::builtin::array_pop_or_panic");
+    expect_builtin_name(&names, 18, "std::internal::builtin::array_reserve");
+    expect_builtin_name(&names, 19, "std::internal::builtin::array_set");
+    expect_builtin_name(&names, 20, "std::internal::builtin::array_swap");
+    expect_builtin_name(&names, 21, "std::internal::builtin::array_truncate");
+    expect_builtin_name(&names, 22, "std::internal::builtin::box");
+    expect_builtin_name(&names, 23, "std::internal::builtin::box_borrow");
+    expect_builtin_name(&names, 24, "std::internal::builtin::box_borrow_mut");
+    expect_builtin_name(&names, 25, "std::internal::builtin::box_deinit");
+    expect_builtin_name(&names, 26, "std::internal::builtin::box_take");
+    expect_builtin_name(&names, 27, "std::internal::builtin::fs_create_dir");
+    expect_builtin_name(&names, 28, "std::internal::builtin::fs_exists");
+    expect_builtin_name(&names, 29, "std::internal::builtin::fs_metadata");
+    expect_builtin_name(&names, 30, "std::internal::builtin::fs_read_dir");
+    expect_builtin_name(&names, 31, "std::internal::builtin::fs_read_file_into");
+    expect_builtin_name(&names, 32, "std::internal::builtin::fs_remove_dir");
+    expect_builtin_name(&names, 33, "std::internal::builtin::fs_remove_file");
+    expect_builtin_name(&names, 34, "std::internal::builtin::fs_rename");
+    expect_builtin_name(&names, 35, "std::internal::builtin::fs_write_file");
+    expect_builtin_name(&names, 36, "std::internal::builtin::io_blocking");
+    expect_builtin_name(&names, 37, "std::internal::builtin::io_evented");
+    expect_builtin_name(&names, 38, "std::internal::builtin::io_failing");
+    expect_builtin_name(&names, 39, "std::internal::builtin::io_read_stdin_into");
+    expect_builtin_name(&names, 40, "std::internal::builtin::io_write_stderr");
+    expect_builtin_name(&names, 41, "std::internal::builtin::io_write_stdout");
+    expect_builtin_name(&names, 42, "std::internal::builtin::map");
+    expect_builtin_name(&names, 43, "std::internal::builtin::map_at");
+    expect_builtin_name(&names, 44, "std::internal::builtin::map_at_mut");
+    expect_builtin_name(&names, 45, "std::internal::builtin::map_contains");
+    expect_builtin_name(&names, 46, "std::internal::builtin::map_deinit");
+    expect_builtin_name(&names, 47, "std::internal::builtin::map_get");
+    expect_builtin_name(&names, 48, "std::internal::builtin::map_insert");
+    expect_builtin_name(&names, 49, "std::internal::builtin::map_key_at");
+    expect_builtin_name(&names, 50, "std::internal::builtin::map_len");
+    expect_builtin_name(&names, 51, "std::internal::builtin::map_take_value_at");
+    expect_builtin_name(&names, 52, "std::internal::builtin::mem_fixed_buffer");
+    expect_builtin_name(&names, 53, "std::internal::builtin::mem_len");
+    expect_builtin_name(&names, 54, "std::internal::builtin::mem_page_allocator");
+    expect_builtin_name(&names, 55, "std::internal::builtin::panic");
+    expect_builtin_name(&names, 56, "std::internal::builtin::process_arg");
+    expect_builtin_name(&names, 57, "std::internal::builtin::process_arg_count");
+    expect_builtin_name(&names, 58, "std::internal::builtin::process_env");
+    expect_builtin_name(&names, 59, "std::internal::builtin::process_monotonic_millis");
+    expect_builtin_name(&names, 60, "std::internal::builtin::process_spawn_wait8");
+    expect_builtin_name(&names, 61, "std::internal::builtin::test_fail");
+    expect_builtin_name(&names, 62, "std::internal::builtin::test_fail_equal");
+    testing::expect(!primitive("std::internal::builtin::missing"));
+    testing::expect(!primitive("std::internal::builtin::process_spawn_wait"));
+}

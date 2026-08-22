@@ -1,0 +1,215 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: BytesIter) has_next() -> bool {
+    return self.index < mem::len(self.bytes);
+}
+
+fn (self: &var BytesIter) next() -> u8 {
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+fn fill(bytes: &var []u8, first: u8) -> void {
+    bytes[0] = first;
+    bytes[1] = first + cast<u8>(1);
+    return;
+}
+
+// A struct literal may capture a runtime view at a let; the binding joins the
+// borrow class and walks the buffer through `&var self` methods.
+test "struct literal captures a runtime view" {
+    var buf = [2]u8 {};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 10);
+    let view = buf.as_bytes();
+    var it = BytesIter { bytes: view, index: 0 };
+    var total = 0;
+    while it.has_next() {
+        total = total + cast<i64>(it.next());
+    }
+    testing::expect_equal<i64>(21, total);
+}
+
+// A factory returning a view-capturing struct ties its result to the view
+// argument; the tie is derived from the signature, not the body.
+test "factory call ties its result to the view argument" {
+    var buf = [2]u8 {};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 30);
+    let view = buf.as_bytes();
+    var it = iter(view);
+    testing::expect_equal<i64>(30, cast<i64>(it.next()));
+    testing::expect_equal<i64>(31, cast<i64>(it.next()));
+}
+
+struct Stats {
+    pub len: i64
+}
+
+fn stats(bytes: []u8) -> Stats {
+    return Stats { len: mem::len(bytes) };
+}
+
+// A struct that cannot hold a view takes view arguments freely: the checker
+// reads the field types instead of rejecting every struct return.
+test "view-free struct returns take view arguments freely" {
+    var buf = [4]u8 {};
+    let view = buf.as_bytes();
+    let s = stats(view);
+    testing::expect_equal<i64>(4, s.len);
+}
+
+// Reading the captured view back out keeps the tie; the copy is a view of the
+// same backing.
+test "captured view field reads stay tied" {
+    var buf = [2]u8 {};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    let inner = it.bytes;
+    testing::expect_equal<i64>(2, mem::len(inner));
+}
+
+// Once the cursor's last use passes, its borrows release and the buffer is
+// writable again.
+test "capture releases at last use" {
+    var buf = [2]u8 {};
+    let view = buf.as_bytes();
+    let it = BytesIter { bytes: view, index: 0 };
+    testing::expect_equal<i64>(0, it.index);
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 50);
+    let check = buf.as_bytes();
+    testing::expect_equal<i64>(50, cast<i64>(check[0]));
+}
+
+struct Sink {
+    pub total: i64
+}
+
+fn (self: &var Sink) take(bytes: []u8) -> void {
+    self.total = self.total + mem::len(bytes);
+    return;
+}
+
+fn (self: &Sink) weigh(bytes: []u8) -> i64 {
+    return self.total + mem::len(bytes);
+}
+
+// A view lends to a method on the same condition it lends to a plain
+// function: neither the return type nor any `&var` parameter -- the receiver
+// included -- may carry a view out, so the callee cannot keep it past the
+// call. `Sink` holds only an i64, so the lend is safe.
+test "a view lends to a method whose receiver cannot keep it" {
+    var buf = [3]u8 {};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 4);
+    let view = buf.as_bytes();
+    var sink = Sink { total: 0 };
+    sink.take(view);
+    sink.take(view);
+    testing::expect_equal<i64>(6, sink.total);
+    testing::expect_equal<i64>(9, sink.weigh(view));
+}
+
+struct BufferedIter {
+    pub bytes: []u8,
+    pub index: i64,
+    pub seen: array::Array<i64>
+}
+
+fn buffered_iter(allocator: Allocator, bytes: []u8) -> BufferedIter {
+    return BufferedIter {
+        bytes: bytes,
+        index: 0,
+        seen: array::new<i64>(allocator)
+    };
+}
+
+// An aggregate can owe cleanup and still retain a source view. Its binding
+// keeps both facts: deinit remains mandatory, and the backing stays borrowed
+// until that explicit cleanup is the aggregate's final use.
+test "owner aggregate captures a runtime view" {
+    let allocator = mem::page_allocator();
+    var buf = [3]u8 {};
+    let scratch = buf.as_mut_bytes();
+    fill(scratch, 60);
+    let view = buf.as_bytes();
+    var it = buffered_iter(allocator, view);
+    errdefer it.deinit();
+    try it.seen.append(cast<i64>(it.bytes[0]));
+    testing::expect_equal<i64>(60, it.seen.get_or_panic(0));
+    it.deinit();
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(90);
+    let check = buf.as_bytes();
+    testing::expect_equal<i64>(90, cast<i64>(check[0]));
+}
+
+struct SplitView {
+    pub left: []u8,
+    pub right: []u8
+}
+
+fn split_view(bytes: []u8) -> ?SplitView {
+    if mem::len(bytes) < 2 {
+        return null;
+    }
+    return SplitView {
+        left: bytes[0..1],
+        right: bytes[1..mem::len(bytes)]
+    };
+}
+
+fn view_tail(bytes: []u8) -> []u8 {
+    return bytes[1..mem::len(bytes)];
+}
+
+fn fallible_split_view(bytes: []u8) -> !?SplitView {
+    return split_view(bytes);
+}
+
+// A capture keeps the original String borrowed when a helper returns views
+// through an optional struct. The tie ends with the capture scope.
+test "capture propagates a borrowed view through a helper return" {
+    let allocator = mem::page_allocator();
+    var text = try string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    let tail = view_tail(bytes);
+    testing::expect_equal<u8>(cast<u8>(98), tail[0]);
+    if split_view(tail) |parts| {
+        testing::expect_equal<u8>(cast<u8>(98), parts.left[0]);
+        testing::expect_equal<u8>(cast<u8>(99), parts.right[0]);
+    }
+    try text.append_bytes("d");
+    testing::expect_equal<i64>(4, text.len());
+}
+
+// Try removes only the error layer, so the optional capture keeps the same
+// transitive view provenance and releases it after the capture's final use.
+test "try preserves transitive view capture provenance" {
+    let allocator = mem::page_allocator();
+    var text = try string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    let tail = view_tail(bytes);
+    if try fallible_split_view(tail) |parts| {
+        testing::expect_equal<u8>(cast<u8>(98), parts.left[0]);
+        testing::expect_equal<u8>(cast<u8>(99), parts.right[0]);
+    }
+    try text.append_bytes("d");
+    testing::expect_equal<i64>(4, text.len());
+}

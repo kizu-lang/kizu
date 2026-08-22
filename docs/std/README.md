@@ -16,8 +16,10 @@
 | --- | --- |
 | [io](io.md) | explicit stdout / stderr / stdin |
 | [mem](mem.md) | allocator capability、byte helper、`Box<T>`、`leak`、`Limit` |
+| [arena](arena.md) | handle で参照する owned arena |
 | [string](string.md) | owned byte buffer |
 | [array](array.md) | owned contiguous collection |
+| [sort](sort.md) | owner-safe in-place string sorting |
 | [map](map.md) | owned symbol table |
 | [fmt](fmt.md) | diagnostic 用の最小 formatting |
 | [json](json.md) | JSON encode |

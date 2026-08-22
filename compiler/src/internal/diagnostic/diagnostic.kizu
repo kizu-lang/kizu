@@ -1,0 +1,310 @@
+import compiler::internal::ast;
+import compiler::internal::source;
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/diagnostic. A Diagnostic owns its structured
+// text; rendering borrows the invocation SourceMap because SourceId is the
+// copyable integer half of that ownership pair in Kizu.
+
+/// Identifies whether a diagnostic blocks compilation or is advisory.
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// Carries structured diagnostic data shared by CLI and LSP renderers.
+pub struct Diagnostic {
+    pub severity: Severity,
+    pub category: string::String,
+    pub code: string::String,
+    pub message: string::String,
+    pub span: ast::Span,
+    pub notes: array::Array<string::String>,
+    pub help: string::String
+}
+
+// Holds borrowed parts of one already-split input line.
+struct FirstLineParts {
+    severity: Severity,
+    category: []u8,
+    message: []u8
+}
+
+/// Constructs one structured diagnostic from its summary fields.
+pub fn new(
+    allocator: Allocator,
+    severity: Severity,
+    category: []u8,
+    span: ast::Span,
+    message: []u8
+) -> !Diagnostic {
+    var diagnostic = Diagnostic {
+        severity: severity,
+        category: string::new(allocator),
+        code: string::new(allocator),
+        message: string::new(allocator),
+        span: span,
+        notes: array::new<string::String>(allocator),
+        help: string::new(allocator)
+    };
+    errdefer diagnostic.deinit();
+    try diagnostic.category.append_bytes(category);
+    try diagnostic.message.append_bytes(message);
+    return move diagnostic;
+}
+
+/// Parses ADR-style diagnostic text into structured fields.
+pub fn from_text(
+    allocator: Allocator,
+    severity: Severity,
+    span: ast::Span,
+    text: []u8
+) -> !Diagnostic {
+    let length = mem::len(text);
+    let first_end = line_end(text, 0);
+    let parts = split_first_line(severity, text[0..first_end]);
+    var diagnostic = try new(
+        allocator,
+        parts.severity,
+        parts.category,
+        span,
+        parts.message
+    );
+    errdefer diagnostic.deinit();
+    if first_end == length {
+        return move diagnostic;
+    }
+    var start = first_end + 1;
+    while start <= length {
+        let end = line_end(text, start);
+        try add_text_line(
+            allocator,
+            &var diagnostic,
+            text[start..end]
+        );
+        if end == length {
+            break;
+        }
+        start = end + 1;
+    }
+    return move diagnostic;
+}
+
+fn add_text_line(
+    allocator: Allocator,
+    diagnostic: &var Diagnostic,
+    line: []u8
+) -> !void {
+    if mem::starts_with(line, "note: ") {
+        return append_note(allocator, diagnostic, line[6..mem::len(line)]);
+    }
+    if mem::starts_with(line, "help: ") {
+        if diagnostic.help.len() > 0 {
+            try diagnostic.help.append_byte(cast<u8>(10));
+        }
+        return diagnostic.help.append_bytes(line[6..mem::len(line)]);
+    }
+    if mem::len(line) == 0 {
+        return;
+    }
+    if diagnostic.message.len() == 0 {
+        return diagnostic.message.append_bytes(line);
+    }
+    return append_note(allocator, diagnostic, line);
+}
+
+fn append_note(
+    allocator: Allocator,
+    diagnostic: &var Diagnostic,
+    note: []u8
+) -> !void {
+    let owned = try string::from_bytes(allocator, note);
+    errdefer owned.deinit();
+    return diagnostic.notes.append(move owned);
+}
+
+/// Renders the ADR-0072 message form without CLI severity wrapping.
+fn (self: &Diagnostic) error(
+    allocator: Allocator,
+    sources: &source::SourceMap
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    if self.category.len() > 0 {
+        try out.append_string(&self.category);
+        try out.append_bytes(": ");
+    } else {
+        if self.severity == Severity::Warning {
+            try out.append_bytes("warning: ");
+        }
+    }
+    try out.append_string(&self.message);
+    if !self.span.is_zero() {
+        try out.append_bytes(" at ");
+        var wrote_path = false;
+        if self.span.source |id| {
+            wrote_path = try append_source_path(&var out, sources, id);
+        }
+        if wrote_path {
+            try out.append_bytes(":");
+        }
+        try fmt::append_i64(&var out, self.span.start.line);
+        try out.append_bytes(":");
+        try fmt::append_i64(&var out, self.span.start.column);
+    }
+    var index = 0;
+    while self.notes.at(index) |note| {
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("note: ");
+        try out.append_string(note);
+        index = index + 1;
+    }
+    if self.help.len() > 0 {
+        try append_help(&var out, &self.help);
+    }
+    return move out;
+}
+
+fn append_source_path(
+    out: &var string::String,
+    sources: &source::SourceMap,
+    id: source::SourceId
+) -> !bool {
+    if sources.at(id) |file| {
+        if file.path.len() > 0 {
+            try out.append_string(&file.path);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn append_help(
+    out: &var string::String,
+    help: &string::String
+) -> !void {
+    let bytes = help.as_bytes();
+    let length = mem::len(bytes);
+    var start = 0;
+    while start <= length {
+        let end = line_end(bytes, start);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("help: ");
+        try out.append_bytes(bytes[start..end]);
+        if end == length {
+            break;
+        }
+        start = end + 1;
+    }
+    return;
+}
+
+/// Renders the diagnostic with the CLI severity prefix when needed.
+fn (self: &Diagnostic) cli_error(
+    allocator: Allocator,
+    sources: &source::SourceMap
+) -> !string::String {
+    let rendered = try self.error(allocator, sources);
+    if self.severity == Severity::Warning {
+        return move rendered;
+    }
+    defer rendered.deinit();
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("error: ");
+    try out.append_string(&rendered);
+    return move out;
+}
+
+/// Returns the primary source span for the diagnostic.
+fn (self: &Diagnostic) source_span() -> ast::Span {
+    return self.span;
+}
+
+/// Returns the diagnostic severity for LSP and other renderers.
+fn (self: &Diagnostic) severity_level() -> Severity {
+    return self.severity;
+}
+
+/// Records one stable machine-readable diagnostic code.
+fn (self: &var Diagnostic) with_code(code: []u8) -> !void {
+    self.code.clear();
+    return self.code.append_bytes(code);
+}
+
+/// Appends one structured note line.
+fn (self: &var Diagnostic) with_note(
+    allocator: Allocator,
+    note: []u8
+) -> !void {
+    return append_note(allocator, self, note);
+}
+
+/// Records one help message.
+fn (self: &var Diagnostic) with_help(help: []u8) -> !void {
+    self.help.clear();
+    return self.help.append_bytes(help);
+}
+
+fn split_first_line(
+    default_severity: Severity,
+    first: []u8
+) -> FirstLineParts {
+    if mem::starts_with(first, "warning: ") {
+        return FirstLineParts {
+            severity: Severity::Warning,
+            category: "",
+            message: first[9..mem::len(first)]
+        };
+    }
+    if find_bytes(first, ": ") |index| {
+        let category = first[0..index];
+        if ends_with(category, "error") {
+            return FirstLineParts {
+                severity: default_severity,
+                category: category,
+                message: first[index + 2..mem::len(first)]
+            };
+        }
+    }
+    return FirstLineParts {
+        severity: default_severity,
+        category: "",
+        message: first
+    };
+}
+
+fn line_end(text: []u8, start: i64) -> i64 {
+    var index = start;
+    while index < mem::len(text) {
+        if text[index] == cast<u8>(10) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn find_bytes(bytes: []u8, needle: []u8) -> ?i64 {
+    let needle_len = mem::len(needle);
+    var index = 0;
+    while index + needle_len <= mem::len(bytes) {
+        if mem::equal_bytes(bytes[index..index + needle_len], needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn ends_with(bytes: []u8, suffix: []u8) -> bool {
+    let suffix_len = mem::len(suffix);
+    let length = mem::len(bytes);
+    if suffix_len > length {
+        return false;
+    }
+    return mem::equal_bytes(bytes[length - suffix_len..length], suffix);
+}

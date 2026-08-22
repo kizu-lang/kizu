@@ -1,0 +1,175 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn append_part(
+    allocator: Allocator,
+    parts: &var array::Array<string::String>,
+    bytes: []u8
+) -> !void {
+    let part = try string::from_bytes(allocator, bytes);
+    errdefer part.deinit();
+    try parts.append(move part);
+    return;
+}
+
+fn append_utf8(out: &var string::String, code: i64) -> !void {
+    if code < 128 {
+        try out.append_byte(cast<u8>(code));
+        return;
+    }
+    if code < 2048 {
+        try out.append_byte(cast<u8>(192 + code / 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    if code < 65536 {
+        try out.append_byte(cast<u8>(224 + code / 4096));
+        try out.append_byte(cast<u8>(128 + (code / 64) % 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    try out.append_byte(cast<u8>(240 + code / 262144));
+    try out.append_byte(cast<u8>(128 + (code / 4096) % 64));
+    try out.append_byte(cast<u8>(128 + (code / 64) % 64));
+    try out.append_byte(cast<u8>(128 + code % 64));
+    return;
+}
+
+fn append_white_space_set(out: &var string::String) -> !void {
+    try append_utf8(out, 9);
+    try append_utf8(out, 10);
+    try append_utf8(out, 11);
+    try append_utf8(out, 12);
+    try append_utf8(out, 13);
+    try append_utf8(out, 32);
+    try append_utf8(out, 133);
+    try append_utf8(out, 160);
+    try append_utf8(out, 5760);
+    try append_utf8(out, 8192);
+    try append_utf8(out, 8193);
+    try append_utf8(out, 8194);
+    try append_utf8(out, 8195);
+    try append_utf8(out, 8196);
+    try append_utf8(out, 8197);
+    try append_utf8(out, 8198);
+    try append_utf8(out, 8199);
+    try append_utf8(out, 8200);
+    try append_utf8(out, 8201);
+    try append_utf8(out, 8202);
+    try append_utf8(out, 8232);
+    try append_utf8(out, 8233);
+    try append_utf8(out, 8239);
+    try append_utf8(out, 8287);
+    try append_utf8(out, 12288);
+    return;
+}
+
+test "string join preserves separators and returns an independent owner" {
+    let allocator = mem::page_allocator();
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    try append_part(allocator, &var parts, "  first  ");
+    try append_part(allocator, &var parts, "");
+    try append_part(allocator, &var parts, " last  ");
+    var joined = try string::join(allocator, &parts, "::");
+    defer joined.deinit();
+    var expected = string::new(allocator);
+    defer expected.deinit();
+    try expected.append_bytes("first  ");
+    try expected.append_bytes("::::");
+    try expected.append_bytes(" last");
+    parts.deinit();
+    let before = joined.capacity();
+    string::trim_space_in_place(&var joined);
+    testing::expect_equal<i64>(before, joined.capacity());
+    let bytes = joined.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, expected_bytes));
+}
+
+test "string join handles empty parts and an empty separator" {
+    let allocator = mem::page_allocator();
+    var empty = array::new<string::String>(allocator);
+    defer empty.deinit();
+    let none = try string::join(allocator, &empty, ",");
+    defer none.deinit();
+    testing::expect_equal<i64>(0, none.len());
+
+    var parts = array::new<string::String>(allocator);
+    defer parts.deinit();
+    try append_part(allocator, &var parts, "a");
+    try append_part(allocator, &var parts, "");
+    try append_part(allocator, &var parts, "b");
+    let joined = try string::join(allocator, &parts, "");
+    defer joined.deinit();
+    let bytes = joined.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, "ab"));
+
+    var single = array::new<string::String>(allocator);
+    errdefer single.deinit();
+    try append_part(allocator, &var single, "solo");
+    let only = try string::join(allocator, &single, "ignored");
+    defer only.deinit();
+    single.deinit();
+    let only_bytes = only.as_bytes();
+    testing::expect(mem::equal_bytes(only_bytes, "solo"));
+}
+
+test "string trim recognizes the fixed Unicode White Space set" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    defer text.deinit();
+    try append_white_space_set(&var text);
+    try text.append_bytes("middle");
+    try append_white_space_set(&var text);
+    let before = text.capacity();
+    string::trim_space_in_place(&var text);
+    testing::expect_equal<i64>(before, text.capacity());
+    let bytes = text.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, "middle"));
+
+    var only_space = string::new(allocator);
+    defer only_space.deinit();
+    try append_white_space_set(&var only_space);
+    let only_capacity = only_space.capacity();
+    string::trim_space_in_place(&var only_space);
+    testing::expect_equal<i64>(0, only_space.len());
+    testing::expect_equal<i64>(only_capacity, only_space.capacity());
+
+    var inner_space = string::new(allocator);
+    defer inner_space.deinit();
+    try inner_space.append_bytes("left");
+    try append_utf8(&var inner_space, 12288);
+    try inner_space.append_bytes("right");
+    string::trim_space_in_place(&var inner_space);
+    let inner_bytes = inner_space.as_bytes();
+    testing::expect(mem::equal_bytes(inner_bytes, "left　right"));
+}
+
+test "string trim retains non-space Unicode and malformed UTF-8" {
+    let allocator = mem::page_allocator();
+    var non_space = string::new(allocator);
+    defer non_space.deinit();
+    try append_utf8(&var non_space, 6158);
+    try append_utf8(&var non_space, 65279);
+    try append_utf8(&var non_space, 65533);
+    string::trim_space_in_place(&var non_space);
+    testing::expect_equal<i64>(9, non_space.len());
+
+    var raw = [4]u8{};
+    let writable = raw.as_mut_bytes();
+    writable[0] = cast<u8>(32);
+    writable[1] = cast<u8>(226);
+    writable[2] = cast<u8>(128);
+    writable[3] = cast<u8>(32);
+    let input = raw.as_bytes();
+    var malformed = try string::from_bytes(allocator, input);
+    defer malformed.deinit();
+    string::trim_space_in_place(&var malformed);
+    testing::expect_equal<i64>(2, malformed.len());
+    let bytes = malformed.as_bytes();
+    testing::expect_equal<i64>(226, cast<i64>(bytes[0]));
+    testing::expect_equal<i64>(128, cast<i64>(bytes[1]));
+}

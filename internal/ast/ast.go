@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/quote"
+	"github.com/kizu-lang/kizu/internal/source"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -16,13 +18,13 @@ type Position struct {
 
 // Span identifies a half-open source range using one-based positions.
 //
-// File is the path the range was read from. A package is checked as one merged
-// program, so without it a diagnostic's line and column say nothing about which
-// module they belong to.
+// Source identifies the source record the range was read from. A package is
+// checked as one merged program, so without it a diagnostic's line and column
+// say nothing about which module they belong to.
 type Span struct {
-	File  string
-	Start Position
-	End   Position
+	Source source.ID
+	Start  Position
+	End    Position
 }
 
 // IsZero reports whether a span has no source position.
@@ -182,8 +184,8 @@ func (d *FunctionDecl) String() string {
 		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %q fn %s%s%s(%s)%s",
-			prefix, d.ExternABI, receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sextern %s fn %s%s%s(%s)%s",
+			prefix, quote.Bytes(d.ExternABI), receiver, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
 	if d.Body == nil {
 		return fmt.Sprintf("%sfn %s%s%s(%s)%s;",
@@ -205,9 +207,9 @@ func (*TestDecl) declNode() {}
 // String returns a compact debug representation of the test declaration.
 func (d *TestDecl) String() string {
 	if d.Body == nil {
-		return fmt.Sprintf("test %q <missing>", d.Name)
+		return fmt.Sprintf("test %s <missing>", quote.Bytes(d.Name))
 	}
-	return fmt.Sprintf("test %q %s", d.Name, d.Body.String())
+	return fmt.Sprintf("test %s %s", quote.Bytes(d.Name), d.Body.String())
 }
 
 // StructDecl represents a top-level struct declaration.
@@ -217,6 +219,9 @@ type StructDecl struct {
 	TypeParams []string
 	Fields     []Field
 	Public     bool
+	// Span points at the declaration name so unsafe invariant writes can stay
+	// confined to the file that owns their contract.
+	Span Span
 	// RequiresUnsafe marks a struct whose fields carry an invariant the
 	// compiler cannot check, spelled `unsafe struct`. Establishing or changing
 	// that invariant is what needs `unsafe`, so writes are marked and reads are
@@ -499,10 +504,6 @@ func (s *AssignStmt) String() string {
 // ReturnStmt represents an explicit return statement.
 type ReturnStmt struct {
 	Value Expression
-	// RetiredErrDefers names the errdefer receivers this error return must not
-	// clean up because they were moved before it (ADR-0114). The ownership
-	// checker is the only writer; lowering reads it to drop those cleanups.
-	RetiredErrDefers []string
 }
 
 // statementNode marks ReturnStmt as a statement node.
@@ -772,13 +773,6 @@ func (s *ExprStmt) String() string {
 type IdentExpr struct {
 	Name string
 	Span Span
-	// SlotDepth/SlotIndex are a lexical address precomputed by the interpreter
-	// resolver, valid only when SlotResolved is true and the name is
-	// unambiguous in scope. Evaluation verifies the binding name and falls
-	// back to name lookup otherwise.
-	SlotDepth    int
-	SlotIndex    int
-	SlotResolved bool
 }
 
 // expressionNode marks IdentExpr as an expression node.
@@ -792,11 +786,6 @@ func (e *IdentExpr) String() string {
 // IntExpr represents an integer literal.
 type IntExpr struct {
 	Value string
-	// Parsed holds the decimal value precomputed at parse time; Parsed is
-	// only valid when ParseOK is true. Evaluators fall back to reparsing
-	// Value otherwise so overflow still surfaces at the original point.
-	Parsed  int64
-	ParseOK bool
 }
 
 // expressionNode marks IntExpr as an expression node.
@@ -817,7 +806,7 @@ func (*StringExpr) expressionNode() {}
 
 // String returns the quoted literal spelling.
 func (e *StringExpr) String() string {
-	return fmt.Sprintf("%q", e.Value)
+	return quote.Bytes(e.Value)
 }
 
 // NullExpr is the `null` literal of an optional type.
@@ -905,75 +894,12 @@ func (e *PrefixExpr) String() string {
 	return fmt.Sprintf("(%s%s)", e.Operator, e.Right.String())
 }
 
-// BinaryOp identifies a binary operator so evaluation can dispatch on an
-// integer instead of repeatedly comparing the Operator string.
-type BinaryOp uint8
-
-// Binary operator kinds. BinaryOpUnknown covers any operator the classifier
-// does not recognize, letting consumers fall back to the Operator string.
-const (
-	BinaryOpUnknown BinaryOp = iota
-	BinaryOpAdd
-	BinaryOpSub
-	BinaryOpMul
-	BinaryOpDiv
-	BinaryOpMod
-	BinaryOpLt
-	BinaryOpLe
-	BinaryOpGt
-	BinaryOpGe
-	BinaryOpEq
-	BinaryOpNe
-	BinaryOpAnd
-	BinaryOpOr
-)
-
-// ClassifyBinaryOp maps an operator spelling to its BinaryOp, returning
-// BinaryOpUnknown for anything unrecognized.
-func ClassifyBinaryOp(op string) BinaryOp {
-	switch op {
-	case "+":
-		return BinaryOpAdd
-	case "-":
-		return BinaryOpSub
-	case "*":
-		return BinaryOpMul
-	case "/":
-		return BinaryOpDiv
-	case "%":
-		return BinaryOpMod
-	case "<":
-		return BinaryOpLt
-	case "<=":
-		return BinaryOpLe
-	case ">":
-		return BinaryOpGt
-	case ">=":
-		return BinaryOpGe
-	case "==":
-		return BinaryOpEq
-	case "!=":
-		return BinaryOpNe
-	case "and":
-		return BinaryOpAnd
-	case "or":
-		return BinaryOpOr
-	default:
-		return BinaryOpUnknown
-	}
-}
-
 // BinaryExpr represents an infix binary operator expression.
 type BinaryExpr struct {
 	Left         Expression
 	Operator     string
 	OperatorSpan Span
 	Right        Expression
-	// Op is the operator precomputed by ClassifyBinaryOp so evaluation can
-	// dispatch on an integer. The parser sets it for every binary operator;
-	// BinaryOpUnknown only arises for an unrecognized spelling, which the
-	// evaluator rejects through the same path as any other invalid operator.
-	Op BinaryOp
 }
 
 // expressionNode marks BinaryExpr as an expression node.
@@ -1034,10 +960,6 @@ func (e *CastExpr) String() string {
 // TryExpr unwraps a !T value or returns the error from the current function.
 type TryExpr struct {
 	Value Expression
-	// RetiredErrDefers names the errdefer receivers this try's error path must
-	// not clean up because they were moved before it (ADR-0114). The ownership
-	// checker is the only writer; lowering reads it to drop those cleanups.
-	RetiredErrDefers []string
 }
 
 // expressionNode marks TryExpr as an expression node.

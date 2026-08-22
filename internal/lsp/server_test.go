@@ -220,7 +220,7 @@ fn main(value: token::Token) -> void {
 `
 	writeLSPPackage(t, root, map[string]string{
 		"src/main.kizu": mainSource,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 `,
@@ -286,7 +286,7 @@ fn main(value: token::Token) -> void {
 `
 	writeLSPPackage(t, root, map[string]string{
 		"src/main.kizu": "let x = 1;\n",
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 `,
@@ -306,6 +306,26 @@ fn main(value: token::Token) -> void {
 	}
 	diagnostics := publishedDiagnostics(t, messages[0])
 	if len(diagnostics) != 0 {
+		t.Fatalf("got diagnostics %#v, want none", diagnostics)
+	}
+}
+
+// TestServerTestFileDiagnosticsUsePackageTestGraph checks test-only sources join
+// the production module and can use its private declarations in the editor.
+func TestServerTestFileDiagnosticsUsePackageTestGraph(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
+	testSource := `test "private helper" {
+    let _ = answer();
+}
+`
+	writeLSPPackage(t, root, map[string]string{
+		"src/parser/parser.kizu":      "fn answer() -> i64 { return 42; }\n",
+		"src/parser/parser_test.kizu": testSource,
+	})
+	uri := fileURI(filepath.Join(root, "src", "parser", "parser_test.kizu"))
+	server := NewServer(nil, nil)
+	server.documents[uri] = testSource
+	if diagnostics := server.analyzeDocument(uri); len(diagnostics) != 0 {
 		t.Fatalf("got diagnostics %#v, want none", diagnostics)
 	}
 }
@@ -619,7 +639,6 @@ name = "app"
 version = "0.2.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 `
 	writeLSPFile(t, filepath.Join(root, "kizu.toml"), manifest)

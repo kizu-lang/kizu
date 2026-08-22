@@ -1,0 +1,638 @@
+import compiler::internal::source;
+import compiler::internal::token;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/lexer/lexer.go. Input is borrowed from the
+// compilation source record. Token text is copied through the explicit
+// allocator passed to new/new_source.
+
+struct Span {
+    start: i64,
+    end: i64
+}
+
+struct Scalar {
+    value: i64,
+    width: i64,
+    valid: bool
+}
+
+struct CompoundToken {
+    next: u8,
+    compound: token::Kind,
+    single: token::Kind
+}
+
+/// Scans Kizu source text into tokens.
+pub struct Lexer {
+    allocator: Allocator,
+    input: []u8,
+    position: i64,
+    read_position: i64,
+    ch: u8,
+    line: i64,
+    column: i64,
+    pending_doc: array::Array<Span>,
+    pending_safety: array::Array<Span>,
+    source: ?source::SourceId
+}
+
+/// Creates a lexer for input.
+pub fn new(allocator: Allocator, input: []u8) -> Lexer {
+    return make(allocator, null, input);
+}
+
+/// Creates a lexer that stamps source ID onto every token it produces.
+pub fn new_source(
+    allocator: Allocator,
+    source_id: source::SourceId,
+    input: []u8
+) -> Lexer {
+    return make(allocator, source_id, input);
+}
+
+fn make(
+    allocator: Allocator,
+    source_id: ?source::SourceId,
+    input: []u8
+) -> Lexer {
+    var out = Lexer {
+        allocator: allocator,
+        input: input,
+        position: 0,
+        read_position: 0,
+        ch: cast<u8>(0),
+        line: 1,
+        column: 0,
+        pending_doc: array::new<Span>(allocator),
+        pending_safety: array::new<Span>(allocator),
+        source: source_id
+    };
+    out.read_char();
+    return move out;
+}
+
+/// Returns the next token from the input stream.
+fn (self: &var Lexer) next_token() -> !token::Token {
+    try self.skip_ignored();
+    var out = try self.scan_token();
+    errdefer out.deinit();
+    try self.attach_comments(&var out);
+    clear_spans(&var self.pending_doc);
+    clear_spans(&var self.pending_safety);
+    return move out;
+}
+
+fn (self: &var Lexer) scan_token() -> !token::Token {
+    let line = self.line;
+    let column = self.column;
+    if self.ch == cast<u8>(61) {
+        var out = if self.peek_char() == cast<u8>(62) {
+            try self.two_char_token(token::Kind::FatArrow)
+        } else {
+            try self.read_compound_token(CompoundToken {
+                next: cast<u8>(61),
+                compound: token::Kind::Eq,
+                single: token::Kind::Assign
+            })
+        };
+        self.read_char();
+        return move out;
+    }
+    if self.ch == cast<u8>(34) {
+        let literal = try self.read_string();
+        return self.token_from_string(token::Kind::String, move literal, line, column);
+    }
+    if self.ch == cast<u8>(92) and self.peek_char() == cast<u8>(92) {
+        let literal = try self.read_multiline_string();
+        return self.token_from_string(token::Kind::String, move literal, line, column);
+    }
+    if self.ch == cast<u8>(0) {
+        var out = try self.token_from_bytes(token::Kind::Eof, "", line, column);
+        self.read_char();
+        return move out;
+    }
+    if compound_token(self.ch) |spec| {
+        var out = try self.read_compound_token(spec);
+        self.read_char();
+        return move out;
+    }
+    if single_char_kind(self.ch) |kind| {
+        var out = try self.one_char_token(kind);
+        self.read_char();
+        return move out;
+    }
+    if is_letter(self.ch) {
+        let start = self.position;
+        while is_letter(self.ch) or is_digit(self.ch) {
+            self.read_char();
+        }
+        let literal = self.input[start..self.position];
+        return self.token_from_bytes(token::lookup_ident(literal), literal, line, column);
+    }
+    if is_digit(self.ch) {
+        let start = self.position;
+        while is_digit(self.ch) {
+            self.read_char();
+        }
+        return self.token_from_bytes(token::Kind::Int,
+            self.input[start..self.position], line, column);
+    }
+    var out = try self.one_char_token(token::Kind::Illegal);
+    self.read_char();
+    return move out;
+}
+
+fn (self: &var Lexer) read_compound_token(spec: CompoundToken) -> !token::Token {
+    if self.peek_char() == spec.next {
+        return self.two_char_token(spec.compound);
+    }
+    return self.one_char_token(spec.single);
+}
+
+fn (self: &Lexer) one_char_token(kind: token::Kind) -> !token::Token {
+    return self.token_from_bytes(kind, self.input[self.position..self.read_position],
+        self.line, self.column);
+}
+
+fn (self: &var Lexer) two_char_token(kind: token::Kind) -> !token::Token {
+    let start = self.position;
+    let line = self.line;
+    let column = self.column;
+    self.read_char();
+    return self.token_from_bytes(kind, self.input[start..self.read_position], line, column);
+}
+
+fn (self: &Lexer) token_from_bytes(
+    kind: token::Kind,
+    bytes: []u8,
+    line: i64,
+    column: i64
+) -> !token::Token {
+    let literal = try owned_text(self.allocator, bytes);
+    return self.token_from_string(kind, move literal, line, column);
+}
+
+fn (self: &Lexer) token_from_string(
+    kind: token::Kind,
+    literal: string::String,
+    line: i64,
+    column: i64
+) -> !token::Token {
+    var out = token::Token {
+        kind: kind,
+        literal: move literal,
+        line: line,
+        column: column,
+        doc_comments: array::new<string::String>(self.allocator),
+        safety: array::new<string::String>(self.allocator),
+        source: self.source
+    };
+    return move out;
+}
+
+fn (self: &var Lexer) attach_comments(out: &var token::Token) -> !void {
+    var index = 0;
+    while index < self.pending_doc.len() {
+        let span = self.pending_doc.get_or_panic(index);
+        var text = try owned_text(self.allocator, self.input[span.start..span.end]);
+        errdefer text.deinit();
+        try out.doc_comments.append(move text);
+        index = index + 1;
+    }
+    index = 0;
+    while index < self.pending_safety.len() {
+        let span = self.pending_safety.get_or_panic(index);
+        var text = try owned_text(self.allocator, self.input[span.start..span.end]);
+        errdefer text.deinit();
+        try out.safety.append(move text);
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &var Lexer) read_char() -> void {
+    let length = mem::len(self.input);
+    self.position = self.read_position;
+    if self.read_position >= length {
+        self.ch = cast<u8>(0);
+        self.read_position = self.read_position + 1;
+    } else {
+        let scalar = decode_scalar(self.input, self.read_position);
+        self.ch = self.input[self.read_position];
+        self.read_position = self.read_position + scalar.width;
+    }
+    if self.ch == cast<u8>(10) {
+        self.line = self.line + 1;
+        self.column = 0;
+    } else {
+        self.column = self.column + 1;
+    }
+    return;
+}
+
+fn (self: &Lexer) peek_char() -> u8 {
+    if self.read_position >= mem::len(self.input) {
+        return cast<u8>(0);
+    }
+    return self.input[self.read_position];
+}
+
+fn (self: &Lexer) peek_byte(offset: i64) -> u8 {
+    let at = self.position + offset;
+    if at < 0 or at >= mem::len(self.input) {
+        return cast<u8>(0);
+    }
+    return self.input[at];
+}
+
+fn (self: &var Lexer) skip_ignored() -> !void {
+    while true {
+        if self.skip_whitespace() {
+            clear_spans(&var self.pending_doc);
+            clear_spans(&var self.pending_safety);
+        }
+        if self.ch != cast<u8>(47) or self.peek_char() != cast<u8>(47) {
+            return;
+        }
+        if self.is_doc_comment_start() {
+            try self.pending_doc.append(self.read_doc_comment());
+            continue;
+        }
+        if self.read_safety_comment() |span| {
+            try self.pending_safety.append(span);
+            continue;
+        }
+        clear_spans(&var self.pending_doc);
+        clear_spans(&var self.pending_safety);
+        self.skip_line_comment();
+    }
+    return;
+}
+
+fn (self: &var Lexer) skip_whitespace() -> bool {
+    var newlines = 0;
+    while is_ignored_space(self.ch) {
+        if self.ch == cast<u8>(10) {
+            newlines = newlines + 1;
+        }
+        self.read_char();
+    }
+    return newlines > 1;
+}
+
+fn (self: &var Lexer) skip_line_comment() -> void {
+    while self.ch != cast<u8>(10) and self.ch != cast<u8>(0) {
+        self.read_char();
+    }
+    return;
+}
+
+fn (self: &Lexer) is_doc_comment_start() -> bool {
+    return self.peek_byte(2) == cast<u8>(47) and self.peek_byte(3) != cast<u8>(47);
+}
+
+fn (self: &var Lexer) read_safety_comment() -> ?Span {
+    var offset = 2;
+    while self.peek_byte(offset) == cast<u8>(32) or
+        self.peek_byte(offset) == cast<u8>(9) {
+        offset = offset + 1;
+    }
+    let prefix = "SAFETY:";
+    var index = 0;
+    while index < mem::len(prefix) {
+        if self.peek_byte(offset + index) != prefix[index] {
+            return null;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while index < offset + mem::len(prefix) {
+        self.read_char();
+        index = index + 1;
+    }
+    let start = self.position;
+    self.skip_line_comment();
+    return trim_space_span(self.input, Span {
+        start: start, end: self.position
+    });
+}
+
+fn (self: &var Lexer) read_doc_comment() -> Span {
+    self.read_char();
+    self.read_char();
+    self.read_char();
+    if self.ch == cast<u8>(32) {
+        self.read_char();
+    }
+    let start = self.position;
+    while self.ch != cast<u8>(10) and self.ch != cast<u8>(0) {
+        self.read_char();
+    }
+    var end = self.position;
+    if end > start and self.input[end - 1] == cast<u8>(13) {
+        end = end - 1;
+    }
+    return Span {
+        start: start, end: end
+    };
+}
+
+fn (self: &var Lexer) read_string() -> !string::String {
+    self.read_char();
+    let start = self.position;
+    while self.ch != cast<u8>(34) and self.ch != cast<u8>(0) {
+        self.read_char();
+    }
+    let out = try owned_text(self.allocator, self.input[start..self.position]);
+    if self.ch == cast<u8>(34) {
+        self.read_char();
+    }
+    return move out;
+}
+
+fn (self: &var Lexer) read_multiline_string() -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    while true {
+        self.read_char();
+        self.read_char();
+        let start = self.position;
+        while self.ch != cast<u8>(10) and self.ch != cast<u8>(0) {
+            self.read_char();
+        }
+        if out.len() > 0 {
+            try out.append_byte(cast<u8>(10));
+        }
+        try append_normalized_utf8(&var out, self.input[start..self.position]);
+        if !self.peek_multiline_continuation() {
+            break;
+        }
+    }
+    return move out;
+}
+
+fn (self: &var Lexer) peek_multiline_continuation() -> bool {
+    if self.ch != cast<u8>(10) {
+        return false;
+    }
+    var position = self.read_position;
+    let length = mem::len(self.input);
+    while position < length {
+        let ch = self.input[position];
+        if ch == cast<u8>(32) or ch == cast<u8>(9) or ch == cast<u8>(13) {
+            position = position + 1;
+            continue;
+        }
+        if ch == cast<u8>(92) and position + 1 < length and
+            self.input[position + 1] == cast<u8>(92) {
+            while self.read_position <= position {
+                self.read_char();
+            }
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+fn single_char_kind(ch: u8) -> ?token::Kind {
+    if ch == cast<u8>(43) {
+        return token::Kind::Plus;
+    }
+    if ch == cast<u8>(47) {
+        return token::Kind::Slash;
+    }
+    if ch == cast<u8>(38) {
+        return token::Kind::Amp;
+    }
+    if ch == cast<u8>(42) {
+        return token::Kind::Asterisk;
+    }
+    if ch == cast<u8>(37) {
+        return token::Kind::Percent;
+    }
+    if ch == cast<u8>(64) {
+        return token::Kind::At;
+    }
+    if ch == cast<u8>(63) {
+        return token::Kind::Question;
+    }
+    if ch == cast<u8>(124) {
+        return token::Kind::Pipe;
+    }
+    if ch == cast<u8>(44) {
+        return token::Kind::Comma;
+    }
+    if ch == cast<u8>(58) {
+        return token::Kind::Colon;
+    }
+    if ch == cast<u8>(59) {
+        return token::Kind::Semicolon;
+    }
+    if ch == cast<u8>(40) {
+        return token::Kind::LParen;
+    }
+    if ch == cast<u8>(41) {
+        return token::Kind::RParen;
+    }
+    if ch == cast<u8>(123) {
+        return token::Kind::LBrace;
+    }
+    if ch == cast<u8>(125) {
+        return token::Kind::RBrace;
+    }
+    if ch == cast<u8>(91) {
+        return token::Kind::LBracket;
+    }
+    if ch == cast<u8>(93) {
+        return token::Kind::RBracket;
+    }
+    return null;
+}
+
+fn compound_token(ch: u8) -> ?CompoundToken {
+    if ch == cast<u8>(61) {
+        return CompoundToken {
+            next: cast<u8>(61), compound: token::Kind::Eq,
+            single: token::Kind::Assign
+        };
+    }
+    if ch == cast<u8>(45) {
+        return CompoundToken {
+            next: cast<u8>(62), compound: token::Kind::Arrow,
+            single: token::Kind::Minus
+        };
+    }
+    if ch == cast<u8>(33) {
+        return CompoundToken {
+            next: cast<u8>(61), compound: token::Kind::NotEq,
+            single: token::Kind::Bang
+        };
+    }
+    if ch == cast<u8>(60) {
+        return CompoundToken {
+            next: cast<u8>(61), compound: token::Kind::Lte,
+            single: token::Kind::Lt
+        };
+    }
+    if ch == cast<u8>(62) {
+        return CompoundToken {
+            next: cast<u8>(61), compound: token::Kind::Gte,
+            single: token::Kind::Gt
+        };
+    }
+    if ch == cast<u8>(46) {
+        return CompoundToken {
+            next: cast<u8>(46), compound: token::Kind::Range,
+            single: token::Kind::Dot
+        };
+    }
+    if ch == cast<u8>(58) {
+        return CompoundToken {
+            next: cast<u8>(58), compound: token::Kind::DoubleColon,
+            single: token::Kind::Colon
+        };
+    }
+    return null;
+}
+
+fn is_ignored_space(ch: u8) -> bool {
+    return ch == cast<u8>(32) or ch == cast<u8>(9) or ch == cast<u8>(10) or
+        ch == cast<u8>(13);
+}
+
+fn is_letter(ch: u8) -> bool {
+    return (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or
+        (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or ch == cast<u8>(95);
+}
+
+fn is_digit(ch: u8) -> bool {
+    return ch >= cast<u8>(48) and ch <= cast<u8>(57);
+}
+
+fn clear_spans(spans: &var array::Array<Span>) -> void {
+    while spans.pop() |_| {}
+    return;
+}
+
+fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_normalized_utf8(&var out, bytes);
+    return move out;
+}
+
+fn append_normalized_utf8(out: &var string::String, bytes: []u8) -> !void {
+    var position = 0;
+    let length = mem::len(bytes);
+    while position < length {
+        let scalar = decode_scalar(bytes, position);
+        if scalar.valid {
+            try out.append_bytes(bytes[position..position + scalar.width]);
+        } else {
+            try out.append_byte(cast<u8>(239));
+            try out.append_byte(cast<u8>(191));
+            try out.append_byte(cast<u8>(189));
+        }
+        position = position + scalar.width;
+    }
+    return;
+}
+
+fn decode_scalar(bytes: []u8, position: i64) -> Scalar {
+    let length = mem::len(bytes);
+    if position < 0 or position >= length {
+        return Scalar {
+            value: 0, width: 1, valid: false
+        };
+    }
+    let first = bytes[position];
+    if first < cast<u8>(128) {
+        return Scalar {
+            value: cast<i64>(first), width: 1, valid: true
+        };
+    }
+    if first >= cast<u8>(194) and first <= cast<u8>(223) and position + 1 < length {
+        let second = bytes[position + 1];
+        if is_continuation(second) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(192)) * 64 +
+                    cast<i64>(second - cast<u8>(128)),
+                width: 2,
+                valid: true
+            };
+        }
+    }
+    if first >= cast<u8>(224) and first <= cast<u8>(239) and position + 2 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(224) and second < cast<u8>(160)) and
+            !(first == cast<u8>(237) and second > cast<u8>(159));
+        if second_valid and is_continuation(third) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(224)) * 4096 +
+                    cast<i64>(second - cast<u8>(128)) * 64 +
+                    cast<i64>(third - cast<u8>(128)),
+                width: 3,
+                valid: true
+            };
+        }
+    }
+    if first >= cast<u8>(240) and first <= cast<u8>(244) and position + 3 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let fourth = bytes[position + 3];
+        let second_valid = is_continuation(second) and
+            !(first == cast<u8>(240) and second < cast<u8>(144)) and
+            !(first == cast<u8>(244) and second > cast<u8>(143));
+        if second_valid and is_continuation(third) and is_continuation(fourth) {
+            return Scalar {
+                value: cast<i64>(first - cast<u8>(240)) * 262144 +
+                    cast<i64>(second - cast<u8>(128)) * 4096 +
+                    cast<i64>(third - cast<u8>(128)) * 64 +
+                    cast<i64>(fourth - cast<u8>(128)),
+                width: 4,
+                valid: true
+            };
+        }
+    }
+    return Scalar {
+        value: 65533, width: 1, valid: false
+    };
+}
+
+fn is_continuation(byte: u8) -> bool {
+    return byte >= cast<u8>(128) and byte <= cast<u8>(191);
+}
+
+fn trim_space_span(bytes: []u8, span: Span) -> Span {
+    var position = span.start;
+    var start = span.end;
+    var end = span.end;
+    var found = false;
+    while position < span.end {
+        let scalar = decode_scalar(bytes, position);
+        if !is_unicode_space(scalar.value) {
+            if !found {
+                start = position;
+                found = true;
+            }
+            end = position + scalar.width;
+        }
+        position = position + scalar.width;
+    }
+    return Span {
+        start: start, end: end
+    };
+}
+
+fn is_unicode_space(value: i64) -> bool {
+    return value == 9 or value == 10 or value == 11 or value == 12 or value == 13 or
+        value == 32 or value == 133 or value == 160 or value == 5760 or
+        (value >= 8192 and value <= 8202) or value == 8232 or value == 8233 or
+        value == 8239 or value == 8287 or value == 12288;
+}

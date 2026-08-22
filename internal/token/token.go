@@ -1,5 +1,7 @@
 package token
 
+import "github.com/kizu-lang/kizu/internal/source"
+
 // Type identifies the kind of lexical token.
 type Type string
 
@@ -91,9 +93,9 @@ type Token struct {
 	// says why a statement is allowed to break the compiler's proof, so the two
 	// are kept apart rather than merged into one comment list.
 	Safety []string
-	// File is the source path the token was read from, carried so spans built
-	// from it can name the file a diagnostic points into.
-	File string
+	// Source identifies the source record this token was read from. Token text
+	// remains standalone while every token from one file shares this handle.
+	Source source.ID
 }
 
 var keywords = map[string]Type{

@@ -50,7 +50,7 @@ func (e *emitter) writeBoxInstr(instr *ir.Instr) error {
 // back the payload pointer or null, and the recoverable result is built
 // branch-free: the null test is the ok flag and selects the failure code.
 func (e *emitter) writeBoxNew(instr *ir.Instr) error {
-	success, ok := errorUnionSuccessType(instr.Result.Type)
+	success, ok := e.errorUnionSuccessType(instr.Result.Type)
 	if len(instr.Args) != 2 || !ok || !isBoxLLVMType(success) {
 		return fmt.Errorf("llvm error: box.new expects allocator, T -> !Box<T>")
 	}
@@ -79,7 +79,7 @@ func (e *emitter) writeBoxNew(instr *ir.Instr) error {
 		payloadName, unionType, baseName, rawName)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, i64 %s, %d\n",
 		resultName, unionType, payloadName, codeName,
-		errorUnionFailureIndex(instr.Result.Type))
+		e.errorUnionFailureIndex(instr.Result.Type))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }

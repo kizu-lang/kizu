@@ -4,13 +4,14 @@
 「どこに何があるか」「データがどう流れるか」を最短で掴むことを目的にします。
 各領域の深掘りは末尾のドキュメント索引から辿ってください。
 
-## 1. 全体像: 実装は 1 つ
+## 1. 全体像: shipping 実装は 1 つ
 
-Kizu の実装は `internal/` + `cmd/kizu` の Go 実装だけです(ADR-0082)。
-Kizu で書かれた第二実装(selfhost)は削除しました。言語仕様がまだ動いている段階で
-2 つの実装を並走させると、機能を足すたびに 2 回書くことになり、片方がもう片方を
-偽装して緑を保つ失敗が起きるためです。self-host は言語が固まってから、
-ADR-0082 が示した構造に沿って作り直します。
+Kizu の shipping 実装は `internal/` + `cmd/kizu` の Go 実装だけです(ADR-0082)。
+`compiler/` では、その構造と挙動を保った Kizu への機械移植を進めますが、cutover
+までは CLI、fallback、user-facing command から呼びません。以前の selfhost は
+独立した第二実装として育ち、片方がもう片方を偽装して緑を保ったため削除しました。
+今回は `docs/selfhost-porting.md` と field ごとの ownership 判断を先に固定し、
+cutover と同時に Go compiler と移植専用の仕組みを削除します。
 
 規模感(2026-08 時点): Go 実装 約 42k 行 + テスト 約 18k 行、Kizu 製 std 約 10k 行、
 examples 約 5k 行。
@@ -26,9 +27,11 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
   stdmethod, stdprim            std の method 署名と builtin primitive の一覧
   unsafecap                     unsafe が覆う操作の種類と診断文言
-  fmt, diagnostic, buildcache, cimport, lsp
+  fmt, diagnostic, quote, buildcache, cimport, lsp
+compiler/            non-shipping の Kizu compiler 移植先(cutover まで CLI 非接続)
+  src/main_test.kizu test-only package root。cutover までは user-facing entrypoint を持たない
+  src/internal/      1 directory = 1 module の、package外へ公開しない移植済み実装
 lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
-  kizu/              言語の自己記述層(Kizu で書かれた lexer/parser/AST)
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
 tests/fixtures/      module 解決などが使う固定入力
@@ -70,7 +73,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 ## 4. std の二層構造
 
 - 実行時の組み込み(print、メモリ、fs、process 等)は Go 実装が提供し、
-  `lib/kizu/std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
+  `lib/kizu/std/src/*/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
 - Go 側は `internal/project`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std は利用者の package と同じ loader を通り、`internal/stdlib` が
   持つのは「ツリーがどこにあるか」だけです。std に public 型を足すときは
@@ -121,6 +124,6 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 | std の API リファレンス | docs/std/ |
 | stdlib の移行計画と builtin registry | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
-| なぜ実装が 1 つなのか | docs/adr/0082-single-go-implementation.md |
-| self-host を作り直すときの制約 | docs/adr/0081-remove-self-compiling-backend.md |
+| self-host の移植規則 | docs/selfhost-porting.md |
+| self-host の移植判断と shipping 境界 | docs/adr/0082-selfhost-mechanical-port.md |
 | 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0049 モジュール解決)|

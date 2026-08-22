@@ -43,7 +43,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		instr.Op == "ref.store":
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
-		instr.Op == "arena.at" || instr.Op == "arena.deinit":
+		instr.Op == "arena.at" || instr.Op == "arena.len" ||
+		instr.Op == "arena.pop_or_panic" || instr.Op == "arena.deinit":
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "error.error" || instr.Op == "error.try":
 		return e.writeUnsupportedOpaque(instr)

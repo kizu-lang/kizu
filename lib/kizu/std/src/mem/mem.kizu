@@ -1,0 +1,187 @@
+pub error Error {
+    OutOfMemory,
+}
+
+// Limit spells an allocation ceiling. Choosing not to cap is also a choice, so
+// it is written Unlimited and stays visible in source.
+pub union Limit {
+    Bytes(i64),
+    Unlimited,
+}
+
+// limit_bytes renders a Limit for runtime primitives: the cap for Bytes,
+// -1 for Unlimited.
+pub fn limit_bytes(limit: std::mem::Limit) -> i64 {
+    return match limit {
+        Bytes(count) => count,
+        Unlimited => -1,
+    };
+}
+
+// page_allocator returns the stable page allocator capability.
+pub fn page_allocator() -> Allocator {
+    return std::internal::builtin::mem_page_allocator();
+}
+
+// fixed_buffer returns an allocator that carves allocations out of the caller's
+// buffer. It takes the buffer's writable view for as long as the allocator and
+// everything allocated from it live, so the returned Allocator and every owner
+// built from it stay tied to the buffer's frame. Freeing is a no-op; memory
+// comes back when the buffer's frame ends. Exhaustion is OutOfMemory.
+pub fn fixed_buffer(bytes: &var []u8) -> Allocator {
+    return std::internal::builtin::mem_fixed_buffer(bytes);
+}
+
+// box allocates one owned value behind an explicit allocator boundary.
+pub fn box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T> {
+    return std::internal::builtin::box<T>(allocator, move value);
+}
+
+// borrow returns a local shared view of a Box payload.
+fn (self: std::mem::Box<T>) borrow<T>() -> &T {
+    return std::internal::builtin::box_borrow<T>(self);
+}
+
+// borrow_mut returns a local mutable view of a Box payload.
+fn (self: std::mem::Box<T>) borrow_mut<T>() -> &var T {
+    return std::internal::builtin::box_borrow_mut<T>(self);
+}
+
+// take consumes the Box, releases its cell, and returns the owned payload.
+fn (self: std::mem::Box<T>) take<T>() -> T {
+    return std::internal::builtin::box_take<T>(self);
+}
+
+// deinit consumes the payload, then releases the cell. A payload that owns
+// nothing has nothing to consume, so the take is not generated for it; a
+// payload that owns something is released with the cell, which is what keeps
+// a Box from leaking what it holds (ADR-0091).
+fn (self: std::mem::Box<T>) deinit<T>() -> void {
+    comptime if std::meta::is_owner<T>() {
+        let payload = std::internal::builtin::box_take<T>(self);
+        payload.deinit();
+    } else {
+        std::internal::builtin::box_deinit<T>(self);
+    }
+    return;
+}
+
+// leak consumes an owner value without releasing it. The one way to write
+// leak-on-exit in source (ADR-0091).
+pub fn leak<T>(value: T) -> void {
+    return;
+}
+
+// len returns the byte length of a read-only byte slice.
+pub fn len(bytes: []u8) -> i64 {
+    return std::internal::builtin::mem_len(bytes);
+}
+
+// byte_at returns one checked byte from a read-only byte slice, or null when
+// index is out of bounds. Absence is the answer to a lookup, not a failure
+// (docs/style.md).
+pub fn byte_at(bytes: []u8, index: i64) -> ?u8 {
+    if index < 0 or index >= std::mem::len(bytes) {
+        return null;
+    }
+    return bytes[index];
+}
+
+// equal_bytes compares two byte slices.
+pub fn equal_bytes(left: []u8, right: []u8) -> bool {
+    let left_len = std::mem::len(left);
+    if left_len != std::mem::len(right) {
+        return false;
+    }
+
+    var index = 0;
+    while index < left_len {
+        if left[index] != right[index] {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// starts_with reports whether bytes starts with prefix.
+pub fn starts_with(bytes: []u8, prefix: []u8) -> bool {
+    let prefix_len = std::mem::len(prefix);
+    if prefix_len > std::mem::len(bytes) {
+        return false;
+    }
+
+    var index = 0;
+    while index < prefix_len {
+        if bytes[index] != prefix[index] {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// slice returns a checked sub-slice without allocating, or null when the
+// bounds fall outside bytes.
+pub fn slice(bytes: []u8, start: i64, end: i64) -> ?[]u8 {
+    if start < 0 or end < start or end > std::mem::len(bytes) {
+        return null;
+    }
+    return bytes[start..end];
+}
+
+// trim_ascii trims ASCII whitespace from both ends.
+pub fn trim_ascii(bytes: []u8) -> []u8 {
+    var start = 0;
+    var end = std::mem::len(bytes);
+
+    while start < end {
+        if !std::mem::is_ascii_space(bytes[start]) {
+            break;
+        }
+        start = start + 1;
+    }
+
+    while end > start {
+        let previous = end - 1;
+        if !std::mem::is_ascii_space(bytes[previous]) {
+            break;
+        }
+        end = previous;
+    }
+
+    return bytes[start..end];
+}
+
+// BytesIter is a cursor over a read-only byte view. It captures the view, so
+// it stays tied to the bytes it walks (ADR-0100) and can never outlive them.
+pub struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+// bytes_iter starts a byte cursor at the beginning of bytes. Drive it with
+// `while it.next() |byte| { ... }`; exhaustion is null, not a failure.
+pub fn bytes_iter(bytes: []u8) -> std::mem::BytesIter {
+    return std::mem::BytesIter { bytes: bytes, index: 0 };
+}
+
+// next returns the byte under the cursor and advances, or null at the end.
+fn (self: &var std::mem::BytesIter) next() -> ?u8 {
+    if self.index >= std::mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+// is_ascii_space reports whether byte is one of the ASCII whitespace bytes.
+fn is_ascii_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(11) or
+        byte == cast<u8>(12);
+}

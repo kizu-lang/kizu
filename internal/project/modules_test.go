@@ -1,15 +1,16 @@
 package project
 
 import (
-	"github.com/kizu-lang/kizu/internal/manifest"
-	"github.com/kizu-lang/kizu/internal/types"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/manifest"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestModuleFixture resolves and parses the basic multi-file fixture.
@@ -33,7 +34,9 @@ func TestModuleFixture(t *testing.T) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
 	for _, module := range graph.Modules {
-		parseConformanceModule(t, module)
+		for _, file := range module.Files {
+			parseConformanceModule(t, module.Path, file)
+		}
 	}
 	if err := loadGraph(graph); err != nil {
 		t.Fatalf("check graph failed: %v", err)
@@ -41,30 +44,32 @@ func TestModuleFixture(t *testing.T) {
 }
 
 // parseConformanceModule checks that one fixture source is valid Kizu syntax.
-func parseConformanceModule(t *testing.T, module Module) {
+func parseConformanceModule(t *testing.T, modulePath string, file string) {
 	t.Helper()
-	source, err := os.ReadFile(module.File)
+	source, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := parser.New(lexer.New(string(source)))
 	p.ParseProgram()
 	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors in %s: %v", module.Path, p.Errors())
+		t.Fatalf("parser errors in %s: %v", modulePath, p.Errors())
 	}
 }
 
-// TestResolveModules maps source files to package module paths.
+// TestResolveModules groups directory files into package module paths.
 func TestResolveModules(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "src/main.kizu")
-	writeFile(t, root, "src/lexer.kizu")
+	writeFile(t, root, "src/cli.kizu")
+	writeFile(t, root, "src/lexer/lexer.kizu")
 	writeFile(t, root, "src/parser/mod.kizu")
-	writeFile(t, root, "src/parser/ast.kizu")
+	writeFile(t, root, "src/parser/helper.kizu")
+	writeFile(t, root, "src/parser/parser_test.kizu")
+	writeFile(t, root, "src/parser/ast/ast.kizu")
 
 	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
-		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
 	})
 	if err != nil {
@@ -75,14 +80,18 @@ func TestResolveModules(t *testing.T) {
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
+	if len(graph.Modules[0].Files) != 2 || len(graph.Modules[2].Files) != 2 ||
+		len(graph.Modules[2].TestFiles) != 1 {
+		t.Fatalf("unexpected grouped modules %#v", graph.Modules)
+	}
 }
 
 // TestResolveModulesWithoutRootModule checks a package needs no module of its
 // own name. std has none: everything it holds is `std::mem` or below.
 func TestResolveModulesWithoutRootModule(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, root, "src/lexer.kizu")
-	writeFile(t, root, "src/internal/table.kizu")
+	writeFile(t, root, "src/lexer/lexer.kizu")
+	writeFile(t, root, "src/internal/table/table.kizu")
 
 	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
@@ -98,20 +107,38 @@ func TestResolveModulesWithoutRootModule(t *testing.T) {
 	}
 }
 
-// TestResolveModulesRejectsDuplicateModulePaths checks mod/file collisions.
-func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
+// TestResolveModulesTreatsModAndMainAsOrdinaryFiles checks filenames add no namespace.
+func TestResolveModulesTreatsModAndMainAsOrdinaryFiles(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, root, "src/main.kizu")
-	writeFile(t, root, "src/parser.kizu")
 	writeFile(t, root, "src/parser/mod.kizu")
+	writeFile(t, root, "src/parser/main.kizu")
 
-	_, err := ResolveModules(root, manifest.Manifest{
+	graph, err := ResolveModules(root, manifest.Manifest{
 		PackageName: "app",
-		Root:        "src/main.kizu",
 		Paths:       []string{"src"},
 	})
-	if err == nil {
-		t.Fatal("expected duplicate module error")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if len(graph.Modules) != 1 || graph.Modules[0].Path != "app::parser" ||
+		len(graph.Modules[0].Files) != 2 {
+		t.Fatalf("unexpected modules %#v", graph.Modules)
+	}
+}
+
+// TestModuleSourceFilesOrdersBothViews keeps declaration and test order stable.
+func TestModuleSourceFilesOrdersBothViews(t *testing.T) {
+	module := Module{
+		Files:     []string{"z.kizu", "a.kizu"},
+		TestFiles: []string{"m_test.kizu", "b_test.kizu"},
+	}
+	production := module.SourceFiles(false)
+	if !sameStrings(production, []string{"a.kizu", "z.kizu"}) {
+		t.Fatalf("got production files %#v", production)
+	}
+	tests := module.SourceFiles(true)
+	if !sameStrings(tests, []string{"a.kizu", "b_test.kizu", "m_test.kizu", "z.kizu"}) {
+		t.Fatalf("got test files %#v", tests)
 	}
 }
 
@@ -142,7 +169,7 @@ fn main(value: table::Entry) -> void {
     return;
 }
 `,
-		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+		"src/parser/internal/table/table.kizu": "pub struct Entry { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(),
@@ -159,13 +186,31 @@ func TestLoadGraphAcceptsInternalImportInsideSubtree(t *testing.T) {
     return;
 }
 `,
-		"src/parser/ast.kizu": `import app::parser::internal::table;
+		"src/parser/ast/ast.kizu": `import app::parser::internal::table;
 
 pub fn first(entry: table::Entry) -> i64 {
     return entry.value;
 }
 `,
-		"src/parser/internal/table.kizu": "pub struct Entry { pub value: i64, }",
+		"src/parser/internal/table/table.kizu": "pub struct Entry { pub value: i64, }",
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestLoadGraphBindsPackageNamespaceInRootModule checks fully qualified siblings.
+func TestLoadGraphBindsPackageNamespaceInRootModule(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `fn main() -> void {
+    print(app::lexer::answer());
+    return;
+}
+`,
+		"src/lexer/lexer.kizu": `pub fn answer() -> i64 {
+    return 42;
+}
+`,
 	})
 	if err := checkTempModuleGraph(t, root); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -182,8 +227,8 @@ fn main(value: lexer::Token) -> void {
     return;
 }
 `,
-		"src/lexer.kizu":        "pub struct Token { pub value: i64, }",
-		"src/parser/lexer.kizu": "pub struct Token { pub value: i64, }",
+		"src/lexer/lexer.kizu":        "pub struct Token { pub value: i64, }",
+		"src/parser/lexer/lexer.kizu": "pub struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "duplicate import alias `lexer`") {
@@ -197,15 +242,139 @@ func TestLoadGraphRejectsDuplicateFunction(t *testing.T) {
 		"src/main.kizu": `fn parse() -> void {
     return;
 }
-
-fn parse() -> void {
+`,
+		"src/duplicate.kizu": `fn parse() -> void {
     return;
 }
+
 `,
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "duplicate function `app::parse`") {
 		t.Fatalf("got error %v, want duplicate function", err)
+	}
+}
+
+// TestLoadGraphSharesPrivateDeclarationsAcrossFiles checks directory module scope.
+func TestLoadGraphSharesPrivateDeclarationsAcrossFiles(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::counter;
+
+fn main() -> void {
+    print(counter::value());
+    return;
+}
+`,
+		"src/counter/type.kizu": `struct Counter {
+    value: i64,
+}
+`,
+		"src/counter/value.kizu": `pub fn value() -> i64 {
+    let counter = Counter { value: 7 };
+    return counter.value;
+}
+`,
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatalf("check graph failed: %v", err)
+	}
+}
+
+// TestLoadGraphKeepsImportsFileLocal checks one file cannot lend another an import.
+func TestLoadGraphKeepsImportsFileLocal(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": "fn main() -> void { return; }\n",
+		"src/token/token.kizu": `pub struct Token { pub value: i64, }
+`,
+		"src/parser/imported.kizu": `import app::token;
+
+fn first(value: token::Token) -> i64 {
+    return value.value;
+}
+`,
+		"src/parser/missing_import.kizu": `fn second(value: token::Token) -> i64 {
+    return value.value;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "`token` is not imported") {
+		t.Fatalf("got error %v, want file-local import failure", err)
+	}
+}
+
+// TestLoadTestProgramAddsTestFilesToTheirModule checks Go-style test inclusion.
+func TestLoadTestProgramAddsTestFilesToTheirModule(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/parser/parser.kizu": `fn answer() -> i64 { return 42; }
+`,
+		"src/parser/parser_test.kizu": `test "private helper is visible" {
+    let _ = answer();
+}
+`,
+	})
+	graph := resolveTempModuleGraph(t, root)
+	production, err := LoadProgram(graph)
+	if err != nil {
+		t.Fatalf("load production failed: %v", err)
+	}
+	if countTests(production) != 0 {
+		t.Fatal("production load included a test file")
+	}
+	tests, err := LoadTestProgram(graph)
+	if err != nil {
+		t.Fatalf("load tests failed: %v", err)
+	}
+	if err := types.New().Check(tests); err != nil {
+		t.Fatalf("check tests failed: %v", err)
+	}
+	if countTests(tests) != 1 {
+		t.Fatalf("got %d tests, want 1", countTests(tests))
+	}
+}
+
+// TestLoadTestProgramAddsTestOnlyModules checks black-box integration tests.
+func TestLoadTestProgramAddsTestOnlyModules(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/parser/parser.kizu": `pub fn answer() -> i64 { return 42; }
+`,
+		"src/parser_integration/parser_integration_test.kizu": `import app::parser;
+
+test "public parser API" {
+    let _ = parser::answer();
+}
+`,
+	})
+	graph := resolveTempModuleGraph(t, root)
+	program, err := LoadTestProgram(graph)
+	if err != nil {
+		t.Fatalf("load tests failed: %v", err)
+	}
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("check tests failed: %v", err)
+	}
+	if countTests(program) != 1 {
+		t.Fatalf("got %d tests, want 1", countTests(program))
+	}
+}
+
+// TestLoadGraphKeepsUnsafeInvariantWritesInDeclarationFile preserves ADR-0089.
+func TestLoadGraphKeepsUnsafeInvariantWritesInDeclarationFile(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/buffer/type.kizu": `/// data points to one live byte.
+unsafe struct Buf {
+    data: ptr<u8>,
+}
+`,
+		"src/buffer/wrap.kizu": `fn wrap(data: ptr<u8>) -> Buf {
+    // SAFETY: the caller supplies the live byte named by the type contract.
+    return unsafe Buf { data: data };
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "confined to its declaration file") {
+		t.Fatalf("got error %v, want unsafe declaration-file boundary", err)
 	}
 }
 
@@ -218,7 +387,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/lexer.kizu": `import app;
+		"src/lexer/lexer.kizu": `import app;
 
 pub struct Token {
     pub kind: i64,
@@ -236,15 +405,15 @@ func TestLoadGraphRejectsImportShadowing(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": `import app::lexer;
 
-struct lexer {
-    pub value: i64,
-}
-
 fn main() -> void {
     return;
 }
 `,
-		"src/lexer.kizu": "pub struct Token { pub value: i64, }",
+		"src/collision.kizu": `struct lexer {
+    pub value: i64,
+}
+`,
+		"src/lexer/lexer.kizu": "pub struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "declaration `lexer` shadows import") {
@@ -261,7 +430,7 @@ fn main(value: lexer::Token) -> void {
     return;
 }
 `,
-		"src/lexer.kizu": "struct Token { pub value: i64, }",
+		"src/lexer/lexer.kizu": "struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "type `lexer::Token` is private") {
@@ -290,7 +459,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 
@@ -308,7 +477,7 @@ pub fn make(kind: i64) -> Token {
 func TestLoadProgramWithSourcesPrefersOverride(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
 		"src/main.kizu": "let x = 1;\n",
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 `,
@@ -352,7 +521,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 
@@ -378,7 +547,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
 }
 `,
@@ -400,7 +569,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
     secret: i64,
 }
@@ -423,7 +592,7 @@ fn main() -> void {
     return;
 }
 `,
-		"src/token.kizu": `pub struct Token {
+		"src/token/token.kizu": `pub struct Token {
     pub kind: i64,
     secret: i64,
 }
@@ -460,7 +629,6 @@ name = "app"
 version = "0.2.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 `
 	writeFileContent(t, root, "kizu.toml", manifest)
@@ -485,6 +653,19 @@ func writeFileContent(t *testing.T, root string, rel string, source string) {
 // checkTempModuleGraph parses the temp manifest, resolves modules, and checks it.
 func checkTempModuleGraph(t *testing.T, root string) error {
 	t.Helper()
+	graph := resolveTempModuleGraph(t, root)
+	// Visibility across modules is decided by the type checker reading the
+	// resolved program, so a test about it has to get that far.
+	program, err := LoadProgram(graph)
+	if err != nil {
+		return err
+	}
+	return types.New().Check(program)
+}
+
+// resolveTempModuleGraph reads and resolves one temporary package fixture.
+func resolveTempModuleGraph(t *testing.T, root string) Graph {
+	t.Helper()
 	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
 	if err != nil {
 		t.Fatal(err)
@@ -497,13 +678,18 @@ func checkTempModuleGraph(t *testing.T, root string) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Visibility across modules is decided by the type checker reading the
-	// resolved program, so a test about it has to get that far.
-	program, err := LoadProgram(graph)
-	if err != nil {
-		return err
+	return graph
+}
+
+// countTests returns the number of test declarations in a merged program.
+func countTests(program *ast.Program) int {
+	count := 0
+	for _, decl := range program.Decls {
+		if _, ok := decl.(*ast.TestDecl); ok {
+			count++
+		}
 	}
-	return types.New().Check(program)
+	return count
 }
 
 // modulePaths returns only module path strings.

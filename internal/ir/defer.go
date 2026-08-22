@@ -102,6 +102,9 @@ func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 	if elem, ok := boxElementType(receiverType); ok {
 		return containerCleanup{boxTypeName, "box.deinit", elem}, true
 	}
+	if elem := arenaElementType(receiverType); elem != "unknown" {
+		return containerCleanup{arenaTypeName, "arena.deinit", elem}, true
+	}
 	return containerCleanup{}, false
 }
 
@@ -131,9 +134,6 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 			)
 		}
 		return Cleanup{Op: "call." + methodName, Args: []Value{receiver}}, nil
-	}
-	if method == typ.CleanupMethod && arenaElementType(receiverType) != "unknown" {
-		return Cleanup{Op: "arena.deinit", Args: []Value{receiver}}, nil
 	}
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
 }

@@ -96,8 +96,15 @@ policy.
 - `std::arena::Arena<T>.add(value)` moves `value` into the arena.
 - `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.
 - `std::arena::Handle<T>` is an opaque ID, not a raw pointer.
-- `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a local borrow-like value.
-- `std::arena::Arena<T>.deinit()` explicitly releases the arena and invalidates the binding.
+- `std::arena::Arena<T>.at(std::arena::Handle<T>)` returns a shared borrow `&T`
+  tied to the arena.
+- A bound `Arena.at` result keeps the arena borrowed until its last use; `add`
+  and `deinit` cannot run while that borrow is live.
+- An `Arena.at` borrow can return through a parameter-rooted arena, but cannot
+  escape a local arena.
+- `std::arena::Arena<T>` may own elements that themselves own resources.
+- `std::arena::Arena<T>.deinit()` consumes every initialized owner element before
+  releasing arena storage and invalidating the binding.
 - Values read through `arena.at` cannot be moved out.
 - A handle can only be used with the arena that produced it.
 - A handle cannot outlive its arena.
@@ -234,15 +241,17 @@ memory-safety invariants to representative examples.
 | mutable borrow requires mutable binding | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_immutable.kizu` |
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
-| `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
+| `&var self` method requires a mutable receiver | `examples/mutable_self_method.kizu`, `tests/behavior/src/mutable_self_method/mutable_self_method_test.kizu` | `examples/negative/mutable_self_method_let_receiver.kizu` |
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
-| arena at is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_at_move.kizu` |
+| arena at returns an arena-tied `&T` | `examples/arena.kizu`, `examples/arena_helper.kizu`, `tests/behavior/src/arena_param/arena_param_test.kizu` | `examples/negative/arena_at_move.kizu`, `examples/negative/arena_at_borrow_escape.kizu`, `examples/negative/arena_deinit_while_at_borrowed.kizu` |
 | arena cleanup invalidates arena and handles | `examples/arena.kizu` | `examples/negative/arena_double_deinit.kizu`, `examples/negative/arena_add_after_deinit.kizu`, `examples/negative/arena_at_after_deinit.kizu`, `examples/negative/arena_deinit_while_borrowed.kizu`, `examples/negative/arena_deinit_wrong_receiver.kizu`, `examples/negative/arena_deinit_borrowed_receiver.kizu`, `examples/negative/arena_deinit_temporary_receiver.kizu`, `examples/negative/arena_deinit_moved_receiver.kizu`, `examples/negative/arena_handle_after_deinit.kizu` |
+| arena cleanup consumes owner elements before storage | `examples/arena_owner_elements.kizu` | |
+| Box take transfers its payload and consumes the cell | `examples/std_mem_box_take.kizu` | `examples/negative/std_mem_box_take_after_take.kizu`, `examples/negative/std_mem_box_take_while_borrowed.kizu` |
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
-| fixed-buffer allocator ties owners to the buffer frame | `examples/fixed_buffer.kizu`, `tests/behavior/src/fixed_buffer_allocator.kizu` | `examples/negative/fixed_buffer_owner_escape.kizu`, `examples/negative/fixed_buffer_allocator_escape.kizu`, `examples/negative/fixed_buffer_alias.kizu`, `examples/negative/fixed_buffer_reborrow.kizu`, `examples/negative/fixed_buffer_unbound_result.kizu`, `examples/negative/fixed_buffer_inline_factory.kizu`, `examples/negative/fixed_buffer_struct_capture.kizu` |
-| view-capturing struct stays tied to its view sources | `examples/bytes_iter.kizu`, `tests/behavior/src/view_capture.kizu` | `examples/negative/view_capture_escape.kizu`, `examples/negative/view_capture_alias.kizu`, `examples/negative/view_capture_mutate.kizu`, `examples/negative/view_capture_inline_arg.kizu`, `examples/negative/view_capture_field_escape.kizu`, `examples/negative/view_capture_smuggle.kizu` |
+| fixed-buffer allocator ties owners to the buffer frame | `examples/fixed_buffer.kizu`, `tests/behavior/src/fixed_buffer_allocator/fixed_buffer_allocator_test.kizu` | `examples/negative/fixed_buffer_owner_escape.kizu`, `examples/negative/fixed_buffer_allocator_escape.kizu`, `examples/negative/fixed_buffer_alias.kizu`, `examples/negative/fixed_buffer_reborrow.kizu`, `examples/negative/fixed_buffer_unbound_result.kizu`, `examples/negative/fixed_buffer_inline_factory.kizu`, `examples/negative/fixed_buffer_struct_capture.kizu` |
+| view-capturing struct stays tied to its view sources | `examples/bytes_iter.kizu`, `tests/behavior/src/view_capture/view_capture_test.kizu` | `examples/negative/view_capture_escape.kizu`, `examples/negative/view_capture_alias.kizu`, `examples/negative/view_capture_mutate.kizu`, `examples/negative/view_capture_borrow_arg_mutate.kizu`, `examples/negative/view_capture_inline_arg.kizu`, `examples/negative/view_capture_field_escape.kizu`, `examples/negative/view_capture_smuggle.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
 | deferred cleanup is explicit and ownership-checked | `examples/defer_cleanup.kizu`, `examples/defer_order.kizu` | `examples/negative/defer_non_cleanup_expr.kizu`, `examples/negative/defer_invalid_statement.kizu`, `examples/negative/defer_after_move.kizu`, `examples/negative/defer_after_explicit_deinit.kizu`, `examples/negative/defer_cleanup_while_borrowed.kizu` |
 | `unsafe` is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |

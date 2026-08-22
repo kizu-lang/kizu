@@ -1,0 +1,342 @@
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/stdmeta/stdmeta.go. Form metadata is static;
+// only names() and split_apply() allocate caller-owned result storage.
+
+/// Identifies one compiler-resolved std::meta form.
+pub enum Form {
+    IsStruct,
+    IsEnum,
+    IsUnion,
+    IsOptional,
+    IsArray,
+    IsBox,
+    IsMap,
+    IsOwner,
+    HasPublicFields,
+    Element,
+    PublicFields,
+    FieldName,
+    FieldType,
+    Field,
+    Variants,
+    VariantName,
+    VariantType,
+    HasPayload,
+    Variant,
+    Construct,
+    Unsupported,
+}
+
+/// Describes the source shape accepted by one std::meta form.
+pub struct Shape {
+    pub static_args: i64,
+    pub capture: bool,
+    pub args: i64,
+    pub type_form: bool,
+    pub variadic: bool,
+    pub worker: i64
+}
+
+struct Entry {
+    form: Form,
+    shape: Shape
+}
+
+/// Returns the source spelling of form.
+pub fn spelling(form: Form) -> []u8 {
+    return match form {
+        IsStruct => "std::meta::is_struct",
+        IsEnum => "std::meta::is_enum",
+        IsUnion => "std::meta::is_union",
+        IsOptional => "std::meta::is_optional",
+        IsArray => "std::meta::is_array",
+        IsBox => "std::meta::is_box",
+        IsMap => "std::meta::is_map",
+        IsOwner => "std::meta::is_owner",
+        HasPublicFields => "std::meta::has_public_fields",
+        Element => "std::meta::element",
+        PublicFields => "std::meta::public_fields",
+        FieldName => "std::meta::field_name",
+        FieldType => "std::meta::field_type",
+        Field => "std::meta::field",
+        Variants => "std::meta::variants",
+        VariantName => "std::meta::variant_name",
+        VariantType => "std::meta::variant_type",
+        HasPayload => "std::meta::has_payload",
+        Variant => "std::meta::variant",
+        Construct => "std::meta::construct",
+        Unsupported => "std::meta::unsupported",
+    };
+}
+
+/// Returns the shape of name, or null when name is not a std::meta form.
+pub fn lookup(name: []u8) -> ?Shape {
+    if lookup_entry(name) |value| {
+        return value.shape;
+    }
+    return null;
+}
+
+/// Reports whether name is a compile-time predicate form.
+pub fn predicate(name: []u8) -> bool {
+    if lookup_entry(name) |value| {
+        return match value.form {
+            IsStruct => true,
+            IsEnum => true,
+            IsUnion => true,
+            IsOptional => true,
+            IsArray => true,
+            IsBox => true,
+            IsMap => true,
+            IsOwner => true,
+            HasPublicFields => true,
+            HasPayload => true,
+            _ => false,
+        };
+    }
+    return false;
+}
+
+/// Reports whether form consumes a variant capture instead of a field capture.
+pub fn variant_form(form: Form) -> bool {
+    return match form {
+        VariantName => true,
+        VariantType => true,
+        HasPayload => true,
+        Variant => true,
+        _ => false,
+    };
+}
+
+/// Returns every form.
+pub fn names(allocator: Allocator) -> !array::Array<Form> {
+    var out = array::new<Form>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while entry(index) |value| {
+        try out.append(value.form);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Owns the static arguments split from one recognized form application.
+pub struct ApplyParts {
+    pub form: Form,
+    pub args: array::Array<string::String>
+}
+
+/// Splits a spelling such as std::meta::field_type<T, f>.
+pub fn split_apply(
+    allocator: Allocator,
+    text: []u8
+) -> !?ApplyParts {
+    var normalized = try string::from_bytes(allocator, text);
+    defer normalized.deinit();
+    string::trim_space_in_place(&var normalized);
+    let spelling_bytes = normalized.as_bytes();
+    let length = mem::len(spelling_bytes);
+    var open = 0;
+    while open < length and spelling_bytes[open] != cast<u8>(60) {
+        open = open + 1;
+    }
+    if open == length or length == 0 or
+        spelling_bytes[length - 1] != cast<u8>(62) {
+        return null;
+    }
+    var name = try string::from_bytes(allocator, spelling_bytes[0..open]);
+    defer name.deinit();
+    string::trim_space_in_place(&var name);
+    let name_bytes = name.as_bytes();
+    if lookup_entry(name_bytes) |known| {
+        let argument_bytes = spelling_bytes[open + 1..length - 1];
+        if try split_args(allocator, argument_bytes) |args| {
+            return ApplyParts {
+                form: known.form,
+                args: move args
+            };
+        }
+    }
+    return null;
+}
+
+fn split_args(
+    allocator: Allocator,
+    text: []u8
+) -> !?array::Array<string::String> {
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    var depth = 0;
+    var start = 0;
+    var index = 0;
+    while index < mem::len(text) {
+        let byte = text[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+                if depth < 0 {
+                    parts.deinit();
+                    return null;
+                }
+            } else {
+                if byte == cast<u8>(44) and depth == 0 {
+                    if !try append_trimmed_part(
+                        allocator,
+                        &var parts,
+                        text[start..index]
+                    ) {
+                        parts.deinit();
+                        return null;
+                    }
+                    start = index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    if depth != 0 or !try append_trimmed_part(
+        allocator,
+        &var parts,
+        text[start..mem::len(text)]
+    ) {
+        parts.deinit();
+        return null;
+    }
+    return move parts;
+}
+
+fn append_trimmed_part(
+    allocator: Allocator,
+    parts: &var array::Array<string::String>,
+    text: []u8
+) -> !bool {
+    var part = try string::from_bytes(allocator, text);
+    errdefer part.deinit();
+    string::trim_space_in_place(&var part);
+    if part.len() == 0 {
+        part.deinit();
+        return false;
+    }
+    try parts.append(move part);
+    return true;
+}
+
+fn lookup_entry(name: []u8) -> ?Entry {
+    var index = 0;
+    while entry(index) |value| {
+        if mem::equal_bytes(spelling(value.form), name) {
+            return value;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn entry(index: i64) -> ?Entry {
+    if index == 0 {
+        return simple_entry(Form::IsStruct, 1);
+    }
+    if index == 1 {
+        return simple_entry(Form::IsEnum, 1);
+    }
+    if index == 2 {
+        return simple_entry(Form::IsUnion, 1);
+    }
+    if index == 3 {
+        return simple_entry(Form::IsOptional, 1);
+    }
+    if index == 4 {
+        return simple_entry(Form::IsArray, 1);
+    }
+    if index == 5 {
+        return simple_entry(Form::IsBox, 1);
+    }
+    if index == 6 {
+        return simple_entry(Form::IsMap, 1);
+    }
+    if index == 7 {
+        return simple_entry(Form::IsOwner, 1);
+    }
+    if index == 8 {
+        return simple_entry(Form::HasPublicFields, 1);
+    }
+    if index == 9 {
+        return Entry {
+            form: Form::Element,
+            shape: Shape {
+                static_args: 1, capture: false, args: 0,
+                type_form: true, variadic: false, worker: 0
+            }
+        };
+    }
+    if index == 10 {
+        return simple_entry(Form::PublicFields, 1);
+    }
+    if index == 11 {
+        return capture_entry(Form::FieldName, false, 0, false);
+    }
+    if index == 12 {
+        return capture_entry(Form::FieldType, true, 0, false);
+    }
+    if index == 13 {
+        return capture_entry(Form::Field, false, 1, false);
+    }
+    if index == 14 {
+        return simple_entry(Form::Variants, 1);
+    }
+    if index == 15 {
+        return capture_entry(Form::VariantName, false, 0, false);
+    }
+    if index == 16 {
+        return capture_entry(Form::VariantType, true, 0, false);
+    }
+    if index == 17 {
+        return capture_entry(Form::HasPayload, false, 0, false);
+    }
+    if index == 18 {
+        return capture_entry(Form::Variant, false, 0, true);
+    }
+    if index == 19 {
+        return Entry {
+            form: Form::Construct,
+            shape: Shape {
+                static_args: 2, capture: false, args: 0,
+                type_form: false, variadic: true, worker: 2
+            }
+        };
+    }
+    if index == 20 {
+        return simple_entry(Form::Unsupported, 1);
+    }
+    return null;
+}
+
+fn simple_entry(form: Form, static_args: i64) -> Entry {
+    return Entry {
+        form: form,
+        shape: Shape {
+            static_args: static_args, capture: false, args: 0,
+            type_form: false, variadic: false, worker: 0
+        }
+    };
+}
+
+fn capture_entry(
+    form: Form,
+    type_form: bool,
+    args: i64,
+    variadic: bool
+) -> Entry {
+    return Entry {
+        form: form,
+        shape: Shape {
+            static_args: 2, capture: true, args: args,
+            type_form: type_form, variadic: variadic, worker: 0
+        }
+    };
+}

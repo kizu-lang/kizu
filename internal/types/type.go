@@ -11,6 +11,36 @@ import (
 // Type is the static type name used by the v0 checker.
 type Type string
 
+// typeTable owns the parsed structure behind every type spelling this checker
+// asks structural questions about. Type remains the comparable spelling used
+// by checker maps and diagnostics.
+type typeTable struct {
+	parsed *typ.Table
+}
+
+// newTypeTable creates an empty phase-owned type table.
+func newTypeTable() typeTable {
+	return typeTable{parsed: typ.NewTable()}
+}
+
+// remember records a type the source parser or checker already parsed.
+func (t *typeTable) remember(parsed typ.Type) Type {
+	if parsed == nil {
+		return ""
+	}
+	return Type(t.parsed.Remember(parsed).String())
+}
+
+// lookup returns the one parsed structure for value, parsing compiler-produced
+// spellings only on their first structural query.
+func (t *typeTable) lookup(value Type) (typ.Type, bool) {
+	parsed, err := t.parsed.Parse(string(value))
+	if err != nil {
+		return nil, false
+	}
+	return parsed, true
+}
+
 const (
 	typeBool       Type = "bool"
 	typeField      Type = "Field"
@@ -201,21 +231,26 @@ func containsBorrowOptional(t Type) bool {
 }
 
 // isBorrowedViewReturnType reports whether typ returns a non-owned view.
-func isBorrowedViewReturnType(typ Type) bool {
-	success := unwrapReturnSuccessType(typ)
-	text := string(success)
-	return strings.HasPrefix(text, "&") || strings.HasPrefix(text, "[]")
+func (t *typeTable) isBorrowedViewReturnType(value Type) bool {
+	success := t.unwrapReturnSuccessType(value)
+	parsed, ok := t.lookup(success)
+	if !ok {
+		return false
+	}
+	switch parsed.(type) {
+	case *typ.Borrow, *typ.Slice:
+		return true
+	default:
+		return false
+	}
 }
 
 // unwrapReturnSuccessType extracts the success payload of !T-like return types.
-func unwrapReturnSuccessType(typ Type) Type {
-	if elem, ok := errorUnionElement(typ); ok {
-		return Type(elem)
+func (t *typeTable) unwrapReturnSuccessType(value Type) Type {
+	if _, success, ok := t.errorUnionParts(value); ok {
+		return success
 	}
-	if _, elem, ok := errorUnionParts(typ); ok {
-		return Type(elem)
-	}
-	return typ
+	return value
 }
 
 // borrowWrappedType returns the full spelling for a borrow-bearing field or parameter.
@@ -250,23 +285,23 @@ func sameType(left Type, right Type) bool {
 // replaced where the whole name matches, so `T` leaves `Timer` alone; a
 // spelling this checker cannot parse is left as it stands, because rejecting it
 // belongs to parseType and its diagnostic.
-func substituteTypeParams(declared Type, subst map[string]Type) Type {
+func (t *typeTable) substituteTypeParams(declared Type, subst map[string]Type) Type {
 	if replacement, ok := subst[string(declared)]; ok {
 		return replacement
 	}
-	parsed, err := typ.Parse(string(declared))
-	if err != nil {
+	parsed, ok := t.lookup(declared)
+	if !ok {
 		return declared
 	}
-	return Type(typ.Substitute(parsed, parsedSubst(subst)).String())
+	return t.remember(typ.Substitute(parsed, t.parsedSubst(subst)))
 }
 
 // parsedSubst parses the replacement types once per substitution.
-func parsedSubst(subst map[string]Type) map[string]typ.Type {
+func (t *typeTable) parsedSubst(subst map[string]Type) map[string]typ.Type {
 	out := make(map[string]typ.Type, len(subst))
 	for name, replacement := range subst {
-		parsed, err := typ.Parse(string(replacement))
-		if err != nil {
+		parsed, ok := t.lookup(replacement)
+		if !ok {
 			continue
 		}
 		out[name] = parsed
@@ -307,8 +342,13 @@ func optionalElem(t Type) (Type, bool) {
 // absorbsErrorUnion reports whether returning a result that fails one way from a
 // function that declares no error set is the same absorption `try` does. A
 // declared `E!T` is not this, because it named the one set it accepts.
-func absorbsErrorUnion(want Type, got Type) bool {
-	return typ.AbsorbsErrorSet(string(want), string(got))
+func (t *typeTable) absorbsErrorUnion(want Type, got Type) bool {
+	wantType, ok := t.lookup(want)
+	if !ok {
+		return false
+	}
+	gotType, ok := t.lookup(got)
+	return ok && typ.AbsorbsErrorSet(wantType, gotType)
 }
 
 // explicitBorrowType extracts &T and &var T spellings.
@@ -327,6 +367,46 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 		return "", false, "", false
 	}
 	return "", mutable, Type(rest), true
+}
+
+// borrowedValueType returns the value visible through an explicit borrow.
+// Borrow locals already store this inner type in scope; this keeps direct
+// borrowed-return expressions equally transparent to field, method, and match
+// reads without erasing their borrow type in move-sensitive positions.
+func borrowedValueType(value Type) Type {
+	if _, _, inner, ok := explicitBorrowType(value); ok {
+		return inner
+	}
+	return value
+}
+
+// coerceReturnedBorrowArgument admits a borrow-return expression only into a
+// borrow parameter. Explicit `&value` syntax is unwrapped before expression
+// checking; a call returning &T reaches this point still carrying that type,
+// so it must make the same owning/borrowed distinction here.
+func coerceReturnedBorrowArgument(
+	got Type,
+	want Type,
+	wantBorrow bool,
+	wantMutable bool,
+) (Type, error) {
+	_, mutable, inner, ok := explicitBorrowType(got)
+	if !ok {
+		return got, nil
+	}
+	if !wantBorrow {
+		return "", errorf("type error: borrow argument cannot be passed to owning parameter")
+	}
+	if mutable && !wantMutable {
+		return "", errorf("type error: argument expects &T, got &var")
+	}
+	if !mutable && wantMutable {
+		return "", errorf("type error: argument expects &var T, got &T")
+	}
+	if !sameType(inner, want) {
+		return got, nil
+	}
+	return inner, nil
 }
 
 // joinTypes renders static arguments for an instantiation key.
@@ -457,14 +537,22 @@ func methodMatches(want *functionType, got *functionType) bool {
 }
 
 // errorUnionElement extracts T from legacy !T.
-func errorUnionElement(typ Type) (string, bool) {
-	_, success, ok := errorUnionParts(typ)
+func (t *typeTable) errorUnionElement(value Type) (Type, bool) {
+	_, success, ok := t.errorUnionParts(value)
 	return success, ok
 }
 
 // errorUnionParts extracts error and success types from !T or Error!T.
-func errorUnionParts(union Type) (string, string, bool) {
-	return typ.ErrorUnionParts(string(union))
+func (t *typeTable) errorUnionParts(union Type) (Type, Type, bool) {
+	parsed, ok := t.lookup(union)
+	if !ok {
+		return "", "", false
+	}
+	errorType, success, ok := typ.ErrorUnionParts(parsed)
+	if !ok {
+		return "", "", false
+	}
+	return t.remember(errorType), t.remember(success), true
 }
 
 // splitGenericType extracts base and raw arguments from base<args>.

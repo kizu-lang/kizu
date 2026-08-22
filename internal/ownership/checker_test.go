@@ -236,6 +236,89 @@ fn main() -> !void {
 	}
 }
 
+// TestCheckAcceptsOwnerViewCapture keeps a view tie and an explicit deinit
+// obligation on the same binding. The source becomes writable again after
+// the owner is consumed.
+func TestCheckAcceptsOwnerViewCapture(t *testing.T) {
+	source := `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader {
+        input: input,
+        pending: std::array::new<i64>(allocator),
+    };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    var value = reader(allocator, view);
+    print(value.pending.len());
+    value.deinit();
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(1);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsOwnerViewCaptureMisuse checks that supporting a mixed
+// aggregate neither drops its cleanup nor releases its source tie early.
+func TestCheckRejectsOwnerViewCaptureMisuse(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "missing cleanup",
+			source: `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader { input: input, pending: std::array::new<i64>(allocator) };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let value = reader(allocator, view);
+    print(value.pending.len());
+    return;
+}`,
+			want: "owned value `value` is never deinitialized",
+		},
+		{
+			name: "source mutation while owner lives",
+			source: `struct Reader {
+    pub input: []u8,
+    pub pending: std::array::Array<i64>,
+}
+fn reader(allocator: Allocator, input: []u8) -> Reader {
+    return Reader { input: input, pending: std::array::new<i64>(allocator) };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var buf = [16]u8{};
+    let view = buf.as_bytes();
+    let value = reader(allocator, view);
+    defer value.deinit();
+    let writable = buf.as_mut_bytes();
+    writable[0] = cast<u8>(1);
+    print(value.pending.len());
+    return;
+}`,
+			want: "value `buf` cannot be mutably borrowed while borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsViewCaptureEscapes pins the view-capture escape rules
 // (ADR-0100): a struct tied to a local view stays in the frame, and views
 // cannot smuggle out through `&var` parameters.
@@ -304,6 +387,72 @@ fn main() -> !void {
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsTransitiveViewCaptureMutation keeps every link in a
+// String-view-helper-capture chain borrowed for the capture body.
+func TestCheckRejectsTransitiveViewCaptureMutation(t *testing.T) {
+	source := `struct SplitView {
+    pub left: []u8,
+    pub right: []u8,
+}
+fn tail(bytes: []u8) -> []u8 {
+    return bytes[1..std::mem::len(bytes)];
+}
+fn split(bytes: []u8) -> !?SplitView {
+    return SplitView { left: bytes[0..1], right: bytes[1..std::mem::len(bytes)] };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = try std::string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    let suffix = tail(bytes);
+    if try split(suffix) |parts| {
+        try text.append_bytes("d");
+        print(parts.left);
+    }
+    return;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(),
+		"String.append_bytes` cannot run while string is borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsViewCaptureMutationThroughBorrowArgument derives the
+// capture tie from an explicit borrow parameter rather than argument syntax.
+func TestCheckRejectsViewCaptureMutationThroughBorrowArgument(t *testing.T) {
+	source := `struct SplitView {
+    pub left: []u8,
+    pub right: []u8,
+}
+fn split(text: &std::string::String) -> ?SplitView {
+    let bytes = text.as_bytes();
+    return SplitView { left: bytes[0..1], right: bytes[1..std::mem::len(bytes)] };
+}
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = try std::string::from_bytes(allocator, "abc");
+    defer text.deinit();
+    if split(&text) |parts| {
+        try text.append_bytes("d");
+        print(parts.left);
+    }
+    return;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(),
+		"String.append_bytes` cannot run while string is borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
 }
 
 // TestCheckRejectsBorrowProvenanceReturnConflicts checks parent restrictions stay local.
@@ -1163,7 +1312,7 @@ fn main() {
     let h = boxes.add(Box { user: User { name: "alice" } });
     take(boxes.at(h).user);
 }`,
-			want: "arena.at returns a local borrow and its fields cannot be moved",
+			want: "arena.at returns &T, so its fields cannot be moved",
 		},
 	}
 	runErrorCases(t, cases)
@@ -1433,10 +1582,11 @@ func TestCheckErrDeferRetirementIsRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if err := New().Check(program); err != nil {
+	checker := New()
+	if err := checker.Check(program); err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	retired := retiredErrDefersOf(t, program, "build")
+	retired := retiredErrDefersOf(t, program, checker.Result(), "build")
 	want := [][]string{nil, {"child"}, {"child"}}
 	if len(retired) != len(want) {
 		t.Fatalf("got %d try exits, want %d", len(retired), len(want))
@@ -1567,7 +1717,12 @@ func TestCheckAllowsSecondOwnerUnderItsOwnName(t *testing.T) {
 
 // retiredErrDefersOf lists, in source order, what each try in the named
 // function retires.
-func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]string {
+func retiredErrDefersOf(
+	t *testing.T,
+	program *ast.Program,
+	result Result,
+	name string,
+) [][]string {
 	t.Helper()
 	var retired [][]string
 	for _, decl := range program.Decls {
@@ -1581,7 +1736,7 @@ func retiredErrDefersOf(t *testing.T, program *ast.Program, name string) [][]str
 				continue
 			}
 			if try, ok := expr.Expr.(*ast.TryExpr); ok {
-				retired = append(retired, try.RetiredErrDefers)
+				retired = append(retired, result.RetiredErrDefersForTry(try))
 			}
 		}
 	}
@@ -1742,6 +1897,44 @@ fn main(values: std::array::Array<Name>) {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckArrayCloneDoesNotMoveCopyArray keeps clone as a read of the source
+// while tracking the returned Array as a separate owner.
+func TestCheckArrayCloneDoesNotMoveCopyArray(t *testing.T) {
+	source := `fn copy(values: std::array::Array<i64>, allocator: Allocator) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    print(values.len());
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckArrayCloneRejectsOwnerElements keeps element-specific deep copy
+// outside the generic Array API.
+func TestCheckArrayCloneRejectsOwnerElements(t *testing.T) {
+	source := `fn copy(
+    values: std::array::Array<std::string::String>,
+    allocator: Allocator,
+) -> !void {
+    defer values.deinit();
+    let copied = try values.clone(allocator);
+    defer copied.deinit();
+    return;
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected copy-element error")
+	}
+	if !strings.Contains(err.Error(), "`Array.clone` requires copy element") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 
