@@ -548,6 +548,194 @@ fn add_union_decl(
     }));
 }
 
+fn (self: &var Parser) parse_struct_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    let declaration = try self.parse_struct_decl_with_doc(
+        tree,
+        types,
+        move docs
+    );
+    return add_struct_decl(tree, move declaration);
+}
+
+fn (self: &var Parser) parse_struct_decl_with_doc(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String
+) -> !ast::StructDecl {
+    let doc = tree.add_text(move docs);
+    if !try self.expect_peek(token::Kind::Ident) {
+        let name = tree.add_text(string::new(self.allocator));
+        return empty_struct_decl(self.allocator, name, doc);
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    if self.peek_kind() == token::Kind::Lt {
+        try self.next_token();
+        if try self.parse_generic_param_list(tree, types) |type_params| {
+            errdefer type_params.deinit();
+            if type_params.len() == 0 or !try self.expect_type_close() {
+                return make_struct_decl(
+                    name,
+                    doc,
+                    move type_params,
+                    array::new<ast::Field>(self.allocator)
+                );
+            }
+            let fields = try self.parse_struct_body(tree, types);
+            return make_struct_decl(
+                name,
+                doc,
+                move type_params,
+                move fields
+            );
+        }
+        return empty_struct_decl(self.allocator, name, doc);
+    }
+    let fields = try self.parse_struct_body(tree, types);
+    return make_struct_decl(
+        name,
+        doc,
+        array::new<ast::Text>(self.allocator),
+        move fields
+    );
+}
+
+fn (self: &var Parser) parse_struct_body(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !array::Array<ast::Field> {
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return array::new<ast::Field>(self.allocator);
+    }
+    return self.parse_struct_fields(tree, types);
+}
+
+fn (self: &var Parser) parse_struct_fields(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !array::Array<ast::Field> {
+    var fields = array::new<ast::Field>(self.allocator);
+    errdefer fields.deinit();
+    try self.next_token();
+    while self.current_kind() != token::Kind::RBrace and
+        self.current_kind() != token::Kind::Eof {
+        if try self.parse_struct_field(tree, types) |field| {
+            try fields.append(field);
+        } else {
+            return move fields;
+        }
+        if !try self.consume_list_delimiter("struct field") {
+            return move fields;
+        }
+        try self.next_token();
+    }
+    return move fields;
+}
+
+fn (self: &var Parser) parse_struct_field(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?ast::Field {
+    let doc_handle = self.stream.get_or_panic(self.position);
+    let docs = try self.comment_text_at(doc_handle);
+    let doc = tree.add_text(move docs);
+    var public = false;
+    if self.current_kind() == token::Kind::Public {
+        public = true;
+        try self.next_token();
+    }
+    if self.current_kind() != token::Kind::Ident {
+        let handle = self.stream.get_or_panic(self.position);
+        let message = try name_list_token_message(
+            self.allocator,
+            "field name",
+            self.tokens.at(handle)
+        );
+        try self.record_error(move message);
+        return null;
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    if !try self.expect_peek(token::Kind::Colon) {
+        return null;
+    }
+    try self.next_token();
+    var borrow = false;
+    var mut_borrow = false;
+    if self.current_kind() == token::Kind::Amp {
+        borrow = true;
+        try self.next_token();
+        if self.current_kind() == token::Kind::Var {
+            mut_borrow = true;
+            try self.next_token();
+        }
+    }
+    let parsed = try self.parse_type_name(types);
+    if parsed |type_name| {
+        let name = try retain_literal(
+            self.allocator,
+            tree,
+            self.tokens.at(name_handle)
+        );
+        return ast::Field {
+            name: name,
+            doc: doc,
+            type_name: type_name,
+            borrow: borrow,
+            mut_borrow: mut_borrow,
+            public: public
+        };
+    }
+    return null;
+}
+
+fn empty_struct_decl(
+    allocator: Allocator,
+    name: ast::Text,
+    doc: ast::Text
+) -> ast::StructDecl {
+    return make_struct_decl(
+        name,
+        doc,
+        array::new<ast::Text>(allocator),
+        array::new<ast::Field>(allocator)
+    );
+}
+
+fn make_struct_decl(
+    name: ast::Text,
+    doc: ast::Text,
+    type_params: array::Array<ast::Text>,
+    fields: array::Array<ast::Field>
+) -> ast::StructDecl {
+    return ast::StructDecl {
+        name: name,
+        doc: doc,
+        type_params: move type_params,
+        fields: move fields,
+        public: false,
+        requires_unsafe: false
+    };
+}
+
+fn add_struct_decl(
+    tree: &var ast::Ast,
+    declaration: ast::StructDecl
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Struct(
+        move declaration
+    ));
+}
+
 fn (self: &var Parser) parse_return_clause(
     types: &var typ::Table,
     signature: &var ast::FunctionSignature

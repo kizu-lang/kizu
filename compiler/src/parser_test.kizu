@@ -1392,6 +1392,356 @@ test "parser keeps partial union declarations after syntax errors" {
     }
 }
 
+fn expect_struct_field(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    fields: &array::Array<ast::Field>,
+    index: i64,
+    name: []u8,
+    docs: []u8,
+    type_name: []u8,
+    borrow: bool,
+    mut_borrow: bool,
+    public: bool
+) -> !void {
+    let field = fields.get_or_panic(index);
+    expect_retained_bytes(tree.texts.at(field.name.node), name);
+    expect_retained_bytes(tree.texts.at(field.doc.node), docs);
+    testing::expect_equal<bool>(borrow, field.borrow);
+    testing::expect_equal<bool>(mut_borrow, field.mut_borrow);
+    testing::expect_equal<bool>(public, field.public);
+    let rendered = try typ::render(allocator, types, field.type_name);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, type_name);
+    return;
+}
+
+test "parser retains generic struct fields docs borrows and visibility" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let input =
+        \\/// User docs.
+        \\struct User<T> {
+        \\    /// Name docs.
+        \\    pub name: []u8,
+        \\    borrowed: &T,
+        \\    mutable: &var T,
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_struct_decl(&var tree, &var types);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Struct(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "User");
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "User docs."
+            );
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            if retained.type_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.node), "T");
+            } else {
+                testing::fail("missing struct type parameter");
+            }
+            testing::expect_equal<i64>(3, retained.fields.len());
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &types,
+                &retained.fields,
+                0,
+                "name",
+                "Name docs.",
+                "[]u8",
+                false,
+                false,
+                true
+            );
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &types,
+                &retained.fields,
+                1,
+                "borrowed",
+                "",
+                "T",
+                true,
+                false,
+                false
+            );
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &types,
+                &retained.fields,
+                2,
+                "mutable",
+                "",
+                "T",
+                true,
+                true,
+                false
+            );
+            testing::expect(!retained.public);
+            testing::expect(!retained.requires_unsafe);
+        },
+        _ => testing::fail("parser did not retain a struct declaration"),
+    }
+}
+
+test "parser keeps struct declarations mutable until final retention" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let scanner = lexer::new(allocator, "struct Guard {}");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let docs = try string::from_bytes(allocator, "Injected docs.");
+    var declaration = try value.parse_struct_decl_with_doc(
+        &var tree,
+        &var types,
+        move docs
+    );
+    value.deinit();
+    declaration.public = true;
+    declaration.requires_unsafe = true;
+    let retained = tree.add_declaration(ast::DeclarationNode::Struct(
+        move declaration
+    ));
+    match tree.declarations.at(retained.node) {
+        Struct(node) => {
+            expect_retained_bytes(tree.texts.at(node.name.node), "Guard");
+            expect_retained_bytes(
+                tree.texts.at(node.doc.node),
+                "Injected docs."
+            );
+            testing::expect(node.public);
+            testing::expect(node.requires_unsafe);
+        },
+        _ => testing::fail("mutable struct declaration was not retained"),
+    }
+}
+
+test "parser keeps partial struct declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let name_scanner = lexer::new(allocator, "struct ;");
+    var name = try parser::new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_struct_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        7
+    );
+    match tree.declarations.at(name_decl.node) {
+        Struct(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser did not retain a partial struct"),
+    }
+
+    let generic_scanner = lexer::new(allocator, "struct Box<T {");
+    var generic = try parser::new(allocator, move generic_scanner);
+    defer generic.deinit();
+    let generic_decl = try generic.parse_struct_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &generic,
+        0,
+        "expected next token `>`, got `{`",
+        12,
+        13
+    );
+    match tree.declarations.at(generic_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser lost a partial generic struct"),
+    }
+
+    let empty_generic_scanner = lexer::new(
+        allocator,
+        "struct Box<> { value: i64 }"
+    );
+    var empty_generic = try parser::new(
+        allocator,
+        move empty_generic_scanner
+    );
+    defer empty_generic.deinit();
+    let empty_generic_decl = try empty_generic.parse_struct_decl(
+        &var tree,
+        &var types
+    );
+    testing::expect(empty_generic.current_kind() == token::Kind::Gt);
+    testing::expect(empty_generic.peek_kind() == token::Kind::LBrace);
+    expect_parser_diagnostic(
+        &empty_generic,
+        0,
+        "expected static parameter, got `>`",
+        12,
+        13
+    );
+    match tree.declarations.at(empty_generic_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser accepted an empty struct generic list"),
+    }
+
+    let value_param_scanner = lexer::new(
+        allocator,
+        "struct Box<n: i64> { value: i64 }"
+    );
+    var value_param = try parser::new(allocator, move value_param_scanner);
+    defer value_param.deinit();
+    let value_param_decl = try value_param.parse_struct_decl(
+        &var tree,
+        &var types
+    );
+    testing::expect(value_param.current_kind() == token::Kind::Ident);
+    testing::expect(value_param.peek_kind() == token::Kind::Gt);
+    expect_parser_diagnostic(
+        &value_param,
+        0,
+        "expected type parameter, got n: i64",
+        15,
+        18
+    );
+    match tree.declarations.at(value_param_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser accepted a struct value parameter"),
+    }
+
+    let brace_scanner = lexer::new(allocator, "struct User ;");
+    var brace = try parser::new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_struct_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        8,
+        12
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser lost a brace-partial struct"),
+    }
+
+    let item_scanner = lexer::new(allocator, "struct User { 1 }");
+    var item = try parser::new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_struct_decl(&var tree, &var types);
+    let item_message =
+        \\expected field name, got integer "1"
+    ;
+    expect_parser_diagnostic(&item, 0, item_message, 15, 16);
+    match tree.declarations.at(item_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained an invalid struct field"),
+    }
+
+    let public_scanner = lexer::new(allocator, "struct User { pub 1 }");
+    var public = try parser::new(allocator, move public_scanner);
+    defer public.deinit();
+    let public_decl = try public.parse_struct_decl(&var tree, &var types);
+    let public_message =
+        \\expected field name, got integer "1"
+    ;
+    expect_parser_diagnostic(&public, 0, public_message, 19, 20);
+    match tree.declarations.at(public_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained an invalid public field"),
+    }
+
+    let colon_scanner = lexer::new(allocator, "struct User { name i64 }");
+    var colon = try parser::new(allocator, move colon_scanner);
+    defer colon.deinit();
+    let colon_decl = try colon.parse_struct_decl(&var tree, &var types);
+    let colon_message =
+        \\expected next token `:`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(&colon, 0, colon_message, 15, 19);
+    match tree.declarations.at(colon_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained a field without a colon"),
+    }
+
+    let type_scanner = lexer::new(allocator, "struct User { name: + }");
+    var type_value = try parser::new(allocator, move type_scanner);
+    defer type_value.deinit();
+    let type_decl = try type_value.parse_struct_decl(&var tree, &var types);
+    expect_parser_diagnostic(
+        &type_value,
+        0,
+        "expected type, got `+`",
+        21,
+        22
+    );
+    match tree.declarations.at(type_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained a field without a type"),
+    }
+
+    let comma_scanner = lexer::new(
+        allocator,
+        "struct User { name: i64 age: i64 }"
+    );
+    var comma = try parser::new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_struct_decl(&var tree, &var types);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after struct field",
+        21,
+        24
+    );
+    match tree.declarations.at(comma_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(1, retained.fields.len()),
+        _ => testing::fail("parser lost partial struct fields"),
+    }
+
+    let eof_scanner = lexer::new(allocator, "struct User { name: i64");
+    var eof = try parser::new(allocator, move eof_scanner);
+    defer eof.deinit();
+    let eof_decl = try eof.parse_struct_decl(&var tree, &var types);
+    testing::expect(eof.current_kind() == token::Kind::Eof);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, eof.diagnostics_len());
+    match tree.declarations.at(eof_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(1, retained.fields.len()),
+        _ => testing::fail("parser lost an EOF-partial struct"),
+    }
+}
+
 test "parser retains import paths after token cleanup" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
