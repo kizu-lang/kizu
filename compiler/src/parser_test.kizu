@@ -172,6 +172,147 @@ fn expect_retained_bytes(value: &string::String, expected: []u8) -> void {
     return;
 }
 
+fn expect_parsed_expression(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_expression(&var tree, &var types, 1);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        &types,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_statement(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree, &var types);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_statement(
+        allocator,
+        &tree,
+        &types,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_block(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let block = try value.parse_block_stmt(&var tree, &var types);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_block(allocator, &tree, &types, block);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_expression_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_render: []u8,
+    expected_message: []u8
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try value.parse_expression(&var tree, &var types, 1);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    if value.diagnostic(0) |entry| {
+        expect_retained_bytes(&entry.message, expected_message);
+    } else {
+        testing::fail("missing expression diagnostic");
+    }
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        &types,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected_render);
+    return;
+}
+
+fn expect_parsed_statement_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_render: []u8,
+    expected_message: []u8
+) -> !void {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let statement = try value.parse_statement(&var tree, &var types);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    if value.diagnostic(0) |entry| {
+        expect_retained_bytes(&entry.message, expected_message);
+    } else {
+        testing::fail("missing statement diagnostic");
+    }
+    let rendered = try ast::render_statement(
+        allocator,
+        &tree,
+        &types,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected_render);
+    return;
+}
+
 fn expect_break_label(
     tree: &ast::Ast,
     statement: ast::Statement,
@@ -4259,4 +4400,364 @@ test "parser token diagnostics preserve every description class" {
         token::Kind::Int,
         unicode
     );
+}
+
+test "parser expression recursion preserves Pratt and postfix behavior" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_expression(allocator, "1", "1");
+    let quoted =
+        \\"x"
+    ;
+    try expect_parsed_expression(allocator, quoted, quoted);
+    try expect_parsed_expression(allocator, "true", "true");
+    try expect_parsed_expression(allocator, "null", "null");
+    try expect_parsed_expression(
+        allocator,
+        "type<i64>",
+        "type<i64>"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "-1 + 2 * 3",
+        "((-1) + (2 * 3))"
+    );
+    try expect_parsed_expression(allocator, "&x", "(&x)");
+    try expect_parsed_expression(allocator, "&var x", "(&varx)");
+    try expect_parsed_expression(
+        allocator,
+        "(1 + 2) * 3",
+        "((1 + 2) * 3)"
+    );
+    try expect_parsed_expression(allocator, "f()", "f()");
+    try expect_parsed_expression(allocator, "f(1, 2,)", "f(1, 2)");
+    try expect_parsed_expression(allocator, "values[1]", "values[1]");
+    try expect_parsed_expression(
+        allocator,
+        "values[1..2]",
+        "values[1..2]"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "values[..2]",
+        "values[..2]"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "values[1..]",
+        "values[1..]"
+    );
+    try expect_parsed_expression(allocator, "value.field", "value.field");
+    try expect_parsed_expression(allocator, "value.*", "value.*");
+    try expect_parsed_expression(
+        allocator,
+        "std::Thing",
+        "std::Thing"
+    );
+    try expect_parsed_expression(allocator, "f<T>(x)", "f<T>(x)");
+    try expect_parsed_expression(allocator, "x < y", "(x < y)");
+    try expect_parsed_expression(
+        allocator,
+        "x orelse y",
+        "(x orelse y)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse return;",
+        "(x orelse return)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse return y;",
+        "(x orelse return y)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse break :outer;",
+        "(x orelse break :outer)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse continue :outer;",
+        "(x orelse continue :outer)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "comptime f()",
+        "comptime f()"
+    );
+    try expect_parsed_expression(allocator, "try f()", "try f()");
+    try expect_parsed_expression(allocator, "move x", "move x");
+    try expect_parsed_expression(allocator, "unsafe f()", "unsafe f()");
+    try expect_parsed_expression(
+        allocator,
+        "cast<i64>(x)",
+        "cast<i64>(x)"
+    );
+    try expect_parsed_expression(allocator, "[4]u8{}", "[4]u8{}");
+    try expect_parsed_expression(
+        allocator,
+        "Point { x: 1, y: 2 }",
+        "Point { x: 1, y: 2 }"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "if true {  } else {  }",
+        "if true {  } else {  }"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "match x { Ready => 1 }",
+        "match x { Ready => 1 }"
+    );
+}
+
+test "parser statement recursion preserves control flow and blocks" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_statement(allocator, "let x = 1;", "let x = 1;");
+    try expect_parsed_statement(allocator, "var x = 1;", "var x = 1;");
+    try expect_parsed_statement(allocator, "x = 2;", "x = 2;");
+    try expect_parsed_statement(allocator, "return;", "return;");
+    try expect_parsed_statement(allocator, "return x;", "return x;");
+    try expect_parsed_statement(allocator, "defer f();", "defer f();");
+    try expect_parsed_statement(
+        allocator,
+        "errdefer f();",
+        "errdefer f();"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "if true { return; } else { x; }",
+        "if true { return; } else { x; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "while true |value| { break; }",
+        "while true { break; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "outer: while true { continue :outer; }",
+        "outer: while true { continue :outer; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "for 0..10 |i| { break; }",
+        "for 0..10 |i| { break; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "match x { Ready => return, Value(v) => { return v; } }",
+        "match x { Ready => return;, Value(v) => { return v; } }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime if true {  } else {  }",
+        "comptime if true {  } else {  }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime for fields |field| {  }",
+        "comptime for fields |field| {  }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime match value |variant, payload| {  }",
+        "comptime match value |variant, payload| {  }"
+    );
+    try expect_parsed_block(
+        allocator,
+        "{ let x = 1; return x; }",
+        "{ let x = 1; return x; }"
+    );
+}
+
+test "parser retains one safety text identity for one statement" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\// SAFETY: bounds checked
+        \\unsafe first() + unsafe second();
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree, &var types);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.statements.at(statement.node) {
+        Expr(expression_statement) => {
+            match tree.expressions.at(expression_statement.expr.node) {
+                Binary(binary) => {
+                    match tree.expressions.at(binary.left.node) {
+                        Unsafe(left) => {
+                            match tree.expressions.at(binary.right.node) {
+                                Unsafe(right) => {
+                                    testing::expect(
+                                        left.safety.node == right.safety.node
+                                    );
+                                    expect_retained_bytes(
+                                        tree.texts.at(left.safety.node),
+                                        "bounds checked"
+                                    );
+                                },
+                                _ => testing::fail("missing right unsafe marker"),
+                            }
+                        },
+                        _ => testing::fail("missing left unsafe marker"),
+                    }
+                },
+                _ => testing::fail("safety statement was not binary"),
+            }
+        },
+        _ => testing::fail("safety expression was not a statement"),
+    }
+}
+
+test "parser restores enclosing safety across nested statements" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\// SAFETY: condition checked
+        \\if unsafe ready { unsafe run(); }
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree, &var types);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.statements.at(statement.node) {
+        If(branch) => {
+            match tree.expressions.at(branch.condition.node) {
+                Unsafe(condition) => {
+                    expect_retained_bytes(
+                        tree.texts.at(condition.safety.node),
+                        "condition checked"
+                    );
+                    match tree.statements.at(branch.consequence.node) {
+                        Block(block) => {
+                            let nested = block.statements.get_or_panic(0);
+                            match tree.statements.at(nested.node) {
+                                Expr(expression_statement) => {
+                                    match tree.expressions.at(
+                                        expression_statement.expr.node
+                                    ) {
+                                        Unsafe(body) => {
+                                            testing::expect(
+                                                condition.safety.node !=
+                                                    body.safety.node
+                                            );
+                                            expect_retained_bytes(
+                                                tree.texts.at(body.safety.node),
+                                                ""
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "nested marker was not unsafe"
+                                        ),
+                                    }
+                                },
+                                _ => testing::fail(
+                                    "nested unsafe was not a statement"
+                                ),
+                            }
+                        },
+                        _ => testing::fail("if consequence was not a block"),
+                    }
+                },
+                _ => testing::fail("if condition was not unsafe"),
+            }
+        },
+        _ => testing::fail("safety input was not an if statement"),
+    }
+}
+
+test "parser recursive recovery retains partial nodes and diagnostics" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_expression_error(
+        allocator,
+        "@",
+        "<error>",
+        "expected expression, got `@`"
+    );
+    try expect_parsed_expression_error(
+        allocator,
+        "values[..]",
+        "values[..]",
+        "slice expression requires at least one bound"
+    );
+    try expect_parsed_expression_error(
+        allocator,
+        "Point { 1: 2 }",
+        "Point {  }",
+        \\expected field name, got integer "1"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "let x = 1",
+        "let x = 1;",
+        "expected `;` after let statement"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "defer return;",
+        "defer <error>;",
+        "defer expects an expression statement"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "name: return;",
+        "<error>;",
+        "label `name` must be attached to while or for"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "comptime for values {  }",
+        "comptime for values || {  }",
+        "comptime for requires a capture, as in `comptime for list |field| { ... }`"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "comptime match value {  }",
+        "comptime match value || {  }",
+        "comptime match requires a capture, as in `comptime match value |variant| { ... }`"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "match x { 1 => x }",
+        "match x {  }",
+        \\expected match tag, got integer "1"
+    );
+
+    var types = typ::new(allocator);
+    defer types.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "f(1");
+    var value = try parser::new(allocator, move scanner);
+    defer value.deinit();
+    let partial = try value.parse_expression(&var tree, &var types, 1);
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token `)`, got end of file",
+        3,
+        4
+    );
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        &types,
+        partial
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, "f(1)");
 }
