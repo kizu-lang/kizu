@@ -58,7 +58,7 @@ type Checker struct {
 	currentReturn   Type
 	currentFunction *functionType
 	currentStd      bool
-	typeParams      map[string]bool
+	typeParams      typeParamStore
 	typeArgValues   map[string]Type
 	// staticParams holds the compile-time value parameters of the generic being
 	// checked, by declared type. A runtime local of the same name is not one of
@@ -476,11 +476,8 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
 		return err
 	}
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(decl.TypeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enter(decl.TypeParams)
+	defer c.typeParams.restore(previousTypeParams)
 	union := &unionType{
 		name: decl.Name, typeParams: decl.TypeParams,
 		variants: map[string]string{}, public: decl.Public,
@@ -526,11 +523,8 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		return err
 	}
 	c.structs[decl.Name] = decl
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(decl.TypeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enter(decl.TypeParams)
+	defer c.typeParams.restore(previousTypeParams)
 	for _, field := range decl.Fields {
 		typ, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
@@ -788,12 +782,8 @@ func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, 
 // out of the body: a signature that came from a body is one no other package
 // can be told without being shipped the body too.
 func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, error) {
-	typeParams := fn.TypeParamNames()
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(typeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enterSignature(fn)
+	defer c.typeParams.restore(previousTypeParams)
 
 	if index, reserved := reservedFunctionStaticParamIndex(fn); reserved {
 		param := fn.StaticParams[index]
@@ -978,7 +968,7 @@ func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
 // parseNamedType validates primitive, declared, and type-parameter names.
 func (c *Checker) parseNamedType(name string) (Type, error) {
 	typ := Type(name)
-	if c.typeParams[name] {
+	if c.typeParams.contains(name) {
 		return typ, nil
 	}
 	if !c.isTypeName(name) {
@@ -1124,7 +1114,7 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
 		return "", errorf("type error: std::map::Map expects 2 static arguments")
 	}
-	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
+	if !sameType(Type(args[0]), typeByteString) && !c.typeParams.contains(args[0]) {
 		return "", errorf("type error: std::map::Map key type must be []u8")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
@@ -1338,20 +1328,19 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
-	previousTypeParams := c.typeParams
+	previousTypeParams := c.typeParams.enterSignature(fn.sig)
 	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
-	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.staticParams = staticParams
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
-		c.typeParams = previousTypeParams
+		c.typeParams.restore(previousTypeParams)
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
@@ -3853,7 +3842,7 @@ func (c *Checker) checkArrayConstructor(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	if !c.typeParams[string(elem)] {
+	if !c.typeParams.contains(string(elem)) {
 		if err := c.rejectArrayElementType(elem); err != nil {
 			return "", true, err
 		}
@@ -4758,7 +4747,7 @@ func (c *Checker) fieldStaticArg(
 			"type error: `%s` static argument `%s` has no type parameter before it",
 			name, param.Name)
 	}
-	if c.typeParams[owner] {
+	if c.typeParams.contains(owner) {
 		// The owner is the enclosing generic's own parameter, so which fields
 		// exist is not known here. The instantiation of that generic checks
 		// this call again with the type bound.
@@ -4883,14 +4872,13 @@ func (c *Checker) enterInstanceContext(
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
-	previousTypeParams := c.typeParams
+	previousTypeParams := c.typeParams.enterSignature(fn.sig)
 	previousTypeArgValues := c.typeArgValues
 	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = returnType
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
-	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.typeArgValues = subst
 	c.staticParams = staticParams
 	c.loopLabels = nil
@@ -4898,7 +4886,7 @@ func (c *Checker) enterInstanceContext(
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
-		c.typeParams = previousTypeParams
+		c.typeParams.restore(previousTypeParams)
 		c.typeArgValues = previousTypeArgValues
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops

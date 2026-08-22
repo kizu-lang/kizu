@@ -1,0 +1,61 @@
+import compiler::internal::ast;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+test "type parameter scopes replace and restore outer names" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var store = new_type_param_store(allocator);
+    defer store.deinit();
+    var outer = array::new<ast::Text>(allocator);
+    defer outer.deinit();
+    let outer_name = try tree.add_text_from_bytes("T");
+    try outer.append(outer_name);
+    var inner = array::new<ast::Text>(allocator);
+    defer inner.deinit();
+    let inner_name = try tree.add_text_from_bytes("U");
+    try inner.append(inner_name);
+    let empty = try store.enter_ast(&tree, &outer);
+    testing::expect(store.contains("T"));
+    let previous = try store.enter_ast(&tree, &inner);
+    testing::expect(store.contains("U"));
+    testing::expect(!store.contains("T"));
+    store.restore(previous);
+    testing::expect(store.contains("T"));
+    testing::expect(!store.contains("U"));
+    store.restore(empty);
+    testing::expect(!store.contains("T"));
+}
+
+test "signature scopes select only type-valued static parameters" {
+    let allocator = mem::page_allocator();
+    var signature = FunctionSignatureType {
+        extern_abi: string::new(allocator),
+        static_params: array::new<StaticParamType>(allocator),
+        params: array::new<SignatureParamType>(allocator),
+        return_type: empty_type(),
+        requires_unsafe: false,
+        std: false
+    };
+    defer signature.deinit();
+    try signature.static_params.append(StaticParamType {
+        name: try string::from_bytes(allocator, "T"),
+        type_name: empty_type(),
+        is_type: true
+    });
+    try signature.static_params.append(StaticParamType {
+        name: try string::from_bytes(allocator, "count"),
+        type_name: empty_type(),
+        is_type: false
+    });
+    var store = new_type_param_store(allocator);
+    defer store.deinit();
+    let previous = try store.enter_signature(&signature);
+    testing::expect(store.contains("T"));
+    testing::expect(!store.contains("count"));
+    store.restore(previous);
+    testing::expect(!store.contains("T"));
+}

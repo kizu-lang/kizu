@@ -264,18 +264,6 @@ func borrowWrappedType(borrow bool, mutable bool, typ string) string {
 	return "&" + typ
 }
 
-// typeParamSet returns a lookup for function-level type parameters.
-func typeParamSet(params []string) map[string]bool {
-	if len(params) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(params))
-	for _, param := range params {
-		out[param] = true
-	}
-	return out
-}
-
 // sameType reports exact type equality.
 func sameType(left Type, right Type) bool {
 	return left == right

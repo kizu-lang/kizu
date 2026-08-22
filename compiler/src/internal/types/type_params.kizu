@@ -1,0 +1,87 @@
+import compiler::internal::ast;
+import std::arena;
+import std::array;
+import std::map;
+
+// Owns every type-parameter frame made during a checker phase. The current
+// frame is a copy handle so entering a generic never moves an owner field.
+struct TypeParamStore {
+    allocator: Allocator,
+    frames: arena::Arena<map::Map<[]u8, bool>>,
+    current: ?arena::Handle<map::Map<[]u8, bool>>
+}
+
+fn new_type_param_store(allocator: Allocator) -> TypeParamStore {
+    return TypeParamStore {
+        allocator: allocator,
+        frames: arena::new<map::Map<[]u8, bool>>(allocator),
+        current: null
+    };
+}
+
+// Selects params and returns the frame the caller must restore. An empty list
+// selects no parameters rather than capturing names from the outer generic.
+fn (self: &var TypeParamStore) enter_ast(
+    tree: &ast::Ast,
+    params: &array::Array<ast::Text>
+) -> !?arena::Handle<map::Map<[]u8, bool>> {
+    let previous = self.current;
+    if params.len() == 0 {
+        self.current = null;
+        return previous;
+    }
+    var names = map::new<[]u8, bool>(self.allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while params.at(index) |param| {
+        let retained = tree.texts.at(param.node);
+        let name = retained.as_bytes();
+        try names.insert(name, true);
+        index = index + 1;
+    }
+    let handle = self.frames.add(move names);
+    self.current = handle;
+    return previous;
+}
+
+// Selects only type-valued static parameters from a cached signature.
+fn (self: &var TypeParamStore) enter_signature(
+    signature: &FunctionSignatureType
+) -> !?arena::Handle<map::Map<[]u8, bool>> {
+    let previous = self.current;
+    if signature.static_params.len() == 0 {
+        self.current = null;
+        return previous;
+    }
+    var names = map::new<[]u8, bool>(self.allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while signature.static_params.at(index) |param| {
+        if param.is_type {
+            let name = param.name.as_bytes();
+            try names.insert(name, true);
+        }
+        index = index + 1;
+    }
+    if names.len() == 0 {
+        names.deinit();
+        self.current = null;
+        return previous;
+    }
+    let handle = self.frames.add(move names);
+    self.current = handle;
+    return previous;
+}
+
+// Selects the frame returned by enter_ast.
+fn (self: &var TypeParamStore) restore(
+    previous: ?arena::Handle<map::Map<[]u8, bool>>
+) -> void {
+    self.current = previous;
+}
+
+// Reports whether name belongs to the selected frame.
+fn (self: &TypeParamStore) contains(name: []u8) -> bool {
+    let handle = self.current orelse return false;
+    return self.frames.at(handle).contains(name);
+}
