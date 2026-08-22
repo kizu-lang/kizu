@@ -3102,6 +3102,145 @@ test "parser rejects malformed payload captures without retained text" {
     testing::expect(close_parser.peek_kind() == token::Kind::Plus);
 }
 
+test "parser retains zero one or two variant captures after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let absent_scanner = lexer::new(allocator, "value {");
+    var absent = try parser::new(allocator, move absent_scanner);
+    defer absent.deinit();
+    if try absent.parse_variant_capture(&var tree) |captures| {
+        defer captures.deinit();
+        testing::expect_equal<i64>(0, captures.len());
+        testing::expect(absent.current_kind() == token::Kind::Ident);
+        testing::expect(absent.peek_kind() == token::Kind::LBrace);
+    } else {
+        testing::fail("absent variant capture was malformed");
+    }
+
+    let one_scanner = lexer::new(allocator, "value |variant| {");
+    var one = try parser::new(allocator, move one_scanner);
+    errdefer one.deinit();
+    if try one.parse_variant_capture(&var tree) |captures| {
+        testing::expect(one.current_kind() == token::Kind::Pipe);
+        testing::expect(one.peek_kind() == token::Kind::LBrace);
+        one.deinit();
+        defer captures.deinit();
+        testing::expect_equal<i64>(1, captures.len());
+        if captures.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "variant");
+        } else {
+            testing::fail("missing variant capture name");
+        }
+    } else {
+        one.deinit();
+        testing::fail("one variant capture was rejected");
+    }
+
+    let two_scanner = lexer::new(
+        allocator,
+        "value |variant, payload| {"
+    );
+    var two = try parser::new(allocator, move two_scanner);
+    errdefer two.deinit();
+    if try two.parse_variant_capture(&var tree) |captures| {
+        testing::expect(two.current_kind() == token::Kind::Pipe);
+        testing::expect(two.peek_kind() == token::Kind::LBrace);
+        two.deinit();
+        defer captures.deinit();
+        testing::expect_equal<i64>(2, captures.len());
+        if captures.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "variant");
+        } else {
+            testing::fail("missing first variant capture");
+        }
+        if captures.at(1) |binding| {
+            expect_retained_bytes(tree.texts.at(binding.node), "payload");
+        } else {
+            testing::fail("missing payload capture");
+        }
+    } else {
+        two.deinit();
+        testing::fail("two variant captures were rejected");
+    }
+}
+
+test "parser rejects malformed and excess variant captures" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "value ||");
+    var name = try parser::new(allocator, move name_scanner);
+    defer name.deinit();
+    if try name.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("variant capture without a name was accepted");
+    }
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `|`",
+        7,
+        8
+    );
+    testing::expect(name.current_kind() == token::Kind::Pipe);
+    testing::expect(name.peek_kind() == token::Kind::Pipe);
+
+    let close_scanner = lexer::new(allocator, "value |first {");
+    var close = try parser::new(allocator, move close_scanner);
+    defer close.deinit();
+    if try close.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("unclosed variant capture was accepted");
+    }
+    expect_parser_diagnostic(
+        &close,
+        0,
+        "expected next token `|`, got `{`",
+        8,
+        13
+    );
+    testing::expect(close.current_kind() == token::Kind::Ident);
+    testing::expect(close.peek_kind() == token::Kind::LBrace);
+
+    let second_scanner = lexer::new(allocator, "value |first, |");
+    var second = try parser::new(allocator, move second_scanner);
+    defer second.deinit();
+    if try second.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("variant capture without a second name was accepted");
+    }
+    expect_parser_diagnostic(
+        &second,
+        0,
+        "expected next token identifier, got `|`",
+        13,
+        14
+    );
+    testing::expect(second.current_kind() == token::Kind::Comma);
+    testing::expect(second.peek_kind() == token::Kind::Pipe);
+
+    let excess_scanner = lexer::new(
+        allocator,
+        "value |first, second, third| {"
+    );
+    var excess = try parser::new(allocator, move excess_scanner);
+    defer excess.deinit();
+    if try excess.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("third variant capture was accepted");
+    }
+    expect_parser_diagnostic(
+        &excess,
+        0,
+        "expected next token `|`, got `,`",
+        15,
+        21
+    );
+    testing::expect(excess.current_kind() == token::Kind::Ident);
+    testing::expect(excess.peek_kind() == token::Kind::Comma);
+}
+
 test "parser retains canonical type names after token cleanup" {
     let allocator = mem::page_allocator();
     var types = typ::new(allocator);
