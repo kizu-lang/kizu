@@ -982,3 +982,104 @@ pub fn is_known_generic_base(base: []u8) -> bool {
 fn equal(left: []u8, right: []u8) -> bool {
     return mem::equal_bytes(left, right);
 }
+
+/// Identifies where Ast retains the leading owner-union cleanup match.
+pub union OwnerUnionMatch {
+    Statement(ast::Statement),
+    Expression(ast::Expression),
+}
+
+// Returns the leading `match self` from one owner-union cleanup body. The
+// result is a copy handle; Ast continues to own the match payload and arms.
+pub fn owner_union_self_match(
+    tree: &ast::Ast,
+    body: ?ast::Block,
+    self_name: []u8
+) -> ?OwnerUnionMatch {
+    let retained_body = body orelse return null;
+    match tree.statements.at(retained_body.node) {
+        Block(block) => {
+            let first = block.statements.get(0) orelse return null;
+            match tree.statements.at(first.node) {
+                Match(value) => {
+                    if owner_union_ident_is(tree, value.value, self_name) {
+                        return OwnerUnionMatch::Statement(first);
+                    }
+                },
+                Expr(statement) => {
+                    match tree.expressions.at(statement.expr.node) {
+                        Match(value) => {
+                            if owner_union_ident_is(
+                                tree,
+                                value.value,
+                                self_name
+                            ) {
+                                return OwnerUnionMatch::Expression(
+                                    statement.expr
+                                );
+                            }
+                        },
+                        _ => {},
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+// Reports whether an arm body is exactly `<binding>.deinit()`.
+pub fn match_arm_cleans_payload(
+    tree: &ast::Ast,
+    body: ast::Statement,
+    binding: []u8
+) -> bool {
+    match tree.statements.at(body.node) {
+        Expr(statement) => {
+            return owner_union_deinit_call(tree, statement.expr, binding);
+        },
+        _ => return false,
+    }
+}
+
+// Reports whether an expression calls `deinit` directly on one binding. The
+// later expression checker validates the call arguments and payload type.
+fn owner_union_deinit_call(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    binding: []u8
+) -> bool {
+    match tree.expressions.at(expression.node) {
+        Call(call) => {
+            match tree.expressions.at(call.callee.node) {
+                Field(field) => {
+                    let retained = tree.texts.at(field.name.node);
+                    let name = retained.as_bytes();
+                    return !field.namespace and
+                        mem::equal_bytes(name, typ::cleanup_method()) and
+                        owner_union_ident_is(tree, field.receiver, binding);
+                },
+                _ => return false,
+            }
+        },
+        _ => return false,
+    }
+}
+
+// Reports whether an expression is the requested identifier.
+fn owner_union_ident_is(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> bool {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            return mem::equal_bytes(name, expected);
+        },
+        _ => return false,
+    }
+}
