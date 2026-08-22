@@ -2558,6 +2558,11 @@ owner はすべてそれを持つので(§8)、場合分けはありません。
 `Map.insert` は owner value に対して trap です(占有しているかは実行時に
 しか分からないため)。置き換えは `at_mut` で in-place に行います。
 
+`Array.swap` は例外です。両方の initialized slot を storage 上で交換するだけで、
+どちらの owner も copy・replace・cleanup しないため、owner element に使えます。
+receiver は owned local または `&var Array<T>` に限り、shared borrow 越しの
+呼び出しは拒否します。
+
 `String.deinit` / `Box.deinit` / `Map.deinit` / `Arena.deinit` は caller 側の binding を
 無効化する必要があるため、owned local receiver 限定です。値を保持している
 場所では `owner.field.deinit()` の direct field cleanup も同じで、その field は

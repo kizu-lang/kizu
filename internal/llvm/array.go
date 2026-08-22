@@ -20,6 +20,7 @@ func (e *emitter) writeArrayRuntimeDecls() {
 	e.out.WriteString("declare ptr @kizu_array_get(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr)\n")
 	e.out.WriteString("declare i1 @kizu_array_set(ptr, i64, ptr)\n")
+	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
 	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
@@ -87,9 +88,26 @@ func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 		return e.writeArrayAt(instr)
 	case "array.set":
 		return e.writeArraySet(instr)
+	case "array.swap":
+		return e.writeArraySwap(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported array instruction `%s`", instr.Op)
 	}
+}
+
+// writeArraySwap exchanges two initialized slots without copying ownership.
+func (e *emitter) writeArraySwap(instr *ir.Instr) error {
+	if len(instr.Args) != 3 || instr.Args[1].Type != "i64" ||
+		instr.Args[2].Type != "i64" || instr.Result.Type != "!void" {
+		return fmt.Errorf("llvm error: array.swap expects Array<T>, i64, i64 -> !void")
+	}
+	array := e.value(instr.Args[0])
+	left := e.value(instr.Args[1])
+	right := e.value(instr.Args[2])
+	okName := localName(instr.Result.Name) + ".ok"
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_swap(ptr %s, i64 %s, i64 %s)\n",
+		okName, array.operand, left.operand, right.operand)
+	return e.writeArrayBoolResult(instr.Result, okName, "array_swap")
 }
 
 // writeArrayNew lowers std::array::new<T>(allocator) to an opaque runtime handle.

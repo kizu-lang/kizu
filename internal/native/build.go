@@ -544,6 +544,7 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
 
 void *kizu_array_new(void *allocator, int64_t elem_size);
 _Bool kizu_array_append(void *handle, const void *elem);
+_Bool kizu_array_swap(void *handle, int64_t left, int64_t right);
 _Bool kizu_array_truncate(void *handle, int64_t len);
 static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
 
@@ -1628,6 +1629,24 @@ _Bool kizu_array_set(void *handle, int64_t index, const void *elem) {
         return 0;
     }
     memcpy(array->data + index * array->elem_size, elem, (size_t)array->elem_size);
+    return 1;
+}
+
+_Bool kizu_array_swap(void *handle, int64_t left, int64_t right) {
+    KizuArray *array = (KizuArray *)handle;
+    if (!array || left < 0 || right < 0 || left >= array->len || right >= array->len) {
+        return 0;
+    }
+    if (left == right) {
+        return 1;
+    }
+    unsigned char *left_elem = array->data + left * array->elem_size;
+    unsigned char *right_elem = array->data + right * array->elem_size;
+    for (int64_t index = 0; index < array->elem_size; index++) {
+        unsigned char byte = left_elem[index];
+        left_elem[index] = right_elem[index];
+        right_elem[index] = byte;
+    }
     return 1;
 }
 

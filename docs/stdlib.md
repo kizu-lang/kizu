@@ -130,7 +130,7 @@ Current builtin thinning candidates:
 | `std::internal::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::internal::builtin::process_arg_count`, `std::internal::builtin::process_arg`, `std::internal::builtin::process_env` | Host primitive | Keep as host process boundary |
 | `std::internal::builtin::process_exit_code` | Removed | Implemented in `lib/kizu/std/src/process.kizu` as a pure value helper |
-| `std::internal::builtin::array<T>`, `std::internal::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/array.kizu`; direct user calls are rejected |
+| `std::internal::builtin::array<T>`, `std::internal::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/array.kizu`; `array_swap` exchanges initialized storage slots without copying or dropping owners; direct user calls are rejected |
 | `std::internal::builtin::map<K, V>`, `std::internal::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `lib/kizu/std/src/map.kizu`; direct user calls are rejected |
 
 `std::testing` now keeps the public assertion surface in `lib/kizu/std/src/testing.kizu`.
@@ -159,8 +159,9 @@ for parallel work once a real execution path exists.
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `lib/kizu/std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
-| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `reserve`, `clone`, `pop`, `pop_or_panic`, `get`, `get_or_panic`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::internal::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
+| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `reserve`, `clone`, `pop`, `pop_or_panic`, `get`, `get_or_panic`, `at`, `at_mut`, `set`, `swap`, `deinit` | Kizu constructor and method wrappers over reserved `std::internal::builtin::array_*`; Go owned storage, bounds checks, owner-safe slot exchange, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
 | `std::string` | `String`, `from_bytes`, `join`, `trim_space_in_place`, `append_bytes`, `append_byte`, `append_string`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `as_mut_bytes`, `deinit` | Kizu implementation in `lib/kizu/std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage private and mutable access exclusive |
+| `std::sort` | `strings` | Allocation-free Kizu heapsort over `String.as_bytes()` and owner-safe `Array.swap` | keep ordering logic in Kizu source; add a generic comparator only after its language contract exists |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::json` | `encoder`, `begin_object`, `end_object`, `begin_array`, `end_array`, `begin_object_field`, `begin_array_field`, `write_i64`, `write_bool`, `write_null`, `write_bytes`, `write_*_field`, `finish_into`, `deinit`, `encode<T>`, `encode_value<T>` | Kizu source over `String` and `std::meta`; API misuse traps through `std::internal::builtin::panic` | keep only the trap primitive trusted; `decode<T>` and `Value` still to come |
 | `std::map` | `Map<[]u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::internal::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
@@ -189,6 +190,7 @@ lib/kizu/std/
     arena.kizu
     mem.kizu
     array.kizu
+    sort.kizu
     string.kizu
     map.kizu
     testing.kizu

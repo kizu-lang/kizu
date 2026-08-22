@@ -4306,6 +4306,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
 		"std::internal::builtin::array_reserve",
 		"std::internal::builtin::array_set",
+		"std::internal::builtin::array_swap",
 		"std::internal::builtin::array_deinit",
 		"std::internal::builtin::array_truncate",
 		"std::internal::builtin::array_clear",
@@ -5931,10 +5932,25 @@ func (c *Checker) checkArrayReceiverMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
+	if err := checkArrayReceiverBorrow(field, env); err != nil {
+		return "", err
+	}
 	if field.Name == "at_mut" && !mutableReceiverPlace(field.Receiver, env) {
 		return "", errorf("type error: `Array.at_mut` requires mutable array binding")
 	}
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
+}
+
+// checkArrayReceiverBorrow rejects slot exchange through a shared Array borrow.
+func checkArrayReceiverBorrow(field *ast.FieldExpr, env *scope) error {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok || field.Name != "swap" || !env.isBorrowed(ident.Name) {
+		return nil
+	}
+	if !env.isMutBorrowed(ident.Name) {
+		return errorf("type error: `Array.%s` requires mutable Array receiver", field.Name)
+	}
+	return nil
 }
 
 // checkMapReceiverMethod validates receiver-sensitive Map<K, V> methods.

@@ -106,6 +106,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::array_pop_or_panic":       true,
 	"std::internal::builtin::array_reserve":            true,
 	"std::internal::builtin::array_set":                true,
+	"std::internal::builtin::array_swap":               true,
 	"std::internal::builtin::array_truncate":           true,
 	"std::internal::builtin::box":                      true,
 	"std::internal::builtin::box_borrow":               true,

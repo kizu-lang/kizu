@@ -1995,6 +1995,7 @@ var arrayPrimitives = map[string]string{
 	"std::internal::builtin::array_pop_or_panic": "pop_or_panic",
 	"std::internal::builtin::array_reserve":      "reserve",
 	"std::internal::builtin::array_set":          "set",
+	"std::internal::builtin::array_swap":         "swap",
 	"std::internal::builtin::array_truncate":     "truncate",
 }
 
@@ -2151,7 +2152,7 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 // path rather than lowering them to an instruction.
 func arrayMethodResultType(name string) (string, bool) {
 	switch name {
-	case "append", "reserve", "set", "truncate":
+	case "append", "reserve", "set", "swap", "truncate":
 		return "!void", true
 	case "len", "capacity":
 		return "i64", true

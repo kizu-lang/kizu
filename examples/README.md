@@ -88,6 +88,7 @@ go test ./...
 | explicit copy-element array clone | `std_array.kizu` | clones into a caller-selected allocator without aliasing the source buffer |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through `at`/`at_mut` captures |
+| owner-safe string sorting | `std_sort_strings.kizu` | sorts owned strings in byte-lexical order without allocation or owner replacement |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&var String` |
@@ -238,6 +239,8 @@ single source file. Run them with `kizu check <package-root>`.
 | array get is copy-only | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
 | array clone is copy-only | `negative/std_array_clone_non_copy.kizu` | `Array.clone` rejects owner elements that need per-type deep copy |
 | array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
+| array swap checks both indexes | `negative/std_array_swap_bounds.kizu` | `std::array::Error::OutOfBounds` |
+| array swap requires mutable access | `negative/std_array_swap_shared_param.kizu`, `negative/std_array_swap_shared_field.kizu` | `` `Array.swap` requires mutable Array receiver `` |
 | box allocation failure is a recoverable error | `negative/std_mem_box_oom.kizu` | `runtime error: std::mem::Error::OutOfMemory` |
 | `Box.take` consumes the box and waits for borrows | `negative/std_mem_box_take_after_take.kizu`, `negative/std_mem_box_take_while_borrowed.kizu` | `moved value` / `cannot run while box is borrowed` |
 | array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |

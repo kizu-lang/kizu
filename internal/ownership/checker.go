@@ -4820,7 +4820,8 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		"std::internal::builtin::array_pop", "std::internal::builtin::array_pop_or_panic",
 		"std::internal::builtin::array_get", "std::internal::builtin::array_get_or_panic",
 		"std::internal::builtin::array_at", "std::internal::builtin::array_at_mut",
-		"std::internal::builtin::array_set", "std::internal::builtin::array_deinit":
+		"std::internal::builtin::array_set", "std::internal::builtin::array_swap",
+		"std::internal::builtin::array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
 		return "", false, nil
@@ -6120,7 +6121,9 @@ func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *
 	value := &binding{
 		name: receiver.path, typeName: receiver.typeName,
 		// A field of a mutable place is itself a mutable place.
-		mutable: mutablePlace(receiver.owner),
+		mutable:       mutablePlace(receiver.owner),
+		borrowedParam: receiver.owner.borrowedParam,
+		mutBorrow:     receiver.owner.mutBorrow,
 		activeBorrows: receiver.owner.activeBorrows +
 			overlappingFieldCount(receiver.owner.fieldBorrows, receiver.field),
 		activeMutBorrows: receiver.owner.activeMutBorrows +
@@ -6306,7 +6309,8 @@ type containerAccessTable struct {
 var containerAccessTables = map[string]containerAccessTable{
 	"std::array::Array": {kind: "array", label: "Array", methods: map[string]containerAccess{
 		"append": accessMutate, "reserve": accessMutate, "set": accessMutate,
-		"pop": accessMutate, "pop_or_panic": accessMutate,
+		"swap": accessMutate,
+		"pop":  accessMutate, "pop_or_panic": accessMutate,
 		"truncate": accessMutate, "clear": accessMutate,
 		"len": accessRead, "capacity": accessRead,
 		"get": accessRead, "get_or_panic": accessRead, "clone": accessRead,
@@ -6575,8 +6579,8 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayCopyMethod(elem, name, args, env)
 	case "at", "at_mut":
 		return c.checkArrayAtCondition(array, elem, name, args, env)
-	case "set":
-		return c.checkArraySet(elem, args, env)
+	case "set", "swap":
+		return c.checkArrayIndexedMutation(array, elem, name, args, env)
 	case "deinit":
 		if len(args) != 0 {
 			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
@@ -6588,6 +6592,40 @@ func (c *Checker) checkArrayMethod(
 		// the table refusal above is the user-facing one.
 		return "", errorf("array error: method `%s` is classified but unhandled", name)
 	}
+}
+
+// checkArrayIndexedMutation validates set and owner-safe slot exchange.
+func (c *Checker) checkArrayIndexedMutation(
+	value *binding,
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if name == "set" {
+		return c.checkArraySet(elem, args, env)
+	}
+	if value.borrowedParam && !value.mutBorrow {
+		return "", errorf("array error: `Array.swap` requires mutable Array receiver")
+	}
+	return c.checkArraySwap(args, env)
+}
+
+// checkArraySwap validates two checked indexes without moving either element.
+func (c *Checker) checkArraySwap(args []ast.Expression, env *scope) (string, error) {
+	if len(args) != 2 {
+		return "", errorf("array error: `Array.swap` expects 2 args, got %d", len(args))
+	}
+	for _, arg := range args {
+		got, err := c.readExpr(arg, env)
+		if err != nil {
+			return "", err
+		}
+		if got != "i64" {
+			return "", errorf("array error: `Array.swap` expects i64 index, got %s", got)
+		}
+	}
+	return "!void", nil
 }
 
 // checkArrayCopyMethod dispatches operations whose result duplicates copy

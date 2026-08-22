@@ -185,6 +185,7 @@ var failureErrors = map[string]struct{ set, member string }{
 	"array_append":   {"std::array::Error", "OutOfMemory"},
 	"array_bounds":   {"std::array::Error", "OutOfBounds"},
 	"array_reserve":  {"std::array::Error", "OutOfMemory"},
+	"array_swap":     {"std::array::Error", "OutOfBounds"},
 	"array_truncate": {"std::array::Error", "OutOfBounds"},
 	"map_insert":     {"std::map::Error", "OutOfMemory"},
 	"box_new":        {"std::mem::Error", "OutOfMemory"},
