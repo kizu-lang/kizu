@@ -22,4 +22,6 @@
 // carries one is checked for still failing, so the line cannot outlive it.
 // `error:` is the substring a `-fails` case must print. `output:` is what a
 // program prints, and the lines after it are that output, so it goes last.
+// Package cases keep this block in src/main.kizu, or src/main_test.kizu when
+// the package contains tests only.
 package conformance

@@ -48,7 +48,7 @@ capacity の増加戦略は実装が決めます。保証するのは `capacity(
 `clear` は length を 0 にしますが、capacity は保持します。
 UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
-`std::string::String` の public behavior は `lib/kizu/std/src/string.kizu` に実装します。
+`std::string::String` の public behavior は `lib/kizu/std/src/string/string.kizu` に実装します。
 private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
 raw pointer は公開しません。mutable backing は `as_mut_bytes` の
 exclusive borrow 経由でだけ公開します(ADR-0096)。public

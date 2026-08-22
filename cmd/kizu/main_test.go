@@ -157,7 +157,6 @@ name = "my_app"
 version = "0.1.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 `)
 	assertFileContent(t, filepath.Join(target, "src", "main.kizu"), initMainSource)
@@ -198,7 +197,6 @@ name = "current_project"
 version = "0.1.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 `)
 }
@@ -298,7 +296,7 @@ func TestCheckPackageCommandWithoutModuleRoot(t *testing.T) {
 func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(
-		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [\"lib\"]\n",
+		"[package]\nname = \"frontend\"\n\n[modules]\npaths = [\"lib\"]\n",
 	)
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
 		t.Fatal(err)
@@ -307,16 +305,25 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	if err := os.Mkdir(libDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	checksDir := filepath.Join(libDir, "checks")
+	if err := os.Mkdir(checksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	checks := "pub fn touch() -> void {\n    return;\n}\n"
-	if err := os.WriteFile(filepath.Join(libDir, "checks.kizu"), []byte(checks), 0o644); err != nil {
+	checksPath := filepath.Join(checksDir, "checks.kizu")
+	if err := os.WriteFile(checksPath, []byte(checks), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	parserDir := filepath.Join(libDir, "parser")
 	if err := os.Mkdir(parserDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	astDir := filepath.Join(parserDir, "ast")
+	if err := os.Mkdir(astDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	nested := "pub fn touch() -> void {\n    return;\n}\n"
-	if err := os.WriteFile(filepath.Join(parserDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(astDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	source := "import frontend::checks;\n" +
@@ -332,7 +339,7 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	nested = "pub fn touch() -> void {\n    frontend::root_touch();\n}\n"
-	if err := os.WriteFile(filepath.Join(parserDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(astDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -345,11 +352,11 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	}
 }
 
-// TestCheckPackageCommandRejectsDuplicateModules keeps module graph invariants intact.
-func TestCheckPackageCommandRejectsDuplicateModules(t *testing.T) {
+// TestCheckPackageCommandCombinesDirectoryFiles checks one directory is one module.
+func TestCheckPackageCommandCombinesDirectoryFiles(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(
-		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [\"lib\"]\n",
+		"[package]\nname = \"frontend\"\n\n[modules]\npaths = [\"lib\"]\n",
 	)
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
 		t.Fatal(err)
@@ -362,31 +369,32 @@ func TestCheckPackageCommandRejectsDuplicateModules(t *testing.T) {
 	if err := os.Mkdir(parserDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mainPath := filepath.Join(libDir, "main.kizu")
-	if err := os.WriteFile(mainPath, []byte("fn main() {}\n"), 0o644); err != nil {
+	mainSource := `import frontend::parser;
+
+fn main() {
+    print(parser::answer());
+}
+`
+	if err := os.WriteFile(filepath.Join(libDir, "main.kizu"), []byte(mainSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	parserFile := "pub fn touch() -> void {\n    return;\n}\n"
-	parserPath := filepath.Join(libDir, "parser.kizu")
-	if err := os.WriteFile(parserPath, []byte(parserFile), 0o644); err != nil {
+	privateHelper := "fn value() -> i64 {\n    return 42;\n}\n"
+	valuePath := filepath.Join(parserDir, "value.kizu")
+	if err := os.WriteFile(valuePath, []byte(privateHelper), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	parserMod := "pub fn other() -> void {\n    return;\n}\n"
-	parserModPath := filepath.Join(parserDir, "mod.kizu")
-	if err := os.WriteFile(parserModPath, []byte(parserMod), 0o644); err != nil {
+	publicAPI := "pub fn answer() -> i64 {\n    return value();\n}\n"
+	parserPath := filepath.Join(parserDir, "parser.kizu")
+	if err := os.WriteFile(parserPath, []byte(publicAPI), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
-	if runErr == nil || !strings.Contains(runErr.Error(), "duplicate module") {
-		t.Fatalf("got error %v, want duplicate module", runErr)
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
 	}
-	// The message names both files that claim the module path; asserting the
-	// exact text would freeze two temp-dir paths into the expectation.
-	for _, fragment := range []string{"parser/mod.kizu", "parser.kizu"} {
-		if !strings.Contains(out, fragment) {
-			t.Fatalf("duplicate module diagnostic %q does not name %s", out, fragment)
-		}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
 	}
 }
 
@@ -569,7 +577,7 @@ fn main() {
 func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(
-		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [lib]\n",
+		"[package]\nname = \"frontend\"\n\n[modules]\npaths = [lib]\n",
 	)
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
 		t.Fatal(err)
@@ -1121,7 +1129,7 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 func TestBuildEmitLLVMPackageCommandSmoke(t *testing.T) {
 	root := t.TempDir()
 	manifest := []byte(
-		"[package]\nname = \"app\"\n\n[modules]\nroot = \"src/main.kizu\"\npaths = [\"src\"]\n",
+		"[package]\nname = \"app\"\n\n[modules]\npaths = [\"src\"]\n",
 	)
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
 		t.Fatal(err)
@@ -1144,7 +1152,11 @@ pub fn main() -> void {
     return 42;
 }
 `)
-	if err := os.WriteFile(filepath.Join(srcDir, "math.kizu"), helperSource, 0o644); err != nil {
+	mathDir := filepath.Join(srcDir, "math")
+	if err := os.Mkdir(mathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mathDir, "math.kizu"), helperSource, 0o644); err != nil {
 		t.Fatal(err)
 	}
 

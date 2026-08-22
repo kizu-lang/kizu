@@ -1,0 +1,2387 @@
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn retained_text(
+    tree: &var Ast,
+    bytes: []u8
+) -> !Text {
+    return tree.add_text_from_bytes(bytes);
+}
+
+fn expect_text(tree: &Ast, value: Text, expected: []u8) -> void {
+    expect_retained_text(tree.texts.at(value.node), expected);
+    return;
+}
+
+fn expect_retained_text(
+    retained: &string::String,
+    expected: []u8
+) -> void {
+    let bytes = retained.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn add_ident_expression(
+    tree: &var Ast,
+    name: []u8
+) -> !Expression {
+    let retained = try retained_text(tree, name);
+    return tree.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: retained,
+        span: zero_span()
+    }));
+}
+
+fn add_int_expression(
+    tree: &var Ast,
+    value: []u8
+) -> !Expression {
+    let retained = try retained_text(tree, value);
+    return tree.add_expression(ExpressionNode::Int(IntExpr {
+        value: retained
+    }));
+}
+
+fn add_empty_block(
+    allocator: Allocator,
+    tree: &var Ast
+) -> Block {
+    return tree.add_block(BlockStmt {
+        statements: array::new<Statement>(allocator)
+    });
+}
+
+fn expect_expression_render(
+    allocator: Allocator,
+    tree: &Ast,
+    expression: Expression,
+    expected: []u8
+) -> !void {
+    let rendered = try render_expression(
+        allocator,
+        tree,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_statement_render(
+    allocator: Allocator,
+    tree: &Ast,
+    statement: Statement,
+    expected: []u8
+) -> !void {
+    let rendered = try render_statement(
+        allocator,
+        tree,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_block_render(
+    allocator: Allocator,
+    tree: &Ast,
+    block: Block,
+    expected: []u8
+) -> !void {
+    let rendered = try render_block(allocator, tree, block);
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_declaration_render(
+    allocator: Allocator,
+    tree: &Ast,
+    declaration: Declaration,
+    expected: []u8
+) -> !void {
+    let rendered = try render_declaration(
+        allocator,
+        tree,
+        declaration
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_program_render(
+    allocator: Allocator,
+    tree: &Ast,
+    program: &Program,
+    expected: []u8
+) -> !void {
+    let rendered = try render_program(
+        allocator,
+        tree,
+        program
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn empty_signature(
+    allocator: Allocator,
+    tree: &var Ast,
+    name: []u8
+) -> !FunctionSignature {
+    let function_name = try retained_text(tree, name);
+    let extern_abi = try retained_text(tree, "");
+    return FunctionSignature {
+        receiver: false,
+        name: function_name,
+        static_params: array::new<StaticParam>(allocator),
+        params: array::new<Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: extern_abi,
+        public: false,
+        std: false
+    };
+}
+
+fn expect_marker_value(
+    tree: &Ast,
+    marker: Expression,
+    expected: []u8
+) -> void {
+    if marker_value(tree, marker) |inner| {
+        match tree.expressions.at(inner.node) {
+            Int(value) => {
+                expect_text(tree, value.value, expected);
+            },
+            _ => testing::fail("marker did not retain its integer child"),
+        }
+    } else {
+        testing::fail("transparent marker was not recognized");
+    }
+    return;
+}
+
+fn expect_block_len(tree: &Ast, block: Block, expected: i64) -> void {
+    match tree.statements.at(block.node) {
+        Block(value) => testing::expect_equal<i64>(expected, value.statements.len()),
+        _ => testing::fail("block handle did not retain a block statement"),
+    }
+    return;
+}
+
+fn expect_variant_path(
+    tree: &Ast,
+    path: Expression,
+    expected_owner: []u8,
+    expected_variant: []u8
+) -> void {
+    match tree.expressions.at(path.node) {
+        Field(field) => {
+            testing::expect(field.namespace);
+            testing::expect(field.span.is_zero());
+            expect_text(tree, field.name, expected_variant);
+            match tree.expressions.at(field.receiver.node) {
+                Ident(ident) => {
+                    testing::expect(ident.span.is_zero());
+                    expect_text(tree, ident.name, expected_owner);
+                },
+                _ => testing::fail("variant owner was not an identifier"),
+            }
+        },
+        _ => testing::fail("variant path was not a namespace field"),
+    }
+    return;
+}
+
+fn expect_ident_name(
+    tree: &Ast,
+    expression: Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Ident(ident) => {
+            testing::expect(ident.span.is_zero());
+            expect_text(tree, ident.name, expected);
+        },
+        _ => testing::fail("expression was not an identifier"),
+    }
+    return;
+}
+
+fn expect_construct_worker(
+    tree: &Ast,
+    statement: Statement,
+    expected_binding: []u8,
+    expected_type_arg: []u8,
+    expected_args: ExpressionList,
+    expected_arg: Expression
+) -> void {
+    match tree.statements.at(statement.node) {
+        Let(binding) => {
+            testing::expect(!binding.mutable);
+            expect_text(tree, binding.name, expected_binding);
+            match tree.expressions.at(binding.value.node) {
+                Try(tried) => match tree.expressions.at(tried.value.node) {
+                    Call(call) => {
+                        testing::expect(call.args.node == expected_args.node);
+                        testing::expect_equal<i64>(1, call.args.len(tree));
+                        testing::expect(
+                            call.args.get_or_panic(tree, 0).node == expected_arg.node
+                        );
+                        match tree.expressions.at(call.callee.node) {
+                            TypeApply(applied) => {
+                                expect_text(tree, applied.type_arg, expected_type_arg);
+                                expect_ident_name(tree, applied.callee, "make");
+                            },
+                            _ => testing::fail("worker call had no static field argument"),
+                        }
+                    },
+                    _ => testing::fail("worker result was not a call"),
+                },
+                _ => testing::fail("worker result was not tried"),
+            }
+        },
+        _ => testing::fail("construct statement was not a binding"),
+    }
+    return;
+}
+
+fn expect_construct_cleanup(
+    tree: &Ast,
+    statement: Statement,
+    expected_binding: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        ErrDefer(cleanup) => match tree.expressions.at(cleanup.expr.node) {
+            Call(call) => {
+                testing::expect_equal<i64>(0, call.args.len(tree));
+                match tree.expressions.at(call.callee.node) {
+                    Field(method) => {
+                        testing::expect(!method.namespace);
+                        testing::expect(method.span.is_zero());
+                        expect_text(tree, method.name, "deinit");
+                        expect_ident_name(tree, method.receiver, expected_binding);
+                    },
+                    _ => testing::fail("cleanup callee was not a method field"),
+                }
+            },
+            _ => testing::fail("errdefer did not retain a cleanup call"),
+        },
+        _ => testing::fail("owner field had no errdefer"),
+    }
+    return;
+}
+
+fn expect_construct_field(
+    tree: &Ast,
+    field: &FieldValue,
+    expected_name: []u8,
+    expected_binding: []u8,
+    moved: bool
+) -> void {
+    expect_text(tree, field.name, expected_name);
+    if moved {
+        match tree.expressions.at(field.value.node) {
+            Move(marker) => {
+                testing::expect(marker.span.is_zero());
+                expect_ident_name(tree, marker.value, expected_binding);
+            },
+            _ => testing::fail("owner field handoff was not marked move"),
+        }
+    } else {
+        expect_ident_name(tree, field.value, expected_binding);
+    }
+    return;
+}
+
+fn add_struct_with_field(
+    allocator: Allocator,
+    tree: &var Ast,
+    program: &var Program,
+    name: []u8,
+    field_name: []u8,
+    field_type: typ::Type
+) -> !void {
+    var fields = array::new<Field>(allocator);
+    errdefer fields.deinit();
+    try fields.append(Field {
+        name: try retained_text(tree, field_name),
+        doc: try retained_text(tree, ""),
+        type_name: field_type,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    let declaration_name = try retained_text(tree, name);
+    let declaration_doc = try retained_text(tree, "");
+    let declaration = tree.add_declaration(DeclarationNode::Struct(
+        StructDecl {
+        name: declaration_name,
+        doc: declaration_doc,
+            type_params: array::new<Text>(allocator),
+            fields: move fields,
+            public: false,
+            span: zero_span(),
+            requires_unsafe: false
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_union_with_payload(
+    allocator: Allocator,
+    tree: &var Ast,
+    program: &var Program,
+    name: []u8,
+    variant_name: []u8,
+    payload: typ::Type
+) -> !void {
+    var variants = array::new<UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(UnionVariant {
+        name: try retained_text(tree, variant_name),
+        doc: try retained_text(tree, ""),
+        payload: payload
+    });
+    let declaration_name = try retained_text(tree, name);
+    let declaration_doc = try retained_text(tree, "");
+    let declaration = tree.add_declaration(DeclarationNode::Union(
+        UnionDecl {
+        name: declaration_name,
+        doc: declaration_doc,
+        type_params: array::new<Text>(allocator),
+        variants: move variants,
+        public: false
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn add_cleanup_function(
+    allocator: Allocator,
+    tree: &var Ast,
+    program: &var Program,
+    name: []u8,
+    derived: bool
+) -> !void {
+    var signature = try empty_signature(allocator, tree, name);
+    errdefer signature.deinit();
+    signature.receiver = true;
+    let doc = try retained_text(tree, "");
+    let declaration = tree.add_declaration(DeclarationNode::Function(
+        FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: derived,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn expect_owner(
+    owners: &map::Map<[]u8, bool>,
+    name: []u8,
+    expected: bool
+) -> void {
+    let actual = owners.get(name) orelse false;
+    testing::expect(actual == expected);
+    return;
+}
+
+fn expect_type_name(
+    allocator: Allocator,
+    types: &typ::Table,
+    value: typ::Type,
+    expected: []u8
+) -> !void {
+    let rendered = try typ::render(allocator, types, value);
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_cleanup_field(
+    tree: &Ast,
+    statement: Statement,
+    expected_field: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => {
+            testing::expect(value.semicolon);
+            match tree.expressions.at(value.expr.node) {
+                Call(call) => {
+                    testing::expect_equal<i64>(0, call.args.len(tree));
+                    match tree.expressions.at(call.callee.node) {
+                        Field(method) => {
+                            expect_text(tree, method.name, "deinit");
+                            match tree.expressions.at(method.receiver.node) {
+                                Field(field) => {
+                                    expect_text(tree, field.name, expected_field);
+                                    expect_ident_name(tree, field.receiver, "self");
+                                },
+                                _ => testing::fail("cleanup receiver was not a field"),
+                            }
+                        },
+                        _ => testing::fail("cleanup callee was not a method"),
+                    }
+                },
+                _ => testing::fail("cleanup statement was not a call"),
+            }
+        },
+        _ => testing::fail("cleanup was not an expression statement"),
+    }
+    return;
+}
+
+fn expect_cleanup_ident(
+    tree: &Ast,
+    statement: Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => match tree.expressions.at(value.expr.node) {
+            Call(call) => match tree.expressions.at(call.callee.node) {
+                Field(method) => {
+                    expect_text(tree, method.name, "deinit");
+                    expect_ident_name(tree, method.receiver, expected);
+                },
+                _ => testing::fail("cleanup callee was not a method"),
+            },
+            _ => testing::fail("cleanup statement was not a call"),
+        },
+        _ => testing::fail("cleanup was not an expression statement"),
+    }
+    return;
+}
+
+test "span zero state follows its source position" {
+    let missing = zero_span();
+    testing::expect(missing.is_zero());
+    let present = Span {
+        source: null,
+        start: Position { line: 2, column: 4 },
+        end: Position { line: 2, column: 7 }
+    };
+    testing::expect(!present.is_zero());
+}
+
+test "function signatures return only type parameter names" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let integer = try tree.types.parse("i64");
+    var signature = try empty_signature(allocator, &var tree, "visit");
+    defer signature.deinit();
+    try signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "T"),
+        type_name: null
+    });
+    try signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "count"),
+        type_name: integer
+    });
+    try signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "U"),
+        type_name: null
+    });
+    let names = try signature.type_param_names(allocator);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+    if names.get(0) |name| {
+        expect_text(&tree, name, "T");
+    } else {
+        testing::fail("missing first type parameter name");
+    }
+    if names.get(1) |name| {
+        expect_text(&tree, name, "U");
+    } else {
+        testing::fail("missing second type parameter name");
+    }
+    testing::expect_equal<i64>(3, signature.static_params.len());
+    var empty = try empty_signature(allocator, &var tree, "plain");
+    defer empty.deinit();
+    let empty_names = try empty.type_param_names(allocator);
+    defer empty_names.deinit();
+    testing::expect_equal<i64>(0, empty_names.len());
+}
+
+test "match arms recognize only the wildcard tag" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let retained_body = tree.add_block(BlockStmt {
+        statements: array::new<Statement>(allocator)
+    });
+    let body = retained_body.as_statement();
+    let empty = try retained_text(&var tree, "");
+    let wildcard = MatchArm {
+        tag: try retained_text(&var tree, "_"),
+        binding: empty,
+        body: body
+    };
+    let named = MatchArm {
+        tag: try retained_text(&var tree, "Value"),
+        binding: empty,
+        body: body
+    };
+    testing::expect(wildcard.is_wildcard(&tree));
+    testing::expect(!named.is_wildcard(&tree));
+}
+
+test "buffer literal type text preserves its stored size" {
+    let allocator = mem::page_allocator();
+    let positive = BufferLiteralExpr {
+        size: 12,
+        span: zero_span()
+    };
+    let positive_text = try positive.type_text(allocator);
+    defer positive_text.deinit();
+    expect_retained_text(&positive_text, "[12]u8");
+    let negative = BufferLiteralExpr {
+        size: -2,
+        span: zero_span()
+    };
+    let negative_text = try negative.type_text(allocator);
+    defer negative_text.deinit();
+    expect_retained_text(&negative_text, "[-2]u8");
+}
+
+test "field paths retain their root and dotted suffix" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let root_span = Span {
+        source: null,
+        start: Position { line: 3, column: 4 },
+        end: Position { line: 3, column: 9 }
+    };
+    let root_name = try retained_text(&var tree, "owner");
+    let root = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: root_name,
+        span: root_span
+    }));
+    let first_name = try retained_text(&var tree, "a");
+    let first = tree.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: root,
+        name: first_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let second_name = try retained_text(&var tree, "b");
+    let second = tree.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: first,
+        name: second_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    if try field_path_root(allocator, &tree, first) |resolved| {
+        defer resolved.deinit();
+        expect_text(&tree, resolved.root.name, "owner");
+        testing::expect_equal<i64>(3, resolved.root.span.start.line);
+        testing::expect_equal<i64>(4, resolved.root.span.start.column);
+        testing::expect_equal<i64>(3, resolved.root.span.end.line);
+        testing::expect_equal<i64>(9, resolved.root.span.end.column);
+        expect_retained_text(&resolved.path, "a");
+    } else {
+        testing::fail("direct field path was not recognized");
+    }
+    if try field_path_root(allocator, &tree, second) |resolved| {
+        defer resolved.deinit();
+        expect_text(&tree, resolved.root.name, "owner");
+        expect_retained_text(&resolved.path, "a.b");
+    } else {
+        testing::fail("nested field path was not recognized");
+    }
+    if try field_path_root(allocator, &tree, root) |resolved| {
+        resolved.deinit();
+        testing::fail("identifier was accepted as a field path");
+    }
+    let namespace_name = try retained_text(&var tree, "Item");
+    let namespaced = tree.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: root,
+        name: namespace_name,
+        namespace: true,
+        span: zero_span()
+    }));
+    if try field_path_root(allocator, &tree, namespaced) |resolved| {
+        resolved.deinit();
+        testing::fail("namespace field was accepted as a runtime path");
+    }
+    let nested_name = try retained_text(&var tree, "value");
+    let nested_namespace = tree.add_expression(ExpressionNode::Field(
+        FieldExpr {
+        receiver: namespaced,
+        name: nested_name,
+        namespace: false,
+        span: zero_span()
+    }
+    ));
+    if try field_path_root(allocator, &tree, nested_namespace) |resolved| {
+        resolved.deinit();
+        testing::fail("runtime field above a namespace field was accepted");
+    }
+    let integer_text = try retained_text(&var tree, "1");
+    let integer = tree.add_expression(ExpressionNode::Int(IntExpr {
+        value: integer_text
+    }));
+    let invalid_name = try retained_text(&var tree, "value");
+    let invalid_root = tree.add_expression(ExpressionNode::Field(
+        FieldExpr {
+        receiver: integer,
+        name: invalid_name,
+        namespace: false,
+        span: zero_span()
+    }
+    ));
+    if try field_path_root(allocator, &tree, invalid_root) |resolved| {
+        resolved.deinit();
+        testing::fail("non-identifier field root was accepted");
+    }
+}
+
+test "expression rendering covers values operators calls and access" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let integer_type = try tree.types.parse("i64");
+    let x = try add_ident_expression(&var tree, "x");
+    let foo = try add_ident_expression(&var tree, "foo");
+    let one = try add_int_expression(&var tree, "1");
+    let forty_one = try add_int_expression(&var tree, "41");
+    try expect_expression_render(allocator, &tree, x, "x");
+    try expect_expression_render(allocator, &tree, forty_one, "41");
+    let string_text = try retained_text(&var tree, "café");
+    let string_value = tree.add_expression(ExpressionNode::String(
+        StringExpr { value: string_text }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        string_value,
+        \\"caf\xC3\xA9"
+    );
+    let null_value = tree.add_expression(ExpressionNode::Null(
+        NullExpr { span: zero_span() }
+    ));
+    try expect_expression_render(allocator, &tree, null_value, "null");
+    let true_value = tree.add_expression(ExpressionNode::Bool(
+        BoolExpr { value: true }
+    ));
+    let false_value = tree.add_expression(ExpressionNode::Bool(
+        BoolExpr { value: false }
+    ));
+    try expect_expression_render(allocator, &tree, true_value, "true");
+    try expect_expression_render(allocator, &tree, false_value, "false");
+    let type_name = try retained_text(&var tree, "i64");
+    let type_value = tree.add_expression(ExpressionNode::Type(
+        TypeExpr { type_name: type_name }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        type_value,
+        "type<i64>"
+    );
+    let comptime_value = tree.add_expression(ExpressionNode::Comptime(
+        ComptimeExpr { expr: x }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        comptime_value,
+        "comptime x"
+    );
+    let minus = try retained_text(&var tree, "-");
+    let prefix = tree.add_expression(ExpressionNode::Prefix(
+        PrefixExpr { operator: minus, right: forty_one }
+    ));
+    try expect_expression_render(allocator, &tree, prefix, "(-41)");
+    let plus = try retained_text(&var tree, "+");
+    let binary = tree.add_expression(ExpressionNode::Binary(
+        BinaryExpr {
+        left: forty_one,
+        operator: plus,
+        operator_span: zero_span(),
+        right: one
+    }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        binary,
+        "(41 + 1)"
+    );
+    var args = array::new<Expression>(allocator);
+    errdefer args.deinit();
+    try args.append(x);
+    try args.append(forty_one);
+    let retained_args = tree.add_expression_list(move args);
+    let call = tree.add_expression(ExpressionNode::Call(CallExpr {
+        callee: foo,
+        args: retained_args
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        call,
+        "foo(x, 41)"
+    );
+    let static_arg = try retained_text(&var tree, "i64");
+    let applied = tree.add_expression(ExpressionNode::TypeApply(
+        TypeApplyExpr { callee: foo, type_arg: static_arg }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        applied,
+        "foo<i64>"
+    );
+    let cast = tree.add_expression(ExpressionNode::Cast(CastExpr {
+        target_type: integer_type,
+        value: x,
+        keyword_span: zero_span()
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        cast,
+        "cast<i64>(x)"
+    );
+    let tried = tree.add_expression(ExpressionNode::Try(
+        TryExpr { value: call }
+    ));
+    let moved = tree.add_expression(ExpressionNode::Move(
+        MoveExpr { value: x, span: zero_span() }
+    ));
+    let safety = try retained_text(&var tree, "checked by caller");
+    let unsafe_value = tree.add_expression(ExpressionNode::Unsafe(
+        UnsafeExpr { value: x, safety: safety, span: zero_span() }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        tried,
+        "try foo(x, 41)"
+    );
+    try expect_expression_render(allocator, &tree, moved, "move x");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        unsafe_value,
+        "unsafe x"
+    );
+    let indexed = tree.add_expression(ExpressionNode::Index(
+        IndexExpr {
+        target: x,
+        index: one,
+        start: null,
+        end: null,
+        slice: false,
+        span: zero_span()
+    }
+    ));
+    let sliced = tree.add_expression(ExpressionNode::Index(
+        IndexExpr {
+        target: x,
+        index: null,
+        start: one,
+        end: forty_one,
+        slice: true,
+        span: zero_span()
+    }
+    ));
+    let open_slice = tree.add_expression(ExpressionNode::Index(
+        IndexExpr {
+        target: x,
+        index: null,
+        start: null,
+        end: null,
+        slice: true,
+        span: zero_span()
+    }
+    ));
+    try expect_expression_render(allocator, &tree, indexed, "x[1]");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        sliced,
+        "x[1..41]"
+    );
+    try expect_expression_render(
+        allocator,
+        &tree,
+        open_slice,
+        "x[..]"
+    );
+    let field_name = try retained_text(&var tree, "value");
+    let field = tree.add_expression(ExpressionNode::Field(FieldExpr {
+        receiver: x,
+        name: field_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let owner = try add_ident_expression(&var tree, "Type");
+    let variant_name = try retained_text(&var tree, "Item");
+    let namespace = tree.add_expression(ExpressionNode::Field(
+        FieldExpr {
+        receiver: owner,
+        name: variant_name,
+        namespace: true,
+        span: zero_span()
+    }
+    ));
+    let deref = tree.add_expression(ExpressionNode::Deref(
+        DerefExpr { receiver: x, operator_span: zero_span() }
+    ));
+    try expect_expression_render(allocator, &tree, field, "x.value");
+    try expect_expression_render(
+        allocator,
+        &tree,
+        namespace,
+        "Type::Item"
+    );
+    try expect_expression_render(allocator, &tree, deref, "x.*");
+    let returned = tree.add_statement(StatementNode::Return(
+        ReturnStmt { value: x }
+    ));
+    let guarded = tree.add_expression(ExpressionNode::OrelseGuard(
+        OrelseGuardExpr {
+        condition: x,
+        exit: returned,
+        span: zero_span()
+    }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        guarded,
+        "(x orelse return x)"
+    );
+}
+
+test "expression rendering covers composite and control forms" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let empty = try retained_text(&var tree, "");
+    let value = try add_ident_expression(&var tree, "value");
+    let payload = try add_ident_expression(&var tree, "payload");
+    let capture_name = try retained_text(&var tree, "captured");
+    let meta_owner = try retained_text(&var tree, "Option");
+    let one = try add_int_expression(&var tree, "1");
+    let true_value = tree.add_expression(ExpressionNode::Bool(
+        BoolExpr { value: true }
+    ));
+    var fields = array::new<FieldValue>(allocator);
+    errdefer fields.deinit();
+    try fields.append(FieldValue {
+        name: try retained_text(&var tree, "x"),
+        value: one
+    });
+    try fields.append(FieldValue {
+        name: try retained_text(&var tree, "item"),
+        value: value
+    });
+    let point_name = try retained_text(&var tree, "Point");
+    let literal = tree.add_expression(ExpressionNode::StructLiteral(
+        StructLiteralExpr {
+        type_name: point_name,
+        fields: move fields,
+        span: zero_span()
+    }
+    ));
+    let buffer = tree.add_expression(ExpressionNode::BufferLiteral(
+        BufferLiteralExpr { size: 4, span: zero_span() }
+    ));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        literal,
+        "Point { x: 1, item: value }"
+    );
+    try expect_expression_render(
+        allocator,
+        &tree,
+        buffer,
+        "[4]u8{}"
+    );
+    let consequence = add_empty_block(allocator, &var tree);
+    let alternative = add_empty_block(allocator, &var tree);
+    let conditional = tree.add_expression(ExpressionNode::If(IfStmt {
+        condition: true_value,
+        consequence: consequence,
+        alternative: alternative,
+        capture: capture_name
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        conditional,
+        "if true {  } else {  }"
+    );
+    let bare_body = tree.add_statement(StatementNode::Expr(
+        ExprStmt { expr: payload, semicolon: false }
+    ));
+    let return_body = tree.add_statement(StatementNode::Return(
+        ReturnStmt { value: null }
+    ));
+    var arms = array::new<MatchArm>(allocator);
+    errdefer arms.deinit();
+    try arms.append(MatchArm {
+        tag: try retained_text(&var tree, "Some"),
+        binding: try retained_text(&var tree, "item"),
+        body: bare_body
+    });
+    try arms.append(MatchArm {
+        tag: try retained_text(&var tree, "_"),
+        binding: empty,
+        body: return_body
+    });
+    let matched = tree.add_expression(ExpressionNode::Match(MatchStmt {
+        value: value,
+        arms: move arms,
+        meta_capture: capture_name,
+        meta_owner: meta_owner
+    }));
+    try expect_expression_render(
+        allocator,
+        &tree,
+        matched,
+        "match value { Some(item) => payload, _ => return; }"
+    );
+}
+
+test "statement rendering covers control and compile-time forms" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let empty = try retained_text(&var tree, "");
+    let x_name = try retained_text(&var tree, "x");
+    let outer = try retained_text(&var tree, "outer");
+    let item_name = try retained_text(&var tree, "item");
+    let variant_name = try retained_text(&var tree, "Variant");
+    let payload_name = try retained_text(&var tree, "payload");
+    let x = try add_ident_expression(&var tree, "x");
+    let values = try add_ident_expression(&var tree, "values");
+    let zero = try add_int_expression(&var tree, "0");
+    let one = try add_int_expression(&var tree, "1");
+    let three = try add_int_expression(&var tree, "3");
+    let true_value = tree.add_expression(ExpressionNode::Bool(
+        BoolExpr { value: true }
+    ));
+    let foo = try add_ident_expression(&var tree, "foo");
+    let no_args = tree.add_expression_list(
+        array::new<Expression>(allocator)
+    );
+    let call = tree.add_expression(ExpressionNode::Call(CallExpr {
+        callee: foo,
+        args: no_args
+    }));
+    let let_statement = tree.add_statement(StatementNode::Let(
+        LetStmt { mutable: false, name: x_name, value: one }
+    ));
+    let var_statement = tree.add_statement(StatementNode::Let(
+        LetStmt { mutable: true, name: x_name, value: zero }
+    ));
+    let assignment = tree.add_statement(StatementNode::Assign(
+        AssignStmt { target: x, value: one }
+    ));
+    let empty_return = tree.add_statement(StatementNode::Return(
+        ReturnStmt { value: null }
+    ));
+    let value_return = tree.add_statement(StatementNode::Return(
+        ReturnStmt { value: x }
+    ));
+    let deferred = tree.add_statement(StatementNode::Defer(
+        DeferStmt { expr: call }
+    ));
+    let error_deferred = tree.add_statement(StatementNode::ErrDefer(
+        ErrDeferStmt { expr: call }
+    ));
+    let expression_statement = tree.add_statement(StatementNode::Expr(
+        ExprStmt { expr: x, semicolon: false }
+    ));
+    try expect_statement_render(
+        allocator, &tree, let_statement, "let x = 1;"
+    );
+    try expect_statement_render(
+        allocator, &tree, var_statement, "var x = 0;"
+    );
+    try expect_statement_render(
+        allocator, &tree, assignment, "x = 1;"
+    );
+    try expect_statement_render(
+        allocator, &tree, empty_return, "return;"
+    );
+    try expect_statement_render(
+        allocator, &tree, value_return, "return x;"
+    );
+    try expect_statement_render(
+        allocator, &tree, deferred, "defer foo();"
+    );
+    try expect_statement_render(
+        allocator, &tree, error_deferred, "errdefer foo();"
+    );
+    try expect_statement_render(
+        allocator, &tree, expression_statement, "x;"
+    );
+    let empty_body = add_empty_block(allocator, &var tree);
+    let other_body = add_empty_block(allocator, &var tree);
+    let conditional = tree.add_statement(StatementNode::If(IfStmt {
+        condition: true_value,
+        consequence: empty_body,
+        alternative: other_body,
+        capture: payload_name
+    }));
+    let while_statement = tree.add_statement(StatementNode::While(
+        WhileStmt {
+        label: outer,
+        condition: true_value,
+        body: empty_body,
+        capture: payload_name
+    }
+    ));
+    let for_statement = tree.add_statement(StatementNode::For(
+        ForStmt {
+        label: outer,
+        name: item_name,
+        start: zero,
+        end: three,
+        body: empty_body
+    }
+    ));
+    let plain_break = tree.add_statement(StatementNode::Break(
+        BreakStmt { label: empty }
+    ));
+    let named_break = tree.add_statement(StatementNode::Break(
+        BreakStmt { label: outer }
+    ));
+    let plain_continue = tree.add_statement(StatementNode::Continue(
+        ContinueStmt { label: empty }
+    ));
+    let named_continue = tree.add_statement(StatementNode::Continue(
+        ContinueStmt { label: outer }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        conditional,
+        "if true {  } else {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        while_statement,
+        "outer: while true {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        for_statement,
+        "outer: for 0..3 |item| {  }"
+    );
+    try expect_statement_render(
+        allocator, &tree, plain_break, "break;"
+    );
+    try expect_statement_render(
+        allocator, &tree, named_break, "break :outer;"
+    );
+    try expect_statement_render(
+        allocator, &tree, plain_continue, "continue;"
+    );
+    try expect_statement_render(
+        allocator, &tree, named_continue, "continue :outer;"
+    );
+    var arms = array::new<MatchArm>(allocator);
+    errdefer arms.deinit();
+    let terminated_body = tree.add_statement(StatementNode::Expr(
+        ExprStmt { expr: x, semicolon: true }
+    ));
+    try arms.append(MatchArm {
+        tag: try retained_text(&var tree, "Ready"),
+        binding: empty,
+        body: terminated_body
+    });
+    let match_statement = tree.add_statement(StatementNode::Match(
+        MatchStmt {
+        value: x,
+        arms: move arms,
+        meta_capture: payload_name,
+        meta_owner: variant_name
+    }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        match_statement,
+        "match x { Ready => x; }"
+    );
+    let comptime_if = tree.add_statement(StatementNode::ComptimeIf(
+        ComptimeIfStmt {
+        condition: true_value,
+        consequence: empty_body,
+        alternative: other_body
+    }
+    ));
+    let comptime_for = tree.add_statement(StatementNode::ComptimeFor(
+        ComptimeForStmt {
+        list: values,
+        name: item_name,
+        body: empty_body
+    }
+    ));
+    let comptime_match = tree.add_statement(StatementNode::ComptimeMatch(
+        ComptimeMatchStmt {
+        value: x,
+        name: variant_name,
+        binding: payload_name,
+        body: empty_body
+    }
+    ));
+    try expect_statement_render(
+        allocator,
+        &tree,
+        comptime_if,
+        "comptime if true {  } else {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        comptime_for,
+        "comptime for values |item| {  }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        comptime_match,
+        "comptime match x |Variant, payload| {  }"
+    );
+    let empty_block = add_empty_block(allocator, &var tree);
+    try expect_block_render(allocator, &tree, empty_block, "{  }");
+    var statements = array::new<Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.append(let_statement);
+    try statements.append(value_return);
+    let populated_block = tree.add_block(BlockStmt {
+        statements: move statements
+    });
+    try expect_block_render(
+        allocator,
+        &tree,
+        populated_block,
+        "{ let x = 1; return x; }"
+    );
+    try expect_statement_render(
+        allocator,
+        &tree,
+        populated_block.as_statement(),
+        "{ let x = 1; return x; }"
+    );
+}
+
+test "declaration and program rendering cover every top level form" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let integer = try tree.types.parse("i64");
+    let boolean = try tree.types.parse("bool");
+    var program = new_program(allocator);
+    defer program.deinit();
+    try expect_program_render(allocator, &tree, &program, "");
+    let ignored_doc = try retained_text(
+        &var tree,
+        "ignored documentation"
+    );
+    var import_path = array::new<Text>(allocator);
+    errdefer import_path.deinit();
+    try import_path.append(try retained_text(&var tree, "std"));
+    try import_path.append(try retained_text(&var tree, "mem"));
+    let import_decl = tree.add_declaration(DeclarationNode::Import(
+        ImportDecl { path: move import_path }
+    ));
+    try program.add_declaration(import_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        import_decl,
+        "import std::mem"
+    );
+    var function_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "visit"
+    );
+    errdefer function_signature.deinit();
+    function_signature.receiver = true;
+    function_signature.return_type = boolean;
+    function_signature.requires_unsafe = true;
+    function_signature.public = true;
+    function_signature.std = true;
+    try function_signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "T"),
+        type_name: null
+    });
+    try function_signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "n"),
+        type_name: integer
+    });
+    try function_signature.params.append(Param {
+        name: try retained_text(&var tree, "self"),
+        type_name: integer,
+        borrow: true,
+        mut_borrow: true
+    });
+    try function_signature.params.append(Param {
+        name: try retained_text(&var tree, "value"),
+        type_name: integer,
+        borrow: true,
+        mut_borrow: false
+    });
+    try function_signature.params.append(Param {
+        name: try retained_text(&var tree, "slot"),
+        type_name: boolean,
+        borrow: false,
+        mut_borrow: true
+    });
+    try function_signature.params.append(Param {
+        name: try retained_text(&var tree, "plain"),
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false
+    });
+    let function_body = add_empty_block(allocator, &var tree);
+    let function_decl = tree.add_declaration(DeclarationNode::Function(
+        FunctionDecl {
+        signature: move function_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: function_body
+    }
+    ));
+    try program.add_declaration(function_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        function_decl,
+        "pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }"
+    );
+    var extern_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "write"
+    );
+    errdefer extern_signature.deinit();
+    extern_signature.public = true;
+    extern_signature.requires_unsafe = true;
+    extern_signature.extern_abi = try retained_text(
+        &var tree,
+        "C ABI"
+    );
+    let extern_body = add_empty_block(allocator, &var tree);
+    let extern_decl = tree.add_declaration(DeclarationNode::Function(
+        FunctionDecl {
+        signature: move extern_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: extern_body
+    }
+    ));
+    try program.add_declaration(extern_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        extern_decl,
+        \\pub unsafe extern "C ABI" fn write()
+    );
+    let present_test_name = try retained_text(&var tree, "check");
+    let present_test_body = add_empty_block(allocator, &var tree);
+    let present_test = tree.add_declaration(DeclarationNode::Test(
+        TestDecl {
+        name: present_test_name,
+        body: present_test_body
+    }
+    ));
+    try program.add_declaration(present_test);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        present_test,
+        \\test "check" {  }
+    );
+    let missing_test_name = try retained_text(&var tree, "検査");
+    let missing_test = tree.add_declaration(DeclarationNode::Test(
+        TestDecl {
+        name: missing_test_name,
+        body: null
+    }
+    ));
+    try program.add_declaration(missing_test);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        missing_test,
+        \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
+    );
+    var struct_type_params = array::new<Text>(allocator);
+    errdefer struct_type_params.deinit();
+    try struct_type_params.append(try retained_text(
+        &var tree,
+        "T"
+    ));
+    try struct_type_params.append(try retained_text(
+        &var tree,
+        "U"
+    ));
+    var fields = array::new<Field>(allocator);
+    errdefer fields.deinit();
+    try fields.append(Field {
+        name: try retained_text(&var tree, "value"),
+        doc: ignored_doc,
+        type_name: integer,
+        borrow: true,
+        mut_borrow: false,
+        public: true
+    });
+    try fields.append(Field {
+        name: try retained_text(&var tree, "slot"),
+        doc: ignored_doc,
+        type_name: boolean,
+        borrow: true,
+        mut_borrow: true,
+        public: false
+    });
+    try fields.append(Field {
+        name: try retained_text(&var tree, "plain"),
+        doc: ignored_doc,
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    let struct_name = try retained_text(&var tree, "Pair");
+    let struct_decl = tree.add_declaration(DeclarationNode::Struct(
+        StructDecl {
+        name: struct_name,
+        doc: ignored_doc,
+            type_params: move struct_type_params,
+            fields: move fields,
+            public: true,
+            span: zero_span(),
+            requires_unsafe: true
+    }
+    ));
+    try program.add_declaration(struct_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        struct_decl,
+        "pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }"
+    );
+    var tags = array::new<Text>(allocator);
+    errdefer tags.deinit();
+    try tags.append(try retained_text(&var tree, "Ready"));
+    try tags.append(try retained_text(&var tree, "Done"));
+    var tag_docs = map::new<[]u8, Text>(allocator);
+    errdefer tag_docs.deinit();
+    try tag_docs.insert("Ready", ignored_doc);
+    let enum_name = try retained_text(&var tree, "State");
+    let enum_decl = tree.add_declaration(DeclarationNode::Enum(
+        EnumDecl {
+        name: enum_name,
+        doc: ignored_doc,
+        tags: move tags,
+        tag_docs: move tag_docs,
+        public: true
+    }
+    ));
+    try program.add_declaration(enum_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        enum_decl,
+        "pub enum State { Ready, Done }"
+    );
+    var members = array::new<Text>(allocator);
+    errdefer members.deinit();
+    try members.append(try retained_text(&var tree, "Missing"));
+    try members.append(try retained_text(&var tree, "Invalid"));
+    var member_docs = map::new<[]u8, Text>(allocator);
+    errdefer member_docs.deinit();
+    try member_docs.insert("Missing", ignored_doc);
+    let error_name = try retained_text(&var tree, "Failure");
+    let error_decl = tree.add_declaration(DeclarationNode::ErrorSet(
+        ErrorSetDecl {
+        name: error_name,
+        doc: ignored_doc,
+        members: move members,
+        member_docs: move member_docs,
+        public: true
+    }
+    ));
+    try program.add_declaration(error_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        error_decl,
+        "pub error Failure { Missing, Invalid }"
+    );
+    var union_type_params = array::new<Text>(allocator);
+    errdefer union_type_params.deinit();
+    try union_type_params.append(try retained_text(
+        &var tree,
+        "T"
+    ));
+    var variants = array::new<UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(UnionVariant {
+        name: try retained_text(&var tree, "Ok"),
+        doc: ignored_doc,
+        payload: integer
+    });
+    try variants.append(UnionVariant {
+        name: try retained_text(&var tree, "Empty"),
+        doc: ignored_doc,
+        payload: null
+    });
+    let union_name = try retained_text(&var tree, "Result");
+    let union_decl = tree.add_declaration(DeclarationNode::Union(
+        UnionDecl {
+        name: union_name,
+        doc: ignored_doc,
+        type_params: move union_type_params,
+        variants: move variants,
+        public: true
+    }
+    ));
+    try program.add_declaration(union_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        union_decl,
+        "pub union Result<T> { Ok(i64), Empty }"
+    );
+    var methods = array::new<FunctionDecl>(allocator);
+    errdefer methods.deinit();
+    var first_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "first"
+    );
+    errdefer first_signature.deinit();
+    first_signature.receiver = true;
+    try methods.append(FunctionDecl {
+        signature: move first_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: null
+    });
+    let second_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "second"
+    );
+    errdefer second_signature.deinit();
+    try methods.append(FunctionDecl {
+        signature: move second_signature,
+        doc: ignored_doc,
+        derived: false,
+        body: null
+    });
+    let contract_name = try retained_text(&var tree, "Visitor");
+    let contract_decl = tree.add_declaration(DeclarationNode::Contract(
+        ContractDecl {
+        name: contract_name,
+        methods: move methods,
+        public: true
+    }
+    ));
+    try program.add_declaration(contract_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        contract_decl,
+        "pub contract Visitor { fn first();; fn second(); }"
+    );
+    let impl_contract_name = try retained_text(
+        &var tree,
+        "Visitor"
+    );
+    let impl_type_name = try retained_text(&var tree, "Walker");
+    let impl_decl = tree.add_declaration(DeclarationNode::Impl(
+        ImplDecl {
+        contract_name: impl_contract_name,
+        type_name: impl_type_name
+    }
+    ));
+    try program.add_declaration(impl_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        impl_decl,
+        "impl Visitor for Walker;"
+    );
+    let expected_program =
+        \\import std::mem
+        \\pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }
+        \\pub unsafe extern "C ABI" fn write()
+        \\test "check" {  }
+        \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
+        \\pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }
+        \\pub enum State { Ready, Done }
+        \\pub error Failure { Missing, Invalid }
+        \\pub union Result<T> { Ok(i64), Empty }
+        \\pub contract Visitor { fn first();; fn second(); }
+        \\impl Visitor for Walker;
+    ;
+    try expect_program_render(
+        allocator,
+        &tree,
+        &program,
+        expected_program
+    );
+}
+
+test "program retains declaration handles and nested contract methods" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let integer = try tree.types.parse("i64");
+    var program = new_program(allocator);
+    defer program.deinit();
+    var body_statements = array::new<Statement>(allocator);
+    errdefer body_statements.deinit();
+    let body = tree.add_block(BlockStmt {
+        statements: move body_statements
+    });
+    var signature = try empty_signature(allocator, &var tree, "visit");
+    errdefer signature.deinit();
+    try signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "T"),
+        type_name: null
+    });
+    try signature.static_params.append(StaticParam {
+        name: try retained_text(&var tree, "count"),
+        type_name: integer
+    });
+    let function_doc = try retained_text(
+        &var tree,
+        "Visits one value."
+    );
+    let function_decl = FunctionDecl {
+        signature: move signature,
+        doc: function_doc,
+        derived: false,
+        body: body
+    };
+    let function = tree.add_declaration(DeclarationNode::Function(
+        move function_decl
+    ));
+    try program.add_declaration(function);
+    var methods = array::new<FunctionDecl>(allocator);
+    errdefer methods.deinit();
+    let method_signature = try empty_signature(allocator, &var tree, "visit");
+    errdefer method_signature.deinit();
+    let method_doc = try retained_text(&var tree, "");
+    try methods.append(FunctionDecl {
+        signature: move method_signature,
+        doc: method_doc,
+        derived: false,
+        body: null
+    });
+    let contract_node = ContractDecl {
+        name: try retained_text(&var tree, "Visitor"),
+        methods: move methods,
+        public: true
+    };
+    let contract_decl = tree.add_declaration(DeclarationNode::Contract(
+        move contract_node
+    ));
+    try program.add_declaration(contract_decl);
+    var tags = array::new<Text>(allocator);
+    errdefer tags.deinit();
+    try tags.append(try retained_text(&var tree, "Ready"));
+    var tag_docs = map::new<[]u8, Text>(allocator);
+    errdefer tag_docs.deinit();
+    try tag_docs.insert(
+        "Ready",
+        try retained_text(&var tree, "The visitor may run.")
+    );
+    let enum_name = try retained_text(&var tree, "State");
+    let enum_doc = try retained_text(&var tree, "Visitor state.");
+    let enum_node = EnumDecl {
+        name: enum_name,
+        doc: enum_doc,
+        tags: move tags,
+        tag_docs: move tag_docs,
+        public: true
+    };
+    let enum_decl = tree.add_declaration(DeclarationNode::Enum(move enum_node));
+    try program.add_declaration(enum_decl);
+    let error_name = try retained_text(&var tree, "Failure");
+    let error_doc = try retained_text(&var tree, "");
+    let error_node = ErrorSetDecl {
+        name: error_name,
+        doc: error_doc,
+        members: array::new<Text>(allocator),
+        member_docs: null,
+        public: false
+    };
+    let error_decl = tree.add_declaration(DeclarationNode::ErrorSet(
+        move error_node
+    ));
+    try program.add_declaration(error_decl);
+    testing::expect_equal<i64>(4, program.declarations.len());
+    match tree.declarations.at(function.node) {
+        Function(value) => {
+            expect_text(&tree, value.signature.name, "visit");
+            if value.body |retained| {
+                expect_block_len(&tree, retained, 0);
+            } else {
+                testing::fail("function body was not retained");
+            }
+            if value.signature.static_params.at(0) |param| {
+                testing::expect(param.is_type());
+            } else {
+                testing::fail("missing type parameter");
+            }
+            if value.signature.static_params.at(1) |param| {
+                testing::expect(!param.is_type());
+            } else {
+                testing::fail("missing value parameter");
+            }
+        },
+        _ => testing::fail("function handle changed node category"),
+    }
+    match tree.declarations.at(contract_decl.node) {
+        Contract(value) => {
+            testing::expect(value.public);
+            testing::expect_equal<i64>(1, value.methods.len());
+        },
+        _ => testing::fail("contract handle changed node category"),
+    }
+    match tree.declarations.at(enum_decl.node) {
+        Enum(value) => {
+            if value.tag_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+            } else {
+                testing::fail("enum tag docs were not retained");
+            }
+        },
+        _ => testing::fail("enum handle changed node category"),
+    }
+    match tree.declarations.at(error_decl.node) {
+        ErrorSet(value) => {
+            if value.member_docs |_| {
+                testing::fail("empty error docs did not remain compact");
+            }
+        },
+        _ => testing::fail("error set handle changed node category"),
+    }
+}
+
+test "deinit owner discovery includes declared and transitive holders" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let outer_type = try tree.types.parse("Outer");
+    let middle_type = try tree.types.parse("Middle");
+    let optional_inner_type = try tree.types.parse("?Inner");
+    let array_type = try tree.types.parse("std::array::Array<u8>");
+    let integer_type = try tree.types.parse("i64");
+    var program = new_program(allocator);
+    defer program.deinit();
+    try add_union_with_payload(
+        allocator,
+        &var tree,
+        &var program,
+        "Slot",
+        "Held",
+        outer_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Outer",
+        "middle",
+        middle_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Middle",
+        "inner",
+        optional_inner_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Inner",
+        "bytes",
+        array_type
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Point",
+        "x",
+        integer_type
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "std::array::Array.deinit",
+        false
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Generated.deinit",
+        true
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Resource<u8>.deinit",
+        false
+    );
+    let owners = try deinit_owners(allocator, &tree, &program);
+    defer owners.deinit();
+    expect_owner(&owners, "std::arena::Arena", true);
+    expect_owner(&owners, "std::array::Array", true);
+    expect_owner(&owners, "Generated", true);
+    expect_owner(&owners, "Resource", true);
+    expect_owner(&owners, "Inner", true);
+    expect_owner(&owners, "Middle", true);
+    expect_owner(&owners, "Outer", true);
+    expect_owner(&owners, "Slot", true);
+    expect_owner(&owners, "Point", false);
+    let declared = try declared_deinits(allocator, &tree, &program);
+    defer declared.deinit();
+    expect_owner(&declared, "std::arena::Arena", true);
+    expect_owner(&declared, "std::array::Array", true);
+    expect_owner(&declared, "Generated", false);
+    expect_owner(&declared, "Resource", true);
+    expect_owner(&declared, "Inner", false);
+}
+
+test "derived struct deinit consumes plain and optional owner fields" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let string_type = try tree.types.parse("std::string::String");
+    let optional_string = try tree.types.parse("?std::string::String");
+    let integer = try tree.types.parse("i64");
+    var fields = array::new<Field>(allocator);
+    errdefer fields.deinit();
+    let empty = try retained_text(&var tree, "");
+    try fields.append(Field {
+        name: try retained_text(&var tree, "name"),
+        doc: empty,
+        type_name: string_type,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    try fields.append(Field {
+        name: try retained_text(&var tree, "age"),
+        doc: empty,
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    try fields.append(Field {
+        name: try retained_text(&var tree, "nick"),
+        doc: empty,
+        type_name: optional_string,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    var type_params = array::new<Text>(allocator);
+    errdefer type_params.deinit();
+    try type_params.append(try retained_text(&var tree, "T"));
+    let visitor_name = try retained_text(&var tree, "Visitor");
+    let declaration = tree.add_declaration(DeclarationNode::Struct(
+        StructDecl {
+        name: visitor_name,
+        doc: empty,
+            type_params: move type_params,
+            fields: move fields,
+            public: false,
+            span: zero_span(),
+            requires_unsafe: false
+    }
+    ));
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    if try derive_deinit(
+        allocator,
+        &var tree,
+        &owners,
+        declaration
+    ) |function| {
+        let generated = tree.add_declaration(DeclarationNode::Function(
+            move function
+        ));
+        match tree.declarations.at(generated.node) {
+            Function(value) => {
+                testing::expect(value.derived);
+                testing::expect(value.signature.receiver);
+                testing::expect(!value.signature.std);
+                expect_text(&tree, value.signature.name, "Visitor.deinit");
+                testing::expect_equal<i64>(1, value.signature.static_params.len());
+                if value.signature.static_params.at(0) |param| {
+                    expect_text(&tree, param.name, "T");
+                    testing::expect(param.is_type());
+                } else {
+                    testing::fail("derived deinit lost its type parameter");
+                }
+                testing::expect_equal<i64>(1, value.signature.params.len());
+                if value.signature.params.at(0) |receiver| {
+                    expect_text(&tree, receiver.name, "self");
+                    try expect_type_name(
+                        allocator,
+                        &tree.types,
+                        receiver.type_name,
+                        "Visitor<T>"
+                    );
+                } else {
+                    testing::fail("derived deinit had no receiver");
+                }
+                if value.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => {
+                            testing::expect_equal<i64>(3, block.statements.len());
+                            expect_cleanup_field(
+                                &tree,
+                                block.statements.get_or_panic(0),
+                                "name"
+                            );
+                            let optional = block.statements.get_or_panic(1);
+                            match tree.statements.at(optional.node) {
+                                If(opened) => {
+                                    expect_text(&tree, opened.capture, "held");
+                                    match tree.expressions.at(opened.condition.node) {
+                                        Field(field) => {
+                                            expect_text(&tree, field.name, "nick");
+                                            expect_ident_name(
+                                                &tree,
+                                                field.receiver,
+                                                "self"
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "optional owner was not read as a field"
+                                        ),
+                                    }
+                                    match tree.statements.at(opened.consequence.node) {
+                                        Block(consequence) => {
+                                            testing::expect_equal<i64>(
+                                                1,
+                                                consequence.statements.len()
+                                            );
+                                            expect_cleanup_ident(
+                                                &tree,
+                                                consequence.statements.get_or_panic(0),
+                                                "held"
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "optional owner had no consequence block"
+                                        ),
+                                    }
+                                },
+                                _ => testing::fail("optional owner was not opened first"),
+                            }
+                            match tree.statements.at(
+                                block.statements.get_or_panic(2).node
+                            ) {
+                                Return(returned) => if returned.value |_| {
+                                    testing::fail("derived return carried a value");
+                                },
+                                _ => testing::fail("derived deinit had no final return"),
+                            }
+                        },
+                        _ => testing::fail("derived body handle was not a block"),
+                    }
+                } else {
+                    testing::fail("derived deinit had no body");
+                }
+            },
+            _ => testing::fail("derived declaration was not a function"),
+        }
+    } else {
+        testing::fail("struct holding owners got no derived deinit");
+    }
+}
+
+test "derived union deinit matches every variant and consumes owner payload" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let string_type = try tree.types.parse("std::string::String");
+    let integer = try tree.types.parse("i64");
+    let empty = try retained_text(&var tree, "");
+    var variants = array::new<UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(UnionVariant {
+        name: try retained_text(&var tree, "Kept"),
+        doc: empty,
+        payload: string_type
+    });
+    try variants.append(UnionVariant {
+        name: try retained_text(&var tree, "Count"),
+        doc: empty,
+        payload: integer
+    });
+    try variants.append(UnionVariant {
+        name: try retained_text(&var tree, "Vacant"),
+        doc: empty,
+        payload: null
+    });
+    let slot_name = try retained_text(&var tree, "std::Slot");
+    let declaration = tree.add_declaration(DeclarationNode::Union(
+        UnionDecl {
+        name: slot_name,
+        doc: empty,
+        type_params: array::new<Text>(allocator),
+        variants: move variants,
+        public: false
+    }
+    ));
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    if try derive_deinit(
+        allocator,
+        &var tree,
+        &owners,
+        declaration
+    ) |function| {
+        let generated = tree.add_declaration(DeclarationNode::Function(
+            move function
+        ));
+        match tree.declarations.at(generated.node) {
+            Function(value) => {
+                testing::expect(value.signature.std);
+                expect_text(&tree, value.signature.name, "std::Slot.deinit");
+                if value.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => match tree.statements.at(
+                            block.statements.get_or_panic(0).node
+                        ) {
+                            Match(selected) => {
+                                testing::expect_equal<i64>(3, selected.arms.len());
+                                expect_ident_name(&tree, selected.value, "self");
+                                if selected.arms.at(0) |arm| {
+                                    expect_text(&tree, arm.tag, "Kept");
+                                    expect_text(&tree, arm.binding, "held");
+                                    expect_cleanup_ident(&tree, arm.body, "held");
+                                } else {
+                                    testing::fail("owner variant had no match arm");
+                                }
+                                if selected.arms.at(1) |arm| {
+                                    expect_text(&tree, arm.binding, "");
+                                    expect_block_len(&tree, Block {
+                                        node: arm.body.node
+                                    }, 0);
+                                } else {
+                                    testing::fail("copy variant had no match arm");
+                                }
+                                if selected.arms.at(2) |arm| {
+                                    expect_text(&tree, arm.binding, "");
+                                    expect_block_len(&tree, Block {
+                                        node: arm.body.node
+                                    }, 0);
+                                } else {
+                                    testing::fail("empty variant had no match arm");
+                                }
+                            },
+                            _ => testing::fail(
+                                "union deinit body did not start with match"
+                            ),
+                        },
+                        _ => testing::fail("derived union body was not a block"),
+                    }
+                } else {
+                    testing::fail("derived union deinit had no body");
+                }
+            },
+            _ => testing::fail("derived union declaration was not a function"),
+        }
+    } else {
+        testing::fail("union carrying an owner got no derived deinit");
+    }
+}
+
+test "adding derived deinits skips copy and manually cleaned types" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let resource = try tree.types.parse("Resource");
+    let integer = try tree.types.parse("i64");
+    var program = new_program(allocator);
+    defer program.deinit();
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Resource.deinit",
+        false
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Holder",
+        "resource",
+        resource
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Manual",
+        "resource",
+        resource
+    );
+    try add_cleanup_function(
+        allocator,
+        &var tree,
+        &var program,
+        "Manual.deinit",
+        false
+    );
+    try add_struct_with_field(
+        allocator,
+        &var tree,
+        &var program,
+        "Point",
+        "x",
+        integer
+    );
+    try add_derived_deinits(
+        allocator,
+        &var tree,
+        &var program
+    );
+    testing::expect_equal<i64>(6, program.declarations.len());
+    let generated = program.declarations.get_or_panic(5);
+    match tree.declarations.at(generated.node) {
+        Function(value) => {
+            testing::expect(value.derived);
+            expect_text(&tree, value.signature.name, "Holder.deinit");
+        },
+        _ => testing::fail("appended derived declaration was not a function"),
+    }
+    try add_derived_deinits(
+        allocator,
+        &var tree,
+        &var program
+    );
+    testing::expect_equal<i64>(6, program.declarations.len());
+}
+
+test "variant helpers preserve shared bodies and ordinary expression shape" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let subject_name = try retained_text(&var tree, "slot");
+    let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: subject_name,
+        span: zero_span()
+    }));
+    var body_statements = array::new<Statement>(allocator);
+    errdefer body_statements.deinit();
+    let body = tree.add_block(BlockStmt {
+        statements: move body_statements
+    });
+    let capture_name = try retained_text(&var tree, "variant");
+    let payload_name = try retained_text(&var tree, "payload");
+    let owner_name = try retained_text(&var tree, "Slot");
+    let empty_name = try retained_text(&var tree, "");
+    let vacant_name = try retained_text(&var tree, "Vacant");
+    let held_name = try retained_text(&var tree, "Held");
+    let comptime_node = ComptimeMatchStmt {
+        value: subject,
+        name: capture_name,
+        binding: payload_name,
+        body: body
+    };
+    let comptime_stmt = tree.add_statement(StatementNode::ComptimeMatch(
+        comptime_node
+    ));
+    var variants = array::new<MetaVariant>(allocator);
+    defer variants.deinit();
+    try variants.append(MetaVariant {
+        name: vacant_name,
+        has_payload: false
+    });
+    try variants.append(MetaVariant {
+        name: held_name,
+        has_payload: true
+    });
+    match tree.statements.at(comptime_stmt.node) {
+        ComptimeMatch(stmt) => {
+            let expanded = try comptime_match_expansion(
+                allocator,
+                stmt,
+                owner_name,
+                empty_name,
+                &variants
+            );
+            defer expanded.deinit();
+            testing::expect_equal<i64>(2, expanded.arms.len());
+            expect_text(&tree, expanded.meta_capture, "variant");
+            expect_text(&tree, expanded.meta_owner, "Slot");
+            if expanded.arms.at(0) |arm| {
+                expect_text(&tree, arm.tag, "Vacant");
+                expect_text(&tree, arm.binding, "");
+                testing::expect(arm.body.node == body.node);
+            } else {
+                testing::fail("missing first expansion arm");
+            }
+            if expanded.arms.at(1) |arm| {
+                expect_text(&tree, arm.tag, "Held");
+                expect_text(&tree, arm.binding, "payload");
+                testing::expect(arm.body.node == body.node);
+            } else {
+                testing::fail("missing second expansion arm");
+            }
+            expect_block_len(&tree, body, 0);
+        },
+        _ => testing::fail("comptime match was not retained in the statement arena"),
+    }
+    let no_args = tree.add_expression_list(array::new<Expression>(allocator));
+    let tag = try variant_expansion(
+        &var tree,
+        "Slot",
+        "Vacant",
+        no_args
+    );
+    expect_variant_path(&tree, tag, "Slot", "Vacant");
+    var source_args = array::new<Expression>(allocator);
+    errdefer source_args.deinit();
+    try source_args.append(subject);
+    let source_args_list = tree.add_expression_list(move source_args);
+    let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
+        callee: subject,
+        args: source_args_list
+    }));
+    match tree.expressions.at(source_call.node) {
+        Call(source) => {
+            let shared_args = source.args;
+            let call = try variant_expansion(
+                &var tree,
+                "Slot",
+                "Held",
+                shared_args
+            );
+            match tree.expressions.at(call.node) {
+                Call(value) => {
+                    testing::expect(value.args.node == source_args_list.node);
+                    testing::expect_equal<i64>(1, value.args.len(&tree));
+                    expect_variant_path(&tree, value.callee, "Slot", "Held");
+                    match tree.expressions.at(value.args.get_or_panic(&tree, 0).node) {
+                        Ident(ident) => {
+                            expect_text(&tree, ident.name, "slot");
+                        },
+                        _ => testing::fail("variant payload argument changed shape"),
+                    }
+                },
+                _ => testing::fail("payload expansion was not a call"),
+            }
+        },
+        _ => testing::fail("source arguments were not retained by a call"),
+    }
+}
+
+test "construct expansion builds fields in order and marks owner handoff" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let subject_name = try retained_text(&var tree, "input");
+    let subject = tree.add_expression(ExpressionNode::Ident(IdentExpr {
+        name: subject_name,
+        span: zero_span()
+    }));
+    var source_args = array::new<Expression>(allocator);
+    errdefer source_args.deinit();
+    try source_args.append(subject);
+    let source_args_list = tree.add_expression_list(move source_args);
+    let source_call = tree.add_expression(ExpressionNode::Call(CallExpr {
+        callee: subject,
+        args: source_args_list
+    }));
+    var fields = array::new<ConstructField>(allocator);
+    defer fields.deinit();
+    try fields.append(ConstructField {
+        name: "name",
+        type_name: "std::string::String"
+    });
+    try fields.append(ConstructField {
+        name: "count",
+        type_name: "i64"
+    });
+    var owners = map::new<[]u8, bool>(allocator);
+    defer owners.deinit();
+    try owners.insert("std::string::String", true);
+    try owners.insert("std::array::Array", true);
+    testing::expect(owner_type(
+        &owners,
+        "std::array::Array<std::string::String>"
+    ));
+    testing::expect(!owner_type(&owners, "i64"));
+    match tree.expressions.at(source_call.node) {
+        Call(source) => {
+            let shared_args = source.args;
+            let expanded = try construct_expansion(
+                allocator,
+                &var tree,
+                "User",
+                "make",
+                &fields,
+                shared_args,
+                &owners
+            );
+            defer expanded.deinit();
+            testing::expect_equal<i64>(3, expanded.statements.len());
+            expect_construct_worker(
+                &tree,
+                expanded.statements.get_or_panic(0),
+                "construct$name",
+                "User, name",
+                source_args_list,
+                subject
+            );
+            expect_construct_cleanup(
+                &tree,
+                expanded.statements.get_or_panic(1),
+                "construct$name"
+            );
+            expect_construct_worker(
+                &tree,
+                expanded.statements.get_or_panic(2),
+                "construct$count",
+                "User, count",
+                source_args_list,
+                subject
+            );
+            match tree.expressions.at(expanded.literal.node) {
+                StructLiteral(literal) => {
+                    testing::expect(literal.span.is_zero());
+                    expect_text(&tree, literal.type_name, "User");
+                    testing::expect_equal<i64>(2, literal.fields.len());
+                    if literal.fields.at(0) |field| {
+                        expect_construct_field(
+                            &tree,
+                            field,
+                            "name",
+                            "construct$name",
+                            true
+                        );
+                    } else {
+                        testing::fail("missing owner field");
+                    }
+                    if literal.fields.at(1) |field| {
+                        expect_construct_field(
+                            &tree,
+                            field,
+                            "count",
+                            "construct$count",
+                            false
+                        );
+                    } else {
+                        testing::fail("missing copy field");
+                    }
+                },
+                _ => testing::fail("construct result was not a struct literal"),
+            }
+            match tree.expressions.at(source_call.node) {
+                Call(retained) => {
+                    testing::expect(retained.args.node == source_args_list.node);
+                    testing::expect_equal<i64>(1, retained.args.len(&tree));
+                },
+                _ => testing::fail("source call changed shape"),
+            }
+        },
+        _ => testing::fail("source arguments were not retained by a call"),
+    }
+}
+
+test "typed handles retain a shared expression graph" {
+    let allocator = mem::page_allocator();
+    var tree = new(allocator);
+    defer tree.deinit();
+    let literal_text = try retained_text(&var tree, "41");
+    let literal = tree.add_expression(ExpressionNode::Int(IntExpr {
+        value: literal_text
+    }));
+    let marker = tree.add_expression(ExpressionNode::Move(MoveExpr {
+        value: literal,
+        span: zero_span()
+    }));
+    let comptime_marker = tree.add_expression(ExpressionNode::Comptime(
+        ComptimeExpr { expr: literal }
+    ));
+    let safety = try retained_text(
+        &var tree,
+        "integer literal has no unsafe effect"
+    );
+    let unsafe_marker = tree.add_expression(ExpressionNode::Unsafe(UnsafeExpr {
+        value: literal,
+        safety: safety,
+        span: zero_span()
+    }));
+    let statement = tree.add_statement(StatementNode::Expr(ExprStmt {
+        expr: marker,
+        semicolon: true
+    }));
+    var statements = array::new<Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.append(statement);
+    let block = tree.add_block(BlockStmt {
+        statements: move statements
+    });
+    let first_block = block.as_statement();
+    let second_block = block.as_statement();
+    testing::expect(first_block.node == block.node);
+    testing::expect(second_block.node == block.node);
+    expect_marker_value(&tree, marker, "41");
+    expect_marker_value(&tree, comptime_marker, "41");
+    expect_marker_value(&tree, unsafe_marker, "41");
+    if marker_value(&tree, literal) |_| {
+        testing::fail("plain expression was treated as a marker");
+    }
+    match tree.statements.at(statement.node) {
+        Expr(value) => testing::expect(value.semicolon),
+        _ => testing::fail("statement handle changed node category"),
+    }
+    match tree.statements.at(first_block.node) {
+        Block(value) => testing::expect_equal<i64>(1, value.statements.len()),
+        _ => testing::fail("first block handle changed node category"),
+    }
+    match tree.statements.at(second_block.node) {
+        Block(value) => testing::expect_equal<i64>(1, value.statements.len()),
+        _ => testing::fail("shared block handle changed node category"),
+    }
+}

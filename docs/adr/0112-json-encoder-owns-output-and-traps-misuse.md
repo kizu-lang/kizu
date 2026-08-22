@@ -107,7 +107,7 @@ byte 列は決定的に escape する(`"`、`\`、newline、CR、tab は 2 文�
 
 ## 影響
 
-- `lib/kizu/std/src/json.kizu` 追加(`Encoder` と streaming API)
+- `lib/kizu/std/src/json/json.kizu` 追加(`Encoder` と streaming API)
 - `std::internal::builtin::panic(message: []u8) -> void` を追加。既存の
   `test_fail` と同じ経路(IR `panic.fail` → `kizu_panic_fail`)で、
   `runtime error: <message>` を stderr に出して abort する。std が「これは

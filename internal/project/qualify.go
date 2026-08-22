@@ -12,7 +12,7 @@ import (
 )
 
 // qualifyModule rewrites one parsed module into package-qualified names.
-func (c *graphChecker) qualifyModule(module *moduleUnit) (*ast.Program, error) {
+func (c *graphChecker) qualifyModule(module *moduleFile) (*ast.Program, error) {
 	out := &ast.Program{}
 	for _, decl := range module.program.Decls {
 		qualified, err := c.qualifyDecl(module, decl)
@@ -27,7 +27,7 @@ func (c *graphChecker) qualifyModule(module *moduleUnit) (*ast.Program, error) {
 }
 
 // qualifyDecl rewrites declaration type references for a package check.
-func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl, error) {
+func (c *graphChecker) qualifyDecl(module *moduleFile, decl ast.Decl) (ast.Decl, error) {
 	switch d := decl.(type) {
 	case *ast.ImportDecl:
 		return nil, nil
@@ -64,7 +64,7 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 // under the type it is a method on, so two types in one module may each declare
 // a `len`; anything else is filed under its module.
 func (c *graphChecker) declaredFunctionName(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.FunctionDecl,
 ) (string, error) {
 	if !decl.Receiver || len(decl.Params) == 0 {
@@ -99,7 +99,7 @@ func receiverBase(t typ.Type) (string, bool) {
 
 // qualifyStruct rewrites a struct declaration and its field types.
 func (c *graphChecker) qualifyStruct(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.StructDecl,
 ) (*ast.StructDecl, error) {
 	cp := *decl
@@ -117,7 +117,7 @@ func (c *graphChecker) qualifyStruct(
 
 // qualifyUnion rewrites a union declaration and its payload types.
 func (c *graphChecker) qualifyUnion(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.UnionDecl,
 ) (*ast.UnionDecl, error) {
 	cp := *decl
@@ -138,7 +138,7 @@ func (c *graphChecker) qualifyUnion(
 
 // qualifyContract rewrites contract method signature type references.
 func (c *graphChecker) qualifyContract(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.ContractDecl,
 ) (*ast.ContractDecl, error) {
 	cp := *decl
@@ -155,7 +155,7 @@ func (c *graphChecker) qualifyContract(
 }
 
 // qualifyImpl rewrites the type and contract an assertion names.
-func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast.ImplDecl, error) {
+func (c *graphChecker) qualifyImpl(module *moduleFile, decl *ast.ImplDecl) (*ast.ImplDecl, error) {
 	cp := *decl
 	typeName, err := c.resolveType(module, decl.TypeName)
 	if err != nil {
@@ -176,7 +176,7 @@ func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast
 // lets it name the trusted primitives and what makes its `self` parameter a
 // method receiver.
 func (c *graphChecker) qualifyFunction(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.FunctionDecl,
 	name string,
 ) (*ast.FunctionDecl, error) {
@@ -208,7 +208,7 @@ func (c *graphChecker) qualifyFunction(
 
 // qualifyTestDecl rewrites type-bearing expressions inside a test block.
 func (c *graphChecker) qualifyTestDecl(
-	module *moduleUnit,
+	module *moduleFile,
 	decl *ast.TestDecl,
 ) (*ast.TestDecl, error) {
 	cp := *decl
@@ -219,7 +219,7 @@ func (c *graphChecker) qualifyTestDecl(
 
 // qualifyBlock rewrites type-bearing expressions inside a block.
 func (c *graphChecker) qualifyBlock(
-	module *moduleUnit,
+	module *moduleFile,
 	block *ast.BlockStmt,
 ) (*ast.BlockStmt, error) {
 	if block == nil {
@@ -237,7 +237,7 @@ func (c *graphChecker) qualifyBlock(
 }
 
 // qualifyStmt rewrites type-bearing expressions inside one statement.
-func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.Statement, error) {
+func (c *graphChecker) qualifyStmt(module *moduleFile, stmt ast.Statement) (ast.Statement, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		cp := *s
@@ -286,7 +286,7 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 // qualifyComptimeStmt rewrites the statements that are resolved at compile
 // time. A statement that is none of them carries nothing to qualify.
 func (c *graphChecker) qualifyComptimeStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt ast.Statement,
 ) (ast.Statement, error) {
 	switch s := stmt.(type) {
@@ -304,7 +304,7 @@ func (c *graphChecker) qualifyComptimeStmt(
 // qualifyComptimeMatchStmt rewrites the dispatched value and the body every
 // variant expands.
 func (c *graphChecker) qualifyComptimeMatchStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.ComptimeMatchStmt,
 ) (*ast.ComptimeMatchStmt, error) {
 	cp := *stmt
@@ -319,7 +319,7 @@ func (c *graphChecker) qualifyComptimeMatchStmt(
 
 // qualifyComptimeForStmt rewrites the compile-time list and the loop body.
 func (c *graphChecker) qualifyComptimeForStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.ComptimeForStmt,
 ) (*ast.ComptimeForStmt, error) {
 	cp := *stmt
@@ -334,7 +334,7 @@ func (c *graphChecker) qualifyComptimeForStmt(
 
 // qualifyDeferStmt rewrites type-bearing expressions in a deferred cleanup.
 func (c *graphChecker) qualifyDeferStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.DeferStmt,
 ) (*ast.DeferStmt, error) {
 	cp := *stmt
@@ -345,7 +345,7 @@ func (c *graphChecker) qualifyDeferStmt(
 
 // qualifyErrDeferStmt rewrites type-bearing expressions in an errdefer cleanup.
 func (c *graphChecker) qualifyErrDeferStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.ErrDeferStmt,
 ) (*ast.ErrDeferStmt, error) {
 	cp := *stmt
@@ -356,7 +356,7 @@ func (c *graphChecker) qualifyErrDeferStmt(
 
 // qualifyAssignStmt rewrites both sides of an assignment statement.
 func (c *graphChecker) qualifyAssignStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.AssignStmt,
 ) (*ast.AssignStmt, error) {
 	cp := *stmt
@@ -370,7 +370,7 @@ func (c *graphChecker) qualifyAssignStmt(
 }
 
 // qualifyIfStmt rewrites all expressions reachable from an if node.
-func (c *graphChecker) qualifyIfStmt(module *moduleUnit, stmt *ast.IfStmt) (*ast.IfStmt, error) {
+func (c *graphChecker) qualifyIfStmt(module *moduleFile, stmt *ast.IfStmt) (*ast.IfStmt, error) {
 	cp := *stmt
 	condition, err := c.qualifyExpr(module, stmt.Condition)
 	if err != nil {
@@ -386,7 +386,7 @@ func (c *graphChecker) qualifyIfStmt(module *moduleUnit, stmt *ast.IfStmt) (*ast
 }
 
 // qualifyForStmt rewrites range bounds and loop body expressions.
-func (c *graphChecker) qualifyForStmt(module *moduleUnit, stmt *ast.ForStmt) (*ast.ForStmt, error) {
+func (c *graphChecker) qualifyForStmt(module *moduleFile, stmt *ast.ForStmt) (*ast.ForStmt, error) {
 	cp := *stmt
 	var err error
 	cp.Start, err = c.qualifyExpr(module, stmt.Start)
@@ -403,7 +403,7 @@ func (c *graphChecker) qualifyForStmt(module *moduleUnit, stmt *ast.ForStmt) (*a
 
 // qualifyComptimeIfStmt rewrites both branches of a compile-time conditional.
 func (c *graphChecker) qualifyComptimeIfStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.ComptimeIfStmt,
 ) (*ast.ComptimeIfStmt, error) {
 	cp := *stmt
@@ -422,7 +422,7 @@ func (c *graphChecker) qualifyComptimeIfStmt(
 
 // qualifyMatchStmt rewrites the matched value and all arm bodies.
 func (c *graphChecker) qualifyMatchStmt(
-	module *moduleUnit,
+	module *moduleFile,
 	stmt *ast.MatchStmt,
 ) (*ast.MatchStmt, error) {
 	cp := *stmt
@@ -443,7 +443,7 @@ func (c *graphChecker) qualifyMatchStmt(
 
 // qualifyExpr rewrites type names carried by expressions.
 func (c *graphChecker) qualifyExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr ast.Expression,
 ) (ast.Expression, error) {
 	switch e := expr.(type) {
@@ -473,7 +473,7 @@ func (c *graphChecker) qualifyExpr(
 // qualifyOrelseGuardExpr rewrites the condition and any returned value of an
 // orelse guard.
 func (c *graphChecker) qualifyOrelseGuardExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.OrelseGuardExpr,
 ) (*ast.OrelseGuardExpr, error) {
 	cp := *expr
@@ -495,7 +495,7 @@ func (c *graphChecker) qualifyOrelseGuardExpr(
 
 // qualifyTypeOrControlExpr rewrites type-bearing and control expressions.
 func (c *graphChecker) qualifyTypeOrControlExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr ast.Expression,
 ) (ast.Expression, error) {
 	switch e := expr.(type) {
@@ -528,7 +528,7 @@ func (c *graphChecker) qualifyTypeOrControlExpr(
 
 // qualifyComptimeExpr rewrites the expression evaluated at compile time.
 func (c *graphChecker) qualifyComptimeExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.ComptimeExpr,
 ) (*ast.ComptimeExpr, error) {
 	cp := *expr
@@ -539,7 +539,7 @@ func (c *graphChecker) qualifyComptimeExpr(
 
 // qualifyPrefixExpr rewrites the operand of a unary expression.
 func (c *graphChecker) qualifyPrefixExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.PrefixExpr,
 ) (*ast.PrefixExpr, error) {
 	cp := *expr
@@ -550,7 +550,7 @@ func (c *graphChecker) qualifyPrefixExpr(
 
 // qualifyBinaryExpr rewrites both sides of a binary expression.
 func (c *graphChecker) qualifyBinaryExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.BinaryExpr,
 ) (*ast.BinaryExpr, error) {
 	cp := *expr
@@ -565,7 +565,7 @@ func (c *graphChecker) qualifyBinaryExpr(
 
 // qualifyCastExpr rewrites the target type and value of a cast expression.
 func (c *graphChecker) qualifyCastExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.CastExpr,
 ) (*ast.CastExpr, error) {
 	cp := *expr
@@ -580,7 +580,7 @@ func (c *graphChecker) qualifyCastExpr(
 
 // qualifyTryExpr rewrites the fallible expression wrapped by try.
 func (c *graphChecker) qualifyTryExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.TryExpr,
 ) (*ast.TryExpr, error) {
 	cp := *expr
@@ -591,7 +591,7 @@ func (c *graphChecker) qualifyTryExpr(
 
 // qualifyUnsafeExpr rewrites the expression an unsafe marker covers.
 func (c *graphChecker) qualifyUnsafeExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.UnsafeExpr,
 ) (*ast.UnsafeExpr, error) {
 	cp := *expr
@@ -602,7 +602,7 @@ func (c *graphChecker) qualifyUnsafeExpr(
 
 // qualifyMoveExpr rewrites the place a move marker covers.
 func (c *graphChecker) qualifyMoveExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.MoveExpr,
 ) (*ast.MoveExpr, error) {
 	cp := *expr
@@ -613,7 +613,7 @@ func (c *graphChecker) qualifyMoveExpr(
 
 // qualifyCallExpr rewrites callees and arguments inside a call expression.
 func (c *graphChecker) qualifyCallExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.CallExpr,
 ) (*ast.CallExpr, error) {
 	cp := *expr
@@ -639,7 +639,7 @@ func (c *graphChecker) qualifyCallExpr(
 // expression left the name unqualified while the declaration was registered
 // under the module path, so the call found nothing that takes static arguments.
 func (c *graphChecker) qualifyTypeApplyExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.TypeApplyExpr,
 ) (*ast.TypeApplyExpr, error) {
 	cp := *expr
@@ -684,7 +684,7 @@ func workerArgIndex(callee ast.Expression) int {
 // way a callee written as a bare name is resolved. A name that is not this
 // module's stays as written, which is what an already-qualified spelling and a
 // forwarded static parameter both need.
-func (c *graphChecker) qualifyFunctionName(module *moduleUnit, name string) string {
+func (c *graphChecker) qualifyFunctionName(module *moduleFile, name string) string {
 	if c.declaresFunction(module, name) {
 		return module.qualify(name)
 	}
@@ -693,7 +693,7 @@ func (c *graphChecker) qualifyFunctionName(module *moduleUnit, name string) stri
 
 // qualifyCallee rewrites imported function calls to their package function name.
 func (c *graphChecker) qualifyCallee(
-	module *moduleUnit,
+	module *moduleFile,
 	expr ast.Expression,
 ) (ast.Expression, error) {
 	// Qualifying rewrites the callee node, so the span has to be carried over:
@@ -719,14 +719,14 @@ func (c *graphChecker) qualifyCallee(
 // declaresFunction reports whether module has a local top-level function. It
 // reads the index collectFunctions built, which holds exactly the functions a
 // module names -- methods are filed under their receiver and are not among them.
-func (c *graphChecker) declaresFunction(module *moduleUnit, name string) bool {
+func (c *graphChecker) declaresFunction(module *moduleFile, name string) bool {
 	_, ok := c.functions[module.qualify(name)]
 	return ok
 }
 
 // qualifyFieldExpr rewrites namespace receivers while preserving field names.
 func (c *graphChecker) qualifyFieldExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.FieldExpr,
 ) (*ast.FieldExpr, error) {
 	cp := *expr
@@ -744,7 +744,7 @@ func (c *graphChecker) qualifyFieldExpr(
 
 // qualifyIndexExpr rewrites target and index expressions.
 func (c *graphChecker) qualifyIndexExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.IndexExpr,
 ) (*ast.IndexExpr, error) {
 	cp := *expr
@@ -767,7 +767,7 @@ func (c *graphChecker) qualifyIndexExpr(
 
 // qualifyDerefExpr rewrites the receiver before explicit pointer dereference.
 func (c *graphChecker) qualifyDerefExpr(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.DerefExpr,
 ) (*ast.DerefExpr, error) {
 	cp := *expr
@@ -778,7 +778,7 @@ func (c *graphChecker) qualifyDerefExpr(
 
 // qualifyStructLiteral rewrites struct literal type and field value expressions.
 func (c *graphChecker) qualifyStructLiteral(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.StructLiteralExpr,
 ) (*ast.StructLiteralExpr, error) {
 	cp := *expr

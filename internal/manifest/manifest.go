@@ -13,7 +13,6 @@ import (
 type Manifest struct {
 	PackageName string
 	Version     string
-	Root        string
 	Paths       []string
 }
 
@@ -141,12 +140,6 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Version = parsed
-	case "modules.root":
-		parsed, err := parseStringValue(value, lineNo)
-		if err != nil {
-			return err
-		}
-		manifest.Root = parsed
 	case "modules.paths":
 		parsed, err := parseStringList(value, lineNo)
 		if err != nil {

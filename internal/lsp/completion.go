@@ -99,25 +99,33 @@ func (s *Server) completionSources(uri string, source string) ([]string, []strin
 		return []string{source}, nil
 	}
 	graph, err := loadPackageGraph(root)
-	if err != nil || !graphContainsFile(graph, path) {
+	includeTests := project.IsTestFile(path)
+	if err != nil || !graph.ContainsFile(path, includeTests) {
 		return []string{source}, nil
 	}
-	return s.completionSourcesFromGraph(graph, source), graphModulePaths(graph)
+	return s.completionSourcesFromGraph(graph, source, includeTests),
+		graphModulePaths(graph, includeTests)
 }
 
 // completionSourcesFromGraph reads package module sources with open-buffer overrides.
-func (s *Server) completionSourcesFromGraph(graph project.Graph, fallback string) []string {
-	overrides := s.packageSourceOverrides(graph)
+func (s *Server) completionSourcesFromGraph(
+	graph project.Graph,
+	fallback string,
+	includeTests bool,
+) []string {
+	overrides := s.packageSourceOverrides(graph, includeTests)
 	sources := []string{}
 	for _, module := range graph.Modules {
-		cleanFile := filepath.Clean(module.File)
-		if source, ok := overrides[cleanFile]; ok {
-			sources = append(sources, source)
-			continue
-		}
-		data, err := os.ReadFile(module.File)
-		if err == nil {
-			sources = append(sources, string(data))
+		for _, file := range module.SourceFiles(includeTests) {
+			cleanFile := filepath.Clean(file)
+			if source, ok := overrides[cleanFile]; ok {
+				sources = append(sources, source)
+				continue
+			}
+			data, err := os.ReadFile(file)
+			if err == nil {
+				sources = append(sources, string(data))
+			}
 		}
 	}
 	if len(sources) == 0 {
@@ -987,9 +995,12 @@ func normalizeCompletionType(typ string) string {
 }
 
 // graphModulePaths returns module path strings from a graph.
-func graphModulePaths(graph project.Graph) []string {
+func graphModulePaths(graph project.Graph, includeTests bool) []string {
 	paths := make([]string, 0, len(graph.Modules))
 	for _, module := range graph.Modules {
+		if len(module.SourceFiles(includeTests)) == 0 {
+			continue
+		}
 		paths = append(paths, module.Path)
 	}
 	return paths

@@ -122,9 +122,10 @@ Kizu の通常の snake_case と module namespace へ機械的に変換します
 
 compiler package の外へ見せる module は root の `compiler` だけです。実装 module は
 `src/internal/` に置き、Go の `internal/x` を `compiler::internal::x` に対応させます。
-module 本体は `src/internal/parser.kizu`、その test は
-`src/internal/parser/test.kizu` に置きます。`mod.kizu` は使いません。実装を子 module
-へ分ける場合は `src/internal/parser/internal/x.kizu` に置き、parser subtree の外へ
+module 本体は `src/internal/parser/parser.kizu`、その test は
+`src/internal/parser/parser_test.kizu` に置き、同じmoduleとして扱います。Go packageの
+production fileを分ける場合も同じdirectoryへ置きます。別moduleとして閉じる必要が
+ある実装だけを `src/internal/parser/internal/x/x.kizu` に置き、parser subtreeの外へ
 公開しません。
 
 | Go | Kizu |

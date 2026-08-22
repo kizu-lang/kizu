@@ -401,6 +401,7 @@ func (p *Parser) parseStructDeclWithDoc(docs string) *ast.StructDecl {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span = tokenSpan(p.cur)
 	if p.peek.Type == token.LT {
 		p.nextToken()
 		decl.TypeParams = p.parseGenericParamList()

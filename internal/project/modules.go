@@ -9,10 +9,11 @@ import (
 	"strings"
 )
 
-// Module identifies one source file in a resolved package graph.
+// Module identifies the ordered source files in one directory module.
 type Module struct {
-	Path string
-	File string
+	Path      string
+	Files     []string
+	TestFiles []string
 }
 
 // Graph is the deterministic module list resolved from a manifest.
@@ -29,25 +30,22 @@ type Graph struct {
 // still a namespace its own modules reach each other through, whether or not a
 // module answers to it.
 func ResolveModules(baseDir string, manifest manifest.Manifest) (Graph, error) {
-	rootFile := ""
-	if manifest.Root != "" {
-		rootFile = filepath.Clean(filepath.Join(baseDir, manifest.Root))
-	}
-	modules := map[string]string{}
+	modules := map[string]*Module{}
+	seenFiles := map[string]string{}
 	for _, sourceRoot := range manifest.Paths {
 		root := filepath.Clean(filepath.Join(baseDir, sourceRoot))
-		if err := collectSourceRoot(modules, manifest, rootFile, root); err != nil {
+		if err := collectSourceRoot(modules, seenFiles, manifest.PackageName, root); err != nil {
 			return Graph{}, err
 		}
 	}
 	return Graph{PackageName: manifest.PackageName, Modules: sortedModules(modules)}, nil
 }
 
-// collectSourceRoot walks one source root and records Kizu source modules.
+// collectSourceRoot walks one source root and groups Kizu files by directory.
 func collectSourceRoot(
-	modules map[string]string,
-	manifest manifest.Manifest,
-	rootFile string,
+	modules map[string]*Module,
+	seenFiles map[string]string,
+	packageName string,
 	sourceRoot string,
 ) error {
 	return filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, err error) error {
@@ -57,45 +55,52 @@ func collectSourceRoot(
 		if entry.IsDir() || filepath.Ext(path) != ".kizu" {
 			return nil
 		}
-		modulePath, err := sourceModulePath(manifest.PackageName, sourceRoot, rootFile, path)
+		modulePath, err := sourceModulePath(packageName, sourceRoot, path)
 		if err != nil {
 			return err
 		}
-		if previous, exists := modules[modulePath]; exists {
-			return fmt.Errorf("module error: duplicate module `%s`: %s and %s",
-				modulePath, previous, path)
+		cleanPath := filepath.Clean(path)
+		if previous, exists := seenFiles[cleanPath]; exists {
+			if previous == modulePath {
+				return nil
+			}
+			return fmt.Errorf("module error: source `%s` belongs to both `%s` and `%s`",
+				cleanPath, previous, modulePath)
 		}
-		modules[modulePath] = path
+		seenFiles[cleanPath] = modulePath
+		module := modules[modulePath]
+		if module == nil {
+			module = &Module{Path: modulePath}
+			modules[modulePath] = module
+		}
+		if IsTestFile(cleanPath) {
+			module.TestFiles = append(module.TestFiles, cleanPath)
+		} else {
+			module.Files = append(module.Files, cleanPath)
+		}
 		return nil
 	})
 }
 
-// sourceModulePath converts one source file path into a Kizu module path.
+// sourceModulePath converts a source directory into a Kizu module path.
 func sourceModulePath(
 	packageName string,
 	sourceRoot string,
-	rootFile string,
 	path string,
 ) (string, error) {
-	cleanPath := filepath.Clean(path)
-	if cleanPath == rootFile {
-		return packageName, nil
-	}
-	rel, err := filepath.Rel(sourceRoot, cleanPath)
+	rel, err := filepath.Rel(sourceRoot, filepath.Dir(filepath.Clean(path)))
 	if err != nil {
 		return "", err
 	}
-	name := strings.TrimSuffix(filepath.ToSlash(rel), ".kizu")
-	name = strings.TrimSuffix(name, "/mod")
-	name = strings.TrimSuffix(name, "/main")
-	if name == "" {
+	name := filepath.ToSlash(rel)
+	if name == "." || name == "" {
 		return packageName, nil
 	}
 	return packageName + "::" + strings.ReplaceAll(name, "/", "::"), nil
 }
 
 // sortedModules returns modules ordered by module path.
-func sortedModules(modules map[string]string) []Module {
+func sortedModules(modules map[string]*Module) []Module {
 	paths := make([]string, 0, len(modules))
 	for path := range modules {
 		paths = append(paths, path)
@@ -103,9 +108,48 @@ func sortedModules(modules map[string]string) []Module {
 	sort.Strings(paths)
 	out := make([]Module, 0, len(paths))
 	for _, path := range paths {
-		out = append(out, Module{Path: path, File: modules[path]})
+		module := modules[path]
+		sort.Strings(module.Files)
+		sort.Strings(module.TestFiles)
+		out = append(out, *module)
 	}
 	return out
+}
+
+// IsTestFile reports whether a package source joins its module only for tests.
+func IsTestFile(path string) bool {
+	return strings.HasSuffix(filepath.Base(path), "_test.kizu")
+}
+
+// SourceFiles returns this module's deterministic production or test source set.
+func (m Module) SourceFiles(includeTests bool) []string {
+	files := make([]string, 0, len(m.Files)+len(m.TestFiles))
+	files = append(files, m.Files...)
+	if includeTests {
+		files = append(files, m.TestFiles...)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// SourceFiles returns every graph source in module and file order.
+func (g Graph) SourceFiles(includeTests bool) []string {
+	files := []string{}
+	for _, module := range g.Modules {
+		files = append(files, module.SourceFiles(includeTests)...)
+	}
+	return files
+}
+
+// ContainsFile reports whether path belongs to this graph in the selected mode.
+func (g Graph) ContainsFile(path string, includeTests bool) bool {
+	wanted := filepath.Clean(path)
+	for _, file := range g.SourceFiles(includeTests) {
+		if filepath.Clean(file) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // InternalSegment names the directory a package keeps its own modules in. A

@@ -157,26 +157,34 @@ name = "app"
 version = "0.1.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 ```
 
 `package.name` は user module の root namespace になります。
-たとえば `name = "app"` の package では、`src/lexer.kizu` を
-`app::lexer` として import します。
-
-`[modules].root` は package 名そのものになる file を指します。省略できます。
-library package はその module を持つ理由が無いことがあり、std は持ちません
-(std の module はすべて `std::mem` 以下で、裸の `std` はありません)。
-
-module path は file path から決まります。
+module path は、`[modules].paths` に指定した source root からの directory path で
+決まります。source root 直下が package root module、子 directory が child module
+です。同じ directory の production `.kizu` file はすべて同じ module に属し、file
+名は module path に影響しません。
 
 ```text
-src/main.kizu       -> app
-src/lexer.kizu      -> app::lexer
-src/parser/mod.kizu -> app::parser
-src/parser/ast.kizu -> app::parser::ast
+src/main.kizu                 -> app
+src/cli.kizu                  -> app
+src/lexer/lexer.kizu          -> app::lexer
+src/parser/ast/ast.kizu       -> app::parser::ast
 ```
+
+`main.kizu` と `mod.kizu` に特別な module 意味はありません。production file が無い
+directory は production module を作りません。したがって library package は package
+root module を持たなくてもよく、std の source root 直下には production file を
+置きません。
+
+package graph 内で suffix が `_test.kizu` の file は `kizu test <package>` のときだけ、
+同じ directory の module に加わります。package を対象にした `run` / `check` / `build`
+からは除外します。file path を直接指定した loose-source command は、その1fileを明示的に
+選んだものなので通常どおり読みます。
+対象 module の private 宣言を見る white-box test はその directory に置きます。依存方向を
+逆向きにする integration test は別の test-only directory module に置き、対象の public API
+を import します。通常の module cycle 規則を test だけ緩めることはしません。
 
 ## 4. 設計概要
 
@@ -622,16 +630,19 @@ package の内部 module は `internal` ディレクトリで隠します。mani
 書きません。どこに置いたかが規則そのものです。
 
 ```text
-src/lexer.kizu                   -> app::lexer                    公開
-src/internal/table.kizu          -> app::internal::table          app 配下からだけ
-src/parser/internal/state.kizu   -> app::parser::internal::state  app::parser 配下からだけ
+src/lexer/lexer.kizu                    -> app::lexer                    公開
+src/internal/table/table.kizu           -> app::internal::table          app 配下からだけ
+src/parser/internal/state/state.kizu    -> app::parser::internal::state  app::parser 配下からだけ
 ```
 
 `internal` は階層のどこにでも置けます。`X::internal::Y` は `X` とその下の module
 からだけ import / 参照できます。部分木の中だけで使う内部 module を、package 全体に
 見せずに置けます。
 
-visibility は default private です。
+visibility は default private です。同じ directory の file は一つの module を構成する
+ため、private な top-level declaration と field はその module の全fileから使えます。
+import はfile-localで、各fileが自分の外部依存を明示します。同じmoduleの宣言を使う
+ためのimportは不要です。
 
 ```kizu
 import std::array;
@@ -1838,9 +1849,10 @@ unsafe struct Bytes {
 }
 ```
 
-`unsafe struct` は field を `pub` にできません。Kizu の module は 1 file で
-`pub(crate)` / `pub(super)` を持たないため(§6.6)、不変条件を壊しうるコードは
-宣言と同じ file の中だけに閉じます。
+`unsafe struct` は field を `pub` にできません。通常のprivate fieldは同じmoduleの
+全fileから使えますが、`unsafe struct` の構築とfieldへの書き込みは、その宣言がある
+fileの中だけに閉じます。別fileでは `unsafe` を付けても拒否します。これにより、
+不変条件を作り変えられる監査範囲はmoduleの大きさにかかわらず1fileに固定されます。
 
 不変条件を作る操作 —— 構築と field への書き込み —— には `unsafe` が要ります。
 field の読みには要りません。読み出した raw pointer は、それを使う操作の側が
@@ -2168,7 +2180,7 @@ Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
 
 ```kizu
-// lib/kizu/std/src/array.kizu
+// lib/kizu/std/src/array/array.kizu
 pub fn new<T>(allocator: Allocator) -> std::array::Array<T> {
     return std::internal::builtin::array<T>(allocator);
 }
@@ -2626,9 +2638,14 @@ test "parser accepts minimal function" {
 
 `kizu test <path>` は file または package root を受け取り、check 後に
 top-level `test` block だけを source order で実行します。`main` は実行しません。
+package 内では dependency を先にした resolved module order、同じmodule内のfile path
+order、各file内のdeclaration orderで実行します。
 test block は parameterless `!void` body として扱うため、helper が返す `!T` には
 `try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
 `test: ok` を表示します。
+package test では、production fileに加えて `_test.kizu` fileを同じdirectoryのmodule
+へ加えます。test fileは同じmoduleのprivate宣言を使え、test helperも同じmoduleの
+他のtest fileから使えます。file-local importの規則はtest fileにも適用します。
 filesystem-wide test discovery、test filter、test attribute、async test、location-aware
 diagnostics、message builder helper は後続で扱います。
 

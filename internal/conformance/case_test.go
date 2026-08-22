@@ -1,9 +1,30 @@
 package conformance
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestBlockPathFindsTestOnlyPackage checks package promises can live with tests.
+func TestBlockPathFindsTestOnlyPackage(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "tests", "behavior", "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "main_test.kizu"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := blockPath(root, "tests/behavior")
+	if err != nil {
+		t.Fatalf("block path failed: %v", err)
+	}
+	if got != "tests/behavior/src/main_test.kizu" {
+		t.Fatalf("got %q, want test-only package entry", got)
+	}
+}
 
 // TestBlockReadsWhatTheProgramDeclares checks the trailing comment block is
 // read as the case, output included.

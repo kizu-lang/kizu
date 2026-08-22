@@ -385,8 +385,8 @@ func (c *Checker) checkPublicStructFields(decl *ast.StructDecl) error {
 			continue
 		}
 		// An `unsafe struct` keeps every field private. That is what pins the
-		// code able to break its invariant to this one file: Kizu modules are
-		// one file and do not nest their privacy (SPEC §6.6).
+		// code able to break its invariant to its declaration file even when a
+		// directory module has other implementation files (SPEC §12).
 		if decl.RequiresUnsafe {
 			return errorf("unsafe error: `unsafe struct %s` cannot have `pub` field `%s`"+
 				"\nhelp: drop `pub` so only this file can break the invariant",
@@ -6058,7 +6058,7 @@ func (c *Checker) checkArrayMethod(
 }
 
 // checkStdMethod checks a receiver call against the signature std declares for
-// it in std/src/*.kizu, with the receiver's static arguments substituted in.
+// it in std/src/*/*.kizu, with the receiver's static arguments substituted in.
 func (c *Checker) checkStdMethod(
 	receiver string,
 	typeArgs []Type,

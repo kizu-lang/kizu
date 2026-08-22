@@ -69,7 +69,11 @@ func casePaths(dir string) ([]string, error) {
 
 // read reads the case one program declares at the end of itself.
 func read(dir string, path string) (Case, error) {
-	source, err := os.ReadFile(filepath.Join(dir, blockPath(path)))
+	blockFile, err := blockPath(dir, path)
+	if err != nil {
+		return Case{}, err
+	}
+	source, err := os.ReadFile(filepath.Join(dir, blockFile))
 	if err != nil {
 		return Case{}, err
 	}
@@ -80,11 +84,21 @@ func read(dir string, path string) (Case, error) {
 	return parse(path, lines)
 }
 
-// blockPath returns the file a case is declared in. A package declares itself
-// in the module its entry point is in.
-func blockPath(path string) string {
+// blockPath returns the file a case is declared in. A runnable package uses
+// main.kizu; a test-only package uses main_test.kizu.
+func blockPath(dir string, path string) (string, error) {
 	if strings.HasSuffix(path, ".kizu") {
-		return path
+		return path, nil
 	}
-	return path + "/src/main.kizu"
+	for _, name := range []string{"main.kizu", "main_test.kizu"} {
+		candidate := filepath.ToSlash(filepath.Join(path, "src", name))
+		info, err := os.Stat(filepath.Join(dir, candidate))
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("package has no src/main.kizu or src/main_test.kizu case file")
 }

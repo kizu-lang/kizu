@@ -1,0 +1,4846 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::source;
+import compiler::internal::token;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct TypeShape {
+    count: i64,
+    first: i64,
+    second: i64,
+    third: i64,
+    fourth: i64,
+    fifth: i64
+}
+
+fn (self: &var TypeShape) visit(value: &typ::Node) -> void {
+    let code = match value {
+        Name(_) => 1,
+        Slice(_) => 2,
+        Buffer(_) => 3,
+        Borrow(_) => 4,
+        Optional(_) => 5,
+        Const(_) => 6,
+        ErrorUnion(_) => 7,
+    };
+    if self.count == 0 {
+        self.first = code;
+    } else {
+        if self.count == 1 {
+            self.second = code;
+        } else {
+            if self.count == 2 {
+                self.third = code;
+            } else {
+                if self.count == 3 {
+                    self.fourth = code;
+                } else {
+                    if self.count == 4 {
+                        self.fifth = code;
+                    }
+                }
+            }
+        }
+    }
+    self.count = self.count + 1;
+    return;
+}
+
+fn retained_text(
+    tree: &var ast::Ast,
+    bytes: []u8
+) -> !ast::Text {
+    return tree.add_text_from_bytes(bytes);
+}
+
+fn expect_type_apply_lookahead(
+    allocator: Allocator,
+    input: []u8,
+    expected: bool
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    testing::expect_equal<bool>(expected, try value.type_apply_looks_like_call());
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    testing::expect_equal<bool>(expected, try value.type_apply_looks_like_call());
+    testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.peek_kind());
+    try value.next_token();
+    testing::expect_equal<token::Kind>(token::Kind::Lt, value.current_kind());
+    return;
+}
+
+fn expect_peek_expression_end(
+    allocator: Allocator,
+    input: []u8,
+    expected: bool
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<bool>(expected, value.peek_is_expression_end());
+    return;
+}
+
+fn expect_peek_precedence(
+    allocator: Allocator,
+    input: []u8,
+    expected: i64
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect_equal<i64>(1, value.current_precedence());
+    testing::expect_equal<i64>(expected, value.peek_precedence());
+    try value.next_token();
+    testing::expect_equal<i64>(expected, value.current_precedence());
+    return;
+}
+
+fn expect_parser_diagnostic(
+    value: &Parser,
+    index: i64,
+    expected: []u8,
+    start_column: i64,
+    end_column: i64
+) -> void {
+    if value.diagnostic(index) |entry| {
+        let message = entry.message.as_bytes();
+        testing::expect_equal<[]u8>(expected, message);
+        testing::expect_equal<i64>(1, entry.span.start.line);
+        testing::expect_equal<i64>(start_column, entry.span.start.column);
+        testing::expect_equal<i64>(1, entry.span.end.line);
+        testing::expect_equal<i64>(end_column, entry.span.end.column);
+    } else {
+        testing::fail("missing parser diagnostic");
+    }
+    return;
+}
+
+fn expect_current_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_kind: token::Kind,
+    expected_message: []u8,
+    end_column: i64
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(!try value.expect_current(expected_kind));
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    expect_parser_diagnostic(&value, 0, expected_message, 1, end_column);
+    return;
+}
+
+fn expect_peek_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_kind: token::Kind,
+    expected_message: []u8
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(!try value.expect_peek(expected_kind));
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    expect_parser_diagnostic(&value, 0, expected_message, 1, 4);
+    return;
+}
+
+fn expect_retained_bytes(value: &string::String, expected: []u8) -> void {
+    let bytes = value.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_parsed_expression(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_expression(&var tree, 1);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_statement(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_statement(
+        allocator,
+        &tree,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_block(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let block = try value.parse_block_stmt(&var tree);
+    if value.diagnostics_len() != 0 {
+        testing::fail(input);
+    }
+    value.deinit();
+    let rendered = try ast::render_block(allocator, &tree, block);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected);
+    return;
+}
+
+fn expect_parsed_expression_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_render: []u8,
+    expected_message: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try value.parse_expression(&var tree, 1);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    if value.diagnostic(0) |entry| {
+        expect_retained_bytes(&entry.message, expected_message);
+    } else {
+        testing::fail("missing expression diagnostic");
+    }
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        expression
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected_render);
+    return;
+}
+
+fn expect_parsed_statement_error(
+    allocator: Allocator,
+    input: []u8,
+    expected_render: []u8,
+    expected_message: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let statement = try value.parse_statement(&var tree);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    if value.diagnostic(0) |entry| {
+        expect_retained_bytes(&entry.message, expected_message);
+    } else {
+        testing::fail("missing statement diagnostic");
+    }
+    let rendered = try ast::render_statement(
+        allocator,
+        &tree,
+        statement
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, expected_render);
+    return;
+}
+
+fn expect_break_label(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Break(value) => {
+            expect_retained_bytes(tree.texts.at(value.label.node), expected);
+        },
+        _ => testing::fail("parser did not retain a break statement"),
+    }
+    return;
+}
+
+fn expect_continue_label(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expected: []u8
+) -> void {
+    match tree.statements.at(statement.node) {
+        Continue(value) => {
+            expect_retained_bytes(tree.texts.at(value.label.node), expected);
+        },
+        _ => testing::fail("parser did not retain a continue statement"),
+    }
+    return;
+}
+
+fn expect_import_path(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    first: []u8,
+    second: []u8,
+    third: []u8
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Import(value) => {
+            var expected_len = 1;
+            if mem::len(second) > 0 {
+                expected_len = 2;
+            }
+            if mem::len(third) > 0 {
+                expected_len = 3;
+            }
+            testing::expect_equal<i64>(expected_len, value.path.len());
+            let first_part = value.path.get_or_panic(0);
+            expect_retained_bytes(tree.texts.at(first_part.node), first);
+            if expected_len >= 2 {
+                let second_part = value.path.get_or_panic(1);
+                expect_retained_bytes(tree.texts.at(second_part.node), second);
+            }
+            if expected_len == 3 {
+                let third_part = value.path.get_or_panic(2);
+                expect_retained_bytes(tree.texts.at(third_part.node), third);
+            }
+        },
+        _ => testing::fail("parser did not retain an import declaration"),
+    }
+    return;
+}
+
+fn expect_empty_import_path(
+    tree: &ast::Ast,
+    declaration: ast::Declaration
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Import(value) => testing::expect_equal<i64>(0, value.path.len()),
+        _ => testing::fail("parser did not retain an import declaration"),
+    }
+    return;
+}
+
+fn expect_impl_names(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    contract_name: []u8,
+    type_name: []u8
+) -> void {
+    match tree.declarations.at(declaration.node) {
+        Impl(value) => {
+            expect_retained_bytes(
+                tree.texts.at(value.contract_name.node),
+                contract_name
+            );
+            expect_retained_bytes(
+                tree.texts.at(value.type_name.node),
+                type_name
+            );
+        },
+        _ => testing::fail("parser did not retain an impl declaration"),
+    }
+    return;
+}
+
+fn expect_function_stub(
+    tree: &ast::Ast,
+    value: &ast::FunctionDecl,
+    public: bool,
+    docs: []u8
+) -> void {
+    testing::expect_equal<bool>(false, value.signature.receiver);
+    testing::expect_equal<i64>(0, value.signature.static_params.len());
+    testing::expect_equal<i64>(0, value.signature.params.len());
+    if value.signature.return_type |_| {
+        testing::fail("function stub retained a return type");
+    }
+    testing::expect_equal<bool>(false, value.signature.requires_unsafe);
+    testing::expect_equal<bool>(public, value.signature.public);
+    testing::expect_equal<bool>(false, value.signature.std);
+    testing::expect_equal<bool>(false, value.derived);
+    if value.body |_| {
+        testing::fail("function stub retained a body");
+    }
+    expect_retained_bytes(tree.texts.at(value.signature.name.node), "");
+    expect_retained_bytes(tree.texts.at(value.signature.extern_abi.node), "");
+    expect_retained_bytes(tree.texts.at(value.doc.node), docs);
+    return;
+}
+
+fn new_function_signature(
+    allocator: Allocator,
+    tree: &var ast::Ast
+) -> !ast::FunctionSignature {
+    let name = tree.add_empty_text();
+    let extern_abi = tree.add_empty_text();
+    return ast::FunctionSignature {
+        receiver: false,
+        name: name,
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: array::new<ast::Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: extern_abi,
+        public: false,
+        std: false
+    };
+}
+
+fn expect_param(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    params: &array::Array<ast::Param>,
+    index: i64,
+    name: []u8,
+    type_name: []u8,
+    borrow: bool,
+    mut_borrow: bool
+) -> !void {
+    let param = params.get_or_panic(index);
+    expect_retained_bytes(tree.texts.at(param.name.node), name);
+    testing::expect_equal<bool>(borrow, param.borrow);
+    testing::expect_equal<bool>(mut_borrow, param.mut_borrow);
+    let rendered = try typ::render(allocator, &tree.types, param.type_name);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, type_name);
+    return;
+}
+
+fn expect_type_expression(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Type(value) => {
+            expect_retained_bytes(
+                tree.texts.at(value.type_name.node),
+                expected
+            );
+        },
+        _ => testing::fail("parser did not retain a type expression"),
+    }
+    return;
+}
+
+fn add_ident_expression(
+    tree: &var ast::Ast,
+    name: []u8,
+    start_column: i64,
+    end_column: i64
+) -> !ast::Expression {
+    let retained = try tree.add_text_from_bytes(name);
+    return tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: retained,
+        span: ast::Span {
+            source: null,
+            start: ast::Position { line: 1, column: start_column },
+            end: ast::Position { line: 1, column: end_column }
+        }
+    }));
+}
+
+fn add_field_expression(
+    tree: &var ast::Ast,
+    receiver: ast::Expression,
+    name: []u8,
+    namespace: bool
+) -> !ast::Expression {
+    let retained = try tree.add_text_from_bytes(name);
+    return tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: receiver,
+        name: retained,
+        namespace: namespace,
+        span: zero_span()
+    }));
+}
+
+fn expect_struct_literal_type_name(
+    allocator: Allocator,
+    value: &Parser,
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: []u8
+) -> !void {
+    if try value.struct_literal_type_name(allocator, tree, expression) |name| {
+        defer name.deinit();
+        expect_retained_bytes(&name, expected);
+    } else {
+        testing::fail("parser rejected a struct literal type name");
+    }
+    return;
+}
+
+fn expect_no_struct_literal_type_name(
+    allocator: Allocator,
+    value: &Parser,
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !void {
+    if try value.struct_literal_type_name(allocator, tree, expression) |name| {
+        name.deinit();
+        testing::fail("parser accepted an invalid struct literal type name");
+    }
+    return;
+}
+
+fn expect_type_apply_expression(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    callee: ast::Expression,
+    expected: []u8
+) -> void {
+    match tree.expressions.at(expression.node) {
+        TypeApply(value) => {
+            testing::expect(value.callee.node == callee.node);
+            expect_retained_bytes(
+                tree.texts.at(value.type_arg.node),
+                expected
+            );
+        },
+        _ => testing::fail("parser did not retain a type application"),
+    }
+    return;
+}
+
+fn expect_error_ident(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    start_column: i64,
+    end_column: i64
+) -> void {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => {
+            expect_retained_bytes(tree.texts.at(value.name.node), "<error>");
+            testing::expect_equal<i64>(start_column, value.span.start.column);
+            testing::expect_equal<i64>(end_column, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain an error identifier"),
+    }
+    return;
+}
+
+fn expect_buffer_literal(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected_size: i64
+) -> void {
+    match tree.expressions.at(expression.node) {
+        BufferLiteral(value) => {
+            testing::expect_equal<i64>(expected_size, value.size);
+            testing::expect_equal<i64>(1, value.span.start.column);
+            testing::expect_equal<i64>(2, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain a buffer literal"),
+    }
+    return;
+}
+
+fn parse_break_then_deinit(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8
+) -> !ast::Statement {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_break_stmt(tree);
+}
+
+fn expect_optional_text(
+    tree: &ast::Ast,
+    value: ?ast::Text,
+    expected: []u8
+) -> void {
+    if value |text| {
+        expect_retained_bytes(tree.texts.at(text.node), expected);
+    } else {
+        testing::fail("parser did not retain optional text");
+    }
+    return;
+}
+
+fn parse_capture_then_deinit(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8
+) -> !?ast::Text {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_payload_capture(tree);
+}
+
+fn parse_type_then_deinit(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8
+) -> !?typ::Type {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    return value.parse_type_name(tree);
+}
+
+fn expect_parsed_type(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    let parsed = try parse_type_then_deinit(allocator, tree, input);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, &tree.types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, expected);
+    } else {
+        testing::fail("parser did not retain a type name");
+    }
+    return;
+}
+
+fn expect_type_shape(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8,
+    count: i64,
+    first: i64,
+    second: i64,
+    third: i64
+) -> !void {
+    let parsed = try parse_type_then_deinit(allocator, tree, input);
+    if parsed |type_name| {
+        var shape = TypeShape {
+            count: 0,
+            first: 0,
+            second: 0,
+            third: 0,
+            fourth: 0,
+            fifth: 0
+        };
+        typ::walk<TypeShape>(&tree.types, type_name, &var shape);
+        testing::expect_equal<i64>(count, shape.count);
+        testing::expect_equal<i64>(first, shape.first);
+        testing::expect_equal<i64>(second, shape.second);
+        testing::expect_equal<i64>(third, shape.third);
+    } else {
+        testing::fail("parser did not retain a type shape");
+    }
+    return;
+}
+
+fn expect_type_error(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8,
+    start_column: i64,
+    end_column: i64
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var tree);
+    if parsed |_| {
+        testing::fail("invalid type retained a type name");
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        expected,
+        start_column,
+        end_column
+    );
+    return;
+}
+
+fn expect_static_type_arg(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    input: []u8,
+    allow_const: bool,
+    expected: []u8
+) -> !void {
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_static_type_arg(tree, allow_const) |arg| {
+        value.deinit();
+        defer arg.deinit();
+        expect_retained_bytes(&arg, expected);
+    } else {
+        value.deinit();
+        testing::fail("parser did not retain a static argument");
+    }
+    return;
+}
+
+test "parser lifecycle owns its token stream and diagnostics" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path = try string::from_bytes(allocator, "sample.kizu");
+    errdefer path.deinit();
+    let text = try string::from_bytes(allocator, "first 2");
+    errdefer text.deinit();
+    let id = try sources.add(move path, move text);
+    if sources.at(id) |file| {
+        let input = file.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, input);
+        var value = try new(allocator, move scanner);
+        defer value.deinit();
+        testing::expect_equal<i64>(0, value.diagnostics_len());
+        if value.diagnostic(0) |_| {
+            testing::fail("new parser retained an unexpected diagnostic");
+        }
+        testing::expect_equal<token::Kind>(token::Kind::Ident, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Int, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Int, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        try value.next_token();
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.current_kind());
+        testing::expect_equal<token::Kind>(token::Kind::Eof, value.peek_kind());
+        let errors = try value.errors(allocator, &sources);
+        defer errors.deinit();
+        testing::expect_equal<i64>(0, errors.len());
+    } else {
+        testing::fail("parser source was not retained");
+    }
+}
+
+test "parser reports the complete top-level declaration set" {
+    let allocator = mem::page_allocator();
+    let ident_scanner = lexer::new(allocator, "foo next");
+    var ident = try new(allocator, move ident_scanner);
+    defer ident.deinit();
+    try ident.error_expected_declaration();
+    testing::expect(ident.current_kind() == token::Kind::Ident);
+    testing::expect(ident.peek_kind() == token::Kind::Ident);
+    let ident_message =
+        \\expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got identifier "foo"
+    ;
+    expect_parser_diagnostic(&ident, 0, ident_message, 1, 4);
+    let symbol_scanner = lexer::new(allocator, "+");
+    var symbol = try new(allocator, move symbol_scanner);
+    defer symbol.deinit();
+    try symbol.error_expected_declaration();
+    testing::expect(symbol.current_kind() == token::Kind::Plus);
+    testing::expect(symbol.peek_kind() == token::Kind::Eof);
+    let symbol_message =
+        "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got `+`"
+        ;
+    expect_parser_diagnostic(&symbol, 0, symbol_message, 1, 2);
+}
+
+test "parser normalizes lexer comment tokens across Unicode and CRLF" {
+    let allocator = mem::page_allocator();
+    var input = string::new(allocator);
+    defer input.deinit();
+    try input.append_bytes("///　first  ");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("///");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("/// last　");
+    try input.append_byte(cast<u8>(13));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("fn main() {}");
+    let source_bytes = input.as_bytes();
+    var scanner = lexer::new(allocator, source_bytes);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect(actual.kind == token::Kind::Function);
+    testing::expect_equal<i64>(3, actual.doc_comments.len());
+    let empty_scanner = lexer::new(allocator, "");
+    var value = try new(allocator, move empty_scanner);
+    defer value.deinit();
+    let text = try value.comment_text(&actual.doc_comments);
+    defer text.deinit();
+    var expected = string::new(allocator);
+    defer expected.deinit();
+    try expected.append_bytes("first  ");
+    try expected.append_byte(cast<u8>(10));
+    try expected.append_byte(cast<u8>(10));
+    try expected.append_bytes("last");
+    let expected_bytes = expected.as_bytes();
+    expect_retained_bytes(&text, expected_bytes);
+}
+
+test "parser comment normalization keeps lexer replacement scalars" {
+    let allocator = mem::page_allocator();
+    var input = string::new(allocator);
+    defer input.deinit();
+    try input.append_bytes("/// ");
+    try input.append_byte(cast<u8>(255));
+    try input.append_byte(cast<u8>(10));
+    try input.append_bytes("fn main() {}");
+    let source_bytes = input.as_bytes();
+    var scanner = lexer::new(allocator, source_bytes);
+    defer scanner.deinit();
+    let actual = try scanner.next_token();
+    defer actual.deinit();
+    testing::expect_equal<i64>(1, actual.doc_comments.len());
+    let empty_scanner = lexer::new(allocator, "");
+    var value = try new(allocator, move empty_scanner);
+    defer value.deinit();
+    let text = try value.comment_text(&actual.doc_comments);
+    defer text.deinit();
+    expect_retained_bytes(&text, "�");
+}
+
+test "function recovery stub retains visibility docs and empty defaults" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let docs = try string::from_bytes(allocator, "Retained docs.");
+    var documented = value.function_stub(&var tree, true, move docs);
+    defer documented.deinit();
+    let empty_docs = string::new(allocator);
+    let private = value.function_stub(
+        &var tree,
+        false,
+        move empty_docs
+    );
+    defer private.deinit();
+    value.deinit();
+    expect_function_stub(&tree, &documented, true, "Retained docs.");
+    expect_function_stub(&tree, &private, false, "");
+    documented.signature.requires_unsafe = true;
+    testing::expect(documented.signature.requires_unsafe);
+}
+
+test "parser retains extern docs ABI and signature after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// Calls the host runtime.
+        \\extern "c" fn host<T>(value: &T) -> !i64 next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_extern_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                "host"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.doc.node),
+                "Calls the host runtime."
+            );
+            testing::expect(!function.signature.receiver);
+            testing::expect_equal<i64>(1, function.signature.static_params.len());
+            testing::expect_equal<i64>(1, function.signature.params.len());
+            testing::expect(!function.signature.requires_unsafe);
+            testing::expect(!function.signature.public);
+            testing::expect(!function.signature.std);
+            testing::expect(!function.derived);
+            if function.body |_| {
+                testing::fail("extern declaration gained a body");
+            }
+            if function.signature.static_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.name.node), "T");
+                if param.type_name |_| {
+                    testing::fail("extern type parameter gained a value type");
+                }
+            } else {
+                testing::fail("missing extern static parameter");
+            }
+            try expect_param(
+                allocator,
+                &tree,
+                &function.signature.params,
+                0,
+                "value",
+                "T",
+                true,
+                false
+            );
+            if function.signature.return_type |return_type| {
+                let rendered = try typ::render(
+                    allocator,
+                    &tree.types,
+                    return_type
+                );
+                defer rendered.deinit();
+                expect_retained_bytes(&rendered, "!i64");
+            } else {
+                testing::fail("missing extern return type");
+            }
+        },
+        _ => testing::fail("parser did not retain an extern declaration"),
+    }
+}
+
+test "parser keeps partial extern declarations" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let abi_scanner = lexer::new(allocator, "extern ;");
+    var missing_abi = try new(allocator, move abi_scanner);
+    errdefer missing_abi.deinit();
+    let abi_decl = try missing_abi.parse_extern_decl(&var tree);
+    testing::expect(missing_abi.current_kind() == token::Kind::Extern);
+    testing::expect(missing_abi.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &missing_abi,
+        0,
+        "expected next token string, got `;`",
+        1,
+        7
+    );
+    missing_abi.deinit();
+    match tree.declarations.at(abi_decl.node) {
+        Function(function) => expect_function_stub(&tree, function, false, ""),
+        _ => testing::fail("parser lost an ABI-partial extern declaration"),
+    }
+    let function_input =
+        \\extern "c" ;
+    ;
+    let function_scanner = lexer::new(allocator, function_input);
+    var missing_function = try new(allocator, move function_scanner);
+    errdefer missing_function.deinit();
+    let docs = try string::from_bytes(allocator, "Injected docs.");
+    let function_decl = try missing_function.parse_extern_decl_with_doc(
+        &var tree,
+        move docs,
+        false
+    );
+    testing::expect(missing_function.current_kind() == token::Kind::String);
+    testing::expect(missing_function.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &missing_function,
+        0,
+        "expected next token `fn`, got `;`",
+        8,
+        9
+    );
+    missing_function.deinit();
+    match tree.declarations.at(function_decl.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                ""
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.doc.node),
+                "Injected docs."
+            );
+        },
+        _ => testing::fail("parser lost a function-partial extern declaration"),
+    }
+    let signature_input =
+        \\extern "c" fn host ;
+    ;
+    let signature_scanner = lexer::new(allocator, signature_input);
+    var partial_signature = try new(allocator, move signature_scanner);
+    errdefer partial_signature.deinit();
+    let signature_decl = try partial_signature.parse_extern_decl(
+        &var tree
+    );
+    testing::expect(partial_signature.current_kind() == token::Kind::Ident);
+    testing::expect(partial_signature.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &partial_signature,
+        0,
+        "expected next token `(`, got `;`",
+        15,
+        19
+    );
+    partial_signature.deinit();
+    match tree.declarations.at(signature_decl.node) {
+        Function(function) => {
+            expect_retained_bytes(
+                tree.texts.at(function.signature.extern_abi.node),
+                "c"
+            );
+            expect_retained_bytes(
+                tree.texts.at(function.signature.name.node),
+                "host"
+            );
+            testing::expect_equal<i64>(0, function.signature.params.len());
+        },
+        _ => testing::fail("parser lost a signature-partial extern declaration"),
+    }
+}
+
+test "parser recognizes identifier-led error set declarations" {
+    let allocator = mem::page_allocator();
+    let declaration_scanner = lexer::new(allocator, "error Parse { Failed }");
+    var declaration = try new(allocator, move declaration_scanner);
+    defer declaration.deinit();
+    testing::expect(declaration.starts_error_set_decl());
+    let brace_scanner = lexer::new(allocator, "error {");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    testing::expect(!brace.starts_error_set_decl());
+    let name_scanner = lexer::new(allocator, "errors Parse");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    testing::expect(!name.starts_error_set_decl());
+    let literal_input =
+        \\"error" Parse
+    ;
+    let literal_scanner = lexer::new(allocator, literal_input);
+    var literal = try new(allocator, move literal_scanner);
+    defer literal.deinit();
+    testing::expect(literal.starts_error_set_decl());
+}
+
+test "parser retains enum names docs and compact empty metadata" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// State docs.
+        \\enum State {
+        \\    /// Active docs.
+        \\    Active,
+        \\    ///
+        \\    Idle,
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_enum_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Enum(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "State");
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "State docs."
+            );
+            testing::expect_equal<i64>(2, retained.tags.len());
+            if retained.tags.at(0) |tag| {
+                expect_retained_bytes(tree.texts.at(tag.node), "Active");
+            } else {
+                testing::fail("missing first enum tag");
+            }
+            if retained.tags.at(1) |tag| {
+                expect_retained_bytes(tree.texts.at(tag.node), "Idle");
+            } else {
+                testing::fail("missing second enum tag");
+            }
+            if retained.tag_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+                if docs.at("Active") |text| {
+                    expect_retained_bytes(
+                        tree.texts.at(text.node),
+                        "Active docs."
+                    );
+                } else {
+                    testing::fail("missing enum tag docs");
+                }
+                if docs.at("Idle") |_| {
+                    testing::fail("empty tag docs were retained");
+                }
+            } else {
+                testing::fail("documented enum lost its tag docs");
+            }
+            testing::expect(!retained.public);
+        },
+        _ => testing::fail("parser did not retain an enum declaration"),
+    }
+}
+
+test "parser leaves enum doc metadata null when every tag is undocumented" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "enum Empty { One }");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_enum_decl(&var tree);
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Enum(retained) => {
+            testing::expect_equal<i64>(1, retained.tags.len());
+            if retained.tag_docs |_| {
+                testing::fail("empty enum tag docs did not remain compact");
+            }
+        },
+        _ => testing::fail("parser did not retain an enum declaration"),
+    }
+}
+
+test "parser keeps duplicate enum tags and the latest docs by name" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\enum Repeat {
+        \\    /// First docs.
+        \\    Same,
+        \\    /// Second docs.
+        \\    Same,
+        \\}
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_enum_decl(&var tree);
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Enum(retained) => {
+            testing::expect_equal<i64>(2, retained.tags.len());
+            if retained.tag_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+                if docs.at("Same") |text| {
+                    expect_retained_bytes(
+                        tree.texts.at(text.node),
+                        "Second docs."
+                    );
+                } else {
+                    testing::fail("duplicate tag docs were not retained");
+                }
+            } else {
+                testing::fail("duplicate tag docs map is missing");
+            }
+        },
+        _ => testing::fail("parser did not retain an enum declaration"),
+    }
+}
+
+test "parser keeps partial enum name lists after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "enum ;");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_enum_decl(&var tree);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        5
+    );
+    match tree.declarations.at(name_decl.node) {
+        Enum(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.tags.len());
+        },
+        _ => testing::fail("parser did not retain a partial enum"),
+    }
+    let brace_scanner = lexer::new(allocator, "enum Color ;");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_enum_decl(&var tree);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        6,
+        11
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Enum(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Color");
+            testing::expect_equal<i64>(0, retained.tags.len());
+        },
+        _ => testing::fail("parser did not retain a partial enum"),
+    }
+    let item_scanner = lexer::new(allocator, "enum Color { 1 }");
+    var item = try new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_enum_decl(&var tree);
+    testing::expect(item.current_kind() == token::Kind::Int);
+    testing::expect(item.peek_kind() == token::Kind::RBrace);
+    let item_message =
+        \\expected enum tag, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &item,
+        0,
+        item_message,
+        14,
+        15
+    );
+    match tree.declarations.at(item_decl.node) {
+        Enum(retained) => testing::expect_equal<i64>(0, retained.tags.len()),
+        _ => testing::fail("parser did not retain a partial enum"),
+    }
+    let comma_scanner = lexer::new(allocator, "enum Color { Red Green }");
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_enum_decl(&var tree);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after enum tag",
+        14,
+        17
+    );
+    match tree.declarations.at(comma_decl.node) {
+        Enum(retained) => testing::expect_equal<i64>(1, retained.tags.len()),
+        _ => testing::fail("parser did not retain a partial enum"),
+    }
+    let eof_scanner = lexer::new(allocator, "enum Color { Red");
+    var eof = try new(allocator, move eof_scanner);
+    defer eof.deinit();
+    let eof_decl = try eof.parse_enum_decl(&var tree);
+    testing::expect(eof.current_kind() == token::Kind::Eof);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, eof.diagnostics_len());
+    match tree.declarations.at(eof_decl.node) {
+        Enum(retained) => testing::expect_equal<i64>(1, retained.tags.len()),
+        _ => testing::fail("parser did not retain an EOF partial enum"),
+    }
+}
+
+test "parser retains error set members and docs after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// Failure docs.
+        \\error Failure {
+        \\    /// Missing docs.
+        \\    Missing,
+        \\    Timeout,
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    testing::expect(value.starts_error_set_decl());
+    let declaration = try value.parse_error_set_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(
+                tree.texts.at(retained.name.node),
+                "Failure"
+            );
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "Failure docs."
+            );
+            testing::expect_equal<i64>(2, retained.members.len());
+            if retained.members.at(0) |member| {
+                expect_retained_bytes(tree.texts.at(member.node), "Missing");
+            } else {
+                testing::fail("missing first error set member");
+            }
+            if retained.members.at(1) |member| {
+                expect_retained_bytes(tree.texts.at(member.node), "Timeout");
+            } else {
+                testing::fail("missing second error set member");
+            }
+            if retained.member_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+                if docs.at("Missing") |text| {
+                    expect_retained_bytes(
+                        tree.texts.at(text.node),
+                        "Missing docs."
+                    );
+                } else {
+                    testing::fail("missing error set member docs");
+                }
+                if docs.at("Timeout") |_| {
+                    testing::fail("empty error set member docs were retained");
+                }
+            } else {
+                testing::fail("documented error set lost its member docs");
+            }
+            testing::expect(!retained.public);
+        },
+        _ => testing::fail("parser did not retain an error set declaration"),
+    }
+}
+
+test "parser keeps partial error set declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "error ;");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_error_set_decl(&var tree);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        6
+    );
+    match tree.declarations.at(name_decl.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+    let brace_scanner = lexer::new(allocator, "error Failure ;");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_error_set_decl(&var tree);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        7,
+        14
+    );
+    match tree.declarations.at(brace_decl.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(
+                tree.texts.at(retained.name.node),
+                "Failure"
+            );
+            testing::expect_equal<i64>(0, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+    let member_scanner = lexer::new(allocator, "error Failure { 1 }");
+    var member = try new(allocator, move member_scanner);
+    defer member.deinit();
+    let member_decl = try member.parse_error_set_decl(&var tree);
+    let member_message =
+        \\expected error name, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &member,
+        0,
+        member_message,
+        17,
+        18
+    );
+    match tree.declarations.at(member_decl.node) {
+        ErrorSet(retained) => {
+            testing::expect_equal<i64>(0, retained.members.len());
+            if retained.member_docs |_| {
+                testing::fail("partial error set retained empty docs");
+            }
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+    let comma_scanner = lexer::new(
+        allocator,
+        "error Failure { Lost Timeout }"
+    );
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_error_set_decl(&var tree);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after error name",
+        17,
+        21
+    );
+    match tree.declarations.at(comma_decl.node) {
+        ErrorSet(retained) => {
+            testing::expect_equal<i64>(1, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+}
+
+test "parser retains generic union variants docs and payload types" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// Shape docs.
+        \\union Shape<T> {
+        \\    /// Point docs.
+        \\    Point,
+        \\    /// Value docs.
+        \\    Value(T),
+        \\    Bytes([]u8),
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_union_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Shape");
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "Shape docs."
+            );
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            if retained.type_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.node), "T");
+            } else {
+                testing::fail("missing union type parameter");
+            }
+            testing::expect_equal<i64>(3, retained.variants.len());
+            if retained.variants.at(0) |point| {
+                expect_retained_bytes(tree.texts.at(point.name.node), "Point");
+                expect_retained_bytes(
+                    tree.texts.at(point.doc.node),
+                    "Point docs."
+                );
+                if point.payload |_| {
+                    testing::fail("payload-free union variant gained a type");
+                }
+            } else {
+                testing::fail("missing payload-free union variant");
+            }
+            if retained.variants.at(1) |variant| {
+                expect_retained_bytes(tree.texts.at(variant.name.node), "Value");
+                expect_retained_bytes(
+                    tree.texts.at(variant.doc.node),
+                    "Value docs."
+                );
+                if variant.payload |payload| {
+                    let rendered = try typ::render(allocator, &tree.types, payload);
+                    defer rendered.deinit();
+                    expect_retained_bytes(&rendered, "T");
+                } else {
+                    testing::fail("missing named union payload type");
+                }
+            } else {
+                testing::fail("missing named-payload union variant");
+            }
+            if retained.variants.at(2) |variant| {
+                expect_retained_bytes(tree.texts.at(variant.name.node), "Bytes");
+                expect_retained_bytes(tree.texts.at(variant.doc.node), "");
+                if variant.payload |payload| {
+                    let rendered = try typ::render(allocator, &tree.types, payload);
+                    defer rendered.deinit();
+                    expect_retained_bytes(&rendered, "[]u8");
+                } else {
+                    testing::fail("missing slice union payload type");
+                }
+            } else {
+                testing::fail("missing slice-payload union variant");
+            }
+            testing::expect(!retained.public);
+        },
+        _ => testing::fail("parser did not retain a union declaration"),
+    }
+}
+
+test "parser keeps partial union declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "union ;");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_union_decl(&var tree);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        6
+    );
+    match tree.declarations.at(name_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain a partial union"),
+    }
+    let generic_scanner = lexer::new(allocator, "union Box<T {");
+    var generic = try new(allocator, move generic_scanner);
+    defer generic.deinit();
+    let generic_decl = try generic.parse_union_decl(&var tree);
+    expect_parser_diagnostic(
+        &generic,
+        0,
+        "expected next token `>`, got `{`",
+        11,
+        12
+    );
+    match tree.declarations.at(generic_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Box");
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain partial generic union"),
+    }
+    let empty_generic_scanner = lexer::new(allocator, "union Box<> { Value }");
+    var empty_generic = try new(
+        allocator,
+        move empty_generic_scanner
+    );
+    defer empty_generic.deinit();
+    let empty_generic_decl = try empty_generic.parse_union_decl(
+        &var tree
+    );
+    testing::expect(empty_generic.current_kind() == token::Kind::Gt);
+    testing::expect(empty_generic.peek_kind() == token::Kind::LBrace);
+    expect_parser_diagnostic(
+        &empty_generic,
+        0,
+        "expected static parameter, got `>`",
+        11,
+        12
+    );
+    match tree.declarations.at(empty_generic_decl.node) {
+        Union(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser accepted an empty union generic list"),
+    }
+    let value_param_scanner = lexer::new(
+        allocator,
+        "union Box<n: i64> { Value }"
+    );
+    var value_param = try new(allocator, move value_param_scanner);
+    defer value_param.deinit();
+    let value_param_decl = try value_param.parse_union_decl(
+        &var tree
+    );
+    testing::expect(value_param.current_kind() == token::Kind::Ident);
+    testing::expect(value_param.peek_kind() == token::Kind::Gt);
+    expect_parser_diagnostic(
+        &value_param,
+        0,
+        "expected type parameter, got n: i64",
+        14,
+        17
+    );
+    match tree.declarations.at(value_param_decl.node) {
+        Union(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser accepted a union value parameter"),
+    }
+    let brace_scanner = lexer::new(allocator, "union Shape ;");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_union_decl(&var tree);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        7,
+        12
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Union(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "Shape");
+            testing::expect_equal<i64>(0, retained.variants.len());
+        },
+        _ => testing::fail("parser did not retain a partial union"),
+    }
+    let item_scanner = lexer::new(allocator, "union Shape { 1 }");
+    var item = try new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_union_decl(&var tree);
+    let item_message =
+        \\expected union variant, got integer "1"
+    ;
+    expect_parser_diagnostic(&item, 0, item_message, 15, 16);
+    match tree.declarations.at(item_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(0, retained.variants.len()),
+        _ => testing::fail("parser did not retain invalid union prefix"),
+    }
+    let payload_scanner = lexer::new(
+        allocator,
+        "union Shape { Circle(i64, Next }"
+    );
+    var payload = try new(allocator, move payload_scanner);
+    defer payload.deinit();
+    let payload_decl = try payload.parse_union_decl(&var tree);
+    testing::expect(payload.current_kind() == token::Kind::Ident);
+    testing::expect(payload.peek_kind() == token::Kind::Comma);
+    expect_parser_diagnostic(
+        &payload,
+        0,
+        "expected next token `)`, got `,`",
+        22,
+        25
+    );
+    match tree.declarations.at(payload_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(0, retained.variants.len()),
+        _ => testing::fail("parser retained malformed union payload"),
+    }
+    let comma_scanner = lexer::new(
+        allocator,
+        "union Shape { Point Circle(i64) }"
+    );
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_union_decl(&var tree);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after union variant",
+        15,
+        20
+    );
+    match tree.declarations.at(comma_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(1, retained.variants.len()),
+        _ => testing::fail("parser lost partial union variants"),
+    }
+    let eof_scanner = lexer::new(allocator, "union Shape { Point");
+    var eof = try new(allocator, move eof_scanner);
+    defer eof.deinit();
+    let eof_decl = try eof.parse_union_decl(&var tree);
+    testing::expect(eof.current_kind() == token::Kind::Eof);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, eof.diagnostics_len());
+    match tree.declarations.at(eof_decl.node) {
+        Union(retained) => testing::expect_equal<i64>(1, retained.variants.len()),
+        _ => testing::fail("parser lost an EOF-partial union"),
+    }
+}
+
+fn expect_struct_field(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    fields: &array::Array<ast::Field>,
+    index: i64,
+    name: []u8,
+    docs: []u8,
+    type_name: []u8,
+    borrow: bool,
+    mut_borrow: bool,
+    public: bool
+) -> !void {
+    let field = fields.get_or_panic(index);
+    expect_retained_bytes(tree.texts.at(field.name.node), name);
+    expect_retained_bytes(tree.texts.at(field.doc.node), docs);
+    testing::expect_equal<bool>(borrow, field.borrow);
+    testing::expect_equal<bool>(mut_borrow, field.mut_borrow);
+    testing::expect_equal<bool>(public, field.public);
+    let rendered = try typ::render(allocator, &tree.types, field.type_name);
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, type_name);
+    return;
+}
+
+test "parser retains generic struct fields docs borrows and visibility" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// User docs.
+        \\struct User<T> {
+        \\    /// Name docs.
+        \\    pub name: []u8,
+        \\    borrowed: &T,
+        \\    mutable: &var T,
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_struct_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Struct(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "User");
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "User docs."
+            );
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            if retained.type_params.at(0) |param| {
+                expect_retained_bytes(tree.texts.at(param.node), "T");
+            } else {
+                testing::fail("missing struct type parameter");
+            }
+            testing::expect_equal<i64>(3, retained.fields.len());
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &retained.fields,
+                0,
+                "name",
+                "Name docs.",
+                "[]u8",
+                false,
+                false,
+                true
+            );
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &retained.fields,
+                1,
+                "borrowed",
+                "",
+                "T",
+                true,
+                false,
+                false
+            );
+            try expect_struct_field(
+                allocator,
+                &tree,
+                &retained.fields,
+                2,
+                "mutable",
+                "",
+                "T",
+                true,
+                true,
+                false
+            );
+            testing::expect(!retained.public);
+            testing::expect(!retained.requires_unsafe);
+        },
+        _ => testing::fail("parser did not retain a struct declaration"),
+    }
+}
+
+test "parser keeps struct declarations mutable until final retention" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "struct Guard {}");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let docs = try string::from_bytes(allocator, "Injected docs.");
+    var declaration = try value.parse_struct_decl_with_doc(
+        &var tree,
+        move docs,
+        false
+    );
+    value.deinit();
+    declaration.public = true;
+    declaration.requires_unsafe = true;
+    let retained = tree.add_declaration(ast::DeclarationNode::Struct(
+        move declaration
+    ));
+    match tree.declarations.at(retained.node) {
+        Struct(node) => {
+            expect_retained_bytes(tree.texts.at(node.name.node), "Guard");
+            expect_retained_bytes(
+                tree.texts.at(node.doc.node),
+                "Injected docs."
+            );
+            testing::expect(node.public);
+            testing::expect(node.requires_unsafe);
+        },
+        _ => testing::fail("mutable struct declaration was not retained"),
+    }
+}
+
+test "parser keeps partial struct declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "struct ;");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_struct_decl(&var tree);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        7
+    );
+    match tree.declarations.at(name_decl.node) {
+        Struct(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser did not retain a partial struct"),
+    }
+    let generic_scanner = lexer::new(allocator, "struct Box<T {");
+    var generic = try new(allocator, move generic_scanner);
+    defer generic.deinit();
+    let generic_decl = try generic.parse_struct_decl(&var tree);
+    expect_parser_diagnostic(
+        &generic,
+        0,
+        "expected next token `>`, got `{`",
+        12,
+        13
+    );
+    match tree.declarations.at(generic_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(1, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser lost a partial generic struct"),
+    }
+    let empty_generic_scanner = lexer::new(
+        allocator,
+        "struct Box<> { value: i64 }"
+    );
+    var empty_generic = try new(
+        allocator,
+        move empty_generic_scanner
+    );
+    defer empty_generic.deinit();
+    let empty_generic_decl = try empty_generic.parse_struct_decl(
+        &var tree
+    );
+    testing::expect(empty_generic.current_kind() == token::Kind::Gt);
+    testing::expect(empty_generic.peek_kind() == token::Kind::LBrace);
+    expect_parser_diagnostic(
+        &empty_generic,
+        0,
+        "expected static parameter, got `>`",
+        12,
+        13
+    );
+    match tree.declarations.at(empty_generic_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser accepted an empty struct generic list"),
+    }
+    let value_param_scanner = lexer::new(
+        allocator,
+        "struct Box<n: i64> { value: i64 }"
+    );
+    var value_param = try new(allocator, move value_param_scanner);
+    defer value_param.deinit();
+    let value_param_decl = try value_param.parse_struct_decl(
+        &var tree
+    );
+    testing::expect(value_param.current_kind() == token::Kind::Ident);
+    testing::expect(value_param.peek_kind() == token::Kind::Gt);
+    expect_parser_diagnostic(
+        &value_param,
+        0,
+        "expected type parameter, got n: i64",
+        15,
+        18
+    );
+    match tree.declarations.at(value_param_decl.node) {
+        Struct(retained) => {
+            testing::expect_equal<i64>(0, retained.type_params.len());
+            testing::expect_equal<i64>(0, retained.fields.len());
+        },
+        _ => testing::fail("parser accepted a struct value parameter"),
+    }
+    let brace_scanner = lexer::new(allocator, "struct User ;");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_struct_decl(&var tree);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        8,
+        12
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser lost a brace-partial struct"),
+    }
+    let item_scanner = lexer::new(allocator, "struct User { 1 }");
+    var item = try new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_struct_decl(&var tree);
+    let item_message =
+        \\expected field name, got integer "1"
+    ;
+    expect_parser_diagnostic(&item, 0, item_message, 15, 16);
+    match tree.declarations.at(item_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained an invalid struct field"),
+    }
+    let public_scanner = lexer::new(allocator, "struct User { pub 1 }");
+    var public = try new(allocator, move public_scanner);
+    defer public.deinit();
+    let public_decl = try public.parse_struct_decl(&var tree);
+    let public_message =
+        \\expected field name, got integer "1"
+    ;
+    expect_parser_diagnostic(&public, 0, public_message, 19, 20);
+    match tree.declarations.at(public_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained an invalid public field"),
+    }
+    let colon_scanner = lexer::new(allocator, "struct User { name i64 }");
+    var colon = try new(allocator, move colon_scanner);
+    defer colon.deinit();
+    let colon_decl = try colon.parse_struct_decl(&var tree);
+    let colon_message =
+        \\expected next token `:`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(&colon, 0, colon_message, 15, 19);
+    match tree.declarations.at(colon_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained a field without a colon"),
+    }
+    let type_scanner = lexer::new(allocator, "struct User { name: + }");
+    var type_value = try new(allocator, move type_scanner);
+    defer type_value.deinit();
+    let type_decl = try type_value.parse_struct_decl(&var tree);
+    expect_parser_diagnostic(
+        &type_value,
+        0,
+        "expected type, got `+`",
+        21,
+        22
+    );
+    match tree.declarations.at(type_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(0, retained.fields.len()),
+        _ => testing::fail("parser retained a field without a type"),
+    }
+    let comma_scanner = lexer::new(
+        allocator,
+        "struct User { name: i64 age: i64 }"
+    );
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_struct_decl(&var tree);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after struct field",
+        21,
+        24
+    );
+    match tree.declarations.at(comma_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(1, retained.fields.len()),
+        _ => testing::fail("parser lost partial struct fields"),
+    }
+    let eof_scanner = lexer::new(allocator, "struct User { name: i64");
+    var eof = try new(allocator, move eof_scanner);
+    defer eof.deinit();
+    let eof_decl = try eof.parse_struct_decl(&var tree);
+    testing::expect(eof.current_kind() == token::Kind::Eof);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, eof.diagnostics_len());
+    match tree.declarations.at(eof_decl.node) {
+        Struct(retained) => testing::expect_equal<i64>(1, retained.fields.len()),
+        _ => testing::fail("parser lost an EOF-partial struct"),
+    }
+}
+
+test "parser retains contract method signatures after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\contract Writer {
+        \\    fn write<T, n: i64>(value: &T) -> !i64;
+        \\    fn flush()
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_contract_decl(&var tree, false);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        Contract(contract_decl) => {
+            expect_retained_bytes(tree.texts.at(contract_decl.name.node), "Writer");
+            testing::expect_equal<i64>(2, contract_decl.methods.len());
+            testing::expect(!contract_decl.public);
+            if contract_decl.methods.at(0) |method| {
+                expect_retained_bytes(
+                    tree.texts.at(method.signature.name.node),
+                    "write"
+                );
+                expect_retained_bytes(tree.texts.at(method.doc.node), "");
+                expect_retained_bytes(
+                    tree.texts.at(method.signature.extern_abi.node),
+                    ""
+                );
+                testing::expect(!method.signature.receiver);
+                testing::expect_equal<i64>(2, method.signature.static_params.len());
+                testing::expect_equal<i64>(1, method.signature.params.len());
+                testing::expect(!method.signature.public);
+                testing::expect(!method.signature.requires_unsafe);
+                testing::expect(!method.signature.std);
+                testing::expect(!method.derived);
+                if method.body |_| {
+                    testing::fail("contract method gained a body");
+                }
+                if method.signature.static_params.at(0) |param| {
+                    expect_retained_bytes(tree.texts.at(param.name.node), "T");
+                    if param.type_name |_| {
+                        testing::fail("type parameter gained a value type");
+                    }
+                } else {
+                    testing::fail("missing contract type parameter");
+                }
+                if method.signature.static_params.at(1) |param| {
+                    expect_retained_bytes(tree.texts.at(param.name.node), "n");
+                    if param.type_name |type_name| {
+                        let rendered = try typ::render(
+                            allocator,
+                            &tree.types,
+                            type_name
+                        );
+                        defer rendered.deinit();
+                        expect_retained_bytes(&rendered, "i64");
+                    } else {
+                        testing::fail("missing static value parameter type");
+                    }
+                } else {
+                    testing::fail("missing contract value parameter");
+                }
+                try expect_param(
+                    allocator,
+                    &tree,
+                    &method.signature.params,
+                    0,
+                    "value",
+                    "T",
+                    true,
+                    false
+                );
+                if method.signature.return_type |return_type| {
+                    let rendered = try typ::render(
+                        allocator,
+                        &tree.types,
+                        return_type
+                    );
+                    defer rendered.deinit();
+                    expect_retained_bytes(&rendered, "!i64");
+                } else {
+                    testing::fail("missing contract method return type");
+                }
+            } else {
+                testing::fail("missing first contract method");
+            }
+            if contract_decl.methods.at(1) |method| {
+                expect_retained_bytes(
+                    tree.texts.at(method.signature.name.node),
+                    "flush"
+                );
+                testing::expect_equal<i64>(0, method.signature.static_params.len());
+                testing::expect_equal<i64>(0, method.signature.params.len());
+                if method.signature.return_type |_| {
+                    testing::fail("void contract method gained a return type");
+                }
+            } else {
+                testing::fail("missing second contract method");
+            }
+        },
+        _ => testing::fail("parser did not retain a contract declaration"),
+    }
+}
+
+test "parser keeps partial contracts and method signatures" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "contract ;");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_contract_decl(&var tree, false);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        9
+    );
+    match tree.declarations.at(name_decl.node) {
+        Contract(contract_decl) => {
+            expect_retained_bytes(tree.texts.at(contract_decl.name.node), "");
+            testing::expect_equal<i64>(0, contract_decl.methods.len());
+        },
+        _ => testing::fail("parser lost a nameless contract"),
+    }
+    let brace_scanner = lexer::new(allocator, "contract C ;");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_contract_decl(&var tree, false);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        10,
+        11
+    );
+    match tree.declarations.at(brace_decl.node) {
+        Contract(contract_decl) => testing::expect_equal<i64>(0, contract_decl.methods.len()),
+        _ => testing::fail("parser lost a brace-partial contract"),
+    }
+    let item_scanner = lexer::new(allocator, "contract C { 1 }");
+    var item = try new(allocator, move item_scanner);
+    defer item.deinit();
+    let item_decl = try item.parse_contract_decl(&var tree, false);
+    let item_message =
+        \\expected contract method, got integer "1"
+    ;
+    expect_parser_diagnostic(&item, 0, item_message, 14, 15);
+    match tree.declarations.at(item_decl.node) {
+        Contract(contract_decl) => testing::expect_equal<i64>(0, contract_decl.methods.len()),
+        _ => testing::fail("parser retained an invalid contract method"),
+    }
+    let method_scanner = lexer::new(allocator, "contract C { fn ; }");
+    var method = try new(allocator, move method_scanner);
+    defer method.deinit();
+    let method_decl = try method.parse_contract_decl(&var tree, false);
+    expect_parser_diagnostic(
+        &method,
+        0,
+        "expected next token identifier, got `;`",
+        14,
+        16
+    );
+    testing::expect(method.current_kind() == token::Kind::RBrace);
+    testing::expect(method.peek_kind() == token::Kind::Eof);
+    match tree.declarations.at(method_decl.node) {
+        Contract(contract_decl) => {
+            testing::expect_equal<i64>(1, contract_decl.methods.len());
+            if contract_decl.methods.at(0) |partial| {
+                expect_retained_bytes(
+                    tree.texts.at(partial.signature.name.node),
+                    ""
+                );
+                testing::expect_equal<i64>(0, partial.signature.params.len());
+            } else {
+                testing::fail("missing partial contract method");
+            }
+        },
+        _ => testing::fail("parser lost a partial method contract"),
+    }
+}
+
+test "parser rejects receivers in contract method requirements" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(
+        allocator,
+        "contract C { fn (self: C) read(); }"
+    );
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let declaration = try value.parse_contract_decl(&var tree, false);
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "a contract method takes no receiver; it says what a method looks like, not what it is on",
+        32,
+        33
+    );
+    testing::expect(value.current_kind() == token::Kind::RParen);
+    testing::expect(value.peek_kind() == token::Kind::Semicolon);
+    match tree.declarations.at(declaration.node) {
+        Contract(contract_decl) => testing::expect_equal<i64>(0, contract_decl.methods.len()),
+        _ => testing::fail("parser lost a receiver-rejected contract"),
+    }
+}
+
+test "parser retains import paths after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "import app::parser::ast; next");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_import_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Semicolon);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    expect_import_path(&tree, declaration, "app", "parser", "ast");
+}
+
+test "parser keeps partial imports after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "import ;");
+    var empty = try new(allocator, move empty_scanner);
+    defer empty.deinit();
+    let empty_decl = try empty.parse_import_decl(&var tree);
+    expect_empty_import_path(&tree, empty_decl);
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        7
+    );
+    let partial_scanner = lexer::new(allocator, "import app::;");
+    var partial = try new(allocator, move partial_scanner);
+    errdefer partial.deinit();
+    let partial_decl = try partial.parse_import_decl(&var tree);
+    testing::expect(partial.current_kind() == token::Kind::DoubleColon);
+    testing::expect(partial.peek_kind() == token::Kind::Semicolon);
+    expect_parser_diagnostic(
+        &partial,
+        0,
+        "expected next token identifier, got `;`",
+        11,
+        13
+    );
+    partial.deinit();
+    expect_import_path(&tree, partial_decl, "app", "", "");
+    let terminator_scanner = lexer::new(allocator, "import app next");
+    var terminator = try new(allocator, move terminator_scanner);
+    errdefer terminator.deinit();
+    let terminator_decl = try terminator.parse_import_decl(&var tree);
+    testing::expect(terminator.current_kind() == token::Kind::Ident);
+    testing::expect(terminator.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &terminator,
+        0,
+        "expected `;` after import declaration",
+        8,
+        11
+    );
+    terminator.deinit();
+    expect_import_path(&tree, terminator_decl, "app", "", "");
+}
+
+test "parser retains impl declarations after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "impl Show for User; next");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let declaration = try value.parse_impl_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Semicolon);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    expect_impl_names(&tree, declaration, "Show", "User");
+}
+
+test "parser keeps partial impl declarations on missing words" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "impl ;");
+    var empty = try new(allocator, move empty_scanner);
+    errdefer empty.deinit();
+    let empty_decl = try empty.parse_impl_decl(&var tree);
+    testing::expect(empty.current_kind() == token::Kind::Impl);
+    testing::expect(empty.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, empty.diagnostics_len());
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        5
+    );
+    empty.deinit();
+    expect_impl_names(&tree, empty_decl, "", "");
+    let for_scanner = lexer::new(allocator, "impl Show;");
+    var missing_for = try new(allocator, move for_scanner);
+    errdefer missing_for.deinit();
+    let for_decl = try missing_for.parse_impl_decl(&var tree);
+    testing::expect(missing_for.current_kind() == token::Kind::Ident);
+    testing::expect(missing_for.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, missing_for.diagnostics_len());
+    let for_message =
+        "expected `impl <contract> for Show;`; a method on a type is `fn (self: Show) name(...)`"
+        ;
+    expect_parser_diagnostic(&missing_for, 0, for_message, 6, 10);
+    missing_for.deinit();
+    expect_impl_names(&tree, for_decl, "", "");
+    let type_scanner = lexer::new(allocator, "impl Show for ;");
+    var missing_type = try new(allocator, move type_scanner);
+    errdefer missing_type.deinit();
+    let type_decl = try missing_type.parse_impl_decl(&var tree);
+    testing::expect(missing_type.current_kind() == token::Kind::For);
+    testing::expect(missing_type.peek_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(1, missing_type.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_type,
+        0,
+        "expected next token identifier, got `;`",
+        11,
+        14
+    );
+    missing_type.deinit();
+    expect_impl_names(&tree, type_decl, "Show", "");
+}
+
+test "parser rejects impl bodies and missing terminators" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let body_scanner = lexer::new(allocator, "impl Show for User {");
+    var body = try new(allocator, move body_scanner);
+    errdefer body.deinit();
+    let body_decl = try body.parse_impl_decl(&var tree);
+    testing::expect(body.current_kind() == token::Kind::Ident);
+    testing::expect(body.peek_kind() == token::Kind::LBrace);
+    testing::expect_equal<i64>(1, body.diagnostics_len());
+    let body_message =
+        "`impl Show for User` takes no body; write the methods as `fn (self: User) name(...)` and end this with `;`"
+        ;
+    expect_parser_diagnostic(&body, 0, body_message, 15, 19);
+    body.deinit();
+    expect_impl_names(&tree, body_decl, "Show", "User");
+    let terminator_scanner = lexer::new(allocator, "impl Show for User next");
+    var terminator = try new(allocator, move terminator_scanner);
+    errdefer terminator.deinit();
+    let terminator_decl = try terminator.parse_impl_decl(&var tree);
+    testing::expect(terminator.current_kind() == token::Kind::Ident);
+    testing::expect(terminator.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, terminator.diagnostics_len());
+    expect_parser_diagnostic(
+        &terminator,
+        0,
+        "expected `;` after impl declaration",
+        15,
+        19
+    );
+    terminator.deinit();
+    expect_impl_names(&tree, terminator_decl, "Show", "User");
+}
+
+test "parser retains function return type graphs" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var signature = try new_function_signature(allocator, &var tree);
+    defer signature.deinit();
+    let scanner = lexer::new(allocator, "fn -> !i64");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    testing::expect(try value.parse_return_clause(&var tree, &var signature));
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    if signature.return_type |return_type| {
+        let rendered = try typ::render(allocator, &tree.types, return_type);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "!i64");
+    } else {
+        testing::fail("parser did not retain a return type");
+    }
+}
+
+test "parser return clause absence and failure preserve Go cursor behavior" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var absent_signature = try new_function_signature(allocator, &var tree);
+    defer absent_signature.deinit();
+    absent_signature.return_type = try tree.types.parse("i64");
+    let absent_scanner = lexer::new(allocator, "fn body");
+    var absent = try new(allocator, move absent_scanner);
+    defer absent.deinit();
+    testing::expect(try absent.parse_return_clause(
+        &var tree,
+        &var absent_signature
+    ));
+    testing::expect(absent.current_kind() == token::Kind::Function);
+    testing::expect(absent.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, absent.diagnostics_len());
+    if absent_signature.return_type |_| {} else {
+        testing::fail("absent return clause cleared the existing type");
+    }
+    var failed_signature = try new_function_signature(allocator, &var tree);
+    defer failed_signature.deinit();
+    failed_signature.return_type = try tree.types.parse("i64");
+    let failed_scanner = lexer::new(allocator, "fn -> ;");
+    var failed = try new(allocator, move failed_scanner);
+    defer failed.deinit();
+    testing::expect(!try failed.parse_return_clause(
+        &var tree,
+        &var failed_signature
+    ));
+    testing::expect(failed.current_kind() == token::Kind::Semicolon);
+    testing::expect(failed.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(1, failed.diagnostics_len());
+    if failed_signature.return_type |_| {
+        testing::fail("invalid return clause retained a type");
+    }
+    expect_parser_diagnostic(
+        &failed,
+        0,
+        "expected type, got `;`",
+        7,
+        8
+    );
+}
+
+test "parser retains borrowed parameters after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "(a: &i64, b: &var i64,) next");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree);
+    defer params.deinit();
+    testing::expect_equal<i64>(2, params.len());
+    testing::expect(value.current_kind() == token::Kind::RParen);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &params,
+        0,
+        "a",
+        "i64",
+        true,
+        false
+    );
+    try expect_param(
+        allocator,
+        &tree,
+        &params,
+        1,
+        "b",
+        "i64",
+        true,
+        true
+    );
+}
+
+test "parser retains an owned parameter without a trailing comma" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "(a: i64) next");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree);
+    defer params.deinit();
+    testing::expect_equal<i64>(1, params.len());
+    testing::expect(value.current_kind() == token::Kind::RParen);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &params,
+        0,
+        "a",
+        "i64",
+        false,
+        false
+    );
+}
+
+test "parser keeps empty and partial parameter lists" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "() next");
+    var empty = try new(allocator, move empty_scanner);
+    defer empty.deinit();
+    let empty_params = try empty.parse_params(&var tree);
+    defer empty_params.deinit();
+    testing::expect_equal<i64>(0, empty_params.len());
+    testing::expect(empty.current_kind() == token::Kind::RParen);
+    testing::expect(empty.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, empty.diagnostics_len());
+    let missing_close_scanner = lexer::new(allocator, "(a: i64");
+    var missing_close = try new(
+        allocator,
+        move missing_close_scanner
+    );
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_params(&var tree);
+    defer partial.deinit();
+    testing::expect_equal<i64>(1, partial.len());
+    testing::expect(missing_close.current_kind() == token::Kind::Ident);
+    testing::expect(missing_close.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(1, missing_close.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `)`, got end of file",
+        5,
+        8
+    );
+}
+
+test "parser reports malformed parameters without appending them" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let comptime_scanner = lexer::new(allocator, "(comptime n: i64)");
+    var static_param = try new(allocator, move comptime_scanner);
+    defer static_param.deinit();
+    let comptime_params = try static_param.parse_params(&var tree);
+    defer comptime_params.deinit();
+    testing::expect_equal<i64>(0, comptime_params.len());
+    testing::expect(static_param.current_kind() == token::Kind::Comptime);
+    testing::expect(static_param.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, static_param.diagnostics_len());
+    expect_parser_diagnostic(
+        &static_param,
+        0,
+        "compile-time parameter belongs in `<...>`, not `(...)`",
+        2,
+        10
+    );
+    let name_scanner = lexer::new(allocator, "(1: i64)");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_params = try name.parse_params(&var tree);
+    defer name_params.deinit();
+    testing::expect_equal<i64>(0, name_params.len());
+    testing::expect(name.current_kind() == token::Kind::Int);
+    testing::expect(name.peek_kind() == token::Kind::Colon);
+    testing::expect_equal<i64>(1, name.diagnostics_len());
+    let name_message =
+        \\expected parameter name, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &name,
+        0,
+        name_message,
+        2,
+        3
+    );
+    let colon_scanner = lexer::new(allocator, "(a i64)");
+    var colon = try new(allocator, move colon_scanner);
+    defer colon.deinit();
+    let colon_params = try colon.parse_params(&var tree);
+    defer colon_params.deinit();
+    testing::expect_equal<i64>(0, colon_params.len());
+    testing::expect(colon.current_kind() == token::Kind::Ident);
+    testing::expect(colon.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, colon.diagnostics_len());
+    let colon_message =
+        \\expected next token `:`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(
+        &colon,
+        0,
+        colon_message,
+        2,
+        3
+    );
+    let type_scanner = lexer::new(allocator, "(a: ;)");
+    var type_value = try new(allocator, move type_scanner);
+    defer type_value.deinit();
+    let type_params = try type_value.parse_params(&var tree);
+    defer type_params.deinit();
+    testing::expect_equal<i64>(0, type_params.len());
+    testing::expect(type_value.current_kind() == token::Kind::Semicolon);
+    testing::expect(type_value.peek_kind() == token::Kind::RParen);
+    testing::expect_equal<i64>(1, type_value.diagnostics_len());
+    expect_parser_diagnostic(
+        &type_value,
+        0,
+        "expected type, got `;`",
+        5,
+        6
+    );
+}
+
+test "parser returns valid parameters before a malformed parameter" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "(a: i64, 1: i64)");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let params = try value.parse_params(&var tree);
+    defer params.deinit();
+    testing::expect_equal<i64>(1, params.len());
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect(value.peek_kind() == token::Kind::Colon);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+    let expected =
+        \\expected parameter name, got integer "1"
+    ;
+    expect_parser_diagnostic(&value, 0, expected, 10, 11);
+    value.deinit();
+    try expect_param(
+        allocator,
+        &tree,
+        &params,
+        0,
+        "a",
+        "i64",
+        false,
+        false
+    );
+}
+
+test "parser returns one receiver parameter" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "fn (self: &var Parser) advance");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_receiver(&var tree) |params| {
+        defer params.deinit();
+        testing::expect_equal<i64>(1, params.len());
+        testing::expect(value.current_kind() == token::Kind::RParen);
+        testing::expect(value.peek_kind() == token::Kind::Ident);
+        testing::expect_equal<i64>(0, value.diagnostics_len());
+        value.deinit();
+        try expect_param(
+            allocator,
+            &tree,
+            &params,
+            0,
+            "self",
+            "Parser",
+            true,
+            true
+        );
+    } else {
+        value.deinit();
+        testing::fail("parser rejected one receiver parameter");
+    }
+}
+
+test "parser rejects receiver counts" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let empty_scanner = lexer::new(allocator, "fn () name");
+    var empty = try new(allocator, move empty_scanner);
+    defer empty.deinit();
+    if try empty.parse_receiver(&var tree) |params| {
+        params.deinit();
+        testing::fail("parser accepted zero receivers");
+    }
+    testing::expect(empty.current_kind() == token::Kind::RParen);
+    testing::expect(empty.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, empty.diagnostics_len());
+    expect_parser_diagnostic(
+        &empty,
+        0,
+        "expected one receiver in `fn (...)`, got 0",
+        5,
+        6
+    );
+    let many_scanner = lexer::new(allocator, "fn (a: i64, b: i64) name");
+    var many = try new(allocator, move many_scanner);
+    defer many.deinit();
+    if try many.parse_receiver(&var tree) |params| {
+        params.deinit();
+        testing::fail("parser accepted multiple receivers");
+    }
+    testing::expect(many.current_kind() == token::Kind::RParen);
+    testing::expect(many.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(1, many.diagnostics_len());
+    expect_parser_diagnostic(
+        &many,
+        0,
+        "expected one receiver in `fn (...)`, got 2",
+        19,
+        20
+    );
+}
+
+test "parser rejects an unterminated receiver" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "fn (self: Parser");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_receiver(&var tree) |params| {
+        params.deinit();
+        testing::fail("parser accepted an unterminated receiver");
+    }
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(2, value.diagnostics_len());
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token `)`, got end of file",
+        11,
+        17
+    );
+    let second =
+        \\expected `)`, got identifier "Parser"
+    ;
+    expect_parser_diagnostic(&value, 1, second, 11, 17);
+}
+
+test "type apply lookahead rewinds cached tokens" {
+    let allocator = mem::page_allocator();
+    try expect_type_apply_lookahead(allocator, "f<T>(x)", true);
+    try expect_type_apply_lookahead(allocator, "f<Array<T>>(x)", true);
+    try expect_type_apply_lookahead(allocator, "f<T> + x", false);
+    try expect_type_apply_lookahead(allocator, "f<T;", false);
+    try expect_type_apply_lookahead(allocator, "f<T{", false);
+    try expect_type_apply_lookahead(allocator, "f<T}", false);
+    try expect_type_apply_lookahead(allocator, "f<T", false);
+}
+
+test "type apply target is an identifier or namespace field" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let function_name = try retained_text(&var tree, "f");
+    let empty_name = try retained_text(&var tree, "");
+    let field_name = try retained_text(&var tree, "call");
+    let integer_text = try retained_text(&var tree, "1");
+    let function = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: function_name,
+        span: zero_span()
+    }));
+    let empty = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+        name: empty_name,
+        span: zero_span()
+    }));
+    let namespace = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: function,
+        name: field_name,
+        namespace: true,
+        span: zero_span()
+    }));
+    let instance = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: function,
+        name: field_name,
+        namespace: false,
+        span: zero_span()
+    }));
+    let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: integer_text
+    }));
+    let scanner = lexer::new(allocator, "f<T>(x)");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(try value.should_parse_type_apply(&tree, function));
+    testing::expect(try value.should_parse_type_apply(&tree, namespace));
+    testing::expect(!try value.should_parse_type_apply(&tree, empty));
+    testing::expect(!try value.should_parse_type_apply(&tree, instance));
+    testing::expect(!try value.should_parse_type_apply(&tree, integer));
+}
+
+test "parser precedence preserves Pratt binding order" {
+    let allocator = mem::page_allocator();
+    try expect_peek_precedence(allocator, "a orelse", 2);
+    try expect_peek_precedence(allocator, "a or", 3);
+    try expect_peek_precedence(allocator, "a and", 4);
+    try expect_peek_precedence(allocator, "a ==", 5);
+    try expect_peek_precedence(allocator, "a !=", 5);
+    try expect_peek_precedence(allocator, "a <", 6);
+    try expect_peek_precedence(allocator, "a <=", 6);
+    try expect_peek_precedence(allocator, "a >", 6);
+    try expect_peek_precedence(allocator, "a >=", 6);
+    try expect_peek_precedence(allocator, "a +", 7);
+    try expect_peek_precedence(allocator, "a -", 7);
+    try expect_peek_precedence(allocator, "a *", 8);
+    try expect_peek_precedence(allocator, "a /", 8);
+    try expect_peek_precedence(allocator, "a %", 8);
+    try expect_peek_precedence(allocator, "a (", 10);
+    try expect_peek_precedence(allocator, "a [", 10);
+    try expect_peek_precedence(allocator, "a .", 11);
+    try expect_peek_precedence(allocator, "a ::", 11);
+    try expect_peek_precedence(allocator, "a", 1);
+}
+
+test "parser recognizes optional expression terminators" {
+    let allocator = mem::page_allocator();
+    try expect_peek_expression_end(allocator, "a;", true);
+    try expect_peek_expression_end(allocator, "a,", true);
+    try expect_peek_expression_end(allocator, "a}", true);
+    try expect_peek_expression_end(allocator, "a)", true);
+    try expect_peek_expression_end(allocator, "a]", true);
+    try expect_peek_expression_end(allocator, "a+", false);
+}
+
+test "parser expectations retain diagnostics and advance only on match" {
+    let allocator = mem::page_allocator();
+    let scanner = lexer::new(allocator, "foo 1");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    testing::expect(try value.expect_current(token::Kind::Ident));
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Int);
+    testing::expect(!try value.expect_peek(token::Kind::String));
+    let expected =
+        \\expected next token string, got integer "1"
+    ;
+    expect_parser_diagnostic(&value, 0, expected, 1, 4);
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Int);
+    testing::expect(try value.expect_peek(token::Kind::Int));
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect_equal<i64>(1, value.diagnostics_len());
+}
+
+test "parser type close accepts current, nested, and peek angles" {
+    let allocator = mem::page_allocator();
+    let current_scanner = lexer::new(allocator, "> +");
+    var current = try new(allocator, move current_scanner);
+    defer current.deinit();
+    testing::expect(try current.expect_type_close());
+    testing::expect(current.current_kind() == token::Kind::Gt);
+    testing::expect(current.peek_kind() == token::Kind::Plus);
+    let nested_scanner = lexer::new(allocator, "> >");
+    var nested = try new(allocator, move nested_scanner);
+    defer nested.deinit();
+    testing::expect(try nested.expect_type_close());
+    testing::expect(nested.current_kind() == token::Kind::Gt);
+    testing::expect(nested.peek_kind() == token::Kind::Eof);
+    let peek_scanner = lexer::new(allocator, "< >");
+    var peek = try new(allocator, move peek_scanner);
+    defer peek.deinit();
+    testing::expect(try peek.expect_type_close());
+    testing::expect(peek.current_kind() == token::Kind::Gt);
+    testing::expect(peek.peek_kind() == token::Kind::Eof);
+    let mismatch_scanner = lexer::new(allocator, "< +");
+    var mismatch = try new(allocator, move mismatch_scanner);
+    defer mismatch.deinit();
+    testing::expect(!try mismatch.expect_type_close());
+    let expected = "expected next token `>`, got `+`";
+    expect_parser_diagnostic(&mismatch, 0, expected, 1, 2);
+    testing::expect(mismatch.current_kind() == token::Kind::Lt);
+    testing::expect(mismatch.peek_kind() == token::Kind::Plus);
+}
+
+test "parser statement terminators accept current and peek semicolons" {
+    let allocator = mem::page_allocator();
+    let current_scanner = lexer::new(allocator, "; +");
+    var current = try new(allocator, move current_scanner);
+    defer current.deinit();
+    testing::expect(try current.expect_statement_terminator("return statement"));
+    testing::expect(current.current_kind() == token::Kind::Semicolon);
+    testing::expect(current.peek_kind() == token::Kind::Plus);
+    let peek_scanner = lexer::new(allocator, "foo ;");
+    var peek = try new(allocator, move peek_scanner);
+    defer peek.deinit();
+    testing::expect(try peek.expect_statement_terminator("return statement"));
+    testing::expect(peek.current_kind() == token::Kind::Semicolon);
+    testing::expect(peek.peek_kind() == token::Kind::Eof);
+    let mismatch_scanner = lexer::new(allocator, "foo +");
+    var mismatch = try new(allocator, move mismatch_scanner);
+    defer mismatch.deinit();
+    testing::expect(!try mismatch.expect_statement_terminator("return statement"));
+    let expected = "expected `;` after return statement";
+    expect_parser_diagnostic(&mismatch, 0, expected, 1, 4);
+    testing::expect(mismatch.current_kind() == token::Kind::Ident);
+    testing::expect(mismatch.peek_kind() == token::Kind::Plus);
+}
+
+test "parser list delimiters accept comma, brace, and end of file" {
+    let allocator = mem::page_allocator();
+    let comma_scanner = lexer::new(allocator, "foo ,");
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    testing::expect(try comma.consume_list_delimiter("struct field"));
+    testing::expect(comma.current_kind() == token::Kind::Comma);
+    testing::expect(comma.peek_kind() == token::Kind::Eof);
+    let brace_scanner = lexer::new(allocator, "foo }");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    testing::expect(try brace.consume_list_delimiter("struct field"));
+    testing::expect(brace.current_kind() == token::Kind::Ident);
+    testing::expect(brace.peek_kind() == token::Kind::RBrace);
+    let eof_scanner = lexer::new(allocator, "foo");
+    var eof = try new(allocator, move eof_scanner);
+    defer eof.deinit();
+    testing::expect(try eof.consume_list_delimiter("struct field"));
+    testing::expect(eof.current_kind() == token::Kind::Ident);
+    testing::expect(eof.peek_kind() == token::Kind::Eof);
+    let mismatch_scanner = lexer::new(allocator, "foo ;");
+    var mismatch = try new(allocator, move mismatch_scanner);
+    defer mismatch.deinit();
+    testing::expect(!try mismatch.consume_list_delimiter("struct field"));
+    let expected = "expected `,` after struct field";
+    expect_parser_diagnostic(&mismatch, 0, expected, 1, 4);
+    testing::expect(mismatch.current_kind() == token::Kind::Ident);
+    testing::expect(mismatch.peek_kind() == token::Kind::Semicolon);
+}
+
+fn expect_expr_statement(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    expression: ast::Expression,
+    semicolon: bool
+) -> void {
+    match tree.statements.at(statement.node) {
+        Expr(value) => {
+            testing::expect(value.expr.node == expression.node);
+            testing::expect_equal<bool>(semicolon, value.semicolon);
+        },
+        _ => testing::fail("parser did not retain an expression statement"),
+    }
+    return;
+}
+
+test "parser finishes expression statements at explicit and branch ends" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let semicolon_scanner = lexer::new(allocator, "value;");
+    var semicolon = try new(allocator, move semicolon_scanner);
+    defer semicolon.deinit();
+    let semicolon_expr = try add_ident_expression(
+        &var tree,
+        "semicolon",
+        1,
+        10
+    );
+    let semicolon_stmt = try semicolon.finish_expr_stmt(
+        &var tree,
+        semicolon_expr
+    );
+    expect_expr_statement(&tree, semicolon_stmt, semicolon_expr, true);
+    testing::expect(semicolon.current_kind() == token::Kind::Semicolon);
+    testing::expect(semicolon.peek_kind() == token::Kind::Eof);
+    testing::expect_equal<i64>(0, semicolon.diagnostics_len());
+    let brace_scanner = lexer::new(allocator, "value}");
+    var brace = try new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_expr = try add_ident_expression(
+        &var tree,
+        "brace",
+        1,
+        6
+    );
+    let brace_stmt = try brace.finish_expr_stmt(&var tree, brace_expr);
+    expect_expr_statement(&tree, brace_stmt, brace_expr, false);
+    testing::expect(brace.current_kind() == token::Kind::Ident);
+    testing::expect(brace.peek_kind() == token::Kind::RBrace);
+    testing::expect_equal<i64>(0, brace.diagnostics_len());
+    let comma_scanner = lexer::new(allocator, "value,");
+    var comma = try new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_expr = try add_ident_expression(
+        &var tree,
+        "comma",
+        1,
+        6
+    );
+    let comma_stmt = try comma.finish_expr_stmt(&var tree, comma_expr);
+    expect_expr_statement(&tree, comma_stmt, comma_expr, false);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Comma);
+    testing::expect_equal<i64>(0, comma.diagnostics_len());
+}
+
+test "parser retains unterminated expression statements with diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "value next");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try add_ident_expression(
+        &var tree,
+        "value",
+        1,
+        6
+    );
+    let statement = try value.finish_expr_stmt(&var tree, expression);
+    expect_expr_statement(&tree, statement, expression, false);
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected `;` after expression statement",
+        1,
+        6
+    );
+    testing::expect(value.current_kind() == token::Kind::Ident);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+}
+
+test "parser retains break and continue labels in the AST" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let break_scanner = lexer::new(allocator, "break :outer;");
+    var break_parser = try new(allocator, move break_scanner);
+    defer break_parser.deinit();
+    let break_statement = try break_parser.parse_break_stmt(&var tree);
+    expect_break_label(&tree, break_statement, "outer");
+    testing::expect(break_parser.current_kind() == token::Kind::Semicolon);
+    testing::expect_equal<i64>(0, break_parser.diagnostics_len());
+    let continue_scanner = lexer::new(allocator, "continue;");
+    var continue_parser = try new(allocator, move continue_scanner);
+    defer continue_parser.deinit();
+    let continue_statement = try continue_parser.parse_continue_stmt(&var tree);
+    expect_continue_label(&tree, continue_statement, "");
+    testing::expect(
+        continue_parser.current_kind() == token::Kind::Semicolon
+    );
+    testing::expect_equal<i64>(0, continue_parser.diagnostics_len());
+    let retained = try parse_break_then_deinit(
+        allocator,
+        &var tree,
+        "break :retained;"
+    );
+    expect_break_label(&tree, retained, "retained");
+}
+
+test "parser retains branch nodes while reporting label and terminator errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let label_scanner = lexer::new(allocator, "break :;");
+    var label_parser = try new(allocator, move label_scanner);
+    defer label_parser.deinit();
+    let break_statement = try label_parser.parse_break_stmt(&var tree);
+    expect_break_label(&tree, break_statement, "");
+    let expected_label = "expected next token identifier, got `;`";
+    expect_parser_diagnostic(&label_parser, 0, expected_label, 7, 8);
+    testing::expect(label_parser.current_kind() == token::Kind::Semicolon);
+    let terminator_scanner = lexer::new(allocator, "continue :outer");
+    var terminator_parser = try new(allocator, move terminator_scanner);
+    defer terminator_parser.deinit();
+    let continue_statement = try terminator_parser.parse_continue_stmt(
+        &var tree
+    );
+    expect_continue_label(&tree, continue_statement, "outer");
+    let expected_terminator = "expected `;` after continue statement";
+    expect_parser_diagnostic(
+        &terminator_parser,
+        0,
+        expected_terminator,
+        11,
+        16
+    );
+    testing::expect(terminator_parser.current_kind() == token::Kind::Ident);
+    testing::expect(terminator_parser.peek_kind() == token::Kind::Eof);
+}
+
+test "parser retains keyword literal expressions" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let true_scanner = lexer::new(allocator, "true");
+    var true_parser = try new(allocator, move true_scanner);
+    defer true_parser.deinit();
+    let true_expression = true_parser.parse_keyword_literal_expression(
+        &var tree
+    );
+    match tree.expressions.at(true_expression.node) {
+        Bool(value) => testing::expect(value.value),
+        _ => testing::fail("true did not retain a bool expression"),
+    }
+    let false_scanner = lexer::new(allocator, "false");
+    var false_parser = try new(allocator, move false_scanner);
+    defer false_parser.deinit();
+    let false_expression = false_parser.parse_keyword_literal_expression(
+        &var tree
+    );
+    match tree.expressions.at(false_expression.node) {
+        Bool(value) => testing::expect(!value.value),
+        _ => testing::fail("false did not retain a bool expression"),
+    }
+    let null_scanner = lexer::new(allocator, "null");
+    var null_parser = try new(allocator, move null_scanner);
+    defer null_parser.deinit();
+    let null_expression = null_parser.parse_keyword_literal_expression(
+        &var tree
+    );
+    match tree.expressions.at(null_expression.node) {
+        Null(value) => {
+            testing::expect_equal<i64>(1, value.span.start.line);
+            testing::expect_equal<i64>(1, value.span.start.column);
+            testing::expect_equal<i64>(1, value.span.end.line);
+            testing::expect_equal<i64>(5, value.span.end.column);
+        },
+        _ => testing::fail("null did not retain a null expression"),
+    }
+}
+
+test "parser retains type expressions after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "type<ptr<const u8>>");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_type_expr(&var tree);
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_type_expression(&tree, expression, "ptr<const u8>");
+}
+
+test "parser accepts value static arguments in type expressions" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "type<4096>");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let expression = try value.parse_type_expr(&var tree);
+    expect_type_expression(&tree, expression, "4096");
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+}
+
+test "parser keeps partial type expressions and exact diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let open_scanner = lexer::new(allocator, "type i64");
+    var missing_open = try new(allocator, move open_scanner);
+    defer missing_open.deinit();
+    let empty = try missing_open.parse_type_expr(&var tree);
+    expect_type_expression(&tree, empty, "");
+    let expected_open =
+        \\expected next token `<`, got identifier "i64"
+    ;
+    expect_parser_diagnostic(
+        &missing_open,
+        0,
+        expected_open,
+        1,
+        5
+    );
+    let arg_scanner = lexer::new(allocator, "type<+>");
+    var invalid_arg = try new(allocator, move arg_scanner);
+    defer invalid_arg.deinit();
+    let invalid = try invalid_arg.parse_type_expr(&var tree);
+    expect_type_expression(&tree, invalid, "");
+    expect_parser_diagnostic(
+        &invalid_arg,
+        0,
+        "expected static argument, got `+`",
+        6,
+        7
+    );
+    testing::expect(invalid_arg.current_kind() == token::Kind::Plus);
+    testing::expect(invalid_arg.peek_kind() == token::Kind::Gt);
+    let close_scanner = lexer::new(allocator, "type<i64");
+    var missing_close = try new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_type_expr(&var tree);
+    expect_type_expression(&tree, partial, "i64");
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `>`, got end of file",
+        6,
+        9
+    );
+}
+
+test "parser retains field namespace and dereference postfix nodes" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let receiver = try add_ident_expression(
+        &var tree,
+        "pkg",
+        1,
+        4
+    );
+    let field_scanner = lexer::new(allocator, ".field");
+    var field_parser = try new(allocator, move field_scanner);
+    errdefer field_parser.deinit();
+    let field = try field_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        false
+    );
+    testing::expect(field_parser.current_kind() == token::Kind::Ident);
+    field_parser.deinit();
+    match tree.expressions.at(field.node) {
+        Field(value) => {
+            testing::expect(value.receiver.node == receiver.node);
+            testing::expect(!value.namespace);
+            expect_retained_bytes(tree.texts.at(value.name.node), "field");
+            testing::expect_equal<i64>(1, value.span.start.column);
+            testing::expect_equal<i64>(7, value.span.end.column);
+        },
+        _ => testing::fail("parser did not retain field access"),
+    }
+    let namespace_scanner = lexer::new(allocator, "::Item");
+    var namespace_parser = try new(
+        allocator,
+        move namespace_scanner
+    );
+    defer namespace_parser.deinit();
+    let namespace = try namespace_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        true
+    );
+    match tree.expressions.at(namespace.node) {
+        Field(value) => {
+            testing::expect(value.namespace);
+            expect_retained_bytes(tree.texts.at(value.name.node), "Item");
+        },
+        _ => testing::fail("parser did not retain namespace access"),
+    }
+    let deref_scanner = lexer::new(allocator, ".*");
+    var deref_parser = try new(allocator, move deref_scanner);
+    defer deref_parser.deinit();
+    let deref = try deref_parser.parse_field_expr(
+        &var tree,
+        receiver,
+        false
+    );
+    match tree.expressions.at(deref.node) {
+        Deref(value) => {
+            testing::expect(value.receiver.node == receiver.node);
+            testing::expect_equal<i64>(2, value.operator_span.start.column);
+            testing::expect_equal<i64>(3, value.operator_span.end.column);
+        },
+        _ => testing::fail("parser did not retain postfix dereference"),
+    }
+}
+
+test "parser retains malformed field nodes with Go diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let receiver = try add_ident_expression(
+        &var tree,
+        "value",
+        1,
+        6
+    );
+    let scanner = lexer::new(allocator, ".+");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let field = try value.parse_field_expr(&var tree, receiver, false);
+    match tree.expressions.at(field.node) {
+        Field(node) => {
+            expect_retained_bytes(tree.texts.at(node.name.node), "");
+            testing::expect(node.span.is_zero());
+        },
+        _ => testing::fail("malformed field did not retain a field node"),
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token identifier, got `+`",
+        1,
+        2
+    );
+    testing::expect(value.current_kind() == token::Kind::Dot);
+    testing::expect(value.peek_kind() == token::Kind::Plus);
+}
+
+test "parser retains type applications after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let callee = try add_ident_expression(
+        &var tree,
+        "make",
+        1,
+        5
+    );
+    let scanner = lexer::new(allocator, "<Array<T>, 4,>");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let applied = try value.parse_type_apply_expr(
+        &var tree,
+        callee
+    );
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_type_apply_expression(
+        &tree,
+        applied,
+        callee,
+        "Array<T>, 4"
+    );
+}
+
+test "parser keeps nested and partial type application token states" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let callee = try add_ident_expression(
+        &var tree,
+        "make",
+        1,
+        5
+    );
+    let nested_scanner = lexer::new(allocator, "<Array<T>>");
+    var nested = try new(allocator, move nested_scanner);
+    defer nested.deinit();
+    let nested_expr = try nested.parse_type_apply_expr(
+        &var tree,
+        callee
+    );
+    expect_type_apply_expression(&tree, nested_expr, callee, "Array<T>");
+    testing::expect(nested.current_kind() == token::Kind::Gt);
+    testing::expect(nested.peek_kind() == token::Kind::Eof);
+    let invalid_scanner = lexer::new(allocator, "<+>");
+    var invalid = try new(allocator, move invalid_scanner);
+    defer invalid.deinit();
+    let invalid_expr = try invalid.parse_type_apply_expr(
+        &var tree,
+        callee
+    );
+    expect_type_apply_expression(&tree, invalid_expr, callee, "");
+    expect_parser_diagnostic(
+        &invalid,
+        0,
+        "expected static argument, got `+`",
+        2,
+        3
+    );
+    testing::expect(invalid.current_kind() == token::Kind::Plus);
+    testing::expect(invalid.peek_kind() == token::Kind::Gt);
+    let close_scanner = lexer::new(allocator, "<i64");
+    var missing_close = try new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let partial = try missing_close.parse_type_apply_expr(
+        &var tree,
+        callee
+    );
+    expect_type_apply_expression(&tree, partial, callee, "i64");
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `>`, got end of file",
+        2,
+        5
+    );
+}
+
+test "parser retains fixed byte buffer literals after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "[004]u8{}");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let expression = try value.parse_buffer_literal_expr(
+        &var tree
+    );
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    value.deinit();
+    expect_buffer_literal(&tree, expression, 4);
+}
+
+test "parser classifies namespaced struct literal targets" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let package = try add_ident_expression(&var tree, "app", 1, 4);
+    let module = try add_field_expression(
+        &var tree,
+        package,
+        "model",
+        true
+    );
+    let qualified = try add_field_expression(
+        &var tree,
+        module,
+        "User",
+        true
+    );
+    try expect_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        qualified,
+        "app::model::User"
+    );
+    let direct = try add_ident_expression(&var tree, "User", 1, 5);
+    try expect_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        direct,
+        "User"
+    );
+}
+
+test "parser rejects non-type struct literal targets" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let package = try add_ident_expression(&var tree, "app", 1, 4);
+    let lower = try add_field_expression(
+        &var tree,
+        package,
+        "user",
+        true
+    );
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, lower);
+    let owner = try add_ident_expression(&var tree, "Outer", 1, 6);
+    let nested_type = try add_field_expression(
+        &var tree,
+        owner,
+        "Inner",
+        true
+    );
+    try expect_no_struct_literal_type_name(
+        allocator,
+        &value,
+        &tree,
+        nested_type
+    );
+    let instance = try add_field_expression(
+        &var tree,
+        package,
+        "User",
+        false
+    );
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, instance);
+    let value_text = try tree.add_text_from_bytes("1");
+    let integer = tree.add_expression(ast::ExpressionNode::Int(ast::IntExpr {
+        value: value_text
+    }));
+    try expect_no_struct_literal_type_name(allocator, &value, &tree, integer);
+}
+
+test "parser rejects non-buffer and non-byte buffer literals" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let slice_scanner = lexer::new(allocator, "[]u8{}");
+    var slice_parser = try new(allocator, move slice_scanner);
+    defer slice_parser.deinit();
+    let slice = try slice_parser.parse_buffer_literal_expr(
+        &var tree
+    );
+    expect_error_ident(&tree, slice, 1, 2);
+    expect_parser_diagnostic(
+        &slice_parser,
+        0,
+        "expected buffer literal `[N]u8{}`, got type `[]u8`",
+        3,
+        5
+    );
+    let elem_scanner = lexer::new(allocator, "[4]i64{}");
+    var elem_parser = try new(allocator, move elem_scanner);
+    defer elem_parser.deinit();
+    let elem = try elem_parser.parse_buffer_literal_expr(
+        &var tree
+    );
+    expect_error_ident(&tree, elem, 1, 2);
+    expect_parser_diagnostic(
+        &elem_parser,
+        0,
+        "buffer element must be u8, got i64",
+        4,
+        7
+    );
+}
+
+test "parser keeps buffer literal recovery and brace short circuit" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let size_scanner = lexer::new(allocator, "[0]u8{}");
+    var size_parser = try new(allocator, move size_scanner);
+    defer size_parser.deinit();
+    let bad_size = try size_parser.parse_buffer_literal_expr(
+        &var tree
+    );
+    expect_error_ident(&tree, bad_size, 1, 2);
+    expect_parser_diagnostic(
+        &size_parser,
+        0,
+        "buffer size must be a positive integer, got 0",
+        2,
+        3
+    );
+    let open_scanner = lexer::new(allocator, "[4]u8");
+    var missing_open = try new(allocator, move open_scanner);
+    defer missing_open.deinit();
+    let open_error = try missing_open.parse_buffer_literal_expr(
+        &var tree
+    );
+    expect_error_ident(&tree, open_error, 1, 2);
+    testing::expect_equal<i64>(1, missing_open.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_open,
+        0,
+        "expected next token `{`, got end of file",
+        4,
+        6
+    );
+    let close_scanner = lexer::new(allocator, "[4]u8{");
+    var missing_close = try new(allocator, move close_scanner);
+    defer missing_close.deinit();
+    let close_error = try missing_close.parse_buffer_literal_expr(
+        &var tree
+    );
+    expect_error_ident(&tree, close_error, 1, 2);
+    testing::expect_equal<i64>(1, missing_close.diagnostics_len());
+    expect_parser_diagnostic(
+        &missing_close,
+        0,
+        "expected next token `}`, got end of file",
+        6,
+        7
+    );
+}
+
+test "parser retains optional payload captures after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let absent_scanner = lexer::new(allocator, "value +");
+    var absent_parser = try new(allocator, move absent_scanner);
+    defer absent_parser.deinit();
+    let absent = try absent_parser.parse_payload_capture(&var tree);
+    expect_optional_text(&tree, absent, "");
+    testing::expect(absent_parser.current_kind() == token::Kind::Ident);
+    testing::expect(absent_parser.peek_kind() == token::Kind::Plus);
+    let present = try parse_capture_then_deinit(
+        allocator,
+        &var tree,
+        "value |held|"
+    );
+    expect_optional_text(&tree, present, "held");
+}
+
+test "parser rejects malformed payload captures without retained text" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "value | |");
+    var name_parser = try new(allocator, move name_scanner);
+    defer name_parser.deinit();
+    let missing_name = try name_parser.parse_payload_capture(&var tree);
+    if missing_name |_| {
+        testing::fail("malformed capture retained a name");
+    }
+    let expected_name = "expected next token identifier, got `|`";
+    expect_parser_diagnostic(&name_parser, 0, expected_name, 7, 8);
+    testing::expect(name_parser.current_kind() == token::Kind::Pipe);
+    testing::expect(name_parser.peek_kind() == token::Kind::Pipe);
+    let close_scanner = lexer::new(allocator, "value |held +");
+    var close_parser = try new(allocator, move close_scanner);
+    defer close_parser.deinit();
+    let missing_close = try close_parser.parse_payload_capture(&var tree);
+    if missing_close |_| {
+        testing::fail("unclosed capture retained a name");
+    }
+    let expected_close = "expected next token `|`, got `+`";
+    expect_parser_diagnostic(&close_parser, 0, expected_close, 8, 12);
+    testing::expect(close_parser.current_kind() == token::Kind::Ident);
+    testing::expect(close_parser.peek_kind() == token::Kind::Plus);
+}
+
+test "parser retains zero one or two variant captures after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let absent_scanner = lexer::new(allocator, "value {");
+    var absent = try new(allocator, move absent_scanner);
+    defer absent.deinit();
+    if try absent.parse_variant_capture(&var tree) |captures| {
+        defer captures.deinit();
+        testing::expect_equal<i64>(0, captures.len());
+        testing::expect(absent.current_kind() == token::Kind::Ident);
+        testing::expect(absent.peek_kind() == token::Kind::LBrace);
+    } else {
+        testing::fail("absent variant capture was malformed");
+    }
+    let one_scanner = lexer::new(allocator, "value |variant| {");
+    var one = try new(allocator, move one_scanner);
+    errdefer one.deinit();
+    if try one.parse_variant_capture(&var tree) |captures| {
+        testing::expect(one.current_kind() == token::Kind::Pipe);
+        testing::expect(one.peek_kind() == token::Kind::LBrace);
+        one.deinit();
+        defer captures.deinit();
+        testing::expect_equal<i64>(1, captures.len());
+        if captures.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "variant");
+        } else {
+            testing::fail("missing variant capture name");
+        }
+    } else {
+        one.deinit();
+        testing::fail("one variant capture was rejected");
+    }
+    let two_scanner = lexer::new(
+        allocator,
+        "value |variant, payload| {"
+    );
+    var two = try new(allocator, move two_scanner);
+    errdefer two.deinit();
+    if try two.parse_variant_capture(&var tree) |captures| {
+        testing::expect(two.current_kind() == token::Kind::Pipe);
+        testing::expect(two.peek_kind() == token::Kind::LBrace);
+        two.deinit();
+        defer captures.deinit();
+        testing::expect_equal<i64>(2, captures.len());
+        if captures.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "variant");
+        } else {
+            testing::fail("missing first variant capture");
+        }
+        if captures.at(1) |binding| {
+            expect_retained_bytes(tree.texts.at(binding.node), "payload");
+        } else {
+            testing::fail("missing payload capture");
+        }
+    } else {
+        two.deinit();
+        testing::fail("two variant captures were rejected");
+    }
+}
+
+test "parser rejects malformed and excess variant captures" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "value ||");
+    var name = try new(allocator, move name_scanner);
+    defer name.deinit();
+    if try name.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("variant capture without a name was accepted");
+    }
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `|`",
+        7,
+        8
+    );
+    testing::expect(name.current_kind() == token::Kind::Pipe);
+    testing::expect(name.peek_kind() == token::Kind::Pipe);
+    let close_scanner = lexer::new(allocator, "value |first {");
+    var close = try new(allocator, move close_scanner);
+    defer close.deinit();
+    if try close.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("unclosed variant capture was accepted");
+    }
+    expect_parser_diagnostic(
+        &close,
+        0,
+        "expected next token `|`, got `{`",
+        8,
+        13
+    );
+    testing::expect(close.current_kind() == token::Kind::Ident);
+    testing::expect(close.peek_kind() == token::Kind::LBrace);
+    let second_scanner = lexer::new(allocator, "value |first, |");
+    var second = try new(allocator, move second_scanner);
+    defer second.deinit();
+    if try second.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("variant capture without a second name was accepted");
+    }
+    expect_parser_diagnostic(
+        &second,
+        0,
+        "expected next token identifier, got `|`",
+        13,
+        14
+    );
+    testing::expect(second.current_kind() == token::Kind::Comma);
+    testing::expect(second.peek_kind() == token::Kind::Pipe);
+    let excess_scanner = lexer::new(
+        allocator,
+        "value |first, second, third| {"
+    );
+    var excess = try new(allocator, move excess_scanner);
+    defer excess.deinit();
+    if try excess.parse_variant_capture(&var tree) |captures| {
+        captures.deinit();
+        testing::fail("third variant capture was accepted");
+    }
+    expect_parser_diagnostic(
+        &excess,
+        0,
+        "expected next token `|`, got `,`",
+        15,
+        21
+    );
+    testing::expect(excess.current_kind() == token::Kind::Ident);
+    testing::expect(excess.peek_kind() == token::Kind::Comma);
+}
+
+test "parser retains canonical type names after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    try expect_parsed_type(allocator, &var tree, "i64", "i64");
+    try expect_parsed_type(allocator, &var tree, "?i64", "?i64");
+    try expect_parsed_type(allocator, &var tree, "!&var T", "!&var T");
+    try expect_parsed_type(
+        allocator,
+        &var tree,
+        "ParseError!std::array::Array<T>",
+        "ParseError!std::array::Array<T>"
+    );
+    try expect_parsed_type(allocator, &var tree, "[]u8", "[]u8");
+    try expect_parsed_type(allocator, &var tree, "[004]u8", "[4]u8");
+    try expect_parsed_type(
+        allocator,
+        &var tree,
+        "ptr<const u8>",
+        "ptr<const u8>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var tree,
+        "Array<ptr<const u8>>",
+        "Array<ptr<const u8>>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var tree,
+        "std::map::Map<[]u8, Array<?T>>",
+        "std::map::Map<[]u8, Array<?T>>"
+    );
+    try expect_parsed_type(
+        allocator,
+        &var tree,
+        "Array<T,>",
+        "Array<T>"
+    );
+    try expect_parsed_type(allocator, &var tree, "E!F!T", "E!F!T");
+}
+
+test "parser preserves prefix and error union graph precedence" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    try expect_type_shape(
+        allocator,
+        &var tree,
+        "?E!T",
+        4,
+        5,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var tree,
+        "&E!T",
+        4,
+        4,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var tree,
+        "[]E!T",
+        4,
+        2,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var tree,
+        "[2]E!T",
+        4,
+        3,
+        7,
+        1
+    );
+    try expect_type_shape(
+        allocator,
+        &var tree,
+        "E!F!T",
+        5,
+        7,
+        1,
+        7
+    );
+}
+
+test "parser reports malformed type names at the current token" {
+    let allocator = mem::page_allocator();
+    try expect_type_error(
+        allocator,
+        "+",
+        "expected type, got `+`",
+        1,
+        2
+    );
+    try expect_type_error(
+        allocator,
+        "[0]u8",
+        "buffer size must be a positive integer, got 0",
+        2,
+        3
+    );
+    try expect_type_error(
+        allocator,
+        "[9223372036854775808]u8",
+        "buffer size must be a positive integer, got 9223372036854775808",
+        2,
+        21
+    );
+    try expect_type_error(
+        allocator,
+        "[]const u8",
+        "expected static type argument, got const",
+        3,
+        8
+    );
+    try expect_type_error(
+        allocator,
+        "Array<T",
+        "expected next token `>`, got end of file",
+        7,
+        8
+    );
+    try expect_type_error(
+        allocator,
+        "Array<>",
+        "expected type, got `>`",
+        7,
+        8
+    );
+}
+
+test "parser keeps a valid namespace prefix before a malformed suffix" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "std::+");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var tree);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, &tree.types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "std");
+    } else {
+        testing::fail("valid namespace prefix was discarded");
+    }
+    let expected = "expected next token identifier, got `+`";
+    expect_parser_diagnostic(&value, 0, expected, 4, 6);
+    testing::expect(value.current_kind() == token::Kind::DoubleColon);
+    testing::expect(value.peek_kind() == token::Kind::Plus);
+}
+
+test "parser applies ptr const rules to the retained partial path" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "ptr::<const u8>");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let parsed = try value.parse_type_name(&var tree);
+    if parsed |type_name| {
+        let rendered = try typ::render(allocator, &tree.types, type_name);
+        defer rendered.deinit();
+        expect_retained_bytes(&rendered, "ptr<const u8>");
+    } else {
+        testing::fail("partial ptr path did not retain const arguments");
+    }
+    let expected = "expected next token identifier, got `<`";
+    expect_parser_diagnostic(&value, 0, expected, 4, 6);
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+}
+
+test "parser renders static arguments independently of its token stream" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    try expect_static_type_arg(
+        allocator,
+        &var tree,
+        "Array<?T>",
+        false,
+        "Array<?T>"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var tree,
+        "ptr<const u8>",
+        false,
+        "ptr<const u8>"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var tree,
+        "const u8",
+        true,
+        "const u8"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var tree,
+        "4096",
+        false,
+        "4096"
+    );
+    try expect_static_type_arg(
+        allocator,
+        &var tree,
+        "true",
+        false,
+        "true"
+    );
+}
+
+test "parser joins static argument lists and retains closing tokens" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(
+        allocator,
+        "Array<T>, 4096, true,>"
+    );
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var tree, false) |args| {
+        defer args.deinit();
+        expect_retained_bytes(&args, "Array<T>, 4096, true");
+    } else {
+        testing::fail("parser discarded a static argument list");
+    }
+    testing::expect(value.current_kind() == token::Kind::Comma);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+    testing::expect(try value.expect_type_close());
+    testing::expect(value.current_kind() == token::Kind::Gt);
+}
+
+test "parser preserves nested static argument closing tokens" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "Array<T>>");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var tree, false) |args| {
+        defer args.deinit();
+        expect_retained_bytes(&args, "Array<T>");
+    } else {
+        testing::fail("parser discarded a nested static argument");
+    }
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+    testing::expect(try value.expect_type_close());
+    testing::expect(value.current_kind() == token::Kind::Gt);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+}
+
+test "parser rejects invalid static arguments without a partial list" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "i64, +");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_type_arg_list(&var tree, false) |_| {
+        testing::fail("parser retained a partial static argument list");
+    }
+    let expected = "expected static argument, got `+`";
+    expect_parser_diagnostic(&value, 0, expected, 6, 7);
+    testing::expect(value.current_kind() == token::Kind::Plus);
+    let const_scanner = lexer::new(allocator, "const u8");
+    var const_parser = try new(allocator, move const_scanner);
+    defer const_parser.deinit();
+    if try const_parser.parse_static_type_arg(&var tree, false) |_| {
+        testing::fail("parser accepted const outside an allowed position");
+    }
+    let const_expected = "expected static type argument, got const";
+    expect_parser_diagnostic(
+        &const_parser,
+        0,
+        const_expected,
+        1,
+        6
+    );
+}
+
+test "parser retains static parameters in the Ast-owned type graph" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "<T, n: i64,>");
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    if try value.parse_static_param_list(&var tree) |params| {
+        defer params.deinit();
+        testing::expect(value.current_kind() == token::Kind::Comma);
+        testing::expect(value.peek_kind() == token::Kind::Gt);
+        value.deinit();
+        testing::expect_equal<i64>(2, params.len());
+        if params.at(0) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "T");
+            testing::expect(param.is_type());
+        } else {
+            testing::fail("missing type static parameter");
+        }
+        if params.at(1) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "n");
+            testing::expect(!param.is_type());
+            if param.type_name |type_name| {
+                let rendered = try typ::render(
+                    allocator,
+                    &tree.types,
+                    type_name
+                );
+                defer rendered.deinit();
+                expect_retained_bytes(&rendered, "i64");
+            } else {
+                testing::fail("missing value parameter type");
+            }
+        } else {
+            testing::fail("missing value static parameter");
+        }
+    } else {
+        value.deinit();
+        testing::fail("parser discarded static parameters");
+    }
+}
+
+test "parser rejects duplicate and malformed static parameters" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let duplicate_scanner = lexer::new(allocator, "<T, T>");
+    var duplicate = try new(allocator, move duplicate_scanner);
+    defer duplicate.deinit();
+    if try duplicate.parse_static_param_list(&var tree) |_| {
+        testing::fail("parser retained duplicate static parameters");
+    }
+    expect_parser_diagnostic(
+        &duplicate,
+        0,
+        "duplicate static parameter T",
+        5,
+        6
+    );
+    let malformed_scanner = lexer::new(allocator, "<+>");
+    var malformed = try new(allocator, move malformed_scanner);
+    defer malformed.deinit();
+    if try malformed.parse_static_param_list(&var tree) |_| {
+        testing::fail("parser retained a malformed static parameter");
+    }
+    expect_parser_diagnostic(
+        &malformed,
+        0,
+        "expected static parameter, got `+`",
+        2,
+        3
+    );
+}
+
+test "parser keeps Go recovery when a static parameter type is malformed" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "<n: +>");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_static_param_list(&var tree) |params| {
+        defer params.deinit();
+        testing::expect_equal<i64>(1, params.len());
+        if params.at(0) |param| {
+            expect_retained_bytes(tree.texts.at(param.name.node), "n");
+            testing::expect(param.is_type());
+        } else {
+            testing::fail("missing recovered static parameter");
+        }
+    } else {
+        testing::fail("parser did not preserve static parameter recovery");
+    }
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected type, got `+`",
+        5,
+        6
+    );
+    testing::expect(value.current_kind() == token::Kind::Plus);
+    testing::expect(value.peek_kind() == token::Kind::Gt);
+}
+
+test "parser accepts only type entries in generic parameter lists" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "<T, U,>");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    if try value.parse_generic_param_list(&var tree) |names| {
+        defer names.deinit();
+        testing::expect_equal<i64>(2, names.len());
+        if names.at(0) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "T");
+        } else {
+            testing::fail("missing first generic parameter");
+        }
+        if names.at(1) |name| {
+            expect_retained_bytes(tree.texts.at(name.node), "U");
+        } else {
+            testing::fail("missing second generic parameter");
+        }
+    } else {
+        testing::fail("parser discarded generic parameters");
+    }
+    let value_scanner = lexer::new(allocator, "<T, n: i64>");
+    var with_value = try new(allocator, move value_scanner);
+    defer with_value.deinit();
+    if try with_value.parse_generic_param_list(&var tree) |_| {
+        testing::fail("parser accepted a value parameter as generic type");
+    }
+    expect_parser_diagnostic(
+        &with_value,
+        0,
+        "expected type parameter, got n: i64",
+        8,
+        11
+    );
+}
+
+test "parser token diagnostics preserve every description class" {
+    let allocator = mem::page_allocator();
+    let identifier =
+        \\expected `fn`, got identifier "foo"
+    ;
+    try expect_current_error(
+        allocator,
+        "foo",
+        token::Kind::Function,
+        identifier,
+        4
+    );
+    let symbol =
+        "expected identifier, got `+`"
+        ;
+    try expect_current_error(
+        allocator,
+        "+",
+        token::Kind::Ident,
+        symbol,
+        2
+    );
+    let illegal =
+        \\expected end of file, got illegal token "#"
+    ;
+    try expect_current_error(
+        allocator,
+        "#",
+        token::Kind::Eof,
+        illegal,
+        2
+    );
+    let eof =
+        "expected next token identifier, got end of file"
+        ;
+    try expect_peek_error(allocator, "foo", token::Kind::Ident, eof);
+    let unicode =
+        \\expected next token integer, got string "caf\xC3\xA9"
+    ;
+    let unicode_input =
+        \\foo "café"
+    ;
+    try expect_peek_error(
+        allocator,
+        unicode_input,
+        token::Kind::Int,
+        unicode
+    );
+}
+
+test "parser expression recursion preserves Pratt and postfix behavior" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_expression(allocator, "1", "1");
+    let quoted =
+        \\"x"
+    ;
+    try expect_parsed_expression(allocator, quoted, quoted);
+    try expect_parsed_expression(allocator, "true", "true");
+    try expect_parsed_expression(allocator, "null", "null");
+    try expect_parsed_expression(
+        allocator,
+        "type<i64>",
+        "type<i64>"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "-1 + 2 * 3",
+        "((-1) + (2 * 3))"
+    );
+    try expect_parsed_expression(allocator, "&x", "(&x)");
+    try expect_parsed_expression(allocator, "&var x", "(&varx)");
+    try expect_parsed_expression(
+        allocator,
+        "(1 + 2) * 3",
+        "((1 + 2) * 3)"
+    );
+    try expect_parsed_expression(allocator, "f()", "f()");
+    try expect_parsed_expression(allocator, "f(1, 2,)", "f(1, 2)");
+    try expect_parsed_expression(allocator, "values[1]", "values[1]");
+    try expect_parsed_expression(
+        allocator,
+        "values[1..2]",
+        "values[1..2]"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "values[..2]",
+        "values[..2]"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "values[1..]",
+        "values[1..]"
+    );
+    try expect_parsed_expression(allocator, "value.field", "value.field");
+    try expect_parsed_expression(allocator, "value.*", "value.*");
+    try expect_parsed_expression(
+        allocator,
+        "std::Thing",
+        "std::Thing"
+    );
+    try expect_parsed_expression(allocator, "f<T>(x)", "f<T>(x)");
+    try expect_parsed_expression(allocator, "x < y", "(x < y)");
+    try expect_parsed_expression(
+        allocator,
+        "x orelse y",
+        "(x orelse y)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse return;",
+        "(x orelse return)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse return y;",
+        "(x orelse return y)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse break :outer;",
+        "(x orelse break :outer)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "x orelse continue :outer;",
+        "(x orelse continue :outer)"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "comptime f()",
+        "comptime f()"
+    );
+    try expect_parsed_expression(allocator, "try f()", "try f()");
+    try expect_parsed_expression(allocator, "move x", "move x");
+    try expect_parsed_expression(allocator, "unsafe f()", "unsafe f()");
+    try expect_parsed_expression(
+        allocator,
+        "cast<i64>(x)",
+        "cast<i64>(x)"
+    );
+    try expect_parsed_expression(allocator, "[4]u8{}", "[4]u8{}");
+    try expect_parsed_expression(
+        allocator,
+        "Point { x: 1, y: 2 }",
+        "Point { x: 1, y: 2 }"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "if true {  } else {  }",
+        "if true {  } else {  }"
+    );
+    try expect_parsed_expression(
+        allocator,
+        "match x { Ready => 1 }",
+        "match x { Ready => 1 }"
+    );
+}
+
+test "parser statement recursion preserves control flow and blocks" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_statement(allocator, "let x = 1;", "let x = 1;");
+    try expect_parsed_statement(allocator, "var x = 1;", "var x = 1;");
+    try expect_parsed_statement(allocator, "x = 2;", "x = 2;");
+    try expect_parsed_statement(allocator, "return;", "return;");
+    try expect_parsed_statement(allocator, "return x;", "return x;");
+    try expect_parsed_statement(allocator, "defer f();", "defer f();");
+    try expect_parsed_statement(
+        allocator,
+        "errdefer f();",
+        "errdefer f();"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "if true { return; } else { x; }",
+        "if true { return; } else { x; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "while true |value| { break; }",
+        "while true { break; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "outer: while true { continue :outer; }",
+        "outer: while true { continue :outer; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "for 0..10 |i| { break; }",
+        "for 0..10 |i| { break; }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "match x { Ready => return, Value(v) => { return v; } }",
+        "match x { Ready => return;, Value(v) => { return v; } }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime if true {  } else {  }",
+        "comptime if true {  } else {  }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime for fields |field| {  }",
+        "comptime for fields |field| {  }"
+    );
+    try expect_parsed_statement(
+        allocator,
+        "comptime match value |variant, payload| {  }",
+        "comptime match value |variant, payload| {  }"
+    );
+    try expect_parsed_block(
+        allocator,
+        "{ let x = 1; return x; }",
+        "{ let x = 1; return x; }"
+    );
+}
+
+test "parser retains one safety text identity for one statement" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\// SAFETY: bounds checked
+        \\unsafe first() + unsafe second();
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.statements.at(statement.node) {
+        Expr(expression_statement) => {
+            match tree.expressions.at(expression_statement.expr.node) {
+                Binary(binary) => {
+                    match tree.expressions.at(binary.left.node) {
+                        Unsafe(left) => {
+                            match tree.expressions.at(binary.right.node) {
+                                Unsafe(right) => {
+                                    testing::expect(
+                                        left.safety.node == right.safety.node
+                                    );
+                                    expect_retained_bytes(
+                                        tree.texts.at(left.safety.node),
+                                        "bounds checked"
+                                    );
+                                },
+                                _ => testing::fail("missing right unsafe marker"),
+                            }
+                        },
+                        _ => testing::fail("missing left unsafe marker"),
+                    }
+                },
+                _ => testing::fail("safety statement was not binary"),
+            }
+        },
+        _ => testing::fail("safety expression was not a statement"),
+    }
+}
+
+test "parser restores enclosing safety across nested statements" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\// SAFETY: condition checked
+        \\if unsafe ready { unsafe run(); }
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    let statement = try value.parse_statement(&var tree);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.statements.at(statement.node) {
+        If(branch) => {
+            match tree.expressions.at(branch.condition.node) {
+                Unsafe(condition) => {
+                    expect_retained_bytes(
+                        tree.texts.at(condition.safety.node),
+                        "condition checked"
+                    );
+                    match tree.statements.at(branch.consequence.node) {
+                        Block(block) => {
+                            let nested = block.statements.get_or_panic(0);
+                            match tree.statements.at(nested.node) {
+                                Expr(expression_statement) => {
+                                    match tree.expressions.at(
+                                        expression_statement.expr.node
+                                    ) {
+                                        Unsafe(body) => {
+                                            testing::expect(
+                                                condition.safety.node !=
+                                                body.safety.node
+                                            );
+                                            expect_retained_bytes(
+                                                tree.texts.at(body.safety.node),
+                                                ""
+                                            );
+                                        },
+                                        _ => testing::fail(
+                                            "nested marker was not unsafe"
+                                        ),
+                                    }
+                                },
+                                _ => testing::fail(
+                                    "nested unsafe was not a statement"
+                                ),
+                            }
+                        },
+                        _ => testing::fail("if consequence was not a block"),
+                    }
+                },
+                _ => testing::fail("if condition was not unsafe"),
+            }
+        },
+        _ => testing::fail("safety input was not an if statement"),
+    }
+}
+
+test "parser recursive recovery retains partial nodes and diagnostics" {
+    let allocator = mem::page_allocator();
+    try expect_parsed_expression_error(
+        allocator,
+        "@",
+        "<error>",
+        "expected expression, got `@`"
+    );
+    try expect_parsed_expression_error(
+        allocator,
+        "values[..]",
+        "values[..]",
+        "slice expression requires at least one bound"
+    );
+    try expect_parsed_expression_error(
+        allocator,
+        "Point { 1: 2 }",
+        "Point {  }",
+        \\expected field name, got integer "1"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "let x = 1",
+        "let x = 1;",
+        "expected `;` after let statement"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "defer return;",
+        "defer <error>;",
+        "defer expects an expression statement"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "name: return;",
+        "<error>;",
+        "label `name` must be attached to while or for"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "comptime for values {  }",
+        "comptime for values || {  }",
+        "comptime for requires a capture, as in `comptime for list |field| { ... }`"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "comptime match value {  }",
+        "comptime match value || {  }",
+        "comptime match requires a capture, as in `comptime match value |variant| { ... }`"
+    );
+    try expect_parsed_statement_error(
+        allocator,
+        "match x { 1 => x }",
+        "match x {  }",
+        \\expected match tag, got integer "1"
+    );
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "f(1");
+    var value = try new(allocator, move scanner);
+    defer value.deinit();
+    let partial = try value.parse_expression(&var tree, 1);
+    testing::expect(value.current_kind() == token::Kind::Int);
+    testing::expect(value.peek_kind() == token::Kind::Eof);
+    expect_parser_diagnostic(
+        &value,
+        0,
+        "expected next token `)`, got end of file",
+        3,
+        4
+    );
+    let rendered = try ast::render_expression(
+        allocator,
+        &tree,
+        partial
+    );
+    defer rendered.deinit();
+    expect_retained_bytes(&rendered, "f(1)");
+}
+
+test "parser program dispatches every top-level declaration" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\import std::mem;
+        \\/// Exported docs.
+        \\pub fn exported() {}
+        \\test "smoke" {}
+        \\pub error Failure { Bad }
+        \\fn local() {}
+        \\pub unsafe fn raw() {}
+        \\/// Raw docs.
+        \\pub unsafe struct Raw {}
+        \\/// Host docs.
+        \\pub extern "c" fn host(value: i64)
+        \\pub struct Box { pub value: i64 }
+        \\pub enum Color { Red }
+        \\pub union Maybe { None, Some(i64) }
+        \\pub contract Writer { fn write(value: i64); }
+        \\impl Writer for Box;
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    var program = try value.parse_program(&var tree);
+    defer program.deinit();
+    testing::expect_equal<token::Kind>(
+        token::Kind::Eof,
+        value.current_kind()
+    );
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    testing::expect_equal<i64>(13, program.declarations.len());
+    value.deinit();
+    let rendered = try ast::render_program(
+        allocator,
+        &tree,
+        &program
+    );
+    defer rendered.deinit();
+    let expected =
+        \\import std::mem
+        \\pub fn exported() {  }
+        \\test "smoke" {  }
+        \\pub error Failure { Bad }
+        \\fn local() {  }
+        \\pub unsafe fn raw() {  }
+        \\pub unsafe struct Raw {  }
+        \\pub extern "c" fn host(value: i64)
+        \\pub struct Box { pub value: i64 }
+        \\pub enum Color { Red }
+        \\pub union Maybe { None, Some(i64) }
+        \\pub contract Writer { fn write(value: i64); }
+        \\impl Writer for Box;
+    ;
+    expect_retained_bytes(&rendered, expected);
+    let function = program.declarations.get_or_panic(1);
+    match tree.declarations.at(function.node) {
+        Function(declaration) => {
+            expect_retained_bytes(
+                tree.texts.at(declaration.doc.node),
+                "Exported docs."
+            );
+        },
+        _ => testing::fail("program lost the public function"),
+    }
+    let unsafe_struct = program.declarations.get_or_panic(6);
+    match tree.declarations.at(unsafe_struct.node) {
+        Struct(declaration) => {
+            expect_retained_bytes(
+                tree.texts.at(declaration.doc.node),
+                "Raw docs."
+            );
+        },
+        _ => testing::fail("program lost the unsafe struct"),
+    }
+    let external = program.declarations.get_or_panic(7);
+    match tree.declarations.at(external.node) {
+        Function(declaration) => {
+            expect_retained_bytes(
+                tree.texts.at(declaration.doc.node),
+                "Host docs."
+            );
+        },
+        _ => testing::fail("program lost the extern function"),
+    }
+}
+
+test "parser program recovers between top-level declarations" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(
+        allocator,
+        "nope pub 1 fn ok() {}"
+    );
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    var program = try value.parse_program(&var tree);
+    defer program.deinit();
+    testing::expect_equal<token::Kind>(
+        token::Kind::Eof,
+        value.current_kind()
+    );
+    testing::expect_equal<i64>(2, value.diagnostics_len());
+    let declaration_message =
+        \\expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got identifier "nope"
+    ;
+    expect_parser_diagnostic(
+        &value,
+        0,
+        declaration_message,
+        1,
+        5
+    );
+    let public_message =
+        \\expected public declaration, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &value,
+        1,
+        public_message,
+        10,
+        11
+    );
+    testing::expect_equal<i64>(2, program.declarations.len());
+    value.deinit();
+    let rendered = try ast::render_program(
+        allocator,
+        &tree,
+        &program
+    );
+    defer rendered.deinit();
+    let expected =
+        \\pub fn ();
+        \\fn ok() {  }
+    ;
+    expect_retained_bytes(&rendered, expected);
+}
+
+test "parser program retains partial test and function declarations" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\test "broken" fn partial()
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    var program = try value.parse_program(&var tree);
+    defer program.deinit();
+    testing::expect_equal<token::Kind>(
+        token::Kind::Eof,
+        value.current_kind()
+    );
+    testing::expect_equal<i64>(2, value.diagnostics_len());
+    testing::expect_equal<i64>(2, program.declarations.len());
+    value.deinit();
+    let rendered = try ast::render_program(
+        allocator,
+        &tree,
+        &program
+    );
+    defer rendered.deinit();
+    let expected =
+        \\test "broken" <missing>
+        \\fn partial();
+    ;
+    expect_retained_bytes(&rendered, expected);
+}
+
+test "parser program retains malformed top-level recovery stubs" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// Recovered docs.
+        \\pub unsafe enum Color {}
+        \\test 1
+        \\fn ;
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    var program = try value.parse_program(&var tree);
+    defer program.deinit();
+    testing::expect_equal<token::Kind>(
+        token::Kind::Eof,
+        value.current_kind()
+    );
+    testing::expect_equal<i64>(5, value.diagnostics_len());
+    testing::expect_equal<i64>(4, program.declarations.len());
+    if value.diagnostic(0) |entry| {
+        let message = entry.message.as_bytes();
+        testing::expect_equal<[]u8>(
+            "expected fn or struct after unsafe, got `enum`",
+            message
+        );
+        testing::expect_equal<i64>(2, entry.span.start.line);
+        testing::expect_equal<i64>(5, entry.span.start.column);
+        testing::expect_equal<i64>(2, entry.span.end.line);
+        testing::expect_equal<i64>(11, entry.span.end.column);
+    } else {
+        testing::fail("missing unsafe declaration diagnostic");
+    }
+    value.deinit();
+    let recovered = program.declarations.get_or_panic(0);
+    match tree.declarations.at(recovered.node) {
+        Function(function) => expect_function_stub(
+            &tree,
+            function,
+            true,
+            "Recovered docs."
+        ),
+        _ => testing::fail("unsafe recovery did not retain a function stub"),
+    }
+    let rendered = try ast::render_program(
+        allocator,
+        &tree,
+        &program
+    );
+    defer rendered.deinit();
+    let expected =
+        \\pub fn ();
+        \\enum Color {  }
+        \\test "" <missing>
+        \\fn ();
+    ;
+    expect_retained_bytes(&rendered, expected);
+}
+
+test "parser rendered errors outlive parser diagnostics" {
+    let allocator = mem::page_allocator();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path = try string::from_bytes(allocator, "sample.kizu");
+    errdefer path.deinit();
+    let text = try string::from_bytes(allocator, "foo");
+    errdefer text.deinit();
+    let id = try sources.add(move path, move text);
+    if sources.at(id) |file| {
+        let input = file.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, input);
+        var value = try new(allocator, move scanner);
+        errdefer value.deinit();
+        try value.error_expected_declaration();
+        let errors = try value.errors(allocator, &sources);
+        defer errors.deinit();
+        value.deinit();
+        testing::expect_equal<i64>(1, errors.len());
+        if errors.at(0) |rendered| {
+            let bytes = rendered.as_bytes();
+            let expected =
+                \\expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got identifier "foo" at sample.kizu:1:1
+            ;
+            testing::expect_equal<[]u8>(expected, bytes);
+        } else {
+            testing::fail("parser did not render its diagnostic");
+        }
+    } else {
+        testing::fail("parser source was not retained");
+    }
+}

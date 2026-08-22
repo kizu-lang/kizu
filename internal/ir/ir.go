@@ -6,7 +6,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 )
 
-// Module is a lowered Kizu source file.
+// Module is one lowered Kizu program, from either a package or a loose source file.
 type Module struct {
 	Structs map[string]Struct
 	Enums   map[string]Enum

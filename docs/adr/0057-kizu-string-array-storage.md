@@ -18,7 +18,7 @@ storage primitives.
 Represent `std::string::String` in Kizu source as a std-owned struct backed by
 `std::array::Array<u8>`.
 
-`std/src/string.kizu` owns the public constructor and all public `String`
+`std/src/string/string.kizu` owns the public constructor and all public `String`
 methods. Go no longer provides `std::builtin::string_*` or an `OwnedString`
 runtime value.
 

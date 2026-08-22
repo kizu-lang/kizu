@@ -219,6 +219,9 @@ type StructDecl struct {
 	TypeParams []string
 	Fields     []Field
 	Public     bool
+	// Span points at the declaration name so unsafe invariant writes can stay
+	// confined to the file that owns their contract.
+	Span Span
 	// RequiresUnsafe marks a struct whose fields carry an invariant the
 	// compiler cannot check, spelled `unsafe struct`. Establishing or changing
 	// that invariant is what needs `unsafe`, so writes are marked and reads are

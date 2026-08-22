@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -120,27 +121,30 @@ func (s *Server) navigationSources(uri string, source string) []navigationSource
 		return []navigationSource{{uri: uri, path: path, source: source}}
 	}
 	graph, err := loadPackageGraph(root)
-	if err != nil || !graphContainsFile(graph, path) {
+	includeTests := project.IsTestFile(path)
+	if err != nil || !graph.ContainsFile(path, includeTests) {
 		return []navigationSource{{uri: uri, path: path, source: source}}
 	}
-	overrides := s.packageSourceOverrides(graph)
-	sources := make([]navigationSource, 0, len(graph.Modules))
+	overrides := s.packageSourceOverrides(graph, includeTests)
+	sources := make([]navigationSource, 0, len(graph.SourceFiles(includeTests)))
 	for _, module := range graph.Modules {
-		cleanPath := filepath.Clean(module.File)
-		text, ok := overrides[cleanPath]
-		if !ok {
-			data, err := os.ReadFile(module.File)
-			if err != nil {
-				continue
+		for _, file := range module.SourceFiles(includeTests) {
+			cleanPath := filepath.Clean(file)
+			text, ok := overrides[cleanPath]
+			if !ok {
+				data, err := os.ReadFile(file)
+				if err != nil {
+					continue
+				}
+				text = string(data)
 			}
-			text = string(data)
+			sources = append(sources, navigationSource{
+				uri:    fileURIFromPath(cleanPath),
+				path:   cleanPath,
+				module: module.Path,
+				source: text,
+			})
 		}
-		sources = append(sources, navigationSource{
-			uri:    fileURIFromPath(cleanPath),
-			path:   cleanPath,
-			module: module.Path,
-			source: text,
-		})
 	}
 	if len(sources) == 0 {
 		return []navigationSource{{uri: uri, path: path, source: source}}
@@ -151,6 +155,9 @@ func (s *Server) navigationSources(uri string, source string) []navigationSource
 // addModule registers a package module as a navigable target.
 func (idx navigationIndex) addModule(src navigationSource) {
 	if src.module == "" {
+		return
+	}
+	if _, exists := idx.modules[src.module]; exists {
 		return
 	}
 	idx.modules[src.module] = navigationDeclaration{

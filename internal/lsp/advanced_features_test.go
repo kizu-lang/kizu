@@ -68,8 +68,8 @@ fn main(value: token::Token) -> void {
 }
 `
 	writeLSPPackage(t, root, map[string]string{
-		"src/main.kizu":  mainSource,
-		"src/token.kizu": tokenSource,
+		"src/main.kizu":        mainSource,
+		"src/token/token.kizu": tokenSource,
 	})
 	mainURI := fileURIFromPath(root + "/src/main.kizu")
 	server := NewServer(nil, nil)

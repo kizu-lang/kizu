@@ -73,6 +73,11 @@ func requireUnsafeStructInvariant(
 	if fieldName != "" {
 		target = "`" + decl.Name + "." + fieldName + "`"
 	}
+	if !decl.Span.Source.IsZero() && !span.Source.IsZero() && decl.Span.Source != span.Source {
+		return errorAtCode(span, "unsafe.invariant_file_boundary",
+			"unsafe error: %s %s is confined to its declaration file `%s`",
+			action, target, decl.Span.Source.Path())
+	}
 	return requireUnsafeCapabilityAt(mark, unsafeStructInvariant, action+" "+target, span)
 }
 

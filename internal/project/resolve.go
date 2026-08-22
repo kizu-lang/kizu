@@ -12,7 +12,7 @@ import (
 
 // resolveTypeNamespaceReceiver resolves the receiver of Type::Tag namespace lookups.
 func (c *graphChecker) resolveTypeNamespaceReceiver(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.FieldExpr,
 ) (string, bool) {
 	parts, ok := namespaceParts(expr.Receiver)
@@ -24,7 +24,7 @@ func (c *graphChecker) resolveTypeNamespaceReceiver(
 
 // resolveNamespacePath resolves a complete module-qualified namespace chain.
 func (c *graphChecker) resolveNamespacePath(
-	module *moduleUnit,
+	module *moduleFile,
 	expr *ast.FieldExpr,
 ) (string, bool, error) {
 	parts, ok := namespaceParts(expr)
@@ -36,7 +36,7 @@ func (c *graphChecker) resolveNamespacePath(
 
 // resolveNamespaceParts resolves local or imported function namespace parts.
 func (c *graphChecker) resolveNamespaceParts(
-	module *moduleUnit,
+	module *moduleFile,
 	parts []string,
 ) (string, bool, error) {
 	if len(parts) == 0 {
@@ -70,7 +70,7 @@ func (c *graphChecker) resolveNamespaceParts(
 // speaks only for paths that name a std module: a chain that names nothing there
 // is somebody else's error, and saying `import it` would name a fix that does
 // not exist.
-func rejectUnboundStd(module *moduleUnit, parts []string) error {
+func rejectUnboundStd(module *moduleFile, parts []string) error {
 	if len(parts) < 2 || parts[0] != stdlib.Root {
 		return nil
 	}
@@ -115,7 +115,7 @@ func stdModulePrefix(parts []string) (string, int, error) {
 // internalModuleError refuses a module the reading file may not reach. What
 // keeps it in is where it sits, so the message says where that is rather than
 // naming a list it is missing from.
-func internalModuleError(path string, module *moduleUnit) error {
+func internalModuleError(path string, module *moduleFile) error {
 	internal, scope, _ := internalModule(path)
 	return fmt.Errorf("module error: `%s` is internal to `%s` and is not reachable from `%s`",
 		internal, scope, module.name())
@@ -131,7 +131,7 @@ func isStdPath(path string) bool {
 // not declare is one the compiler provides itself -- `std::arena::Arena` has no
 // Kizu source -- so it passes through to the checker that knows about it.
 func (c *graphChecker) resolveStdFunction(
-	module *moduleUnit,
+	module *moduleFile,
 	name string,
 	parts []string,
 ) (string, bool, error) {
@@ -145,7 +145,7 @@ func (c *graphChecker) resolveStdFunction(
 
 // resolveImportedFunction validates visibility for a call through an import alias.
 func (c *graphChecker) resolveImportedFunction(
-	module *moduleUnit,
+	module *moduleFile,
 	target string,
 	parts []string,
 ) (string, bool, error) {
@@ -164,7 +164,7 @@ func (c *graphChecker) resolveImportedFunction(
 
 // resolveTypeNamespaceParts resolves namespace parts only when they name a type.
 func (c *graphChecker) resolveTypeNamespaceParts(
-	module *moduleUnit,
+	module *moduleFile,
 	parts []string,
 ) (string, bool) {
 	if len(parts) == 0 {
@@ -211,7 +211,7 @@ func namespaceParts(expr ast.Expression) ([]string, bool) {
 }
 
 // resolveType rewrites a source type name into its package-qualified form.
-func (c *graphChecker) resolveType(module *moduleUnit, name string) (string, error) {
+func (c *graphChecker) resolveType(module *moduleFile, name string) (string, error) {
 	parsed, err := c.parsedTypes.Parse(name)
 	if err != nil {
 		return "", fmt.Errorf("module error: unknown type `%s`", name)
@@ -225,7 +225,7 @@ func (c *graphChecker) resolveType(module *moduleUnit, name string) (string, err
 
 // resolveTypeNode rewrites every name a type mentions to its package-qualified
 // form, keeping the structure around it.
-func (c *graphChecker) resolveTypeNode(module *moduleUnit, t typ.Type) (typ.Type, error) {
+func (c *graphChecker) resolveTypeNode(module *moduleFile, t typ.Type) (typ.Type, error) {
 	resolver := typeResolver{checker: c, module: module}
 	return typ.MapNames(t, func(path []string) ([]string, error) {
 		resolved, err := resolver.resolveBase(strings.Join(path, "::"))
@@ -238,7 +238,7 @@ func (c *graphChecker) resolveTypeNode(module *moduleUnit, t typ.Type) (typ.Type
 
 type typeResolver struct {
 	checker *graphChecker
-	module  *moduleUnit
+	module  *moduleFile
 }
 
 // resolveBase resolves one non-generic type base.
@@ -311,14 +311,14 @@ func splitTypeArgs(args string) ([]string, error) {
 	return parts, nil
 }
 
-// sortedModuleUnits returns modules in deterministic path order.
-func sortedModuleUnits(modules map[string]*moduleUnit) []*moduleUnit {
+// sortedModuleGroups returns modules in deterministic path order.
+func sortedModuleGroups(modules map[string]*moduleGroup) []*moduleGroup {
 	paths := make([]string, 0, len(modules))
 	for path := range modules {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	out := make([]*moduleUnit, 0, len(paths))
+	out := make([]*moduleGroup, 0, len(paths))
 	for _, path := range paths {
 		out = append(out, modules[path])
 	}

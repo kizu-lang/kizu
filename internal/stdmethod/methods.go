@@ -7,7 +7,7 @@ import (
 
 // Method is one method declared with a receiver slot.
 //
-// std/src/*.kizu writes container methods this way, forwarding to a
+// std/src/*/*.kizu writes container methods this way, forwarding to a
 // `std::internal::builtin::*` primitive:
 //
 //	fn (self: std::array::Array<T>) append<T>(value: T) -> !void {

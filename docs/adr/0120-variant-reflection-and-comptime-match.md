@@ -110,7 +110,7 @@ program の型ではなく JSON 自身の形を名指しているので、tag �
 - `internal/stdmeta`: form 7 つと `VariantForm`
 - `internal/types` / `internal/ownership` / `internal/ir`: capture が field か
   variant かを持ち、match の arm を回すときに arm 自身の variant を束縛する
-- `lib/kizu/std/src/json.kizu`: `encode_variant_value` / `encode_variant_field` /
+- `lib/kizu/std/src/json/json.kizu`: `encode_variant_value` / `encode_variant_field` /
   `decode_variant`、および `Value` の `encode_any_value` / `encode_any_field`
 - `docs/std/json.md`: encode / decode の表に union と enum
 

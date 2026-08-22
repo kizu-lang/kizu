@@ -34,8 +34,11 @@ Generics 不在のまま `expect_equal_<type>` family を増やすと API と di
 `expect(std::mem::equal_bytes(left, right))` のように caller 側で明示する。
 必要なら caller が `std::fmt` と `fail` で domain-specific diagnostic を構築する。
 
-`kizu test <file>` は v0.2 では discovery なしの single-file runner とする。
-file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示する。
+`kizu test <path>` は top-level `test` declaration を実行し、`main` は実行しない。
+loose source file は明示されたその file だけを対象にする。package root は production
+file と `_test.kizu` file を directory module ごとに読み、package 全体の test を 1 回の
+link と実行で処理する。package test の module/file 規則は ADR-0049、runner の現在の
+契約は `SPEC.md` が持つ。
 
 ## Consequences
 
@@ -45,4 +48,7 @@ file を check して `main` を実行し、未処理 error がなければ `tes
 - expected / actual の rich diagnostic は generic equality か message builder helper の
   設計後に再導入する。
 - `expect` failure は通常の recoverable error ではなく、明示 test trap になる。
-- test discovery、location-aware diagnostics は後続に残す。
+- package の `_test.kizu` discovery は filesystem の directory module 規則だけで決まり、
+  test list や別の manifest 設定を持たない。
+- package root より上からの filesystem-wide discovery、filter、location-aware diagnostics
+  は後続に残す。

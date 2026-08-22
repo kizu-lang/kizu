@@ -29,8 +29,8 @@ internal/            Go 実装(1 パッケージ = 1 責務)
   unsafecap                     unsafe が覆う操作の種類と診断文言
   fmt, diagnostic, quote, buildcache, cimport, lsp
 compiler/            non-shipping の Kizu compiler 移植先(cutover まで CLI 非接続)
-  src/main.kizu      package root。cutover までは user-facing entrypoint にしない
-  src/internal/      compiler package の外へ公開しない移植済み実装 module
+  src/main_test.kizu test-only package root。cutover までは user-facing entrypoint を持たない
+  src/internal/      1 directory = 1 module の、package外へ公開しない移植済み実装
 lib/kizu/std/src/     Kizu で書かれた標準ライブラリ
 examples/            言語機能ごとの実例(末尾に自分の case を書く)
 tests/behavior/      振る舞いの assert を 1 package に束ねたもの
@@ -73,7 +73,7 @@ CLI(`cmd/kizu`)のコマンド: `run` `parse` `check` `test` `fmt` `init` `ir`
 ## 4. std の二層構造
 
 - 実行時の組み込み(print、メモリ、fs、process 等)は Go 実装が提供し、
-  `lib/kizu/std/src/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
+  `lib/kizu/std/src/*/*.kizu` はその上の Kizu 製 API 面(`std::array` `std::map` `std::string` …)。
 - Go 側は `internal/project`(+ `internal/types` の `knownTypes`)経由で std の宣言を
   取り込みます。std は利用者の package と同じ loader を通り、`internal/stdlib` が
   持つのは「ツリーがどこにあるか」だけです。std に public 型を足すときは

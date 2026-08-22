@@ -76,7 +76,6 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0067: direct field method receivers](0067-direct-field-method-receivers.md) (receiver / borrow の 1 段上限は 0111 が N 段に拡張。cleanup 1 段の境界は維持)
 - [ADR-0068: safe borrow field access](0068-safe-borrow-field-access.md)
 - [ADR-0069: raw pointer dereference syntax](0069-raw-pointer-dereference-syntax.md)
-- [ADR-0070: package export surface](0070-package-export-surface.md)
 - [ADR-0072: diagnostic message style](0072-diagnostic-message-style.md)
 - [ADR-0074: control expressions and statement semicolons](0074-control-expressions-and-statement-semicolons.md)
 - [ADR-0075: owner aggregate cleanup and errdefer](0075-owner-aggregate-cleanup-and-errdefer.md)

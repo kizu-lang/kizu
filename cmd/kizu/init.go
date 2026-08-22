@@ -146,7 +146,6 @@ name = "%s"
 version = "0.1.0"
 
 [modules]
-root = "src/main.kizu"
 paths = ["src"]
 `, packageName)
 }

@@ -1914,7 +1914,7 @@ func paramsAfterSelf(params []Param) []Param {
 }
 
 // lowerStdContainerMethod runs the wrapper std declares for a container method,
-// so the body in std/src/*.kizu is what the call does rather than a description
+// so the body in std/src/*/*.kizu is what the call does rather than a description
 // of it. There is no second answer to fall back on: a lookup that stops finding
 // the declaration fails here, instead of quietly lowering to an instruction the
 // lowerer picked out of a list of its own.
@@ -1976,7 +1976,7 @@ func (l *lowerer) lowerImplMethodCall(name string, args []Value) (Value, error) 
 }
 
 // arrayPrimitives maps a std::internal::builtin Array primitive to the method it lowers
-// as. std/src/array.kizu forwards each method to one of these, and lowering the
+// as. std/src/array/array.kizu forwards each method to one of these, and lowering the
 // forward is what makes that line the implementation rather than a description
 // of one.
 var arrayPrimitives = map[string]string{
@@ -2014,7 +2014,7 @@ var mapPrimitives = map[string]string{
 }
 
 // boxPrimitives maps a std::internal::builtin Box primitive to the operation it
-// lowers as. std/src/mem.kizu forwards the constructor and each method to one
+// lowers as. std/src/mem/mem.kizu forwards the constructor and each method to one
 // of these, reached the same way the Array and Map primitives are.
 var boxPrimitives = map[string]string{
 	"std::internal::builtin::box":            "new",
@@ -2048,7 +2048,7 @@ func (l *lowerer) lowerArenaPrimitive(name string, elem string, args []Value) (V
 }
 
 // lowerBoxMethod lowers the runtime primitive one std::mem::Box<T> wrapper
-// forwards to. Only a wrapper body in std/src/mem.kizu reaches it.
+// forwards to. Only a wrapper body in std/src/mem/mem.kizu reaches it.
 func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value, error) {
 	switch name {
 	case "new":
@@ -2085,7 +2085,7 @@ func mapPrimitiveValueType(typeArg string) string {
 }
 
 // lowerMapMethod lowers the runtime primitive one std::map::Map<[]u8, V> method
-// forwards to. Only a wrapper body in std/src/map.kizu reaches it: a `m.get(k)`
+// forwards to. Only a wrapper body in std/src/map/map.kizu reaches it: a `m.get(k)`
 // call lowers as a call to that wrapper, and this is what the wrapper does.
 func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (Value, error) {
 	switch name {
