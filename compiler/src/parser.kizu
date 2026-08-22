@@ -11,7 +11,7 @@ import std::map;
 import std::mem;
 import std::string;
 
-// Partial mechanical port of internal/parser/parser.go. Expression handles
+// Mechanical port of internal/parser/parser.go. Expression handles
 // borrow their Ast explicitly because the Kizu graph owner replaces Go node
 // pointers retained by the runtime.
 
@@ -109,6 +109,139 @@ fn (self: &Parser) starts_error_set_decl() -> bool {
         self.peek_kind() == token::Kind::Ident;
 }
 
+/// Parses one complete source file into caller-owned declaration storage.
+pub fn (self: &var Parser) parse_program(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Program {
+    var program = ast::new_program(self.allocator);
+    errdefer program.deinit();
+    while self.current_kind() != token::Kind::Eof {
+        if try self.parse_top_level_declaration(tree, types) |declaration| {
+            try program.add_declaration(declaration);
+        }
+        try self.next_token();
+    }
+    return move program;
+}
+
+fn (self: &var Parser) parse_top_level_declaration(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?ast::Declaration {
+    let kind = self.current_kind();
+    if kind == token::Kind::Import {
+        return try self.parse_import_decl(tree);
+    }
+    if kind == token::Kind::Public {
+        return try self.parse_public_decl(tree, types);
+    }
+    if kind == token::Kind::Ident {
+        return try self.parse_ident_led_decl(tree, types);
+    }
+    if kind == token::Kind::Function {
+        return try self.parse_function_decl(tree, types);
+    }
+    if kind == token::Kind::Unsafe {
+        let handle = self.stream.get_or_panic(self.position);
+        let current = self.tokens.at(handle);
+        let docs = try self.comment_text(&current.doc_comments);
+        return try self.parse_unsafe_decl(tree, types, move docs, false);
+    }
+    if kind == token::Kind::Extern {
+        return try self.parse_extern_decl(tree, types);
+    }
+    if kind == token::Kind::Struct {
+        return try self.parse_struct_decl(tree, types);
+    }
+    if kind == token::Kind::Enum {
+        return try self.parse_enum_decl(tree);
+    }
+    if kind == token::Kind::Union {
+        return try self.parse_union_decl(tree, types);
+    }
+    if kind == token::Kind::Contract {
+        return try self.parse_contract_decl(tree, types, false);
+    }
+    if kind == token::Kind::Impl {
+        return try self.parse_impl_decl(tree);
+    }
+    try self.error_expected_declaration();
+    return null;
+}
+
+fn (self: &var Parser) parse_public_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    errdefer docs.deinit();
+    try self.next_token();
+    return self.parse_top_level_decl_with_doc(
+        tree,
+        types,
+        move docs
+    );
+}
+
+fn (self: &var Parser) parse_top_level_decl_with_doc(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String
+) -> !ast::Declaration {
+    errdefer docs.deinit();
+    let kind = self.current_kind();
+    if kind == token::Kind::Function {
+        return self.parse_function_decl_with_doc(tree, types, move docs, true);
+    }
+    if kind == token::Kind::Unsafe {
+        return self.parse_unsafe_decl(tree, types, move docs, true);
+    }
+    if kind == token::Kind::Extern {
+        return self.parse_extern_decl_with_doc(tree, types, move docs, true);
+    }
+    if kind == token::Kind::Struct {
+        let declaration = try self.parse_struct_decl_with_doc(
+            tree,
+            types,
+            move docs,
+            true
+        );
+        return add_struct_decl(tree, move declaration);
+    }
+    if kind == token::Kind::Enum {
+        return self.parse_enum_decl_with_doc(tree, move docs, true);
+    }
+    if kind == token::Kind::Union {
+        return self.parse_union_decl_with_doc(tree, types, move docs, true);
+    }
+    if kind == token::Kind::Contract {
+        docs.deinit();
+        return self.parse_contract_decl(tree, types, true);
+    }
+    if kind == token::Kind::Ident and self.starts_error_set_decl() {
+        return self.parse_error_set_decl_with_doc(tree, move docs, true);
+    }
+    let message = try public_declaration_message(self.allocator, self);
+    try self.record_error(move message);
+    let function = self.function_stub(tree, true, move docs);
+    return add_function_decl(tree, move function);
+}
+
+fn public_declaration_message(
+    allocator: Allocator,
+    parser: &Parser
+) -> !string::String {
+    let handle = parser.stream.get_or_panic(parser.position);
+    return unexpected_token_message(
+        allocator,
+        "expected public declaration, got ",
+        parser.tokens.at(handle)
+    );
+}
+
 fn (self: &var Parser) parse_import_decl(
     tree: &var ast::Ast
 ) -> !ast::Declaration {
@@ -178,6 +311,131 @@ fn (self: &Parser) function_stub(
     };
 }
 
+fn (self: &var Parser) parse_ident_led_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    if token_literal_equal(self.tokens.at(handle), "test") {
+        return try self.parse_test_decl(tree, types);
+    }
+    if self.starts_error_set_decl() {
+        return try self.parse_error_set_decl(tree);
+    }
+    try self.error_expected_declaration();
+    return null;
+}
+
+fn (self: &var Parser) parse_test_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    if !try self.expect_peek(token::Kind::String) {
+        let name = try tree.add_text_from_bytes(self.allocator, "");
+        return add_test_decl(tree, name, null);
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return add_test_decl(tree, name, null);
+    }
+    let body = try self.parse_block_stmt(tree, types);
+    return add_test_decl(tree, name, body);
+}
+
+fn add_test_decl(
+    tree: &var ast::Ast,
+    name: ast::Text,
+    body: ?ast::Block
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Test(ast::TestDecl {
+        name: name,
+        body: body
+    }));
+}
+
+fn (self: &var Parser) parse_function_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    return self.parse_function_decl_with_doc(tree, types, move docs, false);
+}
+
+fn (self: &var Parser) parse_function_decl_with_doc(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String,
+    public: bool
+) -> !ast::Declaration {
+    let function = self.function_stub(tree, public, move docs);
+    return self.parse_function_after_fn(tree, types, move function);
+}
+
+fn (self: &var Parser) parse_function_after_fn(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    function: ast::FunctionDecl
+) -> !ast::Declaration {
+    var value = move function;
+    errdefer value.deinit();
+    if !try self.parse_function_signature_after_fn(
+        tree,
+        types,
+        &var value.signature
+    ) {
+        return add_function_decl(tree, move value);
+    }
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return add_function_decl(tree, move value);
+    }
+    let body = try self.parse_block_stmt(tree, types);
+    value.body = body;
+    return add_function_decl(tree, move value);
+}
+
+fn (self: &var Parser) parse_unsafe_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    docs: string::String,
+    public: bool
+) -> !ast::Declaration {
+    errdefer docs.deinit();
+    if self.peek_kind() == token::Kind::Struct {
+        try self.next_token();
+        var declaration = try self.parse_struct_decl_with_doc(
+            tree,
+            types,
+            move docs,
+            public
+        );
+        declaration.requires_unsafe = true;
+        return add_struct_decl(tree, move declaration);
+    }
+    if self.peek_kind() == token::Kind::Function {
+        var function = self.function_stub(tree, public, move docs);
+        errdefer function.deinit();
+        function.signature.requires_unsafe = true;
+        try self.next_token();
+        return self.parse_function_after_fn(tree, types, move function);
+    }
+    let peek_handle = self.stream.get_or_panic(self.position + 1);
+    let message = try unexpected_token_message(
+        self.allocator,
+        "expected fn or struct after unsafe, got ",
+        self.tokens.at(peek_handle)
+    );
+    try self.record_error(move message);
+    let function = self.function_stub(tree, public, move docs);
+    return add_function_decl(tree, move function);
+}
+
 fn (self: &var Parser) parse_extern_decl(
     tree: &var ast::Ast,
     types: &var typ::Table
@@ -185,15 +443,16 @@ fn (self: &var Parser) parse_extern_decl(
     let handle = self.stream.get_or_panic(self.position);
     let current = self.tokens.at(handle);
     let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_extern_decl_with_doc(tree, types, move docs);
+    return self.parse_extern_decl_with_doc(tree, types, move docs, false);
 }
 
 fn (self: &var Parser) parse_extern_decl_with_doc(
     tree: &var ast::Ast,
     types: &var typ::Table,
-    docs: string::String
+    docs: string::String,
+    public: bool
 ) -> !ast::Declaration {
-    var function = self.function_stub(tree, false, move docs);
+    var function = self.function_stub(tree, public, move docs);
     errdefer function.deinit();
     if !try self.expect_peek(token::Kind::String) {
         return add_function_decl(tree, move function);
@@ -231,12 +490,13 @@ fn (self: &var Parser) parse_enum_decl(
     let handle = self.stream.get_or_panic(self.position);
     let current = self.tokens.at(handle);
     let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_enum_decl_with_doc(tree, move docs);
+    return self.parse_enum_decl_with_doc(tree, move docs, false);
 }
 
 fn (self: &var Parser) parse_enum_decl_with_doc(
     tree: &var ast::Ast,
-    docs: string::String
+    docs: string::String,
+    public: bool
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
@@ -245,7 +505,8 @@ fn (self: &var Parser) parse_enum_decl_with_doc(
             tree,
             name,
             doc,
-            empty_name_list(self.allocator)
+            empty_name_list(self.allocator),
+            public
         );
     }
     let name_handle = self.stream.get_or_panic(self.position);
@@ -259,25 +520,27 @@ fn (self: &var Parser) parse_enum_decl_with_doc(
             tree,
             name,
             doc,
-            empty_name_list(self.allocator)
+            empty_name_list(self.allocator),
+            public
         );
     }
     let list = try self.parse_name_list(tree, "enum tag");
-    return add_enum_decl(tree, name, doc, move list);
+    return add_enum_decl(tree, name, doc, move list, public);
 }
 
 fn add_enum_decl(
     tree: &var ast::Ast,
     name: ast::Text,
     doc: ast::Text,
-    list: NameList
+    list: NameList,
+    public: bool
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::Enum(ast::EnumDecl {
         name: name,
         doc: doc,
         tags: move list.names,
         tag_docs: move list.docs,
-        public: false
+        public: public
     }));
 }
 
@@ -287,12 +550,13 @@ fn (self: &var Parser) parse_error_set_decl(
     let handle = self.stream.get_or_panic(self.position);
     let current = self.tokens.at(handle);
     let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_error_set_decl_with_doc(tree, move docs);
+    return self.parse_error_set_decl_with_doc(tree, move docs, false);
 }
 
 fn (self: &var Parser) parse_error_set_decl_with_doc(
     tree: &var ast::Ast,
-    docs: string::String
+    docs: string::String,
+    public: bool
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
@@ -301,7 +565,8 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
             tree,
             name,
             doc,
-            empty_name_list(self.allocator)
+            empty_name_list(self.allocator),
+            public
         );
     }
     let name_handle = self.stream.get_or_panic(self.position);
@@ -315,18 +580,20 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
             tree,
             name,
             doc,
-            empty_name_list(self.allocator)
+            empty_name_list(self.allocator),
+            public
         );
     }
     let list = try self.parse_name_list(tree, "error name");
-    return add_error_set_decl(tree, name, doc, move list);
+    return add_error_set_decl(tree, name, doc, move list, public);
 }
 
 fn add_error_set_decl(
     tree: &var ast::Ast,
     name: ast::Text,
     doc: ast::Text,
-    list: NameList
+    list: NameList,
+    public: bool
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::ErrorSet(
         ast::ErrorSetDecl {
@@ -334,7 +601,7 @@ fn add_error_set_decl(
             doc: doc,
             members: move list.names,
             member_docs: move list.docs,
-            public: false
+            public: public
         }
     ));
 }
@@ -435,18 +702,19 @@ fn (self: &var Parser) parse_union_decl(
     let handle = self.stream.get_or_panic(self.position);
     let current = self.tokens.at(handle);
     let docs = try self.comment_text(&current.doc_comments);
-    return self.parse_union_decl_with_doc(tree, types, move docs);
+    return self.parse_union_decl_with_doc(tree, types, move docs, false);
 }
 
 fn (self: &var Parser) parse_union_decl_with_doc(
     tree: &var ast::Ast,
     types: &var typ::Table,
-    docs: string::String
+    docs: string::String,
+    public: bool
 ) -> !ast::Declaration {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
         let name = tree.add_text(string::new(self.allocator));
-        return add_empty_union_decl(self.allocator, tree, name, doc);
+        return add_empty_union_decl(self.allocator, tree, name, doc, public);
     }
     let name_handle = self.stream.get_or_panic(self.position);
     let name = try retain_literal(
@@ -464,7 +732,8 @@ fn (self: &var Parser) parse_union_decl_with_doc(
                     name,
                     doc,
                     move type_params,
-                    array::new<ast::UnionVariant>(self.allocator)
+                    array::new<ast::UnionVariant>(self.allocator),
+                    public
                 );
             }
             if !try self.expect_peek(token::Kind::LBrace) {
@@ -473,7 +742,8 @@ fn (self: &var Parser) parse_union_decl_with_doc(
                     name,
                     doc,
                     move type_params,
-                    array::new<ast::UnionVariant>(self.allocator)
+                    array::new<ast::UnionVariant>(self.allocator),
+                    public
                 );
             }
             let variants = try self.parse_union_variants(tree, types);
@@ -482,13 +752,14 @@ fn (self: &var Parser) parse_union_decl_with_doc(
                 name,
                 doc,
                 move type_params,
-                move variants
+                move variants,
+                public
             );
         }
-        return add_empty_union_decl(self.allocator, tree, name, doc);
+        return add_empty_union_decl(self.allocator, tree, name, doc, public);
     }
     if !try self.expect_peek(token::Kind::LBrace) {
-        return add_empty_union_decl(self.allocator, tree, name, doc);
+        return add_empty_union_decl(self.allocator, tree, name, doc, public);
     }
     let variants = try self.parse_union_variants(tree, types);
     return add_union_decl(
@@ -496,7 +767,8 @@ fn (self: &var Parser) parse_union_decl_with_doc(
         name,
         doc,
         array::new<ast::Text>(self.allocator),
-        move variants
+        move variants,
+        public
     );
 }
 
@@ -568,14 +840,16 @@ fn add_empty_union_decl(
     allocator: Allocator,
     tree: &var ast::Ast,
     name: ast::Text,
-    doc: ast::Text
+    doc: ast::Text,
+    public: bool
 ) -> ast::Declaration {
     return add_union_decl(
         tree,
         name,
         doc,
         array::new<ast::Text>(allocator),
-        array::new<ast::UnionVariant>(allocator)
+        array::new<ast::UnionVariant>(allocator),
+        public
     );
 }
 
@@ -584,14 +858,15 @@ fn add_union_decl(
     name: ast::Text,
     doc: ast::Text,
     type_params: array::Array<ast::Text>,
-    variants: array::Array<ast::UnionVariant>
+    variants: array::Array<ast::UnionVariant>,
+    public: bool
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::Union(ast::UnionDecl {
         name: name,
         doc: doc,
         type_params: move type_params,
         variants: move variants,
-        public: false
+        public: public
     }));
 }
 
@@ -605,7 +880,8 @@ fn (self: &var Parser) parse_struct_decl(
     let declaration = try self.parse_struct_decl_with_doc(
         tree,
         types,
-        move docs
+        move docs,
+        false
     );
     return add_struct_decl(tree, move declaration);
 }
@@ -613,12 +889,13 @@ fn (self: &var Parser) parse_struct_decl(
 fn (self: &var Parser) parse_struct_decl_with_doc(
     tree: &var ast::Ast,
     types: &var typ::Table,
-    docs: string::String
+    docs: string::String,
+    public: bool
 ) -> !ast::StructDecl {
     let doc = tree.add_text(move docs);
     if !try self.expect_peek(token::Kind::Ident) {
         let name = tree.add_text(string::new(self.allocator));
-        return empty_struct_decl(self.allocator, name, doc);
+        return empty_struct_decl(self.allocator, name, doc, public);
     }
     let name_handle = self.stream.get_or_panic(self.position);
     let name = try retain_literal(
@@ -635,7 +912,8 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
                     name,
                     doc,
                     move type_params,
-                    array::new<ast::Field>(self.allocator)
+                    array::new<ast::Field>(self.allocator),
+                    public
                 );
             }
             let fields = try self.parse_struct_body(tree, types);
@@ -643,17 +921,19 @@ fn (self: &var Parser) parse_struct_decl_with_doc(
                 name,
                 doc,
                 move type_params,
-                move fields
+                move fields,
+                public
             );
         }
-        return empty_struct_decl(self.allocator, name, doc);
+        return empty_struct_decl(self.allocator, name, doc, public);
     }
     let fields = try self.parse_struct_body(tree, types);
     return make_struct_decl(
         name,
         doc,
         array::new<ast::Text>(self.allocator),
-        move fields
+        move fields,
+        public
     );
 }
 
@@ -748,13 +1028,15 @@ fn (self: &var Parser) parse_struct_field(
 fn empty_struct_decl(
     allocator: Allocator,
     name: ast::Text,
-    doc: ast::Text
+    doc: ast::Text,
+    public: bool
 ) -> ast::StructDecl {
     return make_struct_decl(
         name,
         doc,
         array::new<ast::Text>(allocator),
-        array::new<ast::Field>(allocator)
+        array::new<ast::Field>(allocator),
+        public
     );
 }
 
@@ -762,14 +1044,15 @@ fn make_struct_decl(
     name: ast::Text,
     doc: ast::Text,
     type_params: array::Array<ast::Text>,
-    fields: array::Array<ast::Field>
+    fields: array::Array<ast::Field>,
+    public: bool
 ) -> ast::StructDecl {
     return ast::StructDecl {
         name: name,
         doc: doc,
         type_params: move type_params,
         fields: move fields,
-        public: false,
+        public: public,
         requires_unsafe: false
     };
 }
@@ -846,14 +1129,16 @@ fn (self: &var Parser) parse_function_signature_after_fn(
 
 fn (self: &var Parser) parse_contract_decl(
     tree: &var ast::Ast,
-    types: &var typ::Table
+    types: &var typ::Table,
+    public: bool
 ) -> !ast::Declaration {
     if !try self.expect_peek(token::Kind::Ident) {
         let name = tree.add_text(string::new(self.allocator));
         return add_contract_decl(
             tree,
             name,
-            array::new<ast::FunctionDecl>(self.allocator)
+            array::new<ast::FunctionDecl>(self.allocator),
+            public
         );
     }
     let name_handle = self.stream.get_or_panic(self.position);
@@ -866,11 +1151,12 @@ fn (self: &var Parser) parse_contract_decl(
         return add_contract_decl(
             tree,
             name,
-            array::new<ast::FunctionDecl>(self.allocator)
+            array::new<ast::FunctionDecl>(self.allocator),
+            public
         );
     }
     let methods = try self.parse_contract_methods(tree, types);
-    return add_contract_decl(tree, name, move methods);
+    return add_contract_decl(tree, name, move methods, public);
 }
 
 fn (self: &var Parser) parse_contract_methods(
@@ -935,13 +1221,14 @@ fn (self: &var Parser) parse_contract_method(
 fn add_contract_decl(
     tree: &var ast::Ast,
     name: ast::Text,
-    methods: array::Array<ast::FunctionDecl>
+    methods: array::Array<ast::FunctionDecl>,
+    public: bool
 ) -> ast::Declaration {
     return tree.add_declaration(ast::DeclarationNode::Contract(
         ast::ContractDecl {
             name: name,
             methods: move methods,
-            public: false
+            public: public
         }
     ));
 }
