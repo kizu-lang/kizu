@@ -50,15 +50,8 @@ func (c *Checker) underMark(
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
-	types         typeTable
-	functions     map[string]*functionType
-	structs       map[string]*ast.StructDecl
-	enums         map[string]*enumType
-	errorSets     map[string]*errorSetType
-	unions        map[string]*unionType
-	contracts     map[string]*contractType
-	impls         map[string]map[string]*functionType
-	declaredTypes map[string]bool
+	checkerMetadata
+	types typeTable
 	// declaredDeinits names the types whose cleanup an author wrote. They hold
 	// an obligation of their own, so their fields are not taken one at a time.
 	declaredDeinits map[string]bool
@@ -103,15 +96,8 @@ type Checker struct {
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
+		checkerMetadata:  newCheckerMetadata(),
 		types:            newTypeTable(),
-		functions:        map[string]*functionType{},
-		structs:          map[string]*ast.StructDecl{},
-		enums:            map[string]*enumType{},
-		errorSets:        map[string]*errorSetType{},
-		unions:           map[string]*unionType{},
-		contracts:        map[string]*contractType{},
-		impls:            map[string]map[string]*functionType{},
-		declaredTypes:    map[string]bool{},
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
@@ -282,36 +268,6 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 	fnType.name = decl.Name
 	methods[name] = fnType
 	return nil
-}
-
-// predeclareTypeNames lets recursive fields refer to later declarations through Box.
-func (c *Checker) predeclareTypeNames(program *ast.Program) error {
-	for _, decl := range program.Decls {
-		name, ok := declaredTypeName(decl)
-		if !ok {
-			continue
-		}
-		c.declaredTypes[name] = true
-	}
-	return nil
-}
-
-// declaredTypeName returns the user type introduced by a declaration.
-func declaredTypeName(decl ast.Decl) (string, bool) {
-	switch d := decl.(type) {
-	case *ast.StructDecl:
-		return d.Name, true
-	case *ast.EnumDecl:
-		return d.Name, true
-	case *ast.ErrorSetDecl:
-		return d.Name, true
-	case *ast.UnionDecl:
-		return d.Name, true
-	case *ast.ContractDecl:
-		return d.Name, true
-	default:
-		return "", false
-	}
 }
 
 // checkPublicAPI rejects private types exposed through public declarations.

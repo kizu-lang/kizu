@@ -1,0 +1,89 @@
+import compiler::internal::ast;
+import std::array;
+import std::map;
+
+// Mechanical owner mapping for the declaration registries embedded in the Go
+// Checker. Owner records live once in Arrays; name and method Maps retain only
+// copy indexes, while struct declarations remain handles into the caller Ast.
+
+struct ErrorSetHandle {
+    index: i64
+}
+
+struct UnionHandle {
+    index: i64
+}
+
+struct ContractHandle {
+    index: i64
+}
+
+struct CheckerMetadata {
+    functions: array::Array<FunctionType>,
+    functions_by_name: map::Map<[]u8, FunctionHandle>,
+    structs: map::Map<[]u8, ast::Declaration>,
+    enums: array::Array<EnumType>,
+    enums_by_name: map::Map<[]u8, EnumHandle>,
+    error_sets: array::Array<ErrorSetType>,
+    error_sets_by_name: map::Map<[]u8, ErrorSetHandle>,
+    unions: array::Array<UnionType>,
+    unions_by_name: map::Map<[]u8, UnionHandle>,
+    contracts: array::Array<ContractType>,
+    contracts_by_name: map::Map<[]u8, ContractHandle>,
+    impls: map::Map<[]u8, map::Map<[]u8, FunctionHandle>>,
+    declared_types: map::Map<[]u8, bool>
+}
+
+fn new_checker_metadata(allocator: Allocator) -> CheckerMetadata {
+    return CheckerMetadata {
+        functions: array::new<FunctionType>(allocator),
+        functions_by_name: map::new<[]u8, FunctionHandle>(allocator),
+        structs: map::new<[]u8, ast::Declaration>(allocator),
+        enums: array::new<EnumType>(allocator),
+        enums_by_name: map::new<[]u8, EnumHandle>(allocator),
+        error_sets: array::new<ErrorSetType>(allocator),
+        error_sets_by_name: map::new<[]u8, ErrorSetHandle>(allocator),
+        unions: array::new<UnionType>(allocator),
+        unions_by_name: map::new<[]u8, UnionHandle>(allocator),
+        contracts: array::new<ContractType>(allocator),
+        contracts_by_name: map::new<[]u8, ContractHandle>(allocator),
+        impls: map::new<[]u8, map::Map<[]u8, FunctionHandle>>(allocator),
+        declared_types: map::new<[]u8, bool>(allocator)
+    };
+}
+
+// Registers every source name that introduces a type before declarations are
+// collected, so recursive fields see later declarations too.
+fn predeclare_type_names(
+    tree: &ast::Ast,
+    program: &ast::Program,
+    metadata: &var CheckerMetadata
+) -> !void {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        let node = tree.declarations.at(declaration.node);
+        if declared_type_name(node) |name| {
+            let retained = tree.texts.at(name.node);
+            let bytes = retained.as_bytes();
+            try metadata.declared_types.insert(bytes, true);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &CheckerMetadata) has_declared_type(name: []u8) -> bool {
+    return self.declared_types.contains(name);
+}
+
+fn declared_type_name(node: &ast::DeclarationNode) -> ?ast::Text {
+    match node {
+        Struct(declaration) => return declaration.name,
+        Enum(declaration) => return declaration.name,
+        ErrorSet(declaration) => return declaration.name,
+        Union(declaration) => return declaration.name,
+        Contract(declaration) => return declaration.name,
+        _ => {},
+    }
+    return null;
+}
