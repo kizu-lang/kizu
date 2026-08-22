@@ -963,6 +963,163 @@ test "parser keeps partial enum name lists after syntax errors" {
     }
 }
 
+test "parser retains error set members and docs after token cleanup" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let input =
+        \\/// Failure docs.
+        \\error Failure {
+        \\    /// Missing docs.
+        \\    Missing,
+        \\    Timeout,
+        \\} next
+    ;
+    let scanner = lexer::new(allocator, input);
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    testing::expect(value.starts_error_set_decl());
+    let declaration = try value.parse_error_set_decl(&var tree);
+    testing::expect(value.current_kind() == token::Kind::RBrace);
+    testing::expect(value.peek_kind() == token::Kind::Ident);
+    testing::expect_equal<i64>(0, value.diagnostics_len());
+    value.deinit();
+    match tree.declarations.at(declaration.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(
+                tree.texts.at(retained.name.node),
+                "Failure"
+            );
+            expect_retained_bytes(
+                tree.texts.at(retained.doc.node),
+                "Failure docs."
+            );
+            testing::expect_equal<i64>(2, retained.members.len());
+            if retained.members.at(0) |member| {
+                expect_retained_bytes(tree.texts.at(member.node), "Missing");
+            } else {
+                testing::fail("missing first error set member");
+            }
+            if retained.members.at(1) |member| {
+                expect_retained_bytes(tree.texts.at(member.node), "Timeout");
+            } else {
+                testing::fail("missing second error set member");
+            }
+            if retained.member_docs |docs| {
+                testing::expect_equal<i64>(1, docs.len());
+                if docs.at("Missing") |text| {
+                    expect_retained_bytes(
+                        tree.texts.at(text.node),
+                        "Missing docs."
+                    );
+                } else {
+                    testing::fail("missing error set member docs");
+                }
+                if docs.at("Timeout") |_| {
+                    testing::fail("empty error set member docs were retained");
+                }
+            } else {
+                testing::fail("documented error set lost its member docs");
+            }
+            testing::expect(!retained.public);
+        },
+        _ => testing::fail("parser did not retain an error set declaration"),
+    }
+}
+
+test "parser keeps partial error set declarations after syntax errors" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let name_scanner = lexer::new(allocator, "error ;");
+    var name = try parser::new(allocator, move name_scanner);
+    defer name.deinit();
+    let name_decl = try name.parse_error_set_decl(&var tree);
+    expect_parser_diagnostic(
+        &name,
+        0,
+        "expected next token identifier, got `;`",
+        1,
+        6
+    );
+    match tree.declarations.at(name_decl.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(tree.texts.at(retained.name.node), "");
+            testing::expect_equal<i64>(0, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+
+    let brace_scanner = lexer::new(allocator, "error Failure ;");
+    var brace = try parser::new(allocator, move brace_scanner);
+    defer brace.deinit();
+    let brace_decl = try brace.parse_error_set_decl(&var tree);
+    expect_parser_diagnostic(
+        &brace,
+        0,
+        "expected next token `{`, got `;`",
+        7,
+        14
+    );
+    match tree.declarations.at(brace_decl.node) {
+        ErrorSet(retained) => {
+            expect_retained_bytes(
+                tree.texts.at(retained.name.node),
+                "Failure"
+            );
+            testing::expect_equal<i64>(0, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+
+    let member_scanner = lexer::new(allocator, "error Failure { 1 }");
+    var member = try parser::new(allocator, move member_scanner);
+    defer member.deinit();
+    let member_decl = try member.parse_error_set_decl(&var tree);
+    let member_message =
+        \\expected error name, got integer "1"
+    ;
+    expect_parser_diagnostic(
+        &member,
+        0,
+        member_message,
+        17,
+        18
+    );
+    match tree.declarations.at(member_decl.node) {
+        ErrorSet(retained) => {
+            testing::expect_equal<i64>(0, retained.members.len());
+            if retained.member_docs |_| {
+                testing::fail("partial error set retained empty docs");
+            }
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+
+    let comma_scanner = lexer::new(
+        allocator,
+        "error Failure { Lost Timeout }"
+    );
+    var comma = try parser::new(allocator, move comma_scanner);
+    defer comma.deinit();
+    let comma_decl = try comma.parse_error_set_decl(&var tree);
+    testing::expect(comma.current_kind() == token::Kind::Ident);
+    testing::expect(comma.peek_kind() == token::Kind::Ident);
+    expect_parser_diagnostic(
+        &comma,
+        0,
+        "expected `,` after error name",
+        17,
+        21
+    );
+    match tree.declarations.at(comma_decl.node) {
+        ErrorSet(retained) => {
+            testing::expect_equal<i64>(1, retained.members.len());
+        },
+        _ => testing::fail("parser did not retain a partial error set"),
+    }
+}
+
 test "parser retains import paths after token cleanup" {
     let allocator = mem::page_allocator();
     var tree = ast::new(allocator);
