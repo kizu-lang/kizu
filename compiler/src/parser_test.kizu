@@ -266,6 +266,31 @@ fn expect_impl_names(
     return;
 }
 
+fn expect_function_stub(
+    tree: &ast::Ast,
+    value: &ast::FunctionDecl,
+    public: bool,
+    docs: []u8
+) -> void {
+    testing::expect_equal<bool>(false, value.signature.receiver);
+    testing::expect_equal<i64>(0, value.signature.static_params.len());
+    testing::expect_equal<i64>(0, value.signature.params.len());
+    if value.signature.return_type |_| {
+        testing::fail("function stub retained a return type");
+    }
+    testing::expect_equal<bool>(false, value.signature.requires_unsafe);
+    testing::expect_equal<bool>(public, value.signature.public);
+    testing::expect_equal<bool>(false, value.signature.std);
+    testing::expect_equal<bool>(false, value.derived);
+    if value.body |_| {
+        testing::fail("function stub retained a body");
+    }
+    expect_retained_bytes(tree.texts.at(value.signature.name.node), "");
+    expect_retained_bytes(tree.texts.at(value.signature.extern_abi.node), "");
+    expect_retained_bytes(tree.texts.at(value.doc.node), docs);
+    return;
+}
+
 fn new_function_signature(
     allocator: Allocator,
     tree: &var ast::Ast
@@ -673,6 +698,30 @@ test "parser comment normalization keeps lexer replacement scalars" {
     let text = try value.comment_text(&actual.doc_comments);
     defer text.deinit();
     expect_retained_bytes(&text, "�");
+}
+
+test "function recovery stub retains visibility docs and empty defaults" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "");
+    var value = try parser::new(allocator, move scanner);
+    errdefer value.deinit();
+    let docs = try string::from_bytes(allocator, "Retained docs.");
+    var documented = value.function_stub(&var tree, true, move docs);
+    defer documented.deinit();
+    let empty_docs = string::new(allocator);
+    let private = value.function_stub(
+        &var tree,
+        false,
+        move empty_docs
+    );
+    defer private.deinit();
+    value.deinit();
+    expect_function_stub(&tree, &documented, true, "Retained docs.");
+    expect_function_stub(&tree, &private, false, "");
+    documented.signature.requires_unsafe = true;
+    testing::expect(documented.signature.requires_unsafe);
 }
 
 test "parser retains import paths after token cleanup" {
