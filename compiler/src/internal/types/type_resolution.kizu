@@ -1,0 +1,820 @@
+import compiler::internal::ast;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Type resolution retains canonical Type handles in one checker-owned table
+// and returns only copy semantic issues. The later Checker boundary owns
+// diagnostic construction. Allocation failure and a malformed spelling minted
+// by the compiler remain operational `!`; source types arrive as parsed nodes.
+
+struct TypeArityIssue {
+    pub subject: Type,
+    pub expected: i64
+}
+
+struct MetaArityIssue {
+    pub form: stdmeta::Form,
+    pub expected: i64,
+    pub actual: i64
+}
+
+struct MetaCaptureKindIssue {
+    pub form: stdmeta::Form,
+    pub capture: Type
+}
+
+struct MetaCaptureOwnerIssue {
+    capture: Type,
+    field: MetaFieldHandle,
+    owner: Type
+}
+
+fn (self: &MetaCaptureOwnerIssue) capture_type() -> Type {
+    return self.capture;
+}
+
+fn (self: &MetaCaptureOwnerIssue) field_handle() -> MetaFieldHandle {
+    return self.field;
+}
+
+fn (self: &MetaCaptureOwnerIssue) owner_type() -> Type {
+    return self.owner;
+}
+
+union TypeResolutionIssue {
+    Missing,
+    Unknown(Type),
+    WrapsOptional(Type),
+    ErrorSetRequired(Type),
+    OptionalStaticArg(Type),
+    SingleGenericArity(Type),
+    MapArity,
+    MapKey,
+    UnknownGeneric(Type),
+    UserGenericArity(TypeArityIssue),
+    OptionalOptional(Type),
+    OptionalErrorUnion(Type),
+    MetaNotType(stdmeta::Form),
+    MetaArity(MetaArityIssue),
+    MetaCaptureUnbound(Type),
+    MetaCaptureKind(MetaCaptureKindIssue),
+    MetaCaptureOwner(MetaCaptureOwnerIssue),
+    MetaVariantNoPayload(MetaFieldHandle),
+    MetaElementArity,
+    MetaElementUnsupported(Type),
+}
+
+union TypeResolution {
+    Value(Type),
+    Issue(TypeResolutionIssue),
+}
+
+struct MetaFieldHandle {
+    node: arena::Handle<MetaField>
+}
+
+struct MetaField {
+    owner: Type,
+    name: string::String,
+    type_name: Type,
+    variant: bool
+}
+
+union MetaCaptureResolution {
+    Value(MetaFieldHandle),
+    Issue(TypeResolutionIssue),
+}
+
+// Owns the fields ported so far from one checker phase. Later checker work
+// units extend this same owner instead of exposing its private leaves as APIs.
+struct Checker {
+    allocator: Allocator,
+    types: TypeTable,
+    metadata: CheckerMetadata,
+    type_params: TypeParamStore,
+    type_arg_values: map::Map<[]u8, Type>,
+    meta_field_entries: arena::Arena<MetaField>,
+    meta_fields: map::Map<[]u8, MetaFieldHandle>
+}
+
+fn new_checker(allocator: Allocator) -> Checker {
+    return Checker {
+        allocator: allocator,
+        types: new_type_table(allocator),
+        metadata: new_checker_metadata(allocator),
+        type_params: new_type_param_store(allocator),
+        type_arg_values: map::new<[]u8, Type>(allocator),
+        meta_field_entries: arena::new<MetaField>(allocator),
+        meta_fields: map::new<[]u8, MetaFieldHandle>(allocator)
+    };
+}
+
+// Retains one comptime field or variant record and returns its copy identity.
+fn (self: &var Checker) retain_meta_field(
+    owner: Type,
+    name: []u8,
+    type_name: Type,
+    variant: bool
+) -> !MetaFieldHandle {
+    let retained_name = try string::from_bytes(self.allocator, name);
+    let handle = self.meta_field_entries.add(MetaField {
+        owner: owner,
+        name: move retained_name,
+        type_name: type_name,
+        variant: variant
+    });
+    return MetaFieldHandle { node: handle };
+}
+
+// Selects one retained field under a live comptime capture name.
+fn (self: &var Checker) bind_meta_field(
+    capture: []u8,
+    field: MetaFieldHandle
+) -> !void {
+    return self.meta_fields.insert(capture, field);
+}
+
+// Copies one retained type at the checker diagnostic boundary.
+fn (self: &Checker) copy_resolution_text(
+    allocator: Allocator,
+    value: Type
+) -> !string::String {
+    return self.types.copy_text(allocator, value);
+}
+
+// Returns the owner needed to describe one retained meta field.
+fn (self: &Checker) meta_field_owner(
+    handle: MetaFieldHandle
+) -> Type {
+    return self.meta_field_entries.at(handle.node).owner;
+}
+
+// resolve_type validates one compiler-owned type spelling.
+fn (self: &var Checker) resolve_type(
+    tree: &ast::Ast,
+    name: []u8
+) -> !TypeResolution {
+    let retained = try self.types.intern(name);
+    return self.resolve_retained_type(tree, retained);
+}
+
+fn (self: &var Checker) resolve_retained_type(
+    tree: &ast::Ast,
+    retained: Type
+) -> !TypeResolution {
+    var resolved = retained;
+    match try self.resolve_meta_type(tree, resolved) {
+        Value(value) => {
+            resolved = value;
+        },
+        Issue(issue) => {
+            match issue {
+                MetaCaptureUnbound(_) => {},
+                _ => return TypeResolution::Issue(issue),
+            }
+        },
+    }
+    return self.resolve_type_value(tree, resolved);
+}
+
+// resolve_type_node validates one parser-owned graph and retains its canonical
+// identity in the checker table.
+fn (self: &var Checker) resolve_type_node(
+    tree: &ast::Ast,
+    parsed: ?typ::Type
+) -> !TypeResolution {
+    let source = parsed orelse return TypeResolution::Issue(
+        TypeResolutionIssue::Missing
+    );
+    let value = try self.types.remember(&tree.types, source);
+    return self.resolve_type_value(tree, value);
+}
+
+fn (self: &var Checker) resolve_type_value(
+    tree: &ast::Ast,
+    value: Type
+) -> !TypeResolution {
+    let parsed = self.types.lookup(value) orelse return TypeResolution::Issue(
+        TypeResolutionIssue::Unknown(value)
+    );
+    match typ::root_node(&self.types.parsed, parsed) {
+        ErrorUnion(_) => return self.resolve_error_union_type(tree, value),
+        Borrow(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            let elem = try self.types.retain_parsed(child);
+            return self.resolve_wrapping_type(tree, value, elem);
+        },
+        Slice(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            let elem = try self.types.retain_parsed(child);
+            return self.resolve_wrapping_type(tree, value, elem);
+        },
+        Buffer(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            let elem = try self.types.retain_parsed(child);
+            return self.resolve_wrapping_type(tree, value, elem);
+        },
+        Optional(node) => {
+            let child = typ::child_type(parsed, node.elem);
+            let elem = try self.types.retain_parsed(child);
+            return self.resolve_nullable_type(tree, value, elem);
+        },
+        Name(node) => return self.resolve_name_type(
+            tree,
+            value,
+            parsed,
+            node
+        ),
+        _ => return TypeResolution::Issue(
+            TypeResolutionIssue::Unknown(value)
+        ),
+    }
+}
+
+fn (self: &var Checker) resolve_wrapping_type(
+    tree: &ast::Ast,
+    name: Type,
+    elem: Type
+) -> !TypeResolution {
+    if self.is_optional_root(elem) {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::WrapsOptional(name)
+        );
+    }
+    return retain_resolution_name(
+        name,
+        try self.resolve_type_value(tree, elem)
+    );
+}
+
+fn (self: &var Checker) resolve_error_union_type(
+    tree: &ast::Ast,
+    name: Type
+) -> !TypeResolution {
+    let parts = try self.types.error_union_parts(name) orelse
+        return TypeResolution::Issue(TypeResolutionIssue::Unknown(name));
+    if !same_type(parts.err, empty_type()) {
+        match try self.resolve_type_value(tree, parts.err) {
+            Issue(issue) => return TypeResolution::Issue(issue),
+            Value(error_name) => {
+                if !self.has_error_set(error_name) {
+                    return TypeResolution::Issue(
+                        TypeResolutionIssue::ErrorSetRequired(error_name)
+                    );
+                }
+            },
+        }
+    }
+    if self.is_optional_root(parts.success) {
+        return retain_resolution_name(
+            name,
+            try self.resolve_type_value(tree, parts.success)
+        );
+    }
+    return self.resolve_wrapping_type(tree, name, parts.success);
+}
+
+fn (self: &var Checker) resolve_nullable_type(
+    tree: &ast::Ast,
+    name: Type,
+    elem: Type
+) -> !TypeResolution {
+    if self.is_optional_root(elem) {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::OptionalOptional(elem)
+        );
+    }
+    if self.is_error_union_root(elem) {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::OptionalErrorUnion(elem)
+        );
+    }
+    return retain_resolution_name(
+        name,
+        try self.resolve_type_value(tree, elem)
+    );
+}
+
+fn retain_resolution_name(
+    name: Type,
+    resolved: TypeResolution
+) -> TypeResolution {
+    return match resolved {
+        Value(_) => TypeResolution::Value(name),
+        Issue(issue) => TypeResolution::Issue(issue),
+    };
+}
+
+fn (self: &Checker) is_optional_root(value: Type) -> bool {
+    if self.types.lookup(value) |parsed| {
+        return match typ::root_node(&self.types.parsed, parsed) {
+            Optional(_) => true,
+            _ => false,
+        };
+    }
+    return false;
+}
+
+fn (self: &Checker) is_error_union_root(value: Type) -> bool {
+    if self.types.lookup(value) |parsed| {
+        return match typ::root_node(&self.types.parsed, parsed) {
+            ErrorUnion(_) => true,
+            _ => false,
+        };
+    }
+    return false;
+}
+
+fn (self: &Checker) has_error_set(value: Type) -> bool {
+    let handle = value.node orelse return false;
+    let entry = self.types.entries.at(handle);
+    let bytes = entry.spelling.as_bytes();
+    return self.metadata.error_sets_by_name.contains(bytes);
+}
+
+fn (self: &var Checker) resolve_name_type(
+    tree: &ast::Ast,
+    name: Type,
+    parsed: typ::Type,
+    node: &typ::Name
+) -> !TypeResolution {
+    if node.args.len() == 0 {
+        return self.resolve_named_type(name);
+    }
+    let base = try copy_name_path(self.allocator, node);
+    defer base.deinit();
+    let bytes = base.as_bytes();
+    return self.resolve_generic_type(tree, name, parsed, node, bytes);
+}
+
+fn copy_name_path(
+    allocator: Allocator,
+    node: &typ::Name
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while node.path.at(index) |part| {
+        if index > 0 {
+            try out.append_bytes("::");
+        }
+        let bytes = part.as_bytes();
+        try out.append_bytes(bytes);
+        index = index + 1;
+    }
+    return move out;
+}
+
+fn (self: &Checker) resolve_named_type(
+    name: Type
+) -> TypeResolution {
+    let handle = name.node orelse return TypeResolution::Issue(
+        TypeResolutionIssue::Unknown(name)
+    );
+    let entry = self.types.entries.at(handle);
+    let bytes = entry.spelling.as_bytes();
+    if self.type_params.contains(bytes) or self.metadata.is_type_name(bytes) {
+        return TypeResolution::Value(name);
+    }
+    return TypeResolution::Issue(TypeResolutionIssue::Unknown(name));
+}
+
+fn (self: &var Checker) resolve_generic_type(
+    tree: &ast::Ast,
+    name: Type,
+    parsed: typ::Type,
+    node: &typ::Name,
+    base: []u8
+) -> !TypeResolution {
+    var index = 0;
+    while node.args.get(index) |argument| {
+        let child = typ::child_type(parsed, argument);
+        let retained = try self.types.retain_parsed(child);
+        if try self.types.optional_elem(retained) |_| {
+            return TypeResolution::Issue(
+                TypeResolutionIssue::OptionalStaticArg(retained)
+            );
+        }
+        index = index + 1;
+    }
+    if stdmeta::identify(base) |identified| {
+        return self.resolve_meta_type_form(
+            tree,
+            name,
+            identified.form,
+            identified.shape,
+            node.args.len()
+        );
+    }
+    let base_type = try self.types.intern(base);
+    if mem::equal_bytes(base, "std::mem::Box") {
+        return self.resolve_single_generic_type(
+            tree,
+            name,
+            base_type,
+            parsed,
+            node
+        );
+    }
+    if mem::equal_bytes(base, "std::map::Map") {
+        return self.resolve_map_type(tree, name, parsed, node);
+    }
+    if mem::equal_bytes(base, "ptr") {
+        if node.args.len() != 1 {
+            return TypeResolution::Issue(
+                TypeResolutionIssue::SingleGenericArity(base_type)
+            );
+        }
+        let argument = typ::child_type(
+            parsed,
+            node.args.get_or_panic(0)
+        );
+        let retained = try self.types.retain_parsed(argument);
+        return self.resolve_pointer_type(tree, name, retained);
+    }
+    if self.user_generic_arity(tree, base) |expected| {
+        return self.resolve_user_generic_type(
+            tree,
+            name,
+            base_type,
+            parsed,
+            node,
+            expected
+        );
+    }
+    if !is_known_generic_base(base) {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::UnknownGeneric(base_type)
+        );
+    }
+    return self.resolve_single_generic_type(
+        tree,
+        name,
+        base_type,
+        parsed,
+        node
+    );
+}
+
+fn (self: &var Checker) resolve_single_generic_type(
+    tree: &ast::Ast,
+    name: Type,
+    base: Type,
+    parsed: typ::Type,
+    node: &typ::Name
+) -> !TypeResolution {
+    if node.args.len() != 1 {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::SingleGenericArity(base)
+        );
+    }
+    let argument = typ::child_type(
+        parsed,
+        node.args.get_or_panic(0)
+    );
+    let retained = try self.types.retain_parsed(argument);
+    return retain_resolution_name(
+        name,
+        try self.resolve_type_value(tree, retained)
+    );
+}
+
+fn (self: &var Checker) resolve_user_generic_type(
+    tree: &ast::Ast,
+    name: Type,
+    base: Type,
+    parsed: typ::Type,
+    node: &typ::Name,
+    expected: i64
+) -> !TypeResolution {
+    if node.args.len() != expected {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::UserGenericArity(TypeArityIssue {
+            subject: base,
+            expected: expected
+        })
+        );
+    }
+    var index = 0;
+    while node.args.get(index) |argument| {
+        let child = typ::child_type(parsed, argument);
+        let retained = try self.types.retain_parsed(child);
+        match try self.resolve_type_value(tree, retained) {
+            Issue(issue) => return TypeResolution::Issue(issue),
+            Value(_) => {},
+        }
+        index = index + 1;
+    }
+    return TypeResolution::Value(name);
+}
+
+fn (self: &var Checker) resolve_map_type(
+    tree: &ast::Ast,
+    name: Type,
+    parsed: typ::Type,
+    node: &typ::Name
+) -> !TypeResolution {
+    if node.args.len() != 2 {
+        return TypeResolution::Issue(TypeResolutionIssue::MapArity);
+    }
+    let key_node = typ::child_type(parsed, node.args.get_or_panic(0));
+    let key = try self.types.retain_parsed(key_node);
+    if !self.types.is_text(key, "[]u8") and !self.is_type_parameter(key) {
+        return TypeResolution::Issue(TypeResolutionIssue::MapKey);
+    }
+    let value_node = typ::child_type(parsed, node.args.get_or_panic(1));
+    let value = try self.types.retain_parsed(value_node);
+    return retain_resolution_name(
+        name,
+        try self.resolve_type_value(tree, value)
+    );
+}
+
+fn (self: &Checker) is_type_parameter(value: Type) -> bool {
+    let handle = value.node orelse return false;
+    let entry = self.types.entries.at(handle);
+    let bytes = entry.spelling.as_bytes();
+    return self.type_params.contains(bytes);
+}
+
+fn (self: &var Checker) resolve_pointer_type(
+    tree: &ast::Ast,
+    name: Type,
+    argument: Type
+) -> !TypeResolution {
+    var inner = argument;
+    if self.types.lookup(argument) |parsed| {
+        match typ::root_node(&self.types.parsed, parsed) {
+            Const(node) => {
+                let child = typ::child_type(parsed, node.elem);
+                inner = try self.types.retain_parsed(child);
+            },
+            _ => {},
+        }
+    }
+    return retain_resolution_name(
+        name,
+        try self.resolve_type_value(tree, inner)
+    );
+}
+
+fn (self: &Checker) user_generic_arity(
+    tree: &ast::Ast,
+    base: []u8
+) -> ?i64 {
+    if self.metadata.structs.get(base) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Struct(value) => return value.type_params.len(),
+            _ => {},
+        }
+    }
+    if self.metadata.unions_by_name.get(base) |handle| {
+        if self.metadata.unions.at(handle.index) |value| {
+            return value.type_params.len();
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) resolve_meta_type_form(
+    tree: &ast::Ast,
+    name: Type,
+    form: stdmeta::Form,
+    shape: stdmeta::Shape,
+    actual: i64
+) -> !TypeResolution {
+    if !shape.type_form {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::MetaNotType(form)
+        );
+    }
+    if actual != shape.static_args {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::MetaArity(MetaArityIssue {
+            form: form,
+            expected: shape.static_args,
+            actual: actual
+        })
+        );
+    }
+    match try self.resolve_meta_type(tree, name) {
+        Value(resolved) => {
+            if same_type(resolved, name) {
+                return TypeResolution::Value(name);
+            }
+            return self.resolve_retained_type(tree, resolved);
+        },
+        Issue(issue) => {
+            match issue {
+                MetaCaptureUnbound(_) => return TypeResolution::Value(name),
+                _ => return TypeResolution::Issue(issue),
+            }
+        },
+    }
+}
+
+fn (self: &var Checker) resolve_meta_type(
+    tree: &ast::Ast,
+    value: Type
+) -> !TypeResolution {
+    let parsed = self.types.lookup(value) orelse
+        return TypeResolution::Value(value);
+    match typ::root_node(&self.types.parsed, parsed) {
+        Name(node) => return self.resolve_meta_name_type(
+            tree,
+            value,
+            parsed,
+            node
+        ),
+        _ => return TypeResolution::Value(value),
+    }
+}
+
+fn (self: &var Checker) resolve_meta_name_type(
+    tree: &ast::Ast,
+    value: Type,
+    parsed: typ::Type,
+    node: &typ::Name
+) -> !TypeResolution {
+    if node.args.len() == 0 {
+        return TypeResolution::Value(value);
+    }
+    let base = try copy_name_path(self.allocator, node);
+    defer base.deinit();
+    let base_bytes = base.as_bytes();
+    let identified = stdmeta::identify(base_bytes) orelse
+        return TypeResolution::Value(value);
+    let form = identified.form;
+    var args = array::new<Type>(self.allocator);
+    defer args.deinit();
+    var index = 0;
+    while node.args.get(index) |argument| {
+        let child = typ::child_type(parsed, argument);
+        let retained = try self.types.retain_parsed(child);
+        let substituted = try self.types.substitute_type_params(
+            retained,
+            &self.type_arg_values
+        );
+        match try self.resolve_meta_type(tree, substituted) {
+            Value(resolved) => try args.append(resolved),
+            Issue(issue) => return TypeResolution::Issue(issue),
+        }
+        index = index + 1;
+    }
+    return match form {
+        FieldType => try self.resolve_meta_field_type(tree, form, &args),
+        VariantType => try self.resolve_meta_variant_type(tree, form, &args),
+        Element => try self.resolve_meta_element(tree, &args),
+        _ => TypeResolution::Issue(TypeResolutionIssue::MetaNotType(form)),
+    };
+}
+
+fn (self: &var Checker) resolve_meta_field_type(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    args: &array::Array<Type>
+) -> !TypeResolution {
+    match try self.resolve_meta_capture(tree, form, args) {
+        Issue(issue) => return TypeResolution::Issue(issue),
+        Value(handle) => {
+            let field = self.meta_field_entries.at(handle.node);
+            return TypeResolution::Value(field.type_name);
+        },
+    }
+}
+
+fn (self: &var Checker) resolve_meta_variant_type(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    args: &array::Array<Type>
+) -> !TypeResolution {
+    match try self.resolve_meta_capture(tree, form, args) {
+        Issue(issue) => return TypeResolution::Issue(issue),
+        Value(handle) => {
+            let field = self.meta_field_entries.at(handle.node);
+            if same_type(field.type_name, empty_type()) {
+                return TypeResolution::Issue(
+                    TypeResolutionIssue::MetaVariantNoPayload(handle)
+                );
+            }
+            return TypeResolution::Value(field.type_name);
+        },
+    }
+}
+
+fn (self: &var Checker) resolve_meta_capture(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    args: &array::Array<Type>
+) -> !MetaCaptureResolution {
+    if args.len() != 2 {
+        return MetaCaptureResolution::Issue(
+            TypeResolutionIssue::MetaArity(MetaArityIssue {
+            form: form,
+            expected: 2,
+            actual: args.len()
+        })
+        );
+    }
+    let capture = args.get_or_panic(1);
+    let handle = self.meta_field_handle(capture) orelse
+        return MetaCaptureResolution::Issue(
+        TypeResolutionIssue::MetaCaptureUnbound(capture)
+    );
+    let field = self.meta_field_entries.at(handle.node);
+    if field.variant != stdmeta::variant_form(form) {
+        return MetaCaptureResolution::Issue(
+            TypeResolutionIssue::MetaCaptureKind(MetaCaptureKindIssue {
+            form: form,
+            capture: capture
+        })
+        );
+    }
+    let owner = args.get_or_panic(0);
+    match try self.resolve_type_value(tree, owner) {
+        Issue(issue) => return MetaCaptureResolution::Issue(issue),
+        Value(resolved_owner) => {
+            if !same_type(resolved_owner, field.owner) {
+                return MetaCaptureResolution::Issue(
+                    TypeResolutionIssue::MetaCaptureOwner(
+                        MetaCaptureOwnerIssue {
+                    capture: capture,
+                    field: handle,
+                    owner: resolved_owner
+                }
+                    )
+                );
+            }
+        },
+    }
+    return MetaCaptureResolution::Value(handle);
+}
+
+fn (self: &Checker) meta_field_handle(
+    capture: Type
+) -> ?MetaFieldHandle {
+    let handle = capture.node orelse return null;
+    let entry = self.types.entries.at(handle);
+    let bytes = entry.spelling.as_bytes();
+    return self.meta_fields.get(bytes);
+}
+
+fn (self: &var Checker) resolve_meta_element(
+    tree: &ast::Ast,
+    args: &array::Array<Type>
+) -> !TypeResolution {
+    if args.len() != 1 {
+        return TypeResolution::Issue(
+            TypeResolutionIssue::MetaElementArity
+        );
+    }
+    let container = args.get_or_panic(0);
+    match try self.resolve_type_value(tree, container) {
+        Issue(issue) => return TypeResolution::Issue(issue),
+        Value(_) => {},
+    }
+    if try self.types.optional_elem(container) |elem| {
+        return TypeResolution::Value(elem);
+    }
+    let parsed = self.types.lookup(container) orelse
+        return TypeResolution::Issue(
+        TypeResolutionIssue::MetaElementUnsupported(container)
+    );
+    match typ::root_node(&self.types.parsed, parsed) {
+        Name(node) => return self.resolve_meta_name_element(
+            container,
+            parsed,
+            node
+        ),
+        _ => return TypeResolution::Issue(
+            TypeResolutionIssue::MetaElementUnsupported(container)
+        ),
+    }
+}
+
+fn (self: &var Checker) resolve_meta_name_element(
+    container: Type,
+    parsed: typ::Type,
+    node: &typ::Name
+) -> !TypeResolution {
+    let base = try copy_name_path(self.allocator, node);
+    defer base.deinit();
+    let bytes = base.as_bytes();
+    if (mem::equal_bytes(bytes, "std::array::Array") or
+        mem::equal_bytes(bytes, "std::mem::Box")) and node.args.len() == 1 {
+        let element = typ::child_type(parsed, node.args.get_or_panic(0));
+        return TypeResolution::Value(try self.types.retain_parsed(element));
+    }
+    if mem::equal_bytes(bytes, "std::map::Map") and node.args.len() == 2 {
+        let value = typ::child_type(parsed, node.args.get_or_panic(1));
+        return TypeResolution::Value(try self.types.retain_parsed(value));
+    }
+    return TypeResolution::Issue(
+        TypeResolutionIssue::MetaElementUnsupported(container)
+    );
+}

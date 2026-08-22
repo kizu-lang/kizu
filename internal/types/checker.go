@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -905,246 +904,14 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 // happens to sit: the `!` in `Array<!i64>` belongs to the argument, not to this
 // type.
 func (c *Checker) parseType(name string) (Type, error) {
-	// A `std::meta` form written where a type goes names a type rather than
-	// being one, so it resolves before the spelling is read (ADR-0113). A form
-	// whose capture is not bound here keeps its spelling: that is a declaration,
-	// and parseMetaTypeForm is the one place that decides what to do with it.
-	resolved := name
-	rewritten, err := c.resolveMetaTypeText(name)
-	if err != nil && !isUnboundMetaCaptureError(err) {
-		return "", err
-	}
-	if err == nil {
-		resolved = rewritten
-	}
-	parsed, ok := c.types.lookup(Type(resolved))
-	if !ok {
-		return "", errorf("type error: unknown type `%s`", resolved)
-	}
-	return c.parseTypeNode(parsed)
+	return resolvedType(c.resolveType(name))
 }
 
 // parseTypeNode validates a type the parser already read, which is every type a
 // declaration writes. Only a type the compiler itself spells still arrives as
 // text, and parseType is the entry for those.
 func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
-	if parsed == nil {
-		return "", errorf("type error: missing type")
-	}
-	c.types.remember(parsed)
-	name := parsed.String()
-	switch node := parsed.(type) {
-	case *typ.ErrorUnion:
-		return c.parseErrorUnionType(name, node)
-	case *typ.Borrow:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Slice:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Buffer:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Optional:
-		return c.parseNullableType(name, node.Elem)
-	case *typ.Name:
-		if len(node.Args) == 0 {
-			return c.parseNamedType(name)
-		}
-		return c.parseGenericType(name, strings.Join(node.Path, "::"), argTexts(node.Args))
-	default:
-		return "", errorf("type error: unknown type `%s`", name)
-	}
-}
-
-// parseWrappingType validates the element of a type that wraps one.
-func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
-	if _, ok := elem.(*typ.Optional); ok {
-		return "", errorf("type error: `%s` cannot wrap an optional yet", name)
-	}
-	if _, err := c.parseTypeNode(elem); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseNamedType validates primitive, declared, and type-parameter names.
-func (c *Checker) parseNamedType(name string) (Type, error) {
-	typ := Type(name)
-	if c.typeParams.contains(name) {
-		return typ, nil
-	}
-	if !c.isTypeName(name) {
-		return "", errorf("type error: unknown type `%s`", name)
-	}
-	return typ, nil
-}
-
-// parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
-func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
-	if node.Err != nil {
-		errName, err := c.parseTypeNode(node.Err)
-		if err != nil {
-			return "", err
-		}
-		if c.errorSets[string(errName)] == nil {
-			return "", errorf(
-				"type error: the error of `E!T` must be an `error` set, got `%s`",
-				errName)
-		}
-	}
-	// An optional success (`E!?T`) is the one composition optionals allow:
-	// the call can fail, and succeeding can still find nothing.
-	if _, ok := node.Ok.(*typ.Optional); ok {
-		if _, err := c.parseTypeNode(node.Ok); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	}
-	return c.parseWrappingType(name, node.Ok)
-}
-
-// parseGenericType validates supported generic-like type spellings.
-func (c *Checker) parseGenericType(name string, base string, args []string) (Type, error) {
-	if err := rejectOptionalArgs(args); err != nil {
-		return "", err
-	}
-	if shape, ok := stdmeta.Lookup(base); ok {
-		return c.parseMetaTypeForm(name, stdmeta.Form(base), shape, args)
-	}
-	switch base {
-	case "std::mem::Box":
-		arg, err := singleGenericArg(base, args)
-		if err != nil {
-			return "", err
-		}
-		if _, err := c.parseType(arg); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	case "std::map::Map":
-		return c.parseMapType(name, args)
-	case "ptr":
-		arg, err := singleGenericArg(base, args)
-		if err != nil {
-			return "", err
-		}
-		return c.parsePointerType(name, arg)
-	}
-
-	if c.structs[base] != nil {
-		return c.parseUserGenericType(name, base, args, c.structs[base].TypeParams)
-	}
-	if union := c.unions[base]; union != nil {
-		return c.parseUserGenericType(name, base, args, union.typeParams)
-	}
-
-	if !isKnownGenericBase(base) {
-		return "", errorf("type error: unknown generic type `%s`", base)
-	}
-	arg, err := singleGenericArg(base, args)
-	if err != nil {
-		return "", err
-	}
-	if _, err := c.parseType(arg); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseMetaTypeForm validates a `std::meta` form written where a type goes but
-// not yet resolvable: a declaration writes `std::meta::field_type<T, f>` before
-// either name is bound, exactly as it writes `T`. The spelling stands for
-// itself here and resolves at each instantiation, where the capture is bound.
-func (c *Checker) parseMetaTypeForm(
-	name string,
-	form stdmeta.Form,
-	shape stdmeta.Shape,
-	args []string,
-) (Type, error) {
-	if !shape.Type {
-		return "", errorf("comptime error: `%s` does not name a type", form)
-	}
-	if len(args) != shape.StaticArgs {
-		return "", errorf("comptime error: `%s` expects %d static arguments, got %d",
-			form, shape.StaticArgs, len(args))
-	}
-	resolved, err := c.resolveMetaTypeText(name)
-	if err != nil && !isUnboundMetaCaptureError(err) {
-		return "", err
-	}
-	if isUnboundMetaCaptureError(err) || resolved == name {
-		// An unbound capture is what a declaration looks like.
-		return Type(name), nil
-	}
-	return c.parseType(resolved)
-}
-
-// parseUserGenericType validates static type arguments for user declarations.
-func (c *Checker) parseUserGenericType(
-	name string,
-	base string,
-	args []string,
-	types []string,
-) (Type, error) {
-	want := len(types)
-	if len(args) != want {
-		return "", errorf("type error: `%s` expects %d static arguments", base, want)
-	}
-	for _, arg := range args {
-		if _, err := c.parseType(arg); err != nil {
-			return "", err
-		}
-	}
-	return Type(name), nil
-}
-
-// parseMapType validates the symbol-table map spelling.
-func (c *Checker) parseMapType(name string, args []string) (Type, error) {
-	if len(args) != 2 {
-		return "", errorf("type error: std::map::Map expects 2 static arguments")
-	}
-	if !sameType(Type(args[0]), typeByteString) && !c.typeParams.contains(args[0]) {
-		return "", errorf("type error: std::map::Map key type must be []u8")
-	}
-	if _, err := c.parseType(args[1]); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseNullableType validates nullable pointer types.
-func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
-	if inner, ok := elem.(*typ.Name); ok &&
-		len(inner.Path) == 1 && inner.Path[0] == "ptr" && len(inner.Args) == 1 {
-		if _, err := c.parsePointerType(elem.String(), inner.Args[0].String()); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	}
-	// The element follows the same rule as an error union's success type:
-	// anything parseable. The one wrapping optionals allow is being wrapped
-	// by an error union (`E!?T`), so an optional or error-union element is
-	// rejected here rather than by an allow-list.
-	switch elem.(type) {
-	case *typ.Optional:
-		return "", errorf("type error: optional cannot wrap an optional `%s`", elem)
-	case *typ.ErrorUnion:
-		return "", errorf(
-			"type error: optional cannot wrap an error union `%s`; spell it `E!?T`", elem)
-	}
-	if _, err := c.parseTypeNode(elem); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parsePointerType validates raw pointer element types.
-func (c *Checker) parsePointerType(name string, arg string) (Type, error) {
-	if strings.HasPrefix(arg, "const ") {
-		arg = strings.TrimPrefix(arg, "const ")
-	}
-	if _, err := c.parseType(arg); err != nil {
-		return "", err
-	}
-	return Type(name), nil
+	return resolvedType(c.resolveTypeNode(parsed))
 }
 
 // rejectPrivateType reports an error when typeName exposes a private declaration.
@@ -3928,7 +3695,9 @@ func rejectOptionalStaticArgs(typeArg string) error {
 func rejectOptionalArgs(args []string) error {
 	for _, arg := range args {
 		if _, ok := optionalElem(Type(arg)); ok {
-			return errorf("type error: optional `%s` cannot be a static argument yet", arg)
+			return typeResolutionError(typeResolutionIssue{
+				kind: typeResolutionOptionalStaticArg, subject: Type(arg),
+			})
 		}
 	}
 	return nil
@@ -6305,7 +6074,7 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	if !ok || len(args) != 2 {
 		return nil, errorf("type error: std::map::Map expects 2 static arguments")
 	}
-	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
+	if _, err := c.parseType(fmt.Sprintf("std::map::Map<%s>", arg)); err != nil {
 		return nil, err
 	}
 	return args, nil

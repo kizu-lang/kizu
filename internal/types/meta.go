@@ -1,7 +1,6 @@
 package types
 
 import (
-	"errors"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -157,46 +156,15 @@ func (c *Checker) publicFields(typeArg string) ([]metaField, error) {
 
 // metaCapture resolves the capture named in a form's static arguments.
 func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, error) {
-	if len(args) != 2 {
-		return metaField{}, errorf("comptime error: `%s` expects 2 static arguments", form)
+	typeArgs := make([]Type, len(args))
+	for idx, arg := range args {
+		typeArgs[idx] = Type(arg)
 	}
-	field, ok := c.metaFields[args[1]]
-	if !ok {
-		return metaField{}, unboundMetaCaptureError{errorf(
-			"comptime error: `%s` is not a comptime capture", args[1])}
-	}
-	if field.variant != stdmeta.VariantForm(form) {
-		return metaField{}, errorf("comptime error: `%s` expects a %s capture, got `%s`",
-			form, metaCaptureKind(stdmeta.VariantForm(form)), args[1])
-	}
-	owner, err := c.parseType(args[0])
-	if err != nil {
-		return metaField{}, err
-	}
-	if owner != field.owner {
-		return metaField{}, errorf("comptime error: capture `%s` belongs to %s, not %s",
-			args[1], field.owner, owner)
+	field, issue := c.resolveMetaCapture(form, typeArgs)
+	if issue.present() {
+		return metaField{}, typeResolutionError(issue)
 	}
 	return field, nil
-}
-
-// unboundMetaCaptureError marks the one resolution failure a generic
-// declaration defers. The capture only exists while one comptime expansion is
-// checked; every other failure is already a concrete program error.
-type unboundMetaCaptureError struct {
-	err error
-}
-
-// Error returns the wrapped diagnostic.
-func (e unboundMetaCaptureError) Error() string {
-	return e.err.Error()
-}
-
-// isUnboundMetaCaptureError reports whether a declaration must retain the form
-// until an instantiation binds its capture.
-func isUnboundMetaCaptureError(err error) bool {
-	var unbound unboundMetaCaptureError
-	return errors.As(err, &unbound)
 }
 
 // metaCaptureKind names a capture kind for a diagnostic.
@@ -262,74 +230,11 @@ func metaVariantList(variants []metaField) []ast.MetaVariant {
 // type they name. Text with no form in it comes back unchanged, so every
 // caller can run it over any spelling.
 func (c *Checker) resolveMetaTypeText(text string) (string, error) {
-	form, args, ok := stdmeta.SplitApply(text)
-	if !ok {
-		return text, nil
+	resolved, issue := c.resolveMetaType(Type(text))
+	if issue.present() {
+		return "", typeResolutionError(issue)
 	}
-	for idx, arg := range args {
-		// A form's own arguments carry the type parameters of the body being
-		// instantiated, so they are bound before the form is resolved.
-		resolved, err := c.resolveMetaTypeText(string(c.types.substituteTypeParams(
-			Type(arg), c.typeArgValues)))
-		if err != nil {
-			return "", err
-		}
-		args[idx] = resolved
-	}
-	switch form {
-	case stdmeta.FieldType:
-		field, err := c.metaCapture(form, args)
-		if err != nil {
-			return "", err
-		}
-		return string(field.typ), nil
-	case stdmeta.VariantType:
-		variant, err := c.metaCapture(form, args)
-		if err != nil {
-			return "", err
-		}
-		if variant.typ == "" {
-			return "", errorf(
-				"comptime error: variant `%s::%s` carries no payload, so "+
-					"`%s` names nothing; ask `%s` first",
-				variant.owner, variant.name, stdmeta.VariantType, stdmeta.HasPayload)
-		}
-		return string(variant.typ), nil
-	case stdmeta.Element:
-		return c.metaElement(args)
-	default:
-		return "", errorf("comptime error: `%s` does not name a type", form)
-	}
-}
-
-// metaElement names what a container holds.
-func (c *Checker) metaElement(args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("comptime error: `%s` expects 1 static argument", stdmeta.Element)
-	}
-	container, err := c.parseType(args[0])
-	if err != nil {
-		return "", err
-	}
-	if elem, ok := optionalElem(container); ok {
-		return string(elem), nil
-	}
-	base, elem, ok := splitGenericType(string(container))
-	if ok && (base == "std::array::Array" || base == "std::mem::Box") {
-		return elem, nil
-	}
-	// A map holds two types. What it *contains* is the value: the key is how
-	// an entry is found, and every map key is `[]u8` today.
-	if ok && base == "std::map::Map" {
-		args, err := typ.SplitArgs(elem)
-		if err != nil || len(args) != 2 {
-			return "", errorf("comptime error: `%s` cannot read %s", stdmeta.Element, container)
-		}
-		return args[1], nil
-	}
-	return "", errorf(
-		"comptime error: `%s` expects ?T, Array<T>, Box<T>, or Map<K, V>, got %s",
-		stdmeta.Element, container)
+	return string(resolved), nil
 }
 
 // checkMetaApply types the forms written where an expression goes. ok reports

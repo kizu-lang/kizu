@@ -305,17 +305,8 @@ func (t *typeTable) parsedSubst(subst map[string]Type) map[string]typ.Type {
 	return out
 }
 
-// argTexts returns the spelling of each static argument.
-func argTexts(args []typ.Type) []string {
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		out = append(out, arg.String())
-	}
-	return out
-}
-
 // isKnownGenericBase reports whether base names a generic type the compiler
-// provides. parseGenericType gives each one its own argument rules; this answers
+// provides. resolveGenericType gives each one its own argument rules; this answers
 // the prior question of whether the spelling is a type at all, which is also
 // what stops a function from taking it.
 func isKnownGenericBase(base string) bool {
@@ -556,12 +547,4 @@ func splitGenericArgs(arg string) ([]string, bool) {
 		return nil, false
 	}
 	return args, true
-}
-
-// singleGenericArg returns the only argument for one-parameter generic types.
-func singleGenericArg(base string, args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("type error: `%s` expects 1 static argument", base)
-	}
-	return args[0], nil
 }
