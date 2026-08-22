@@ -1240,6 +1240,410 @@ fn string_ends_with(value: &string::String, expected: u8) -> bool {
     return bytes[length - 1] == expected;
 }
 
+/// Renders one source-file root in the compact compiler diagnostic form.
+pub fn render_program(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    program: &Program
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while program.declarations.at(index) |declaration| {
+        if index > 0 {
+            try out.append_byte(cast<u8>(10));
+        }
+        try append_declaration(
+            &var out,
+            ast,
+            types,
+            Declaration { node: declaration.node }
+        );
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Renders one retained declaration in the compact compiler diagnostic form.
+pub fn render_declaration(
+    allocator: Allocator,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: Declaration
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_declaration(&var out, ast, types, declaration);
+    return move out;
+}
+
+fn append_declaration(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: Declaration
+) -> !void {
+    match ast.declarations.at(declaration.node) {
+        Import(value) => try append_import_decl(out, ast, value),
+        Function(value) => try append_function_decl(out, ast, types, value),
+        Test(value) => try append_test_decl(out, ast, types, value),
+        Struct(value) => try append_struct_decl(out, ast, types, value),
+        Enum(value) => try append_enum_decl(out, ast, value),
+        ErrorSet(value) => try append_error_set_decl(out, ast, value),
+        Union(value) => try append_union_decl(out, ast, types, value),
+        Contract(value) => try append_contract_decl(out, ast, types, value),
+        Impl(value) => try append_impl_decl(out, ast, value),
+    }
+    return;
+}
+
+fn append_import_decl(
+    out: &var string::String,
+    ast: &Ast,
+    declaration: &ImportDecl
+) -> !void {
+    try out.append_bytes("import ");
+    return append_text_list(out, ast, &declaration.path, "::");
+}
+
+fn append_function_decl(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &FunctionDecl
+) -> !void {
+    if declaration.signature.public {
+        try out.append_bytes("pub ");
+    }
+    if declaration.signature.requires_unsafe {
+        try out.append_bytes("unsafe ");
+    }
+    if !text_is_empty(ast, declaration.signature.extern_abi) {
+        try out.append_bytes("extern ");
+        let abi = ast.texts.at(declaration.signature.extern_abi.node);
+        let abi_bytes = abi.as_bytes();
+        try fmt::append_bytes_literal(out, abi_bytes);
+        try out.append_bytes(" fn ");
+        try append_function_name_and_signature(out, ast, types, declaration);
+        return;
+    }
+    try out.append_bytes("fn ");
+    try append_function_name_and_signature(out, ast, types, declaration);
+    if declaration.body |body| {
+        try out.append_byte(cast<u8>(32));
+        try append_block(out, ast, types, body);
+    } else {
+        try out.append_byte(cast<u8>(59));
+    }
+    return;
+}
+
+fn append_function_name_and_signature(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &FunctionDecl
+) -> !void {
+    var param_index = 0;
+    if declaration.signature.receiver {
+        if declaration.signature.params.at(0) |receiver| {
+            try out.append_byte(cast<u8>(40));
+            try append_param(out, ast, types, receiver);
+            try out.append_bytes(") ");
+            param_index = 1;
+        }
+    }
+    try append_text(out, ast, declaration.signature.name);
+    if declaration.signature.static_params.len() > 0 {
+        try out.append_byte(cast<u8>(60));
+        try append_static_params(
+            out,
+            ast,
+            types,
+            &declaration.signature.static_params
+        );
+        try out.append_byte(cast<u8>(62));
+    }
+    try out.append_byte(cast<u8>(40));
+    var output_index = 0;
+    while declaration.signature.params.at(param_index) |param| {
+        if output_index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_param(out, ast, types, param);
+        param_index = param_index + 1;
+        output_index = output_index + 1;
+    }
+    try out.append_byte(cast<u8>(41));
+    if declaration.signature.return_type |return_type| {
+        try out.append_bytes(" -> ");
+        try typ::append_render(out, types, return_type);
+    }
+    return;
+}
+
+fn append_static_params(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    params: &array::Array<StaticParam>
+) -> !void {
+    var index = 0;
+    while params.at(index) |param| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_static_param(out, ast, types, param);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Appends one static parameter using its source declaration spelling.
+pub fn append_static_param(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    param: &StaticParam
+) -> !void {
+    try append_text(out, ast, param.name);
+    if param.type_name |type_name| {
+        try out.append_bytes(": ");
+        try typ::append_render(out, types, type_name);
+    }
+    return;
+}
+
+fn append_param(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    param: &Param
+) -> !void {
+    try append_text(out, ast, param.name);
+    try out.append_bytes(": ");
+    try append_borrow_prefix(out, param.borrow, param.mut_borrow);
+    return typ::append_render(out, types, param.type_name);
+}
+
+fn append_test_decl(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &TestDecl
+) -> !void {
+    try out.append_bytes("test ");
+    let name = ast.texts.at(declaration.name.node);
+    let name_bytes = name.as_bytes();
+    try fmt::append_bytes_literal(out, name_bytes);
+    if declaration.body |body| {
+        try out.append_byte(cast<u8>(32));
+        try append_block(out, ast, types, body);
+    } else {
+        try out.append_bytes(" <missing>");
+    }
+    return;
+}
+
+fn append_struct_decl(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &StructDecl
+) -> !void {
+    if declaration.public {
+        try out.append_bytes("pub ");
+    }
+    if declaration.requires_unsafe {
+        try out.append_bytes("unsafe ");
+    }
+    try out.append_bytes("struct ");
+    try append_text(out, ast, declaration.name);
+    try append_type_params(out, ast, &declaration.type_params);
+    try out.append_bytes(" { ");
+    var index = 0;
+    while declaration.fields.at(index) |field| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_field(out, ast, types, field);
+        index = index + 1;
+    }
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_field(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    field: &Field
+) -> !void {
+    if field.public {
+        try out.append_bytes("pub ");
+    }
+    try append_text(out, ast, field.name);
+    try out.append_bytes(": ");
+    try append_borrow_prefix(out, field.borrow, field.mut_borrow);
+    return typ::append_render(out, types, field.type_name);
+}
+
+fn append_enum_decl(
+    out: &var string::String,
+    ast: &Ast,
+    declaration: &EnumDecl
+) -> !void {
+    if declaration.public {
+        try out.append_bytes("pub ");
+    }
+    try out.append_bytes("enum ");
+    try append_text(out, ast, declaration.name);
+    try out.append_bytes(" { ");
+    try append_text_list(out, ast, &declaration.tags, ", ");
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_error_set_decl(
+    out: &var string::String,
+    ast: &Ast,
+    declaration: &ErrorSetDecl
+) -> !void {
+    if declaration.public {
+        try out.append_bytes("pub ");
+    }
+    try out.append_bytes("error ");
+    try append_text(out, ast, declaration.name);
+    try out.append_bytes(" { ");
+    try append_text_list(out, ast, &declaration.members, ", ");
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_union_decl(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &UnionDecl
+) -> !void {
+    if declaration.public {
+        try out.append_bytes("pub ");
+    }
+    try out.append_bytes("union ");
+    try append_text(out, ast, declaration.name);
+    try append_type_params(out, ast, &declaration.type_params);
+    try out.append_bytes(" { ");
+    var index = 0;
+    while declaration.variants.at(index) |variant| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_union_variant(out, ast, types, variant);
+        index = index + 1;
+    }
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_union_variant(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    variant: &UnionVariant
+) -> !void {
+    try append_text(out, ast, variant.name);
+    if variant.payload |payload| {
+        try out.append_byte(cast<u8>(40));
+        try typ::append_render(out, types, payload);
+        try out.append_byte(cast<u8>(41));
+    }
+    return;
+}
+
+fn append_contract_decl(
+    out: &var string::String,
+    ast: &Ast,
+    types: &typ::Table,
+    declaration: &ContractDecl
+) -> !void {
+    if declaration.public {
+        try out.append_bytes("pub ");
+    }
+    try out.append_bytes("contract ");
+    try append_text(out, ast, declaration.name);
+    try out.append_bytes(" { ");
+    var index = 0;
+    while declaration.methods.at(index) |method| {
+        if index > 0 {
+            try out.append_bytes("; ");
+        }
+        try append_function_decl(out, ast, types, method);
+        index = index + 1;
+    }
+    try out.append_bytes(" }");
+    return;
+}
+
+fn append_impl_decl(
+    out: &var string::String,
+    ast: &Ast,
+    declaration: &ImplDecl
+) -> !void {
+    try out.append_bytes("impl ");
+    try append_text(out, ast, declaration.contract_name);
+    try out.append_bytes(" for ");
+    try append_text(out, ast, declaration.type_name);
+    try out.append_byte(cast<u8>(59));
+    return;
+}
+
+fn append_type_params(
+    out: &var string::String,
+    ast: &Ast,
+    params: &array::Array<Text>
+) -> !void {
+    if params.len() == 0 {
+        return;
+    }
+    try out.append_byte(cast<u8>(60));
+    try append_text_list(out, ast, params, ", ");
+    try out.append_byte(cast<u8>(62));
+    return;
+}
+
+fn append_text_list(
+    out: &var string::String,
+    ast: &Ast,
+    values: &array::Array<Text>,
+    separator: []u8
+) -> !void {
+    var index = 0;
+    while values.at(index) |value| {
+        if index > 0 {
+            try out.append_bytes(separator);
+        }
+        try append_text(out, ast, Text { node: value.node });
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_borrow_prefix(
+    out: &var string::String,
+    borrow: bool,
+    mut_borrow: bool
+) -> !void {
+    if mut_borrow {
+        try out.append_bytes("&var ");
+    } else {
+        if borrow {
+            try out.append_byte(cast<u8>(38));
+        }
+    }
+    return;
+}
+
 /// Expands one compile-time match into the ordinary match every phase reads.
 pub fn comptime_match_expansion(
     allocator: Allocator,

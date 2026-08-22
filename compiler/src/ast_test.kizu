@@ -117,6 +117,42 @@ fn expect_block_render(
     return;
 }
 
+fn expect_declaration_render(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    declaration: ast::Declaration,
+    expected: []u8
+) -> !void {
+    let rendered = try ast::render_declaration(
+        allocator,
+        tree,
+        types,
+        declaration
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
+fn expect_program_render(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    types: &typ::Table,
+    program: &ast::Program,
+    expected: []u8
+) -> !void {
+    let rendered = try ast::render_program(
+        allocator,
+        tree,
+        types,
+        program
+    );
+    defer rendered.deinit();
+    expect_retained_text(&rendered, expected);
+    return;
+}
+
 fn empty_signature(
     allocator: Allocator,
     tree: &var ast::Ast,
@@ -1226,6 +1262,398 @@ test "statement rendering covers control and compile-time forms" {
         &types,
         populated_block.as_statement(),
         "{ let x = 1; return x; }"
+    );
+}
+
+test "declaration and program rendering cover every top level form" {
+    let allocator = mem::page_allocator();
+    var types = typ::new(allocator);
+    defer types.deinit();
+    let integer = try types.parse("i64");
+    let boolean = try types.parse("bool");
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var program = ast::new_program(allocator);
+    defer program.deinit();
+    try expect_program_render(allocator, &tree, &types, &program, "");
+    let ignored_doc = try retained_text(
+        allocator,
+        &var tree,
+        "ignored documentation"
+    );
+
+    var import_path = array::new<ast::Text>(allocator);
+    errdefer import_path.deinit();
+    try import_path.append(try retained_text(allocator, &var tree, "std"));
+    try import_path.append(try retained_text(allocator, &var tree, "mem"));
+    let import_decl = tree.add_declaration(ast::DeclarationNode::Import(
+        ast::ImportDecl { path: move import_path }
+    ));
+    try program.add_declaration(import_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        import_decl,
+        "import std::mem"
+    );
+
+    var function_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "visit"
+    );
+    errdefer function_signature.deinit();
+    function_signature.receiver = true;
+    function_signature.return_type = boolean;
+    function_signature.requires_unsafe = true;
+    function_signature.public = true;
+    function_signature.std = true;
+    try function_signature.static_params.append(ast::StaticParam {
+        name: try retained_text(allocator, &var tree, "T"),
+        type_name: null
+    });
+    try function_signature.static_params.append(ast::StaticParam {
+        name: try retained_text(allocator, &var tree, "n"),
+        type_name: integer
+    });
+    try function_signature.params.append(ast::Param {
+        name: try retained_text(allocator, &var tree, "self"),
+        type_name: integer,
+        borrow: true,
+        mut_borrow: true
+    });
+    try function_signature.params.append(ast::Param {
+        name: try retained_text(allocator, &var tree, "value"),
+        type_name: integer,
+        borrow: true,
+        mut_borrow: false
+    });
+    try function_signature.params.append(ast::Param {
+        name: try retained_text(allocator, &var tree, "slot"),
+        type_name: boolean,
+        borrow: false,
+        mut_borrow: true
+    });
+    try function_signature.params.append(ast::Param {
+        name: try retained_text(allocator, &var tree, "plain"),
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false
+    });
+    let function_body = add_empty_block(allocator, &var tree);
+    let function_decl = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+            signature: move function_signature,
+            doc: ignored_doc,
+            derived: true,
+            body: function_body
+        }
+    ));
+    try program.add_declaration(function_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        function_decl,
+        "pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }"
+    );
+
+    var extern_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "write"
+    );
+    errdefer extern_signature.deinit();
+    extern_signature.public = true;
+    extern_signature.requires_unsafe = true;
+    extern_signature.extern_abi = try retained_text(
+        allocator,
+        &var tree,
+        "C ABI"
+    );
+    let extern_body = add_empty_block(allocator, &var tree);
+    let extern_decl = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+            signature: move extern_signature,
+            doc: ignored_doc,
+            derived: true,
+            body: extern_body
+        }
+    ));
+    try program.add_declaration(extern_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        extern_decl,
+        \\pub unsafe extern "C ABI" fn write()
+    );
+
+    let present_test_name = try retained_text(allocator, &var tree, "check");
+    let present_test_body = add_empty_block(allocator, &var tree);
+    let present_test = tree.add_declaration(ast::DeclarationNode::Test(
+        ast::TestDecl {
+            name: present_test_name,
+            body: present_test_body
+        }
+    ));
+    try program.add_declaration(present_test);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        present_test,
+        \\test "check" {  }
+    );
+    let missing_test_name = try retained_text(allocator, &var tree, "検査");
+    let missing_test = tree.add_declaration(ast::DeclarationNode::Test(
+        ast::TestDecl {
+            name: missing_test_name,
+            body: null
+        }
+    ));
+    try program.add_declaration(missing_test);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        missing_test,
+        \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
+    );
+
+    var struct_type_params = array::new<ast::Text>(allocator);
+    errdefer struct_type_params.deinit();
+    try struct_type_params.append(try retained_text(
+        allocator,
+        &var tree,
+        "T"
+    ));
+    try struct_type_params.append(try retained_text(
+        allocator,
+        &var tree,
+        "U"
+    ));
+    var fields = array::new<ast::Field>(allocator);
+    errdefer fields.deinit();
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "value"),
+        doc: ignored_doc,
+        type_name: integer,
+        borrow: true,
+        mut_borrow: false,
+        public: true
+    });
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "slot"),
+        doc: ignored_doc,
+        type_name: boolean,
+        borrow: true,
+        mut_borrow: true,
+        public: false
+    });
+    try fields.append(ast::Field {
+        name: try retained_text(allocator, &var tree, "plain"),
+        doc: ignored_doc,
+        type_name: integer,
+        borrow: false,
+        mut_borrow: false,
+        public: false
+    });
+    let struct_name = try retained_text(allocator, &var tree, "Pair");
+    let struct_decl = tree.add_declaration(ast::DeclarationNode::Struct(
+        ast::StructDecl {
+            name: struct_name,
+            doc: ignored_doc,
+            type_params: move struct_type_params,
+            fields: move fields,
+            public: true,
+            requires_unsafe: true
+        }
+    ));
+    try program.add_declaration(struct_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        struct_decl,
+        "pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }"
+    );
+
+    var tags = array::new<ast::Text>(allocator);
+    errdefer tags.deinit();
+    try tags.append(try retained_text(allocator, &var tree, "Ready"));
+    try tags.append(try retained_text(allocator, &var tree, "Done"));
+    var tag_docs = map::new<[]u8, ast::Text>(allocator);
+    errdefer tag_docs.deinit();
+    try tag_docs.insert("Ready", ignored_doc);
+    let enum_name = try retained_text(allocator, &var tree, "State");
+    let enum_decl = tree.add_declaration(ast::DeclarationNode::Enum(
+        ast::EnumDecl {
+            name: enum_name,
+            doc: ignored_doc,
+            tags: move tags,
+            tag_docs: move tag_docs,
+            public: true
+        }
+    ));
+    try program.add_declaration(enum_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        enum_decl,
+        "pub enum State { Ready, Done }"
+    );
+
+    var members = array::new<ast::Text>(allocator);
+    errdefer members.deinit();
+    try members.append(try retained_text(allocator, &var tree, "Missing"));
+    try members.append(try retained_text(allocator, &var tree, "Invalid"));
+    var member_docs = map::new<[]u8, ast::Text>(allocator);
+    errdefer member_docs.deinit();
+    try member_docs.insert("Missing", ignored_doc);
+    let error_name = try retained_text(allocator, &var tree, "Failure");
+    let error_decl = tree.add_declaration(ast::DeclarationNode::ErrorSet(
+        ast::ErrorSetDecl {
+            name: error_name,
+            doc: ignored_doc,
+            members: move members,
+            member_docs: move member_docs,
+            public: true
+        }
+    ));
+    try program.add_declaration(error_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        error_decl,
+        "pub error Failure { Missing, Invalid }"
+    );
+
+    var union_type_params = array::new<ast::Text>(allocator);
+    errdefer union_type_params.deinit();
+    try union_type_params.append(try retained_text(
+        allocator,
+        &var tree,
+        "T"
+    ));
+    var variants = array::new<ast::UnionVariant>(allocator);
+    errdefer variants.deinit();
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, &var tree, "Ok"),
+        doc: ignored_doc,
+        payload: integer
+    });
+    try variants.append(ast::UnionVariant {
+        name: try retained_text(allocator, &var tree, "Empty"),
+        doc: ignored_doc,
+        payload: null
+    });
+    let union_name = try retained_text(allocator, &var tree, "Result");
+    let union_decl = tree.add_declaration(ast::DeclarationNode::Union(
+        ast::UnionDecl {
+            name: union_name,
+            doc: ignored_doc,
+            type_params: move union_type_params,
+            variants: move variants,
+            public: true
+        }
+    ));
+    try program.add_declaration(union_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        union_decl,
+        "pub union Result<T> { Ok(i64), Empty }"
+    );
+
+    var methods = array::new<ast::FunctionDecl>(allocator);
+    errdefer methods.deinit();
+    var first_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "first"
+    );
+    errdefer first_signature.deinit();
+    first_signature.receiver = true;
+    try methods.append(ast::FunctionDecl {
+        signature: move first_signature,
+        doc: ignored_doc,
+        derived: true,
+        body: null
+    });
+    let second_signature = try empty_signature(
+        allocator,
+        &var tree,
+        "second"
+    );
+    errdefer second_signature.deinit();
+    try methods.append(ast::FunctionDecl {
+        signature: move second_signature,
+        doc: ignored_doc,
+        derived: false,
+        body: null
+    });
+    let contract_name = try retained_text(allocator, &var tree, "Visitor");
+    let contract_decl = tree.add_declaration(ast::DeclarationNode::Contract(
+        ast::ContractDecl {
+            name: contract_name,
+            methods: move methods,
+            public: true
+        }
+    ));
+    try program.add_declaration(contract_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        contract_decl,
+        "pub contract Visitor { fn first();; fn second(); }"
+    );
+
+    let impl_contract_name = try retained_text(
+        allocator,
+        &var tree,
+        "Visitor"
+    );
+    let impl_type_name = try retained_text(allocator, &var tree, "Walker");
+    let impl_decl = tree.add_declaration(ast::DeclarationNode::Impl(
+        ast::ImplDecl {
+            contract_name: impl_contract_name,
+            type_name: impl_type_name
+        }
+    ));
+    try program.add_declaration(impl_decl);
+    try expect_declaration_render(
+        allocator,
+        &tree,
+        &types,
+        impl_decl,
+        "impl Visitor for Walker;"
+    );
+
+    let expected_program =
+        \\import std::mem
+        \\pub unsafe fn (self: &var i64) visit<T, n: i64>(value: &i64, slot: &var bool, plain: i64) -> bool {  }
+        \\pub unsafe extern "C ABI" fn write()
+        \\test "check" {  }
+        \\test "\xE6\xA4\x9C\xE6\x9F\xBB" <missing>
+        \\pub unsafe struct Pair<T, U> { pub value: &i64, slot: &var bool, plain: i64 }
+        \\pub enum State { Ready, Done }
+        \\pub error Failure { Missing, Invalid }
+        \\pub union Result<T> { Ok(i64), Empty }
+        \\pub contract Visitor { fn first();; fn second(); }
+        \\impl Visitor for Walker;
+    ;
+    try expect_program_render(
+        allocator,
+        &tree,
+        &types,
+        &program,
+        expected_program
     );
 }
 
