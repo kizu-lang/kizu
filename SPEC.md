@@ -2332,9 +2332,10 @@ checker が使うものと同じです。
 storage を指し、確保は起きません。
 
 `element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
-返します。`field_type<T, f>` はその field の型を返します。どちらも型の位置に
-書くので、型値として比べるときは `type<std::meta::element<T>>` と綴ります。
-static 引数にも書けるので、そのまま再帰できます。
+返します。`std::map::Map<[]u8, V>` では、key は entry の見つけ方なので、保持する
+値の型 `V` を返します。`field_type<T, f>` はその field の型を返します。どちらも
+型の位置に書くので、型値として比べるときは `type<std::meta::element<T>>` と
+綴ります。static 引数にも書けるので、そのまま再帰できます。
 
 ```kizu
 fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {

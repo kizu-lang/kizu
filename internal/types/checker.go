@@ -911,7 +911,7 @@ func (c *Checker) parseType(name string) (Type, error) {
 	// and parseMetaTypeForm is the one place that decides what to do with it.
 	resolved := name
 	rewritten, err := c.resolveMetaTypeText(name)
-	if isMetaFormError(err) {
+	if err != nil && !isUnboundMetaCaptureError(err) {
 		return "", err
 	}
 	if err == nil {
@@ -1067,10 +1067,10 @@ func (c *Checker) parseMetaTypeForm(
 			form, shape.StaticArgs, len(args))
 	}
 	resolved, err := c.resolveMetaTypeText(name)
-	if isMetaFormError(err) {
+	if err != nil && !isUnboundMetaCaptureError(err) {
 		return "", err
 	}
-	if err != nil || resolved == name {
+	if isUnboundMetaCaptureError(err) || resolved == name {
 		// An unbound capture is what a declaration looks like.
 		return Type(name), nil
 	}

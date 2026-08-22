@@ -162,8 +162,8 @@ func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, erro
 	}
 	field, ok := c.metaFields[args[1]]
 	if !ok {
-		return metaField{}, errorf(
-			"comptime error: `%s` is not a comptime capture", args[1])
+		return metaField{}, unboundMetaCaptureError{errorf(
+			"comptime error: `%s` is not a comptime capture", args[1])}
 	}
 	if field.variant != stdmeta.VariantForm(form) {
 		return metaField{}, errorf("comptime error: `%s` expects a %s capture, got `%s`",
@@ -180,25 +180,23 @@ func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, erro
 	return field, nil
 }
 
-// metaFormError is the failure of a form that resolved its capture and still
-// names no type. It is separated from every other failure because the two mean
-// opposite things: a capture that is simply not bound here is what a
-// declaration looks like before instantiation and keeps its spelling, while
-// this is the program's mistake and has to be reported where it is written.
-type metaFormError struct {
+// unboundMetaCaptureError marks the one resolution failure a generic
+// declaration defers. The capture only exists while one comptime expansion is
+// checked; every other failure is already a concrete program error.
+type unboundMetaCaptureError struct {
 	err error
 }
 
 // Error returns the wrapped diagnostic.
-func (e metaFormError) Error() string {
+func (e unboundMetaCaptureError) Error() string {
 	return e.err.Error()
 }
 
-// isMetaFormError reports whether a failure is the program's mistake rather
-// than a capture that is not bound yet.
-func isMetaFormError(err error) bool {
-	var formErr metaFormError
-	return errors.As(err, &formErr)
+// isUnboundMetaCaptureError reports whether a declaration must retain the form
+// until an instantiation binds its capture.
+func isUnboundMetaCaptureError(err error) bool {
+	var unbound unboundMetaCaptureError
+	return errors.As(err, &unbound)
 }
 
 // metaCaptureKind names a capture kind for a diagnostic.
@@ -291,10 +289,10 @@ func (c *Checker) resolveMetaTypeText(text string) (string, error) {
 			return "", err
 		}
 		if variant.typ == "" {
-			return "", metaFormError{errorf(
+			return "", errorf(
 				"comptime error: variant `%s::%s` carries no payload, so "+
 					"`%s` names nothing; ask `%s` first",
-				variant.owner, variant.name, stdmeta.VariantType, stdmeta.HasPayload)}
+				variant.owner, variant.name, stdmeta.VariantType, stdmeta.HasPayload)
 		}
 		return string(variant.typ), nil
 	case stdmeta.Element:
@@ -496,10 +494,10 @@ func (c *Checker) constructFields(typeArg string) (Type, []ast.ConstructField, e
 // the form resolved to.
 func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
 	resolved, err := c.resolveMetaTypeText(text)
-	if isMetaFormError(err) {
+	if err != nil {
 		return "", err
 	}
-	if err == nil && resolved != text {
+	if resolved != text {
 		return resolved, nil
 	}
 	parsed, ok := c.types.lookup(Type(text))

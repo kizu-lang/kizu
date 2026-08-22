@@ -47,6 +47,58 @@ fn main() -> void {
 	}
 }
 
+// TestCheckRejectsResolvedMetaTypeErrors keeps only an absent comptime capture
+// deferred at a generic declaration. Container and bound-capture mistakes are
+// already concrete and must not survive as opaque type spellings.
+func TestCheckRejectsResolvedMetaTypeErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "element of a scalar",
+			source: `fn take(value: std::meta::element<i64>) -> void { return; }
+fn main() -> void { return; }`,
+			want: "expects ?T, Array<T>, Box<T>, or Map<K, V>, got i64",
+		},
+		{
+			name: "field capture used as a variant",
+			source: `struct Item { pub value: i64 }
+fn inspect<T>() -> bool {
+    comptime for std::meta::public_fields<T>() |f| {
+        comptime if type<std::meta::variant_type<T, f>> == type<i64> {
+            return true;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+fn main() -> void { print(inspect<Item>()); }`,
+			want: "expects a variant capture, got `f`",
+		},
+		{
+			name: "capture owner mismatch",
+			source: `struct Item { pub value: i64 }
+struct Other { pub value: i64 }
+fn inspect<T>() -> bool {
+    comptime for std::meta::public_fields<T>() |f| {
+        comptime if type<std::meta::field_type<Other, f>> == type<i64> {
+            return true;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+fn main() -> void { print(inspect<Item>()); }`,
+			want: "capture `f` belongs to Item, not Other",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsCompileTimeOnlyTypeAsValue pins `Function` and `Field` as
 // tokens rather than types: neither has a runtime representation, so no value
 // position accepts one, wrapped or not.
