@@ -736,6 +736,169 @@ fn add_struct_decl(
     ));
 }
 
+fn (self: &var Parser) parse_function_signature_after_fn(
+    tree: &var ast::Ast,
+    types: &var typ::Table,
+    signature: &var ast::FunctionSignature
+) -> !bool {
+    if self.peek_kind() == token::Kind::LParen {
+        if try self.parse_receiver(tree, types) |receiver| {
+            defer receiver.deinit();
+            var receiver_index = 0;
+            while receiver.get(receiver_index) |param| {
+                try signature.params.append(param);
+                receiver_index = receiver_index + 1;
+            }
+            signature.receiver = true;
+        } else {
+            return false;
+        }
+    }
+    if !try self.expect_peek(token::Kind::Ident) {
+        return false;
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    signature.name = name;
+    if self.peek_kind() == token::Kind::Lt {
+        try self.next_token();
+        if try self.parse_static_param_list(tree, types) |static_params| {
+            defer static_params.deinit();
+            var static_index = 0;
+            while static_params.get(static_index) |param| {
+                try signature.static_params.append(param);
+                static_index = static_index + 1;
+            }
+            if static_params.len() == 0 or
+                !try self.expect_type_close() {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    if !try self.expect_peek(token::Kind::LParen) {
+        return false;
+    }
+    let params = try self.parse_params(tree, types);
+    defer params.deinit();
+    var index = 0;
+    while params.get(index) |param| {
+        try signature.params.append(param);
+        index = index + 1;
+    }
+    if !try self.expect_current(token::Kind::RParen) {
+        return false;
+    }
+    return self.parse_return_clause(types, signature);
+}
+
+fn (self: &var Parser) parse_contract_decl(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !ast::Declaration {
+    if !try self.expect_peek(token::Kind::Ident) {
+        let name = tree.add_text(string::new(self.allocator));
+        return add_contract_decl(
+            tree,
+            name,
+            array::new<ast::FunctionDecl>(self.allocator)
+        );
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return add_contract_decl(
+            tree,
+            name,
+            array::new<ast::FunctionDecl>(self.allocator)
+        );
+    }
+    let methods = try self.parse_contract_methods(tree, types);
+    return add_contract_decl(tree, name, move methods);
+}
+
+fn (self: &var Parser) parse_contract_methods(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !array::Array<ast::FunctionDecl> {
+    var methods = array::new<ast::FunctionDecl>(self.allocator);
+    errdefer methods.deinit();
+    try self.next_token();
+    while self.current_kind() != token::Kind::RBrace and
+        self.current_kind() != token::Kind::Eof {
+        if self.current_kind() != token::Kind::Function {
+            let handle = self.stream.get_or_panic(self.position);
+            let message = try name_list_token_message(
+                self.allocator,
+                "contract method",
+                self.tokens.at(handle)
+            );
+            try self.record_error(move message);
+            return move methods;
+        }
+        if try self.parse_contract_method(tree, types) |method| {
+            errdefer method.deinit();
+            try methods.append(move method);
+        } else {
+            return move methods;
+        }
+        if self.peek_kind() == token::Kind::Semicolon {
+            try self.next_token();
+        }
+        try self.next_token();
+    }
+    return move methods;
+}
+
+fn (self: &var Parser) parse_contract_method(
+    tree: &var ast::Ast,
+    types: &var typ::Table
+) -> !?ast::FunctionDecl {
+    var method = self.function_stub(
+        tree,
+        false,
+        string::new(self.allocator)
+    );
+    errdefer method.deinit();
+    let _ = try self.parse_function_signature_after_fn(
+        tree,
+        types,
+        &var method.signature
+    );
+    if method.signature.receiver {
+        try self.record_context_error(
+            "a contract method takes no receiver;",
+            " it says what a method looks like, not what it is on"
+        );
+        method.deinit();
+        return null;
+    }
+    return move method;
+}
+
+fn add_contract_decl(
+    tree: &var ast::Ast,
+    name: ast::Text,
+    methods: array::Array<ast::FunctionDecl>
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Contract(
+        ast::ContractDecl {
+            name: name,
+            methods: move methods,
+            public: false
+        }
+    ));
+}
+
 fn (self: &var Parser) parse_return_clause(
     types: &var typ::Table,
     signature: &var ast::FunctionSignature
