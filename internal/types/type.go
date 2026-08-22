@@ -461,59 +461,46 @@ func isPointerType(typ Type) bool {
 	return ok
 }
 
-// containsRawPointer reports whether a type spelling mentions ptr<T> anywhere,
-// including behind `?`, `[]`, and static type arguments.
-func containsRawPointer(typ Type) bool {
-	return containsWrappedType(typ, isPointerType)
+// containsRawPointer reports whether a retained type graph contains ptr<T>.
+func (t *typeTable) containsRawPointer(value Type) bool {
+	return t.containsNamedType(value, "ptr")
 }
 
-// containsTypeValue reports whether a type spelling contains comptime-only type.
-func containsTypeValue(typ Type) bool {
-	return containsWrappedType(typ, func(typ Type) bool {
-		return typ == typeType
-	})
+// containsTypeValue reports whether a retained type graph contains comptime-only type.
+func (t *typeTable) containsTypeValue(value Type) bool {
+	return t.containsNamedType(value, string(typeType))
 }
 
-// containsWrappedType recursively checks prefixes and static type arguments.
-func containsWrappedType(typ Type, match func(Type) bool) bool {
-	text := string(typ)
-	for {
-		switch {
-		case strings.HasPrefix(text, "!"):
-			text = strings.TrimPrefix(text, "!")
-		case strings.HasPrefix(text, "&var "):
-			text = strings.TrimPrefix(text, "&var ")
-		case strings.HasPrefix(text, "&"):
-			text = strings.TrimPrefix(text, "&")
-		case strings.HasPrefix(text, "?"):
-			text = strings.TrimPrefix(text, "?")
-		case strings.HasPrefix(text, "[]"):
-			text = strings.TrimPrefix(text, "[]")
-		case strings.HasPrefix(text, "const "):
-			text = strings.TrimPrefix(text, "const ")
-		default:
-			if match(Type(text)) {
-				return true
-			}
-			base, arg, ok := splitGenericType(text)
-			if !ok {
-				return false
-			}
-			if match(Type(base)) {
-				return true
-			}
-			args, ok := splitGenericArgs(arg)
-			if !ok {
-				return false
-			}
-			for _, item := range args {
-				if containsWrappedType(Type(item), match) {
-					return true
-				}
-			}
-			return false
-		}
+// containsCompileTimeOnly reports whether a retained type graph contains a
+// Function or Field token. Both are names with no runtime representation.
+func (t *typeTable) containsCompileTimeOnly(value Type) bool {
+	return t.containsNamedType(value, string(typeFunction), string(typeField))
+}
+
+// containsNamedType walks the parsed graph retained by this checker phase.
+// Structural queries do not split or allocate a second copy of type text.
+func (t *typeTable) containsNamedType(value Type, names ...string) bool {
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return false
 	}
+	found := false
+	typ.Walk(parsed, func(value typ.Type) {
+		if found {
+			return
+		}
+		name, ok := value.(*typ.Name)
+		if !ok || len(name.Path) != 1 {
+			return
+		}
+		for _, expected := range names {
+			if name.Path[0] == expected {
+				found = true
+				return
+			}
+		}
+	})
+	return found
 }
 
 // methodMatches checks a method against the contract method it stands for. The

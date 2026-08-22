@@ -593,7 +593,7 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, payload); err != nil {
 				return err
 			}
-			if containsTypeValue(parsed) {
+			if c.types.containsTypeValue(parsed) {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
@@ -628,14 +628,14 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
 			return err
 		}
-		if err := checkRawPointerFieldPolicy(decl, field, typ); err != nil {
+		if err := checkRawPointerFieldPolicy(&c.types, decl, field, typ); err != nil {
 			return err
 		}
-		if compileTimeOnlyType(typ) {
+		if compileTimeOnlyType(&c.types, typ) {
 			return errorf("type error: struct field `%s.%s` cannot store %s",
 				decl.Name, field.Name, typ)
 		}
-		if containsTypeValue(typ) {
+		if c.types.containsTypeValue(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
 				decl.Name, field.Name)
 		}
@@ -895,7 +895,7 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 			return nil, err
 		}
 	}
-	if compileTimeOnlyType(ret) {
+	if compileTimeOnlyType(&c.types, ret) {
 		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
 	}
 	if containsBufferType(ret) {
@@ -903,7 +903,7 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 			"type error: function `%s` cannot return a stack buffer; "+
 				"return an owned buffer or write through a view", fn.Name)
 	}
-	if containsTypeValue(ret) {
+	if c.types.containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
 	if !fn.Std && containsBorrowOptional(ret) {
@@ -956,7 +956,7 @@ func (c *Checker) checkFunctionParam(
 	if paramType == typeVoid {
 		return errorf("type error: parameter `%s` cannot have type void", param.Name)
 	}
-	if containsTypeValue(paramType) {
+	if c.types.containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
 	}
 	if containsBufferType(paramType) {
@@ -964,7 +964,7 @@ func (c *Checker) checkFunctionParam(
 			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
 			param.Name)
 	}
-	if err := checkFunctionParamPolicy(param, paramType); err != nil {
+	if err := checkFunctionParamPolicy(&c.types, param, paramType); err != nil {
 		return err
 	}
 	if _, ok := optionalElem(paramType); ok && param.Borrow {
@@ -1583,7 +1583,7 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 	if err != nil {
 		return false, err
 	}
-	if containsTypeValue(typ) {
+	if c.types.containsTypeValue(typ) {
 		return false, errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {

@@ -87,17 +87,15 @@ func checkStaticParamPolicy(fn ast.FunctionSignature) error {
 // names one field of a struct; both are read where they are written and have
 // no runtime representation, so neither can be stored, returned, or passed --
 // nor wrapped, since `?Function` is a value of a type that has no values.
-func compileTimeOnlyType(typ Type) bool {
-	return containsWrappedType(typ, func(typ Type) bool {
-		return typ == typeFunction || typ == typeField
-	})
+func compileTimeOnlyType(table *typeTable, typ Type) bool {
+	return table.containsCompileTimeOnly(typ)
 }
 
 // checkFunctionParamPolicy keeps the compile-time-only tokens out of the
 // runtime argument list. A function name and a field token are both known only
 // at compile time, so they are static arguments.
-func checkFunctionParamPolicy(param ast.Param, typ Type) error {
-	if !compileTimeOnlyType(typ) {
+func checkFunctionParamPolicy(table *typeTable, param ast.Param, typ Type) error {
+	if !compileTimeOnlyType(table, typ) {
 		return nil
 	}
 	return errorf(
@@ -115,8 +113,13 @@ func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 
 // checkRawPointerFieldPolicy rejects a raw pointer field on a struct that has
 // not said it carries an invariant the compiler cannot check.
-func checkRawPointerFieldPolicy(decl *ast.StructDecl, field ast.Field, fieldType Type) error {
-	if decl.RequiresUnsafe || !containsRawPointer(fieldType) {
+func checkRawPointerFieldPolicy(
+	table *typeTable,
+	decl *ast.StructDecl,
+	field ast.Field,
+	fieldType Type,
+) error {
+	if decl.RequiresUnsafe || !table.containsRawPointer(fieldType) {
 		return nil
 	}
 	return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+

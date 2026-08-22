@@ -74,6 +74,36 @@ enum WrappedKind {
     CompileTimeOnly,
 }
 
+// Records whether a structural walk found the requested closed name kind.
+struct WrappedTypeVisitor {
+    kind: WrappedKind,
+    found: bool
+}
+
+fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
+    if self.found {
+        return;
+    }
+    match value {
+        Name(node) => {
+            if node.path.len() != 1 {
+                return;
+            }
+            if node.path.at(0) |part| {
+                let name = part.as_bytes();
+                self.found = match self.kind {
+                    RawPointer => node.args.len() > 0 and equal(name, "ptr"),
+                    TypeValue => equal(name, "type"),
+                    CompileTimeOnly => equal(name, "Field") or
+                        equal(name, "Function"),
+                };
+            }
+        },
+        _ => {},
+    }
+    return;
+}
+
 /// Identifies one EnumType owned by checker metadata storage.
 pub struct EnumHandle {
     pub index: i64
@@ -761,111 +791,34 @@ fn is_const_root(table: &typ::Table, value: ?typ::Type) -> bool {
     return false;
 }
 
-/// Reports whether a type spelling contains a raw pointer.
-pub fn (self: &TypeTable) contains_raw_pointer(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
-    return self.contains_wrapped_type(allocator, value, WrappedKind::RawPointer);
+/// Reports whether a retained type graph contains a raw pointer.
+pub fn (self: &TypeTable) contains_raw_pointer(value: Type) -> bool {
+    return self.contains_wrapped_type(value, WrappedKind::RawPointer);
 }
 
-/// Reports whether a type spelling contains the compile-time `type` value.
-pub fn (self: &TypeTable) contains_type_value(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
-    return self.contains_wrapped_type(allocator, value, WrappedKind::TypeValue);
+/// Reports whether a retained type graph contains the compile-time `type` value.
+pub fn (self: &TypeTable) contains_type_value(value: Type) -> bool {
+    return self.contains_wrapped_type(value, WrappedKind::TypeValue);
 }
 
-/// Reports whether a type spelling contains `Field` or `Function`.
-pub fn (self: &TypeTable) contains_compile_time_only(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
+/// Reports whether a retained type graph contains `Field` or `Function`.
+pub fn (self: &TypeTable) contains_compile_time_only(value: Type) -> bool {
     return self.contains_wrapped_type(
-        allocator,
         value,
         WrappedKind::CompileTimeOnly
     );
 }
 
 fn (self: &TypeTable) contains_wrapped_type(
-    allocator: Allocator,
     value: Type,
     kind: WrappedKind
-) -> !bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return contains_wrapped_text(allocator, bytes, kind);
+) -> bool {
+    if self.lookup(value) |parsed| {
+        var visitor = WrappedTypeVisitor { kind: kind, found: false };
+        typ::walk<WrappedTypeVisitor>(&self.parsed, parsed, &var visitor);
+        return visitor.found;
     }
     return false;
-}
-
-fn contains_wrapped_text(
-    allocator: Allocator,
-    value: []u8,
-    kind: WrappedKind
-) -> !bool {
-    var text = value;
-    while true {
-        if mem::starts_with(text, "!") {
-            text = text[1..mem::len(text)];
-        } else {
-            if mem::starts_with(text, "&var ") {
-                text = text[5..mem::len(text)];
-            } else {
-                if mem::starts_with(text, "&") or
-                    mem::starts_with(text, "?") {
-                    text = text[1..mem::len(text)];
-                } else {
-                    if mem::starts_with(text, "[]") {
-                        text = text[2..mem::len(text)];
-                    } else {
-                        if mem::starts_with(text, "const ") {
-                            text = text[6..mem::len(text)];
-                        } else {
-                            if matches_wrapped_kind(text, kind) {
-                                return true;
-                            }
-                            if typ::split_apply(text) |parts| {
-                                if matches_wrapped_kind(parts.base, kind) {
-                                    return true;
-                                }
-                                let args = try typ::split_args(
-                                    allocator,
-                                    parts.args
-                                );
-                                defer args.deinit();
-                                var index = 0;
-                                while args.at(index) |argument| {
-                                    let bytes = argument.as_bytes();
-                                    if try contains_wrapped_text(
-                                        allocator,
-                                        bytes,
-                                        kind
-                                    ) {
-                                        return true;
-                                    }
-                                    index = index + 1;
-                                }
-                            }
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-fn matches_wrapped_kind(value: []u8, kind: WrappedKind) -> bool {
-    return match kind {
-        RawPointer => equal(value, "ptr"),
-        TypeValue => equal(value, "type"),
-        CompileTimeOnly => equal(value, "Field") or equal(value, "Function"),
-    };
 }
 
 /// Extracts the error and success side of `!T` or `E!T`.
