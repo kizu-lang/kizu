@@ -26,6 +26,11 @@ pub struct Parser {
     safety: string::String
 }
 
+struct NameList {
+    names: array::Array<ast::Text>,
+    docs: ?map::Map<[]u8, ast::Text>
+}
+
 /// Creates a parser and primes its current and lookahead tokens.
 pub fn new(allocator: Allocator, scanner: lexer::Lexer) -> !Parser {
     var input = move scanner;
@@ -171,6 +176,144 @@ fn (self: &Parser) function_stub(
         derived: false,
         body: null
     };
+}
+
+fn (self: &var Parser) parse_enum_decl(
+    tree: &var ast::Ast
+) -> !ast::Declaration {
+    let handle = self.stream.get_or_panic(self.position);
+    let current = self.tokens.at(handle);
+    let docs = try self.comment_text(&current.doc_comments);
+    return self.parse_enum_decl_with_doc(tree, move docs);
+}
+
+fn (self: &var Parser) parse_enum_decl_with_doc(
+    tree: &var ast::Ast,
+    docs: string::String
+) -> !ast::Declaration {
+    let doc = tree.add_text(move docs);
+    if !try self.expect_peek(token::Kind::Ident) {
+        let name = tree.add_text(string::new(self.allocator));
+        return add_enum_decl(
+            tree,
+            name,
+            doc,
+            empty_name_list(self.allocator)
+        );
+    }
+    let name_handle = self.stream.get_or_panic(self.position);
+    let name = try retain_literal(
+        self.allocator,
+        tree,
+        self.tokens.at(name_handle)
+    );
+    if !try self.expect_peek(token::Kind::LBrace) {
+        return add_enum_decl(
+            tree,
+            name,
+            doc,
+            empty_name_list(self.allocator)
+        );
+    }
+    let list = try self.parse_name_list(tree, "enum tag");
+    return add_enum_decl(tree, name, doc, move list);
+}
+
+fn add_enum_decl(
+    tree: &var ast::Ast,
+    name: ast::Text,
+    doc: ast::Text,
+    list: NameList
+) -> ast::Declaration {
+    return tree.add_declaration(ast::DeclarationNode::Enum(ast::EnumDecl {
+        name: name,
+        doc: doc,
+        tags: move list.names,
+        tag_docs: move list.docs,
+        public: false
+    }));
+}
+
+fn (self: &var Parser) parse_name_list(
+    tree: &var ast::Ast,
+    label: []u8
+) -> !NameList {
+    var names = array::new<ast::Text>(self.allocator);
+    errdefer names.deinit();
+    var docs = map::new<[]u8, ast::Text>(self.allocator);
+    errdefer docs.deinit();
+    try self.next_token();
+    while self.current_kind() != token::Kind::RBrace and
+        self.current_kind() != token::Kind::Eof {
+        let handle = self.stream.get_or_panic(self.position);
+        if self.current_kind() != token::Kind::Ident {
+            let actual = self.tokens.at(handle);
+            let message = try name_list_token_message(
+                self.allocator,
+                label,
+                actual
+            );
+            try self.record_error(move message);
+            return finish_name_list(move names, move docs);
+        }
+        let current = self.tokens.at(handle);
+        let name = try retain_literal(self.allocator, tree, current);
+        try names.append(name);
+        let text = try self.comment_text(&current.doc_comments);
+        if text.len() == 0 {
+            text.deinit();
+        } else {
+            let retained = tree.add_text(move text);
+            let key = current.literal.as_bytes();
+            try docs.insert(key, retained);
+        }
+        if !try self.consume_list_delimiter(label) {
+            return finish_name_list(move names, move docs);
+        }
+        try self.next_token();
+    }
+    return finish_name_list(move names, move docs);
+}
+
+fn empty_name_list(allocator: Allocator) -> NameList {
+    return NameList {
+        names: array::new<ast::Text>(allocator),
+        docs: null
+    };
+}
+
+fn finish_name_list(
+    names: array::Array<ast::Text>,
+    docs: map::Map<[]u8, ast::Text>
+) -> NameList {
+    return NameList {
+        names: move names,
+        docs: tag_docs_or_null(move docs)
+    };
+}
+
+fn tag_docs_or_null(
+    docs: map::Map<[]u8, ast::Text>
+) -> ?map::Map<[]u8, ast::Text> {
+    if docs.len() == 0 {
+        docs.deinit();
+        return null;
+    }
+    return move docs;
+}
+
+fn name_list_token_message(
+    allocator: Allocator,
+    label: []u8,
+    actual: &token::Token
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("expected ");
+    try out.append_bytes(label);
+    try out.append_bytes(", got ");
+    try append_token_description(&var out, actual);
+    return move out;
 }
 
 fn (self: &var Parser) parse_return_clause(
