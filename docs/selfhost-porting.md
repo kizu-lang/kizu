@@ -245,6 +245,17 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
 | types | 7768 | 15293 | 1.97 | check corpus 635 case(diagnostics) |
 
+types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
+差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
+builder 165 関数)は `fmt.Sprintf` 相当が無い std gap。`tree` / `scope` / `out` の
+context 引数 576 行と `var x = empty_type()` 131 行は「Go の `(T, error)` 返しを out
+引数 + `!?Diagnostic` で写した」API shape。`defer` / `errdefer` 402 行と `as_bytes`
+束縛 325 行、owned copy 53 行が ownership の明示。error 伝播 `return move x;` 298 行は
+Go の `if err != nil { return err }` 350 箇所と同数で、増分ではない。残る圧縮余地は
+message builder の共通化(parser の `error_*` と同じ融合)と `tree` 引数の扱いだが、
+2.0 未満に入ったので後続 module を優先する。
+
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
