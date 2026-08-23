@@ -119,6 +119,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | `map[string]V` | `std::map::Map<[]u8, V>` | iteration order と overwrite behavior を先に確認する |
 | immutable map literal | pure lookup function または明示 owner の `Map` | hidden global allocator を作らず、hot path は計測する |
 | `*T` | `&T` / `&var T` / `Box<T>` / arena handle | nullable、mutation、owner、lifetime を ownership 表で固定する |
+| parse error 後の nil 埋め partial node | `ast::RecoveredNode` variant | diagnostic を出した後は node を作らず `add_recovered_*` を返す。partial AST は CLI も LSP も捨てるので契約ではない |
 | `(T, error)` | named error または `!T` | caller が error を列挙する契約なら named set を保つ |
 | nullable value | `?T` | absence と failure を混ぜない |
 | interface | static contract / closed union / generic | runtime dispatch を仮定せず、対応が閉じなければ止める |

@@ -711,28 +711,32 @@ test "parser keeps struct declarations mutable until final retention" {
     var value = try new(allocator, move scanner);
     errdefer value.deinit();
     let docs = try string::from_bytes(allocator, "Injected docs.");
-    var declaration = try value.parse_struct_decl_with_doc(
-        &var tree,
-        move docs,
-        false
-    );
-    value.deinit();
-    declaration.public = true;
-    declaration.requires_unsafe = true;
-    let retained = tree.add_declaration(ast::DeclarationNode::Struct(
-        move declaration
-    ));
-    match tree.declarations.at(retained.node) {
-        Struct(node) => {
-            expect_retained_bytes(tree.texts.at(node.name.node), "Guard");
-            expect_retained_bytes(
-                tree.texts.at(node.doc.node),
-                "Injected docs."
-            );
-            testing::expect(node.public);
-            testing::expect(node.requires_unsafe);
-        },
-        _ => testing::fail("mutable struct declaration was not retained"),
+    if try value.parse_struct_decl_with_doc(&var tree, move docs, false) |node| {
+        value.deinit();
+        var declaration = move node;
+        declaration.public = true;
+        declaration.requires_unsafe = true;
+        let retained = tree.add_declaration(ast::DeclarationNode::Struct(
+            move declaration
+        ));
+        match tree.declarations.at(retained.node) {
+            Struct(retained_node) => {
+                expect_retained_bytes(
+                    tree.texts.at(retained_node.name.node),
+                    "Guard"
+                );
+                expect_retained_bytes(
+                    tree.texts.at(retained_node.doc.node),
+                    "Injected docs."
+                );
+                testing::expect(retained_node.public);
+                testing::expect(retained_node.requires_unsafe);
+            },
+            _ => testing::fail("mutable struct declaration was not retained"),
+        }
+    } else {
+        value.deinit();
+        testing::fail("struct declaration was not parsed");
     }
 }
 
@@ -976,66 +980,6 @@ test "parser program dispatches every top-level declaration" {
         },
         _ => testing::fail("program lost the extern function"),
     }
-}
-
-test "parser program retains malformed top-level recovery stubs" {
-    let allocator = mem::page_allocator();
-    var tree = ast::new(allocator);
-    defer tree.deinit();
-    let input =
-        \\/// Recovered docs.
-        \\pub unsafe enum Color {}
-        \\test 1
-        \\fn ;
-    ;
-    let scanner = lexer::new(allocator, input);
-    var value = try new(allocator, move scanner);
-    errdefer value.deinit();
-    var program = try value.parse_program(&var tree);
-    defer program.deinit();
-    testing::expect_equal<token::Kind>(
-        token::Kind::Eof,
-        value.current_kind()
-    );
-    testing::expect_equal<i64>(5, value.diagnostics_len());
-    testing::expect_equal<i64>(4, program.declarations.len());
-    if value.diagnostic(0) |entry| {
-        let message = entry.message.as_bytes();
-        testing::expect_equal<[]u8>(
-            "expected fn or struct after unsafe, got `enum`",
-            message
-        );
-        testing::expect_equal<i64>(2, entry.span.start.line);
-        testing::expect_equal<i64>(5, entry.span.start.column);
-        testing::expect_equal<i64>(2, entry.span.end.line);
-        testing::expect_equal<i64>(11, entry.span.end.column);
-    } else {
-        testing::fail("missing unsafe declaration diagnostic");
-    }
-    value.deinit();
-    let recovered = program.declarations.get_or_panic(0);
-    match tree.declarations.at(recovered.node) {
-        Function(function) => expect_function_stub(
-            &tree,
-            function,
-            true,
-            "Recovered docs."
-        ),
-        _ => testing::fail("unsafe recovery did not retain a function stub"),
-    }
-    let rendered = try ast::render_program(
-        allocator,
-        &tree,
-        &program
-    );
-    defer rendered.deinit();
-    let expected =
-        \\pub fn ();
-        \\enum Color {  }
-        \\test "" <missing>
-        \\fn ();
-    ;
-    expect_retained_bytes(&rendered, expected);
 }
 
 test "parser rendered errors outlive parser diagnostics" {
