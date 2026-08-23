@@ -260,7 +260,7 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
 | types | 7768 | 15293 | 1.97 | check corpus 765 case(diagnostics) |
 | ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
-| ir | 4883 | 9133 | 1.87(words 32,687 / 16,727 = 1.95。`quote.kizu` 354 を除くと 1.80) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
+| ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | compiler(cmd/kizu の parse / check / ir) | 1041(全 command) | 319 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt(types → ownership → ir → optimize)を Go の front end と byte 比較(1,882 case) |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
@@ -286,16 +286,18 @@ ownership の明示は `defer` / `errdefer` 143 行、`as_bytes()` / `name_text`
 `string` の自由な複製を吸収しており、それ以上の圧縮は signature 折返しの 1 行化だけで
 1.5 を切れないため後続 module を優先する。
 
-ir の増分(+4,250 行)の分類。API shape が最大で、signature を 1 引数 1 行に折り返した
+ir の増分(+3,900 行)の分類。API shape が最大で、signature を 1 引数 1 行に折り返した
 545 行、閉じ括弧だけの行が Go 1,126 に対して Kizu 1,841(`if try f() |failed| {` の block 142
 と 100 桁超の呼び出し折返し)、関数宣言が Go 298 に対して Kizu 540(arena handle / view の
 accessor、out 引数の result type)、`(T, error)` 返しを out 引数で写した `out.* =` 151 行と
 `var x = empty_*()` 146 行、`while` の `index = index + 1` 169 行(Go の `for range`)。
 error 伝播は `return move failed` 138 + `|failed|` 142 で、Go の `if err != nil` / `return err`
 258 と同数。ownership の明示は `name_text` + `as_bytes()` の view 束縛 128 組(`[]u8` view を
-関数から返せない gap)と `defer` / `errdefer` 175 行。std gap は `%q`(`quote.kizu` 354 行、
-うち table 122 行)、`fmt.Errorf` 相当の `Arg::` 131 箇所 + `diagnostic.kizu` 72 行、sequence
-literal の無い primitive 表(`call.kizu` +68 行)。Go が `string` で持つ op を `Op` enum + spelling
+関数から返せない gap)と `defer` / `errdefer` 175 行。std gap は `fmt.Errorf` 相当の `Arg::`
+131 箇所 + `diagnostic.kizu` 72 行、sequence literal の無い primitive 表(`call.kizu` +68 行)。
+Go の ir が string literal を `%q`(`strconv.Quote`)で綴っていたのは `internal/quote.Bytes` への
+統一の取りこぼしで、Go 側を揃えた(`kizu ir` の非 ASCII literal の表示だけが変わり、llvm / wasm
+の `strconv.Unquote` は両方を読む)。Go が `string` で持つ op を `Op` enum + spelling
 関数にした `ir.kizu` の約 200 行は Mechanical mapping の判断そのもの。2.0 未満に入ったので
 後続 module(llvm)を優先する。
 
@@ -334,11 +336,9 @@ literal の無い primitive 表(`call.kizu` +68 行)。Go が `string` で持つ
 | union の payload に `Allocator` / `Io` を持つ struct を置けない(llvm の inline payload layout #991 が `Allocator` を知らない) | ir の `LowerResult { Module(Module), Error(Diagnostic) }`(`Module` は `NameTable` の allocator を持つ) | `Lowerer` が `pub module` を持ち、caller が `Lowerer` を生かしたまま `&lowerer.module` を読む(Go の `Lower() (*Module, error)` の戻りを in place にした) |
 | 値受け `self` の method(`fn (self: T) into_x() -> X`)は receiver を consume しない(consume になるのは `deinit` だけ)。`deinit` を宣言した型の field は move out できない | ir の `Lowerer` から `Module` を取り出す | `Lowerer` に `deinit` を宣言せず(導出)、module は取り出さず上の形にした |
 | method 名だけで `&var` 位置を union する slot 判定(既出)の新しい衝突: `set`(`EnvStore.set` と `Array.set`)、`clone`(`EnvStore.clone` と `Array.clone`)、`resolve_type`(ir と project) | `project::Loader.qualify_decl` の match payload `value.tags.clone(..)` が slot 化され clang error | `bind` / `unbind` / `clone_env` / `resolve_bound_type` に改名。module 完了時に全 method 名の `&var` 位置差を列挙し、ir が増やした差は `tree` 引数の位置(常に parameter を渡すので slot 化しない)だけであることを確認した |
-| Go の `fmt.Sprintf("%q")`(`strconv.Quote`、Unicode `IsPrint` 表)に当たる std API が無い。ast / std::fmt は deterministic ASCII(`\xHH`)で quote する | ir の string literal の immediate(`lowerLiteralExpr`)。`examples/std_string_join_trim.kizu` の U+3000、`std_fmt_escapes.kizu` の `éÿ` | `quote.kizu` に `strconv.Quote` を Go 1.22 の IsPrint 表ごと移植(Kizu 側だけ +354 行、うち表 122 行)。Go 側を `quote.Bytes` に揃えれば消せる(`kizu ir` の text だけが変わり、llvm / wasm の `strconv.Unquote` は両方を読む) |
 | `sync.Once` の process 内 cache(`project.StdErrorSets`)に当たるものが無い(shared mutable global を置かない) | ir の error set 番号付け | `project::Loader.std_error_codes()` を呼び出し側(CLI / corpus runner)が 1 回読み、`&StdErrorCodes` を lowering に渡す |
 | `typ::Table.parse` の失敗は `!` で伝播し、Go の「parse できなければ text のまま」に当たる optional parse が無い | ir の `lowerReturnType` / `errorUnionParts` / `resolveMetaTypeDeep` | 空 text だけ guard し、checked program の spelling は parse できる前提にした |
 | `ownership.Result` を値で次の phase へ渡せない(`Name` が Checker の `NameTable` に tied) | ir の `Lower(program, ownershipResult)` | `Checker` を caller が生かし、`retired_return_at` / `retired_try_at` / `retired_name_text` で読んで lowerer 側の `NameTable` へ copy する |
 | `if try f(view) \|x\| { ... }` は capture の間 condition の借用が生きるため、body で `&var self` を呼べない | ir の `split_static_args` / `generic_bindings` | text を local `String` に copy してから split する |
 | `&var ?T` の parameter を書けず、後の file で宣言される型の `?T` field も置けない(struct の field 検査が file 順) | ir の control.kizu(`lower_loop_header` の index phi) | union `LoopTest { Plain(Value), Indexed(cond, phi) }` で header の結果を運ぶ |
 | `if`/`match` は statement と expression で別 node なので、値位置の `if`/`match` を statement として歩けない | ir の `statementValue` / `collectAssigned` / slot walk | `TrailingValue` union と、値位置専用の walk(`collect_assigned_if` / `collect_mut_borrows_value_stmt`) |
-| 同じ module の 3 つ目の UTF-8 decode(std string、lexer、ir の quote)| `quote.kizu` | private に複製。std に decode API を置く判断を cutover までに行う |
