@@ -95,7 +95,7 @@ build policy としては受理済みですが、未実装です。
 | full generics | **その形では予定しません。** 明示的な static 引数のみ。推論・bounds・HKT は入れません(ADR-0066) |
 | `async fn` / `await` 構文 | **採用しません。** function coloring はこの言語が払わないコストです(ADR-0025) |
 | Rust の `Send` / `Sync` trait | **採用しません。** 代わりに置くものは、ユーザーが読める 1 つの規則であって、手書きの whitelist ではありません(ADR-0025) |
-| self-host compiler | **移植中。** 一括 cutover までは Go だけを shipping する(ADR-0082) |
+| self-host compiler | **移植中。** 一括 cutover までは Go だけを shipping する |
 
 ここで「実装済み」と呼ぶのは、conformance case がそれを実行して出力を検査している
 場合だけです。checker だけが強制する規則は機能に数えません。それが ADR-0025 の

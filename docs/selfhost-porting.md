@@ -12,8 +12,21 @@ compiler source、移植 workflow、`docs/selfhost-ownership.tsv` と一緒に�
 - cutover の前後とも user-facing compiler path を一つに保つ
 
 移植と同時に language feature、compiler architecture、optimization、public API を
-再設計しません。必要性が見つかった場合は移植を止め、Go の shipping path と
-SPEC / ADR / behavior test のどこが変わるかを別の判断として先に確定します。
+再設計しません。ただし AST / token の内部表現(node の保持方法、error 回復時の
+placeholder、handle の形)は、render・diagnostic・処理順が Go と同じなら Kizu-native
+に変えてよく、pass 構成と diagnostic 文面は変えません。それ以外の必要性が見つかった
+場合は移植を止め、Go の shipping path と SPEC / behavior test のどこが変わるかを別の
+判断として先に確定します。
+
+機械移植を選んだ理由と却下した案:
+
+| 案 | 却下理由 |
+| --- | --- |
+| compiler を Kizu で一から再設計する | 移植と architecture 変更の差が見えず、Go 版との挙動差を説明できない |
+| 汎用 Go-to-Kizu transpiler を維持する | Go の interface、GC、slice、pointer semantics を再実装する恒久的な第二 toolchain になる |
+| Go と Kizu を長期間ともに shipping する | 言語機能を二度実装し、fallback が片方の欠陥を隠した以前の失敗を繰り返す |
+| file ごとに規則なしで AI へ一括変換させる | ownership、module 境界、diagnostic の判断が file ごとに分岐する |
+| 生成 IR や内部 AST の文字列一致を gate にする | 実装の形を固定し、挙動が正しくても変更できない。examples と behavior test が契約を持つ |
 
 ## Source of truth
 
