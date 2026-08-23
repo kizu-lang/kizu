@@ -1,0 +1,247 @@
+import std::mem;
+import std::string;
+
+enum Step {
+    Emit,
+    Skip,
+}
+
+fn step_of(index: i64) -> Step {
+    if index - (index / 2) * 2 == 0 {
+        return Step::Emit;
+    }
+    return Step::Skip;
+}
+
+// `Skip => {}` is a no-op arm (ADR-0107). Unlike `Skip => return,` it does
+// not leave the function, so every loop iteration still runs.
+fn emit_even(limit: i64) -> void {
+    var i = 0;
+    while i < limit {
+        match step_of(i) {
+            Emit => print(i),
+            Skip => {},
+        }
+        i = i + 1;
+    }
+    return;
+}
+
+union Slot {
+    Kept(string::String),
+    Vacant
+}
+
+// A mixed-variant deinit spells the nothing-to-clean arm `{}`.
+fn (self: Slot) deinit() -> void {
+    match self {
+        Kept(payload) => payload.deinit(),
+        Vacant => {},
+    }
+    return;
+}
+
+fn main() -> !void {
+    emit_even(6);
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes("kept");
+    let kept = Slot::Kept(move name);
+    kept.deinit();
+    let vacant = Slot::Vacant;
+    vacant.deinit();
+    print("done");
+    return;
+}
+
+// run
+// features: match arm-empty union deinit
+// output:
+// 0
+// 2
+// 4
+// done
+
+
+// ir
+// lower:
+// fn step_of(%index: i64) -> Step {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Step = const 0
+//   return %8: Step
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Step = const 1
+//   return %9: Step
+// }
+// fn emit_even(%limit: i64) -> void {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [match.end.4, %9: i64]
+//   %3: bool = binary.< %2: i64, %limit: i64
+//   branch %3: bool, while.body.2, while.end.3
+// while.body.2:
+//   %4: Step = call.step_of %2: i64
+//   jump match.check.5
+// while.end.3:
+//   return void: void
+// match.end.4:
+//   %8: i64 = const 1
+//   %9: i64 = binary.+ %2: i64, %8: i64
+//   jump while.header.1
+// match.check.5:
+//   %5: bool = binary.== %4: Step, 0: Step
+//   branch %5: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   call.print %2: i64
+//   jump match.end.4
+// match.check.7:
+//   %7: bool = binary.== %4: Step, 1: Step
+//   branch %7: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: i64 = const 6
+//   call.emit_even %1: i64
+//   %3: Allocator = call.std::mem::page_allocator
+//   %4: std::string::String = call.std::string::new %3: Allocator
+//   %5: []u8 = const "kept"
+//   %6: !void = call.std::string::String.append_bytes %4: std::string::String, %5: []u8
+//   error.try %6: !void, cleanup call.std::string::String.deinit %4: std::string::String
+//   %8: Slot = union.new %4: std::string::String, Kept
+//   call.Slot.deinit %8: Slot
+//   %10: Slot = union.new Vacant
+//   call.Slot.deinit %10: Slot
+//   %12: []u8 = const "done"
+//   call.print %12: []u8
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// opt:
+// fn step_of(%index: i64) -> Step {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Step = const 0
+//   return %8: Step
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Step = const 1
+//   return %9: Step
+// }
+// fn emit_even(%limit: i64) -> void {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [match.end.4, %9: i64]
+//   %3: bool = binary.< %2: i64, %limit: i64
+//   branch %3: bool, while.body.2, while.end.3
+// while.body.2:
+//   %4: Step = call.step_of %2: i64
+//   jump match.check.5
+// while.end.3:
+//   return void: void
+// match.end.4:
+//   %8: i64 = const 1
+//   %9: i64 = binary.+ %2: i64, %8: i64
+//   jump while.header.1
+// match.check.5:
+//   %5: bool = binary.== %4: Step, 0: Step
+//   branch %5: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   call.print %2: i64
+//   jump match.end.4
+// match.check.7:
+//   %7: bool = binary.== %4: Step, 1: Step
+//   branch %7: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: i64 = const 6
+//   call.emit_even %1: i64
+//   %3: Allocator = call.std::mem::page_allocator
+//   %4: std::string::String = call.std::string::new %3: Allocator
+//   %5: []u8 = const "kept"
+//   %6: !void = call.std::string::String.append_bytes %4: std::string::String, %5: []u8
+//   error.try %6: !void, cleanup call.std::string::String.deinit %4: std::string::String
+//   %8: Slot = union.new %4: std::string::String, Kept
+//   call.Slot.deinit %8: Slot
+//   %10: Slot = union.new Vacant
+//   call.Slot.deinit %10: Slot
+//   %12: []u8 = const "done"
+//   call.print %12: []u8
+//   %14: !void = error.ok
+//   return %14: !void
+// }

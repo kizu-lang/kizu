@@ -1,0 +1,191 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+struct Node {
+    pub tag: i64,
+    pub count: i64,
+}
+
+fn read_tag(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.tag;
+}
+
+fn read_count(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.count;
+}
+
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    unsafe node.*.tag = tag;
+}
+
+fn replace(node: ptr<Node>, value: Node) -> void {
+    // SAFETY: node が有効な Node を指し、上書きしてよいことは呼び出し側が保証する
+    unsafe node.* = value;
+}
+
+test "raw pointer struct deref reads and writes" {
+    // SAFETY: Node が収まる十分な大きさを確保する。試験専用で失敗は考えない
+    let raw = unsafe malloc(64);
+    // SAFETY: raw は Node 1 個分の書き込み可能な領域を指す
+    let node = unsafe cast<ptr<Node>>(raw);
+    // SAFETY: pointer 間 cast は値の再解釈のみで、指す先は同じ有効な Node
+    let reader = unsafe cast<ptr<const Node>>(node);
+
+    replace(node, Node { tag: 7, count: 1 });
+    testing::expect_equal<i64>(7, read_tag(reader));
+
+    write_tag(node, 42);
+    testing::expect_equal<i64>(42, read_tag(reader));
+    testing::expect_equal<i64>(1, read_count(reader));
+
+    // SAFETY: raw は malloc が返した領域で、以後使わない
+    unsafe free(raw);
+}
+
+test "raw pointer whole deref stores a contextual byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe byte.* = 9;
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe byte.*;
+    testing::expect_equal<i64>(9, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+
+// ir
+// lower:
+// fn read_tag(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.tag %1: Node
+//   return %2: i64
+// }
+// fn read_count(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.count %1: Node
+//   return %2: i64
+// }
+// fn write_tag(%node: ptr<Node>, %tag: i64) -> void {
+// entry:
+//   %1: Node = ref.load %node: ptr<Node>
+//   %2: Node = field.set.tag %1: Node, %tag: i64
+//   ref.store %node: ptr<Node>, %2: Node
+//   return void: void
+// }
+// fn replace(%node: ptr<Node>, %value: Node) -> void {
+// entry:
+//   ref.store %node: ptr<Node>, %value: Node
+//   return void: void
+// }
+// fn test.raw_pointer_struct_deref_reads_and_writes() -> !void {
+// entry:
+//   %1: usize = const 64
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: ptr<Node> = cast %2: ptr<u8>, ptr<Node>
+//   %4: ptr<const Node> = cast %3: ptr<Node>, ptr<const Node>
+//   %5: i64 = const 7
+//   %6: i64 = const 1
+//   %7: Node = struct.new {tag: %5: i64, count: %6: i64}
+//   call.replace %3: ptr<Node>, %7: Node
+//   %9: i64 = const 7
+//   %10: i64 = call.read_tag %4: ptr<const Node>
+//   test.expect_equal %9: i64, %10: i64, i64
+//   %12: i64 = const 42
+//   call.write_tag %3: ptr<Node>, %12: i64
+//   %14: i64 = const 42
+//   %15: i64 = call.read_tag %4: ptr<const Node>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 1
+//   %18: i64 = call.read_count %4: ptr<const Node>
+//   test.expect_equal %17: i64, %18: i64, i64
+//   call.free %2: ptr<u8>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.raw_pointer_whole_deref_stores_a_contextual_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 9
+//   ref.store %2: ptr<u8>, %3: u8
+//   %5: u8 = ref.load %2: ptr<u8>
+//   %6: i64 = const 9
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// opt:
+// fn read_tag(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.tag %1: Node
+//   return %2: i64
+// }
+// fn read_count(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.count %1: Node
+//   return %2: i64
+// }
+// fn write_tag(%node: ptr<Node>, %tag: i64) -> void {
+// entry:
+//   %1: Node = ref.load %node: ptr<Node>
+//   %2: Node = field.set.tag %1: Node, %tag: i64
+//   ref.store %node: ptr<Node>, %2: Node
+//   return void: void
+// }
+// fn replace(%node: ptr<Node>, %value: Node) -> void {
+// entry:
+//   ref.store %node: ptr<Node>, %value: Node
+//   return void: void
+// }
+// fn test.raw_pointer_struct_deref_reads_and_writes() -> !void {
+// entry:
+//   %1: usize = const 64
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: ptr<Node> = cast %2: ptr<u8>, ptr<Node>
+//   %4: ptr<const Node> = cast %3: ptr<Node>, ptr<const Node>
+//   %5: i64 = const 7
+//   %6: i64 = const 1
+//   %7: Node = struct.new {tag: %5: i64, count: %6: i64}
+//   call.replace %3: ptr<Node>, %7: Node
+//   %9: i64 = const 7
+//   %10: i64 = call.read_tag %4: ptr<const Node>
+//   test.expect_equal %9: i64, %10: i64, i64
+//   %12: i64 = const 42
+//   call.write_tag %3: ptr<Node>, %12: i64
+//   %14: i64 = const 42
+//   %15: i64 = call.read_tag %4: ptr<const Node>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 1
+//   %18: i64 = call.read_count %4: ptr<const Node>
+//   test.expect_equal %17: i64, %18: i64, i64
+//   call.free %2: ptr<u8>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.raw_pointer_whole_deref_stores_a_contextual_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 9
+//   ref.store %2: ptr<u8>, %3: u8
+//   %5: u8 = ref.load %2: ptr<u8>
+//   %6: i64 = const 9
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }

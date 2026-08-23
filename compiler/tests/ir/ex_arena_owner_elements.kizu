@@ -1,0 +1,127 @@
+import std::arena;
+import std::mem;
+import std::string;
+
+struct Resource {
+    name: string::String,
+}
+
+fn (self: Resource) deinit() -> void {
+    let name = self.name.as_bytes();
+    print(name);
+    self.name.deinit();
+    return;
+}
+
+fn show(resource: &Resource) -> void {
+    let name = resource.name.as_bytes();
+    print(name);
+}
+
+fn owned_text(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let name = try owned_text(allocator, "released");
+    let resources = arena::new<Resource>(allocator);
+    defer resources.deinit();
+    let resource = resources.add(Resource {
+        name: move name
+    });
+    show(resources.at(resource));
+    return;
+}
+
+// run
+// features: arena owner-element deinit std-string
+// output:
+// released
+// released
+
+
+// ir
+// lower:
+// fn Resource.deinit(%self: Resource) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Resource
+//   %2: []u8 = call.std::string::String.as_bytes %1: std::string::String
+//   call.print %2: []u8
+//   %4: std::string::String = field.name %self: Resource
+//   call.std::string::String.deinit %4: std::string::String
+//   return void: void
+// }
+// fn show(%resource: Resource) -> void {
+// entry:
+//   %1: std::string::String = field.name %resource: Resource
+//   %2: []u8 = call.std::string::String.as_bytes %1: std::string::String
+//   call.print %2: []u8
+//   return void: void
+// }
+// fn owned_text(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "released"
+//   %3: !std::string::String = call.owned_text %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: std::arena::Arena<Resource> = arena.new %1: Allocator, Resource
+//   %6: Resource = struct.new {name: %4: std::string::String}
+//   %7: std::arena::Handle<Resource> = arena.add %5: std::arena::Arena<Resource>, %6: Resource
+//   %8: Resource = arena.at %5: std::arena::Arena<Resource>, %7: std::arena::Handle<Resource>
+//   call.show %8: Resource
+//   call.std::arena::Arena.deinit.Resource %5: std::arena::Arena<Resource>
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// opt:
+// fn Resource.deinit(%self: Resource) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Resource
+//   %2: []u8 = call.std::string::String.as_bytes %1: std::string::String
+//   call.print %2: []u8
+//   %4: std::string::String = field.name %self: Resource
+//   call.std::string::String.deinit %4: std::string::String
+//   return void: void
+// }
+// fn show(%resource: Resource) -> void {
+// entry:
+//   %1: std::string::String = field.name %resource: Resource
+//   %2: []u8 = call.std::string::String.as_bytes %1: std::string::String
+//   call.print %2: []u8
+//   return void: void
+// }
+// fn owned_text(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "released"
+//   %3: !std::string::String = call.owned_text %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: std::arena::Arena<Resource> = arena.new %1: Allocator, Resource
+//   %6: Resource = struct.new {name: %4: std::string::String}
+//   %7: std::arena::Handle<Resource> = arena.add %5: std::arena::Arena<Resource>, %6: Resource
+//   %8: Resource = arena.at %5: std::arena::Arena<Resource>, %7: std::arena::Handle<Resource>
+//   call.show %8: Resource
+//   call.std::arena::Arena.deinit.Resource %5: std::arena::Arena<Resource>
+//   %11: !void = error.ok
+//   return %11: !void
+// }

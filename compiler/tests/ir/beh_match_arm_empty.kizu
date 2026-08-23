@@ -1,0 +1,187 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+enum Step {
+    Count,
+    Skip,
+}
+
+fn step_of(index: i64) -> Step {
+    if index - (index / 2) * 2 == 0 {
+        return Step::Count;
+    }
+    return Step::Skip;
+}
+
+// `Tag => {},` is a no-op arm (ADR-0107): unlike `Tag => return,` it does not
+// leave the function, so a loop around the match keeps running.
+test "empty match arm skips without exiting the loop" {
+    let allocator = mem::page_allocator();
+    let counted = array::new<i64>(allocator);
+    defer counted.deinit();
+    var i = 0;
+    while i < 6 {
+        match step_of(i) {
+            Count => try counted.append(i),
+            Skip => {},
+        }
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(3, counted.len());
+    testing::expect_equal<i64>(0, counted.get_or_panic(0));
+    testing::expect_equal<i64>(2, counted.get_or_panic(1));
+    testing::expect_equal<i64>(4, counted.get_or_panic(2));
+    testing::expect_equal<i64>(6, i);
+}
+
+
+// ir
+// lower:
+// fn step_of(%index: i64) -> Step {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Step = const 0
+//   return %8: Step
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Step = const 1
+//   return %9: Step
+// }
+// fn test.empty_match_arm_skips_without_exiting_the_loop() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %4: i64 = phi [entry, %3: i64], [match.end.4, %13: i64]
+//   %5: i64 = const 6
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: Step = call.step_of %4: i64
+//   jump match.check.5
+// while.end.3:
+//   %14: i64 = const 3
+//   %15: i64 = call.std::array::Array.len.i64 %2: std::array::Array<i64>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 0
+//   %18: i64 = const 0
+//   %19: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %18: i64
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: i64 = const 2
+//   %22: i64 = const 1
+//   %23: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %22: i64
+//   test.expect_equal %21: i64, %23: i64, i64
+//   %25: i64 = const 4
+//   %26: i64 = const 2
+//   %27: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %26: i64
+//   test.expect_equal %25: i64, %27: i64, i64
+//   %29: i64 = const 6
+//   test.expect_equal %29: i64, %4: i64, i64
+//   array.deinit %2: std::array::Array<i64>
+//   %32: !void = error.ok
+//   return %32: !void
+// match.end.4:
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %4: i64, %12: i64
+//   jump while.header.1
+// match.check.5:
+//   %8: bool = binary.== %7: Step, 0: Step
+//   branch %8: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %9: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %4: i64
+//   error.try %9: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   jump match.end.4
+// match.check.7:
+//   %11: bool = binary.== %7: Step, 1: Step
+//   branch %11: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// opt:
+// fn step_of(%index: i64) -> Step {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Step = const 0
+//   return %8: Step
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Step = const 1
+//   return %9: Step
+// }
+// fn test.empty_match_arm_skips_without_exiting_the_loop() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %4: i64 = phi [entry, %3: i64], [match.end.4, %13: i64]
+//   %5: i64 = const 6
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: Step = call.step_of %4: i64
+//   jump match.check.5
+// while.end.3:
+//   %14: i64 = const 3
+//   %15: i64 = call.std::array::Array.len.i64 %2: std::array::Array<i64>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 0
+//   %18: i64 = const 0
+//   %19: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %18: i64
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: i64 = const 2
+//   %22: i64 = const 1
+//   %23: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %22: i64
+//   test.expect_equal %21: i64, %23: i64, i64
+//   %25: i64 = const 4
+//   %26: i64 = const 2
+//   %27: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %26: i64
+//   test.expect_equal %25: i64, %27: i64, i64
+//   %29: i64 = const 6
+//   test.expect_equal %29: i64, %4: i64, i64
+//   array.deinit %2: std::array::Array<i64>
+//   %32: !void = error.ok
+//   return %32: !void
+// match.end.4:
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %4: i64, %12: i64
+//   jump while.header.1
+// match.check.5:
+//   %8: bool = binary.== %7: Step, 0: Step
+//   branch %8: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %9: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %4: i64
+//   error.try %9: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   jump match.end.4
+// match.check.7:
+//   %11: bool = binary.== %7: Step, 1: Step
+//   branch %11: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }

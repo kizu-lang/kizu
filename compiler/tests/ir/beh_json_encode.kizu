@@ -1,0 +1,1770 @@
+import std::array;
+import std::json;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+// A scalar is a complete JSON document; `finish_into` appends the encoded
+// bytes into a String the caller owns.
+test "json encoder writes a scalar document" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.write_i64(42);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("42", bytes);
+}
+
+test "json encoder writes bool and null documents" {
+    let allocator = mem::page_allocator();
+    var yes = json::encoder(allocator);
+    defer yes.deinit();
+    try yes.write_bool(true);
+    var yes_out = string::new(allocator);
+    defer yes_out.deinit();
+    try yes.finish_into(yes_out);
+    let yes_bytes = yes_out.as_bytes();
+    testing::expect_equal<[]u8>("true", yes_bytes);
+
+    var nothing = json::encoder(allocator);
+    defer nothing.deinit();
+    try nothing.write_null();
+    var nothing_out = string::new(allocator);
+    defer nothing_out.deinit();
+    try nothing.finish_into(nothing_out);
+    let nothing_bytes = nothing_out.as_bytes();
+    testing::expect_equal<[]u8>("null", nothing_bytes);
+}
+
+// The comma sits between elements only, so the document closes with every
+// element separated and none trailing.
+test "json encoder separates array elements" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_array();
+    try encoder.write_i64(3);
+    try encoder.write_i64(5);
+    try encoder.write_null();
+    try encoder.end_array();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("[3,5,null]", bytes);
+}
+
+// Each nesting level tracks its own element count: the inner arrays place
+// commas independently of the outer one.
+test "json encoder nests arrays with independent commas" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_array();
+    try encoder.begin_array();
+    try encoder.end_array();
+    try encoder.begin_array();
+    try encoder.write_i64(1);
+    try encoder.write_i64(2);
+    try encoder.end_array();
+    try encoder.write_i64(9);
+    try encoder.end_array();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("[[],[1,2],9]", bytes);
+}
+
+test "json encoder writes an empty object document" {
+    let allocator = mem::page_allocator();
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_object();
+    try encoder.end_object();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("{}", bytes);
+}
+
+// A String's bytes reach the encoder as a lent view. The encoder holds no
+// view field and returns none, so the lend ends with the call and the source
+// String stays the owner of those bytes.
+test "json encoder writes a borrowed String view" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("alice");
+    let name_bytes = name.as_bytes();
+
+    var encoder = json::encoder(allocator);
+    defer encoder.deinit();
+    try encoder.begin_object();
+    try encoder.write_bytes_field("name", name_bytes);
+    try encoder.end_object();
+
+    var out = string::new(allocator);
+    defer out.deinit();
+    try encoder.finish_into(out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+pub struct Shape {
+    pub name: []u8,
+    pub origin: Point,
+    pub filled: bool,
+}
+
+// `encode<T>` writes a struct as an object of its public fields, in
+// declaration order, with a nested struct taking the same path.
+test "json encode writes a struct from its own shape" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let point = Point { x: 3, y: 4 };
+    try json::encode<Point>(allocator, point, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"x":3,"y":4}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+test "json encode nests structs and keeps declaration order" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let shape = Shape {
+        name: "box",
+        origin: Point { x: 1, y: 2 },
+        filled: true,
+    };
+    try json::encode<Shape>(allocator, shape, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"name":"box","origin":{"x":1,"y":2},"filled":true}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A scalar is a whole document, so encode is not limited to structs.
+test "json encode writes a scalar document" {
+    let allocator = mem::page_allocator();
+    var out = string::new(allocator);
+    defer out.deinit();
+    let count = 42;
+    try json::encode<i64>(allocator, count, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>("42", bytes);
+}
+
+pub struct Bag {
+    pub label: []u8,
+    pub items: array::Array<i64>,
+}
+
+pub struct Counted {
+    pub counts: map::Map<[]u8, i64>,
+}
+
+pub struct Boxed {
+    pub held: mem::Box<i64>,
+}
+
+pub struct Maybe {
+    pub set: ?i64,
+    pub unset: ?i64,
+}
+
+// An array field becomes a JSON array, in index order.
+test "json encode writes an array field" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    try bag.items.append(5);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Bag>(allocator, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3,5]}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A map becomes an object keyed by its own keys. `key_at` walks insertion
+// order, so the same map encodes the same way every run.
+test "json encode writes a map field in insertion order" {
+    let allocator = mem::page_allocator();
+    var counted = Counted { counts: map::new<[]u8, i64>(allocator) };
+    defer counted.deinit();
+    try counted.counts.insert("x", 1);
+    try counted.counts.insert("y", 2);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Counted>(allocator, counted, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"counts":{"x":1,"y":2}}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A box is the value it holds: sole ownership is a tree, so it adds no shape
+// of its own to the document.
+test "json encode writes through a box" {
+    let allocator = mem::page_allocator();
+    var boxed = Boxed { held: try mem::box<i64>(allocator, 77) };
+    defer boxed.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Boxed>(allocator, boxed, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"held":77}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An optional field carries JSON's own absent value, so a field that is unset
+// is written as null rather than dropped.
+test "json encode writes an unset optional as null" {
+    let allocator = mem::page_allocator();
+    let maybe = Maybe { set: 42, unset: null };
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Maybe>(allocator, maybe, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"set":42,"unset":null}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+pub struct Named {
+    pub id: i64,
+    pub name: string::String,
+}
+
+// A String is a string, not an object. Its bytes are private, so a walk that
+// treated it as a struct would write `{}` and drop the text -- the shape of
+// silent wrongness `unsupported` exists to prevent.
+test "json encode writes a String field as a string" {
+    let allocator = mem::page_allocator();
+    var named = Named { id: 7, name: string::new(allocator) };
+    defer named.deinit();
+    try named.name.append_bytes("alice");
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Named>(allocator, named, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"id":7,"name":"alice"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// The indented form differs from the compact one only in the whitespace
+// between parts: the same keys, the same order, the same values.
+test "json encode indents nested containers" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "nums",
+        \\  "items": [
+        \\    3
+        \\  ]
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// An empty container has nothing to indent, so it stays on one line rather
+// than becoming a pair of braces with a blank line between them.
+test "json encode keeps empty containers on one line" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "none", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 2, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{
+        \\  "label": "none",
+        \\  "items": []
+        \\}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A width of zero is the compact form, so one encoder covers both.
+test "json encode with zero width is the compact form" {
+    let allocator = mem::page_allocator();
+    var bag = Bag { label: "nums", items: array::new<i64>(allocator) };
+    defer bag.deinit();
+    try bag.items.append(3);
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode_with_spaces<Bag>(allocator, 0, bag, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"label":"nums","items":[3]}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+pub enum Visibility {
+    Public,
+    Private,
+}
+
+pub union Slot {
+    Vacant,
+    Number(i64),
+    Label(string::String),
+}
+
+fn (self: Slot) deinit() -> void {
+    match self {
+        Vacant => return,
+        Number(_) => return,
+        Label(text) => text.deinit(),
+    }
+    return;
+}
+
+pub struct Entryish {
+    pub visibility: Visibility,
+    pub slot: Slot,
+}
+
+// An enum is a variant that carries nothing, so it writes as the string naming
+// the tag rather than as an object of its own.
+test "json encode writes an enum tag as a string" {
+    let allocator = mem::page_allocator();
+    let visibility = Visibility::Private;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Visibility>(allocator, visibility, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\"Private"
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A union variant that carries nothing follows the same rule an enum tag does:
+// there is one representation, not one per declaration kind.
+test "json encode writes a payload-free union variant as a string" {
+    let allocator = mem::page_allocator();
+    var slot = Slot::Vacant;
+    defer slot.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Slot>(allocator, slot, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\"Vacant"
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A variant that carries a payload names itself with the single key of an
+// object, so the payload keeps its own shape underneath.
+test "json encode writes a union payload under the variant name" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("hi");
+    var slot = Slot::Label(move text);
+    defer slot.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Slot>(allocator, slot, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"Label":"hi"}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A sum type inside a struct writes under its field name, so one union field
+// no longer takes the whole struct out of the generic path.
+test "json encode writes sum fields of a struct" {
+    let allocator = mem::page_allocator();
+    var entry = Entryish { visibility: Visibility::Public, slot: Slot::Number(7) };
+    defer entry.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Entryish>(allocator, entry, out);
+    let bytes = out.as_bytes();
+    let expected =
+        \\{"visibility":"Public","slot":{"Number":7}}
+    ;
+    testing::expect_equal<[]u8>(expected, bytes);
+}
+
+// A `Value` writes back the document it was read from: its variants name
+// JSON's own shapes, so tagging them would wrap a document that already says
+// what it is.
+test "json encode writes a Value without tagging it" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"a":[1,true,null],"b":"x"}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<json::Value>(allocator, value, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(document, bytes);
+}
+
+
+// ir
+// lower:
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   return void: void
+// match.check.4:
+//   %3: bool = binary.== %1: i64, 1: i64
+//   branch %3: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %4: i64 = union.payload %self: Slot, Number
+//   return void: void
+// match.check.6:
+//   %5: bool = binary.== %1: i64, 2: i64
+//   branch %5: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %6: std::string::String = union.payload %self: Slot, Label
+//   call.std::string::String.deinit %6: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn Bag.deinit(%self: Bag) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.items %self: Bag
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Counted.deinit(%self: Counted) -> void {
+// entry:
+//   %1: std::map::Map<[]u8, i64> = field.counts %self: Counted
+//   call.std::map::Map.deinit.i64 %1: std::map::Map<[]u8, i64>
+//   return void: void
+// }
+// fn Boxed.deinit(%self: Boxed) -> void {
+// entry:
+//   %1: std::mem::Box<i64> = field.held %self: Boxed
+//   call.std::mem::Box.deinit.i64 %1: std::mem::Box<i64>
+//   return void: void
+// }
+// fn Named.deinit(%self: Named) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Named
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Entryish.deinit(%self: Entryish) -> void {
+// entry:
+//   %1: Slot = field.slot %self: Entryish
+//   call.Slot.deinit %1: Slot
+//   return void: void
+// }
+// fn test.json_encoder_writes_a_scalar_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: i64 = const 42
+//   %5: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %4: i64
+//   %6: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %5: !void, cleanup call.std::json::Encoder.deinit %6: std::json::Encoder
+//   %8: std::string::String = call.std::string::new %1: Allocator
+//   %9: &var std::string::String = local.slot %8: std::string::String
+//   %10: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %11: !void = call.std::json::Encoder.finish_into %10: std::json::Encoder, %9: &var std::string::String
+//   %12: std::string::String = ref.load %9: &var std::string::String
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: std::string::String = ref.load %9: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "42"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %9: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   %21: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %21: std::json::Encoder
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.json_encoder_writes_bool_and_null_documents() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: bool = const true
+//   %5: !void = call.std::json::Encoder.write_bool %3: &var std::json::Encoder, %4: bool
+//   %6: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %5: !void, cleanup call.std::json::Encoder.deinit %6: std::json::Encoder
+//   %8: std::string::String = call.std::string::new %1: Allocator
+//   %9: &var std::string::String = local.slot %8: std::string::String
+//   %10: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %11: !void = call.std::json::Encoder.finish_into %10: std::json::Encoder, %9: &var std::string::String
+//   %12: std::string::String = ref.load %9: &var std::string::String
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: std::string::String = ref.load %9: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "true"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %20: &var std::json::Encoder = local.slot %19: std::json::Encoder
+//   %21: !void = call.std::json::Encoder.write_null %20: &var std::json::Encoder
+//   %22: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %23: std::string::String = ref.load %9: &var std::string::String
+//   %24: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %21: !void, cleanup call.std::json::Encoder.deinit %22: std::json::Encoder; call.std::string::String.deinit %23: std::string::String; call.std::json::Encoder.deinit %24: std::json::Encoder
+//   %26: std::string::String = call.std::string::new %1: Allocator
+//   %27: &var std::string::String = local.slot %26: std::string::String
+//   %28: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %29: !void = call.std::json::Encoder.finish_into %28: std::json::Encoder, %27: &var std::string::String
+//   %30: std::string::String = ref.load %27: &var std::string::String
+//   %31: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %32: std::string::String = ref.load %9: &var std::string::String
+//   %33: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %29: !void, cleanup call.std::string::String.deinit %30: std::string::String; call.std::json::Encoder.deinit %31: std::json::Encoder; call.std::string::String.deinit %32: std::string::String; call.std::json::Encoder.deinit %33: std::json::Encoder
+//   %35: std::string::String = ref.load %27: &var std::string::String
+//   %36: []u8 = call.std::string::String.as_bytes %35: std::string::String
+//   %37: []u8 = const "null"
+//   test.expect_equal %37: []u8, %36: []u8, []u8
+//   %39: std::string::String = ref.load %27: &var std::string::String
+//   call.std::string::String.deinit %39: std::string::String
+//   %41: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %41: std::json::Encoder
+//   %43: std::string::String = ref.load %9: &var std::string::String
+//   call.std::string::String.deinit %43: std::string::String
+//   %45: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %45: std::json::Encoder
+//   %47: !void = error.ok
+//   return %47: !void
+// }
+// fn test.json_encoder_separates_array_elements() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: i64 = const 3
+//   %8: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %7: i64
+//   %9: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %8: !void, cleanup call.std::json::Encoder.deinit %9: std::json::Encoder
+//   %11: i64 = const 5
+//   %12: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %11: i64
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %12: !void, cleanup call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: !void = call.std::json::Encoder.write_null %3: &var std::json::Encoder
+//   %16: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %15: !void, cleanup call.std::json::Encoder.deinit %16: std::json::Encoder
+//   %18: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %19: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %18: !void, cleanup call.std::json::Encoder.deinit %19: std::json::Encoder
+//   %21: std::string::String = call.std::string::new %1: Allocator
+//   %22: &var std::string::String = local.slot %21: std::string::String
+//   %23: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %24: !void = call.std::json::Encoder.finish_into %23: std::json::Encoder, %22: &var std::string::String
+//   %25: std::string::String = ref.load %22: &var std::string::String
+//   %26: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %24: !void, cleanup call.std::string::String.deinit %25: std::string::String; call.std::json::Encoder.deinit %26: std::json::Encoder
+//   %28: std::string::String = ref.load %22: &var std::string::String
+//   %29: []u8 = call.std::string::String.as_bytes %28: std::string::String
+//   %30: []u8 = const "[3,5,null]"
+//   test.expect_equal %30: []u8, %29: []u8, []u8
+//   %32: std::string::String = ref.load %22: &var std::string::String
+//   call.std::string::String.deinit %32: std::string::String
+//   %34: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %34: std::json::Encoder
+//   %36: !void = error.ok
+//   return %36: !void
+// }
+// fn test.json_encoder_nests_arrays_with_independent_commas() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %8: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %7: !void, cleanup call.std::json::Encoder.deinit %8: std::json::Encoder
+//   %10: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %11: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %10: !void, cleanup call.std::json::Encoder.deinit %11: std::json::Encoder
+//   %13: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %14: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::json::Encoder.deinit %14: std::json::Encoder
+//   %16: i64 = const 1
+//   %17: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %16: i64
+//   %18: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %17: !void, cleanup call.std::json::Encoder.deinit %18: std::json::Encoder
+//   %20: i64 = const 2
+//   %21: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %20: i64
+//   %22: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %21: !void, cleanup call.std::json::Encoder.deinit %22: std::json::Encoder
+//   %24: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %25: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %24: !void, cleanup call.std::json::Encoder.deinit %25: std::json::Encoder
+//   %27: i64 = const 9
+//   %28: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %27: i64
+//   %29: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %28: !void, cleanup call.std::json::Encoder.deinit %29: std::json::Encoder
+//   %31: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %32: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %31: !void, cleanup call.std::json::Encoder.deinit %32: std::json::Encoder
+//   %34: std::string::String = call.std::string::new %1: Allocator
+//   %35: &var std::string::String = local.slot %34: std::string::String
+//   %36: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %37: !void = call.std::json::Encoder.finish_into %36: std::json::Encoder, %35: &var std::string::String
+//   %38: std::string::String = ref.load %35: &var std::string::String
+//   %39: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %37: !void, cleanup call.std::string::String.deinit %38: std::string::String; call.std::json::Encoder.deinit %39: std::json::Encoder
+//   %41: std::string::String = ref.load %35: &var std::string::String
+//   %42: []u8 = call.std::string::String.as_bytes %41: std::string::String
+//   %43: []u8 = const "[[],[1,2],9]"
+//   test.expect_equal %43: []u8, %42: []u8, []u8
+//   %45: std::string::String = ref.load %35: &var std::string::String
+//   call.std::string::String.deinit %45: std::string::String
+//   %47: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %47: std::json::Encoder
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.json_encoder_writes_an_empty_object_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_object %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: !void = call.std::json::Encoder.end_object %3: &var std::json::Encoder
+//   %8: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %7: !void, cleanup call.std::json::Encoder.deinit %8: std::json::Encoder
+//   %10: std::string::String = call.std::string::new %1: Allocator
+//   %11: &var std::string::String = local.slot %10: std::string::String
+//   %12: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %13: !void = call.std::json::Encoder.finish_into %12: std::json::Encoder, %11: &var std::string::String
+//   %14: std::string::String = ref.load %11: &var std::string::String
+//   %15: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::string::String.deinit %14: std::string::String; call.std::json::Encoder.deinit %15: std::json::Encoder
+//   %17: std::string::String = ref.load %11: &var std::string::String
+//   %18: []u8 = call.std::string::String.as_bytes %17: std::string::String
+//   %19: []u8 = const "{}"
+//   test.expect_equal %19: []u8, %18: []u8, []u8
+//   %21: std::string::String = ref.load %11: &var std::string::String
+//   call.std::string::String.deinit %21: std::string::String
+//   %23: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %23: std::json::Encoder
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.json_encoder_writes_a_borrowed_String_view() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "alice"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   %7: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %8: &var std::json::Encoder = local.slot %7: std::json::Encoder
+//   %9: !void = call.std::json::Encoder.begin_object %8: &var std::json::Encoder
+//   %10: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %9: !void, cleanup call.std::json::Encoder.deinit %10: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %12: []u8 = const "name"
+//   %13: !void = call.std::json::Encoder.write_bytes_field %8: &var std::json::Encoder, %12: []u8, %6: []u8
+//   %14: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::json::Encoder.deinit %14: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %16: !void = call.std::json::Encoder.end_object %8: &var std::json::Encoder
+//   %17: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %16: !void, cleanup call.std::json::Encoder.deinit %17: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %19: std::string::String = call.std::string::new %1: Allocator
+//   %20: &var std::string::String = local.slot %19: std::string::String
+//   %21: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   %22: !void = call.std::json::Encoder.finish_into %21: std::json::Encoder, %20: &var std::string::String
+//   %23: std::string::String = ref.load %20: &var std::string::String
+//   %24: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %22: !void, cleanup call.std::string::String.deinit %23: std::string::String; call.std::json::Encoder.deinit %24: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %26: std::string::String = ref.load %20: &var std::string::String
+//   %27: []u8 = call.std::string::String.as_bytes %26: std::string::String
+//   %28: []u8 = const "{\"name\":\"alice\"}"
+//   test.expect_equal %28: []u8, %27: []u8, []u8
+//   %30: std::string::String = ref.load %20: &var std::string::String
+//   call.std::string::String.deinit %30: std::string::String
+//   %32: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %32: std::json::Encoder
+//   call.std::string::String.deinit %2: std::string::String
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_encode_writes_a_struct_from_its_own_shape() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 3
+//   %5: i64 = const 4
+//   %6: Point = struct.new {x: %4: i64, y: %5: i64}
+//   %7: !void = call.std::json::encode.Point %1: Allocator, %6: Point, %3: &var std::string::String
+//   %8: std::string::String = ref.load %3: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   %12: []u8 = const "{\"x\":3,\"y\":4}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.json_encode_nests_structs_and_keeps_declaration_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: []u8 = const "box"
+//   %5: i64 = const 1
+//   %6: i64 = const 2
+//   %7: Point = struct.new {x: %5: i64, y: %6: i64}
+//   %8: bool = const true
+//   %9: Shape = struct.new {name: %4: []u8, origin: %7: Point, filled: %8: bool}
+//   %10: !void = call.std::json::encode.Shape %1: Allocator, %9: Shape, %3: &var std::string::String
+//   %11: std::string::String = ref.load %3: &var std::string::String
+//   error.try %10: !void, cleanup call.std::string::String.deinit %11: std::string::String
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   %14: []u8 = call.std::string::String.as_bytes %13: std::string::String
+//   %15: []u8 = const "{\"name\":\"box\",\"origin\":{\"x\":1,\"y\":2},\"filled\":true}"
+//   test.expect_equal %15: []u8, %14: []u8, []u8
+//   %17: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %17: std::string::String
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_encode_writes_a_scalar_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 42
+//   %5: !void = call.std::json::encode.i64 %1: Allocator, %4: i64, %3: &var std::string::String
+//   %6: std::string::String = ref.load %3: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: std::string::String = ref.load %3: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "42"
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_encode_writes_an_array_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::array::Array<i64> = field.items %4: Bag
+//   %10: i64 = const 5
+//   %11: !void = call.std::array::Array.append.i64 %9: std::array::Array<i64>, %10: i64
+//   error.try %11: !void, cleanup call.Bag.deinit %4: Bag
+//   %13: std::string::String = call.std::string::new %1: Allocator
+//   %14: &var std::string::String = local.slot %13: std::string::String
+//   %15: !void = call.std::json::encode.Bag %1: Allocator, %4: Bag, %14: &var std::string::String
+//   %16: std::string::String = ref.load %14: &var std::string::String
+//   error.try %15: !void, cleanup call.std::string::String.deinit %16: std::string::String; call.Bag.deinit %4: Bag
+//   %18: std::string::String = ref.load %14: &var std::string::String
+//   %19: []u8 = call.std::string::String.as_bytes %18: std::string::String
+//   %20: []u8 = const "{\"label\":\"nums\",\"items\":[3,5]}"
+//   test.expect_equal %20: []u8, %19: []u8, []u8
+//   %22: std::string::String = ref.load %14: &var std::string::String
+//   call.std::string::String.deinit %22: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.json_encode_writes_a_map_field_in_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: Counted = struct.new {counts: %2: std::map::Map<[]u8, i64>}
+//   %4: std::map::Map<[]u8, i64> = field.counts %3: Counted
+//   %5: []u8 = const "x"
+//   %6: i64 = const 1
+//   %7: !void = call.std::map::Map.insert.i64 %4: std::map::Map<[]u8, i64>, %5: []u8, %6: i64
+//   error.try %7: !void, cleanup call.Counted.deinit %3: Counted
+//   %9: std::map::Map<[]u8, i64> = field.counts %3: Counted
+//   %10: []u8 = const "y"
+//   %11: i64 = const 2
+//   %12: !void = call.std::map::Map.insert.i64 %9: std::map::Map<[]u8, i64>, %10: []u8, %11: i64
+//   error.try %12: !void, cleanup call.Counted.deinit %3: Counted
+//   %14: std::string::String = call.std::string::new %1: Allocator
+//   %15: &var std::string::String = local.slot %14: std::string::String
+//   %16: !void = call.std::json::encode.Counted %1: Allocator, %3: Counted, %15: &var std::string::String
+//   %17: std::string::String = ref.load %15: &var std::string::String
+//   error.try %16: !void, cleanup call.std::string::String.deinit %17: std::string::String; call.Counted.deinit %3: Counted
+//   %19: std::string::String = ref.load %15: &var std::string::String
+//   %20: []u8 = call.std::string::String.as_bytes %19: std::string::String
+//   %21: []u8 = const "{\"counts\":{\"x\":1,\"y\":2}}"
+//   test.expect_equal %21: []u8, %20: []u8, []u8
+//   %23: std::string::String = ref.load %15: &var std::string::String
+//   call.std::string::String.deinit %23: std::string::String
+//   call.Counted.deinit %3: Counted
+//   %26: !void = error.ok
+//   return %26: !void
+// }
+// fn test.json_encode_writes_through_a_box() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 77
+//   %3: !std::mem::Box<i64> = call.std::mem::box.i64 %1: Allocator, %2: i64
+//   %4: std::mem::Box<i64> = error.try %3: !std::mem::Box<i64>
+//   %5: Boxed = struct.new {held: %4: std::mem::Box<i64>}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Boxed %1: Allocator, %5: Boxed, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Boxed.deinit %5: Boxed
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"held\":77}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Boxed.deinit %5: Boxed
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_writes_an_unset_optional_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 42
+//   %3: ?i64 = opt.some %2: i64
+//   %4: ?i64 = opt.null
+//   %5: Maybe = struct.new {set: %3: ?i64, unset: %4: ?i64}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Maybe %1: Allocator, %5: Maybe, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"set\":42,\"unset\":null}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.json_encode_writes_a_String_field_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 7
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: Named = struct.new {id: %2: i64, name: %3: std::string::String}
+//   %5: std::string::String = field.name %4: Named
+//   %6: []u8 = const "alice"
+//   %7: !void = call.std::string::String.append_bytes %5: std::string::String, %6: []u8
+//   error.try %7: !void, cleanup call.Named.deinit %4: Named
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: !void = call.std::json::encode.Named %1: Allocator, %4: Named, %10: &var std::string::String
+//   %12: std::string::String = ref.load %10: &var std::string::String
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.Named.deinit %4: Named
+//   %14: std::string::String = ref.load %10: &var std::string::String
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   %16: []u8 = const "{\"id\":7,\"name\":\"alice\"}"
+//   test.expect_equal %16: []u8, %15: []u8, []u8
+//   %18: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %18: std::string::String
+//   call.Named.deinit %4: Named
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.json_encode_indents_nested_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: i64 = const 2
+//   %12: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %11: i64, %4: Bag, %10: &var std::string::String
+//   %13: std::string::String = ref.load %10: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String; call.Bag.deinit %4: Bag
+//   %15: std::string::String = ref.load %10: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "{\n  \"label\": \"nums\",\n  \"items\": [\n    3\n  ]\n}"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.json_encode_keeps_empty_containers_on_one_line() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "none"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: i64 = const 2
+//   %8: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %7: i64, %4: Bag, %6: &var std::string::String
+//   %9: std::string::String = ref.load %6: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Bag.deinit %4: Bag
+//   %11: std::string::String = ref.load %6: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\n  \"label\": \"none\",\n  \"items\": []\n}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_with_zero_width_is_the_compact_form() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: i64 = const 0
+//   %12: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %11: i64, %4: Bag, %10: &var std::string::String
+//   %13: std::string::String = ref.load %10: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String; call.Bag.deinit %4: Bag
+//   %15: std::string::String = ref.load %10: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "{\"label\":\"nums\",\"items\":[3]}"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.json_encode_writes_an_enum_tag_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Visibility = const 1
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: &var std::string::String = local.slot %3: std::string::String
+//   %5: !void = call.std::json::encode.Visibility %1: Allocator, %2: Visibility, %4: &var std::string::String
+//   %6: std::string::String = ref.load %4: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: std::string::String = ref.load %4: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "\"Private\""
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %4: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_encode_writes_a_payload_free_union_variant_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Slot = union.new Vacant
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: &var std::string::String = local.slot %3: std::string::String
+//   %5: !void = call.std::json::encode.Slot %1: Allocator, %2: Slot, %4: &var std::string::String
+//   %6: std::string::String = ref.load %4: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String; call.Slot.deinit %2: Slot
+//   %8: std::string::String = ref.load %4: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "\"Vacant\""
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %4: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   call.Slot.deinit %2: Slot
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.json_encode_writes_a_union_payload_under_the_variant_name() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "hi"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: Slot = union.new %2: std::string::String, Label
+//   %7: std::string::String = call.std::string::new %1: Allocator
+//   %8: &var std::string::String = local.slot %7: std::string::String
+//   %9: !void = call.std::json::encode.Slot %1: Allocator, %6: Slot, %8: &var std::string::String
+//   %10: std::string::String = ref.load %8: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String; call.Slot.deinit %6: Slot
+//   %12: std::string::String = ref.load %8: &var std::string::String
+//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
+//   %14: []u8 = const "{\"Label\":\"hi\"}"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   %16: std::string::String = ref.load %8: &var std::string::String
+//   call.std::string::String.deinit %16: std::string::String
+//   call.Slot.deinit %6: Slot
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_encode_writes_sum_fields_of_a_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Visibility = const 0
+//   %3: i64 = const 7
+//   %4: Slot = union.new %3: i64, Number
+//   %5: Entryish = struct.new {visibility: %2: Visibility, slot: %4: Slot}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Entryish %1: Allocator, %5: Entryish, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Entryish.deinit %5: Entryish
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"visibility\":\"Public\",\"slot\":{\"Number\":7}}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Entryish.deinit %5: Entryish
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_writes_a_Value_without_tagging_it() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"a\":[1,true,null],\"b\":\"x\"}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %4: std::json::Value, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.std::json::Value.deinit %4: std::json::Value
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   test.expect_equal %2: []u8, %11: []u8, []u8
+//   %13: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %13: std::string::String
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// opt:
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   return void: void
+// match.check.4:
+//   %3: bool = binary.== %1: i64, 1: i64
+//   branch %3: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   return void: void
+// match.check.6:
+//   %5: bool = binary.== %1: i64, 2: i64
+//   branch %5: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %6: std::string::String = union.payload %self: Slot, Label
+//   call.std::string::String.deinit %6: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn Bag.deinit(%self: Bag) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.items %self: Bag
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Counted.deinit(%self: Counted) -> void {
+// entry:
+//   %1: std::map::Map<[]u8, i64> = field.counts %self: Counted
+//   call.std::map::Map.deinit.i64 %1: std::map::Map<[]u8, i64>
+//   return void: void
+// }
+// fn Boxed.deinit(%self: Boxed) -> void {
+// entry:
+//   %1: std::mem::Box<i64> = field.held %self: Boxed
+//   call.std::mem::Box.deinit.i64 %1: std::mem::Box<i64>
+//   return void: void
+// }
+// fn Named.deinit(%self: Named) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Named
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Entryish.deinit(%self: Entryish) -> void {
+// entry:
+//   %1: Slot = field.slot %self: Entryish
+//   call.Slot.deinit %1: Slot
+//   return void: void
+// }
+// fn test.json_encoder_writes_a_scalar_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: i64 = const 42
+//   %5: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %4: i64
+//   %6: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %5: !void, cleanup call.std::json::Encoder.deinit %6: std::json::Encoder
+//   %8: std::string::String = call.std::string::new %1: Allocator
+//   %9: &var std::string::String = local.slot %8: std::string::String
+//   %10: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %11: !void = call.std::json::Encoder.finish_into %10: std::json::Encoder, %9: &var std::string::String
+//   %12: std::string::String = ref.load %9: &var std::string::String
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: std::string::String = ref.load %9: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "42"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %9: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   %21: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %21: std::json::Encoder
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.json_encoder_writes_bool_and_null_documents() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: bool = const true
+//   %5: !void = call.std::json::Encoder.write_bool %3: &var std::json::Encoder, %4: bool
+//   %6: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %5: !void, cleanup call.std::json::Encoder.deinit %6: std::json::Encoder
+//   %8: std::string::String = call.std::string::new %1: Allocator
+//   %9: &var std::string::String = local.slot %8: std::string::String
+//   %10: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %11: !void = call.std::json::Encoder.finish_into %10: std::json::Encoder, %9: &var std::string::String
+//   %12: std::string::String = ref.load %9: &var std::string::String
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: std::string::String = ref.load %9: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "true"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %20: &var std::json::Encoder = local.slot %19: std::json::Encoder
+//   %21: !void = call.std::json::Encoder.write_null %20: &var std::json::Encoder
+//   %22: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %23: std::string::String = ref.load %9: &var std::string::String
+//   %24: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %21: !void, cleanup call.std::json::Encoder.deinit %22: std::json::Encoder; call.std::string::String.deinit %23: std::string::String; call.std::json::Encoder.deinit %24: std::json::Encoder
+//   %26: std::string::String = call.std::string::new %1: Allocator
+//   %27: &var std::string::String = local.slot %26: std::string::String
+//   %28: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %29: !void = call.std::json::Encoder.finish_into %28: std::json::Encoder, %27: &var std::string::String
+//   %30: std::string::String = ref.load %27: &var std::string::String
+//   %31: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   %32: std::string::String = ref.load %9: &var std::string::String
+//   %33: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %29: !void, cleanup call.std::string::String.deinit %30: std::string::String; call.std::json::Encoder.deinit %31: std::json::Encoder; call.std::string::String.deinit %32: std::string::String; call.std::json::Encoder.deinit %33: std::json::Encoder
+//   %35: std::string::String = ref.load %27: &var std::string::String
+//   %36: []u8 = call.std::string::String.as_bytes %35: std::string::String
+//   %37: []u8 = const "null"
+//   test.expect_equal %37: []u8, %36: []u8, []u8
+//   %39: std::string::String = ref.load %27: &var std::string::String
+//   call.std::string::String.deinit %39: std::string::String
+//   %41: std::json::Encoder = ref.load %20: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %41: std::json::Encoder
+//   %43: std::string::String = ref.load %9: &var std::string::String
+//   call.std::string::String.deinit %43: std::string::String
+//   %45: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %45: std::json::Encoder
+//   %47: !void = error.ok
+//   return %47: !void
+// }
+// fn test.json_encoder_separates_array_elements() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: i64 = const 3
+//   %8: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %7: i64
+//   %9: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %8: !void, cleanup call.std::json::Encoder.deinit %9: std::json::Encoder
+//   %11: i64 = const 5
+//   %12: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %11: i64
+//   %13: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %12: !void, cleanup call.std::json::Encoder.deinit %13: std::json::Encoder
+//   %15: !void = call.std::json::Encoder.write_null %3: &var std::json::Encoder
+//   %16: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %15: !void, cleanup call.std::json::Encoder.deinit %16: std::json::Encoder
+//   %18: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %19: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %18: !void, cleanup call.std::json::Encoder.deinit %19: std::json::Encoder
+//   %21: std::string::String = call.std::string::new %1: Allocator
+//   %22: &var std::string::String = local.slot %21: std::string::String
+//   %23: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %24: !void = call.std::json::Encoder.finish_into %23: std::json::Encoder, %22: &var std::string::String
+//   %25: std::string::String = ref.load %22: &var std::string::String
+//   %26: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %24: !void, cleanup call.std::string::String.deinit %25: std::string::String; call.std::json::Encoder.deinit %26: std::json::Encoder
+//   %28: std::string::String = ref.load %22: &var std::string::String
+//   %29: []u8 = call.std::string::String.as_bytes %28: std::string::String
+//   %30: []u8 = const "[3,5,null]"
+//   test.expect_equal %30: []u8, %29: []u8, []u8
+//   %32: std::string::String = ref.load %22: &var std::string::String
+//   call.std::string::String.deinit %32: std::string::String
+//   %34: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %34: std::json::Encoder
+//   %36: !void = error.ok
+//   return %36: !void
+// }
+// fn test.json_encoder_nests_arrays_with_independent_commas() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %8: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %7: !void, cleanup call.std::json::Encoder.deinit %8: std::json::Encoder
+//   %10: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %11: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %10: !void, cleanup call.std::json::Encoder.deinit %11: std::json::Encoder
+//   %13: !void = call.std::json::Encoder.begin_array %3: &var std::json::Encoder
+//   %14: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::json::Encoder.deinit %14: std::json::Encoder
+//   %16: i64 = const 1
+//   %17: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %16: i64
+//   %18: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %17: !void, cleanup call.std::json::Encoder.deinit %18: std::json::Encoder
+//   %20: i64 = const 2
+//   %21: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %20: i64
+//   %22: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %21: !void, cleanup call.std::json::Encoder.deinit %22: std::json::Encoder
+//   %24: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %25: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %24: !void, cleanup call.std::json::Encoder.deinit %25: std::json::Encoder
+//   %27: i64 = const 9
+//   %28: !void = call.std::json::Encoder.write_i64 %3: &var std::json::Encoder, %27: i64
+//   %29: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %28: !void, cleanup call.std::json::Encoder.deinit %29: std::json::Encoder
+//   %31: !void = call.std::json::Encoder.end_array %3: &var std::json::Encoder
+//   %32: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %31: !void, cleanup call.std::json::Encoder.deinit %32: std::json::Encoder
+//   %34: std::string::String = call.std::string::new %1: Allocator
+//   %35: &var std::string::String = local.slot %34: std::string::String
+//   %36: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %37: !void = call.std::json::Encoder.finish_into %36: std::json::Encoder, %35: &var std::string::String
+//   %38: std::string::String = ref.load %35: &var std::string::String
+//   %39: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %37: !void, cleanup call.std::string::String.deinit %38: std::string::String; call.std::json::Encoder.deinit %39: std::json::Encoder
+//   %41: std::string::String = ref.load %35: &var std::string::String
+//   %42: []u8 = call.std::string::String.as_bytes %41: std::string::String
+//   %43: []u8 = const "[[],[1,2],9]"
+//   test.expect_equal %43: []u8, %42: []u8, []u8
+//   %45: std::string::String = ref.load %35: &var std::string::String
+//   call.std::string::String.deinit %45: std::string::String
+//   %47: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %47: std::json::Encoder
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.json_encoder_writes_an_empty_object_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %3: &var std::json::Encoder = local.slot %2: std::json::Encoder
+//   %4: !void = call.std::json::Encoder.begin_object %3: &var std::json::Encoder
+//   %5: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %4: !void, cleanup call.std::json::Encoder.deinit %5: std::json::Encoder
+//   %7: !void = call.std::json::Encoder.end_object %3: &var std::json::Encoder
+//   %8: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %7: !void, cleanup call.std::json::Encoder.deinit %8: std::json::Encoder
+//   %10: std::string::String = call.std::string::new %1: Allocator
+//   %11: &var std::string::String = local.slot %10: std::string::String
+//   %12: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   %13: !void = call.std::json::Encoder.finish_into %12: std::json::Encoder, %11: &var std::string::String
+//   %14: std::string::String = ref.load %11: &var std::string::String
+//   %15: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::string::String.deinit %14: std::string::String; call.std::json::Encoder.deinit %15: std::json::Encoder
+//   %17: std::string::String = ref.load %11: &var std::string::String
+//   %18: []u8 = call.std::string::String.as_bytes %17: std::string::String
+//   %19: []u8 = const "{}"
+//   test.expect_equal %19: []u8, %18: []u8, []u8
+//   %21: std::string::String = ref.load %11: &var std::string::String
+//   call.std::string::String.deinit %21: std::string::String
+//   %23: std::json::Encoder = ref.load %3: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %23: std::json::Encoder
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.json_encoder_writes_a_borrowed_String_view() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "alice"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   %7: std::json::Encoder = call.std::json::encoder %1: Allocator
+//   %8: &var std::json::Encoder = local.slot %7: std::json::Encoder
+//   %9: !void = call.std::json::Encoder.begin_object %8: &var std::json::Encoder
+//   %10: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %9: !void, cleanup call.std::json::Encoder.deinit %10: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %12: []u8 = const "name"
+//   %13: !void = call.std::json::Encoder.write_bytes_field %8: &var std::json::Encoder, %12: []u8, %6: []u8
+//   %14: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %13: !void, cleanup call.std::json::Encoder.deinit %14: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %16: !void = call.std::json::Encoder.end_object %8: &var std::json::Encoder
+//   %17: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %16: !void, cleanup call.std::json::Encoder.deinit %17: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %19: std::string::String = call.std::string::new %1: Allocator
+//   %20: &var std::string::String = local.slot %19: std::string::String
+//   %21: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   %22: !void = call.std::json::Encoder.finish_into %21: std::json::Encoder, %20: &var std::string::String
+//   %23: std::string::String = ref.load %20: &var std::string::String
+//   %24: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   error.try %22: !void, cleanup call.std::string::String.deinit %23: std::string::String; call.std::json::Encoder.deinit %24: std::json::Encoder; call.std::string::String.deinit %2: std::string::String
+//   %26: std::string::String = ref.load %20: &var std::string::String
+//   %27: []u8 = call.std::string::String.as_bytes %26: std::string::String
+//   %28: []u8 = const "{\"name\":\"alice\"}"
+//   test.expect_equal %28: []u8, %27: []u8, []u8
+//   %30: std::string::String = ref.load %20: &var std::string::String
+//   call.std::string::String.deinit %30: std::string::String
+//   %32: std::json::Encoder = ref.load %8: &var std::json::Encoder
+//   call.std::json::Encoder.deinit %32: std::json::Encoder
+//   call.std::string::String.deinit %2: std::string::String
+//   %35: !void = error.ok
+//   return %35: !void
+// }
+// fn test.json_encode_writes_a_struct_from_its_own_shape() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 3
+//   %5: i64 = const 4
+//   %6: Point = struct.new {x: %4: i64, y: %5: i64}
+//   %7: !void = call.std::json::encode.Point %1: Allocator, %6: Point, %3: &var std::string::String
+//   %8: std::string::String = ref.load %3: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   %12: []u8 = const "{\"x\":3,\"y\":4}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.json_encode_nests_structs_and_keeps_declaration_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: []u8 = const "box"
+//   %5: i64 = const 1
+//   %6: i64 = const 2
+//   %7: Point = struct.new {x: %5: i64, y: %6: i64}
+//   %8: bool = const true
+//   %9: Shape = struct.new {name: %4: []u8, origin: %7: Point, filled: %8: bool}
+//   %10: !void = call.std::json::encode.Shape %1: Allocator, %9: Shape, %3: &var std::string::String
+//   %11: std::string::String = ref.load %3: &var std::string::String
+//   error.try %10: !void, cleanup call.std::string::String.deinit %11: std::string::String
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   %14: []u8 = call.std::string::String.as_bytes %13: std::string::String
+//   %15: []u8 = const "{\"name\":\"box\",\"origin\":{\"x\":1,\"y\":2},\"filled\":true}"
+//   test.expect_equal %15: []u8, %14: []u8, []u8
+//   %17: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %17: std::string::String
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_encode_writes_a_scalar_document() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 42
+//   %5: !void = call.std::json::encode.i64 %1: Allocator, %4: i64, %3: &var std::string::String
+//   %6: std::string::String = ref.load %3: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: std::string::String = ref.load %3: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "42"
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_encode_writes_an_array_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::array::Array<i64> = field.items %4: Bag
+//   %10: i64 = const 5
+//   %11: !void = call.std::array::Array.append.i64 %9: std::array::Array<i64>, %10: i64
+//   error.try %11: !void, cleanup call.Bag.deinit %4: Bag
+//   %13: std::string::String = call.std::string::new %1: Allocator
+//   %14: &var std::string::String = local.slot %13: std::string::String
+//   %15: !void = call.std::json::encode.Bag %1: Allocator, %4: Bag, %14: &var std::string::String
+//   %16: std::string::String = ref.load %14: &var std::string::String
+//   error.try %15: !void, cleanup call.std::string::String.deinit %16: std::string::String; call.Bag.deinit %4: Bag
+//   %18: std::string::String = ref.load %14: &var std::string::String
+//   %19: []u8 = call.std::string::String.as_bytes %18: std::string::String
+//   %20: []u8 = const "{\"label\":\"nums\",\"items\":[3,5]}"
+//   test.expect_equal %20: []u8, %19: []u8, []u8
+//   %22: std::string::String = ref.load %14: &var std::string::String
+//   call.std::string::String.deinit %22: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// fn test.json_encode_writes_a_map_field_in_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: Counted = struct.new {counts: %2: std::map::Map<[]u8, i64>}
+//   %4: std::map::Map<[]u8, i64> = field.counts %3: Counted
+//   %5: []u8 = const "x"
+//   %6: i64 = const 1
+//   %7: !void = call.std::map::Map.insert.i64 %4: std::map::Map<[]u8, i64>, %5: []u8, %6: i64
+//   error.try %7: !void, cleanup call.Counted.deinit %3: Counted
+//   %9: std::map::Map<[]u8, i64> = field.counts %3: Counted
+//   %10: []u8 = const "y"
+//   %11: i64 = const 2
+//   %12: !void = call.std::map::Map.insert.i64 %9: std::map::Map<[]u8, i64>, %10: []u8, %11: i64
+//   error.try %12: !void, cleanup call.Counted.deinit %3: Counted
+//   %14: std::string::String = call.std::string::new %1: Allocator
+//   %15: &var std::string::String = local.slot %14: std::string::String
+//   %16: !void = call.std::json::encode.Counted %1: Allocator, %3: Counted, %15: &var std::string::String
+//   %17: std::string::String = ref.load %15: &var std::string::String
+//   error.try %16: !void, cleanup call.std::string::String.deinit %17: std::string::String; call.Counted.deinit %3: Counted
+//   %19: std::string::String = ref.load %15: &var std::string::String
+//   %20: []u8 = call.std::string::String.as_bytes %19: std::string::String
+//   %21: []u8 = const "{\"counts\":{\"x\":1,\"y\":2}}"
+//   test.expect_equal %21: []u8, %20: []u8, []u8
+//   %23: std::string::String = ref.load %15: &var std::string::String
+//   call.std::string::String.deinit %23: std::string::String
+//   call.Counted.deinit %3: Counted
+//   %26: !void = error.ok
+//   return %26: !void
+// }
+// fn test.json_encode_writes_through_a_box() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 77
+//   %3: !std::mem::Box<i64> = call.std::mem::box.i64 %1: Allocator, %2: i64
+//   %4: std::mem::Box<i64> = error.try %3: !std::mem::Box<i64>
+//   %5: Boxed = struct.new {held: %4: std::mem::Box<i64>}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Boxed %1: Allocator, %5: Boxed, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Boxed.deinit %5: Boxed
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"held\":77}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Boxed.deinit %5: Boxed
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_writes_an_unset_optional_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 42
+//   %3: ?i64 = opt.some %2: i64
+//   %4: ?i64 = opt.null
+//   %5: Maybe = struct.new {set: %3: ?i64, unset: %4: ?i64}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Maybe %1: Allocator, %5: Maybe, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"set\":42,\"unset\":null}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.json_encode_writes_a_String_field_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 7
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: Named = struct.new {id: %2: i64, name: %3: std::string::String}
+//   %5: std::string::String = field.name %4: Named
+//   %6: []u8 = const "alice"
+//   %7: !void = call.std::string::String.append_bytes %5: std::string::String, %6: []u8
+//   error.try %7: !void, cleanup call.Named.deinit %4: Named
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: !void = call.std::json::encode.Named %1: Allocator, %4: Named, %10: &var std::string::String
+//   %12: std::string::String = ref.load %10: &var std::string::String
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.Named.deinit %4: Named
+//   %14: std::string::String = ref.load %10: &var std::string::String
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   %16: []u8 = const "{\"id\":7,\"name\":\"alice\"}"
+//   test.expect_equal %16: []u8, %15: []u8, []u8
+//   %18: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %18: std::string::String
+//   call.Named.deinit %4: Named
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.json_encode_indents_nested_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: i64 = const 2
+//   %12: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %11: i64, %4: Bag, %10: &var std::string::String
+//   %13: std::string::String = ref.load %10: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String; call.Bag.deinit %4: Bag
+//   %15: std::string::String = ref.load %10: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "{\n  \"label\": \"nums\",\n  \"items\": [\n    3\n  ]\n}"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.json_encode_keeps_empty_containers_on_one_line() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "none"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: i64 = const 2
+//   %8: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %7: i64, %4: Bag, %6: &var std::string::String
+//   %9: std::string::String = ref.load %6: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Bag.deinit %4: Bag
+//   %11: std::string::String = ref.load %6: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\n  \"label\": \"none\",\n  \"items\": []\n}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_with_zero_width_is_the_compact_form() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "nums"
+//   %3: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %4: Bag = struct.new {label: %2: []u8, items: %3: std::array::Array<i64>}
+//   %5: std::array::Array<i64> = field.items %4: Bag
+//   %6: i64 = const 3
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup call.Bag.deinit %4: Bag
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: i64 = const 0
+//   %12: !void = call.std::json::encode_with_spaces.Bag %1: Allocator, %11: i64, %4: Bag, %10: &var std::string::String
+//   %13: std::string::String = ref.load %10: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String; call.Bag.deinit %4: Bag
+//   %15: std::string::String = ref.load %10: &var std::string::String
+//   %16: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %17: []u8 = const "{\"label\":\"nums\",\"items\":[3]}"
+//   test.expect_equal %17: []u8, %16: []u8, []u8
+//   %19: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %19: std::string::String
+//   call.Bag.deinit %4: Bag
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.json_encode_writes_an_enum_tag_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Visibility = const 1
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: &var std::string::String = local.slot %3: std::string::String
+//   %5: !void = call.std::json::encode.Visibility %1: Allocator, %2: Visibility, %4: &var std::string::String
+//   %6: std::string::String = ref.load %4: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: std::string::String = ref.load %4: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "\"Private\""
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %4: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_encode_writes_a_payload_free_union_variant_as_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Slot = union.new Vacant
+//   %3: std::string::String = call.std::string::new %1: Allocator
+//   %4: &var std::string::String = local.slot %3: std::string::String
+//   %5: !void = call.std::json::encode.Slot %1: Allocator, %2: Slot, %4: &var std::string::String
+//   %6: std::string::String = ref.load %4: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String; call.Slot.deinit %2: Slot
+//   %8: std::string::String = ref.load %4: &var std::string::String
+//   %9: []u8 = call.std::string::String.as_bytes %8: std::string::String
+//   %10: []u8 = const "\"Vacant\""
+//   test.expect_equal %10: []u8, %9: []u8, []u8
+//   %12: std::string::String = ref.load %4: &var std::string::String
+//   call.std::string::String.deinit %12: std::string::String
+//   call.Slot.deinit %2: Slot
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.json_encode_writes_a_union_payload_under_the_variant_name() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "hi"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: Slot = union.new %2: std::string::String, Label
+//   %7: std::string::String = call.std::string::new %1: Allocator
+//   %8: &var std::string::String = local.slot %7: std::string::String
+//   %9: !void = call.std::json::encode.Slot %1: Allocator, %6: Slot, %8: &var std::string::String
+//   %10: std::string::String = ref.load %8: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String; call.Slot.deinit %6: Slot
+//   %12: std::string::String = ref.load %8: &var std::string::String
+//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
+//   %14: []u8 = const "{\"Label\":\"hi\"}"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   %16: std::string::String = ref.load %8: &var std::string::String
+//   call.std::string::String.deinit %16: std::string::String
+//   call.Slot.deinit %6: Slot
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_encode_writes_sum_fields_of_a_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: Visibility = const 0
+//   %3: i64 = const 7
+//   %4: Slot = union.new %3: i64, Number
+//   %5: Entryish = struct.new {visibility: %2: Visibility, slot: %4: Slot}
+//   %6: std::string::String = call.std::string::new %1: Allocator
+//   %7: &var std::string::String = local.slot %6: std::string::String
+//   %8: !void = call.std::json::encode.Entryish %1: Allocator, %5: Entryish, %7: &var std::string::String
+//   %9: std::string::String = ref.load %7: &var std::string::String
+//   error.try %8: !void, cleanup call.std::string::String.deinit %9: std::string::String; call.Entryish.deinit %5: Entryish
+//   %11: std::string::String = ref.load %7: &var std::string::String
+//   %12: []u8 = call.std::string::String.as_bytes %11: std::string::String
+//   %13: []u8 = const "{\"visibility\":\"Public\",\"slot\":{\"Number\":7}}"
+//   test.expect_equal %13: []u8, %12: []u8, []u8
+//   %15: std::string::String = ref.load %7: &var std::string::String
+//   call.std::string::String.deinit %15: std::string::String
+//   call.Entryish.deinit %5: Entryish
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_encode_writes_a_Value_without_tagging_it() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"a\":[1,true,null],\"b\":\"x\"}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %4: std::json::Value, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.std::json::Value.deinit %4: std::json::Value
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   test.expect_equal %2: []u8, %11: []u8, []u8
+//   %13: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %13: std::string::String
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %16: !void = error.ok
+//   return %16: !void
+// }

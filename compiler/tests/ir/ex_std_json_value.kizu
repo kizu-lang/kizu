@@ -1,0 +1,313 @@
+import std::json;
+import std::mem;
+import std::string;
+
+// A `Value` is a document read without deciding its type first. It is an
+// ordinary recursive union, not a document-object layer: `decode<Value>` goes
+// through the same parser every other type does, so both routes sit behind the
+// same defenses against untrusted input.
+fn kind(value: &json::Value) -> []u8 {
+    return match value {
+        Null => "null",
+        Bool(_) => "bool",
+        I64(_) => "i64",
+        Str(_) => "str",
+        Arr(_) => "arr",
+        Obj(_) => "obj",
+    };
+}
+
+// Walking one is an ordinary match, and the payloads are borrowed, so nothing
+// is copied and nothing has to be released here.
+fn size(value: &json::Value) -> i64 {
+    return match value {
+        Null => 0,
+        Bool(_) => 0,
+        I64(number) => number,
+        Str(text) => text.len(),
+        Arr(items) => items.len(),
+        Obj(entries) => entries.len(),
+    };
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"user": "alice", "visits": [1, 2, 3], "active": null}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    print(kind(&value));
+    print(size(&value));
+
+    // A `Value` writes back what it read. Its variants name JSON's own shapes
+    // rather than a program's, so `encode` does not tag them the way it tags a
+    // union a program declared: the document that comes out is the one that
+    // went in, apart from whitespace.
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<json::Value>(allocator, value, out);
+    let written = out.as_bytes();
+    print(written);
+    return;
+}
+
+// run
+// features: std-json decode encode union match recursive-union std-string
+// output:
+// obj
+// 3
+// {"user":"alice","visits":[1,2,3],"active":null}
+
+
+// ir
+// lower:
+// fn kind(%value: &std::json::Value) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
+//   return %20: []u8
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: []u8 = const "null"
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: bool = union.payload %1: std::json::Value, Bool
+//   %7: []u8 = const "bool"
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   %10: []u8 = const "i64"
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %2: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %12: std::string::String = union.payload %1: std::json::Value, Str
+//   %13: []u8 = const "str"
+//   jump match.end.1
+// match.check.10:
+//   %14: bool = binary.== %2: i64, 4: i64
+//   branch %14: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %15: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %16: []u8 = const "arr"
+//   jump match.end.1
+// match.check.12:
+//   %17: bool = binary.== %2: i64, 5: i64
+//   branch %17: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %18: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %19: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn size(%value: &std::json::Value) -> i64 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
+//   return %19: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: bool = union.payload %1: std::json::Value, Bool
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   jump match.end.1
+// match.check.8:
+//   %10: bool = binary.== %2: i64, 3: i64
+//   branch %10: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %11: std::string::String = union.payload %1: std::json::Value, Str
+//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   jump match.end.1
+// match.check.10:
+//   %13: bool = binary.== %2: i64, 4: i64
+//   branch %13: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   jump match.end.1
+// match.check.12:
+//   %16: bool = binary.== %2: i64, 5: i64
+//   branch %16: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %18: i64 = call.std::map::Map.len.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"user\": \"alice\", \"visits\": [1, 2, 3], \"active\": null}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = call.kind %4: std::json::Value
+//   call.print %5: []u8
+//   %7: i64 = call.size %4: std::json::Value
+//   call.print %7: i64
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: !void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %4: std::json::Value, %10: &var std::string::String
+//   %12: std::string::String = ref.load %10: &var std::string::String
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Value.deinit %4: std::json::Value
+//   %14: std::string::String = ref.load %10: &var std::string::String
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   call.print %15: []u8
+//   %17: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %17: std::string::String
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// opt:
+// fn kind(%value: &std::json::Value) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
+//   return %20: []u8
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: []u8 = const "null"
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %7: []u8 = const "bool"
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: []u8 = const "i64"
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %2: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %13: []u8 = const "str"
+//   jump match.end.1
+// match.check.10:
+//   %14: bool = binary.== %2: i64, 4: i64
+//   branch %14: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %16: []u8 = const "arr"
+//   jump match.end.1
+// match.check.12:
+//   %17: bool = binary.== %2: i64, 5: i64
+//   branch %17: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %19: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn size(%value: &std::json::Value) -> i64 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
+//   return %19: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   jump match.end.1
+// match.check.8:
+//   %10: bool = binary.== %2: i64, 3: i64
+//   branch %10: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %11: std::string::String = union.payload %1: std::json::Value, Str
+//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   jump match.end.1
+// match.check.10:
+//   %13: bool = binary.== %2: i64, 4: i64
+//   branch %13: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   jump match.end.1
+// match.check.12:
+//   %16: bool = binary.== %2: i64, 5: i64
+//   branch %16: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %18: i64 = call.std::map::Map.len.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"user\": \"alice\", \"visits\": [1, 2, 3], \"active\": null}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = call.kind %4: std::json::Value
+//   call.print %5: []u8
+//   %7: i64 = call.size %4: std::json::Value
+//   call.print %7: i64
+//   %9: std::string::String = call.std::string::new %1: Allocator
+//   %10: &var std::string::String = local.slot %9: std::string::String
+//   %11: !void = call.std::json::encode.std_3a_3ajson_3a_3aValue %1: Allocator, %4: std::json::Value, %10: &var std::string::String
+//   %12: std::string::String = ref.load %10: &var std::string::String
+//   error.try %11: !void, cleanup call.std::string::String.deinit %12: std::string::String; call.std::json::Value.deinit %4: std::json::Value
+//   %14: std::string::String = ref.load %10: &var std::string::String
+//   %15: []u8 = call.std::string::String.as_bytes %14: std::string::String
+//   call.print %15: []u8
+//   %17: std::string::String = ref.load %10: &var std::string::String
+//   call.std::string::String.deinit %17: std::string::String
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %20: !void = error.ok
+//   return %20: !void
+// }

@@ -1,0 +1,389 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::testing;
+
+// Copy propagates structurally (#1597): a struct / union whose fields and
+// payloads are all copy is itself copy. Collections hand such elements out
+// by value, signatures take them by value, and the source binding survives.
+
+pub struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+struct Rect {
+    pub a: Point,
+    pub b: Point,
+}
+
+union Event {
+    Visit(i64),
+    Step(Point),
+    Nothing,
+}
+
+fn area(r: Rect) -> i64 {
+    return (r.b.x - r.a.x) * (r.b.y - r.a.y);
+}
+
+fn weight(e: Event) -> i64 {
+    return match e {
+        Visit(n) => n,
+        Step(p) => p.x + p.y,
+        Nothing => 0,
+    };
+}
+
+test "struct element comes out of an array by value" {
+    let allocator = mem::page_allocator();
+    var rects = array::new<Rect>(allocator);
+    defer rects.deinit();
+    try rects.append(Rect { a: Point { x: 0, y: 0 }, b: Point { x: 3, y: 4 } });
+    let r = rects.get_or_panic(0);
+    testing::expect_equal<i64>(12, area(r));
+    testing::expect_equal<i64>(12, area(r));
+}
+
+test "union element comes out of an array by value" {
+    let allocator = mem::page_allocator();
+    var events = array::new<Event>(allocator);
+    defer events.deinit();
+    try events.append(Event::Visit(2));
+    try events.append(Event::Step(Point { x: 4, y: 6 }));
+    var total = 0;
+    var i = 0;
+    while i < events.len() {
+        let e = events.get_or_panic(i);
+        total = total + weight(e);
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(12, total);
+}
+
+test "copy struct assignment leaves the source usable" {
+    let p = Point { x: 1, y: 2 };
+    let q = p;
+    testing::expect_equal<i64>(3, p.x + q.y);
+}
+
+test "map holds a copy struct value" {
+    let allocator = mem::page_allocator();
+    let table = map::new<[]u8, Point>(allocator);
+    defer table.deinit();
+    try table.insert("home", Point { x: 7, y: 9 });
+    if table.get("home") |p| {
+        testing::expect_equal<i64>(16, p.x + p.y);
+    } else {
+        testing::expect(false);
+    }
+}
+
+
+// ir
+// lower:
+// fn area(%r: Rect) -> i64 {
+// entry:
+//   %1: Point = field.b %r: Rect
+//   %2: i64 = field.x %1: Point
+//   %3: Point = field.a %r: Rect
+//   %4: i64 = field.x %3: Point
+//   %5: i64 = binary.- %2: i64, %4: i64
+//   %6: Point = field.b %r: Rect
+//   %7: i64 = field.y %6: Point
+//   %8: Point = field.a %r: Rect
+//   %9: i64 = field.y %8: Point
+//   %10: i64 = binary.- %7: i64, %9: i64
+//   %11: i64 = binary.* %5: i64, %10: i64
+//   return %11: i64
+// }
+// fn weight(%e: Event) -> i64 {
+// entry:
+//   %1: i64 = union.tag %e: Event
+//   jump match.check.2
+// match.end.1:
+//   %11: i64 = phi [match.arm.3, %3: i64], [match.arm.5, %8: i64], [match.arm.7, %10: i64]
+//   return %11: i64
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: i64 = union.payload %e: Event, Visit
+//   jump match.end.1
+// match.check.4:
+//   %4: bool = binary.== %1: i64, 1: i64
+//   branch %4: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %5: Point = union.payload %e: Event, Step
+//   %6: i64 = field.x %5: Point
+//   %7: i64 = field.y %5: Point
+//   %8: i64 = binary.+ %6: i64, %7: i64
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %1: i64, 2: i64
+//   branch %9: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %10: i64 = const 0
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.struct_element_comes_out_of_an_array_by_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Rect> = array.new %1: Allocator, Rect
+//   %3: i64 = const 0
+//   %4: i64 = const 0
+//   %5: Point = struct.new {x: %3: i64, y: %4: i64}
+//   %6: i64 = const 3
+//   %7: i64 = const 4
+//   %8: Point = struct.new {x: %6: i64, y: %7: i64}
+//   %9: Rect = struct.new {a: %5: Point, b: %8: Point}
+//   %10: !void = call.std::array::Array.append.Rect %2: std::array::Array<Rect>, %9: Rect
+//   error.try %10: !void, cleanup array.deinit %2: std::array::Array<Rect>
+//   %12: i64 = const 0
+//   %13: Rect = call.std::array::Array.get_or_panic.Rect %2: std::array::Array<Rect>, %12: i64
+//   %14: i64 = const 12
+//   %15: i64 = call.area %13: Rect
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 12
+//   %18: i64 = call.area %13: Rect
+//   test.expect_equal %17: i64, %18: i64, i64
+//   array.deinit %2: std::array::Array<Rect>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.union_element_comes_out_of_an_array_by_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Event> = array.new %1: Allocator, Event
+//   %3: i64 = const 2
+//   %4: Event = union.new %3: i64, Visit
+//   %5: !void = call.std::array::Array.append.Event %2: std::array::Array<Event>, %4: Event
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Event>
+//   %7: i64 = const 4
+//   %8: i64 = const 6
+//   %9: Point = struct.new {x: %7: i64, y: %8: i64}
+//   %10: Event = union.new %9: Point, Step
+//   %11: !void = call.std::array::Array.append.Event %2: std::array::Array<Event>, %10: Event
+//   error.try %11: !void, cleanup array.deinit %2: std::array::Array<Event>
+//   %13: i64 = const 0
+//   %14: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %15: i64 = phi [entry, %13: i64], [while.body.2, %21: i64]
+//   %16: i64 = phi [entry, %14: i64], [while.body.2, %23: i64]
+//   %17: i64 = call.std::array::Array.len.Event %2: std::array::Array<Event>
+//   %18: bool = binary.< %16: i64, %17: i64
+//   branch %18: bool, while.body.2, while.end.3
+// while.body.2:
+//   %19: Event = call.std::array::Array.get_or_panic.Event %2: std::array::Array<Event>, %16: i64
+//   %20: i64 = call.weight %19: Event
+//   %21: i64 = binary.+ %15: i64, %20: i64
+//   %22: i64 = const 1
+//   %23: i64 = binary.+ %16: i64, %22: i64
+//   jump while.header.1
+// while.end.3:
+//   %24: i64 = const 12
+//   test.expect_equal %24: i64, %15: i64, i64
+//   array.deinit %2: std::array::Array<Event>
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.copy_struct_assignment_leaves_the_source_usable() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 2
+//   %3: Point = struct.new {x: %1: i64, y: %2: i64}
+//   %4: i64 = const 3
+//   %5: i64 = field.x %3: Point
+//   %6: i64 = field.y %3: Point
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   test.expect_equal %4: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.map_holds_a_copy_struct_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, Point> = map.new %1: Allocator, Point
+//   %3: []u8 = const "home"
+//   %4: i64 = const 7
+//   %5: i64 = const 9
+//   %6: Point = struct.new {x: %4: i64, y: %5: i64}
+//   %7: !void = call.std::map::Map.insert.Point %2: std::map::Map<[]u8, Point>, %3: []u8, %6: Point
+//   error.try %7: !void, cleanup map.deinit %2: std::map::Map<[]u8, Point>
+//   %9: []u8 = const "home"
+//   %10: ?Point = call.std::map::Map.get.Point %2: std::map::Map<[]u8, Point>, %9: []u8
+//   %11: Point = opt.value %10: ?Point
+//   %12: bool = opt.has %10: ?Point
+//   branch %12: bool, if.then.1, if.else.2
+// if.then.1:
+//   %13: i64 = const 16
+//   %14: i64 = field.x %11: Point
+//   %15: i64 = field.y %11: Point
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   test.expect_equal %13: i64, %16: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %18: bool = const false
+//   call.std::testing::expect %18: bool
+//   jump if.end.3
+// if.end.3:
+//   map.deinit %2: std::map::Map<[]u8, Point>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// opt:
+// fn area(%r: Rect) -> i64 {
+// entry:
+//   %1: Point = field.b %r: Rect
+//   %2: i64 = field.x %1: Point
+//   %3: Point = field.a %r: Rect
+//   %4: i64 = field.x %3: Point
+//   %5: i64 = binary.- %2: i64, %4: i64
+//   %6: Point = field.b %r: Rect
+//   %7: i64 = field.y %6: Point
+//   %8: Point = field.a %r: Rect
+//   %9: i64 = field.y %8: Point
+//   %10: i64 = binary.- %7: i64, %9: i64
+//   %11: i64 = binary.* %5: i64, %10: i64
+//   return %11: i64
+// }
+// fn weight(%e: Event) -> i64 {
+// entry:
+//   %1: i64 = union.tag %e: Event
+//   jump match.check.2
+// match.end.1:
+//   %11: i64 = phi [match.arm.3, %3: i64], [match.arm.5, %8: i64], [match.arm.7, %10: i64]
+//   return %11: i64
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: i64 = union.payload %e: Event, Visit
+//   jump match.end.1
+// match.check.4:
+//   %4: bool = binary.== %1: i64, 1: i64
+//   branch %4: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %5: Point = union.payload %e: Event, Step
+//   %6: i64 = field.x %5: Point
+//   %7: i64 = field.y %5: Point
+//   %8: i64 = binary.+ %6: i64, %7: i64
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %1: i64, 2: i64
+//   branch %9: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %10: i64 = const 0
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.struct_element_comes_out_of_an_array_by_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Rect> = array.new %1: Allocator, Rect
+//   %3: i64 = const 0
+//   %4: i64 = const 0
+//   %5: Point = struct.new {x: %3: i64, y: %4: i64}
+//   %6: i64 = const 3
+//   %7: i64 = const 4
+//   %8: Point = struct.new {x: %6: i64, y: %7: i64}
+//   %9: Rect = struct.new {a: %5: Point, b: %8: Point}
+//   %10: !void = call.std::array::Array.append.Rect %2: std::array::Array<Rect>, %9: Rect
+//   error.try %10: !void, cleanup array.deinit %2: std::array::Array<Rect>
+//   %12: i64 = const 0
+//   %13: Rect = call.std::array::Array.get_or_panic.Rect %2: std::array::Array<Rect>, %12: i64
+//   %14: i64 = const 12
+//   %15: i64 = call.area %13: Rect
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: i64 = const 12
+//   %18: i64 = call.area %13: Rect
+//   test.expect_equal %17: i64, %18: i64, i64
+//   array.deinit %2: std::array::Array<Rect>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.union_element_comes_out_of_an_array_by_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Event> = array.new %1: Allocator, Event
+//   %3: i64 = const 2
+//   %4: Event = union.new %3: i64, Visit
+//   %5: !void = call.std::array::Array.append.Event %2: std::array::Array<Event>, %4: Event
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Event>
+//   %7: i64 = const 4
+//   %8: i64 = const 6
+//   %9: Point = struct.new {x: %7: i64, y: %8: i64}
+//   %10: Event = union.new %9: Point, Step
+//   %11: !void = call.std::array::Array.append.Event %2: std::array::Array<Event>, %10: Event
+//   error.try %11: !void, cleanup array.deinit %2: std::array::Array<Event>
+//   %13: i64 = const 0
+//   %14: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %15: i64 = phi [entry, %13: i64], [while.body.2, %21: i64]
+//   %16: i64 = phi [entry, %14: i64], [while.body.2, %23: i64]
+//   %17: i64 = call.std::array::Array.len.Event %2: std::array::Array<Event>
+//   %18: bool = binary.< %16: i64, %17: i64
+//   branch %18: bool, while.body.2, while.end.3
+// while.body.2:
+//   %19: Event = call.std::array::Array.get_or_panic.Event %2: std::array::Array<Event>, %16: i64
+//   %20: i64 = call.weight %19: Event
+//   %21: i64 = binary.+ %15: i64, %20: i64
+//   %22: i64 = const 1
+//   %23: i64 = binary.+ %16: i64, %22: i64
+//   jump while.header.1
+// while.end.3:
+//   %24: i64 = const 12
+//   test.expect_equal %24: i64, %15: i64, i64
+//   array.deinit %2: std::array::Array<Event>
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.copy_struct_assignment_leaves_the_source_usable() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 2
+//   %3: Point = struct.new {x: %1: i64, y: %2: i64}
+//   %4: i64 = const 3
+//   %5: i64 = field.x %3: Point
+//   %6: i64 = field.y %3: Point
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   test.expect_equal %4: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.map_holds_a_copy_struct_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, Point> = map.new %1: Allocator, Point
+//   %3: []u8 = const "home"
+//   %4: i64 = const 7
+//   %5: i64 = const 9
+//   %6: Point = struct.new {x: %4: i64, y: %5: i64}
+//   %7: !void = call.std::map::Map.insert.Point %2: std::map::Map<[]u8, Point>, %3: []u8, %6: Point
+//   error.try %7: !void, cleanup map.deinit %2: std::map::Map<[]u8, Point>
+//   %9: []u8 = const "home"
+//   %10: ?Point = call.std::map::Map.get.Point %2: std::map::Map<[]u8, Point>, %9: []u8
+//   %11: Point = opt.value %10: ?Point
+//   %12: bool = opt.has %10: ?Point
+//   branch %12: bool, if.then.1, if.else.2
+// if.then.1:
+//   %13: i64 = const 16
+//   %14: i64 = field.x %11: Point
+//   %15: i64 = field.y %11: Point
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   test.expect_equal %13: i64, %16: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %18: bool = const false
+//   call.std::testing::expect %18: bool
+//   jump if.end.3
+// if.end.3:
+//   map.deinit %2: std::map::Map<[]u8, Point>
+//   %21: !void = error.ok
+//   return %21: !void
+// }

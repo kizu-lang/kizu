@@ -1,0 +1,312 @@
+import std::mem;
+import std::testing;
+
+pub struct Span {
+    pub start: i64,
+    pub end: i64,
+}
+
+pub struct BinaryExpr {
+    pub left: mem::Box<Expr>,
+    pub right: mem::Box<Expr>,
+}
+
+pub union Expr {
+    Ident(Span),
+    Binary(BinaryExpr),
+}
+
+fn (self: Expr) deinit() -> void {
+    match self {
+        Ident(_) => return,
+        Binary(binary) => binary.deinit(),
+    }
+}
+
+fn expect_ident(expr: &Expr, expected: i64) -> !void {
+    match expr {
+        Ident(span) => testing::expect(expected == span.start),
+        Binary(binary) => testing::fail("unexpected binary"),
+    }
+    return;
+}
+
+fn expect_binary(binary: BinaryExpr) -> !void {
+    defer binary.deinit();
+    let borrowed = binary.left.borrow();
+    try expect_ident(borrowed, 1);
+    return;
+}
+
+// make_binary builds its node behind one cleanup boundary: error paths release
+// the boxed child, the success return moves the whole node out.
+fn make_binary(allocator: Allocator) -> !Expr {
+    let left_span = Span {
+        start: 1,
+        end: 4
+    };
+    let right_span = Span {
+        start: 5,
+        end: 8
+    };
+    let left = try mem::box<Expr>(allocator, Expr::Ident(left_span));
+    errdefer left.deinit();
+    let right = try mem::box<Expr>(allocator, Expr::Ident(right_span));
+    return Expr::Binary(BinaryExpr {
+        left: move left,
+        right: move right
+    });
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let expr = try make_binary(allocator);
+    match expr {
+        Ident(span) => testing::expect_equal<i64>(0, span.start),
+        Binary(binary) => try expect_binary(move binary),
+    }
+    return;
+}
+
+// run
+// features: std-mem box recursive-ast
+// output:
+
+
+// ir
+// lower:
+// fn Expr.deinit(%self: Expr) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Expr
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: Span = union.payload %self: Expr, Ident
+//   return void: void
+// match.check.4:
+//   %4: bool = binary.== %1: i64, 1: i64
+//   branch %4: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %5: BinaryExpr = union.payload %self: Expr, Binary
+//   call.BinaryExpr.deinit %5: BinaryExpr
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn expect_ident(%expr: &Expr, %expected: i64) -> !void {
+// entry:
+//   %1: Expr = union.load %expr: &Expr
+//   %2: i64 = union.tag %1: Expr
+//   jump match.check.2
+// match.end.1:
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: Span = union.payload %1: Expr, Ident
+//   %5: i64 = field.start %4: Span
+//   %6: bool = binary.== %expected: i64, %5: i64
+//   call.std::testing::expect %6: bool
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %2: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %9: BinaryExpr = union.payload %1: Expr, Binary
+//   %10: []u8 = const "unexpected binary"
+//   call.std::testing::fail %10: []u8
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn expect_binary(%binary: BinaryExpr) -> !void {
+// entry:
+//   %1: std::mem::Box<Expr> = field.left %binary: BinaryExpr
+//   %2: &Expr = call.std::mem::Box.borrow.Expr %1: std::mem::Box<Expr>
+//   %3: i64 = const 1
+//   %4: !void = call.expect_ident %2: &Expr, %3: i64
+//   error.try %4: !void, cleanup call.BinaryExpr.deinit %binary: BinaryExpr
+//   call.BinaryExpr.deinit %binary: BinaryExpr
+//   %7: !void = error.ok
+//   return %7: !void
+// }
+// fn make_binary(%allocator: Allocator) -> !Expr {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 4
+//   %3: Span = struct.new {start: %1: i64, end: %2: i64}
+//   %4: i64 = const 5
+//   %5: i64 = const 8
+//   %6: Span = struct.new {start: %4: i64, end: %5: i64}
+//   %7: Expr = union.new %3: Span, Ident
+//   %8: !std::mem::Box<Expr> = call.std::mem::box.Expr %allocator: Allocator, %7: Expr
+//   %9: std::mem::Box<Expr> = error.try %8: !std::mem::Box<Expr>
+//   %10: Expr = union.new %6: Span, Ident
+//   %11: !std::mem::Box<Expr> = call.std::mem::box.Expr %allocator: Allocator, %10: Expr
+//   %12: std::mem::Box<Expr> = error.try %11: !std::mem::Box<Expr>, cleanup call.std::mem::Box.deinit.Expr %9: std::mem::Box<Expr>
+//   %13: BinaryExpr = struct.new {left: %9: std::mem::Box<Expr>, right: %12: std::mem::Box<Expr>}
+//   %14: Expr = union.new %13: BinaryExpr, Binary
+//   %15: !Expr = error.ok %14: Expr
+//   return %15: !Expr
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: !Expr = call.make_binary %1: Allocator
+//   %3: Expr = error.try %2: !Expr
+//   %4: i64 = union.tag %3: Expr
+//   jump match.check.2
+// match.end.1:
+//   %14: !void = error.ok
+//   return %14: !void
+// match.check.2:
+//   %5: bool = binary.== %4: i64, 0: i64
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: Span = union.payload %3: Expr, Ident
+//   %7: i64 = const 0
+//   %8: i64 = field.start %6: Span
+//   test.expect_equal %7: i64, %8: i64, i64
+//   jump match.end.1
+// match.check.4:
+//   %10: bool = binary.== %4: i64, 1: i64
+//   branch %10: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %11: BinaryExpr = union.payload %3: Expr, Binary
+//   %12: !void = call.expect_binary %11: BinaryExpr
+//   error.try %12: !void
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn BinaryExpr.deinit(%self: BinaryExpr) -> void {
+// entry:
+//   %1: std::mem::Box<Expr> = field.left %self: BinaryExpr
+//   call.std::mem::Box.deinit.Expr %1: std::mem::Box<Expr>
+//   %3: std::mem::Box<Expr> = field.right %self: BinaryExpr
+//   call.std::mem::Box.deinit.Expr %3: std::mem::Box<Expr>
+//   return void: void
+// }
+// opt:
+// fn Expr.deinit(%self: Expr) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Expr
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   return void: void
+// match.check.4:
+//   %4: bool = binary.== %1: i64, 1: i64
+//   branch %4: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %5: BinaryExpr = union.payload %self: Expr, Binary
+//   call.BinaryExpr.deinit %5: BinaryExpr
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn expect_ident(%expr: &Expr, %expected: i64) -> !void {
+// entry:
+//   %1: Expr = union.load %expr: &Expr
+//   %2: i64 = union.tag %1: Expr
+//   jump match.check.2
+// match.end.1:
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: Span = union.payload %1: Expr, Ident
+//   %5: i64 = field.start %4: Span
+//   %6: bool = binary.== %expected: i64, %5: i64
+//   call.std::testing::expect %6: bool
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %2: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %10: []u8 = const "unexpected binary"
+//   call.std::testing::fail %10: []u8
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn expect_binary(%binary: BinaryExpr) -> !void {
+// entry:
+//   %1: std::mem::Box<Expr> = field.left %binary: BinaryExpr
+//   %2: &Expr = call.std::mem::Box.borrow.Expr %1: std::mem::Box<Expr>
+//   %3: i64 = const 1
+//   %4: !void = call.expect_ident %2: &Expr, %3: i64
+//   error.try %4: !void, cleanup call.BinaryExpr.deinit %binary: BinaryExpr
+//   call.BinaryExpr.deinit %binary: BinaryExpr
+//   %7: !void = error.ok
+//   return %7: !void
+// }
+// fn make_binary(%allocator: Allocator) -> !Expr {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 4
+//   %3: Span = struct.new {start: %1: i64, end: %2: i64}
+//   %4: i64 = const 5
+//   %5: i64 = const 8
+//   %6: Span = struct.new {start: %4: i64, end: %5: i64}
+//   %7: Expr = union.new %3: Span, Ident
+//   %8: !std::mem::Box<Expr> = call.std::mem::box.Expr %allocator: Allocator, %7: Expr
+//   %9: std::mem::Box<Expr> = error.try %8: !std::mem::Box<Expr>
+//   %10: Expr = union.new %6: Span, Ident
+//   %11: !std::mem::Box<Expr> = call.std::mem::box.Expr %allocator: Allocator, %10: Expr
+//   %12: std::mem::Box<Expr> = error.try %11: !std::mem::Box<Expr>, cleanup call.std::mem::Box.deinit.Expr %9: std::mem::Box<Expr>
+//   %13: BinaryExpr = struct.new {left: %9: std::mem::Box<Expr>, right: %12: std::mem::Box<Expr>}
+//   %14: Expr = union.new %13: BinaryExpr, Binary
+//   %15: !Expr = error.ok %14: Expr
+//   return %15: !Expr
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: !Expr = call.make_binary %1: Allocator
+//   %3: Expr = error.try %2: !Expr
+//   %4: i64 = union.tag %3: Expr
+//   jump match.check.2
+// match.end.1:
+//   %14: !void = error.ok
+//   return %14: !void
+// match.check.2:
+//   %5: bool = binary.== %4: i64, 0: i64
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: Span = union.payload %3: Expr, Ident
+//   %7: i64 = const 0
+//   %8: i64 = field.start %6: Span
+//   test.expect_equal %7: i64, %8: i64, i64
+//   jump match.end.1
+// match.check.4:
+//   %10: bool = binary.== %4: i64, 1: i64
+//   branch %10: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %11: BinaryExpr = union.payload %3: Expr, Binary
+//   %12: !void = call.expect_binary %11: BinaryExpr
+//   error.try %12: !void
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn BinaryExpr.deinit(%self: BinaryExpr) -> void {
+// entry:
+//   %1: std::mem::Box<Expr> = field.left %self: BinaryExpr
+//   call.std::mem::Box.deinit.Expr %1: std::mem::Box<Expr>
+//   %3: std::mem::Box<Expr> = field.right %self: BinaryExpr
+//   call.std::mem::Box.deinit.Expr %3: std::mem::Box<Expr>
+//   return void: void
+// }

@@ -1,0 +1,246 @@
+import compiler::internal::ast;
+import compiler::internal::ir;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::types;
+import std::fs;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The IR corpus in compiler/tests/ir is shared with the Go lowering, which
+// generates each case's expectation block: the rendered module after
+// lowering (`// lower:`) and after the optimize passes (`// opt:`), or the
+// failure either stage reports. The std functions a case pulls in are not
+// listed (they would be most of every block); the selfhost test compares
+// them through the `ir` command. This runner loads every case through this
+// loader, type- and ownership-checks it, lowers it with this module, and
+// requires the same bytes.
+
+/// The blank line plus `// ir` line that ends a case input.
+fn ir_marker() -> []u8 {
+    return
+        \\
+        \\
+        \\// ir
+        \\
+    ;
+}
+
+/// Separates one case into its input and its expectation block.
+fn split_ir_case(data: []u8) -> ?i64 {
+    let marker = ir_marker();
+    let marker_len = mem::len(marker);
+    var index = mem::len(data) - marker_len;
+    while index >= 0 {
+        if mem::slice(data, index, index + marker_len) |candidate| {
+            if mem::equal_bytes(candidate, marker) {
+                return index;
+            }
+        }
+        index = index - 1;
+    }
+    return null;
+}
+
+/// Appends text as one expectation line: embedded newlines become `\n`.
+fn append_folded(out: &var string::String, text: []u8) -> !void {
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte == cast<u8>(10) {
+            try out.append_byte(cast<u8>(92));
+            try out.append_byte(cast<u8>(110));
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Appends a rendered module with every line prefixed by `// `.
+fn append_rendered(out: &var string::String, rendered: []u8) -> !void {
+    if mem::len(rendered) == 0 {
+        return;
+    }
+    try out.append_bytes("// ");
+    var index = 0;
+    while mem::byte_at(rendered, index) |byte| {
+        try out.append_byte(byte);
+        if byte == cast<u8>(10) {
+            try out.append_bytes("// ");
+        }
+        index = index + 1;
+    }
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Renders one section: the module lowered from input, optimized when asked.
+fn render_section(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    input: []u8,
+    opt: bool,
+    out: &var string::String
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit();
+    let loaded = try loader.load_source(&var tree, "", input);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit();
+            try out.append_bytes("// check failed: ");
+            let text = try failed.error(allocator, &loader.sources);
+            defer text.deinit();
+            let bytes = text.as_bytes();
+            return append_folded(out, bytes);
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try out.append_bytes("// check failed: ");
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit();
+                let bytes = text.as_bytes();
+                return append_folded(out, bytes);
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit();
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit();
+                try out.append_bytes("// check failed: ");
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit();
+                let bytes = text.as_bytes();
+                return append_folded(out, bytes);
+            }
+            var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+            defer lowerer.deinit();
+            if try lowerer.lower(&var tree, &program, std_errors) |failed| {
+                defer failed.deinit();
+                try out.append_bytes("// ");
+                let text = try failed.error(allocator, &loader.sources);
+                defer text.deinit();
+                let bytes = text.as_bytes();
+                return append_folded(out, bytes);
+            }
+            if opt {
+                if try ir::optimize(allocator, &var lowerer.module) |failed| {
+                    defer failed.deinit();
+                    try out.append_bytes("// ");
+                    let text = try failed.error(allocator, &loader.sources);
+                    defer text.deinit();
+                    let bytes = text.as_bytes();
+                    return append_folded(out, bytes);
+                }
+            }
+            let rendered = try render_user_functions(allocator, &lowerer.module);
+            defer rendered.deinit();
+            let bytes = rendered.as_bytes();
+            return append_rendered(out, bytes);
+        },
+    }
+}
+
+/// Renders the functions a case declares itself, the Go `Dump` over the
+/// module's functions whose symbol is not under `std::`.
+fn render_user_functions(allocator: Allocator, module: &ir::Module) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_name(function);
+        if module.names.starts_with(name, "std::") {
+            continue;
+        }
+        try ir::append_function(&var out, module, function);
+    }
+    while out.len() > 0 and last_is_newline(&out) {
+        try out.truncate(out.len() - 1);
+    }
+    return move out;
+}
+
+fn last_is_newline(out: &string::String) -> bool {
+    let bytes = out.as_bytes();
+    return bytes[out.len() - 1] == cast<u8>(10);
+}
+
+/// Renders the expectation block of one case: `// lower:` then `// opt:`.
+fn render_ir_case(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    input: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("// lower:");
+    try out.append_byte(cast<u8>(10));
+    try render_section(io, allocator, std_errors, input, false, &var out);
+    try out.append_bytes("// opt:");
+    try out.append_byte(cast<u8>(10));
+    try render_section(io, allocator, std_errors, input, true, &var out);
+    return move out;
+}
+
+test "ir corpus lowers like the shipping compiler" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer std_loader.deinit();
+    let codes = try std_loader.std_error_codes();
+    match codes {
+        Error(failed) => {
+            defer failed.deinit();
+            try io::write_stderr_line(io, "std error codes could not be read");
+            testing::expect(false);
+        },
+        Codes(std_errors) => {
+            defer std_errors.deinit();
+            var entries = try fs::read_dir(io, "compiler/tests/ir");
+            defer entries.deinit();
+            var cases = 0;
+            var failures = 0;
+            var index = 0;
+            while index < entries.len() {
+                let entry = entries.get_or_panic(index);
+                index = index + 1;
+                if entry.is_dir {
+                    continue;
+                }
+                cases = cases + 1;
+                let data = try fs::read_file(io, allocator, entry.path, mem::Limit::Unlimited);
+                defer data.deinit();
+                let bytes = data.as_bytes();
+                if split_ir_case(bytes) |cut| {
+                    let input = bytes[0..cut];
+                    let want = bytes[cut + mem::len(ir_marker())..mem::len(bytes)];
+                    let got = try render_ir_case(io, allocator, &std_errors, input);
+                    defer got.deinit();
+                    let got_bytes = got.as_bytes();
+                    if !mem::equal_bytes(want, got_bytes) {
+                        failures = failures + 1;
+                        try io::write_stderr_line(io, entry.path);
+                        try io::write_stderr_line(io, "--- want");
+                        try io::write_stderr(io, want);
+                        try io::write_stderr_line(io, "--- got");
+                        try io::write_stderr(io, got_bytes);
+                    }
+                } else {
+                    failures = failures + 1;
+                    try io::write_stderr(io, "no `// ir` marker: ");
+                    try io::write_stderr_line(io, entry.path);
+                }
+            }
+            testing::expect(cases > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+}

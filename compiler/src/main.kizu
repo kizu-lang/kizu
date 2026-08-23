@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ir;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
 import compiler::internal::ownership;
@@ -7,6 +8,7 @@ import compiler::internal::parser;
 import compiler::internal::project;
 import compiler::internal::source;
 import compiler::internal::types;
+import std::array;
 import std::fs;
 import std::io;
 import std::mem;
@@ -16,9 +18,10 @@ import std::string;
 
 // Port of cmd/kizu for the commands the selfhost compiler can run so far:
 // `parse` prints the program a file parses to, `check` loads a file or a
-// package with its std modules, type-checks it, and ownership-checks it. The
-// later gates `check` runs in the Go compiler (IR, LLVM emit) follow with
-// their modules. Not connected to the shipping CLI.
+// package with its std modules, type-checks it, and ownership-checks it, and
+// `ir` lowers a checked file or package to typed SSA IR and prints it. The
+// later gates `check` runs in the Go compiler (LLVM emit) follow with their
+// modules. Not connected to the shipping CLI.
 
 /// Names the ways a command line run ends without a result.
 error Cli {
@@ -26,7 +29,8 @@ error Cli {
     Failed,
 }
 
-/// Dispatches the command line: `[--lib-dir PATH] <parse|check> <target>`.
+/// Dispatches the command line:
+/// `[--lib-dir PATH] <parse|check> <target>` or `ir [--opt] <target>`.
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let io = io::blocking();
@@ -59,6 +63,17 @@ fn main() -> !void {
     if mem::equal_bytes(command, "check") {
         return check_target(io, allocator, lib_dir_bytes, target);
     }
+    if mem::equal_bytes(command, "ir") {
+        if mem::equal_bytes(target, "--opt") {
+            if count - next < 3 {
+                try usage(io);
+                return Cli::Usage;
+            }
+            let opt_target = try process::arg(next + 2);
+            return ir_target(io, allocator, lib_dir_bytes, opt_target, true);
+        }
+        return ir_target(io, allocator, lib_dir_bytes, target, false);
+    }
     try usage(io);
     return Cli::Usage;
 }
@@ -66,7 +81,8 @@ fn main() -> !void {
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] parse <file>");
-    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
+    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
 }
 
 /// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
@@ -133,7 +149,9 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !v
     defer tree.deinit();
     var loader = try project::new_loader(io, allocator, lib_dir);
     defer loader.deinit();
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target);
+    var package_name = string::new(allocator);
+    defer package_name.deinit();
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name);
     match loaded {
         Error(failed) => {
             defer failed.deinit();
@@ -157,6 +175,115 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !v
     }
 }
 
+/// Lowers a checked file or package to typed SSA IR and prints it, the Go
+/// `irCommand` over `lowerFile` / `lowerPackage`: a package also gets the
+/// `main` entry wrapper the native build adds.
+fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit();
+    var package_name = string::new(allocator);
+    defer package_name.deinit();
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit();
+            try report(io, allocator, &loader.sources, &failed);
+            return Cli::Failed;
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit();
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            let codes = try loader.std_error_codes();
+            match codes {
+                Error(failed) => {
+                    defer failed.deinit();
+                    try report(io, allocator, &loader.sources, &failed);
+                    return Cli::Failed;
+                },
+                Codes(std_errors) => {
+                    defer std_errors.deinit();
+                    var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+                    defer lowerer.deinit();
+                    if try lowerer.lower(&var tree, &program, &std_errors) |failed| {
+                        defer failed.deinit();
+                        try report(io, allocator, &loader.sources, &failed);
+                        return Cli::Failed;
+                    }
+                    if opt {
+                        if try ir::optimize(allocator, &var lowerer.module) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                    }
+                    if package_name.len() > 0 {
+                        var entry = string::new(allocator);
+                        defer entry.deinit();
+                        try entry.append_string(&package_name);
+                        try entry.append_bytes("::main");
+                        let entry_bytes = entry.as_bytes();
+                        if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                    }
+                    let rendered = try ir::render(allocator, &lowerer.module);
+                    defer rendered.deinit();
+                    let rendered_bytes = rendered.as_bytes();
+                    return io::write_stdout_line(io, rendered_bytes);
+                },
+            }
+        },
+    }
+}
+
+/// Exposes the root module main as the native entrypoint, the Go
+/// `addPackageMain`, so a package uses the same entry rule as a single
+/// file: `fn main`. It writes IR by hand, so it verifies what it produced.
+fn add_package_main(allocator: Allocator, module: &var ir::Module, entry: []u8) -> !?diagnostic::Diagnostic {
+    if module.function_named("main") |_| {
+        return null;
+    }
+    let entry_function = module.function_named(entry) orelse return null;
+    if module.function_param_count(entry_function) != 0 {
+        return null;
+    }
+    let return_type = module.function_return(entry_function);
+    let result_name = try module.names.intern("%1");
+    let main_name = try module.names.intern("main");
+    let entry_name = try module.names.intern("entry");
+    let callee = try module.names.intern(entry);
+    let result = ir::Value { name: result_name, type_name: return_type };
+    let main_function = ir::Function {
+        node: module.function_nodes.add(ir::FunctionNode {
+            name: main_name,
+            params: array::new<ir::Param>(allocator),
+            return_type: return_type,
+            blocks: array::new<ir::Block>(allocator)
+        })
+    };
+    try module.functions.append(main_function);
+    let block = try module.add_block(main_function, entry_name);
+    let call = module.blank_instr(result, ir::Op::Call, callee, ir::empty_name());
+    let _ = try module.add_instr(block, move call);
+    module.set_terminator(block, ir::return_terminator(result));
+    return ir::verify(allocator, module);
+}
+
 /// Reports whether path names a package root: a directory or a manifest.
 fn is_package_root(io: Io, target: []u8) -> !bool {
     let exists = try fs::exists(io, target);
@@ -177,7 +304,8 @@ fn load_target(
     allocator: Allocator,
     loader: &var project::Loader,
     tree: &var ast::Ast,
-    target: []u8
+    target: []u8,
+    package_name: &var string::String
 ) -> !project::LoadResult {
     let package = try is_package_root(io, target);
     if !package {
@@ -204,6 +332,7 @@ fn load_target(
     match parsed {
         Manifest(found) => {
             defer found.deinit();
+            try package_name.append_string(&found.package_name);
             let root_bytes = root.as_bytes();
             let resolved = try project::resolve_modules(io, allocator, root_bytes, &found);
             match resolved {

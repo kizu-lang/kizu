@@ -1,0 +1,340 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct Byte {
+    pub value: u8,
+}
+
+union ByteValue {
+    Item(u8),
+}
+
+fn (self: &Byte) replace(next: u8) -> u8 {
+    return next;
+}
+
+fn identity<T>(value: T) -> T {
+    return value;
+}
+
+fn take_byte(value: u8) -> u8 {
+    return value;
+}
+
+fn take_i32(value: i32) -> i32 {
+    return value;
+}
+
+fn fallible_byte() -> !u8 {
+    return 9;
+}
+
+test "contextual integer literals" {
+    let allocator = mem::page_allocator();
+    var bytes = array::new<u8>(allocator);
+    defer bytes.deinit();
+    try bytes.append(65);
+    try bytes.set(0, 66);
+    testing::expect_equal<i64>(66, cast<i64>(bytes.get_or_panic(0)));
+
+    var text = string::new(allocator);
+    defer text.deinit();
+    try text.append_byte(67);
+    testing::expect_equal<i64>(1, text.len());
+
+    var table = map::new<[]u8, u8>(allocator);
+    defer table.deinit();
+    try table.insert("answer", 68);
+    testing::expect_equal<i64>(68, cast<i64>(table.get("answer") orelse 0));
+
+    let byte = Byte { value: 71 };
+    testing::expect_equal<i64>(71, cast<i64>(byte.value));
+
+    var mutable = Byte { value: 71 };
+    mutable.value = 73;
+    testing::expect_equal<i64>(73, cast<i64>(mutable.value));
+
+    match ByteValue::Item(72) {
+        Item(value) => testing::expect_equal<i64>(72, cast<i64>(value));,
+    }
+
+    testing::expect_equal<i64>(255, cast<i64>(take_byte(255)));
+    testing::expect_equal<i64>(-1, cast<i64>(take_i32(-1)));
+    testing::expect_equal<i64>(9, cast<i64>(try fallible_byte()));
+    testing::expect_equal<i64>(74, cast<i64>(byte.replace(74)));
+    testing::expect_equal<i64>(75, cast<i64>(identity<u8>(75)));
+    testing::expect_equal<u8>(76, identity<u8>(76));
+
+}
+
+
+// ir
+// lower:
+// fn Byte.replace(%self: Byte, %next: u8) -> u8 {
+// entry:
+//   return %next: u8
+// }
+// fn take_byte(%value: u8) -> u8 {
+// entry:
+//   return %value: u8
+// }
+// fn take_i32(%value: i32) -> i32 {
+// entry:
+//   return %value: i32
+// }
+// fn fallible_byte() -> !u8 {
+// entry:
+//   %1: u8 = const 9
+//   %2: !u8 = error.ok %1: u8
+//   return %2: !u8
+// }
+// fn test.contextual_integer_literals() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<u8> = array.new %1: Allocator, u8
+//   %3: u8 = const 65
+//   %4: !void = call.std::array::Array.append.u8 %2: std::array::Array<u8>, %3: u8
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<u8>
+//   %6: i64 = const 0
+//   %7: u8 = const 66
+//   %8: !void = call.std::array::Array.set.u8 %2: std::array::Array<u8>, %6: i64, %7: u8
+//   error.try %8: !void, cleanup array.deinit %2: std::array::Array<u8>
+//   %10: i64 = const 66
+//   %11: i64 = const 0
+//   %12: u8 = call.std::array::Array.get_or_panic.u8 %2: std::array::Array<u8>, %11: i64
+//   %13: i64 = cast %12: u8, i64
+//   test.expect_equal %10: i64, %13: i64, i64
+//   %15: std::string::String = call.std::string::new %1: Allocator
+//   %16: u8 = const 67
+//   %17: !void = call.std::string::String.append_byte %15: std::string::String, %16: u8
+//   error.try %17: !void, cleanup call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %19: i64 = const 1
+//   %20: i64 = call.std::string::String.len %15: std::string::String
+//   test.expect_equal %19: i64, %20: i64, i64
+//   %22: std::map::Map<[]u8, u8> = map.new %1: Allocator, u8
+//   %23: []u8 = const "answer"
+//   %24: u8 = const 68
+//   %25: !void = call.std::map::Map.insert.u8 %22: std::map::Map<[]u8, u8>, %23: []u8, %24: u8
+//   error.try %25: !void, cleanup map.deinit %22: std::map::Map<[]u8, u8>; call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %27: i64 = const 68
+//   %28: []u8 = const "answer"
+//   %29: ?u8 = call.std::map::Map.get.u8 %22: std::map::Map<[]u8, u8>, %28: []u8
+//   %30: bool = opt.has %29: ?u8
+//   branch %30: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %31: u8 = opt.value %29: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %32: u8 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %33: u8 = phi [orelse.some.1, %31: u8], [orelse.else.2, %32: u8]
+//   %34: i64 = cast %33: u8, i64
+//   test.expect_equal %27: i64, %34: i64, i64
+//   %36: u8 = const 71
+//   %37: Byte = struct.new {value: %36: u8}
+//   %38: i64 = const 71
+//   %39: u8 = field.value %37: Byte
+//   %40: i64 = cast %39: u8, i64
+//   test.expect_equal %38: i64, %40: i64, i64
+//   %42: u8 = const 71
+//   %43: Byte = struct.new {value: %42: u8}
+//   %44: u8 = const 73
+//   %45: Byte = field.set.value %43: Byte, %44: u8
+//   %46: i64 = const 73
+//   %47: u8 = field.value %45: Byte
+//   %48: i64 = cast %47: u8, i64
+//   test.expect_equal %46: i64, %48: i64, i64
+//   %50: u8 = const 72
+//   %51: ByteValue = union.new %50: u8, Item
+//   %52: i64 = union.tag %51: ByteValue
+//   jump match.check.5
+// match.end.4:
+//   %58: i64 = const 255
+//   %59: u8 = const 255
+//   %60: u8 = call.take_byte %59: u8
+//   %61: i64 = cast %60: u8, i64
+//   test.expect_equal %58: i64, %61: i64, i64
+//   %63: i64 = const 1
+//   %64: i64 = unary.- %63: i64
+//   %65: i32 = const 1
+//   %66: i32 = unary.- %65: i32
+//   %67: i32 = call.take_i32 %66: i32
+//   %68: i64 = cast %67: i32, i64
+//   test.expect_equal %64: i64, %68: i64, i64
+//   %70: i64 = const 9
+//   %71: !u8 = call.fallible_byte
+//   %72: u8 = error.try %71: !u8, cleanup map.deinit %22: std::map::Map<[]u8, u8>; call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %73: i64 = cast %72: u8, i64
+//   test.expect_equal %70: i64, %73: i64, i64
+//   %75: i64 = const 74
+//   %76: u8 = const 74
+//   %77: u8 = call.Byte.replace %37: Byte, %76: u8
+//   %78: i64 = cast %77: u8, i64
+//   test.expect_equal %75: i64, %78: i64, i64
+//   %80: i64 = const 75
+//   %81: u8 = const 75
+//   %82: u8 = call.identity.u8 %81: u8
+//   %83: i64 = cast %82: u8, i64
+//   test.expect_equal %80: i64, %83: i64, i64
+//   %85: u8 = const 76
+//   %86: u8 = const 76
+//   %87: u8 = call.identity.u8 %86: u8
+//   test.expect_equal %85: u8, %87: u8, u8
+//   map.deinit %22: std::map::Map<[]u8, u8>
+//   call.std::string::String.deinit %15: std::string::String
+//   array.deinit %2: std::array::Array<u8>
+//   %92: !void = error.ok
+//   return %92: !void
+// match.check.5:
+//   %53: bool = binary.== %52: i64, 0: i64
+//   branch %53: bool, match.arm.6, match.unreachable.7
+// match.arm.6:
+//   %54: u8 = union.payload %51: ByteValue, Item
+//   %55: i64 = const 72
+//   %56: i64 = cast %54: u8, i64
+//   test.expect_equal %55: i64, %56: i64, i64
+//   jump match.end.4
+// match.unreachable.7:
+//   unreachable
+// }
+// fn identity.u8(%value: u8) -> u8 {
+// entry:
+//   return %value: u8
+// }
+// opt:
+// fn Byte.replace(%self: Byte, %next: u8) -> u8 {
+// entry:
+//   return %next: u8
+// }
+// fn take_byte(%value: u8) -> u8 {
+// entry:
+//   return %value: u8
+// }
+// fn take_i32(%value: i32) -> i32 {
+// entry:
+//   return %value: i32
+// }
+// fn fallible_byte() -> !u8 {
+// entry:
+//   %1: u8 = const 9
+//   %2: !u8 = error.ok %1: u8
+//   return %2: !u8
+// }
+// fn test.contextual_integer_literals() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<u8> = array.new %1: Allocator, u8
+//   %3: u8 = const 65
+//   %4: !void = call.std::array::Array.append.u8 %2: std::array::Array<u8>, %3: u8
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<u8>
+//   %6: i64 = const 0
+//   %7: u8 = const 66
+//   %8: !void = call.std::array::Array.set.u8 %2: std::array::Array<u8>, %6: i64, %7: u8
+//   error.try %8: !void, cleanup array.deinit %2: std::array::Array<u8>
+//   %10: i64 = const 66
+//   %11: i64 = const 0
+//   %12: u8 = call.std::array::Array.get_or_panic.u8 %2: std::array::Array<u8>, %11: i64
+//   %13: i64 = cast %12: u8, i64
+//   test.expect_equal %10: i64, %13: i64, i64
+//   %15: std::string::String = call.std::string::new %1: Allocator
+//   %16: u8 = const 67
+//   %17: !void = call.std::string::String.append_byte %15: std::string::String, %16: u8
+//   error.try %17: !void, cleanup call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %19: i64 = const 1
+//   %20: i64 = call.std::string::String.len %15: std::string::String
+//   test.expect_equal %19: i64, %20: i64, i64
+//   %22: std::map::Map<[]u8, u8> = map.new %1: Allocator, u8
+//   %23: []u8 = const "answer"
+//   %24: u8 = const 68
+//   %25: !void = call.std::map::Map.insert.u8 %22: std::map::Map<[]u8, u8>, %23: []u8, %24: u8
+//   error.try %25: !void, cleanup map.deinit %22: std::map::Map<[]u8, u8>; call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %27: i64 = const 68
+//   %28: []u8 = const "answer"
+//   %29: ?u8 = call.std::map::Map.get.u8 %22: std::map::Map<[]u8, u8>, %28: []u8
+//   %30: bool = opt.has %29: ?u8
+//   branch %30: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %31: u8 = opt.value %29: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %32: u8 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %33: u8 = phi [orelse.some.1, %31: u8], [orelse.else.2, %32: u8]
+//   %34: i64 = cast %33: u8, i64
+//   test.expect_equal %27: i64, %34: i64, i64
+//   %36: u8 = const 71
+//   %37: Byte = struct.new {value: %36: u8}
+//   %38: i64 = const 71
+//   %39: u8 = field.value %37: Byte
+//   %40: i64 = cast %39: u8, i64
+//   test.expect_equal %38: i64, %40: i64, i64
+//   %42: u8 = const 71
+//   %43: Byte = struct.new {value: %42: u8}
+//   %44: u8 = const 73
+//   %45: Byte = field.set.value %43: Byte, %44: u8
+//   %46: i64 = const 73
+//   %47: u8 = field.value %45: Byte
+//   %48: i64 = cast %47: u8, i64
+//   test.expect_equal %46: i64, %48: i64, i64
+//   %50: u8 = const 72
+//   %51: ByteValue = union.new %50: u8, Item
+//   %52: i64 = union.tag %51: ByteValue
+//   jump match.check.5
+// match.end.4:
+//   %58: i64 = const 255
+//   %59: u8 = const 255
+//   %60: u8 = call.take_byte %59: u8
+//   %61: i64 = cast %60: u8, i64
+//   test.expect_equal %58: i64, %61: i64, i64
+//   %63: i64 = const 1
+//   %64: i64 = unary.- %63: i64
+//   %65: i32 = const 1
+//   %66: i32 = unary.- %65: i32
+//   %67: i32 = call.take_i32 %66: i32
+//   %68: i64 = cast %67: i32, i64
+//   test.expect_equal %64: i64, %68: i64, i64
+//   %70: i64 = const 9
+//   %71: !u8 = call.fallible_byte
+//   %72: u8 = error.try %71: !u8, cleanup map.deinit %22: std::map::Map<[]u8, u8>; call.std::string::String.deinit %15: std::string::String; array.deinit %2: std::array::Array<u8>
+//   %73: i64 = cast %72: u8, i64
+//   test.expect_equal %70: i64, %73: i64, i64
+//   %75: i64 = const 74
+//   %76: u8 = const 74
+//   %77: u8 = call.Byte.replace %37: Byte, %76: u8
+//   %78: i64 = cast %77: u8, i64
+//   test.expect_equal %75: i64, %78: i64, i64
+//   %80: i64 = const 75
+//   %81: u8 = const 75
+//   %82: u8 = call.identity.u8 %81: u8
+//   %83: i64 = cast %82: u8, i64
+//   test.expect_equal %80: i64, %83: i64, i64
+//   %85: u8 = const 76
+//   %86: u8 = const 76
+//   %87: u8 = call.identity.u8 %86: u8
+//   test.expect_equal %85: u8, %87: u8, u8
+//   map.deinit %22: std::map::Map<[]u8, u8>
+//   call.std::string::String.deinit %15: std::string::String
+//   array.deinit %2: std::array::Array<u8>
+//   %92: !void = error.ok
+//   return %92: !void
+// match.check.5:
+//   %53: bool = binary.== %52: i64, 0: i64
+//   branch %53: bool, match.arm.6, match.unreachable.7
+// match.arm.6:
+//   %54: u8 = union.payload %51: ByteValue, Item
+//   %55: i64 = const 72
+//   %56: i64 = cast %54: u8, i64
+//   test.expect_equal %55: i64, %56: i64, i64
+//   jump match.end.4
+// match.unreachable.7:
+//   unreachable
+// }
+// fn identity.u8(%value: u8) -> u8 {
+// entry:
+//   return %value: u8
+// }

@@ -1,0 +1,189 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// ADR-0096: mutability rides the borrow. `&var []u8` holders may write
+// elements; the view is exclusive while it lives and releases at last use.
+
+fn upper_first(buf: &var []u8) -> void {
+    if mem::len(buf) > 0 {
+        buf[0] = 75;
+    }
+    return;
+}
+
+test "as_mut_bytes writes through the view" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("kizu");
+
+    let view = name.as_mut_bytes();
+    upper_first(view);
+    view[3] = 79;
+
+    let read = name.as_bytes();
+    testing::expect(mem::equal_bytes(read, "KizO"));
+}
+
+test "mutable view releases at last use" {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    defer name.deinit();
+    try name.append_bytes("ab");
+
+    let view = name.as_mut_bytes();
+    view[0] = 65;
+
+    try name.append_bytes("c");
+    testing::expect_equal<i64>(3, name.len());
+}
+
+
+// ir
+// lower:
+// fn upper_first(%buf: []u8) -> void {
+// entry:
+//   %1: i64 = call.std::mem::len %buf: []u8
+//   %2: i64 = const 0
+//   %3: bool = binary.> %1: i64, %2: i64
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: u8 = const 75
+//   %5: i64 = const 0
+//   %6: i64 = slice.len %buf: []u8
+//   %7: bool = binary.< %5: i64, 0: i64
+//   cond_fail %7: bool, bounds(%5: i64, %6: i64)
+//   %8: bool = binary.>= %5: i64, %6: i64
+//   cond_fail %8: bool, bounds(%5: i64, %6: i64)
+//   slice.store %buf: []u8, %5: i64, %4: u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn test.as_mut_bytes_writes_through_the_view() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "kizu"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_mut_bytes %2: std::string::String
+//   call.upper_first %6: []u8
+//   %8: u8 = const 79
+//   %9: i64 = const 3
+//   %10: i64 = slice.len %6: []u8
+//   %11: bool = binary.< %9: i64, 0: i64
+//   cond_fail %11: bool, bounds(%9: i64, %10: i64)
+//   %12: bool = binary.>= %9: i64, %10: i64
+//   cond_fail %12: bool, bounds(%9: i64, %10: i64)
+//   slice.store %6: []u8, %9: i64, %8: u8
+//   %14: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   %15: []u8 = const "KizO"
+//   %16: bool = call.std::mem::equal_bytes %14: []u8, %15: []u8
+//   call.std::testing::expect %16: bool
+//   call.std::string::String.deinit %2: std::string::String
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.mutable_view_releases_at_last_use() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "ab"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_mut_bytes %2: std::string::String
+//   %7: u8 = const 65
+//   %8: i64 = const 0
+//   %9: i64 = slice.len %6: []u8
+//   %10: bool = binary.< %8: i64, 0: i64
+//   cond_fail %10: bool, bounds(%8: i64, %9: i64)
+//   %11: bool = binary.>= %8: i64, %9: i64
+//   cond_fail %11: bool, bounds(%8: i64, %9: i64)
+//   slice.store %6: []u8, %8: i64, %7: u8
+//   %13: []u8 = const "c"
+//   %14: !void = call.std::string::String.append_bytes %2: std::string::String, %13: []u8
+//   error.try %14: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %16: i64 = const 3
+//   %17: i64 = call.std::string::String.len %2: std::string::String
+//   test.expect_equal %16: i64, %17: i64, i64
+//   call.std::string::String.deinit %2: std::string::String
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// opt:
+// fn upper_first(%buf: []u8) -> void {
+// entry:
+//   %1: i64 = call.std::mem::len %buf: []u8
+//   %2: i64 = const 0
+//   %3: bool = binary.> %1: i64, %2: i64
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: u8 = const 75
+//   %5: i64 = const 0
+//   %6: i64 = slice.len %buf: []u8
+//   %7: bool = binary.< %5: i64, 0: i64
+//   cond_fail %7: bool, bounds(%5: i64, %6: i64)
+//   %8: bool = binary.>= %5: i64, %6: i64
+//   cond_fail %8: bool, bounds(%5: i64, %6: i64)
+//   slice.store %buf: []u8, %5: i64, %4: u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn test.as_mut_bytes_writes_through_the_view() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "kizu"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_mut_bytes %2: std::string::String
+//   call.upper_first %6: []u8
+//   %8: u8 = const 79
+//   %9: i64 = const 3
+//   %10: i64 = slice.len %6: []u8
+//   %11: bool = binary.< %9: i64, 0: i64
+//   cond_fail %11: bool, bounds(%9: i64, %10: i64)
+//   %12: bool = binary.>= %9: i64, %10: i64
+//   cond_fail %12: bool, bounds(%9: i64, %10: i64)
+//   slice.store %6: []u8, %9: i64, %8: u8
+//   %14: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   %15: []u8 = const "KizO"
+//   %16: bool = call.std::mem::equal_bytes %14: []u8, %15: []u8
+//   call.std::testing::expect %16: bool
+//   call.std::string::String.deinit %2: std::string::String
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.mutable_view_releases_at_last_use() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: []u8 = const "ab"
+//   %4: !void = call.std::string::String.append_bytes %2: std::string::String, %3: []u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %6: []u8 = call.std::string::String.as_mut_bytes %2: std::string::String
+//   %7: u8 = const 65
+//   %8: i64 = const 0
+//   %9: i64 = slice.len %6: []u8
+//   %10: bool = binary.< %8: i64, 0: i64
+//   cond_fail %10: bool, bounds(%8: i64, %9: i64)
+//   %11: bool = binary.>= %8: i64, %9: i64
+//   cond_fail %11: bool, bounds(%8: i64, %9: i64)
+//   slice.store %6: []u8, %8: i64, %7: u8
+//   %13: []u8 = const "c"
+//   %14: !void = call.std::string::String.append_bytes %2: std::string::String, %13: []u8
+//   error.try %14: !void, cleanup call.std::string::String.deinit %2: std::string::String
+//   %16: i64 = const 3
+//   %17: i64 = call.std::string::String.len %2: std::string::String
+//   test.expect_equal %16: i64, %17: i64, i64
+//   call.std::string::String.deinit %2: std::string::String
+//   %20: !void = error.ok
+//   return %20: !void
+// }

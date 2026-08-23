@@ -1,0 +1,327 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::typ;
+import std::array;
+
+// Mechanical port of internal/ir/defer.go: the lexical cleanup frames, the
+// `defer` / `errdefer` statements that record one cleanup each, and the
+// emission of the recorded cleanups at block ends, returns, loop exits and
+// `try` propagation. The Go `Cleanup.Args` is always the one receiver the
+// cleanup consumes, so it is the copy field `arg`; the Go op string is an
+// `Op` plus the symbol a `call.<f>` cleanup carries in `operand`.
+
+/// Opens a lexical cleanup frame for one block, the Go `pushDeferFrame`, and
+/// returns its index.
+fn (self: &var Lowerer) push_defer_frame() -> !i64 {
+    try self.defer_frames.append(array::new<Cleanup>(self.allocator));
+    return self.defer_frames.len() - 1;
+}
+
+/// Closes the innermost lexical cleanup frame, the Go `popDeferFrame`.
+fn (self: &var Lowerer) pop_defer_frame() -> void {
+    if self.defer_frames.pop() |frame| {
+        frame.deinit();
+    }
+    return;
+}
+
+/// Records a checked deferred cleanup without emitting it now, the Go
+/// `lowerDeferStmt`.
+fn (self: &var Lowerer) lower_defer_stmt(tree: &var ast::Ast, statement: ast::DeferStmt) -> !?diagnostic::Diagnostic {
+    return self.record_cleanup(tree, statement.expr, false);
+}
+
+/// Records an error-path cleanup into the shared cleanup stack, the Go
+/// `lowerErrDeferStmt`.
+fn (self: &var Lowerer) lower_err_defer_stmt(tree: &var ast::Ast, statement: ast::ErrDeferStmt) -> !?diagnostic::Diagnostic {
+    return self.record_cleanup(tree, statement.expr, true);
+}
+
+/// Resolves a cleanup expression and registers it in the current frame, the
+/// Go `recordCleanup`. on_error marks errdefer entries that run only on
+/// error-return paths.
+fn (self: &var Lowerer) record_cleanup(tree: &var ast::Ast, expression: ast::Expression, on_error: bool) -> !?diagnostic::Diagnostic {
+    var cleanup = empty_cleanup();
+    if try self.cleanup_from_expr(tree, expression, &var cleanup) |failed| {
+        return move failed;
+    }
+    cleanup.on_error = on_error;
+    cleanup.receiver = try self.cleanup_receiver_name(tree, expression);
+    let frame = self.defer_frames.len() - 1;
+    if self.defer_frames.at_mut(frame) |entries| {
+        try entries.append(cleanup);
+    }
+    return null;
+}
+
+/// Reads the local a cleanup call consumes, the Go `cleanupReceiverName`.
+/// The shape is the one `cleanup_from_expr` accepts, so anything else has
+/// already failed there.
+fn (self: &var Lowerer) cleanup_receiver_name(tree: &ast::Ast, expression: ast::Expression) -> !Name {
+    let call = ownership::call_expr(tree, expression) orelse return empty_name();
+    let field = ownership::field_expr(tree, call.callee) orelse return empty_name();
+    let ident = ownership::ident_expr(tree, field.receiver) orelse return empty_name();
+    return self.text_name(tree, ident.name);
+}
+
+/// Converts the narrow v0 defer expression into a void cleanup, the Go
+/// `cleanupFromExpr`.
+fn (self: &var Lowerer) cleanup_from_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    out: &var Cleanup
+) -> !?diagnostic::Diagnostic {
+    let call = ownership::call_expr(tree, expression) orelse
+        return try self.fail0("ir error: defer expects cleanup method call");
+    if ownership::arg_count(tree, call.args) != 0 {
+        return try self.fail0("ir error: defer expects cleanup method call");
+    }
+    let field = ownership::field_expr(tree, call.callee) orelse
+        return try self.fail0("ir error: defer expects cleanup method call");
+    if field.namespace {
+        return try self.fail0("ir error: defer expects cleanup method call");
+    }
+    let ident = ownership::ident_expr(tree, field.receiver) orelse
+        return try self.fail0("ir error: defer cleanup receiver must be a local");
+    let name = try self.text_name(tree, ident.name);
+    let receiver = self.envs.get(self.env, name) orelse
+        return try self.fail1(tree, "ir error: undefined defer receiver `%s`", Arg::Str(name));
+    let method = try self.text_name(tree, field.name);
+    return self.cleanup_from_method(tree, receiver, method, out);
+}
+
+/// Names what one std container's cleanup needs, the Go `containerCleanup`:
+/// the std type its wrapper is declared on, the runtime op a shallow cleanup
+/// lowers to, and the type argument that decides which of the two runs.
+struct ContainerCleanup {
+    name: []u8,
+    shallow_op: Op,
+    type_arg: Name
+}
+
+/// Reports the cleanup shape of a std container type, the Go
+/// `stdContainerCleanup`, and null for anything else.
+fn (self: &var Lowerer) std_container_cleanup(receiver_type: Name) -> !?ContainerCleanup {
+    if try self.array_element_type(receiver_type) |elem| {
+        return ContainerCleanup { name: "std::array::Array", shallow_op: Op::ArrayDeinit, type_arg: elem };
+    }
+    if try self.map_value_type(receiver_type) |value| {
+        return ContainerCleanup { name: "std::map::Map", shallow_op: Op::MapDeinit, type_arg: value };
+    }
+    if try self.box_element_type(receiver_type) |elem| {
+        return ContainerCleanup { name: "std::mem::Box", shallow_op: Op::BoxDeinit, type_arg: elem };
+    }
+    let elem = try self.arena_element_type(receiver_type);
+    if !self.name_is(elem, "unknown") {
+        return ContainerCleanup { name: "std::arena::Arena", shallow_op: Op::ArenaDeinit, type_arg: elem };
+    }
+    return null;
+}
+
+/// Returns a cleanup that runs op over the one receiver it consumes, the Go
+/// `Cleanup{Op: op, Args: []Value{receiver}}`.
+fn cleanup_of(op: Op, operand: Name, receiver: Value) -> Cleanup {
+    return Cleanup { op: op, operand: operand, arg: receiver, on_error: false, receiver: empty_name() };
+}
+
+/// Returns the record `std_container_call_op` fills, pointing at the
+/// scratch signature until it does.
+fn (self: &Lowerer) cleanup_call_op_slot() -> ContainerCallOp {
+    return ContainerCallOp { symbol: empty_name(), signature: self.scratch_signature };
+}
+
+/// Resolves one receiver.method() cleanup into an IR instruction, the Go
+/// `cleanupFromMethod`.
+fn (self: &var Lowerer) cleanup_from_method(
+    tree: &var ast::Ast,
+    receiver: Value,
+    method: Name,
+    out: &var Cleanup
+) -> !?diagnostic::Diagnostic {
+    let receiver_type = try self.deref_type(receiver.type_name);
+    if try self.std_container_cleanup(receiver_type) |container| {
+        if self.name_is(method, typ::cleanup_method()) {
+            // A container whose contents own something releases them first,
+            // and that loop lives in the std wrapper rather than in a runtime
+            // op: the cleanup calls its instance exactly like a direct call
+            // would. Plain contents have no loop to run, so they keep the
+            // runtime op.
+            if !self.is_owner_type(container.type_arg) {
+                out.* = cleanup_of(container.shallow_op, empty_name(), receiver);
+                return null;
+            }
+            let container_name = container.name;
+            var resolved = self.cleanup_call_op_slot();
+            if try self.std_container_call_op(tree, container_name, method, container.type_arg, &var resolved) |failed| {
+                return move failed;
+            }
+            out.* = cleanup_of(Op::Call, resolved.symbol, receiver);
+            return null;
+        }
+    }
+    if try self.impl_method_callee_name(receiver.type_name, method) |method_name| {
+        var returned = empty_name();
+        if self.signature_named(method_name) |signature| {
+            returned = self.signature_return(signature);
+        }
+        if !self.name_is(returned, "void") {
+            return try self.fail1(tree, "ir error: defer cleanup must return void, got %s", Arg::Str(returned));
+        }
+        out.* = cleanup_of(Op::Call, method_name, receiver);
+        return null;
+    }
+    return try self.fail1(tree, "ir error: unknown cleanup method `%s`", Arg::Str(method));
+}
+
+/// Appends all active cleanups that run on an error-return path, the Go
+/// `errorCleanups`, including both defer and errdefer entries, in execution
+/// order.
+fn (self: &var Lowerer) error_cleanups(out: &var array::Array<Cleanup>) -> !void {
+    return self.cleanups_from(0, true, out);
+}
+
+/// Appends active defer cleanups for a success exit, the Go
+/// `normalCleanups`. errdefer entries are skipped because they do not run
+/// when the block exits normally.
+fn (self: &var Lowerer) normal_cleanups(out: &var array::Array<Cleanup>) -> !void {
+    return self.cleanups_from(0, false, out);
+}
+
+/// Appends cleanups from the requested frame depth inward, the Go
+/// `cleanupsFrom`. When include_error is false, errdefer (error-path) entries
+/// are skipped.
+fn (self: &var Lowerer) cleanups_from(depth: i64, include_error: bool, out: &var array::Array<Cleanup>) -> !void {
+    var frame = self.defer_frames.len();
+    while frame > depth {
+        frame = frame - 1;
+        if self.defer_frames.at(frame) |entries| {
+            var index = entries.len();
+            while index > 0 {
+                index = index - 1;
+                if entries.get(index) |cleanup| {
+                    if cleanup.on_error and !include_error {
+                        continue;
+                    }
+                    try out.append(cleanup);
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Emits success-path cleanups before a normal function exit, the Go
+/// `emitNormalCleanups`.
+fn (self: &var Lowerer) emit_normal_cleanups() -> !void {
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit();
+    try self.normal_cleanups(&var cleanups);
+    return self.emit_cleanups(&cleanups);
+}
+
+/// Emits error-path cleanups before an error-return exit, the Go
+/// `emitErrorCleanups` over `RetiredErrDefersForReturn(stmt)`, minus the
+/// ones a move retired before it.
+fn (self: &var Lowerer) emit_error_cleanups_for_return(statement: ast::Statement) -> !void {
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit();
+    try self.error_cleanups(&var cleanups);
+    try self.retire_cleanups(CleanupExit::Return(statement), &var cleanups);
+    return self.emit_cleanups(&cleanups);
+}
+
+/// Drops the errdefer cleanups whose receiver was moved before this try
+/// expression, the Go `retireCleanups` over `RetiredErrDefersForTry(expr)`.
+fn (self: &var Lowerer) retire_cleanups_for_try(expression: ast::Expression, cleanups: &var array::Array<Cleanup>) -> !void {
+    return self.retire_cleanups(CleanupExit::Try(expression), cleanups);
+}
+
+/// Names the exit an errdefer retirement is asked about: the return
+/// statement or the try expression the ownership checker recorded the
+/// retired receivers under.
+union CleanupExit {
+    Return(ast::Statement),
+    Try(ast::Expression),
+}
+
+/// Reports whether the ownership checker retired the errdefer on receiver
+/// before exit, the Go `moved[cleanup.Receiver]` test.
+fn (self: &Lowerer) retired_before(exit: CleanupExit, receiver: Name) -> bool {
+    match exit {
+        Return(statement) => return self.retired_for_return(statement, receiver),
+        Try(expression) => return self.retired_for_try(expression, receiver),
+    }
+}
+
+/// Drops, in place, the errdefer cleanups whose receiver was moved before
+/// this error exit, the Go `retireCleanups`. The ownership checker decides
+/// which; lowering obeys, so the move rule has one implementation
+/// (ADR-0114).
+fn (self: &Lowerer) retire_cleanups(exit: CleanupExit, cleanups: &var array::Array<Cleanup>) -> !void {
+    var kept = 0;
+    var index = 0;
+    while cleanups.get(index) |cleanup| {
+        index = index + 1;
+        if cleanup.on_error and !is_empty(cleanup.receiver) and self.retired_before(exit, cleanup.receiver) {
+            continue;
+        }
+        try cleanups.set(kept, cleanup);
+        kept = kept + 1;
+    }
+    while cleanups.len() > kept {
+        let _ = cleanups.pop();
+    }
+    return;
+}
+
+/// Emits normal fallthrough cleanups for one lexical block, the Go
+/// `emitCleanupFrame`. errdefer entries are skipped because the block exited
+/// without an error.
+fn (self: &var Lowerer) emit_cleanup_frame(frame: i64) -> !void {
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit();
+    if self.defer_frames.at(frame) |entries| {
+        var index = entries.len();
+        while index > 0 {
+            index = index - 1;
+            if entries.get(index) |cleanup| {
+                if cleanup.on_error {
+                    continue;
+                }
+                try cleanups.append(cleanup);
+            }
+        }
+    }
+    return self.emit_cleanups(&cleanups);
+}
+
+/// Appends cleanup instructions to the current block, the Go `emitCleanups`.
+/// A cleanup receiver that lives in a slot arrives as `&var T` storage; every
+/// cleanup consumes the value, so the slot is loaded at the exit that runs
+/// it.
+fn (self: &var Lowerer) emit_cleanups(cleanups: &array::Array<Cleanup>) -> !void {
+    var index = 0;
+    while cleanups.get(index) |cleanup| {
+        index = index + 1;
+        let arg = try self.load_cleanup_arg(cleanup.arg);
+        let _ = try self.emit_op1(cleanup.op, cleanup.operand, self.common.void_type, arg);
+    }
+    return;
+}
+
+/// Loads a slot-backed cleanup receiver into a value, the Go
+/// `loadCleanupArgs` for the one receiver a cleanup has. An arg without a
+/// slot is returned as it is.
+fn (self: &var Lowerer) load_cleanup_arg(arg: Value) -> !Value {
+    if !self.is_mutable_reference_type(arg.type_name) {
+        return arg;
+    }
+    let elem = try self.deref_type(arg.type_name);
+    return self.emit1(Op::RefLoad, elem, arg);
+}
+
+/// Returns an empty cleanup record, the slot a resolver fills.
+fn empty_cleanup() -> Cleanup {
+    return Cleanup { op: Op::Id, operand: empty_name(), arg: empty_value(), on_error: false, receiver: empty_name() };
+}

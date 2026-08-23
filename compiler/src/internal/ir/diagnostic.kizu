@@ -1,0 +1,93 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// The Go lowerer reports failures as `fmt.Errorf("ir error: ...")`; here a
+// format interpolates up to three Args (`%s` takes a Name, an Ast text or
+// bytes, `%d` an integer) into one Diagnostic without a span, which the CLI
+// prints as `error: ir error: ...`, the text the Go CLI prints.
+
+/// Is one value a failure message interpolates.
+pub union Arg {
+    Str(Name),
+    Text(ast::Text),
+    Int(i64),
+}
+
+fn (self: &Lowerer) append_arg(out: &var string::String, tree: &ast::Ast, arg: Arg) -> !void {
+    match arg {
+        Str(name) => return self.module.names.append_to(out, name),
+        Text(text) => {
+            let retained = tree.texts.at(text.node);
+            return out.append_string(retained);
+        },
+        Int(value) => return fmt::append_i64(out, value),
+    }
+}
+
+/// Renders format with `%s` / `%d` replaced in order by the arguments, the
+/// Go `fmt.Errorf` of one failure; unused arguments are ignored.
+fn (self: &Lowerer) format_message(
+    tree: &ast::Ast,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg
+) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var used = 0;
+    var index = 0;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if used == 0 {
+                try self.append_arg(&var out, tree, a);
+            }
+            if used == 1 {
+                try self.append_arg(&var out, tree, b);
+            }
+            if used == 2 {
+                try self.append_arg(&var out, tree, c);
+            }
+            used = used + 1;
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
+        }
+    }
+    return move out;
+}
+
+/// Builds one failure from finished text, the Go `fmt.Errorf` without
+/// arguments.
+fn (self: &Lowerer) fail0(text: []u8) -> !diagnostic::Diagnostic {
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+fn (self: &Lowerer) fail_message(message: string::String) -> !diagnostic::Diagnostic {
+    defer message.deinit();
+    let text = message.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one failure from a format and one argument.
+fn (self: &Lowerer) fail1(tree: &ast::Ast, format: []u8, a: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, Arg::Int(0), Arg::Int(0));
+    return self.fail_message(move message);
+}
+
+/// Builds one failure from a format and two arguments.
+fn (self: &Lowerer) fail2(tree: &ast::Ast, format: []u8, a: Arg, b: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, b, Arg::Int(0));
+    return self.fail_message(move message);
+}
+
+/// Builds one failure from a format and three arguments.
+fn (self: &Lowerer) fail3(tree: &ast::Ast, format: []u8, a: Arg, b: Arg, c: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, b, c);
+    return self.fail_message(move message);
+}

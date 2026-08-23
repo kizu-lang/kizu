@@ -1,0 +1,141 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+// Every expectation below is the output of Go's strconv.Quote (fmt `%q`) for
+// the same input bytes, taken from the Go 1.22 toolchain.
+
+/// Quotes `input` and compares the text with the Go spelling.
+fn expect_quote(allocator: Allocator, input: []u8, expected: []u8) -> !void {
+    let quoted = try quote_go(allocator, input);
+    defer quoted.deinit();
+    let bytes = quoted.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+/// Quotes the bytes spelled as space-separated decimal values in `text`, for
+/// inputs that a UTF-8 source file cannot carry literally.
+fn expect_quote_bytes(allocator: Allocator, text: []u8, expected: []u8) -> !void {
+    let input = try bytes_of(allocator, text);
+    defer input.deinit();
+    let view = input.as_bytes();
+    try expect_quote(allocator, view, expected);
+    return;
+}
+
+/// Builds a byte string from space-separated decimal byte values.
+fn bytes_of(allocator: Allocator, text: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var value = 0;
+    var pending = false;
+    var index = 0;
+    let length = mem::len(text);
+    while index < length {
+        let byte = text[index];
+        if byte == cast<u8>(32) {
+            if pending {
+                try out.append_byte(cast<u8>(value));
+            }
+            value = 0;
+            pending = false;
+        } else {
+            value = value * 10 + cast<i64>(byte) - 48;
+            pending = true;
+        }
+        index = index + 1;
+    }
+    if pending {
+        try out.append_byte(cast<u8>(value));
+    }
+    return move out;
+}
+
+test "quote_go keeps printable runes and backslashes the quote and backslash" {
+    let allocator = mem::page_allocator();
+    try expect_quote(allocator, "",
+        \\""
+    );
+    try expect_quote(allocator, "plain ~",
+        \\"plain ~"
+    );
+    try expect_quote(allocator, "café",
+        \\"café"
+    );
+    try expect_quote(allocator, "éÿ",
+        \\"éÿ"
+    );
+    try expect_quote(allocator, "😀",
+        \\"😀"
+    );
+    try expect_quote(allocator, "𠀀",
+        \\"𠀀"
+    );
+    try expect_quote(allocator, "Āͷ͸",
+        \\"Āͷ\u0378"
+    );
+    try expect_quote_bytes(allocator, "92 34",
+        \\"\\\""
+    );
+}
+
+test "quote_go escapes control bytes like Go with lowercase hex" {
+    let allocator = mem::page_allocator();
+    try expect_quote_bytes(allocator, "0 31 127",
+        \\"\x00\x1f\x7f"
+    );
+    try expect_quote_bytes(allocator, "7 8 12 11 10 13 9 92 34",
+        \\"\a\b\f\v\n\r\t\\\""
+    );
+}
+
+test "quote_go escapes each invalid UTF-8 byte as lowercase hex" {
+    let allocator = mem::page_allocator();
+    try expect_quote_bytes(allocator, "195 40",
+        \\"\xc3("
+    );
+    try expect_quote_bytes(allocator, "173",
+        \\"\xad"
+    );
+    try expect_quote_bytes(allocator, "128",
+        \\"\x80"
+    );
+    try expect_quote_bytes(allocator, "237 160 128",
+        \\"\xed\xa0\x80"
+    );
+    try expect_quote_bytes(allocator, "240 159 152",
+        \\"\xf0\x9f\x98"
+    );
+    try expect_quote_bytes(allocator, "192 128",
+        \\"\xc0\x80"
+    );
+}
+
+test "quote_go escapes non-printable runes as \u and \U" {
+    let allocator = mem::page_allocator();
+    try expect_quote_bytes(allocator, "227 128 128 102 105 114 115 116",
+        \\"\u3000first"
+    );
+    try expect_quote_bytes(allocator, "194 173",
+        \\"\u00ad"
+    );
+    try expect_quote_bytes(allocator, "226 128 168",
+        \\"\u2028"
+    );
+    try expect_quote_bytes(allocator, "238 128 128",
+        \\"\ue000"
+    );
+    try expect_quote_bytes(allocator, "239 191 189",
+        \\"�"
+    );
+    try expect_quote_bytes(allocator, "240 159 191 191",
+        \\"\U0001ffff"
+    );
+    try expect_quote_bytes(allocator, "243 160 128 129",
+        \\"\U000e0001"
+    );
+    try expect_quote_bytes(allocator, "244 143 191 191",
+        \\"\U0010ffff"
+    );
+}

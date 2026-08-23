@@ -1,0 +1,130 @@
+import std::array;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/ir/reachable.go: dropping the functions no
+// root reaches through direct calls. Go keys its function map and reachable
+// set by the Go string of a function name; here they are keyed by the bytes
+// of the interned Name.
+
+/// Removes module functions that cannot be reached from the supplied roots
+/// through direct calls, the Go `KeepReachableFunctions`. Calls to symbols
+/// outside the module do not add an edge.
+pub fn keep_reachable_functions(allocator: Allocator, module: &var Module, roots: &array::Array<string::String>) -> !void {
+    var functions = map::new<[]u8, Function>(allocator);
+    defer functions.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_name(function);
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try functions.insert(bytes, function);
+    }
+    var reachable = map::new<[]u8, bool>(allocator);
+    defer reachable.deinit();
+    var queue = array::new<Function>(allocator);
+    defer queue.deinit();
+    index = 0;
+    while roots.at(index) |root| {
+        index = index + 1;
+        let root_bytes = root.as_bytes();
+        if functions.get(root_bytes) |function| {
+            if !reachable.contains(root_bytes) {
+                try reachable.insert(root_bytes, true);
+                try queue.append(function);
+            }
+        }
+    }
+    if queue.len() == 0 {
+        return;
+    }
+    var head = 0;
+    while queue.get(head) |function| {
+        head = head + 1;
+        var callees = try direct_callees(allocator, module, function);
+        defer callees.deinit();
+        var callee_index = 0;
+        while callees.get(callee_index) |callee| {
+            callee_index = callee_index + 1;
+            try mark_reachable(module, &functions, &var reachable, &var queue, callee);
+        }
+    }
+    var kept = array::new<Function>(allocator);
+    defer kept.deinit();
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_name(function);
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        if reachable.contains(bytes) {
+            try kept.append(function);
+        }
+    }
+    while module.functions.pop() |_| {}
+    index = 0;
+    while kept.get(index) |function| {
+        index = index + 1;
+        try module.functions.append(function);
+    }
+    return;
+}
+
+/// Queues one callee the first time a reachable function names it, the body
+/// of the Go work-list loop: a symbol the module does not define adds
+/// nothing.
+fn mark_reachable(
+    module: &Module,
+    functions: &map::Map<[]u8, Function>,
+    reachable: &var map::Map<[]u8, bool>,
+    queue: &var array::Array<Function>,
+    callee: Name
+) -> !void {
+    let retained = name_text(&module.names, callee);
+    let bytes = retained.as_bytes();
+    let function = functions.get(bytes) orelse return;
+    if reachable.contains(bytes) {
+        return;
+    }
+    try reachable.insert(bytes, true);
+    return queue.append(function);
+}
+
+/// Returns direct call targets from a function body and its deferred cleanup
+/// paths, the Go `directCallees`.
+fn direct_callees(allocator: Allocator, module: &Module, function: Function) -> !array::Array<Name> {
+    var callees = array::new<Name>(allocator);
+    errdefer callees.deinit();
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if direct_callee(instr_node.op, instr_node.operand) |callee| {
+                try callees.append(callee);
+            }
+            var cleanup_index = 0;
+            while instr_node.cleanups.get(cleanup_index) |cleanup| {
+                cleanup_index = cleanup_index + 1;
+                if direct_callee(cleanup.op, cleanup.operand) |callee| {
+                    try callees.append(callee);
+                }
+            }
+        }
+    }
+    return move callees;
+}
+
+/// Decodes one direct call operation, the Go `directCallee`: the symbol a
+/// `call.<f>` names, null for every other op.
+fn direct_callee(op: Op, operand: Name) -> ?Name {
+    if op != Op::Call {
+        return null;
+    }
+    return operand;
+}

@@ -1,0 +1,185 @@
+import std::array;
+import std::mem;
+
+struct Counter {
+    count: i64,
+}
+
+fn (self: &var Counter) bump() -> void {
+    self.count = self.count + 1;
+    return;
+}
+
+fn reset(counter: &var Counter) -> void {
+    counter.count = 0;
+    return;
+}
+
+struct Tracker {
+    visits: Counter,
+    log: array::Array<i64>,
+}
+
+// A `&var self` method reaches one direct field of a mutable owner: the
+// exclusive borrow derives from the owner's storage, the same derivation a
+// `&var` argument uses. A type split into small fields keeps each field's
+// methods callable through the owner.
+fn (self: &var Tracker) record(id: i64) -> !void {
+    try self.log.append(id);
+    self.visits.bump();
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var tracker = Tracker { visits: Counter { count: 0 }, log: array::new<i64>(allocator) };
+    defer tracker.deinit();
+    try tracker.record(7);
+    try tracker.record(9);
+    tracker.visits.bump();
+    print(tracker.visits.count);
+    reset(tracker.visits);
+    print(tracker.visits.count);
+    print(tracker.log.len());
+    return;
+}
+
+// run
+// features: method receiver mutable-borrow field-access struct
+// output:
+// 3
+// 0
+// 2
+
+
+// ir
+// lower:
+// fn Counter.bump(%self: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.count %self: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.count %self: &var Counter, %3: i64
+//   return void: void
+// }
+// fn reset(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = const 0
+//   field.ref.set.count %counter: &var Counter, %1: i64
+//   return void: void
+// }
+// fn Tracker.record(%self: &var Tracker, %id: i64) -> !void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.log %self: &var Tracker
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %id: i64
+//   error.try %2: !void
+//   %4: &var Counter = field.addr.visits %self: &var Tracker
+//   call.Counter.bump %4: &var Counter
+//   %6: !void = error.ok
+//   return %6: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 0
+//   %3: Counter = struct.new {count: %2: i64}
+//   %4: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %5: Tracker = struct.new {visits: %3: Counter, log: %4: std::array::Array<i64>}
+//   %6: &var Tracker = local.slot %5: Tracker
+//   %7: i64 = const 7
+//   %8: !void = call.Tracker.record %6: &var Tracker, %7: i64
+//   %9: Tracker = ref.load %6: &var Tracker
+//   error.try %8: !void, cleanup call.Tracker.deinit %9: Tracker
+//   %11: i64 = const 9
+//   %12: !void = call.Tracker.record %6: &var Tracker, %11: i64
+//   %13: Tracker = ref.load %6: &var Tracker
+//   error.try %12: !void, cleanup call.Tracker.deinit %13: Tracker
+//   %15: &var Counter = field.addr.visits %6: &var Tracker
+//   call.Counter.bump %15: &var Counter
+//   %17: Counter = field.ref.visits %6: &var Tracker
+//   %18: i64 = field.count %17: Counter
+//   call.print %18: i64
+//   %20: &var Counter = field.addr.visits %6: &var Tracker
+//   call.reset %20: &var Counter
+//   %22: Counter = field.ref.visits %6: &var Tracker
+//   %23: i64 = field.count %22: Counter
+//   call.print %23: i64
+//   %25: std::array::Array<i64> = field.ref.log %6: &var Tracker
+//   %26: i64 = call.std::array::Array.len.i64 %25: std::array::Array<i64>
+//   call.print %26: i64
+//   %28: Tracker = ref.load %6: &var Tracker
+//   call.Tracker.deinit %28: Tracker
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Tracker.deinit(%self: Tracker) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.log %self: Tracker
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// opt:
+// fn Counter.bump(%self: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.count %self: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.count %self: &var Counter, %3: i64
+//   return void: void
+// }
+// fn reset(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = const 0
+//   field.ref.set.count %counter: &var Counter, %1: i64
+//   return void: void
+// }
+// fn Tracker.record(%self: &var Tracker, %id: i64) -> !void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.log %self: &var Tracker
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %id: i64
+//   error.try %2: !void
+//   %4: &var Counter = field.addr.visits %self: &var Tracker
+//   call.Counter.bump %4: &var Counter
+//   %6: !void = error.ok
+//   return %6: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 0
+//   %3: Counter = struct.new {count: %2: i64}
+//   %4: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %5: Tracker = struct.new {visits: %3: Counter, log: %4: std::array::Array<i64>}
+//   %6: &var Tracker = local.slot %5: Tracker
+//   %7: i64 = const 7
+//   %8: !void = call.Tracker.record %6: &var Tracker, %7: i64
+//   %9: Tracker = ref.load %6: &var Tracker
+//   error.try %8: !void, cleanup call.Tracker.deinit %9: Tracker
+//   %11: i64 = const 9
+//   %12: !void = call.Tracker.record %6: &var Tracker, %11: i64
+//   %13: Tracker = ref.load %6: &var Tracker
+//   error.try %12: !void, cleanup call.Tracker.deinit %13: Tracker
+//   %15: &var Counter = field.addr.visits %6: &var Tracker
+//   call.Counter.bump %15: &var Counter
+//   %17: Counter = field.ref.visits %6: &var Tracker
+//   %18: i64 = field.count %17: Counter
+//   call.print %18: i64
+//   %20: &var Counter = field.addr.visits %6: &var Tracker
+//   call.reset %20: &var Counter
+//   %22: Counter = field.ref.visits %6: &var Tracker
+//   %23: i64 = field.count %22: Counter
+//   call.print %23: i64
+//   %25: std::array::Array<i64> = field.ref.log %6: &var Tracker
+//   %26: i64 = call.std::array::Array.len.i64 %25: std::array::Array<i64>
+//   call.print %26: i64
+//   %28: Tracker = ref.load %6: &var Tracker
+//   call.Tracker.deinit %28: Tracker
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Tracker.deinit(%self: Tracker) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.log %self: Tracker
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }

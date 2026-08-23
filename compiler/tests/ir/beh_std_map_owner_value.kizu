@@ -1,0 +1,449 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+test "std map owner value borrow and grow" {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("first", try owned(allocator, "alice"));
+    try names.insert("last", try owned(allocator, "smith"));
+    testing::expect_equal<i64>(2, names.len());
+
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("alice", bytes);
+    } else {
+        testing::fail("first is missing");
+    }
+
+    // at_mut borrows in place, which is how a stored owner changes without
+    // leaving the map.
+    if names.at_mut("last") |name| {
+        try name.append_bytes("son");
+    } else {
+        testing::fail("last is missing");
+    }
+    if names.at("last") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("smithson", bytes);
+    } else {
+        testing::fail("last is missing");
+    }
+}
+
+test "std map owner value keeps insertion order" {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("b", try owned(allocator, "one"));
+    try names.insert("a", try owned(allocator, "two"));
+
+    var joined = string::new(allocator);
+    defer joined.deinit();
+    var index = 0;
+    while names.key_at(index) |key| {
+        try joined.append_bytes(key);
+        index = index + 1;
+    }
+    let order = joined.as_bytes();
+    testing::expect_equal<[]u8>("ba", order);
+}
+
+test "std map holds containers as values" {
+    let allocator = mem::page_allocator();
+
+    // A map value that is itself a container was refused only because the
+    // copy constraint masked it; nothing about nesting needed its own rule.
+    var counts = map::new<[]u8, map::Map<[]u8, i64>>(allocator);
+    defer counts.deinit();
+    var inner = map::new<[]u8, i64>(allocator);
+    errdefer inner.deinit();
+    try inner.insert("hit", 2);
+    try counts.insert("alice", move inner);
+    if counts.at("alice") |held| {
+        testing::expect_equal<i64>(1, held.len());
+    } else {
+        testing::fail("alice is missing");
+    }
+
+    var lists = map::new<[]u8, array::Array<i64>>(allocator);
+    defer lists.deinit();
+    var items = array::new<i64>(allocator);
+    errdefer items.deinit();
+    try items.append(7);
+    try lists.insert("alice", move items);
+    if lists.at("alice") |held| {
+        testing::expect_equal<i64>(1, held.len());
+    } else {
+        testing::fail("alice is missing");
+    }
+}
+
+
+// ir
+// lower:
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn test.std_map_owner_value_borrow_and_grow() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::string::String> = map.new %1: Allocator, std::string::String
+//   %3: []u8 = const "first"
+//   %4: []u8 = const "alice"
+//   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %7: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %3: []u8, %6: std::string::String
+//   error.try %7: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %9: []u8 = const "last"
+//   %10: []u8 = const "smith"
+//   %11: !std::string::String = call.owned %1: Allocator, %10: []u8
+//   %12: std::string::String = error.try %11: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %13: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %9: []u8, %12: std::string::String
+//   error.try %13: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %15: i64 = const 2
+//   %16: i64 = call.std::map::Map.len.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   test.expect_equal %15: i64, %16: i64, i64
+//   %18: []u8 = const "first"
+//   %19: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %18: []u8
+//   %20: &std::string::String = opt.value %19: ?&std::string::String
+//   %21: bool = opt.has %19: ?&std::string::String
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: std::string::String = ref.load %20: &std::string::String
+//   %23: []u8 = call.std::string::String.as_bytes %22: std::string::String
+//   %24: []u8 = const "alice"
+//   test.expect_equal %24: []u8, %23: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %26: []u8 = const "first is missing"
+//   call.std::testing::fail %26: []u8
+//   jump if.end.3
+// if.end.3:
+//   %28: []u8 = const "last"
+//   %29: ?&var std::string::String = call.std::map::Map.at_mut.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %28: []u8
+//   %30: &var std::string::String = opt.value %29: ?&var std::string::String
+//   %31: bool = opt.has %29: ?&var std::string::String
+//   branch %31: bool, if.then.4, if.else.5
+// if.then.4:
+//   %32: std::string::String = ref.load %30: &var std::string::String
+//   %33: []u8 = const "son"
+//   %34: !void = call.std::string::String.append_bytes %32: std::string::String, %33: []u8
+//   error.try %34: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   jump if.end.6
+// if.else.5:
+//   %36: []u8 = const "last is missing"
+//   call.std::testing::fail %36: []u8
+//   jump if.end.6
+// if.end.6:
+//   %38: []u8 = const "last"
+//   %39: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %38: []u8
+//   %40: &std::string::String = opt.value %39: ?&std::string::String
+//   %41: bool = opt.has %39: ?&std::string::String
+//   branch %41: bool, if.then.7, if.else.8
+// if.then.7:
+//   %42: std::string::String = ref.load %40: &std::string::String
+//   %43: []u8 = call.std::string::String.as_bytes %42: std::string::String
+//   %44: []u8 = const "smithson"
+//   test.expect_equal %44: []u8, %43: []u8, []u8
+//   jump if.end.9
+// if.else.8:
+//   %46: []u8 = const "last is missing"
+//   call.std::testing::fail %46: []u8
+//   jump if.end.9
+// if.end.9:
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.std_map_owner_value_keeps_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::string::String> = map.new %1: Allocator, std::string::String
+//   %3: []u8 = const "b"
+//   %4: []u8 = const "one"
+//   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %7: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %3: []u8, %6: std::string::String
+//   error.try %7: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %9: []u8 = const "a"
+//   %10: []u8 = const "two"
+//   %11: !std::string::String = call.owned %1: Allocator, %10: []u8
+//   %12: std::string::String = error.try %11: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %13: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %9: []u8, %12: std::string::String
+//   error.try %13: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %15: std::string::String = call.std::string::new %1: Allocator
+//   %16: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %17: i64 = phi [entry, %16: i64], [while.body.2, %24: i64]
+//   %18: ?[]u8 = call.std::map::Map.key_at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %17: i64
+//   %19: []u8 = opt.value %18: ?[]u8
+//   %20: bool = opt.has %18: ?[]u8
+//   branch %20: bool, while.body.2, while.end.3
+// while.body.2:
+//   %21: !void = call.std::string::String.append_bytes %15: std::string::String, %19: []u8
+//   error.try %21: !void, cleanup call.std::string::String.deinit %15: std::string::String; call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %23: i64 = const 1
+//   %24: i64 = binary.+ %17: i64, %23: i64
+//   jump while.header.1
+// while.end.3:
+//   %25: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %26: []u8 = const "ba"
+//   test.expect_equal %26: []u8, %25: []u8, []u8
+//   call.std::string::String.deinit %15: std::string::String
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.std_map_holds_containers_as_values() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>> = map.new %1: Allocator, std::map::Map<[]u8, i64>
+//   %3: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %4: []u8 = const "hit"
+//   %5: i64 = const 2
+//   %6: !void = call.std::map::Map.insert.i64 %3: std::map::Map<[]u8, i64>, %4: []u8, %5: i64
+//   error.try %6: !void, cleanup map.deinit %3: std::map::Map<[]u8, i64>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %8: []u8 = const "alice"
+//   %9: !void = call.std::map::Map.insert.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %8: []u8, %3: std::map::Map<[]u8, i64>
+//   error.try %9: !void, cleanup call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %11: []u8 = const "alice"
+//   %12: ?&std::map::Map<[]u8, i64> = call.std::map::Map.at.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %11: []u8
+//   %13: &std::map::Map<[]u8, i64> = opt.value %12: ?&std::map::Map<[]u8, i64>
+//   %14: bool = opt.has %12: ?&std::map::Map<[]u8, i64>
+//   branch %14: bool, if.then.1, if.else.2
+// if.then.1:
+//   %15: i64 = const 1
+//   %16: std::map::Map<[]u8, i64> = ref.load %13: &std::map::Map<[]u8, i64>
+//   %17: i64 = call.std::map::Map.len.i64 %16: std::map::Map<[]u8, i64>
+//   test.expect_equal %15: i64, %17: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %19: []u8 = const "alice is missing"
+//   call.std::testing::fail %19: []u8
+//   jump if.end.3
+// if.end.3:
+//   %21: std::map::Map<[]u8, std::array::Array<i64>> = map.new %1: Allocator, std::array::Array<i64>
+//   %22: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %23: i64 = const 7
+//   %24: !void = call.std::array::Array.append.i64 %22: std::array::Array<i64>, %23: i64
+//   error.try %24: !void, cleanup array.deinit %22: std::array::Array<i64>; call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %26: []u8 = const "alice"
+//   %27: !void = call.std::map::Map.insert.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>, %26: []u8, %22: std::array::Array<i64>
+//   error.try %27: !void, cleanup call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %29: []u8 = const "alice"
+//   %30: ?&std::array::Array<i64> = call.std::map::Map.at.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>, %29: []u8
+//   %31: &std::array::Array<i64> = opt.value %30: ?&std::array::Array<i64>
+//   %32: bool = opt.has %30: ?&std::array::Array<i64>
+//   branch %32: bool, if.then.4, if.else.5
+// if.then.4:
+//   %33: i64 = const 1
+//   %34: std::array::Array<i64> = ref.load %31: &std::array::Array<i64>
+//   %35: i64 = call.std::array::Array.len.i64 %34: std::array::Array<i64>
+//   test.expect_equal %33: i64, %35: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   %37: []u8 = const "alice is missing"
+//   call.std::testing::fail %37: []u8
+//   jump if.end.6
+// if.end.6:
+//   call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>
+//   call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %41: !void = error.ok
+//   return %41: !void
+// }
+// opt:
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn test.std_map_owner_value_borrow_and_grow() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::string::String> = map.new %1: Allocator, std::string::String
+//   %3: []u8 = const "first"
+//   %4: []u8 = const "alice"
+//   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %7: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %3: []u8, %6: std::string::String
+//   error.try %7: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %9: []u8 = const "last"
+//   %10: []u8 = const "smith"
+//   %11: !std::string::String = call.owned %1: Allocator, %10: []u8
+//   %12: std::string::String = error.try %11: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %13: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %9: []u8, %12: std::string::String
+//   error.try %13: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %15: i64 = const 2
+//   %16: i64 = call.std::map::Map.len.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   test.expect_equal %15: i64, %16: i64, i64
+//   %18: []u8 = const "first"
+//   %19: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %18: []u8
+//   %20: &std::string::String = opt.value %19: ?&std::string::String
+//   %21: bool = opt.has %19: ?&std::string::String
+//   branch %21: bool, if.then.1, if.else.2
+// if.then.1:
+//   %22: std::string::String = ref.load %20: &std::string::String
+//   %23: []u8 = call.std::string::String.as_bytes %22: std::string::String
+//   %24: []u8 = const "alice"
+//   test.expect_equal %24: []u8, %23: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %26: []u8 = const "first is missing"
+//   call.std::testing::fail %26: []u8
+//   jump if.end.3
+// if.end.3:
+//   %28: []u8 = const "last"
+//   %29: ?&var std::string::String = call.std::map::Map.at_mut.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %28: []u8
+//   %30: &var std::string::String = opt.value %29: ?&var std::string::String
+//   %31: bool = opt.has %29: ?&var std::string::String
+//   branch %31: bool, if.then.4, if.else.5
+// if.then.4:
+//   %32: std::string::String = ref.load %30: &var std::string::String
+//   %33: []u8 = const "son"
+//   %34: !void = call.std::string::String.append_bytes %32: std::string::String, %33: []u8
+//   error.try %34: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   jump if.end.6
+// if.else.5:
+//   %36: []u8 = const "last is missing"
+//   call.std::testing::fail %36: []u8
+//   jump if.end.6
+// if.end.6:
+//   %38: []u8 = const "last"
+//   %39: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %38: []u8
+//   %40: &std::string::String = opt.value %39: ?&std::string::String
+//   %41: bool = opt.has %39: ?&std::string::String
+//   branch %41: bool, if.then.7, if.else.8
+// if.then.7:
+//   %42: std::string::String = ref.load %40: &std::string::String
+//   %43: []u8 = call.std::string::String.as_bytes %42: std::string::String
+//   %44: []u8 = const "smithson"
+//   test.expect_equal %44: []u8, %43: []u8, []u8
+//   jump if.end.9
+// if.else.8:
+//   %46: []u8 = const "last is missing"
+//   call.std::testing::fail %46: []u8
+//   jump if.end.9
+// if.end.9:
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %49: !void = error.ok
+//   return %49: !void
+// }
+// fn test.std_map_owner_value_keeps_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::string::String> = map.new %1: Allocator, std::string::String
+//   %3: []u8 = const "b"
+//   %4: []u8 = const "one"
+//   %5: !std::string::String = call.owned %1: Allocator, %4: []u8
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %7: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %3: []u8, %6: std::string::String
+//   error.try %7: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %9: []u8 = const "a"
+//   %10: []u8 = const "two"
+//   %11: !std::string::String = call.owned %1: Allocator, %10: []u8
+//   %12: std::string::String = error.try %11: !std::string::String, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %13: !void = call.std::map::Map.insert.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %9: []u8, %12: std::string::String
+//   error.try %13: !void, cleanup call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %15: std::string::String = call.std::string::new %1: Allocator
+//   %16: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %17: i64 = phi [entry, %16: i64], [while.body.2, %24: i64]
+//   %18: ?[]u8 = call.std::map::Map.key_at.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>, %17: i64
+//   %19: []u8 = opt.value %18: ?[]u8
+//   %20: bool = opt.has %18: ?[]u8
+//   branch %20: bool, while.body.2, while.end.3
+// while.body.2:
+//   %21: !void = call.std::string::String.append_bytes %15: std::string::String, %19: []u8
+//   error.try %21: !void, cleanup call.std::string::String.deinit %15: std::string::String; call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %23: i64 = const 1
+//   %24: i64 = binary.+ %17: i64, %23: i64
+//   jump while.header.1
+// while.end.3:
+//   %25: []u8 = call.std::string::String.as_bytes %15: std::string::String
+//   %26: []u8 = const "ba"
+//   test.expect_equal %26: []u8, %25: []u8, []u8
+//   call.std::string::String.deinit %15: std::string::String
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %2: std::map::Map<[]u8, std::string::String>
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.std_map_holds_containers_as_values() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>> = map.new %1: Allocator, std::map::Map<[]u8, i64>
+//   %3: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %4: []u8 = const "hit"
+//   %5: i64 = const 2
+//   %6: !void = call.std::map::Map.insert.i64 %3: std::map::Map<[]u8, i64>, %4: []u8, %5: i64
+//   error.try %6: !void, cleanup map.deinit %3: std::map::Map<[]u8, i64>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %8: []u8 = const "alice"
+//   %9: !void = call.std::map::Map.insert.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %8: []u8, %3: std::map::Map<[]u8, i64>
+//   error.try %9: !void, cleanup call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %11: []u8 = const "alice"
+//   %12: ?&std::map::Map<[]u8, i64> = call.std::map::Map.at.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %11: []u8
+//   %13: &std::map::Map<[]u8, i64> = opt.value %12: ?&std::map::Map<[]u8, i64>
+//   %14: bool = opt.has %12: ?&std::map::Map<[]u8, i64>
+//   branch %14: bool, if.then.1, if.else.2
+// if.then.1:
+//   %15: i64 = const 1
+//   %16: std::map::Map<[]u8, i64> = ref.load %13: &std::map::Map<[]u8, i64>
+//   %17: i64 = call.std::map::Map.len.i64 %16: std::map::Map<[]u8, i64>
+//   test.expect_equal %15: i64, %17: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %19: []u8 = const "alice is missing"
+//   call.std::testing::fail %19: []u8
+//   jump if.end.3
+// if.end.3:
+//   %21: std::map::Map<[]u8, std::array::Array<i64>> = map.new %1: Allocator, std::array::Array<i64>
+//   %22: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %23: i64 = const 7
+//   %24: !void = call.std::array::Array.append.i64 %22: std::array::Array<i64>, %23: i64
+//   error.try %24: !void, cleanup array.deinit %22: std::array::Array<i64>; call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %26: []u8 = const "alice"
+//   %27: !void = call.std::map::Map.insert.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>, %26: []u8, %22: std::array::Array<i64>
+//   error.try %27: !void, cleanup call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>; call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %29: []u8 = const "alice"
+//   %30: ?&std::array::Array<i64> = call.std::map::Map.at.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>, %29: []u8
+//   %31: &std::array::Array<i64> = opt.value %30: ?&std::array::Array<i64>
+//   %32: bool = opt.has %30: ?&std::array::Array<i64>
+//   branch %32: bool, if.then.4, if.else.5
+// if.then.4:
+//   %33: i64 = const 1
+//   %34: std::array::Array<i64> = ref.load %31: &std::array::Array<i64>
+//   %35: i64 = call.std::array::Array.len.i64 %34: std::array::Array<i64>
+//   test.expect_equal %33: i64, %35: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   %37: []u8 = const "alice is missing"
+//   call.std::testing::fail %37: []u8
+//   jump if.end.6
+// if.end.6:
+//   call.std::map::Map.deinit.std_3a_3aarray_3a_3aArray_3ci64_3e %21: std::map::Map<[]u8, std::array::Array<i64>>
+//   call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %2: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %41: !void = error.ok
+//   return %41: !void
+// }

@@ -1,0 +1,231 @@
+import std::array;
+import std::string;
+
+// Mechanical port of internal/ir/dump.go: the stable text form of a module,
+// what `kizu ir` prints.
+
+/// Formats a module as a stable text representation, the Go `Dump`: every
+/// function in order, without the trailing newline.
+pub fn render(allocator: Allocator, module: &Module) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        try append_function(&var out, module, function);
+    }
+    while out.len() > 0 and ends_with_newline(&out) {
+        try out.truncate(out.len() - 1);
+    }
+    return move out;
+}
+
+fn ends_with_newline(out: &string::String) -> bool {
+    let bytes = out.as_bytes();
+    return bytes[out.len() - 1] == cast<u8>(10);
+}
+
+/// Writes one function dump, the Go `writeFunction`.
+pub fn append_function(out: &var string::String, module: &Module, function: Function) -> !void {
+    let node = module.function_nodes.at(function.node);
+    try out.append_bytes("fn ");
+    try module.names.append_to(out, node.name);
+    try out.append_byte(cast<u8>(40));
+    var index = 0;
+    while node.params.get(index) |param| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        index = index + 1;
+        try append_value(out, module, param.value());
+    }
+    try out.append_bytes(") -> ");
+    try module.names.append_to(out, node.return_type);
+    try out.append_bytes(" {");
+    try out.append_byte(cast<u8>(10));
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        try append_block(out, module, block);
+    }
+    try out.append_bytes("}");
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Writes one basic block.
+fn append_block(out: &var string::String, module: &Module, block: Block) -> !void {
+    let node = module.blocks.at(block.node);
+    try module.names.append_to(out, node.name);
+    try out.append_bytes(":");
+    try out.append_byte(cast<u8>(10));
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        try out.append_bytes("  ");
+        try append_instr(out, module, instr);
+        try out.append_byte(cast<u8>(10));
+    }
+    if node.terminator.op != TermOp::None {
+        try out.append_bytes("  ");
+        try append_terminator(out, module, node.terminator);
+        try out.append_byte(cast<u8>(10));
+    }
+    return;
+}
+
+/// Formats one instruction.
+fn append_instr(out: &var string::String, module: &Module, instr: Instr) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::Const {
+        try append_value(out, module, node.result);
+        try out.append_bytes(" = const ");
+        return module.names.append_to(out, node.immediate);
+    }
+    if node.op == Op::Phi {
+        try append_value(out, module, node.result);
+        try out.append_bytes(" = phi ");
+        return append_incoming(out, module, &node.incoming);
+    }
+    if node.op == Op::StructNew {
+        try append_value(out, module, node.result);
+        try out.append_bytes(" = struct.new {");
+        try append_fields(out, module, &node.fields);
+        return out.append_bytes("}");
+    }
+    if node.op == Op::CondFail {
+        try out.append_bytes("cond_fail ");
+        if node.args.get(0) |first| {
+            try append_value(out, module, first);
+        }
+        try out.append_bytes(", ");
+        try module.names.append_to(out, node.immediate);
+        try out.append_bytes("(");
+        try append_values_from(out, module, &node.args, 1);
+        return out.append_bytes(")");
+    }
+    return append_generic_instr(out, module, node);
+}
+
+/// Formats a normal non-special instruction.
+fn append_generic_instr(out: &var string::String, module: &Module, node: &InstrNode) -> !void {
+    var args = string::new(module.names.allocator);
+    defer args.deinit();
+    try append_values_from(&var args, module, &node.args, 0);
+    if !is_empty(node.immediate) {
+        if args.len() > 0 {
+            try args.append_bytes(", ");
+        }
+        try module.names.append_to(&var args, node.immediate);
+    }
+    if node.cleanups.len() > 0 {
+        if args.len() > 0 {
+            try args.append_bytes(", ");
+        }
+        try args.append_bytes("cleanup ");
+        try append_cleanups(&var args, module, &node.cleanups);
+    }
+    if module.names.is(node.result.type_name, "void") {
+        try append_op(out, &module.names, node.op, node.operand);
+        try out.append_bytes(" ");
+        return out.append_string(&args);
+    }
+    try append_value(out, module, node.result);
+    try out.append_bytes(" = ");
+    try append_op(out, &module.names, node.op, node.operand);
+    if args.len() == 0 {
+        return;
+    }
+    try out.append_bytes(" ");
+    return out.append_string(&args);
+}
+
+/// Formats deferred cleanups attached to a fallible instruction.
+fn append_cleanups(out: &var string::String, module: &Module, cleanups: &array::Array<Cleanup>) -> !void {
+    var index = 0;
+    while cleanups.get(index) |cleanup| {
+        if index > 0 {
+            try out.append_bytes("; ");
+        }
+        index = index + 1;
+        try append_op(out, &module.names, cleanup.op, cleanup.operand);
+        try out.append_bytes(" ");
+        try append_value(out, module, cleanup.arg);
+    }
+    return;
+}
+
+/// Formats one block terminator.
+fn append_terminator(out: &var string::String, module: &Module, term: Terminator) -> !void {
+    if term.op == TermOp::Return {
+        try out.append_bytes("return ");
+        return append_value(out, module, term.value);
+    }
+    if term.op == TermOp::Jump {
+        try out.append_bytes("jump ");
+        return module.names.append_to(out, term.target);
+    }
+    if term.op == TermOp::Branch {
+        try out.append_bytes("branch ");
+        try append_value(out, module, term.cond);
+        try out.append_bytes(", ");
+        try module.names.append_to(out, term.target);
+        try out.append_bytes(", ");
+        return module.names.append_to(out, term.else_target);
+    }
+    return out.append_bytes("unreachable");
+}
+
+/// Formats a typed value reference, the Go `Value.String`.
+pub fn append_value(out: &var string::String, module: &Module, value: Value) -> !void {
+    try module.names.append_to(out, value.name);
+    if is_empty(value.type_name) {
+        return;
+    }
+    try out.append_bytes(": ");
+    return module.names.append_to(out, value.type_name);
+}
+
+/// Formats instruction operands from position on, the Go `formatValues`.
+fn append_values_from(out: &var string::String, module: &Module, values: &array::Array<Value>, start: i64) -> !void {
+    var index = start;
+    while values.get(index) |value| {
+        if index > start {
+            try out.append_bytes(", ");
+        }
+        index = index + 1;
+        try append_value(out, module, value);
+    }
+    return;
+}
+
+/// Formats phi incoming edges.
+fn append_incoming(out: &var string::String, module: &Module, incoming: &array::Array<Incoming>) -> !void {
+    var index = 0;
+    while incoming.get(index) |item| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        index = index + 1;
+        try out.append_bytes("[");
+        try module.names.append_to(out, item.block);
+        try out.append_bytes(", ");
+        try append_value(out, module, item.value);
+        try out.append_bytes("]");
+    }
+    return;
+}
+
+/// Formats struct field initializers.
+fn append_fields(out: &var string::String, module: &Module, fields: &array::Array<FieldArg>) -> !void {
+    var index = 0;
+    while fields.get(index) |field| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        index = index + 1;
+        try module.names.append_to(out, field.name);
+        try out.append_bytes(": ");
+        try append_value(out, module, field.value);
+    }
+    return;
+}

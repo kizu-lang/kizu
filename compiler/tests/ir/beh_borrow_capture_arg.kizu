@@ -1,0 +1,384 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub value: i64,
+}
+
+fn read_it(x: &Item) -> i64 {
+    return x.value;
+}
+
+fn bump(x: &var Item) -> void {
+    x.value = x.value + 1;
+}
+
+// A borrow capture is a reference binding, and a `&T` parameter of a
+// non-union travels as the element value: the call reads the capture the
+// same way a slot-backed borrow is read, whichever mutability the capture
+// carries.
+test "a borrow capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(41, read_it(r));
+    }
+    if xs.at_mut(0) |m| {
+        testing::expect_equal<i64>(41, read_it(m));
+    }
+}
+
+pub union Shape {
+    Dot,
+    Bar(i64),
+}
+
+fn read_shape(s: &Shape) -> i64 {
+    return match s {
+        Dot => 0,
+        Bar(n) => n,
+    };
+}
+
+// A union's `&T` parameter wants an address to match through, and a mutable
+// capture reads down to the value that address is taken of, the same way the
+// struct case does.
+test "a mutable union capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var shapes = array::new<Shape>(allocator);
+    defer shapes.deinit();
+    try shapes.append(Shape::Bar(42));
+    if shapes.at(0) |r| {
+        testing::expect_equal<i64>(42, read_shape(r));
+    }
+    if shapes.at_mut(0) |m| {
+        testing::expect_equal<i64>(42, read_shape(m));
+    }
+}
+
+// A mutable capture handed on to a `&var T` parameter keeps handing over the
+// same storage, so the callee's write lands in the element.
+test "a mutable capture forwards to a mutable borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at_mut(0) |m| {
+        bump(m);
+    }
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(42, read_it(r));
+    }
+}
+
+
+// ir
+// lower:
+// fn read_it(%x: Item) -> i64 {
+// entry:
+//   %1: i64 = field.value %x: Item
+//   return %1: i64
+// }
+// fn bump(%x: &var Item) -> void {
+// entry:
+//   %1: i64 = field.ref.value %x: &var Item
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.value %x: &var Item, %3: i64
+//   return void: void
+// }
+// fn read_shape(%s: &Shape) -> i64 {
+// entry:
+//   %1: Shape = union.load %s: &Shape
+//   %2: i64 = union.tag %1: Shape
+//   jump match.check.2
+// match.end.1:
+//   %7: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %6: i64]
+//   return %7: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %6: i64 = union.payload %1: Shape, Bar
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.a_borrow_capture_feeds_a_shared_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Item> = array.new %1: Allocator, Item
+//   %3: i64 = const 41
+//   %4: Item = struct.new {value: %3: i64}
+//   %5: !void = call.std::array::Array.append.Item %2: std::array::Array<Item>, %4: Item
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Item>
+//   %7: i64 = const 0
+//   %8: ?&Item = call.std::array::Array.at.Item %2: std::array::Array<Item>, %7: i64
+//   %9: &Item = opt.value %8: ?&Item
+//   %10: bool = opt.has %8: ?&Item
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = const 41
+//   %12: Item = ref.load %9: &Item
+//   %13: i64 = call.read_it %12: Item
+//   test.expect_equal %11: i64, %13: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %15: i64 = const 0
+//   %16: ?&var Item = call.std::array::Array.at_mut.Item %2: std::array::Array<Item>, %15: i64
+//   %17: &var Item = opt.value %16: ?&var Item
+//   %18: bool = opt.has %16: ?&var Item
+//   branch %18: bool, if.then.4, if.else.5
+// if.then.4:
+//   %19: i64 = const 41
+//   %20: Item = ref.load %17: &var Item
+//   %21: i64 = call.read_it %20: Item
+//   test.expect_equal %19: i64, %21: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Item>
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.a_mutable_union_capture_feeds_a_shared_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Shape> = array.new %1: Allocator, Shape
+//   %3: i64 = const 42
+//   %4: Shape = union.new %3: i64, Bar
+//   %5: !void = call.std::array::Array.append.Shape %2: std::array::Array<Shape>, %4: Shape
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Shape>
+//   %7: i64 = const 0
+//   %8: ?&Shape = call.std::array::Array.at.Shape %2: std::array::Array<Shape>, %7: i64
+//   %9: &Shape = opt.value %8: ?&Shape
+//   %10: bool = opt.has %8: ?&Shape
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = const 42
+//   %12: i64 = call.read_shape %9: &Shape
+//   test.expect_equal %11: i64, %12: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = const 0
+//   %15: ?&var Shape = call.std::array::Array.at_mut.Shape %2: std::array::Array<Shape>, %14: i64
+//   %16: &var Shape = opt.value %15: ?&var Shape
+//   %17: bool = opt.has %15: ?&var Shape
+//   branch %17: bool, if.then.4, if.else.5
+// if.then.4:
+//   %18: i64 = const 42
+//   %19: Shape = ref.load %16: &var Shape
+//   %20: i64 = call.read_shape %19: Shape
+//   test.expect_equal %18: i64, %20: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Shape>
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.a_mutable_capture_forwards_to_a_mutable_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Item> = array.new %1: Allocator, Item
+//   %3: i64 = const 41
+//   %4: Item = struct.new {value: %3: i64}
+//   %5: !void = call.std::array::Array.append.Item %2: std::array::Array<Item>, %4: Item
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Item>
+//   %7: i64 = const 0
+//   %8: ?&var Item = call.std::array::Array.at_mut.Item %2: std::array::Array<Item>, %7: i64
+//   %9: &var Item = opt.value %8: ?&var Item
+//   %10: bool = opt.has %8: ?&var Item
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.bump %9: &var Item
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = const 0
+//   %13: ?&Item = call.std::array::Array.at.Item %2: std::array::Array<Item>, %12: i64
+//   %14: &Item = opt.value %13: ?&Item
+//   %15: bool = opt.has %13: ?&Item
+//   branch %15: bool, if.then.4, if.else.5
+// if.then.4:
+//   %16: i64 = const 42
+//   %17: Item = ref.load %14: &Item
+//   %18: i64 = call.read_it %17: Item
+//   test.expect_equal %16: i64, %18: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Item>
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// opt:
+// fn read_it(%x: Item) -> i64 {
+// entry:
+//   %1: i64 = field.value %x: Item
+//   return %1: i64
+// }
+// fn bump(%x: &var Item) -> void {
+// entry:
+//   %1: i64 = field.ref.value %x: &var Item
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.value %x: &var Item, %3: i64
+//   return void: void
+// }
+// fn read_shape(%s: &Shape) -> i64 {
+// entry:
+//   %1: Shape = union.load %s: &Shape
+//   %2: i64 = union.tag %1: Shape
+//   jump match.check.2
+// match.end.1:
+//   %7: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %6: i64]
+//   return %7: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %6: i64 = union.payload %1: Shape, Bar
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.a_borrow_capture_feeds_a_shared_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Item> = array.new %1: Allocator, Item
+//   %3: i64 = const 41
+//   %4: Item = struct.new {value: %3: i64}
+//   %5: !void = call.std::array::Array.append.Item %2: std::array::Array<Item>, %4: Item
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Item>
+//   %7: i64 = const 0
+//   %8: ?&Item = call.std::array::Array.at.Item %2: std::array::Array<Item>, %7: i64
+//   %9: &Item = opt.value %8: ?&Item
+//   %10: bool = opt.has %8: ?&Item
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = const 41
+//   %12: Item = ref.load %9: &Item
+//   %13: i64 = call.read_it %12: Item
+//   test.expect_equal %11: i64, %13: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %15: i64 = const 0
+//   %16: ?&var Item = call.std::array::Array.at_mut.Item %2: std::array::Array<Item>, %15: i64
+//   %17: &var Item = opt.value %16: ?&var Item
+//   %18: bool = opt.has %16: ?&var Item
+//   branch %18: bool, if.then.4, if.else.5
+// if.then.4:
+//   %19: i64 = const 41
+//   %20: Item = ref.load %17: &var Item
+//   %21: i64 = call.read_it %20: Item
+//   test.expect_equal %19: i64, %21: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Item>
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.a_mutable_union_capture_feeds_a_shared_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Shape> = array.new %1: Allocator, Shape
+//   %3: i64 = const 42
+//   %4: Shape = union.new %3: i64, Bar
+//   %5: !void = call.std::array::Array.append.Shape %2: std::array::Array<Shape>, %4: Shape
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Shape>
+//   %7: i64 = const 0
+//   %8: ?&Shape = call.std::array::Array.at.Shape %2: std::array::Array<Shape>, %7: i64
+//   %9: &Shape = opt.value %8: ?&Shape
+//   %10: bool = opt.has %8: ?&Shape
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = const 42
+//   %12: i64 = call.read_shape %9: &Shape
+//   test.expect_equal %11: i64, %12: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = const 0
+//   %15: ?&var Shape = call.std::array::Array.at_mut.Shape %2: std::array::Array<Shape>, %14: i64
+//   %16: &var Shape = opt.value %15: ?&var Shape
+//   %17: bool = opt.has %15: ?&var Shape
+//   branch %17: bool, if.then.4, if.else.5
+// if.then.4:
+//   %18: i64 = const 42
+//   %19: Shape = ref.load %16: &var Shape
+//   %20: i64 = call.read_shape %19: Shape
+//   test.expect_equal %18: i64, %20: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Shape>
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.a_mutable_capture_forwards_to_a_mutable_borrow_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Item> = array.new %1: Allocator, Item
+//   %3: i64 = const 41
+//   %4: Item = struct.new {value: %3: i64}
+//   %5: !void = call.std::array::Array.append.Item %2: std::array::Array<Item>, %4: Item
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Item>
+//   %7: i64 = const 0
+//   %8: ?&var Item = call.std::array::Array.at_mut.Item %2: std::array::Array<Item>, %7: i64
+//   %9: &var Item = opt.value %8: ?&var Item
+//   %10: bool = opt.has %8: ?&var Item
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.bump %9: &var Item
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = const 0
+//   %13: ?&Item = call.std::array::Array.at.Item %2: std::array::Array<Item>, %12: i64
+//   %14: &Item = opt.value %13: ?&Item
+//   %15: bool = opt.has %13: ?&Item
+//   branch %15: bool, if.then.4, if.else.5
+// if.then.4:
+//   %16: i64 = const 42
+//   %17: Item = ref.load %14: &Item
+//   %18: i64 = call.read_it %17: Item
+//   test.expect_equal %16: i64, %18: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   array.deinit %2: std::array::Array<Item>
+//   %21: !void = error.ok
+//   return %21: !void
+// }

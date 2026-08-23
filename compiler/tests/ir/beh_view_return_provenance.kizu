@@ -1,0 +1,134 @@
+import std::testing;
+
+// ADR-0098: a view return is tied to every view argument, derived from the
+// signature alone. The body may return any of them; the caller treats the
+// result as borrowing all of them.
+
+fn pick(a: []u8, b: []u8, take_first: bool) -> []u8 {
+    if take_first {
+        return a;
+    }
+    return b;
+}
+
+fn larger(left: &i64, right: &i64) -> &i64 {
+    if left.* >= right.* {
+        return left;
+    }
+    return right;
+}
+
+test "multi-source borrow return picks either slice source" {
+    testing::expect_equal<[]u8>(pick("left", "right", true), "left");
+    testing::expect_equal<[]u8>(pick("left", "right", false), "right");
+}
+
+test "multi-source borrow return of shared references" {
+    var small = 1;
+    var large = 2;
+    let winner = larger(small, large);
+    testing::expect(winner.* == 2);
+}
+
+
+// ir
+// lower:
+// fn pick(%a: []u8, %b: []u8, %take_first: bool) -> []u8 {
+// entry:
+//   branch %take_first: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %a: []u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %b: []u8
+// }
+// fn larger(%left: i64, %right: i64) -> i64 {
+// entry:
+//   %1: bool = binary.>= %left: i64, %right: i64
+//   branch %1: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %left: i64
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %right: i64
+// }
+// fn test.multi_source_borrow_return_picks_either_slice_source() -> !void {
+// entry:
+//   %1: []u8 = const "left"
+//   %2: []u8 = const "right"
+//   %3: bool = const true
+//   %4: []u8 = call.pick %1: []u8, %2: []u8, %3: bool
+//   %5: []u8 = const "left"
+//   test.expect_equal %4: []u8, %5: []u8, []u8
+//   %7: []u8 = const "left"
+//   %8: []u8 = const "right"
+//   %9: bool = const false
+//   %10: []u8 = call.pick %7: []u8, %8: []u8, %9: bool
+//   %11: []u8 = const "right"
+//   test.expect_equal %10: []u8, %11: []u8, []u8
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.multi_source_borrow_return_of_shared_references() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 2
+//   %3: i64 = call.larger %1: i64, %2: i64
+//   %4: i64 = const 2
+//   %5: bool = binary.== %3: i64, %4: i64
+//   call.std::testing::expect %5: bool
+//   %7: !void = error.ok
+//   return %7: !void
+// }
+// opt:
+// fn pick(%a: []u8, %b: []u8, %take_first: bool) -> []u8 {
+// entry:
+//   branch %take_first: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %a: []u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %b: []u8
+// }
+// fn larger(%left: i64, %right: i64) -> i64 {
+// entry:
+//   %1: bool = binary.>= %left: i64, %right: i64
+//   branch %1: bool, if.then.1, if.else.2
+// if.then.1:
+//   return %left: i64
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return %right: i64
+// }
+// fn test.multi_source_borrow_return_picks_either_slice_source() -> !void {
+// entry:
+//   %1: []u8 = const "left"
+//   %2: []u8 = const "right"
+//   %3: bool = const true
+//   %4: []u8 = call.pick %1: []u8, %2: []u8, %3: bool
+//   %5: []u8 = const "left"
+//   test.expect_equal %4: []u8, %5: []u8, []u8
+//   %7: []u8 = const "left"
+//   %8: []u8 = const "right"
+//   %9: bool = const false
+//   %10: []u8 = call.pick %7: []u8, %8: []u8, %9: bool
+//   %11: []u8 = const "right"
+//   test.expect_equal %10: []u8, %11: []u8, []u8
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.multi_source_borrow_return_of_shared_references() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 2
+//   %3: i64 = call.larger %1: i64, %2: i64
+//   %4: i64 = const 2
+//   %5: bool = binary.== %3: i64, %4: i64
+//   call.std::testing::expect %5: bool
+//   %7: !void = error.ok
+//   return %7: !void
+// }

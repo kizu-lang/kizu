@@ -1,0 +1,174 @@
+import std::array;
+import std::mem;
+
+struct Token {
+    text: []u8,
+}
+
+fn (self: Token) width() -> i64 {
+    return mem::len(self.text);
+}
+
+// Array.at/at_mut return a borrow optional `?&T`: present in bounds, null past
+// the end. A capture is the only consumer, and it holds the array borrowed for
+// the element borrow's scope.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var tokens = array::new<Token>(allocator);
+    defer tokens.deinit();
+
+    try tokens.append(Token { text: "let" });
+
+    if tokens.at(0) |first| {
+        print(first.text);
+        // A read method reaches the element through the capture: the borrow
+        // names the element's storage, and the receiver is read out of it.
+        print(first.width());
+    }
+
+    if tokens.at_mut(0) |slot| {
+        slot.* = Token { text: "var" };
+    }
+
+    var index = 0;
+    while tokens.at(index) |token| {
+        print(token.text);
+        index = index + 1;
+    }
+
+    return;
+}
+
+// run
+// features: std-array borrow mutation optional capture method
+// output:
+// let
+// 3
+// var
+
+
+// ir
+// lower:
+// fn Token.width(%self: Token) -> i64 {
+// entry:
+//   %1: []u8 = field.text %self: Token
+//   %2: i64 = call.std::mem::len %1: []u8
+//   return %2: i64
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Token> = array.new %1: Allocator, Token
+//   %3: []u8 = const "let"
+//   %4: Token = struct.new {text: %3: []u8}
+//   %5: !void = call.std::array::Array.append.Token %2: std::array::Array<Token>, %4: Token
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Token>
+//   %7: i64 = const 0
+//   %8: ?&Token = call.std::array::Array.at.Token %2: std::array::Array<Token>, %7: i64
+//   %9: &Token = opt.value %8: ?&Token
+//   %10: bool = opt.has %8: ?&Token
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: []u8 = field.ref.text %9: &Token
+//   call.print %11: []u8
+//   %13: Token = ref.load %9: &Token
+//   %14: i64 = call.Token.width %13: Token
+//   call.print %14: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %16: i64 = const 0
+//   %17: ?&var Token = call.std::array::Array.at_mut.Token %2: std::array::Array<Token>, %16: i64
+//   %18: &var Token = opt.value %17: ?&var Token
+//   %19: bool = opt.has %17: ?&var Token
+//   branch %19: bool, if.then.4, if.else.5
+// if.then.4:
+//   %20: []u8 = const "var"
+//   %21: Token = struct.new {text: %20: []u8}
+//   ref.store %18: &var Token, %21: Token
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %23: i64 = const 0
+//   jump while.header.7
+// while.header.7:
+//   %24: i64 = phi [if.end.6, %23: i64], [while.body.8, %31: i64]
+//   %25: ?&Token = call.std::array::Array.at.Token %2: std::array::Array<Token>, %24: i64
+//   %26: &Token = opt.value %25: ?&Token
+//   %27: bool = opt.has %25: ?&Token
+//   branch %27: bool, while.body.8, while.end.9
+// while.body.8:
+//   %28: []u8 = field.ref.text %26: &Token
+//   call.print %28: []u8
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %24: i64, %30: i64
+//   jump while.header.7
+// while.end.9:
+//   array.deinit %2: std::array::Array<Token>
+//   %33: !void = error.ok
+//   return %33: !void
+// }
+// opt:
+// fn Token.width(%self: Token) -> i64 {
+// entry:
+//   %1: []u8 = field.text %self: Token
+//   %2: i64 = call.std::mem::len %1: []u8
+//   return %2: i64
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Token> = array.new %1: Allocator, Token
+//   %3: []u8 = const "let"
+//   %4: Token = struct.new {text: %3: []u8}
+//   %5: !void = call.std::array::Array.append.Token %2: std::array::Array<Token>, %4: Token
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Token>
+//   %7: i64 = const 0
+//   %8: ?&Token = call.std::array::Array.at.Token %2: std::array::Array<Token>, %7: i64
+//   %9: &Token = opt.value %8: ?&Token
+//   %10: bool = opt.has %8: ?&Token
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: []u8 = field.ref.text %9: &Token
+//   call.print %11: []u8
+//   %13: Token = ref.load %9: &Token
+//   %14: i64 = call.Token.width %13: Token
+//   call.print %14: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %16: i64 = const 0
+//   %17: ?&var Token = call.std::array::Array.at_mut.Token %2: std::array::Array<Token>, %16: i64
+//   %18: &var Token = opt.value %17: ?&var Token
+//   %19: bool = opt.has %17: ?&var Token
+//   branch %19: bool, if.then.4, if.else.5
+// if.then.4:
+//   %20: []u8 = const "var"
+//   %21: Token = struct.new {text: %20: []u8}
+//   ref.store %18: &var Token, %21: Token
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %23: i64 = const 0
+//   jump while.header.7
+// while.header.7:
+//   %24: i64 = phi [if.end.6, %23: i64], [while.body.8, %31: i64]
+//   %25: ?&Token = call.std::array::Array.at.Token %2: std::array::Array<Token>, %24: i64
+//   %26: &Token = opt.value %25: ?&Token
+//   %27: bool = opt.has %25: ?&Token
+//   branch %27: bool, while.body.8, while.end.9
+// while.body.8:
+//   %28: []u8 = field.ref.text %26: &Token
+//   call.print %28: []u8
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %24: i64, %30: i64
+//   jump while.header.7
+// while.end.9:
+//   array.deinit %2: std::array::Array<Token>
+//   %33: !void = error.ok
+//   return %33: !void
+// }

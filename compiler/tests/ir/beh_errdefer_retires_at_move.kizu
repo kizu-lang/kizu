@@ -1,0 +1,167 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+// A child is covered by its own errdefer until the parent takes it. From the
+// move on the parent's cleanup owns it, so the parent may keep doing fallible
+// work without the two cleanups colliding (ADR-0114).
+fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
+    var parent = array::new<string::String>(allocator);
+    errdefer parent.deinit();
+
+    var i = 0;
+    while i < count {
+        var child = string::new(allocator);
+        errdefer child.deinit();
+        try child.append_byte(cast<u8>(97) + cast<u8>(i));
+        try parent.append(move child);
+        try parent.reserve(1);
+        i = i + 1;
+    }
+    return move parent;
+}
+
+// The moved children stay intact: the parent holds the strings the loop built,
+// and nothing released them twice on the way.
+test "errdefer retires at move" {
+    let allocator = mem::page_allocator();
+    let names = try build(allocator, 3);
+    defer names.deinit();
+
+    testing::expect_equal<i64>(3, names.len());
+    var count = 0;
+    while names.pop() |name| {
+        testing::expect_equal<i64>(1, name.len());
+        name.deinit();
+        count = count + 1;
+    }
+    testing::expect_equal<i64>(3, count);
+}
+
+
+// ir
+// lower:
+// fn build(%allocator: Allocator, %count: i64) -> !std::array::Array<std::string::String> {
+// entry:
+//   %1: std::array::Array<std::string::String> = array.new %allocator: Allocator, std::string::String
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %2: i64], [while.body.2, %18: i64]
+//   %4: bool = binary.< %3: i64, %count: i64
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: std::string::String = call.std::string::new %allocator: Allocator
+//   %6: i64 = const 97
+//   %7: u8 = cast %6: i64, u8
+//   %8: u8 = cast %3: i64, u8
+//   %9: u8 = binary.+ %7: u8, %8: u8
+//   %10: !void = call.std::string::String.append_byte %5: std::string::String, %9: u8
+//   error.try %10: !void, cleanup call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %12: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %14: i64 = const 1
+//   %15: !void = call.std::array::Array.reserve.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %14: i64
+//   error.try %15: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %3: i64, %17: i64
+//   jump while.header.1
+// while.end.3:
+//   %19: !std::array::Array<std::string::String> = error.ok %1: std::array::Array<std::string::String>
+//   return %19: !std::array::Array<std::string::String>
+// }
+// fn test.errdefer_retires_at_move() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 3
+//   %3: !std::array::Array<std::string::String> = call.build %1: Allocator, %2: i64
+//   %4: std::array::Array<std::string::String> = error.try %3: !std::array::Array<std::string::String>
+//   %5: i64 = const 3
+//   %6: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %9: i64 = phi [entry, %8: i64], [while.body.2, %18: i64]
+//   %10: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %11: std::string::String = opt.value %10: ?std::string::String
+//   %12: bool = opt.has %10: ?std::string::String
+//   branch %12: bool, while.body.2, while.end.3
+// while.body.2:
+//   %13: i64 = const 1
+//   %14: i64 = call.std::string::String.len %11: std::string::String
+//   test.expect_equal %13: i64, %14: i64, i64
+//   call.std::string::String.deinit %11: std::string::String
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %9: i64, %17: i64
+//   jump while.header.1
+// while.end.3:
+//   %19: i64 = const 3
+//   test.expect_equal %19: i64, %9: i64, i64
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// opt:
+// fn build(%allocator: Allocator, %count: i64) -> !std::array::Array<std::string::String> {
+// entry:
+//   %1: std::array::Array<std::string::String> = array.new %allocator: Allocator, std::string::String
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %2: i64], [while.body.2, %18: i64]
+//   %4: bool = binary.< %3: i64, %count: i64
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: std::string::String = call.std::string::new %allocator: Allocator
+//   %6: i64 = const 97
+//   %7: u8 = cast %6: i64, u8
+//   %8: u8 = cast %3: i64, u8
+//   %9: u8 = binary.+ %7: u8, %8: u8
+//   %10: !void = call.std::string::String.append_byte %5: std::string::String, %9: u8
+//   error.try %10: !void, cleanup call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %12: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %14: i64 = const 1
+//   %15: !void = call.std::array::Array.reserve.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>, %14: i64
+//   error.try %15: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %1: std::array::Array<std::string::String>
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %3: i64, %17: i64
+//   jump while.header.1
+// while.end.3:
+//   %19: !std::array::Array<std::string::String> = error.ok %1: std::array::Array<std::string::String>
+//   return %19: !std::array::Array<std::string::String>
+// }
+// fn test.errdefer_retires_at_move() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 3
+//   %3: !std::array::Array<std::string::String> = call.build %1: Allocator, %2: i64
+//   %4: std::array::Array<std::string::String> = error.try %3: !std::array::Array<std::string::String>
+//   %5: i64 = const 3
+//   %6: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %9: i64 = phi [entry, %8: i64], [while.body.2, %18: i64]
+//   %10: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %11: std::string::String = opt.value %10: ?std::string::String
+//   %12: bool = opt.has %10: ?std::string::String
+//   branch %12: bool, while.body.2, while.end.3
+// while.body.2:
+//   %13: i64 = const 1
+//   %14: i64 = call.std::string::String.len %11: std::string::String
+//   test.expect_equal %13: i64, %14: i64, i64
+//   call.std::string::String.deinit %11: std::string::String
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %9: i64, %17: i64
+//   jump while.header.1
+// while.end.3:
+//   %19: i64 = const 3
+//   test.expect_equal %19: i64, %9: i64, i64
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %22: !void = error.ok
+//   return %22: !void
+// }

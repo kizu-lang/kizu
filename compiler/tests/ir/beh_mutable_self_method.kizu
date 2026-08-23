@@ -1,0 +1,816 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+pub struct Counter {
+    pub count: i64,
+}
+
+fn (self: &var Counter) bump() -> void {
+    self.count = self.count + 1;
+    return;
+}
+
+fn (self: &var Counter) bump_twice() -> void {
+    self.bump();
+    self.bump();
+    return;
+}
+
+// A `&var self` method mutates the caller's binding in place, including when
+// one mutating method calls another through its own borrowed receiver.
+test "mutable self method writes through the receiver" {
+    var hits = Counter { count: 0 };
+    hits.bump_twice();
+    hits.bump();
+    testing::expect_equal<i64>(3, hits.count);
+}
+
+struct Selector {
+    pub cursor: i64,
+    pub selected: i64,
+}
+
+fn (self: &Selector) peek() -> i64 {
+    return self.cursor * 10;
+}
+
+fn (self: &var Selector) select(index: i64) -> void {
+    self.selected = index;
+    self.cursor = self.cursor + 1;
+}
+
+fn (self: &var Selector) advance() -> void {
+    self.select(self.cursor);
+}
+
+// A `&var self` call may read its own receiver in argument position: the
+// exclusive borrow is two-phase and activates after the arguments settle, so
+// a state machine can feed its own state to its own transition.
+test "mutable self call reads its receiver in argument position" {
+    var sel = Selector { cursor: 3, selected: 0 };
+    sel.advance();
+    testing::expect_equal<i64>(3, sel.selected);
+    testing::expect_equal<i64>(4, sel.cursor);
+    sel.select(sel.peek());
+    testing::expect_equal<i64>(40, sel.selected);
+    testing::expect_equal<i64>(5, sel.cursor);
+}
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: BytesIter) has_next() -> bool {
+    return self.index < mem::len(self.bytes);
+}
+
+fn (self: &var BytesIter) next() -> u8 {
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+// A cursor struct advancing itself is the shape an iterator takes; over
+// static bytes it needs no tie.
+test "mutable self methods drive a byte cursor" {
+    var it = iter("kizu");
+    var total = 0;
+    while it.has_next() {
+        total = total + cast<i64>(it.next());
+    }
+    testing::expect_equal<i64>(451, total);
+}
+
+pub struct Tally {
+    pub hits: Counter,
+    pub faults: Counter,
+}
+
+fn (self: &var Tally) record_hit() -> void {
+    self.hits.bump();
+}
+
+// A `&var self` method reaches one direct field of a mutable owner: the
+// exclusive borrow derives from the owner's storage, from the owner's own
+// `&var self` methods and from call sites alike, and each field's borrow
+// stays its own.
+test "mutable self method runs on a direct field receiver" {
+    var tally = Tally { hits: Counter { count: 0 }, faults: Counter { count: 0 } };
+    tally.record_hit();
+    tally.hits.bump();
+    tally.faults.bump();
+    testing::expect_equal<i64>(2, tally.hits.count);
+    testing::expect_equal<i64>(1, tally.faults.count);
+}
+
+fn clear(counter: &var Counter) -> void {
+    counter.count = 0;
+}
+
+// A `&var` argument projects the same one-level field storage a method
+// receiver does -- bare or with explicit `&var`, the callee writes into the
+// owner's field.
+test "a &var argument reaches one direct field" {
+    var tally = Tally { hits: Counter { count: 3 }, faults: Counter { count: 5 } };
+    clear(tally.hits);
+    clear(&var tally.faults);
+    testing::expect_equal<i64>(0, tally.hits.count);
+    testing::expect_equal<i64>(0, tally.faults.count);
+}
+
+pub struct Journal {
+    pub entries: array::Array<i64>,
+}
+
+fn (self: &var Journal) push(value: i64) -> !void {
+    try self.entries.append(value);
+    return;
+}
+
+fn (self: Journal) last() -> i64 {
+    return self.entries.get_or_panic(self.entries.len() - 1);
+}
+
+pub struct Recorder {
+    pub journal: Journal,
+}
+
+fn (self: &var Recorder) note(value: i64) -> !void {
+    try self.journal.push(value);
+    return;
+}
+
+// A non-copy field -- one that owns an Array -- cannot be copied out, moved
+// out, or rebuilt, so reaching its mutating methods through the owner is the
+// only composition there is.
+test "a mutating method reaches a non-copy field" {
+    let allocator = mem::page_allocator();
+    var recorder = Recorder { journal: Journal { entries: array::new<i64>(allocator) } };
+    defer recorder.deinit();
+    try recorder.note(7);
+    try recorder.note(9);
+    testing::expect_equal<i64>(9, recorder.journal.last());
+}
+
+pub struct Studio {
+    pub recorder: Recorder,
+}
+
+fn sum_entries(entries: &array::Array<i64>) -> i64 {
+    var total = 0;
+    var index = 0;
+    while index < entries.len() {
+        total = total + entries.get_or_panic(index);
+        index = index + 1;
+    }
+    return total;
+}
+
+// A method receiver reaches through a nested field path -- two hops to a
+// `&var` method, three hops into the field's own storage API -- and a borrow
+// argument lends the same nested path. Every mutation lands in the root
+// owner's storage.
+test "nested field paths reach methods and borrows" {
+    let allocator = mem::page_allocator();
+    var studio = Studio {
+        recorder: Recorder { journal: Journal { entries: array::new<i64>(allocator) } },
+    };
+    defer studio.deinit();
+    try studio.recorder.journal.push(4);
+    try studio.recorder.journal.entries.append(6);
+    testing::expect_equal<i64>(6, studio.recorder.journal.last());
+    testing::expect_equal<i64>(10, sum_entries(studio.recorder.journal.entries));
+}
+
+
+// ir
+// lower:
+// fn Counter.bump(%self: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.count %self: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.count %self: &var Counter, %3: i64
+//   return void: void
+// }
+// fn Counter.bump_twice(%self: &var Counter) -> void {
+// entry:
+//   call.Counter.bump %self: &var Counter
+//   call.Counter.bump %self: &var Counter
+//   return void: void
+// }
+// fn Selector.peek(%self: Selector) -> i64 {
+// entry:
+//   %1: i64 = field.cursor %self: Selector
+//   %2: i64 = const 10
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn Selector.select(%self: &var Selector, %index: i64) -> void {
+// entry:
+//   field.ref.set.selected %self: &var Selector, %index: i64
+//   %2: i64 = field.ref.cursor %self: &var Selector
+//   %3: i64 = const 1
+//   %4: i64 = binary.+ %2: i64, %3: i64
+//   field.ref.set.cursor %self: &var Selector, %4: i64
+//   return void: void
+// }
+// fn Selector.advance(%self: &var Selector) -> void {
+// entry:
+//   %1: i64 = field.ref.cursor %self: &var Selector
+//   call.Selector.select %self: &var Selector, %1: i64
+//   return void: void
+// }
+// fn iter(%bytes: []u8) -> BytesIter {
+// entry:
+//   %1: i64 = const 0
+//   %2: BytesIter = struct.new {bytes: %bytes: []u8, index: %1: i64}
+//   return %2: BytesIter
+// }
+// fn BytesIter.has_next(%self: BytesIter) -> bool {
+// entry:
+//   %1: i64 = field.index %self: BytesIter
+//   %2: []u8 = field.bytes %self: BytesIter
+//   %3: i64 = call.std::mem::len %2: []u8
+//   %4: bool = binary.< %1: i64, %3: i64
+//   return %4: bool
+// }
+// fn BytesIter.next(%self: &var BytesIter) -> u8 {
+// entry:
+//   %1: []u8 = field.ref.bytes %self: &var BytesIter
+//   %2: i64 = field.ref.index %self: &var BytesIter
+//   %3: i64 = slice.len %1: []u8
+//   %4: bool = binary.< %2: i64, 0: i64
+//   cond_fail %4: bool, bounds(%2: i64, %3: i64)
+//   %5: bool = binary.>= %2: i64, %3: i64
+//   cond_fail %5: bool, bounds(%2: i64, %3: i64)
+//   %6: u8 = slice.index %1: []u8, %2: i64
+//   %7: i64 = field.ref.index %self: &var BytesIter
+//   %8: i64 = const 1
+//   %9: i64 = binary.+ %7: i64, %8: i64
+//   field.ref.set.index %self: &var BytesIter, %9: i64
+//   return %6: u8
+// }
+// fn Tally.record_hit(%self: &var Tally) -> void {
+// entry:
+//   %1: &var Counter = field.addr.hits %self: &var Tally
+//   call.Counter.bump %1: &var Counter
+//   return void: void
+// }
+// fn clear(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = const 0
+//   field.ref.set.count %counter: &var Counter, %1: i64
+//   return void: void
+// }
+// fn Journal.push(%self: &var Journal, %value: i64) -> !void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Journal
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %value: i64
+//   error.try %2: !void
+//   %4: !void = error.ok
+//   return %4: !void
+// }
+// fn Journal.last(%self: Journal) -> i64 {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Journal
+//   %2: std::array::Array<i64> = field.entries %self: Journal
+//   %3: i64 = call.std::array::Array.len.i64 %2: std::array::Array<i64>
+//   %4: i64 = const 1
+//   %5: i64 = binary.- %3: i64, %4: i64
+//   %6: i64 = call.std::array::Array.get_or_panic.i64 %1: std::array::Array<i64>, %5: i64
+//   return %6: i64
+// }
+// fn Recorder.note(%self: &var Recorder, %value: i64) -> !void {
+// entry:
+//   %1: &var Journal = field.addr.journal %self: &var Recorder
+//   %2: !void = call.Journal.push %1: &var Journal, %value: i64
+//   error.try %2: !void
+//   %4: !void = error.ok
+//   return %4: !void
+// }
+// fn sum_entries(%entries: std::array::Array<i64>) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %1: i64], [while.body.2, %8: i64]
+//   %4: i64 = phi [entry, %2: i64], [while.body.2, %10: i64]
+//   %5: i64 = call.std::array::Array.len.i64 %entries: std::array::Array<i64>
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: i64 = call.std::array::Array.get_or_panic.i64 %entries: std::array::Array<i64>, %4: i64
+//   %8: i64 = binary.+ %3: i64, %7: i64
+//   %9: i64 = const 1
+//   %10: i64 = binary.+ %4: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   return %3: i64
+// }
+// fn Journal.deinit(%self: Journal) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Journal
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Recorder.deinit(%self: Recorder) -> void {
+// entry:
+//   %1: Journal = field.journal %self: Recorder
+//   call.Journal.deinit %1: Journal
+//   return void: void
+// }
+// fn Studio.deinit(%self: Studio) -> void {
+// entry:
+//   %1: Recorder = field.recorder %self: Studio
+//   call.Recorder.deinit %1: Recorder
+//   return void: void
+// }
+// fn test.mutable_self_method_writes_through_the_receiver() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: &var Counter = local.slot %2: Counter
+//   call.Counter.bump_twice %3: &var Counter
+//   call.Counter.bump %3: &var Counter
+//   %6: i64 = const 3
+//   %7: i64 = field.ref.count %3: &var Counter
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.mutable_self_call_reads_its_receiver_in_argument_position() -> !void {
+// entry:
+//   %1: i64 = const 3
+//   %2: i64 = const 0
+//   %3: Selector = struct.new {cursor: %1: i64, selected: %2: i64}
+//   %4: &var Selector = local.slot %3: Selector
+//   call.Selector.advance %4: &var Selector
+//   %6: i64 = const 3
+//   %7: i64 = field.ref.selected %4: &var Selector
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: i64 = const 4
+//   %10: i64 = field.ref.cursor %4: &var Selector
+//   test.expect_equal %9: i64, %10: i64, i64
+//   %12: Selector = ref.load %4: &var Selector
+//   %13: i64 = call.Selector.peek %12: Selector
+//   call.Selector.select %4: &var Selector, %13: i64
+//   %15: i64 = const 40
+//   %16: i64 = field.ref.selected %4: &var Selector
+//   test.expect_equal %15: i64, %16: i64, i64
+//   %18: i64 = const 5
+//   %19: i64 = field.ref.cursor %4: &var Selector
+//   test.expect_equal %18: i64, %19: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.mutable_self_methods_drive_a_byte_cursor() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: BytesIter = call.iter %1: []u8
+//   %3: &var BytesIter = local.slot %2: BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: BytesIter = ref.load %3: &var BytesIter
+//   %7: bool = call.BytesIter.has_next %6: BytesIter
+//   branch %7: bool, while.body.2, while.end.3
+// while.body.2:
+//   %8: u8 = call.BytesIter.next %3: &var BytesIter
+//   %9: i64 = cast %8: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.mutable_self_method_runs_on_a_direct_field_receiver() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: i64 = const 0
+//   %4: Counter = struct.new {count: %3: i64}
+//   %5: Tally = struct.new {hits: %2: Counter, faults: %4: Counter}
+//   %6: &var Tally = local.slot %5: Tally
+//   call.Tally.record_hit %6: &var Tally
+//   %8: &var Counter = field.addr.hits %6: &var Tally
+//   call.Counter.bump %8: &var Counter
+//   %10: &var Counter = field.addr.faults %6: &var Tally
+//   call.Counter.bump %10: &var Counter
+//   %12: i64 = const 2
+//   %13: Counter = field.ref.hits %6: &var Tally
+//   %14: i64 = field.count %13: Counter
+//   test.expect_equal %12: i64, %14: i64, i64
+//   %16: i64 = const 1
+//   %17: Counter = field.ref.faults %6: &var Tally
+//   %18: i64 = field.count %17: Counter
+//   test.expect_equal %16: i64, %18: i64, i64
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.a__var_argument_reaches_one_direct_field() -> !void {
+// entry:
+//   %1: i64 = const 3
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: i64 = const 5
+//   %4: Counter = struct.new {count: %3: i64}
+//   %5: Tally = struct.new {hits: %2: Counter, faults: %4: Counter}
+//   %6: &var Tally = local.slot %5: Tally
+//   %7: &var Counter = field.addr.hits %6: &var Tally
+//   call.clear %7: &var Counter
+//   %9: &var Counter = field.addr.faults %6: &var Tally
+//   call.clear %9: &var Counter
+//   %11: i64 = const 0
+//   %12: Counter = field.ref.hits %6: &var Tally
+//   %13: i64 = field.count %12: Counter
+//   test.expect_equal %11: i64, %13: i64, i64
+//   %15: i64 = const 0
+//   %16: Counter = field.ref.faults %6: &var Tally
+//   %17: i64 = field.count %16: Counter
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.a_mutating_method_reaches_a_non_copy_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Journal = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: Recorder = struct.new {journal: %3: Journal}
+//   %5: &var Recorder = local.slot %4: Recorder
+//   %6: i64 = const 7
+//   %7: !void = call.Recorder.note %5: &var Recorder, %6: i64
+//   %8: Recorder = ref.load %5: &var Recorder
+//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder
+//   %10: i64 = const 9
+//   %11: !void = call.Recorder.note %5: &var Recorder, %10: i64
+//   %12: Recorder = ref.load %5: &var Recorder
+//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder
+//   %14: i64 = const 9
+//   %15: Journal = field.ref.journal %5: &var Recorder
+//   %16: i64 = call.Journal.last %15: Journal
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: Recorder = ref.load %5: &var Recorder
+//   call.Recorder.deinit %18: Recorder
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.nested_field_paths_reach_methods_and_borrows() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Journal = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: Recorder = struct.new {journal: %3: Journal}
+//   %5: Studio = struct.new {recorder: %4: Recorder}
+//   %6: &var Studio = local.slot %5: Studio
+//   %7: &var Recorder = field.addr.recorder %6: &var Studio
+//   %8: &var Journal = field.addr.journal %7: &var Recorder
+//   %9: i64 = const 4
+//   %10: !void = call.Journal.push %8: &var Journal, %9: i64
+//   %11: Studio = ref.load %6: &var Studio
+//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio
+//   %13: Recorder = field.ref.recorder %6: &var Studio
+//   %14: Journal = field.journal %13: Recorder
+//   %15: std::array::Array<i64> = field.entries %14: Journal
+//   %16: i64 = const 6
+//   %17: !void = call.std::array::Array.append.i64 %15: std::array::Array<i64>, %16: i64
+//   %18: Studio = ref.load %6: &var Studio
+//   error.try %17: !void, cleanup call.Studio.deinit %18: Studio
+//   %20: i64 = const 6
+//   %21: Recorder = field.ref.recorder %6: &var Studio
+//   %22: Journal = field.journal %21: Recorder
+//   %23: i64 = call.Journal.last %22: Journal
+//   test.expect_equal %20: i64, %23: i64, i64
+//   %25: i64 = const 10
+//   %26: Recorder = field.ref.recorder %6: &var Studio
+//   %27: Journal = field.journal %26: Recorder
+//   %28: std::array::Array<i64> = field.entries %27: Journal
+//   %29: i64 = call.sum_entries %28: std::array::Array<i64>
+//   test.expect_equal %25: i64, %29: i64, i64
+//   %31: Studio = ref.load %6: &var Studio
+//   call.Studio.deinit %31: Studio
+//   %33: !void = error.ok
+//   return %33: !void
+// }
+// opt:
+// fn Counter.bump(%self: &var Counter) -> void {
+// entry:
+//   %1: i64 = field.ref.count %self: &var Counter
+//   %2: i64 = const 1
+//   %3: i64 = binary.+ %1: i64, %2: i64
+//   field.ref.set.count %self: &var Counter, %3: i64
+//   return void: void
+// }
+// fn Counter.bump_twice(%self: &var Counter) -> void {
+// entry:
+//   call.Counter.bump %self: &var Counter
+//   call.Counter.bump %self: &var Counter
+//   return void: void
+// }
+// fn Selector.peek(%self: Selector) -> i64 {
+// entry:
+//   %1: i64 = field.cursor %self: Selector
+//   %2: i64 = const 10
+//   %3: i64 = binary.* %1: i64, %2: i64
+//   return %3: i64
+// }
+// fn Selector.select(%self: &var Selector, %index: i64) -> void {
+// entry:
+//   field.ref.set.selected %self: &var Selector, %index: i64
+//   %2: i64 = field.ref.cursor %self: &var Selector
+//   %3: i64 = const 1
+//   %4: i64 = binary.+ %2: i64, %3: i64
+//   field.ref.set.cursor %self: &var Selector, %4: i64
+//   return void: void
+// }
+// fn Selector.advance(%self: &var Selector) -> void {
+// entry:
+//   %1: i64 = field.ref.cursor %self: &var Selector
+//   call.Selector.select %self: &var Selector, %1: i64
+//   return void: void
+// }
+// fn iter(%bytes: []u8) -> BytesIter {
+// entry:
+//   %1: i64 = const 0
+//   %2: BytesIter = struct.new {bytes: %bytes: []u8, index: %1: i64}
+//   return %2: BytesIter
+// }
+// fn BytesIter.has_next(%self: BytesIter) -> bool {
+// entry:
+//   %1: i64 = field.index %self: BytesIter
+//   %2: []u8 = field.bytes %self: BytesIter
+//   %3: i64 = call.std::mem::len %2: []u8
+//   %4: bool = binary.< %1: i64, %3: i64
+//   return %4: bool
+// }
+// fn BytesIter.next(%self: &var BytesIter) -> u8 {
+// entry:
+//   %1: []u8 = field.ref.bytes %self: &var BytesIter
+//   %2: i64 = field.ref.index %self: &var BytesIter
+//   %3: i64 = slice.len %1: []u8
+//   %4: bool = binary.< %2: i64, 0: i64
+//   cond_fail %4: bool, bounds(%2: i64, %3: i64)
+//   %5: bool = binary.>= %2: i64, %3: i64
+//   cond_fail %5: bool, bounds(%2: i64, %3: i64)
+//   %6: u8 = slice.index %1: []u8, %2: i64
+//   %7: i64 = field.ref.index %self: &var BytesIter
+//   %8: i64 = const 1
+//   %9: i64 = binary.+ %7: i64, %8: i64
+//   field.ref.set.index %self: &var BytesIter, %9: i64
+//   return %6: u8
+// }
+// fn Tally.record_hit(%self: &var Tally) -> void {
+// entry:
+//   %1: &var Counter = field.addr.hits %self: &var Tally
+//   call.Counter.bump %1: &var Counter
+//   return void: void
+// }
+// fn clear(%counter: &var Counter) -> void {
+// entry:
+//   %1: i64 = const 0
+//   field.ref.set.count %counter: &var Counter, %1: i64
+//   return void: void
+// }
+// fn Journal.push(%self: &var Journal, %value: i64) -> !void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Journal
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %value: i64
+//   error.try %2: !void
+//   %4: !void = error.ok
+//   return %4: !void
+// }
+// fn Journal.last(%self: Journal) -> i64 {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Journal
+//   %2: std::array::Array<i64> = field.entries %self: Journal
+//   %3: i64 = call.std::array::Array.len.i64 %2: std::array::Array<i64>
+//   %4: i64 = const 1
+//   %5: i64 = binary.- %3: i64, %4: i64
+//   %6: i64 = call.std::array::Array.get_or_panic.i64 %1: std::array::Array<i64>, %5: i64
+//   return %6: i64
+// }
+// fn Recorder.note(%self: &var Recorder, %value: i64) -> !void {
+// entry:
+//   %1: &var Journal = field.addr.journal %self: &var Recorder
+//   %2: !void = call.Journal.push %1: &var Journal, %value: i64
+//   error.try %2: !void
+//   %4: !void = error.ok
+//   return %4: !void
+// }
+// fn sum_entries(%entries: std::array::Array<i64>) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %1: i64], [while.body.2, %8: i64]
+//   %4: i64 = phi [entry, %2: i64], [while.body.2, %10: i64]
+//   %5: i64 = call.std::array::Array.len.i64 %entries: std::array::Array<i64>
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: i64 = call.std::array::Array.get_or_panic.i64 %entries: std::array::Array<i64>, %4: i64
+//   %8: i64 = binary.+ %3: i64, %7: i64
+//   %9: i64 = const 1
+//   %10: i64 = binary.+ %4: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   return %3: i64
+// }
+// fn Journal.deinit(%self: Journal) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Journal
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Recorder.deinit(%self: Recorder) -> void {
+// entry:
+//   %1: Journal = field.journal %self: Recorder
+//   call.Journal.deinit %1: Journal
+//   return void: void
+// }
+// fn Studio.deinit(%self: Studio) -> void {
+// entry:
+//   %1: Recorder = field.recorder %self: Studio
+//   call.Recorder.deinit %1: Recorder
+//   return void: void
+// }
+// fn test.mutable_self_method_writes_through_the_receiver() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: &var Counter = local.slot %2: Counter
+//   call.Counter.bump_twice %3: &var Counter
+//   call.Counter.bump %3: &var Counter
+//   %6: i64 = const 3
+//   %7: i64 = field.ref.count %3: &var Counter
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.mutable_self_call_reads_its_receiver_in_argument_position() -> !void {
+// entry:
+//   %1: i64 = const 3
+//   %2: i64 = const 0
+//   %3: Selector = struct.new {cursor: %1: i64, selected: %2: i64}
+//   %4: &var Selector = local.slot %3: Selector
+//   call.Selector.advance %4: &var Selector
+//   %6: i64 = const 3
+//   %7: i64 = field.ref.selected %4: &var Selector
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: i64 = const 4
+//   %10: i64 = field.ref.cursor %4: &var Selector
+//   test.expect_equal %9: i64, %10: i64, i64
+//   %12: Selector = ref.load %4: &var Selector
+//   %13: i64 = call.Selector.peek %12: Selector
+//   call.Selector.select %4: &var Selector, %13: i64
+//   %15: i64 = const 40
+//   %16: i64 = field.ref.selected %4: &var Selector
+//   test.expect_equal %15: i64, %16: i64, i64
+//   %18: i64 = const 5
+//   %19: i64 = field.ref.cursor %4: &var Selector
+//   test.expect_equal %18: i64, %19: i64, i64
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.mutable_self_methods_drive_a_byte_cursor() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: BytesIter = call.iter %1: []u8
+//   %3: &var BytesIter = local.slot %2: BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: BytesIter = ref.load %3: &var BytesIter
+//   %7: bool = call.BytesIter.has_next %6: BytesIter
+//   branch %7: bool, while.body.2, while.end.3
+// while.body.2:
+//   %8: u8 = call.BytesIter.next %3: &var BytesIter
+//   %9: i64 = cast %8: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.mutable_self_method_runs_on_a_direct_field_receiver() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: i64 = const 0
+//   %4: Counter = struct.new {count: %3: i64}
+//   %5: Tally = struct.new {hits: %2: Counter, faults: %4: Counter}
+//   %6: &var Tally = local.slot %5: Tally
+//   call.Tally.record_hit %6: &var Tally
+//   %8: &var Counter = field.addr.hits %6: &var Tally
+//   call.Counter.bump %8: &var Counter
+//   %10: &var Counter = field.addr.faults %6: &var Tally
+//   call.Counter.bump %10: &var Counter
+//   %12: i64 = const 2
+//   %13: Counter = field.ref.hits %6: &var Tally
+//   %14: i64 = field.count %13: Counter
+//   test.expect_equal %12: i64, %14: i64, i64
+//   %16: i64 = const 1
+//   %17: Counter = field.ref.faults %6: &var Tally
+//   %18: i64 = field.count %17: Counter
+//   test.expect_equal %16: i64, %18: i64, i64
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.a__var_argument_reaches_one_direct_field() -> !void {
+// entry:
+//   %1: i64 = const 3
+//   %2: Counter = struct.new {count: %1: i64}
+//   %3: i64 = const 5
+//   %4: Counter = struct.new {count: %3: i64}
+//   %5: Tally = struct.new {hits: %2: Counter, faults: %4: Counter}
+//   %6: &var Tally = local.slot %5: Tally
+//   %7: &var Counter = field.addr.hits %6: &var Tally
+//   call.clear %7: &var Counter
+//   %9: &var Counter = field.addr.faults %6: &var Tally
+//   call.clear %9: &var Counter
+//   %11: i64 = const 0
+//   %12: Counter = field.ref.hits %6: &var Tally
+//   %13: i64 = field.count %12: Counter
+//   test.expect_equal %11: i64, %13: i64, i64
+//   %15: i64 = const 0
+//   %16: Counter = field.ref.faults %6: &var Tally
+//   %17: i64 = field.count %16: Counter
+//   test.expect_equal %15: i64, %17: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.a_mutating_method_reaches_a_non_copy_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Journal = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: Recorder = struct.new {journal: %3: Journal}
+//   %5: &var Recorder = local.slot %4: Recorder
+//   %6: i64 = const 7
+//   %7: !void = call.Recorder.note %5: &var Recorder, %6: i64
+//   %8: Recorder = ref.load %5: &var Recorder
+//   error.try %7: !void, cleanup call.Recorder.deinit %8: Recorder
+//   %10: i64 = const 9
+//   %11: !void = call.Recorder.note %5: &var Recorder, %10: i64
+//   %12: Recorder = ref.load %5: &var Recorder
+//   error.try %11: !void, cleanup call.Recorder.deinit %12: Recorder
+//   %14: i64 = const 9
+//   %15: Journal = field.ref.journal %5: &var Recorder
+//   %16: i64 = call.Journal.last %15: Journal
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: Recorder = ref.load %5: &var Recorder
+//   call.Recorder.deinit %18: Recorder
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.nested_field_paths_reach_methods_and_borrows() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Journal = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: Recorder = struct.new {journal: %3: Journal}
+//   %5: Studio = struct.new {recorder: %4: Recorder}
+//   %6: &var Studio = local.slot %5: Studio
+//   %7: &var Recorder = field.addr.recorder %6: &var Studio
+//   %8: &var Journal = field.addr.journal %7: &var Recorder
+//   %9: i64 = const 4
+//   %10: !void = call.Journal.push %8: &var Journal, %9: i64
+//   %11: Studio = ref.load %6: &var Studio
+//   error.try %10: !void, cleanup call.Studio.deinit %11: Studio
+//   %13: Recorder = field.ref.recorder %6: &var Studio
+//   %14: Journal = field.journal %13: Recorder
+//   %15: std::array::Array<i64> = field.entries %14: Journal
+//   %16: i64 = const 6
+//   %17: !void = call.std::array::Array.append.i64 %15: std::array::Array<i64>, %16: i64
+//   %18: Studio = ref.load %6: &var Studio
+//   error.try %17: !void, cleanup call.Studio.deinit %18: Studio
+//   %20: i64 = const 6
+//   %21: Recorder = field.ref.recorder %6: &var Studio
+//   %22: Journal = field.journal %21: Recorder
+//   %23: i64 = call.Journal.last %22: Journal
+//   test.expect_equal %20: i64, %23: i64, i64
+//   %25: i64 = const 10
+//   %26: Recorder = field.ref.recorder %6: &var Studio
+//   %27: Journal = field.journal %26: Recorder
+//   %28: std::array::Array<i64> = field.entries %27: Journal
+//   %29: i64 = call.sum_entries %28: std::array::Array<i64>
+//   test.expect_equal %25: i64, %29: i64, i64
+//   %31: Studio = ref.load %6: &var Studio
+//   call.Studio.deinit %31: Studio
+//   %33: !void = error.ok
+//   return %33: !void
+// }

@@ -1,0 +1,995 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ir/verify.go: the rules every backend assumes
+// of a module and none of them checks in full. Go reports each failure as an
+// error wrapping ErrVerify; here the same text, `ir verify error: ...`, comes
+// back as one diagnostic without a span. Go keys its sets and maps by the
+// Go string of a value or block name; here they are keyed by the bytes of
+// the interned Name, read through the module's NameTable.
+
+/// Reports the first way a module is not well formed, the Go `Verify`.
+pub fn verify(allocator: Allocator, module: &Module) -> !?diagnostic::Diagnostic {
+    var types = typ::new(allocator);
+    defer types.deinit();
+    return verify_with_types(allocator, module, &var types);
+}
+
+/// Verifies module using the type table that produced it, the Go
+/// `verifyWithTypes`.
+fn verify_with_types(allocator: Allocator, module: &Module, types: &var typ::Table) -> !?diagnostic::Diagnostic {
+    var verifier = Verifier {
+        allocator: allocator,
+        params: map::new<[]u8, Function>(allocator),
+        fn_name: empty_name(),
+        fn_return: empty_name(),
+        block_name: empty_name()
+    };
+    defer verifier.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_name(function);
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try verifier.params.insert(bytes, function);
+    }
+    index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if try verifier.verify_function(module, types, function) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Holds what a rule needs and the position it is reading, the Go
+/// `verifier`: the functions a call can be checked against by name, and the
+/// function and block names every message starts with. The module and the
+/// type table are passed to each rule rather than held, and the block set a
+/// terminator is checked against lives in the function check.
+struct Verifier {
+    allocator: Allocator,
+    params: map::Map<[]u8, Function>,
+    fn_name: Name,
+    fn_return: Name,
+    block_name: Name
+}
+
+/// Is one value a verify failure interpolates: a Name for `%s`, an integer
+/// for `%d`; None fills the arguments a shorter format leaves unused.
+union VerifyArg {
+    Str(Name),
+    Int(i64),
+    None,
+}
+
+/// Checks one function's blocks and the SSA property across them, the Go
+/// `function`.
+fn (self: &var Verifier) verify_function(module: &Module, types: &var typ::Table, function: Function) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    self.fn_name = node.name;
+    self.fn_return = node.return_type;
+    var blocks = map::new<[]u8, bool>(self.allocator);
+    defer blocks.deinit();
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let name = module.block_name(block);
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try blocks.insert(bytes, true);
+    }
+    index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        self.block_name = module.block_name(block);
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            if try self.verify_instr(module, types, instr) |failed| {
+                return move failed;
+            }
+        }
+        if try self.verify_terminator(module, types, &blocks, block) |failed| {
+            return move failed;
+        }
+    }
+    var preds = try block_predecessors(self.allocator, module, function);
+    defer preds.deinit();
+    if try self.phi_incoming_matches_predecessors(module, function, &preds) |failed| {
+        return move failed;
+    }
+    if try self.phi_incoming_dominates(module, function, &preds) |failed| {
+        return move failed;
+    }
+    return self.values_dominate_uses(module, function, &preds);
+}
+
+/// Checks the declared slot an instruction fills, if it fills one, the Go
+/// `instr`.
+fn (self: &Verifier) verify_instr(module: &Module, types: &var typ::Table, instr: Instr) -> !?diagnostic::Diagnostic {
+    let node = module.instrs.at(instr.node);
+    match node.op {
+        StructNew => return self.struct_literal(module, node),
+        UnionNew => return self.union_payload(module, node),
+        ErrorOk => return self.success_wrap(module, types, node),
+        _ => {},
+    }
+    if direct_callee(node.op, node.operand) |callee| {
+        return self.verify_call(module, node, callee);
+    }
+    return null;
+}
+
+/// Checks what a call hands to the function it names, the Go `call`.
+fn (self: &Verifier) verify_call(module: &Module, node: &InstrNode, callee: Name) -> !?diagnostic::Diagnostic {
+    let callee_text = name_text(&module.names, callee);
+    let callee_bytes = callee_text.as_bytes();
+    // A call to a symbol this module does not define, or with an arity the
+    // lowerer built for an instruction rather than a function, has no
+    // declaration here to check against.
+    let declared = self.params.get(callee_bytes) orelse return null;
+    let declared_node = module.function_nodes.at(declared.node);
+    if declared_node.params.len() != node.args.len() {
+        return null;
+    }
+    var index = 0;
+    while declared_node.params.get(index) |param| {
+        let got = node.args.get_or_panic(index);
+        if !argument_fits(module, param, got.type_name) {
+            var position = try string::from_bytes(self.allocator, "call ");
+            errdefer position.deinit();
+            try module.names.append_to(&var position, callee);
+            try position.append_bytes(" argument ");
+            try fmt::append_i64(&var position, index);
+            return try self.fail(module, move position, param.type_name, got.type_name);
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Reports whether a value of type got can fill param, the Go
+/// `argumentFits`. It is the one slot not always filled by its own type: a
+/// parameter read through an address also accepts the value that address is
+/// taken of, which is what `Param.TakesAddressOf` names; the verifier reads
+/// the module without interning, so the dereference is compared as text.
+fn argument_fits(module: &Module, param: Param, got: Name) -> bool {
+    if same_name(param.type_name, got) {
+        return true;
+    }
+    if param.passing != Passing::CopyAddress {
+        return false;
+    }
+    let param_text = name_text(&module.names, param.type_name);
+    let param_bytes = param_text.as_bytes();
+    let got_text = name_text(&module.names, got);
+    let got_bytes = got_text.as_bytes();
+    let deref = deref_type_bytes(param_bytes);
+    return mem::equal_bytes(deref, got_bytes);
+}
+
+/// Returns T for `&T` and `&var T`, and the spelling itself otherwise, the
+/// Go `derefType` over bytes.
+fn deref_type_bytes(name: []u8) -> []u8 {
+    if mem::starts_with(name, "&var ") {
+        return name[5..mem::len(name)];
+    }
+    if mem::starts_with(name, "&") {
+        return name[1..mem::len(name)];
+    }
+    return name;
+}
+
+/// Checks what a struct literal puts in each declared field, the Go
+/// `structLiteral`.
+fn (self: &Verifier) struct_literal(module: &Module, node: &InstrNode) -> !?diagnostic::Diagnostic {
+    let type_text = name_text(&module.names, node.result.type_name);
+    let type_bytes = type_text.as_bytes();
+    if module.structs.at(type_bytes) |declared_struct| {
+        var index = 0;
+        while node.fields.get(index) |field| {
+            index = index + 1;
+            var declared_index = 0;
+            while declared_struct.fields.get(declared_index) |declared| {
+                declared_index = declared_index + 1;
+                if !same_name(declared.name, field.name) {
+                    continue;
+                }
+                if !same_name(declared.type_name, field.value.type_name) {
+                    var position = string::new(self.allocator);
+                    errdefer position.deinit();
+                    try module.names.append_to(&var position, node.result.type_name);
+                    try position.append_bytes(".");
+                    try module.names.append_to(&var position, field.name);
+                    return try self.fail(module, move position, declared.type_name, field.value.type_name);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// Checks what a union constructor carries in its variant, the Go
+/// `unionPayload`.
+fn (self: &Verifier) union_payload(module: &Module, node: &InstrNode) -> !?diagnostic::Diagnostic {
+    let variant = module.union_variant(node.result.type_name, node.immediate) orelse return null;
+    if is_empty(variant.payload) or node.args.len() != 1 {
+        return null;
+    }
+    let arg = node.args.get_or_panic(0);
+    if !same_name(variant.payload, arg.type_name) {
+        var position = string::new(self.allocator);
+        errdefer position.deinit();
+        try module.names.append_to(&var position, node.result.type_name);
+        try position.append_bytes("::");
+        try module.names.append_to(&var position, variant.name);
+        try position.append_bytes(" payload");
+        return try self.fail(module, move position, variant.payload, arg.type_name);
+    }
+    return null;
+}
+
+/// Checks the payload an error union's success carries, the Go
+/// `successWrap`. The success type is compared by its rendered spelling, as
+/// the Go `errorUnionParts` hands it back as text.
+fn (self: &Verifier) success_wrap(module: &Module, types: &var typ::Table, node: &InstrNode) -> !?diagnostic::Diagnostic {
+    if is_empty(node.result.type_name) {
+        return null;
+    }
+    let type_text = name_text(&module.names, node.result.type_name);
+    let type_bytes = type_text.as_bytes();
+    let parsed = try types.parse(type_bytes);
+    let parts = error_union_parts_of(types, parsed) orelse return null;
+    if node.args.len() != 1 {
+        return null;
+    }
+    var success = try typ::render(self.allocator, types, parts.ok);
+    defer success.deinit();
+    let arg = node.args.get_or_panic(0);
+    let arg_text = name_text(&module.names, arg.type_name);
+    let success_bytes = success.as_bytes();
+    let arg_bytes = arg_text.as_bytes();
+    if !mem::equal_bytes(success_bytes, arg_bytes) {
+        var position = try string::from_bytes(self.allocator, "success wrapped as ");
+        errdefer position.deinit();
+        try module.names.append_to(&var position, node.result.type_name);
+        return try self.fail_text(module, move position, &success, arg_text);
+    }
+    return null;
+}
+
+/// Is the structure of one parsed error union spelling: whether it names an
+/// error set, and the success type it carries.
+struct ParsedErrorUnion {
+    has_err: bool,
+    ok: typ::Type
+}
+
+/// Returns the parts of a parsed error union, null for any other type, the
+/// Go `typ.ErrorUnionParts` on a parsed tree.
+fn error_union_parts_of(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUnion {
+    match typ::root_node(types, value) {
+        ErrorUnion(node) => {
+            var has_err = false;
+            if node.err |_| {
+                has_err = true;
+            }
+            return ParsedErrorUnion { has_err: has_err, ok: typ::child_type(value, node.ok) };
+        },
+        _ => {},
+    }
+    return null;
+}
+
+/// Checks that a block ends, that it names blocks that exist, and that what
+/// it returns is what its function declared, the Go `terminator`.
+fn (self: &Verifier) verify_terminator(
+    module: &Module,
+    types: &var typ::Table,
+    blocks: &map::Map<[]u8, bool>,
+    block: Block
+) -> !?diagnostic::Diagnostic {
+    let term = module.block_terminator(block);
+    if term.op == TermOp::None {
+        return try self.failure(
+            module, "block %s has no terminator",
+            VerifyArg::Str(self.block_name), VerifyArg::None, VerifyArg::None, VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None
+        );
+    }
+    var position = 0;
+    while term.successor(position) |target| {
+        position = position + 1;
+        let target_text = name_text(&module.names, target);
+        let target_bytes = target_text.as_bytes();
+        if !blocks.contains(target_bytes) {
+            return try self.failure(
+                module, "block %s branches to %s, which does not exist",
+                VerifyArg::Str(self.block_name), VerifyArg::Str(target), VerifyArg::None,
+                VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
+            );
+        }
+    }
+    let got = term.value.type_name;
+    if term.op != TermOp::Return or is_empty(got) or try absorbs_error_set(module, types, self.fn_return, got) {
+        return null;
+    }
+    if !same_name(self.fn_return, got) {
+        let position_text = try string::from_bytes(self.allocator, "return value");
+        return try self.fail(module, move position_text, self.fn_return, got);
+    }
+    return null;
+}
+
+/// Parses the IR spellings before asking the structural type query, the Go
+/// `absorbsErrorSet` with `typ.AbsorbsErrorSet` inlined: `!T` declares no
+/// error set, so an `E!T` reaching it arrives with E absorbed, while a
+/// declared `E!T` named the one set it takes and absorbs nothing. Go answers
+/// false for a spelling that does not parse; an empty spelling is the one
+/// such case a lowered module holds, and is answered here before parsing.
+fn absorbs_error_set(module: &Module, types: &var typ::Table, want: Name, got: Name) -> !bool {
+    if is_empty(want) or is_empty(got) {
+        return false;
+    }
+    let want_text = name_text(&module.names, want);
+    let want_bytes = want_text.as_bytes();
+    let want_type = try types.parse(want_bytes);
+    let got_text = name_text(&module.names, got);
+    let got_bytes = got_text.as_bytes();
+    let got_type = try types.parse(got_bytes);
+    let want_parts = error_union_parts_of(types, want_type) orelse return false;
+    if want_parts.has_err {
+        return false;
+    }
+    let got_parts = error_union_parts_of(types, got_type) orelse return false;
+    return got_parts.has_err and typ::equal(types, got_parts.ok, types, want_parts.ok);
+}
+
+/// Names one position that holds a value of a type its declaration did not
+/// ask for, the Go `fail`. Every type rule reports through here so the
+/// message reads the same.
+fn (self: &Verifier) fail(module: &Module, position: string::String, want: Name, got: Name) -> !diagnostic::Diagnostic {
+    let want_text = name_text(&module.names, want);
+    let got_text = name_text(&module.names, got);
+    return self.fail_text(module, move position, want_text, got_text);
+}
+
+/// Builds the `fail` message from the spellings of the two types, for the
+/// rule whose declared type is rendered rather than interned.
+fn (self: &Verifier) fail_text(
+    module: &Module,
+    position: string::String,
+    want: &string::String,
+    got: &string::String
+) -> !diagnostic::Diagnostic {
+    defer position.deinit();
+    var out = try string::from_bytes(self.allocator, "ir verify error: ");
+    defer out.deinit();
+    try module.names.append_to(&var out, self.fn_name);
+    try out.append_bytes(": ");
+    try out.append_string(&position);
+    try out.append_bytes(" in block ");
+    try module.names.append_to(&var out, self.block_name);
+    try out.append_bytes(" is ");
+    try out.append_string(got);
+    try out.append_bytes(", declared ");
+    try out.append_string(want);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one verify failure from a Go format and its arguments in order,
+/// the `fmt.Errorf("%w: %s: ...", ErrVerify, v.fn.Name, ...)` of every rule
+/// that is not a type rule: the ErrVerify prefix and the function name are
+/// written first, then `%s` takes a Name and `%d` an integer. A format with
+/// fewer than seven verbs passes None for the rest.
+fn (self: &Verifier) failure(
+    module: &Module,
+    format: []u8,
+    a: VerifyArg,
+    b: VerifyArg,
+    c: VerifyArg,
+    d: VerifyArg,
+    e: VerifyArg,
+    f: VerifyArg,
+    g: VerifyArg
+) -> !diagnostic::Diagnostic {
+    var out = try string::from_bytes(self.allocator, "ir verify error: ");
+    defer out.deinit();
+    try module.names.append_to(&var out, self.fn_name);
+    try out.append_bytes(": ");
+    var used = 0;
+    var index = 0;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if used == 0 {
+                try append_verify_arg(&var out, module, a);
+            }
+            if used == 1 {
+                try append_verify_arg(&var out, module, b);
+            }
+            if used == 2 {
+                try append_verify_arg(&var out, module, c);
+            }
+            if used == 3 {
+                try append_verify_arg(&var out, module, d);
+            }
+            if used == 4 {
+                try append_verify_arg(&var out, module, e);
+            }
+            if used == 5 {
+                try append_verify_arg(&var out, module, f);
+            }
+            if used == 6 {
+                try append_verify_arg(&var out, module, g);
+            }
+            used = used + 1;
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
+        }
+    }
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+fn append_verify_arg(out: &var string::String, module: &Module, arg: VerifyArg) -> !void {
+    match arg {
+        Str(name) => return module.names.append_to(out, name),
+        Int(value) => return fmt::append_i64(out, value),
+        None => return,
+    }
+}
+
+/// Checks the other half of what LLVM's verifier asks of a phi, the Go
+/// `phiIncomingMatchesPredecessors`: one incoming for each block that jumps
+/// to the phi's block, and none from a block that does not. An incoming from
+/// a block that never reaches here reads a value on an edge that does not
+/// exist, and a predecessor with no incoming leaves the phi undefined on an
+/// edge that does.
+///
+/// An edge out of an unreachable block is still an edge, so it is still
+/// counted. phi_incoming_dominates exempts unreachable blocks, which is not
+/// a disagreement: that rule asks which paths reach a block, and an
+/// unreachable block is on none, while this one asks which blocks name it as
+/// a target.
+fn (self: &Verifier) phi_incoming_matches_predecessors(
+    module: &Module,
+    function: Function,
+    preds: &map::Map<[]u8, array::Array<Name>>
+) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var arrives = try names_in(self.allocator, module, preds, block_node.name);
+        defer arrives.deinit();
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != Op::Phi {
+                continue;
+            }
+            if try self.phi_edges(module, block_node.name, instr_node, preds, &arrives) |failed| {
+                return move failed;
+            }
+        }
+    }
+    return null;
+}
+
+/// Checks one phi against the blocks that jump to its own, the Go
+/// `phiEdges`. Counting after the two membership passes is what makes it
+/// edges rather than names: a branch whose arms share a target reaches the
+/// block twice and needs two incoming, and a phi naming one block twice
+/// covers one edge, not two.
+fn (self: &Verifier) phi_edges(
+    module: &Module,
+    block_name: Name,
+    instr_node: &InstrNode,
+    preds: &map::Map<[]u8, array::Array<Name>>,
+    arrives: &map::Map<[]u8, bool>
+) -> !?diagnostic::Diagnostic {
+    var named = map::new<[]u8, bool>(self.allocator);
+    defer named.deinit();
+    var index = 0;
+    while instr_node.incoming.get(index) |incoming| {
+        index = index + 1;
+        let incoming_text = name_text(&module.names, incoming.block);
+        let incoming_bytes = incoming_text.as_bytes();
+        if !arrives.contains(incoming_bytes) {
+            return try self.failure(
+                module, "phi %s in block %s takes a value from %s, which does not jump to %s",
+                VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+                VerifyArg::Str(incoming.block), VerifyArg::Str(block_name), VerifyArg::None,
+                VerifyArg::None, VerifyArg::None
+            );
+        }
+        try named.insert(incoming_bytes, true);
+    }
+    var pred_index = 0;
+    while pred_at(module, preds, block_name, pred_index) |pred| {
+        pred_index = pred_index + 1;
+        let pred_text = name_text(&module.names, pred);
+        let pred_bytes = pred_text.as_bytes();
+        if named.contains(pred_bytes) {
+            continue;
+        }
+        return try self.failure(
+            module, "phi %s in block %s has no value for %s, which jumps to %s",
+            VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+            VerifyArg::Str(pred), VerifyArg::Str(block_name), VerifyArg::None, VerifyArg::None,
+            VerifyArg::None
+        );
+    }
+    let count = pred_count(module, preds, block_name);
+    if instr_node.incoming.len() != count {
+        return try self.failure(
+            module, "phi %s in block %s has %d incoming for %d edges into %s",
+            VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+            VerifyArg::Int(instr_node.incoming.len()), VerifyArg::Int(count), VerifyArg::Str(block_name),
+            VerifyArg::None, VerifyArg::None
+        );
+    }
+    return null;
+}
+
+/// Returns the set of names in a list, the Go `namesIn` over the
+/// predecessors of one block.
+fn names_in(
+    allocator: Allocator,
+    module: &Module,
+    preds: &map::Map<[]u8, array::Array<Name>>,
+    block: Name
+) -> !map::Map<[]u8, bool> {
+    var set = map::new<[]u8, bool>(allocator);
+    errdefer set.deinit();
+    var index = 0;
+    while pred_at(module, preds, block, index) |name| {
+        index = index + 1;
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try set.insert(bytes, true);
+    }
+    return move set;
+}
+
+/// Returns the predecessor at index of block, the Go `preds[name][index]`;
+/// null past the last, and for a block nothing jumps to.
+fn pred_at(
+    module: &Module,
+    preds: &map::Map<[]u8, array::Array<Name>>,
+    block: Name,
+    index: i64
+) -> ?Name {
+    let retained = name_text(&module.names, block);
+    let bytes = retained.as_bytes();
+    if preds.at(bytes) |list| {
+        return list.get(index);
+    }
+    return null;
+}
+
+/// Returns the number of edges into block, the Go `len(preds[name])`.
+fn pred_count(module: &Module, preds: &map::Map<[]u8, array::Array<Name>>, block: Name) -> i64 {
+    let retained = name_text(&module.names, block);
+    let bytes = retained.as_bytes();
+    if preds.at(bytes) |list| {
+        return list.len();
+    }
+    return 0;
+}
+
+/// Checks the SSA property LLVM's verifier enforces, the Go
+/// `phiIncomingDominates`: a phi's incoming value must be defined in a block
+/// that dominates the predecessor it arrives from. A value that is not yet
+/// defined on that edge is read as whatever the register held.
+fn (self: &Verifier) phi_incoming_dominates(
+    module: &Module,
+    function: Function,
+    preds: &map::Map<[]u8, array::Array<Name>>
+) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    if node.blocks.len() == 0 {
+        return null;
+    }
+    var defined_in = try value_defining_blocks(self.allocator, module, function);
+    defer defined_in.deinit();
+    var tree = try build_dominator_tree(self.allocator, module, function, preds);
+    defer tree.deinit();
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != Op::Phi {
+                continue;
+            }
+            var incoming_index = 0;
+            while instr_node.incoming.get(incoming_index) |incoming| {
+                incoming_index = incoming_index + 1;
+                let value_text = name_text(&module.names, incoming.value.name);
+                let value_bytes = value_text.as_bytes();
+                let definition = defined_in.get(value_bytes) orelse continue;
+                if tree.dominates(module, definition, incoming.block) {
+                    continue;
+                }
+                return try self.failure(
+                    module, "phi %s in block %s takes %s from %s, but %s is defined in %s, which does not dominate %s",
+                    VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_node.name),
+                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(incoming.block),
+                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(definition),
+                    VerifyArg::Str(incoming.block)
+                );
+            }
+        }
+    }
+    return null;
+}
+
+/// Checks for every operand what phi_incoming_dominates checks for a phi
+/// edge, the Go `valuesDominateUses`: a value is read only where its
+/// definition is on every path in, and within one block only after it.
+///
+/// A phi is the exception this rule leaves alone. Its operands arrive on
+/// edges rather than where it stands, so a value defined in the block a back
+/// edge leaves from is correct there and would look backwards here.
+fn (self: &Verifier) values_dominate_uses(
+    module: &Module,
+    function: Function,
+    preds: &map::Map<[]u8, array::Array<Name>>
+) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    if node.blocks.len() == 0 {
+        return null;
+    }
+    var defined_in = try value_defining_blocks(self.allocator, module, function);
+    defer defined_in.deinit();
+    var tree = try build_dominator_tree(self.allocator, module, function, preds);
+    defer tree.deinit();
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var above = map::new<[]u8, bool>(self.allocator);
+        defer above.deinit();
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if instr_node.op != Op::Phi {
+                var operands = try instr_operands(self.allocator, instr_node);
+                defer operands.deinit();
+                var operand_index = 0;
+                while operands.get(operand_index) |operand| {
+                    operand_index = operand_index + 1;
+                    if try self.dominates_use(module, &tree, &defined_in, &above, block_node.name, operand) |failed| {
+                        return move failed;
+                    }
+                }
+            }
+            if !is_empty(instr_node.result.name) {
+                let result_text = name_text(&module.names, instr_node.result.name);
+                let result_bytes = result_text.as_bytes();
+                try above.insert(result_bytes, true);
+            }
+        }
+        if try self.dominates_use(module, &tree, &defined_in, &above, block_node.name, block_node.terminator.cond) |failed| {
+            return move failed;
+        }
+        if try self.dominates_use(module, &tree, &defined_in, &above, block_node.name, block_node.terminator.value) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Checks one operand read in block, the Go `dominatesUse`. above holds what
+/// the block has defined so far, which is what separates a read of an
+/// earlier instruction from a read of a later one.
+fn (self: &Verifier) dominates_use(
+    module: &Module,
+    tree: &DominatorTree,
+    defined_in: &map::Map<[]u8, Name>,
+    above: &map::Map<[]u8, bool>,
+    block_name: Name,
+    operand: Value
+) -> !?diagnostic::Diagnostic {
+    let operand_text = name_text(&module.names, operand.name);
+    let operand_bytes = operand_text.as_bytes();
+    // A param or a literal has no defining block and is read anywhere.
+    let definition = defined_in.get(operand_bytes) orelse return null;
+    if same_name(definition, block_name) {
+        if above.contains(operand_bytes) {
+            return null;
+        }
+        return try self.failure(
+            module, "block %s reads %s before it is defined",
+            VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
+        );
+    }
+    if tree.dominates(module, definition, block_name) {
+        return null;
+    }
+    return try self.failure(
+        module, "block %s reads %s, which is defined in %s, and %s does not dominate %s",
+        VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::Str(definition),
+        VerifyArg::Str(definition), VerifyArg::Str(block_name), VerifyArg::None, VerifyArg::None
+    );
+}
+
+/// Returns the values an instruction reads where it stands, the Go
+/// `instrOperands`: its arguments, its field values, and the receiver of
+/// each cleanup.
+fn instr_operands(allocator: Allocator, instr_node: &InstrNode) -> !array::Array<Value> {
+    var operands = array::new<Value>(allocator);
+    errdefer operands.deinit();
+    var index = 0;
+    while instr_node.args.get(index) |arg| {
+        index = index + 1;
+        try operands.append(arg);
+    }
+    index = 0;
+    while instr_node.fields.get(index) |field| {
+        index = index + 1;
+        try operands.append(field.value);
+    }
+    index = 0;
+    while instr_node.cleanups.get(index) |cleanup| {
+        index = index + 1;
+        try operands.append(cleanup.arg);
+    }
+    return move operands;
+}
+
+/// Maps each instruction result to the block defining it, the Go
+/// `valueDefiningBlocks`. Params and literals have no defining block and are
+/// available everywhere.
+fn value_defining_blocks(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, Name> {
+    var defined = map::new<[]u8, Name>(allocator);
+    errdefer defined.deinit();
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if is_empty(instr_node.result.name) {
+                continue;
+            }
+            let result_text = name_text(&module.names, instr_node.result.name);
+            let result_bytes = result_text.as_bytes();
+            try defined.insert(result_bytes, block_node.name);
+        }
+    }
+    return move defined;
+}
+
+/// Answers which blocks dominate which, the Go `dominatorTree`. It stores one
+/// immediate dominator per block rather than a set per block, so the whole
+/// tree is a map and a list and a question is a walk up the chain.
+struct DominatorTree {
+    // index holds each block's position in reverse postorder, which is the
+    // numbering the walk compares against. A block missing from index is
+    // unreachable.
+    index: map::Map<[]u8, i64>,
+    // idom[i] is the reverse-postorder position of block i's immediate
+    // dominator. The entry is its own.
+    idom: array::Array<i64>
+}
+
+/// Computes immediate dominators by the Cooper-Harvey-Kennedy iteration, the
+/// Go `buildDominatorTree`: walk the blocks in reverse postorder, and take
+/// each block's immediate dominator to be the meet of the ones already known
+/// for its predecessors. Storing sets instead costs a map per block and the
+/// entry count grows with the square of the block count, which a function of
+/// a few dozen blocks already feels.
+fn build_dominator_tree(
+    allocator: Allocator,
+    module: &Module,
+    function: Function,
+    preds: &map::Map<[]u8, array::Array<Name>>
+) -> !DominatorTree {
+    var order = try reverse_postorder(allocator, module, function);
+    defer order.deinit();
+    var tree = DominatorTree {
+        index: map::new<[]u8, i64>(allocator),
+        idom: array::new<i64>(allocator)
+    };
+    errdefer tree.deinit();
+    var position = 0;
+    while order.get(position) |name| {
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try tree.index.insert(bytes, position);
+        try tree.idom.append(-1);
+        position = position + 1;
+    }
+    if order.len() == 0 {
+        return move tree;
+    }
+    try tree.idom.set(0, 0);
+    var changed = true;
+    while changed {
+        changed = false;
+        position = 1;
+        while order.get(position) |name| {
+            var meet = -1;
+            var pred_index = 0;
+            while pred_at(module, preds, name, pred_index) |pred| {
+                pred_index = pred_index + 1;
+                let pred_text = name_text(&module.names, pred);
+                let pred_bytes = pred_text.as_bytes();
+                let at = tree.index.get(pred_bytes) orelse continue;
+                if tree.idom.get_or_panic(at) < 0 {
+                    continue;
+                }
+                if meet < 0 {
+                    meet = at;
+                    continue;
+                }
+                meet = tree.meet(meet, at);
+            }
+            if meet >= 0 and tree.idom.get_or_panic(position) != meet {
+                try tree.idom.set(position, meet);
+                changed = true;
+            }
+            position = position + 1;
+        }
+    }
+    return move tree;
+}
+
+/// Walks two blocks up the tree until they arrive at the same one, which is
+/// the nearest block dominating both, the Go `meet`. A block's immediate
+/// dominator always comes earlier in reverse postorder, so each step moves
+/// the higher position down and the walk ends.
+fn (self: &DominatorTree) meet(left: i64, right: i64) -> i64 {
+    var left_at = left;
+    var right_at = right;
+    while left_at != right_at {
+        while left_at > right_at {
+            left_at = self.idom.get_or_panic(left_at);
+        }
+        while right_at > left_at {
+            right_at = self.idom.get_or_panic(right_at);
+        }
+    }
+    return left_at;
+}
+
+/// Reports whether every path reaching block passes through dominator, the
+/// Go `dominates`. An unreachable block is reached by no path, so nothing is
+/// claimed about it.
+fn (self: &DominatorTree) dominates(module: &Module, dominator: Name, block: Name) -> bool {
+    let block_text = name_text(&module.names, block);
+    let block_bytes = block_text.as_bytes();
+    var at = self.index.get(block_bytes) orelse return true;
+    let dominator_text = name_text(&module.names, dominator);
+    let dominator_bytes = dominator_text.as_bytes();
+    let target = self.index.get(dominator_bytes) orelse return false;
+    while at != target {
+        let next = self.idom.get_or_panic(at);
+        if next == at {
+            return false;
+        }
+        at = next;
+    }
+    return true;
+}
+
+/// Lists the blocks reachable from the entry, each after every block it can
+/// reach, then reversed, the Go `reversePostorder`. Predecessors therefore
+/// come first except across a back edge, which is what makes one forward
+/// pass enough for most of the dominator tree.
+fn reverse_postorder(allocator: Allocator, module: &Module, function: Function) -> !array::Array<Name> {
+    let node = module.function_nodes.at(function.node);
+    var blocks = map::new<[]u8, Block>(allocator);
+    defer blocks.deinit();
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let name = module.block_name(block);
+        let retained = name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try blocks.insert(bytes, block);
+    }
+    var visited = map::new<[]u8, bool>(allocator);
+    defer visited.deinit();
+    var order = array::new<Name>(allocator);
+    errdefer order.deinit();
+    let first = node.blocks.get(0) orelse return move order;
+    try visit_postorder(module, &blocks, &var visited, &var order, module.block_name(first));
+    var head = 0;
+    var tail = order.len() - 1;
+    while head < tail {
+        try order.swap(head, tail);
+        head = head + 1;
+        tail = tail - 1;
+    }
+    return move order;
+}
+
+/// Appends name after every block it can reach, the Go `visit` closure of
+/// `reversePostorder`.
+fn visit_postorder(
+    module: &Module,
+    blocks: &map::Map<[]u8, Block>,
+    visited: &var map::Map<[]u8, bool>,
+    order: &var array::Array<Name>,
+    name: Name
+) -> !void {
+    let retained = name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    let block = blocks.get(bytes) orelse return;
+    if visited.contains(bytes) {
+        return;
+    }
+    try visited.insert(bytes, true);
+    let term = module.block_terminator(block);
+    var position = 0;
+    while term.successor(position) |target| {
+        position = position + 1;
+        try visit_postorder(module, blocks, visited, order, target);
+    }
+    return order.append(name);
+}
+
+/// Derives the CFG edges from each block's terminator, the Go
+/// `blockPredecessors`: the blocks that jump to each block, in block order.
+fn block_predecessors(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, array::Array<Name>> {
+    var preds = map::new<[]u8, array::Array<Name>>(allocator);
+    errdefer preds.deinit();
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var position = 0;
+        while block_node.terminator.successor(position) |target| {
+            position = position + 1;
+            try add_predecessor(allocator, module, &var preds, target, block_node.name);
+        }
+    }
+    return move preds;
+}
+
+/// Records one edge, the Go `preds[target] = append(preds[target], name)`.
+fn add_predecessor(
+    allocator: Allocator,
+    module: &Module,
+    preds: &var map::Map<[]u8, array::Array<Name>>,
+    target: Name,
+    pred: Name
+) -> !void {
+    let retained = name_text(&module.names, target);
+    let bytes = retained.as_bytes();
+    if preds.at_mut(bytes) |list| {
+        return list.append(pred);
+    }
+    var list = array::new<Name>(allocator);
+    errdefer list.deinit();
+    try list.append(pred);
+    return preds.insert(bytes, move list);
+}

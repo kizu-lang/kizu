@@ -1,0 +1,729 @@
+import compiler::internal::ast;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ir/ir.go: Kizu's typed SSA intermediate
+// representation. Go links Function, Block and Instr by pointer and spells
+// every name and operation as a string; here the Module owns the nodes in
+// arenas and hands out copy handles, every text is a Name interned in the
+// Module's NameTable, and an operation is an Op tag plus the Name it carries
+// (`call.<symbol>`, `field.<name>`, `binary.<operator>`), spelled back by
+// `append_op` so the rendered module reads as the Go one does.
+
+/// Is one lowered Kizu program, from either a package or a loose source file.
+pub struct Module {
+    pub names: NameTable,
+    pub structs: map::Map<[]u8, Struct>,
+    pub enums: map::Map<[]u8, Enum>,
+    // error_sets are named like enums but numbered globally: an error value
+    // is one integer that means the same member in every error union it
+    // crosses.
+    pub error_sets: map::Map<[]u8, Enum>,
+    pub unions: map::Map<[]u8, Union>,
+    pub functions: array::Array<Function>,
+    pub function_nodes: arena::Arena<FunctionNode>,
+    pub blocks: arena::Arena<BlockNode>,
+    pub instrs: arena::Arena<InstrNode>
+}
+
+/// Creates an empty module whose names are its own.
+pub fn new_module(allocator: Allocator) -> Module {
+    return Module {
+        names: new_name_table(allocator),
+        structs: map::new<[]u8, Struct>(allocator),
+        enums: map::new<[]u8, Enum>(allocator),
+        error_sets: map::new<[]u8, Enum>(allocator),
+        unions: map::new<[]u8, Union>(allocator),
+        functions: array::new<Function>(allocator),
+        function_nodes: arena::new<FunctionNode>(allocator),
+        blocks: arena::new<BlockNode>(allocator),
+        instrs: arena::new<InstrNode>(allocator)
+    };
+}
+
+/// Is the IR view of a declared Kizu struct.
+pub struct Struct {
+    pub name: Name,
+    pub fields: array::Array<Field>
+}
+
+/// Is the IR view of a declared tag enum: each tag's integer.
+pub struct Enum {
+    pub name: Name,
+    pub tags: map::Map<[]u8, i64>
+}
+
+/// Is the IR view of a tagged union declaration.
+pub struct Union {
+    pub name: Name,
+    pub variants: map::Map<[]u8, UnionVariant>
+}
+
+/// Stores one union tag and optional payload type; an empty payload is none.
+pub struct UnionVariant {
+    pub name: Name,
+    pub index: i64,
+    pub payload: Name
+}
+
+/// Is a typed struct field.
+pub struct Field {
+    pub name: Name,
+    pub type_name: Name
+}
+
+/// Identifies one function retained by a Module.
+pub struct Function {
+    pub node: arena::Handle<FunctionNode>
+}
+
+/// Is a typed SSA function. Its parameters keep the Passing lowering decided
+/// for them, so a reader asks how an argument travels instead of inferring it
+/// back from the type's spelling.
+pub struct FunctionNode {
+    pub name: Name,
+    pub params: array::Array<Param>,
+    pub return_type: Name,
+    pub blocks: array::Array<Block>
+}
+
+/// Identifies one basic block retained by a Module.
+pub struct Block {
+    pub node: arena::Handle<BlockNode>
+}
+
+/// Is a basic block with instructions and one terminator. Its predecessors
+/// are not stored: they follow from the terminators naming it.
+pub struct BlockNode {
+    pub name: Name,
+    pub instrs: array::Array<Instr>,
+    pub terminator: Terminator
+}
+
+/// Names an SSA value and its type; an empty type is the untyped zero value.
+pub struct Value {
+    pub name: Name,
+    pub type_name: Name
+}
+
+/// Returns the zero value, the Go `Value{}`.
+pub fn empty_value() -> Value {
+    return Value { name: empty_name(), type_name: empty_name() };
+}
+
+/// Reports whether two SSA value references are identical, the Go
+/// `sameValue`.
+pub fn same_value(left: Value, right: Value) -> bool {
+    return same_name(left.name, right.name) and same_name(left.type_name, right.type_name);
+}
+
+/// Identifies one instruction retained by a Module.
+pub struct Instr {
+    pub node: arena::Handle<InstrNode>
+}
+
+/// Is one SSA instruction. operand is the name the op carries: the callee of
+/// a call, the field of a field access, the operator of a unary or binary op.
+pub struct InstrNode {
+    pub result: Value,
+    pub op: Op,
+    pub operand: Name,
+    pub args: array::Array<Value>,
+    pub immediate: Name,
+    pub fields: array::Array<FieldArg>,
+    pub incoming: array::Array<Incoming>,
+    pub cleanups: array::Array<Cleanup>,
+    // span is set where a runtime failure must name a source position. It
+    // is zero for instructions that cannot fail.
+    pub span: ast::Span
+}
+
+/// Is a deferred void instruction that must run before a scope exits. Its
+/// one operand is the receiver value it consumes. on_error marks errdefer
+/// cleanups, which run only on error-return paths. receiver names the local
+/// the cleanup consumes, so an error exit can drop the cleanups a move has
+/// retired (ADR-0114).
+pub struct Cleanup {
+    pub op: Op,
+    pub operand: Name,
+    pub arg: Value,
+    pub on_error: bool,
+    pub receiver: Name
+}
+
+/// Connects a struct field name to a value.
+pub struct FieldArg {
+    pub name: Name,
+    pub value: Value
+}
+
+/// Is one predecessor value for a phi instruction.
+pub struct Incoming {
+    pub block: Name,
+    pub value: Value
+}
+
+/// Ends a basic block; None is a block that has not ended yet.
+pub struct Terminator {
+    pub op: TermOp,
+    pub value: Value,
+    pub cond: Value,
+    pub target: Name,
+    pub else_target: Name
+}
+
+/// Is the kind of one terminator.
+pub enum TermOp {
+    None,
+    Return,
+    Jump,
+    Branch,
+    Unreachable,
+}
+
+/// Returns the terminator a block starts with, the Go zero `Terminator`.
+pub fn no_terminator() -> Terminator {
+    return Terminator {
+        op: TermOp::None,
+        value: empty_value(),
+        cond: empty_value(),
+        target: empty_name(),
+        else_target: empty_name()
+    };
+}
+
+/// Returns a `return value` terminator.
+pub fn return_terminator(value: Value) -> Terminator {
+    return Terminator {
+        op: TermOp::Return,
+        value: value,
+        cond: empty_value(),
+        target: empty_name(),
+        else_target: empty_name()
+    };
+}
+
+/// Returns a `jump target` terminator.
+pub fn jump_terminator(target: Name) -> Terminator {
+    return Terminator {
+        op: TermOp::Jump,
+        value: empty_value(),
+        cond: empty_value(),
+        target: target,
+        else_target: empty_name()
+    };
+}
+
+/// Returns a `branch cond, target, else` terminator.
+pub fn branch_terminator(cond: Value, target: Name, else_target: Name) -> Terminator {
+    return Terminator {
+        op: TermOp::Branch,
+        value: empty_value(),
+        cond: cond,
+        target: target,
+        else_target: else_target
+    };
+}
+
+/// Returns an `unreachable` terminator.
+pub fn unreachable_terminator() -> Terminator {
+    return Terminator {
+        op: TermOp::Unreachable,
+        value: empty_value(),
+        cond: empty_value(),
+        target: empty_name(),
+        else_target: empty_name()
+    };
+}
+
+/// Returns the block at position among the ones control can reach from this
+/// terminator, the Go `Successors`: the target, then the else target, each
+/// only when named; null past the last.
+pub fn (self: &Terminator) successor(position: i64) -> ?Name {
+    var seen = 0;
+    if !is_empty(self.target) {
+        if seen == position {
+            return self.target;
+        }
+        seen = seen + 1;
+    }
+    if !is_empty(self.else_target) {
+        if seen == position {
+            return self.else_target;
+        }
+    }
+    return null;
+}
+
+/// Is one parameter of a callable: its SSA name, the type the callee sees,
+/// and how the call hands it over.
+pub struct Param {
+    pub name: Name,
+    pub type_name: Name,
+    pub passing: Passing
+}
+
+/// Returns the parameter as the body reads it: the SSA value bound to its
+/// name on entry.
+pub fn (self: &Param) value() -> Value {
+    return Value { name: self.name, type_name: self.type_name };
+}
+
+/// Is how a call hands one parameter to the callee.
+pub enum Passing {
+    // Value copies the parameter. The callee cannot write back through it.
+    Value,
+    // CallerStorage hands over the caller's local itself, so a write in the
+    // callee lands in it.
+    CallerStorage,
+    // CopyAddress hands over the address of a copy made for the call. The
+    // callee reads through it and the caller keeps its own value.
+    CopyAddress,
+}
+
+/// Is the kind of one instruction. The ops that carry a name (`call.<f>`,
+/// `field.<f>`, `binary.<op>`) keep it in the instruction's operand.
+pub enum Op {
+    Const,
+    Phi,
+    StructNew,
+    CondFail,
+    Id,
+    Call,
+    Field,
+    FieldRef,
+    FieldSet,
+    FieldRefSet,
+    FieldAddr,
+    Unary,
+    Binary,
+    RefLoad,
+    RefStore,
+    VolatileLoad,
+    VolatileStore,
+    LocalSlot,
+    SliceLen,
+    SliceIndex,
+    SliceSlice,
+    SliceStore,
+    ErrorOk,
+    ErrorError,
+    ErrorTry,
+    OptNull,
+    OptSome,
+    OptValue,
+    OptHas,
+    Cast,
+    BufferNew,
+    BufferAsBytes,
+    TestFail,
+    PanicFail,
+    TestExpectEqual,
+    ArenaNew,
+    ArenaAdd,
+    ArenaAt,
+    ArenaAtMut,
+    ArenaDeinit,
+    ArenaLen,
+    ArenaPopOrPanic,
+    ArrayNew,
+    ArrayAppend,
+    ArrayAsBytes,
+    ArrayAt,
+    ArrayAtMut,
+    ArrayCapacity,
+    ArrayClear,
+    ArrayDeinit,
+    ArrayGet,
+    ArrayGetOrPanic,
+    ArrayLen,
+    ArrayPop,
+    ArrayPopOrPanic,
+    ArrayReserve,
+    ArraySet,
+    ArraySwap,
+    ArrayTruncate,
+    MapNew,
+    MapAt,
+    MapAtMut,
+    MapContains,
+    MapDeinit,
+    MapGet,
+    MapInsert,
+    MapKeyAt,
+    MapLen,
+    MapTakeValueAt,
+    BoxNew,
+    BoxBorrow,
+    BoxBorrowMut,
+    BoxDeinit,
+    BoxTake,
+    UnionNew,
+    UnionTag,
+    UnionLoad,
+    UnionPayload,
+}
+
+/// Returns the spelling of an op, up to the name it carries: the whole text
+/// for a fixed op, the prefix before the operand for one that carries a name.
+pub fn op_spelling(op: Op) -> []u8 {
+    return match op {
+        Const => "const",
+        Phi => "phi",
+        StructNew => "struct.new",
+        CondFail => "cond_fail",
+        Id => "id",
+        Call => "call.",
+        Field => "field.",
+        FieldRef => "field.ref.",
+        FieldSet => "field.set.",
+        FieldRefSet => "field.ref.set.",
+        FieldAddr => "field.addr.",
+        Unary => "unary.",
+        Binary => "binary.",
+        RefLoad => "ref.load",
+        RefStore => "ref.store",
+        VolatileLoad => "volatile.load",
+        VolatileStore => "volatile.store",
+        LocalSlot => "local.slot",
+        SliceLen => "slice.len",
+        SliceIndex => "slice.index",
+        SliceSlice => "slice.slice",
+        SliceStore => "slice.store",
+        ErrorOk => "error.ok",
+        ErrorError => "error.error",
+        ErrorTry => "error.try",
+        OptNull => "opt.null",
+        OptSome => "opt.some",
+        OptValue => "opt.value",
+        OptHas => "opt.has",
+        Cast => "cast",
+        BufferNew => "buffer.new",
+        BufferAsBytes => "buffer.as_bytes",
+        TestFail => "test.fail",
+        PanicFail => "panic.fail",
+        TestExpectEqual => "test.expect_equal",
+        ArenaNew => "arena.new",
+        ArenaAdd => "arena.add",
+        ArenaAt => "arena.at",
+        ArenaAtMut => "arena.at_mut",
+        ArenaDeinit => "arena.deinit",
+        ArenaLen => "arena.len",
+        ArenaPopOrPanic => "arena.pop_or_panic",
+        ArrayNew => "array.new",
+        ArrayAppend => "array.append",
+        ArrayAsBytes => "array.as_bytes",
+        ArrayAt => "array.at",
+        ArrayAtMut => "array.at_mut",
+        ArrayCapacity => "array.capacity",
+        ArrayClear => "array.clear",
+        ArrayDeinit => "array.deinit",
+        ArrayGet => "array.get",
+        ArrayGetOrPanic => "array.get_or_panic",
+        ArrayLen => "array.len",
+        ArrayPop => "array.pop",
+        ArrayPopOrPanic => "array.pop_or_panic",
+        ArrayReserve => "array.reserve",
+        ArraySet => "array.set",
+        ArraySwap => "array.swap",
+        ArrayTruncate => "array.truncate",
+        MapNew => "map.new",
+        MapAt => "map.at",
+        MapAtMut => "map.at_mut",
+        MapContains => "map.contains",
+        MapDeinit => "map.deinit",
+        MapGet => "map.get",
+        MapInsert => "map.insert",
+        MapKeyAt => "map.key_at",
+        MapLen => "map.len",
+        MapTakeValueAt => "map.take_value_at",
+        BoxNew => "box.new",
+        BoxBorrow => "box.borrow",
+        BoxBorrowMut => "box.borrow_mut",
+        BoxDeinit => "box.deinit",
+        BoxTake => "box.take",
+        UnionNew => "union.new",
+        UnionTag => "union.tag",
+        UnionLoad => "union.load",
+        UnionPayload => "union.payload",
+    };
+}
+
+/// Reports whether an op carries a name in its operand.
+pub fn op_carries_operand(op: Op) -> bool {
+    return match op {
+        Call => true,
+        Field => true,
+        FieldRef => true,
+        FieldSet => true,
+        FieldRefSet => true,
+        FieldAddr => true,
+        Unary => true,
+        Binary => true,
+        _ => false,
+    };
+}
+
+/// Appends the Go spelling of an op and the name it carries.
+pub fn append_op(out: &var string::String, names: &NameTable, op: Op, operand: Name) -> !void {
+    try out.append_bytes(op_spelling(op));
+    if op_carries_operand(op) {
+        try names.append_to(out, operand);
+    }
+    return;
+}
+
+/// Is a function's callable type.
+pub struct Signature {
+    pub params: array::Array<Param>,
+    pub return_type: Name
+}
+
+/// Reports whether a parameter reading through an address is being handed
+/// the value that address is taken of, rather than an address the caller
+/// already held, the Go `Param.TakesAddressOf`.
+pub fn takes_address_of(names: &var NameTable, param: Param, arg_type: Name) -> !bool {
+    if param.passing != Passing::CopyAddress or same_name(param.type_name, arg_type) {
+        return false;
+    }
+    let deref = try names.deref_type(param.type_name);
+    return same_name(deref, arg_type);
+}
+
+/// Returns the symbol a test block lowers to, the Go `TestFunctionName`:
+/// `test.` and the name with every byte outside `_ . a-z A-Z 0-9` replaced by
+/// `_`, one replacement per character.
+pub fn test_function_name(allocator: Allocator, name: []u8) -> !string::String {
+    var out = try string::from_bytes(allocator, "test.");
+    errdefer out.deinit();
+    var index = 0;
+    while index < mem::len(name) {
+        let byte = name[index];
+        index = index + 1;
+        if byte == cast<u8>(95) or byte == cast<u8>(46) or
+            (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+            (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+            (byte >= cast<u8>(48) and byte <= cast<u8>(57)) {
+            try out.append_byte(byte);
+            continue;
+        }
+        // A multi-byte character is one rune in Go, so its continuation bytes
+        // add no second underscore.
+        if byte >= cast<u8>(128) and byte < cast<u8>(192) {
+            continue;
+        }
+        try out.append_byte(cast<u8>(95));
+    }
+    return move out;
+}
+
+/// Appends the lowered test symbols in declaration order, the Go
+/// `TestFunctionNames`.
+pub fn test_function_names(module: &Module, out: &var array::Array<Name>) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        if module.names.starts_with(node.name, "test.") {
+            try out.append(node.name);
+        }
+    }
+    return;
+}
+
+/// Returns the lowered function with the requested symbol, or null.
+pub fn (self: &Module) function_named(name: []u8) -> ?Function {
+    var index = 0;
+    while self.functions.get(index) |function| {
+        index = index + 1;
+        let node = self.function_nodes.at(function.node);
+        if self.names.is(node.name, name) {
+            return function;
+        }
+    }
+    return null;
+}
+
+/// Returns the declared type of a struct field, the Go `fieldType`:
+/// `unknown` when the struct or the field is not declared.
+pub fn (self: &var Module) field_type(struct_name: Name, field_name: Name) -> !Name {
+    let struct_text = name_text(&self.names, struct_name);
+    let struct_bytes = struct_text.as_bytes();
+    if self.structs.at(struct_bytes) |declared| {
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            index = index + 1;
+            if same_name(field.name, field_name) {
+                return field.type_name;
+            }
+        }
+    }
+    return self.names.intern("unknown");
+}
+
+/// Reports whether name declares a union in this module.
+pub fn (self: &Module) has_union(name: Name) -> bool {
+    let text = name_text(&self.names, name);
+    let bytes = text.as_bytes();
+    return self.unions.contains(bytes);
+}
+
+/// Reports whether name declares an error set in this module.
+pub fn (self: &Module) has_error_set(name: Name) -> bool {
+    let text = name_text(&self.names, name);
+    let bytes = text.as_bytes();
+    return self.error_sets.contains(bytes);
+}
+
+/// Reports whether name declares an enum or an error set in this module,
+/// the two `Tags` maps a tag match reads.
+pub fn (self: &Module) has_enum_or_error_set(name: Name) -> bool {
+    let text = name_text(&self.names, name);
+    let bytes = text.as_bytes();
+    return self.enums.contains(bytes) or self.error_sets.contains(bytes);
+}
+
+/// Returns the integer of one enum or error set tag, or null when the type
+/// or the tag is not declared, the Go `Enums[name].Tags[tag]` read with the
+/// error set fallback.
+pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
+    let enum_text = name_text(&self.names, enum_name);
+    let enum_bytes = enum_text.as_bytes();
+    let tag_text = name_text(&self.names, tag);
+    let tag_bytes = tag_text.as_bytes();
+    if self.enums.at(enum_bytes) |declared| {
+        return declared.tags.get(tag_bytes);
+    }
+    if self.error_sets.at(enum_bytes) |declared| {
+        return declared.tags.get(tag_bytes);
+    }
+    return null;
+}
+
+/// Returns one union variant, or null when the union or the variant is not
+/// declared, the Go `Unions[name].Variants[tag]` read.
+pub fn (self: &Module) union_variant(union_name: Name, variant: Name) -> ?UnionVariant {
+    let union_text = name_text(&self.names, union_name);
+    let union_bytes = union_text.as_bytes();
+    let variant_text = name_text(&self.names, variant);
+    let variant_bytes = variant_text.as_bytes();
+    if self.unions.at(union_bytes) |declared| {
+        return declared.variants.get(variant_bytes);
+    }
+    return null;
+}
+
+/// Appends a block to a function and returns its handle.
+pub fn (self: &var Module) add_block(function: Function, name: Name) -> !Block {
+    let block = Block {
+        node: self.blocks.add(BlockNode {
+            name: name,
+            instrs: array::new<Instr>(self.names.allocator),
+            terminator: no_terminator()
+        })
+    };
+    if self.function_nodes.at_mut(function.node) |node| {
+        try node.blocks.append(block);
+    }
+    return block;
+}
+
+/// Retains one instruction and appends it to a block.
+pub fn (self: &var Module) add_instr(block: Block, instr: InstrNode) -> !Instr {
+    let handle = Instr { node: self.instrs.add(move instr) };
+    if self.blocks.at_mut(block.node) |node| {
+        try node.instrs.append(handle);
+    }
+    return handle;
+}
+
+/// Returns an instruction record with empty operand lists, for a caller to
+/// fill in before it is retained.
+pub fn (self: &Module) blank_instr(result: Value, op: Op, operand: Name, immediate: Name) -> InstrNode {
+    let allocator = self.names.allocator;
+    return InstrNode {
+        result: result,
+        op: op,
+        operand: operand,
+        args: array::new<Value>(allocator),
+        immediate: immediate,
+        fields: array::new<FieldArg>(allocator),
+        incoming: array::new<Incoming>(allocator),
+        cleanups: array::new<Cleanup>(allocator),
+        span: ast::zero_span()
+    };
+}
+
+/// Returns the name of a block.
+pub fn (self: &Module) block_name(block: Block) -> Name {
+    return self.blocks.at(block.node).name;
+}
+
+/// Returns the terminator of a block.
+pub fn (self: &Module) block_terminator(block: Block) -> Terminator {
+    return self.blocks.at(block.node).terminator;
+}
+
+/// Reports whether a block has ended, the Go `block.Terminator.Op != ""`.
+pub fn (self: &Module) block_terminated(block: Block) -> bool {
+    return self.blocks.at(block.node).terminator.op != TermOp::None;
+}
+
+/// Ends a block.
+pub fn (self: &var Module) set_terminator(block: Block, terminator: Terminator) -> void {
+    if self.blocks.at_mut(block.node) |node| {
+        node.terminator = terminator;
+    }
+    return;
+}
+
+/// Returns the result of an instruction.
+pub fn (self: &Module) instr_result(instr: Instr) -> Value {
+    return self.instrs.at(instr.node).result;
+}
+
+/// Returns the op of an instruction.
+pub fn (self: &Module) instr_op(instr: Instr) -> Op {
+    return self.instrs.at(instr.node).op;
+}
+
+/// Appends one phi incoming to an instruction.
+pub fn (self: &var Module) add_incoming(instr: Instr, block: Name, value: Value) -> !void {
+    if self.instrs.at_mut(instr.node) |node| {
+        try node.incoming.append(Incoming { block: block, value: value });
+    }
+    return;
+}
+
+/// Appends one cleanup to an instruction.
+pub fn (self: &var Module) add_cleanup(instr: Instr, cleanup: Cleanup) -> !void {
+    if self.instrs.at_mut(instr.node) |node| {
+        try node.cleanups.append(cleanup);
+    }
+    return;
+}
+
+/// Returns the name of a function.
+pub fn (self: &Module) function_name(function: Function) -> Name {
+    return self.function_nodes.at(function.node).name;
+}
+
+/// Returns the return type of a function.
+pub fn (self: &Module) function_return(function: Function) -> Name {
+    return self.function_nodes.at(function.node).return_type;
+}
+
+/// Returns one parameter of a function, or null past the last.
+pub fn (self: &Module) function_param(function: Function, index: i64) -> ?Param {
+    let node = self.function_nodes.at(function.node);
+    return node.params.get(index);
+}
+
+/// Returns the number of parameters a function declares.
+pub fn (self: &Module) function_param_count(function: Function) -> i64 {
+    let node = self.function_nodes.at(function.node);
+    return node.params.len();
+}

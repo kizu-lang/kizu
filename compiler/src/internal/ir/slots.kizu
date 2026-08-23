@@ -1,0 +1,592 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::stdmethod;
+import std::array;
+import std::mem;
+
+// Mechanical port of internal/ir/slots.go. A local is an SSA value, which is
+// enough until something writes through a borrow of it: the callee stores
+// into the borrowed storage, and the caller has to read the store back. An
+// SSA value has no storage to write into, so a local that is passed as
+// `&var` gets a slot and lives in memory for the whole function. A `&var`
+// parameter arrives as such storage already, so it joins the same set:
+// either way the name means storage -- reads load, assignments store, and
+// the places that need the address take the pointer itself.
+//
+// The decision is made once, before the body is lowered, because it has to
+// hold everywhere the name is used. Deciding it where the address is first
+// needed would put the slot inside whatever `if` or loop asked for it, and
+// the name would mean a value on one path and storage on another.
+//
+// The Go `map[string]bool` of names is `self.slots`, an Array<Name> kept as
+// a set: membership is a scan, and a name is added only when absent.
+
+/// Collects into `self.slots` the local names the function passes to a
+/// `&var` parameter, the Go `mutablyBorrowedLocals`.
+fn (self: &var Lowerer) mutably_borrowed_locals(tree: &var ast::Ast, decl: FactsHandle) -> !?diagnostic::Diagnostic {
+    while self.slots.pop() |_| {}
+    if self.decl_body(decl) |body| {
+        if try self.collect_mut_borrows_stmt(tree, body.as_statement()) |failed| {
+            return move failed;
+        }
+    }
+    // A parameter never allocates a slot: one that arrives as caller storage
+    // is added to the set by lower_function_named with the storage it came
+    // with, and any other parameter has no storage to lend.
+    let count = self.decl_param_count(decl);
+    var index = 0;
+    while index < count {
+        let param = self.decl_param(decl, index);
+        index = index + 1;
+        try self.remove_slot(param.name);
+    }
+    return null;
+}
+
+/// Reports whether name is in the slot set, the Go `l.slots[name]`.
+fn (self: &Lowerer) has_slot(name: Name) -> bool {
+    var index = 0;
+    while self.slots.get(index) |slot| {
+        index = index + 1;
+        if same_name(slot, name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Adds name to the slot set, the Go `found[name] = true`.
+fn (self: &var Lowerer) add_slot(name: Name) -> !void {
+    if self.has_slot(name) {
+        return;
+    }
+    return self.slots.append(name);
+}
+
+/// Removes name from the slot set, the Go `delete(found, name)`.
+fn (self: &var Lowerer) remove_slot(name: Name) -> !void {
+    var index = 0;
+    while self.slots.get(index) |slot| {
+        if same_name(slot, name) {
+            let last = self.slots.len() - 1;
+            try self.slots.swap(index, last);
+            let _ = self.slots.pop();
+            return;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Walks one statement for names passed as `&var`, the Go
+/// `collectMutBorrowsStmt`.
+fn (self: &var Lowerer) collect_mut_borrows_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
+    var exprs = array::new<ast::Expression>(self.allocator);
+    defer exprs.deinit();
+    var stmts = array::new<ast::Statement>(self.allocator);
+    defer stmts.deinit();
+    let known = try statement_children(tree, statement, &var exprs, &var stmts);
+    if !known {
+        let kind = try self.name(statement_go_type(tree, statement));
+        return try self.fail1(tree, "ir error: slot analysis does not know statement `%s`", Arg::Str(kind));
+    }
+    return self.collect_mut_borrows_children(tree, &exprs, &stmts);
+}
+
+/// Walks the expressions and then the statements one node holds, the two
+/// loops of the Go `collectMutBorrowsStmt`.
+fn (self: &var Lowerer) collect_mut_borrows_children(
+    tree: &var ast::Ast,
+    exprs: &array::Array<ast::Expression>,
+    stmts: &array::Array<ast::Statement>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while exprs.get(index) |expression| {
+        index = index + 1;
+        if try self.collect_mut_borrows_expr(tree, expression) |failed| {
+            return move failed;
+        }
+    }
+    index = 0;
+    while stmts.get(index) |inner| {
+        index = index + 1;
+        if try self.collect_mut_borrows_stmt(tree, inner) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Appends the expressions and statements written inside stmt, the Go
+/// `statementChildren` (with `flatStatementExprs` and
+/// `nestingStatementChildren` folded in), and reports whether the node is
+/// one this walk knows. An unknown node is an error rather than an empty
+/// answer: a name missed here is a local that keeps its value while the
+/// callee writes into storage nobody reads.
+fn statement_children(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    exprs: &var array::Array<ast::Expression>,
+    stmts: &var array::Array<ast::Statement>
+) -> !bool {
+    match tree.statements.at(statement.node) {
+        Let(s) => try exprs.append(s.value),
+        Assign(s) => {
+            try exprs.append(s.target);
+            try exprs.append(s.value);
+        },
+        Return(s) => {
+            if s.value |value| {
+                try exprs.append(value);
+            }
+        },
+        Defer(s) => try exprs.append(s.expr),
+        ErrDefer(s) => try exprs.append(s.expr),
+        Expr(s) => try exprs.append(s.expr),
+        Break(_) => {},
+        Continue(_) => {},
+        Block(s) => {
+            var index = 0;
+            while s.statements.get(index) |inner| {
+                index = index + 1;
+                try stmts.append(inner);
+            }
+        },
+        If(s) => try if_children(s, exprs, stmts),
+        ComptimeIf(s) => {
+            try exprs.append(s.condition);
+            try stmts.append(s.consequence.as_statement());
+            if s.alternative |alternative| {
+                try stmts.append(alternative.as_statement());
+            }
+        },
+        ComptimeFor(s) => try stmts.append(s.body.as_statement()),
+        ComptimeMatch(s) => {
+            try exprs.append(s.value);
+            try stmts.append(s.body.as_statement());
+        },
+        While(s) => {
+            try exprs.append(s.condition);
+            try stmts.append(s.body.as_statement());
+        },
+        For(s) => {
+            try exprs.append(s.start);
+            try exprs.append(s.end);
+            try stmts.append(s.body.as_statement());
+        },
+        Match(s) => try match_children(s, exprs, stmts),
+        Recovered(_) => return false,
+    }
+    return true;
+}
+
+/// Appends the children of an `if`, the `IfStmt` arm of the Go
+/// `nestingStatementChildren`: the condition, then the blocks that are
+/// present (the Go `blocks`).
+fn if_children(
+    branch: ast::IfStmt,
+    exprs: &var array::Array<ast::Expression>,
+    stmts: &var array::Array<ast::Statement>
+) -> !void {
+    try exprs.append(branch.condition);
+    try stmts.append(branch.consequence.as_statement());
+    if branch.alternative |alternative| {
+        try stmts.append(alternative.as_statement());
+    }
+    return;
+}
+
+/// Appends the children of a `match`, the `MatchStmt` arm of the Go
+/// `nestingStatementChildren`: the value, then the statement each arm runs
+/// (the Go `matchArmBodies`).
+fn match_children(
+    value: &ast::MatchStmt,
+    exprs: &var array::Array<ast::Expression>,
+    stmts: &var array::Array<ast::Statement>
+) -> !void {
+    try exprs.append(value.value);
+    var index = 0;
+    while value.arms.get(index) |arm| {
+        index = index + 1;
+        try stmts.append(arm.body);
+    }
+    return;
+}
+
+/// Walks one expression for names passed as `&var`, the Go
+/// `collectMutBorrowsExpr`.
+fn (self: &var Lowerer) collect_mut_borrows_expr(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
+    if ownership::call_expr(tree, expression) |call| {
+        try self.mark_lent_args(tree, call);
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        if text_is(tree, prefix.operator, "&var") {
+            try self.mark_if_name(tree, prefix.right);
+        }
+    }
+    // `if` and `match` are the two nodes that are both a statement and an
+    // expression, so in value position they are still walked as statements.
+    if ownership::if_expr(tree, expression) |_| {
+        return self.collect_mut_borrows_value_stmt(tree, expression);
+    }
+    if ownership::is_match_expr(tree, expression) {
+        return self.collect_mut_borrows_value_stmt(tree, expression);
+    }
+    var children = array::new<ast::Expression>(self.allocator);
+    defer children.deinit();
+    let known = try expression_children(tree, expression, &var children);
+    if !known {
+        let kind = try self.name(expression_go_type(tree, expression));
+        return try self.fail1(tree, "ir error: slot analysis does not know expression `%s`", Arg::Str(kind));
+    }
+    var index = 0;
+    while children.get(index) |child| {
+        index = index + 1;
+        if try self.collect_mut_borrows_expr(tree, child) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Walks an `if` or `match` written in value position as the statement it
+/// also is, the `collectMutBorrowsStmt(expr.(ast.Statement), found)` arm of
+/// the Go `collectMutBorrowsExpr`.
+fn (self: &var Lowerer) collect_mut_borrows_value_stmt(tree: &var ast::Ast, expression: ast::Expression) -> !?diagnostic::Diagnostic {
+    var exprs = array::new<ast::Expression>(self.allocator);
+    defer exprs.deinit();
+    var stmts = array::new<ast::Statement>(self.allocator);
+    defer stmts.deinit();
+    match tree.expressions.at(expression.node) {
+        If(branch) => try if_children(branch, &var exprs, &var stmts),
+        Match(value) => try match_children(value, &var exprs, &var stmts),
+        _ => {},
+    }
+    return self.collect_mut_borrows_children(tree, &exprs, &stmts);
+}
+
+/// Appends the expressions written inside expr, the Go `expressionChildren`
+/// (with `structLiteralValues` and `guardExpressionChildren` folded in), and
+/// reports whether the node is one this walk knows.
+fn expression_children(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    children: &var array::Array<ast::Expression>
+) -> !bool {
+    match tree.expressions.at(expression.node) {
+        Ident(_) => {},
+        Int(_) => {},
+        String(_) => {},
+        Bool(_) => {},
+        Type(_) => {},
+        BufferLiteral(_) => {},
+        Null(_) => {},
+        Prefix(e) => try children.append(e.right),
+        Binary(e) => {
+            try children.append(e.left);
+            try children.append(e.right);
+        },
+        TypeApply(e) => try children.append(e.callee),
+        Cast(e) => try children.append(e.value),
+        Try(e) => try children.append(e.value),
+        Unsafe(e) => try children.append(e.value),
+        Move(e) => try children.append(e.value),
+        Comptime(e) => try children.append(e.expr),
+        Deref(e) => try children.append(e.receiver),
+        Field(e) => try children.append(e.receiver),
+        Index(e) => {
+            try children.append(e.target);
+            if e.index |index| {
+                try children.append(index);
+            }
+            if e.start |start| {
+                try children.append(start);
+            }
+            if e.end |end| {
+                try children.append(end);
+            }
+        },
+        StructLiteral(e) => {
+            var index = 0;
+            while e.fields.get(index) |field| {
+                index = index + 1;
+                try children.append(field.value);
+            }
+        },
+        Call(e) => {
+            try children.append(e.callee);
+            var index = 0;
+            while ownership::arg_at(tree, e.args, index) |arg| {
+                index = index + 1;
+                try children.append(arg);
+            }
+        },
+        OrelseGuard(e) => {
+            // The condition, and the value a return exit carries.
+            try children.append(e.condition);
+            if ownership::return_stmt(tree, e.exit) |returned| {
+                if returned.value |value| {
+                    try children.append(value);
+                }
+            }
+        },
+        If(_) => return false,
+        Match(_) => return false,
+        Recovered(_) => return false,
+    }
+    return true;
+}
+
+/// Records the names this call hands over as the caller's storage, the Go
+/// `markLentArgs`. It reads the answer lower_param gave rather than deciding
+/// again from the type, so a parameter that starts being passed this way is
+/// marked here by having been passed this way.
+fn (self: &var Lowerer) mark_lent_args(tree: &var ast::Ast, call: ast::CallExpr) -> !void {
+    if ownership::field_expr(tree, call.callee) |field| {
+        if !field.namespace {
+            return self.mark_lent_method_args(tree, field, call.args);
+        }
+    }
+    if ownership::type_apply_expr(tree, call.callee) |type_apply| {
+        return self.mark_lent_generic_args(tree, type_apply, call.args);
+    }
+    let name = try self.function_callee_name(tree, call.callee) orelse return;
+    let signature = self.signature_named(name) orelse return;
+    var index = 0;
+    while ownership::arg_at(tree, call.args, index) |arg| {
+        let param = self.signature_param(signature, index) orelse return;
+        index = index + 1;
+        if param.passing == Passing::CallerStorage {
+            try self.mark_if_name(tree, arg);
+        }
+    }
+    return;
+}
+
+/// Records the names a method call may hand over as storage, the Go
+/// `markLentMethodArgs`. The receiver's type is unknown before lowering, so
+/// the walk unions every method bearing the name: a position is marked when
+/// any method the call could resolve to receives it as the caller's storage.
+/// Marking a name that resolves elsewhere costs it its SSA form, never its
+/// meaning.
+fn (self: &var Lowerer) mark_lent_method_args(
+    tree: &var ast::Ast,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList
+) -> !void {
+    let count = self.signatures.len();
+    var position = 0;
+    while position < count {
+        if self.method_signature_at(tree, position, field.name) |signature| {
+            if self.signature_param(signature, 0) |first| {
+                if first.passing == Passing::CallerStorage {
+                    try self.mark_if_name(tree, field.receiver);
+                }
+            }
+            var index = 0;
+            while ownership::arg_at(tree, args, index) |arg| {
+                if self.signature_param(signature, index + 1) |param| {
+                    if param.passing == Passing::CallerStorage {
+                        try self.mark_if_name(tree, arg);
+                    }
+                }
+                index = index + 1;
+            }
+        }
+        position = position + 1;
+    }
+    return;
+}
+
+/// Returns the declared function at position in the signature table when it
+/// is a method named method, the `stdmethod.SplitMethodName` test the Go
+/// `markLentMethodArgs` applies to each `l.signatures` entry; null past the
+/// last entry or for a function of another name.
+fn (self: &Lowerer) method_signature_at(tree: &ast::Ast, position: i64, method: ast::Text) -> ?SignatureHandle {
+    let key = self.signatures.key_at(position) orelse return null;
+    let parts = stdmethod::split_method_name(key) orelse return null;
+    let method_bytes = parts.method;
+    if !text_is(tree, method, method_bytes) {
+        return null;
+    }
+    return self.signatures.get(key);
+}
+
+/// Records the names a generic call lends, the Go `markLentGenericArgs`.
+/// Like the direct arms above it reads the answer lower_param gave rather
+/// than deciding again from the declaration: declared_instance_params binds
+/// the type arguments without asking for the instance, so the passing is the
+/// one the call will use. A callee this cannot resolve lends nothing.
+fn (self: &var Lowerer) mark_lent_generic_args(
+    tree: &var ast::Ast,
+    type_apply: ast::TypeApplyExpr,
+    args: ast::ExpressionList
+) -> !void {
+    let name = try self.function_callee_name(tree, type_apply.callee) orelse return;
+    let type_arg = try self.text_name(tree, type_apply.type_arg);
+    var params = no_params();
+    if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
+        failed.deinit();
+        return;
+    }
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        if self.view_param(params, index) |param| {
+            if param.passing == Passing::CallerStorage {
+                try self.mark_if_name(tree, arg);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Records the local whose storage expr would hand over, the Go
+/// `markIfName`: the name itself, or the root of a field path -- a
+/// `field.addr` projection needs the root owner in memory, so the root is
+/// the local that loses SSA form.
+fn (self: &var Lowerer) mark_if_name(tree: &ast::Ast, expression: ast::Expression) -> !void {
+    var current = expression;
+    while ownership::field_expr(tree, current) |field| {
+        if field.namespace {
+            break;
+        }
+        current = field.receiver;
+    }
+    let ident = ownership::ident_expr(tree, current) orelse return;
+    let name = try self.text_name(tree, ident.name);
+    return self.add_slot(name);
+}
+
+/// Binds a declaration, the Go `bindLocal`. A local the function mutably
+/// borrows gets its storage here, once, so every later use of the name means
+/// the same place.
+fn (self: &var Lowerer) bind_local(name: Name, value: Value) -> !void {
+    if !self.has_slot(name) {
+        return self.envs.bind(self.env, name, value);
+    }
+    let slot_type = try self.module.names.prefixed("&var ", value.type_name);
+    let slot = try self.emit1(Op::LocalSlot, slot_type, value);
+    return self.envs.bind(self.env, name, slot);
+}
+
+/// Unwraps explicit `&var x` call-site syntax to the name whose storage the
+/// callee is lent, the Go `borrowTargetExpr`. Caller storage only ever comes
+/// from a `&var` parameter, so `&` needs no arm here.
+fn borrow_target_expr(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        if text_is(tree, prefix.operator, "&var") {
+            return prefix.right;
+        }
+    }
+    return expression;
+}
+
+/// Reports whether name is a parameter whose storage is the borrow the
+/// source names, the Go `isStorageParam`. For such a name `n.*` dereferences
+/// the slot itself; a lent local's slot holds the binding's value instead,
+/// which `.*` first reads out.
+fn (self: &Lowerer) is_storage_param(name: Name) -> bool {
+    let wanted_text = name_text(&self.module.names, name);
+    let wanted = wanted_text.as_bytes();
+    let count = self.module.function_param_count(self.current);
+    var index = 0;
+    while index < count {
+        if self.module.function_param(self.current, index) |param| {
+            // The parameter is named `%` + name.
+            let param_text = name_text(&self.module.names, param.name);
+            let bytes = param_text.as_bytes();
+            if mem::len(bytes) == mem::len(wanted) + 1 and bytes[0] == cast<u8>(37) and
+                mem::equal_bytes(bytes[1..mem::len(bytes)], wanted) {
+                return param.passing == Passing::CallerStorage;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Returns the storage behind a name, the Go `slotPointer`, for the places
+/// that need the address rather than the value; null for an expression that
+/// is not a slot-backed name.
+fn (self: &var Lowerer) slot_pointer(tree: &ast::Ast, expression: ast::Expression) -> !?Value {
+    let ident = ownership::ident_expr(tree, expression) orelse return null;
+    let name = try self.text_name(tree, ident.name);
+    if !self.has_slot(name) {
+        return null;
+    }
+    return self.envs.get(self.env, name);
+}
+
+/// Lowers the receiver of a field write, the Go `lowerReceiverAddress`. A
+/// local with storage keeps its address, so the write lands in the local
+/// rather than in a value loaded out of it.
+fn (self: &var Lowerer) lower_receiver_address(tree: &var ast::Ast, expression: ast::Expression, out: &var Value) -> !?diagnostic::Diagnostic {
+    if try self.slot_pointer(tree, expression) |slot| {
+        out.* = slot;
+        return null;
+    }
+    return self.lower_expr(tree, expression, out);
+}
+
+/// Returns no storage, the typed null a `var` needs.
+fn no_storage() -> ?Value {
+    return null;
+}
+
+/// Lowers `base.field` to the field's own storage, the Go
+/// `lowerFieldStorage`: a `field.addr` projection out of the base's storage.
+/// A nested path chains one projection per hop. null when the path is not
+/// rooted in a storage name -- a slot-backed local or a `&var` parameter --
+/// which is the shape the checker admits for every `&var` position.
+fn (self: &var Lowerer) lower_field_storage(tree: &var ast::Ast, expression: ast::Expression) -> !?Value {
+    let field = ownership::field_expr(tree, expression) orelse return null;
+    if field.namespace {
+        return null;
+    }
+    var storage = no_storage();
+    if try self.slot_pointer(tree, field.receiver) |slot| {
+        storage = slot;
+    } else {
+        storage = try self.lower_field_storage(tree, field.receiver);
+    }
+    let found = storage orelse return null;
+    let storage_type = try self.deref_type(found.type_name);
+    let field_name = try self.text_name(tree, field.name);
+    let field_type = try self.field_type(storage_type, field_name);
+    if self.name_is(field_type, "unknown") {
+        return null;
+    }
+    let addr_type = try self.module.names.prefixed("&var ", field_type);
+    return try self.emit_op1(Op::FieldAddr, field_name, addr_type, found);
+}
+
+/// Lowers the arguments of a call to name, the Go `lowerCallArgs`.
+fn (self: &var Lowerer) lower_call_args(tree: &var ast::Ast, name: Name, args: ast::ExpressionList, out: &var array::Array<Value>) -> !?diagnostic::Diagnostic {
+    return self.lower_call_args_as(tree, self.callee_params(name), args, out);
+}
+
+/// Lowers call arguments at the types the callee declares for them, the Go
+/// `lowerCallArgsAs`, which is the one place a call decides what it hands
+/// over. An argument the callee receives as the caller's storage is passed
+/// as the local itself: its declared `&var T` type is a borrow context, and
+/// lower_contextual_expr hands over the storage. Params the lowerer cannot
+/// name -- a callee it has no signature for, or a variadic tail -- leave
+/// those arguments with the types they carry themselves.
+fn (self: &var Lowerer) lower_call_args_as(tree: &var ast::Ast, params: ParamsView, args: ast::ExpressionList, out: &var array::Array<Value>) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if self.view_param(params, index) |param| {
+            want = param.type_name;
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try out.append(value);
+    }
+    return null;
+}

@@ -1,0 +1,1184 @@
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn append_part(
+    allocator: Allocator,
+    parts: &var array::Array<string::String>,
+    bytes: []u8
+) -> !void {
+    let part = try string::from_bytes(allocator, bytes);
+    errdefer part.deinit();
+    try parts.append(move part);
+    return;
+}
+
+fn append_utf8(out: &var string::String, code: i64) -> !void {
+    if code < 128 {
+        try out.append_byte(cast<u8>(code));
+        return;
+    }
+    if code < 2048 {
+        try out.append_byte(cast<u8>(192 + code / 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    if code < 65536 {
+        try out.append_byte(cast<u8>(224 + code / 4096));
+        try out.append_byte(cast<u8>(128 + (code / 64) % 64));
+        try out.append_byte(cast<u8>(128 + code % 64));
+        return;
+    }
+    try out.append_byte(cast<u8>(240 + code / 262144));
+    try out.append_byte(cast<u8>(128 + (code / 4096) % 64));
+    try out.append_byte(cast<u8>(128 + (code / 64) % 64));
+    try out.append_byte(cast<u8>(128 + code % 64));
+    return;
+}
+
+fn append_white_space_set(out: &var string::String) -> !void {
+    try append_utf8(out, 9);
+    try append_utf8(out, 10);
+    try append_utf8(out, 11);
+    try append_utf8(out, 12);
+    try append_utf8(out, 13);
+    try append_utf8(out, 32);
+    try append_utf8(out, 133);
+    try append_utf8(out, 160);
+    try append_utf8(out, 5760);
+    try append_utf8(out, 8192);
+    try append_utf8(out, 8193);
+    try append_utf8(out, 8194);
+    try append_utf8(out, 8195);
+    try append_utf8(out, 8196);
+    try append_utf8(out, 8197);
+    try append_utf8(out, 8198);
+    try append_utf8(out, 8199);
+    try append_utf8(out, 8200);
+    try append_utf8(out, 8201);
+    try append_utf8(out, 8202);
+    try append_utf8(out, 8232);
+    try append_utf8(out, 8233);
+    try append_utf8(out, 8239);
+    try append_utf8(out, 8287);
+    try append_utf8(out, 12288);
+    return;
+}
+
+test "string join preserves separators and returns an independent owner" {
+    let allocator = mem::page_allocator();
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    try append_part(allocator, &var parts, "  first  ");
+    try append_part(allocator, &var parts, "");
+    try append_part(allocator, &var parts, " last  ");
+    var joined = try string::join(allocator, &parts, "::");
+    defer joined.deinit();
+    var expected = string::new(allocator);
+    defer expected.deinit();
+    try expected.append_bytes("first  ");
+    try expected.append_bytes("::::");
+    try expected.append_bytes(" last");
+    parts.deinit();
+    let before = joined.capacity();
+    string::trim_space_in_place(&var joined);
+    testing::expect_equal<i64>(before, joined.capacity());
+    let bytes = joined.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, expected_bytes));
+}
+
+test "string join handles empty parts and an empty separator" {
+    let allocator = mem::page_allocator();
+    var empty = array::new<string::String>(allocator);
+    defer empty.deinit();
+    let none = try string::join(allocator, &empty, ",");
+    defer none.deinit();
+    testing::expect_equal<i64>(0, none.len());
+
+    var parts = array::new<string::String>(allocator);
+    defer parts.deinit();
+    try append_part(allocator, &var parts, "a");
+    try append_part(allocator, &var parts, "");
+    try append_part(allocator, &var parts, "b");
+    let joined = try string::join(allocator, &parts, "");
+    defer joined.deinit();
+    let bytes = joined.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, "ab"));
+
+    var single = array::new<string::String>(allocator);
+    errdefer single.deinit();
+    try append_part(allocator, &var single, "solo");
+    let only = try string::join(allocator, &single, "ignored");
+    defer only.deinit();
+    single.deinit();
+    let only_bytes = only.as_bytes();
+    testing::expect(mem::equal_bytes(only_bytes, "solo"));
+}
+
+test "string trim recognizes the fixed Unicode White Space set" {
+    let allocator = mem::page_allocator();
+    var text = string::new(allocator);
+    defer text.deinit();
+    try append_white_space_set(&var text);
+    try text.append_bytes("middle");
+    try append_white_space_set(&var text);
+    let before = text.capacity();
+    string::trim_space_in_place(&var text);
+    testing::expect_equal<i64>(before, text.capacity());
+    let bytes = text.as_bytes();
+    testing::expect(mem::equal_bytes(bytes, "middle"));
+
+    var only_space = string::new(allocator);
+    defer only_space.deinit();
+    try append_white_space_set(&var only_space);
+    let only_capacity = only_space.capacity();
+    string::trim_space_in_place(&var only_space);
+    testing::expect_equal<i64>(0, only_space.len());
+    testing::expect_equal<i64>(only_capacity, only_space.capacity());
+
+    var inner_space = string::new(allocator);
+    defer inner_space.deinit();
+    try inner_space.append_bytes("left");
+    try append_utf8(&var inner_space, 12288);
+    try inner_space.append_bytes("right");
+    string::trim_space_in_place(&var inner_space);
+    let inner_bytes = inner_space.as_bytes();
+    testing::expect(mem::equal_bytes(inner_bytes, "left　right"));
+}
+
+test "string trim retains non-space Unicode and malformed UTF-8" {
+    let allocator = mem::page_allocator();
+    var non_space = string::new(allocator);
+    defer non_space.deinit();
+    try append_utf8(&var non_space, 6158);
+    try append_utf8(&var non_space, 65279);
+    try append_utf8(&var non_space, 65533);
+    string::trim_space_in_place(&var non_space);
+    testing::expect_equal<i64>(9, non_space.len());
+
+    var raw = [4]u8{};
+    let writable = raw.as_mut_bytes();
+    writable[0] = cast<u8>(32);
+    writable[1] = cast<u8>(226);
+    writable[2] = cast<u8>(128);
+    writable[3] = cast<u8>(32);
+    let input = raw.as_bytes();
+    var malformed = try string::from_bytes(allocator, input);
+    defer malformed.deinit();
+    string::trim_space_in_place(&var malformed);
+    testing::expect_equal<i64>(2, malformed.len());
+    let bytes = malformed.as_bytes();
+    testing::expect_equal<i64>(226, cast<i64>(bytes[0]));
+    testing::expect_equal<i64>(128, cast<i64>(bytes[1]));
+}
+
+
+// ir
+// lower:
+// fn append_part(%allocator: Allocator, %parts: &var std::array::Array<std::string::String>, %bytes: []u8) -> !void {
+// entry:
+//   %1: !std::string::String = call.std::string::from_bytes %allocator: Allocator, %bytes: []u8
+//   %2: std::string::String = error.try %1: !std::string::String
+//   %3: std::array::Array<std::string::String> = ref.load %parts: &var std::array::Array<std::string::String>
+//   %4: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: std::array::Array<std::string::String>, %2: std::string::String
+//   error.try %4: !void
+//   %6: !void = error.ok
+//   return %6: !void
+// }
+// fn append_utf8(%out: &var std::string::String, %code: i64) -> !void {
+// entry:
+//   %1: i64 = const 128
+//   %2: bool = binary.< %code: i64, %1: i64
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   %3: std::string::String = ref.load %out: &var std::string::String
+//   %4: u8 = cast %code: i64, u8
+//   %5: !void = call.std::string::String.append_byte %3: std::string::String, %4: u8
+//   error.try %5: !void
+//   %7: !void = error.ok
+//   return %7: !void
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %8: i64 = const 2048
+//   %9: bool = binary.< %code: i64, %8: i64
+//   branch %9: bool, if.then.4, if.else.5
+// if.then.4:
+//   %10: std::string::String = ref.load %out: &var std::string::String
+//   %11: i64 = const 192
+//   %12: i64 = const 64
+//   %13: i64 = binary./ %code: i64, %12: i64
+//   %14: i64 = binary.+ %11: i64, %13: i64
+//   %15: u8 = cast %14: i64, u8
+//   %16: !void = call.std::string::String.append_byte %10: std::string::String, %15: u8
+//   error.try %16: !void
+//   %18: std::string::String = ref.load %out: &var std::string::String
+//   %19: i64 = const 128
+//   %20: i64 = const 64
+//   %21: i64 = binary.% %code: i64, %20: i64
+//   %22: i64 = binary.+ %19: i64, %21: i64
+//   %23: u8 = cast %22: i64, u8
+//   %24: !void = call.std::string::String.append_byte %18: std::string::String, %23: u8
+//   error.try %24: !void
+//   %26: !void = error.ok
+//   return %26: !void
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %27: i64 = const 65536
+//   %28: bool = binary.< %code: i64, %27: i64
+//   branch %28: bool, if.then.7, if.else.8
+// if.then.7:
+//   %29: std::string::String = ref.load %out: &var std::string::String
+//   %30: i64 = const 224
+//   %31: i64 = const 4096
+//   %32: i64 = binary./ %code: i64, %31: i64
+//   %33: i64 = binary.+ %30: i64, %32: i64
+//   %34: u8 = cast %33: i64, u8
+//   %35: !void = call.std::string::String.append_byte %29: std::string::String, %34: u8
+//   error.try %35: !void
+//   %37: std::string::String = ref.load %out: &var std::string::String
+//   %38: i64 = const 128
+//   %39: i64 = const 64
+//   %40: i64 = binary./ %code: i64, %39: i64
+//   %41: i64 = const 64
+//   %42: i64 = binary.% %40: i64, %41: i64
+//   %43: i64 = binary.+ %38: i64, %42: i64
+//   %44: u8 = cast %43: i64, u8
+//   %45: !void = call.std::string::String.append_byte %37: std::string::String, %44: u8
+//   error.try %45: !void
+//   %47: std::string::String = ref.load %out: &var std::string::String
+//   %48: i64 = const 128
+//   %49: i64 = const 64
+//   %50: i64 = binary.% %code: i64, %49: i64
+//   %51: i64 = binary.+ %48: i64, %50: i64
+//   %52: u8 = cast %51: i64, u8
+//   %53: !void = call.std::string::String.append_byte %47: std::string::String, %52: u8
+//   error.try %53: !void
+//   %55: !void = error.ok
+//   return %55: !void
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   %56: std::string::String = ref.load %out: &var std::string::String
+//   %57: i64 = const 240
+//   %58: i64 = const 262144
+//   %59: i64 = binary./ %code: i64, %58: i64
+//   %60: i64 = binary.+ %57: i64, %59: i64
+//   %61: u8 = cast %60: i64, u8
+//   %62: !void = call.std::string::String.append_byte %56: std::string::String, %61: u8
+//   error.try %62: !void
+//   %64: std::string::String = ref.load %out: &var std::string::String
+//   %65: i64 = const 128
+//   %66: i64 = const 4096
+//   %67: i64 = binary./ %code: i64, %66: i64
+//   %68: i64 = const 64
+//   %69: i64 = binary.% %67: i64, %68: i64
+//   %70: i64 = binary.+ %65: i64, %69: i64
+//   %71: u8 = cast %70: i64, u8
+//   %72: !void = call.std::string::String.append_byte %64: std::string::String, %71: u8
+//   error.try %72: !void
+//   %74: std::string::String = ref.load %out: &var std::string::String
+//   %75: i64 = const 128
+//   %76: i64 = const 64
+//   %77: i64 = binary./ %code: i64, %76: i64
+//   %78: i64 = const 64
+//   %79: i64 = binary.% %77: i64, %78: i64
+//   %80: i64 = binary.+ %75: i64, %79: i64
+//   %81: u8 = cast %80: i64, u8
+//   %82: !void = call.std::string::String.append_byte %74: std::string::String, %81: u8
+//   error.try %82: !void
+//   %84: std::string::String = ref.load %out: &var std::string::String
+//   %85: i64 = const 128
+//   %86: i64 = const 64
+//   %87: i64 = binary.% %code: i64, %86: i64
+//   %88: i64 = binary.+ %85: i64, %87: i64
+//   %89: u8 = cast %88: i64, u8
+//   %90: !void = call.std::string::String.append_byte %84: std::string::String, %89: u8
+//   error.try %90: !void
+//   %92: !void = error.ok
+//   return %92: !void
+// }
+// fn append_white_space_set(%out: &var std::string::String) -> !void {
+// entry:
+//   %1: i64 = const 9
+//   %2: !void = call.append_utf8 %out: &var std::string::String, %1: i64
+//   error.try %2: !void
+//   %4: i64 = const 10
+//   %5: !void = call.append_utf8 %out: &var std::string::String, %4: i64
+//   error.try %5: !void
+//   %7: i64 = const 11
+//   %8: !void = call.append_utf8 %out: &var std::string::String, %7: i64
+//   error.try %8: !void
+//   %10: i64 = const 12
+//   %11: !void = call.append_utf8 %out: &var std::string::String, %10: i64
+//   error.try %11: !void
+//   %13: i64 = const 13
+//   %14: !void = call.append_utf8 %out: &var std::string::String, %13: i64
+//   error.try %14: !void
+//   %16: i64 = const 32
+//   %17: !void = call.append_utf8 %out: &var std::string::String, %16: i64
+//   error.try %17: !void
+//   %19: i64 = const 133
+//   %20: !void = call.append_utf8 %out: &var std::string::String, %19: i64
+//   error.try %20: !void
+//   %22: i64 = const 160
+//   %23: !void = call.append_utf8 %out: &var std::string::String, %22: i64
+//   error.try %23: !void
+//   %25: i64 = const 5760
+//   %26: !void = call.append_utf8 %out: &var std::string::String, %25: i64
+//   error.try %26: !void
+//   %28: i64 = const 8192
+//   %29: !void = call.append_utf8 %out: &var std::string::String, %28: i64
+//   error.try %29: !void
+//   %31: i64 = const 8193
+//   %32: !void = call.append_utf8 %out: &var std::string::String, %31: i64
+//   error.try %32: !void
+//   %34: i64 = const 8194
+//   %35: !void = call.append_utf8 %out: &var std::string::String, %34: i64
+//   error.try %35: !void
+//   %37: i64 = const 8195
+//   %38: !void = call.append_utf8 %out: &var std::string::String, %37: i64
+//   error.try %38: !void
+//   %40: i64 = const 8196
+//   %41: !void = call.append_utf8 %out: &var std::string::String, %40: i64
+//   error.try %41: !void
+//   %43: i64 = const 8197
+//   %44: !void = call.append_utf8 %out: &var std::string::String, %43: i64
+//   error.try %44: !void
+//   %46: i64 = const 8198
+//   %47: !void = call.append_utf8 %out: &var std::string::String, %46: i64
+//   error.try %47: !void
+//   %49: i64 = const 8199
+//   %50: !void = call.append_utf8 %out: &var std::string::String, %49: i64
+//   error.try %50: !void
+//   %52: i64 = const 8200
+//   %53: !void = call.append_utf8 %out: &var std::string::String, %52: i64
+//   error.try %53: !void
+//   %55: i64 = const 8201
+//   %56: !void = call.append_utf8 %out: &var std::string::String, %55: i64
+//   error.try %56: !void
+//   %58: i64 = const 8202
+//   %59: !void = call.append_utf8 %out: &var std::string::String, %58: i64
+//   error.try %59: !void
+//   %61: i64 = const 8232
+//   %62: !void = call.append_utf8 %out: &var std::string::String, %61: i64
+//   error.try %62: !void
+//   %64: i64 = const 8233
+//   %65: !void = call.append_utf8 %out: &var std::string::String, %64: i64
+//   error.try %65: !void
+//   %67: i64 = const 8239
+//   %68: !void = call.append_utf8 %out: &var std::string::String, %67: i64
+//   error.try %68: !void
+//   %70: i64 = const 8287
+//   %71: !void = call.append_utf8 %out: &var std::string::String, %70: i64
+//   error.try %71: !void
+//   %73: i64 = const 12288
+//   %74: !void = call.append_utf8 %out: &var std::string::String, %73: i64
+//   error.try %74: !void
+//   %76: !void = error.ok
+//   return %76: !void
+// }
+// fn test.string_join_preserves_separators_and_returns_an_independent_owner() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: &var std::array::Array<std::string::String> = local.slot %2: std::array::Array<std::string::String>
+//   %4: []u8 = const "  first  "
+//   %5: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %4: []u8
+//   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %5: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %8: []u8 = const ""
+//   %9: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %8: []u8
+//   %10: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %9: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %10: std::array::Array<std::string::String>
+//   %12: []u8 = const " last  "
+//   %13: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %12: []u8
+//   %14: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %13: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   %17: []u8 = const "::"
+//   %18: !std::string::String = call.std::string::join %1: Allocator, %16: std::array::Array<std::string::String>, %17: []u8
+//   %19: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   %20: std::string::String = error.try %18: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %19: std::array::Array<std::string::String>
+//   %21: &var std::string::String = local.slot %20: std::string::String
+//   %22: std::string::String = call.std::string::new %1: Allocator
+//   %23: []u8 = const "first  "
+//   %24: !void = call.std::string::String.append_bytes %22: std::string::String, %23: []u8
+//   %25: std::string::String = ref.load %21: &var std::string::String
+//   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %24: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %25: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   %28: []u8 = const "::::"
+//   %29: !void = call.std::string::String.append_bytes %22: std::string::String, %28: []u8
+//   %30: std::string::String = ref.load %21: &var std::string::String
+//   %31: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %29: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %30: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %31: std::array::Array<std::string::String>
+//   %33: []u8 = const " last"
+//   %34: !void = call.std::string::String.append_bytes %22: std::string::String, %33: []u8
+//   %35: std::string::String = ref.load %21: &var std::string::String
+//   %36: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %34: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %35: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %36: std::array::Array<std::string::String>
+//   %38: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %38: std::array::Array<std::string::String>
+//   %40: std::string::String = ref.load %21: &var std::string::String
+//   %41: i64 = call.std::string::String.capacity %40: std::string::String
+//   call.std::string::trim_space_in_place %21: &var std::string::String
+//   %43: std::string::String = ref.load %21: &var std::string::String
+//   %44: i64 = call.std::string::String.capacity %43: std::string::String
+//   test.expect_equal %41: i64, %44: i64, i64
+//   %46: std::string::String = ref.load %21: &var std::string::String
+//   %47: []u8 = call.std::string::String.as_bytes %46: std::string::String
+//   %48: []u8 = call.std::string::String.as_bytes %22: std::string::String
+//   %49: bool = call.std::mem::equal_bytes %47: []u8, %48: []u8
+//   call.std::testing::expect %49: bool
+//   call.std::string::String.deinit %22: std::string::String
+//   %52: std::string::String = ref.load %21: &var std::string::String
+//   call.std::string::String.deinit %52: std::string::String
+//   %54: !void = error.ok
+//   return %54: !void
+// }
+// fn test.string_join_handles_empty_parts_and_an_empty_separator() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const ","
+//   %4: !std::string::String = call.std::string::join %1: Allocator, %2: std::array::Array<std::string::String>, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: i64 = const 0
+//   %7: i64 = call.std::string::String.len %5: std::string::String
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %10: &var std::array::Array<std::string::String> = local.slot %9: std::array::Array<std::string::String>
+//   %11: []u8 = const "a"
+//   %12: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %11: []u8
+//   %13: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %15: []u8 = const ""
+//   %16: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %15: []u8
+//   %17: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %16: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %17: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %19: []u8 = const "b"
+//   %20: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %19: []u8
+//   %21: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %20: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %23: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %24: []u8 = const ""
+//   %25: !std::string::String = call.std::string::join %1: Allocator, %23: std::array::Array<std::string::String>, %24: []u8
+//   %26: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %27: std::string::String = error.try %25: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %28: []u8 = call.std::string::String.as_bytes %27: std::string::String
+//   %29: []u8 = const "ab"
+//   %30: bool = call.std::mem::equal_bytes %28: []u8, %29: []u8
+//   call.std::testing::expect %30: bool
+//   %32: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %33: &var std::array::Array<std::string::String> = local.slot %32: std::array::Array<std::string::String>
+//   %34: []u8 = const "solo"
+//   %35: !void = call.append_part %1: Allocator, %33: &var std::array::Array<std::string::String>, %34: []u8
+//   %36: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %37: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %35: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %36: std::array::Array<std::string::String>; call.std::string::String.deinit %27: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %37: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %39: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %40: []u8 = const "ignored"
+//   %41: !std::string::String = call.std::string::join %1: Allocator, %39: std::array::Array<std::string::String>, %40: []u8
+//   %42: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %43: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %44: std::string::String = error.try %41: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %42: std::array::Array<std::string::String>; call.std::string::String.deinit %27: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %43: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %45: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %45: std::array::Array<std::string::String>
+//   %47: []u8 = call.std::string::String.as_bytes %44: std::string::String
+//   %48: []u8 = const "solo"
+//   %49: bool = call.std::mem::equal_bytes %47: []u8, %48: []u8
+//   call.std::testing::expect %49: bool
+//   call.std::string::String.deinit %44: std::string::String
+//   call.std::string::String.deinit %27: std::string::String
+//   %53: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %53: std::array::Array<std::string::String>
+//   call.std::string::String.deinit %5: std::string::String
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %57: !void = error.ok
+//   return %57: !void
+// }
+// fn test.string_trim_recognizes_the_fixed_Unicode_White_Space_set() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: !void = call.append_white_space_set %3: &var std::string::String
+//   %5: std::string::String = ref.load %3: &var std::string::String
+//   error.try %4: !void, cleanup call.std::string::String.deinit %5: std::string::String
+//   %7: std::string::String = ref.load %3: &var std::string::String
+//   %8: []u8 = const "middle"
+//   %9: !void = call.std::string::String.append_bytes %7: std::string::String, %8: []u8
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: !void = call.append_white_space_set %3: &var std::string::String
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String
+//   %15: std::string::String = ref.load %3: &var std::string::String
+//   %16: i64 = call.std::string::String.capacity %15: std::string::String
+//   call.std::string::trim_space_in_place %3: &var std::string::String
+//   %18: std::string::String = ref.load %3: &var std::string::String
+//   %19: i64 = call.std::string::String.capacity %18: std::string::String
+//   test.expect_equal %16: i64, %19: i64, i64
+//   %21: std::string::String = ref.load %3: &var std::string::String
+//   %22: []u8 = call.std::string::String.as_bytes %21: std::string::String
+//   %23: []u8 = const "middle"
+//   %24: bool = call.std::mem::equal_bytes %22: []u8, %23: []u8
+//   call.std::testing::expect %24: bool
+//   %26: std::string::String = call.std::string::new %1: Allocator
+//   %27: &var std::string::String = local.slot %26: std::string::String
+//   %28: !void = call.append_white_space_set %27: &var std::string::String
+//   %29: std::string::String = ref.load %27: &var std::string::String
+//   %30: std::string::String = ref.load %3: &var std::string::String
+//   error.try %28: !void, cleanup call.std::string::String.deinit %29: std::string::String; call.std::string::String.deinit %30: std::string::String
+//   %32: std::string::String = ref.load %27: &var std::string::String
+//   %33: i64 = call.std::string::String.capacity %32: std::string::String
+//   call.std::string::trim_space_in_place %27: &var std::string::String
+//   %35: i64 = const 0
+//   %36: std::string::String = ref.load %27: &var std::string::String
+//   %37: i64 = call.std::string::String.len %36: std::string::String
+//   test.expect_equal %35: i64, %37: i64, i64
+//   %39: std::string::String = ref.load %27: &var std::string::String
+//   %40: i64 = call.std::string::String.capacity %39: std::string::String
+//   test.expect_equal %33: i64, %40: i64, i64
+//   %42: std::string::String = call.std::string::new %1: Allocator
+//   %43: &var std::string::String = local.slot %42: std::string::String
+//   %44: std::string::String = ref.load %43: &var std::string::String
+//   %45: []u8 = const "left"
+//   %46: !void = call.std::string::String.append_bytes %44: std::string::String, %45: []u8
+//   %47: std::string::String = ref.load %43: &var std::string::String
+//   %48: std::string::String = ref.load %27: &var std::string::String
+//   %49: std::string::String = ref.load %3: &var std::string::String
+//   error.try %46: !void, cleanup call.std::string::String.deinit %47: std::string::String; call.std::string::String.deinit %48: std::string::String; call.std::string::String.deinit %49: std::string::String
+//   %51: i64 = const 12288
+//   %52: !void = call.append_utf8 %43: &var std::string::String, %51: i64
+//   %53: std::string::String = ref.load %43: &var std::string::String
+//   %54: std::string::String = ref.load %27: &var std::string::String
+//   %55: std::string::String = ref.load %3: &var std::string::String
+//   error.try %52: !void, cleanup call.std::string::String.deinit %53: std::string::String; call.std::string::String.deinit %54: std::string::String; call.std::string::String.deinit %55: std::string::String
+//   %57: std::string::String = ref.load %43: &var std::string::String
+//   %58: []u8 = const "right"
+//   %59: !void = call.std::string::String.append_bytes %57: std::string::String, %58: []u8
+//   %60: std::string::String = ref.load %43: &var std::string::String
+//   %61: std::string::String = ref.load %27: &var std::string::String
+//   %62: std::string::String = ref.load %3: &var std::string::String
+//   error.try %59: !void, cleanup call.std::string::String.deinit %60: std::string::String; call.std::string::String.deinit %61: std::string::String; call.std::string::String.deinit %62: std::string::String
+//   call.std::string::trim_space_in_place %43: &var std::string::String
+//   %65: std::string::String = ref.load %43: &var std::string::String
+//   %66: []u8 = call.std::string::String.as_bytes %65: std::string::String
+//   %67: []u8 = const "left\u3000right"
+//   %68: bool = call.std::mem::equal_bytes %66: []u8, %67: []u8
+//   call.std::testing::expect %68: bool
+//   %70: std::string::String = ref.load %43: &var std::string::String
+//   call.std::string::String.deinit %70: std::string::String
+//   %72: std::string::String = ref.load %27: &var std::string::String
+//   call.std::string::String.deinit %72: std::string::String
+//   %74: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %74: std::string::String
+//   %76: !void = error.ok
+//   return %76: !void
+// }
+// fn test.string_trim_retains_non_space_Unicode_and_malformed_UTF_8() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 6158
+//   %5: !void = call.append_utf8 %3: &var std::string::String, %4: i64
+//   %6: std::string::String = ref.load %3: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: i64 = const 65279
+//   %9: !void = call.append_utf8 %3: &var std::string::String, %8: i64
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: i64 = const 65533
+//   %13: !void = call.append_utf8 %3: &var std::string::String, %12: i64
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   error.try %13: !void, cleanup call.std::string::String.deinit %14: std::string::String
+//   call.std::string::trim_space_in_place %3: &var std::string::String
+//   %17: i64 = const 9
+//   %18: std::string::String = ref.load %3: &var std::string::String
+//   %19: i64 = call.std::string::String.len %18: std::string::String
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: [4]u8 = buffer.new
+//   %22: []u8 = buffer.as_bytes %21: [4]u8
+//   %23: i64 = const 32
+//   %24: u8 = cast %23: i64, u8
+//   %25: i64 = const 0
+//   %26: i64 = slice.len %22: []u8
+//   %27: bool = binary.< %25: i64, 0: i64
+//   cond_fail %27: bool, bounds(%25: i64, %26: i64)
+//   %28: bool = binary.>= %25: i64, %26: i64
+//   cond_fail %28: bool, bounds(%25: i64, %26: i64)
+//   slice.store %22: []u8, %25: i64, %24: u8
+//   %30: i64 = const 226
+//   %31: u8 = cast %30: i64, u8
+//   %32: i64 = const 1
+//   %33: i64 = slice.len %22: []u8
+//   %34: bool = binary.< %32: i64, 0: i64
+//   cond_fail %34: bool, bounds(%32: i64, %33: i64)
+//   %35: bool = binary.>= %32: i64, %33: i64
+//   cond_fail %35: bool, bounds(%32: i64, %33: i64)
+//   slice.store %22: []u8, %32: i64, %31: u8
+//   %37: i64 = const 128
+//   %38: u8 = cast %37: i64, u8
+//   %39: i64 = const 2
+//   %40: i64 = slice.len %22: []u8
+//   %41: bool = binary.< %39: i64, 0: i64
+//   cond_fail %41: bool, bounds(%39: i64, %40: i64)
+//   %42: bool = binary.>= %39: i64, %40: i64
+//   cond_fail %42: bool, bounds(%39: i64, %40: i64)
+//   slice.store %22: []u8, %39: i64, %38: u8
+//   %44: i64 = const 32
+//   %45: u8 = cast %44: i64, u8
+//   %46: i64 = const 3
+//   %47: i64 = slice.len %22: []u8
+//   %48: bool = binary.< %46: i64, 0: i64
+//   cond_fail %48: bool, bounds(%46: i64, %47: i64)
+//   %49: bool = binary.>= %46: i64, %47: i64
+//   cond_fail %49: bool, bounds(%46: i64, %47: i64)
+//   slice.store %22: []u8, %46: i64, %45: u8
+//   %51: []u8 = buffer.as_bytes %21: [4]u8
+//   %52: !std::string::String = call.std::string::from_bytes %1: Allocator, %51: []u8
+//   %53: std::string::String = ref.load %3: &var std::string::String
+//   %54: std::string::String = error.try %52: !std::string::String, cleanup call.std::string::String.deinit %53: std::string::String
+//   %55: &var std::string::String = local.slot %54: std::string::String
+//   call.std::string::trim_space_in_place %55: &var std::string::String
+//   %57: i64 = const 2
+//   %58: std::string::String = ref.load %55: &var std::string::String
+//   %59: i64 = call.std::string::String.len %58: std::string::String
+//   test.expect_equal %57: i64, %59: i64, i64
+//   %61: std::string::String = ref.load %55: &var std::string::String
+//   %62: []u8 = call.std::string::String.as_bytes %61: std::string::String
+//   %63: i64 = const 226
+//   %64: i64 = const 0
+//   %65: i64 = slice.len %62: []u8
+//   %66: bool = binary.< %64: i64, 0: i64
+//   cond_fail %66: bool, bounds(%64: i64, %65: i64)
+//   %67: bool = binary.>= %64: i64, %65: i64
+//   cond_fail %67: bool, bounds(%64: i64, %65: i64)
+//   %68: u8 = slice.index %62: []u8, %64: i64
+//   %69: i64 = cast %68: u8, i64
+//   test.expect_equal %63: i64, %69: i64, i64
+//   %71: i64 = const 128
+//   %72: i64 = const 1
+//   %73: i64 = slice.len %62: []u8
+//   %74: bool = binary.< %72: i64, 0: i64
+//   cond_fail %74: bool, bounds(%72: i64, %73: i64)
+//   %75: bool = binary.>= %72: i64, %73: i64
+//   cond_fail %75: bool, bounds(%72: i64, %73: i64)
+//   %76: u8 = slice.index %62: []u8, %72: i64
+//   %77: i64 = cast %76: u8, i64
+//   test.expect_equal %71: i64, %77: i64, i64
+//   %79: std::string::String = ref.load %55: &var std::string::String
+//   call.std::string::String.deinit %79: std::string::String
+//   %81: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %81: std::string::String
+//   %83: !void = error.ok
+//   return %83: !void
+// }
+// opt:
+// fn append_part(%allocator: Allocator, %parts: &var std::array::Array<std::string::String>, %bytes: []u8) -> !void {
+// entry:
+//   %1: !std::string::String = call.std::string::from_bytes %allocator: Allocator, %bytes: []u8
+//   %2: std::string::String = error.try %1: !std::string::String
+//   %3: std::array::Array<std::string::String> = ref.load %parts: &var std::array::Array<std::string::String>
+//   %4: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %3: std::array::Array<std::string::String>, %2: std::string::String
+//   error.try %4: !void
+//   %6: !void = error.ok
+//   return %6: !void
+// }
+// fn append_utf8(%out: &var std::string::String, %code: i64) -> !void {
+// entry:
+//   %1: i64 = const 128
+//   %2: bool = binary.< %code: i64, %1: i64
+//   branch %2: bool, if.then.1, if.else.2
+// if.then.1:
+//   %3: std::string::String = ref.load %out: &var std::string::String
+//   %4: u8 = cast %code: i64, u8
+//   %5: !void = call.std::string::String.append_byte %3: std::string::String, %4: u8
+//   error.try %5: !void
+//   %7: !void = error.ok
+//   return %7: !void
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %8: i64 = const 2048
+//   %9: bool = binary.< %code: i64, %8: i64
+//   branch %9: bool, if.then.4, if.else.5
+// if.then.4:
+//   %10: std::string::String = ref.load %out: &var std::string::String
+//   %11: i64 = const 192
+//   %12: i64 = const 64
+//   %13: i64 = binary./ %code: i64, %12: i64
+//   %14: i64 = binary.+ %11: i64, %13: i64
+//   %15: u8 = cast %14: i64, u8
+//   %16: !void = call.std::string::String.append_byte %10: std::string::String, %15: u8
+//   error.try %16: !void
+//   %18: std::string::String = ref.load %out: &var std::string::String
+//   %19: i64 = const 128
+//   %20: i64 = const 64
+//   %21: i64 = binary.% %code: i64, %20: i64
+//   %22: i64 = binary.+ %19: i64, %21: i64
+//   %23: u8 = cast %22: i64, u8
+//   %24: !void = call.std::string::String.append_byte %18: std::string::String, %23: u8
+//   error.try %24: !void
+//   %26: !void = error.ok
+//   return %26: !void
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %27: i64 = const 65536
+//   %28: bool = binary.< %code: i64, %27: i64
+//   branch %28: bool, if.then.7, if.else.8
+// if.then.7:
+//   %29: std::string::String = ref.load %out: &var std::string::String
+//   %30: i64 = const 224
+//   %31: i64 = const 4096
+//   %32: i64 = binary./ %code: i64, %31: i64
+//   %33: i64 = binary.+ %30: i64, %32: i64
+//   %34: u8 = cast %33: i64, u8
+//   %35: !void = call.std::string::String.append_byte %29: std::string::String, %34: u8
+//   error.try %35: !void
+//   %37: std::string::String = ref.load %out: &var std::string::String
+//   %38: i64 = const 128
+//   %39: i64 = const 64
+//   %40: i64 = binary./ %code: i64, %39: i64
+//   %41: i64 = const 64
+//   %42: i64 = binary.% %40: i64, %41: i64
+//   %43: i64 = binary.+ %38: i64, %42: i64
+//   %44: u8 = cast %43: i64, u8
+//   %45: !void = call.std::string::String.append_byte %37: std::string::String, %44: u8
+//   error.try %45: !void
+//   %47: std::string::String = ref.load %out: &var std::string::String
+//   %48: i64 = const 128
+//   %49: i64 = const 64
+//   %50: i64 = binary.% %code: i64, %49: i64
+//   %51: i64 = binary.+ %48: i64, %50: i64
+//   %52: u8 = cast %51: i64, u8
+//   %53: !void = call.std::string::String.append_byte %47: std::string::String, %52: u8
+//   error.try %53: !void
+//   %55: !void = error.ok
+//   return %55: !void
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   %56: std::string::String = ref.load %out: &var std::string::String
+//   %57: i64 = const 240
+//   %58: i64 = const 262144
+//   %59: i64 = binary./ %code: i64, %58: i64
+//   %60: i64 = binary.+ %57: i64, %59: i64
+//   %61: u8 = cast %60: i64, u8
+//   %62: !void = call.std::string::String.append_byte %56: std::string::String, %61: u8
+//   error.try %62: !void
+//   %64: std::string::String = ref.load %out: &var std::string::String
+//   %65: i64 = const 128
+//   %66: i64 = const 4096
+//   %67: i64 = binary./ %code: i64, %66: i64
+//   %68: i64 = const 64
+//   %69: i64 = binary.% %67: i64, %68: i64
+//   %70: i64 = binary.+ %65: i64, %69: i64
+//   %71: u8 = cast %70: i64, u8
+//   %72: !void = call.std::string::String.append_byte %64: std::string::String, %71: u8
+//   error.try %72: !void
+//   %74: std::string::String = ref.load %out: &var std::string::String
+//   %75: i64 = const 128
+//   %76: i64 = const 64
+//   %77: i64 = binary./ %code: i64, %76: i64
+//   %78: i64 = const 64
+//   %79: i64 = binary.% %77: i64, %78: i64
+//   %80: i64 = binary.+ %75: i64, %79: i64
+//   %81: u8 = cast %80: i64, u8
+//   %82: !void = call.std::string::String.append_byte %74: std::string::String, %81: u8
+//   error.try %82: !void
+//   %84: std::string::String = ref.load %out: &var std::string::String
+//   %85: i64 = const 128
+//   %86: i64 = const 64
+//   %87: i64 = binary.% %code: i64, %86: i64
+//   %88: i64 = binary.+ %85: i64, %87: i64
+//   %89: u8 = cast %88: i64, u8
+//   %90: !void = call.std::string::String.append_byte %84: std::string::String, %89: u8
+//   error.try %90: !void
+//   %92: !void = error.ok
+//   return %92: !void
+// }
+// fn append_white_space_set(%out: &var std::string::String) -> !void {
+// entry:
+//   %1: i64 = const 9
+//   %2: !void = call.append_utf8 %out: &var std::string::String, %1: i64
+//   error.try %2: !void
+//   %4: i64 = const 10
+//   %5: !void = call.append_utf8 %out: &var std::string::String, %4: i64
+//   error.try %5: !void
+//   %7: i64 = const 11
+//   %8: !void = call.append_utf8 %out: &var std::string::String, %7: i64
+//   error.try %8: !void
+//   %10: i64 = const 12
+//   %11: !void = call.append_utf8 %out: &var std::string::String, %10: i64
+//   error.try %11: !void
+//   %13: i64 = const 13
+//   %14: !void = call.append_utf8 %out: &var std::string::String, %13: i64
+//   error.try %14: !void
+//   %16: i64 = const 32
+//   %17: !void = call.append_utf8 %out: &var std::string::String, %16: i64
+//   error.try %17: !void
+//   %19: i64 = const 133
+//   %20: !void = call.append_utf8 %out: &var std::string::String, %19: i64
+//   error.try %20: !void
+//   %22: i64 = const 160
+//   %23: !void = call.append_utf8 %out: &var std::string::String, %22: i64
+//   error.try %23: !void
+//   %25: i64 = const 5760
+//   %26: !void = call.append_utf8 %out: &var std::string::String, %25: i64
+//   error.try %26: !void
+//   %28: i64 = const 8192
+//   %29: !void = call.append_utf8 %out: &var std::string::String, %28: i64
+//   error.try %29: !void
+//   %31: i64 = const 8193
+//   %32: !void = call.append_utf8 %out: &var std::string::String, %31: i64
+//   error.try %32: !void
+//   %34: i64 = const 8194
+//   %35: !void = call.append_utf8 %out: &var std::string::String, %34: i64
+//   error.try %35: !void
+//   %37: i64 = const 8195
+//   %38: !void = call.append_utf8 %out: &var std::string::String, %37: i64
+//   error.try %38: !void
+//   %40: i64 = const 8196
+//   %41: !void = call.append_utf8 %out: &var std::string::String, %40: i64
+//   error.try %41: !void
+//   %43: i64 = const 8197
+//   %44: !void = call.append_utf8 %out: &var std::string::String, %43: i64
+//   error.try %44: !void
+//   %46: i64 = const 8198
+//   %47: !void = call.append_utf8 %out: &var std::string::String, %46: i64
+//   error.try %47: !void
+//   %49: i64 = const 8199
+//   %50: !void = call.append_utf8 %out: &var std::string::String, %49: i64
+//   error.try %50: !void
+//   %52: i64 = const 8200
+//   %53: !void = call.append_utf8 %out: &var std::string::String, %52: i64
+//   error.try %53: !void
+//   %55: i64 = const 8201
+//   %56: !void = call.append_utf8 %out: &var std::string::String, %55: i64
+//   error.try %56: !void
+//   %58: i64 = const 8202
+//   %59: !void = call.append_utf8 %out: &var std::string::String, %58: i64
+//   error.try %59: !void
+//   %61: i64 = const 8232
+//   %62: !void = call.append_utf8 %out: &var std::string::String, %61: i64
+//   error.try %62: !void
+//   %64: i64 = const 8233
+//   %65: !void = call.append_utf8 %out: &var std::string::String, %64: i64
+//   error.try %65: !void
+//   %67: i64 = const 8239
+//   %68: !void = call.append_utf8 %out: &var std::string::String, %67: i64
+//   error.try %68: !void
+//   %70: i64 = const 8287
+//   %71: !void = call.append_utf8 %out: &var std::string::String, %70: i64
+//   error.try %71: !void
+//   %73: i64 = const 12288
+//   %74: !void = call.append_utf8 %out: &var std::string::String, %73: i64
+//   error.try %74: !void
+//   %76: !void = error.ok
+//   return %76: !void
+// }
+// fn test.string_join_preserves_separators_and_returns_an_independent_owner() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: &var std::array::Array<std::string::String> = local.slot %2: std::array::Array<std::string::String>
+//   %4: []u8 = const "  first  "
+//   %5: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %4: []u8
+//   %6: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %5: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %6: std::array::Array<std::string::String>
+//   %8: []u8 = const ""
+//   %9: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %8: []u8
+//   %10: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %9: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %10: std::array::Array<std::string::String>
+//   %12: []u8 = const " last  "
+//   %13: !void = call.append_part %1: Allocator, %3: &var std::array::Array<std::string::String>, %12: []u8
+//   %14: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %13: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %14: std::array::Array<std::string::String>
+//   %16: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   %17: []u8 = const "::"
+//   %18: !std::string::String = call.std::string::join %1: Allocator, %16: std::array::Array<std::string::String>, %17: []u8
+//   %19: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   %20: std::string::String = error.try %18: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %19: std::array::Array<std::string::String>
+//   %21: &var std::string::String = local.slot %20: std::string::String
+//   %22: std::string::String = call.std::string::new %1: Allocator
+//   %23: []u8 = const "first  "
+//   %24: !void = call.std::string::String.append_bytes %22: std::string::String, %23: []u8
+//   %25: std::string::String = ref.load %21: &var std::string::String
+//   %26: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %24: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %25: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>
+//   %28: []u8 = const "::::"
+//   %29: !void = call.std::string::String.append_bytes %22: std::string::String, %28: []u8
+//   %30: std::string::String = ref.load %21: &var std::string::String
+//   %31: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %29: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %30: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %31: std::array::Array<std::string::String>
+//   %33: []u8 = const " last"
+//   %34: !void = call.std::string::String.append_bytes %22: std::string::String, %33: []u8
+//   %35: std::string::String = ref.load %21: &var std::string::String
+//   %36: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   error.try %34: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::string::String.deinit %35: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %36: std::array::Array<std::string::String>
+//   %38: std::array::Array<std::string::String> = ref.load %3: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %38: std::array::Array<std::string::String>
+//   %40: std::string::String = ref.load %21: &var std::string::String
+//   %41: i64 = call.std::string::String.capacity %40: std::string::String
+//   call.std::string::trim_space_in_place %21: &var std::string::String
+//   %43: std::string::String = ref.load %21: &var std::string::String
+//   %44: i64 = call.std::string::String.capacity %43: std::string::String
+//   test.expect_equal %41: i64, %44: i64, i64
+//   %46: std::string::String = ref.load %21: &var std::string::String
+//   %47: []u8 = call.std::string::String.as_bytes %46: std::string::String
+//   %48: []u8 = call.std::string::String.as_bytes %22: std::string::String
+//   %49: bool = call.std::mem::equal_bytes %47: []u8, %48: []u8
+//   call.std::testing::expect %49: bool
+//   call.std::string::String.deinit %22: std::string::String
+//   %52: std::string::String = ref.load %21: &var std::string::String
+//   call.std::string::String.deinit %52: std::string::String
+//   %54: !void = error.ok
+//   return %54: !void
+// }
+// fn test.string_join_handles_empty_parts_and_an_empty_separator() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const ","
+//   %4: !std::string::String = call.std::string::join %1: Allocator, %2: std::array::Array<std::string::String>, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: i64 = const 0
+//   %7: i64 = call.std::string::String.len %5: std::string::String
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %10: &var std::array::Array<std::string::String> = local.slot %9: std::array::Array<std::string::String>
+//   %11: []u8 = const "a"
+//   %12: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %11: []u8
+//   %13: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %13: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %15: []u8 = const ""
+//   %16: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %15: []u8
+//   %17: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %16: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %17: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %19: []u8 = const "b"
+//   %20: !void = call.append_part %1: Allocator, %10: &var std::array::Array<std::string::String>, %19: []u8
+//   %21: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %20: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %21: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %23: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %24: []u8 = const ""
+//   %25: !std::string::String = call.std::string::join %1: Allocator, %23: std::array::Array<std::string::String>, %24: []u8
+//   %26: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %27: std::string::String = error.try %25: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %26: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %28: []u8 = call.std::string::String.as_bytes %27: std::string::String
+//   %29: []u8 = const "ab"
+//   %30: bool = call.std::mem::equal_bytes %28: []u8, %29: []u8
+//   call.std::testing::expect %30: bool
+//   %32: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %33: &var std::array::Array<std::string::String> = local.slot %32: std::array::Array<std::string::String>
+//   %34: []u8 = const "solo"
+//   %35: !void = call.append_part %1: Allocator, %33: &var std::array::Array<std::string::String>, %34: []u8
+//   %36: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %37: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   error.try %35: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %36: std::array::Array<std::string::String>; call.std::string::String.deinit %27: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %37: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %39: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %40: []u8 = const "ignored"
+//   %41: !std::string::String = call.std::string::join %1: Allocator, %39: std::array::Array<std::string::String>, %40: []u8
+//   %42: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   %43: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   %44: std::string::String = error.try %41: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %42: std::array::Array<std::string::String>; call.std::string::String.deinit %27: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %43: std::array::Array<std::string::String>; call.std::string::String.deinit %5: std::string::String; call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %45: std::array::Array<std::string::String> = ref.load %33: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %45: std::array::Array<std::string::String>
+//   %47: []u8 = call.std::string::String.as_bytes %44: std::string::String
+//   %48: []u8 = const "solo"
+//   %49: bool = call.std::mem::equal_bytes %47: []u8, %48: []u8
+//   call.std::testing::expect %49: bool
+//   call.std::string::String.deinit %44: std::string::String
+//   call.std::string::String.deinit %27: std::string::String
+//   %53: std::array::Array<std::string::String> = ref.load %10: &var std::array::Array<std::string::String>
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %53: std::array::Array<std::string::String>
+//   call.std::string::String.deinit %5: std::string::String
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %57: !void = error.ok
+//   return %57: !void
+// }
+// fn test.string_trim_recognizes_the_fixed_Unicode_White_Space_set() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: !void = call.append_white_space_set %3: &var std::string::String
+//   %5: std::string::String = ref.load %3: &var std::string::String
+//   error.try %4: !void, cleanup call.std::string::String.deinit %5: std::string::String
+//   %7: std::string::String = ref.load %3: &var std::string::String
+//   %8: []u8 = const "middle"
+//   %9: !void = call.std::string::String.append_bytes %7: std::string::String, %8: []u8
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: !void = call.append_white_space_set %3: &var std::string::String
+//   %13: std::string::String = ref.load %3: &var std::string::String
+//   error.try %12: !void, cleanup call.std::string::String.deinit %13: std::string::String
+//   %15: std::string::String = ref.load %3: &var std::string::String
+//   %16: i64 = call.std::string::String.capacity %15: std::string::String
+//   call.std::string::trim_space_in_place %3: &var std::string::String
+//   %18: std::string::String = ref.load %3: &var std::string::String
+//   %19: i64 = call.std::string::String.capacity %18: std::string::String
+//   test.expect_equal %16: i64, %19: i64, i64
+//   %21: std::string::String = ref.load %3: &var std::string::String
+//   %22: []u8 = call.std::string::String.as_bytes %21: std::string::String
+//   %23: []u8 = const "middle"
+//   %24: bool = call.std::mem::equal_bytes %22: []u8, %23: []u8
+//   call.std::testing::expect %24: bool
+//   %26: std::string::String = call.std::string::new %1: Allocator
+//   %27: &var std::string::String = local.slot %26: std::string::String
+//   %28: !void = call.append_white_space_set %27: &var std::string::String
+//   %29: std::string::String = ref.load %27: &var std::string::String
+//   %30: std::string::String = ref.load %3: &var std::string::String
+//   error.try %28: !void, cleanup call.std::string::String.deinit %29: std::string::String; call.std::string::String.deinit %30: std::string::String
+//   %32: std::string::String = ref.load %27: &var std::string::String
+//   %33: i64 = call.std::string::String.capacity %32: std::string::String
+//   call.std::string::trim_space_in_place %27: &var std::string::String
+//   %35: i64 = const 0
+//   %36: std::string::String = ref.load %27: &var std::string::String
+//   %37: i64 = call.std::string::String.len %36: std::string::String
+//   test.expect_equal %35: i64, %37: i64, i64
+//   %39: std::string::String = ref.load %27: &var std::string::String
+//   %40: i64 = call.std::string::String.capacity %39: std::string::String
+//   test.expect_equal %33: i64, %40: i64, i64
+//   %42: std::string::String = call.std::string::new %1: Allocator
+//   %43: &var std::string::String = local.slot %42: std::string::String
+//   %44: std::string::String = ref.load %43: &var std::string::String
+//   %45: []u8 = const "left"
+//   %46: !void = call.std::string::String.append_bytes %44: std::string::String, %45: []u8
+//   %47: std::string::String = ref.load %43: &var std::string::String
+//   %48: std::string::String = ref.load %27: &var std::string::String
+//   %49: std::string::String = ref.load %3: &var std::string::String
+//   error.try %46: !void, cleanup call.std::string::String.deinit %47: std::string::String; call.std::string::String.deinit %48: std::string::String; call.std::string::String.deinit %49: std::string::String
+//   %51: i64 = const 12288
+//   %52: !void = call.append_utf8 %43: &var std::string::String, %51: i64
+//   %53: std::string::String = ref.load %43: &var std::string::String
+//   %54: std::string::String = ref.load %27: &var std::string::String
+//   %55: std::string::String = ref.load %3: &var std::string::String
+//   error.try %52: !void, cleanup call.std::string::String.deinit %53: std::string::String; call.std::string::String.deinit %54: std::string::String; call.std::string::String.deinit %55: std::string::String
+//   %57: std::string::String = ref.load %43: &var std::string::String
+//   %58: []u8 = const "right"
+//   %59: !void = call.std::string::String.append_bytes %57: std::string::String, %58: []u8
+//   %60: std::string::String = ref.load %43: &var std::string::String
+//   %61: std::string::String = ref.load %27: &var std::string::String
+//   %62: std::string::String = ref.load %3: &var std::string::String
+//   error.try %59: !void, cleanup call.std::string::String.deinit %60: std::string::String; call.std::string::String.deinit %61: std::string::String; call.std::string::String.deinit %62: std::string::String
+//   call.std::string::trim_space_in_place %43: &var std::string::String
+//   %65: std::string::String = ref.load %43: &var std::string::String
+//   %66: []u8 = call.std::string::String.as_bytes %65: std::string::String
+//   %67: []u8 = const "left\u3000right"
+//   %68: bool = call.std::mem::equal_bytes %66: []u8, %67: []u8
+//   call.std::testing::expect %68: bool
+//   %70: std::string::String = ref.load %43: &var std::string::String
+//   call.std::string::String.deinit %70: std::string::String
+//   %72: std::string::String = ref.load %27: &var std::string::String
+//   call.std::string::String.deinit %72: std::string::String
+//   %74: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %74: std::string::String
+//   %76: !void = error.ok
+//   return %76: !void
+// }
+// fn test.string_trim_retains_non_space_Unicode_and_malformed_UTF_8() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::string::String = call.std::string::new %1: Allocator
+//   %3: &var std::string::String = local.slot %2: std::string::String
+//   %4: i64 = const 6158
+//   %5: !void = call.append_utf8 %3: &var std::string::String, %4: i64
+//   %6: std::string::String = ref.load %3: &var std::string::String
+//   error.try %5: !void, cleanup call.std::string::String.deinit %6: std::string::String
+//   %8: i64 = const 65279
+//   %9: !void = call.append_utf8 %3: &var std::string::String, %8: i64
+//   %10: std::string::String = ref.load %3: &var std::string::String
+//   error.try %9: !void, cleanup call.std::string::String.deinit %10: std::string::String
+//   %12: i64 = const 65533
+//   %13: !void = call.append_utf8 %3: &var std::string::String, %12: i64
+//   %14: std::string::String = ref.load %3: &var std::string::String
+//   error.try %13: !void, cleanup call.std::string::String.deinit %14: std::string::String
+//   call.std::string::trim_space_in_place %3: &var std::string::String
+//   %17: i64 = const 9
+//   %18: std::string::String = ref.load %3: &var std::string::String
+//   %19: i64 = call.std::string::String.len %18: std::string::String
+//   test.expect_equal %17: i64, %19: i64, i64
+//   %21: [4]u8 = buffer.new
+//   %22: []u8 = buffer.as_bytes %21: [4]u8
+//   %23: i64 = const 32
+//   %24: u8 = cast %23: i64, u8
+//   %25: i64 = const 0
+//   %26: i64 = slice.len %22: []u8
+//   %27: bool = binary.< %25: i64, 0: i64
+//   cond_fail %27: bool, bounds(%25: i64, %26: i64)
+//   %28: bool = binary.>= %25: i64, %26: i64
+//   cond_fail %28: bool, bounds(%25: i64, %26: i64)
+//   slice.store %22: []u8, %25: i64, %24: u8
+//   %30: i64 = const 226
+//   %31: u8 = cast %30: i64, u8
+//   %32: i64 = const 1
+//   %33: i64 = slice.len %22: []u8
+//   %34: bool = binary.< %32: i64, 0: i64
+//   cond_fail %34: bool, bounds(%32: i64, %33: i64)
+//   %35: bool = binary.>= %32: i64, %33: i64
+//   cond_fail %35: bool, bounds(%32: i64, %33: i64)
+//   slice.store %22: []u8, %32: i64, %31: u8
+//   %37: i64 = const 128
+//   %38: u8 = cast %37: i64, u8
+//   %39: i64 = const 2
+//   %40: i64 = slice.len %22: []u8
+//   %41: bool = binary.< %39: i64, 0: i64
+//   cond_fail %41: bool, bounds(%39: i64, %40: i64)
+//   %42: bool = binary.>= %39: i64, %40: i64
+//   cond_fail %42: bool, bounds(%39: i64, %40: i64)
+//   slice.store %22: []u8, %39: i64, %38: u8
+//   %44: i64 = const 32
+//   %45: u8 = cast %44: i64, u8
+//   %46: i64 = const 3
+//   %47: i64 = slice.len %22: []u8
+//   %48: bool = binary.< %46: i64, 0: i64
+//   cond_fail %48: bool, bounds(%46: i64, %47: i64)
+//   %49: bool = binary.>= %46: i64, %47: i64
+//   cond_fail %49: bool, bounds(%46: i64, %47: i64)
+//   slice.store %22: []u8, %46: i64, %45: u8
+//   %51: []u8 = buffer.as_bytes %21: [4]u8
+//   %52: !std::string::String = call.std::string::from_bytes %1: Allocator, %51: []u8
+//   %53: std::string::String = ref.load %3: &var std::string::String
+//   %54: std::string::String = error.try %52: !std::string::String, cleanup call.std::string::String.deinit %53: std::string::String
+//   %55: &var std::string::String = local.slot %54: std::string::String
+//   call.std::string::trim_space_in_place %55: &var std::string::String
+//   %57: i64 = const 2
+//   %58: std::string::String = ref.load %55: &var std::string::String
+//   %59: i64 = call.std::string::String.len %58: std::string::String
+//   test.expect_equal %57: i64, %59: i64, i64
+//   %61: std::string::String = ref.load %55: &var std::string::String
+//   %62: []u8 = call.std::string::String.as_bytes %61: std::string::String
+//   %63: i64 = const 226
+//   %64: i64 = const 0
+//   %65: i64 = slice.len %62: []u8
+//   %66: bool = binary.< %64: i64, 0: i64
+//   cond_fail %66: bool, bounds(%64: i64, %65: i64)
+//   %67: bool = binary.>= %64: i64, %65: i64
+//   cond_fail %67: bool, bounds(%64: i64, %65: i64)
+//   %68: u8 = slice.index %62: []u8, %64: i64
+//   %69: i64 = cast %68: u8, i64
+//   test.expect_equal %63: i64, %69: i64, i64
+//   %71: i64 = const 128
+//   %72: i64 = const 1
+//   %73: i64 = slice.len %62: []u8
+//   %74: bool = binary.< %72: i64, 0: i64
+//   cond_fail %74: bool, bounds(%72: i64, %73: i64)
+//   %75: bool = binary.>= %72: i64, %73: i64
+//   cond_fail %75: bool, bounds(%72: i64, %73: i64)
+//   %76: u8 = slice.index %62: []u8, %72: i64
+//   %77: i64 = cast %76: u8, i64
+//   test.expect_equal %71: i64, %77: i64, i64
+//   %79: std::string::String = ref.load %55: &var std::string::String
+//   call.std::string::String.deinit %79: std::string::String
+//   %81: std::string::String = ref.load %3: &var std::string::String
+//   call.std::string::String.deinit %81: std::string::String
+//   %83: !void = error.ok
+//   return %83: !void
+// }

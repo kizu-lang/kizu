@@ -1,0 +1,334 @@
+import std::arena;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+struct Visitor {
+    pub name: []u8,
+}
+
+// A fixed-buffer allocator serves every container kind from stack bytes.
+test "fixed buffer allocator backs containers" {
+    var buf = [4096]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(41);
+    try values.append(1);
+    testing::expect_equal<i64>(2, values.len());
+    testing::expect_equal<i64>(41, values.get_or_panic(0));
+
+    var text = string::new(alloc);
+    defer text.deinit();
+    try text.append_bytes("fixed");
+    testing::expect_equal<i64>(5, text.len());
+
+    let visitors = arena::new<Visitor>(alloc);
+    defer visitors.deinit();
+    let alice = visitors.add(Visitor { name: "alice" });
+    testing::expect_equal<[]u8>("alice", visitors.at(alice).name);
+}
+
+fn fill(allocator: Allocator, seed: i64) -> !array::Array<i64> {
+    var values = array::new<i64>(allocator);
+    errdefer values.deinit();
+    try values.append(seed);
+    return move values;
+}
+
+// A helper taking Allocator works unchanged; the caller's result inherits the
+// buffer tie and must be consumed in this frame.
+test "fixed buffer allocator flows through helpers" {
+    var buf = [1024]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+    var values = try fill(alloc, 7);
+    defer values.deinit();
+    testing::expect_equal<i64>(7, values.get_or_panic(0));
+}
+
+fn scratch_alloc(bytes: &var []u8) -> Allocator {
+    return mem::fixed_buffer(bytes);
+}
+
+// A wrapper may return the factory result when its sources are its own
+// parameters: the tie travels with the signature and the caller re-derives it.
+test "fixed buffer factory wrapper returns through its parameter" {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = scratch_alloc(scratch);
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(11);
+    testing::expect_equal<i64>(11, values.get_or_panic(0));
+}
+
+fn sum_round(bytes: &var []u8, seed: i64) -> !i64 {
+    let alloc = mem::fixed_buffer(bytes);
+    var values = array::new<i64>(alloc);
+    defer values.deinit();
+    try values.append(seed);
+    try values.append(seed + 1);
+    return values.get_or_panic(0) + values.get_or_panic(1);
+}
+
+// Once a round's owners are gone, the same buffer backs a fresh allocator:
+// per-call scratch memory with no heap involved.
+test "fixed buffer is reusable between rounds" {
+    var buf = [512]u8{};
+    let scratch = buf.as_mut_bytes();
+    testing::expect_equal<i64>(3, try sum_round(scratch, 1));
+    testing::expect_equal<i64>(7, try sum_round(scratch, 3));
+}
+
+
+// ir
+// lower:
+// fn fill(%allocator: Allocator, %seed: i64) -> !std::array::Array<i64> {
+// entry:
+//   %1: std::array::Array<i64> = array.new %allocator: Allocator, i64
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %seed: i64
+//   error.try %2: !void, cleanup array.deinit %1: std::array::Array<i64>
+//   %4: !std::array::Array<i64> = error.ok %1: std::array::Array<i64>
+//   return %4: !std::array::Array<i64>
+// }
+// fn scratch_alloc(%bytes: []u8) -> Allocator {
+// entry:
+//   %1: Allocator = call.std::mem::fixed_buffer %bytes: []u8
+//   return %1: Allocator
+// }
+// fn sum_round(%bytes: []u8, %seed: i64) -> !i64 {
+// entry:
+//   %1: Allocator = call.std::mem::fixed_buffer %bytes: []u8
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %seed: i64
+//   error.try %3: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %seed: i64, %5: i64
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: i64 = const 0
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %9: i64
+//   %11: i64 = const 1
+//   %12: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %11: i64
+//   %13: i64 = binary.+ %10: i64, %12: i64
+//   %14: !i64 = error.ok %13: i64
+//   array.deinit %2: std::array::Array<i64>
+//   return %14: !i64
+// }
+// fn test.fixed_buffer_allocator_backs_containers() -> !void {
+// entry:
+//   %1: [4096]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [4096]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: std::array::Array<i64> = array.new %3: Allocator, i64
+//   %5: i64 = const 41
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   error.try %6: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %8: i64 = const 1
+//   %9: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %8: i64
+//   error.try %9: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %11: i64 = const 2
+//   %12: i64 = call.std::array::Array.len.i64 %4: std::array::Array<i64>
+//   test.expect_equal %11: i64, %12: i64, i64
+//   %14: i64 = const 41
+//   %15: i64 = const 0
+//   %16: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %15: i64
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: std::string::String = call.std::string::new %3: Allocator
+//   %19: []u8 = const "fixed"
+//   %20: !void = call.std::string::String.append_bytes %18: std::string::String, %19: []u8
+//   error.try %20: !void, cleanup call.std::string::String.deinit %18: std::string::String; array.deinit %4: std::array::Array<i64>
+//   %22: i64 = const 5
+//   %23: i64 = call.std::string::String.len %18: std::string::String
+//   test.expect_equal %22: i64, %23: i64, i64
+//   %25: std::arena::Arena<Visitor> = arena.new %3: Allocator, Visitor
+//   %26: []u8 = const "alice"
+//   %27: Visitor = struct.new {name: %26: []u8}
+//   %28: std::arena::Handle<Visitor> = arena.add %25: std::arena::Arena<Visitor>, %27: Visitor
+//   %29: []u8 = const "alice"
+//   %30: Visitor = arena.at %25: std::arena::Arena<Visitor>, %28: std::arena::Handle<Visitor>
+//   %31: []u8 = field.name %30: Visitor
+//   test.expect_equal %29: []u8, %31: []u8, []u8
+//   arena.deinit %25: std::arena::Arena<Visitor>
+//   call.std::string::String.deinit %18: std::string::String
+//   array.deinit %4: std::array::Array<i64>
+//   %36: !void = error.ok
+//   return %36: !void
+// }
+// fn test.fixed_buffer_allocator_flows_through_helpers() -> !void {
+// entry:
+//   %1: [1024]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [1024]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: i64 = const 7
+//   %5: !std::array::Array<i64> = call.fill %3: Allocator, %4: i64
+//   %6: std::array::Array<i64> = error.try %5: !std::array::Array<i64>
+//   %7: i64 = const 7
+//   %8: i64 = const 0
+//   %9: i64 = call.std::array::Array.get_or_panic.i64 %6: std::array::Array<i64>, %8: i64
+//   test.expect_equal %7: i64, %9: i64, i64
+//   array.deinit %6: std::array::Array<i64>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.fixed_buffer_factory_wrapper_returns_through_its_parameter() -> !void {
+// entry:
+//   %1: [512]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [512]u8
+//   %3: Allocator = call.scratch_alloc %2: []u8
+//   %4: std::array::Array<i64> = array.new %3: Allocator, i64
+//   %5: i64 = const 11
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   error.try %6: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %8: i64 = const 11
+//   %9: i64 = const 0
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %9: i64
+//   test.expect_equal %8: i64, %10: i64, i64
+//   array.deinit %4: std::array::Array<i64>
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.fixed_buffer_is_reusable_between_rounds() -> !void {
+// entry:
+//   %1: [512]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [512]u8
+//   %3: i64 = const 3
+//   %4: i64 = const 1
+//   %5: !i64 = call.sum_round %2: []u8, %4: i64
+//   %6: i64 = error.try %5: !i64
+//   test.expect_equal %3: i64, %6: i64, i64
+//   %8: i64 = const 7
+//   %9: i64 = const 3
+//   %10: !i64 = call.sum_round %2: []u8, %9: i64
+//   %11: i64 = error.try %10: !i64
+//   test.expect_equal %8: i64, %11: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// opt:
+// fn fill(%allocator: Allocator, %seed: i64) -> !std::array::Array<i64> {
+// entry:
+//   %1: std::array::Array<i64> = array.new %allocator: Allocator, i64
+//   %2: !void = call.std::array::Array.append.i64 %1: std::array::Array<i64>, %seed: i64
+//   error.try %2: !void, cleanup array.deinit %1: std::array::Array<i64>
+//   %4: !std::array::Array<i64> = error.ok %1: std::array::Array<i64>
+//   return %4: !std::array::Array<i64>
+// }
+// fn scratch_alloc(%bytes: []u8) -> Allocator {
+// entry:
+//   %1: Allocator = call.std::mem::fixed_buffer %bytes: []u8
+//   return %1: Allocator
+// }
+// fn sum_round(%bytes: []u8, %seed: i64) -> !i64 {
+// entry:
+//   %1: Allocator = call.std::mem::fixed_buffer %bytes: []u8
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %seed: i64
+//   error.try %3: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %5: i64 = const 1
+//   %6: i64 = binary.+ %seed: i64, %5: i64
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: i64 = const 0
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %9: i64
+//   %11: i64 = const 1
+//   %12: i64 = call.std::array::Array.get_or_panic.i64 %2: std::array::Array<i64>, %11: i64
+//   %13: i64 = binary.+ %10: i64, %12: i64
+//   %14: !i64 = error.ok %13: i64
+//   array.deinit %2: std::array::Array<i64>
+//   return %14: !i64
+// }
+// fn test.fixed_buffer_allocator_backs_containers() -> !void {
+// entry:
+//   %1: [4096]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [4096]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: std::array::Array<i64> = array.new %3: Allocator, i64
+//   %5: i64 = const 41
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   error.try %6: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %8: i64 = const 1
+//   %9: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %8: i64
+//   error.try %9: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %11: i64 = const 2
+//   %12: i64 = call.std::array::Array.len.i64 %4: std::array::Array<i64>
+//   test.expect_equal %11: i64, %12: i64, i64
+//   %14: i64 = const 41
+//   %15: i64 = const 0
+//   %16: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %15: i64
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: std::string::String = call.std::string::new %3: Allocator
+//   %19: []u8 = const "fixed"
+//   %20: !void = call.std::string::String.append_bytes %18: std::string::String, %19: []u8
+//   error.try %20: !void, cleanup call.std::string::String.deinit %18: std::string::String; array.deinit %4: std::array::Array<i64>
+//   %22: i64 = const 5
+//   %23: i64 = call.std::string::String.len %18: std::string::String
+//   test.expect_equal %22: i64, %23: i64, i64
+//   %25: std::arena::Arena<Visitor> = arena.new %3: Allocator, Visitor
+//   %26: []u8 = const "alice"
+//   %27: Visitor = struct.new {name: %26: []u8}
+//   %28: std::arena::Handle<Visitor> = arena.add %25: std::arena::Arena<Visitor>, %27: Visitor
+//   %29: []u8 = const "alice"
+//   %30: Visitor = arena.at %25: std::arena::Arena<Visitor>, %28: std::arena::Handle<Visitor>
+//   %31: []u8 = field.name %30: Visitor
+//   test.expect_equal %29: []u8, %31: []u8, []u8
+//   arena.deinit %25: std::arena::Arena<Visitor>
+//   call.std::string::String.deinit %18: std::string::String
+//   array.deinit %4: std::array::Array<i64>
+//   %36: !void = error.ok
+//   return %36: !void
+// }
+// fn test.fixed_buffer_allocator_flows_through_helpers() -> !void {
+// entry:
+//   %1: [1024]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [1024]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: i64 = const 7
+//   %5: !std::array::Array<i64> = call.fill %3: Allocator, %4: i64
+//   %6: std::array::Array<i64> = error.try %5: !std::array::Array<i64>
+//   %7: i64 = const 7
+//   %8: i64 = const 0
+//   %9: i64 = call.std::array::Array.get_or_panic.i64 %6: std::array::Array<i64>, %8: i64
+//   test.expect_equal %7: i64, %9: i64, i64
+//   array.deinit %6: std::array::Array<i64>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.fixed_buffer_factory_wrapper_returns_through_its_parameter() -> !void {
+// entry:
+//   %1: [512]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [512]u8
+//   %3: Allocator = call.scratch_alloc %2: []u8
+//   %4: std::array::Array<i64> = array.new %3: Allocator, i64
+//   %5: i64 = const 11
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   error.try %6: !void, cleanup array.deinit %4: std::array::Array<i64>
+//   %8: i64 = const 11
+//   %9: i64 = const 0
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %9: i64
+//   test.expect_equal %8: i64, %10: i64, i64
+//   array.deinit %4: std::array::Array<i64>
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.fixed_buffer_is_reusable_between_rounds() -> !void {
+// entry:
+//   %1: [512]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [512]u8
+//   %3: i64 = const 3
+//   %4: i64 = const 1
+//   %5: !i64 = call.sum_round %2: []u8, %4: i64
+//   %6: i64 = error.try %5: !i64
+//   test.expect_equal %3: i64, %6: i64, i64
+//   %8: i64 = const 7
+//   %9: i64 = const 3
+//   %10: !i64 = call.sum_round %2: []u8, %9: i64
+//   %11: i64 = error.try %10: !i64
+//   test.expect_equal %8: i64, %11: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }

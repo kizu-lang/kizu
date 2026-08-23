@@ -1,0 +1,131 @@
+import std;
+import std::mem;
+import std::string;
+
+struct Names {
+    pub first: string::String,
+    pub second: string::String,
+}
+
+// One call per public field, then the struct literal that takes all of them.
+// Nothing holds a half-built `Names`: the values are separate bindings until
+// the literal consumes them at once. If the second call fails, the `errdefer`
+// the expansion carries releases the first string.
+fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(std::meta::field_name<T, f>());
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var names = try std::meta::construct<Names, field_from_name>(allocator);
+    defer names.deinit();
+    print(names.first.len());
+    print(names.second.len());
+    return;
+}
+
+// run
+// features: comptime construct field-static-param reflection errdefer deinit std-string
+// output:
+// 5
+// 6
+
+
+// ir
+// lower:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: !std::string::String = call.field_from_name.Names.first %1: Allocator
+//   %3: std::string::String = error.try %2: !std::string::String
+//   %4: !std::string::String = call.field_from_name.Names.second %1: Allocator
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::string::String.deinit %3: std::string::String
+//   %6: Names = struct.new {first: %3: std::string::String, second: %5: std::string::String}
+//   %7: !Names = error.ok %6: Names
+//   %8: Names = error.try %7: !Names
+//   %9: std::string::String = field.first %8: Names
+//   %10: i64 = call.std::string::String.len %9: std::string::String
+//   call.print %10: i64
+//   %12: std::string::String = field.second %8: Names
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   call.print %13: i64
+//   call.Names.deinit %8: Names
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn Names.deinit(%self: Names) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Names
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.second %self: Names
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn field_from_name.Names.first(%allocator: Allocator) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: []u8 = const "first"
+//   %3: !void = call.std::string::String.append_bytes %1: std::string::String, %2: []u8
+//   error.try %3: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %5: !std::string::String = error.ok %1: std::string::String
+//   return %5: !std::string::String
+// }
+// fn field_from_name.Names.second(%allocator: Allocator) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: []u8 = const "second"
+//   %3: !void = call.std::string::String.append_bytes %1: std::string::String, %2: []u8
+//   error.try %3: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %5: !std::string::String = error.ok %1: std::string::String
+//   return %5: !std::string::String
+// }
+// opt:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: !std::string::String = call.field_from_name.Names.first %1: Allocator
+//   %3: std::string::String = error.try %2: !std::string::String
+//   %4: !std::string::String = call.field_from_name.Names.second %1: Allocator
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::string::String.deinit %3: std::string::String
+//   %6: Names = struct.new {first: %3: std::string::String, second: %5: std::string::String}
+//   %7: !Names = error.ok %6: Names
+//   %8: Names = error.try %7: !Names
+//   %9: std::string::String = field.first %8: Names
+//   %10: i64 = call.std::string::String.len %9: std::string::String
+//   call.print %10: i64
+//   %12: std::string::String = field.second %8: Names
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   call.print %13: i64
+//   call.Names.deinit %8: Names
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn Names.deinit(%self: Names) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Names
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.second %self: Names
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn field_from_name.Names.first(%allocator: Allocator) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: []u8 = const "first"
+//   %3: !void = call.std::string::String.append_bytes %1: std::string::String, %2: []u8
+//   error.try %3: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %5: !std::string::String = error.ok %1: std::string::String
+//   return %5: !std::string::String
+// }
+// fn field_from_name.Names.second(%allocator: Allocator) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: []u8 = const "second"
+//   %3: !void = call.std::string::String.append_bytes %1: std::string::String, %2: []u8
+//   error.try %3: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %5: !std::string::String = error.ok %1: std::string::String
+//   return %5: !std::string::String
+// }

@@ -1,0 +1,136 @@
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+struct Node {
+    tag: i64,
+    count: i64,
+}
+
+fn read_tag(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.tag;
+}
+
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    unsafe node.*.tag = tag;
+}
+
+fn replace(node: ptr<Node>, value: Node) -> void {
+    // SAFETY: node が有効な Node を指し、上書きしてよいことは呼び出し側が保証する
+    unsafe node.* = value;
+}
+
+fn main() -> void {
+    // SAFETY: Node が収まる大きさを確保する。失敗しない前提の例示専用呼び出し
+    let raw = unsafe malloc(64);
+    // SAFETY: raw は Node 1 個分の書き込み可能な領域を指す
+    let node = unsafe cast<ptr<Node>>(raw);
+    // SAFETY: pointer 間 cast は値の再解釈のみで、指す先は同じ有効な Node
+    let reader = unsafe cast<ptr<const Node>>(node);
+
+    replace(node, Node { tag: 7, count: 1 });
+    print(read_tag(reader));
+
+    write_tag(node, 42);
+    print(read_tag(reader));
+
+    // SAFETY: node は有効な Node を指す
+    let copy = unsafe node.*;
+    print(copy.count);
+
+    // SAFETY: raw は malloc が返した領域で、以後使わない
+    unsafe free(raw);
+}
+
+// run
+// features: unsafe raw-pointer deref extern-c cast
+// output:
+// 7
+// 42
+// 1
+
+
+// ir
+// lower:
+// fn read_tag(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.tag %1: Node
+//   return %2: i64
+// }
+// fn write_tag(%node: ptr<Node>, %tag: i64) -> void {
+// entry:
+//   %1: Node = ref.load %node: ptr<Node>
+//   %2: Node = field.set.tag %1: Node, %tag: i64
+//   ref.store %node: ptr<Node>, %2: Node
+//   return void: void
+// }
+// fn replace(%node: ptr<Node>, %value: Node) -> void {
+// entry:
+//   ref.store %node: ptr<Node>, %value: Node
+//   return void: void
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 64
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: ptr<Node> = cast %2: ptr<u8>, ptr<Node>
+//   %4: ptr<const Node> = cast %3: ptr<Node>, ptr<const Node>
+//   %5: i64 = const 7
+//   %6: i64 = const 1
+//   %7: Node = struct.new {tag: %5: i64, count: %6: i64}
+//   call.replace %3: ptr<Node>, %7: Node
+//   %9: i64 = call.read_tag %4: ptr<const Node>
+//   call.print %9: i64
+//   %11: i64 = const 42
+//   call.write_tag %3: ptr<Node>, %11: i64
+//   %13: i64 = call.read_tag %4: ptr<const Node>
+//   call.print %13: i64
+//   %15: Node = ref.load %3: ptr<Node>
+//   %16: i64 = field.count %15: Node
+//   call.print %16: i64
+//   call.free %2: ptr<u8>
+//   return void: void
+// }
+// opt:
+// fn read_tag(%node: ptr<const Node>) -> i64 {
+// entry:
+//   %1: Node = ref.load %node: ptr<const Node>
+//   %2: i64 = field.tag %1: Node
+//   return %2: i64
+// }
+// fn write_tag(%node: ptr<Node>, %tag: i64) -> void {
+// entry:
+//   %1: Node = ref.load %node: ptr<Node>
+//   %2: Node = field.set.tag %1: Node, %tag: i64
+//   ref.store %node: ptr<Node>, %2: Node
+//   return void: void
+// }
+// fn replace(%node: ptr<Node>, %value: Node) -> void {
+// entry:
+//   ref.store %node: ptr<Node>, %value: Node
+//   return void: void
+// }
+// fn main() -> void {
+// entry:
+//   %1: usize = const 64
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: ptr<Node> = cast %2: ptr<u8>, ptr<Node>
+//   %4: ptr<const Node> = cast %3: ptr<Node>, ptr<const Node>
+//   %5: i64 = const 7
+//   %6: i64 = const 1
+//   %7: Node = struct.new {tag: %5: i64, count: %6: i64}
+//   call.replace %3: ptr<Node>, %7: Node
+//   %9: i64 = call.read_tag %4: ptr<const Node>
+//   call.print %9: i64
+//   %11: i64 = const 42
+//   call.write_tag %3: ptr<Node>, %11: i64
+//   %13: i64 = call.read_tag %4: ptr<const Node>
+//   call.print %13: i64
+//   %15: Node = ref.load %3: ptr<Node>
+//   %16: i64 = field.count %15: Node
+//   call.print %16: i64
+//   call.free %2: ptr<u8>
+//   return void: void
+// }

@@ -1,0 +1,115 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+// The verifier's rules are what the lowering never breaks, so the corpus
+// cannot reach them; these modules are written by hand, the way the Go
+// verify tests build theirs, and the failure each one names must read as
+// the Go message does.
+
+/// Builds a function of one void-returning caller in a fresh module, and
+/// hands back the module with the entry block left for the case to end.
+fn caller_module(allocator: Allocator, return_type: []u8) -> !Module {
+    var module = new_module(allocator);
+    errdefer module.deinit();
+    let name = try module.names.intern("caller");
+    let returned = try module.names.intern(return_type);
+    let function = Function {
+        node: module.function_nodes.add(FunctionNode {
+            name: name,
+            params: array::new<Param>(allocator),
+            return_type: returned,
+            blocks: array::new<Block>(allocator)
+        })
+    };
+    try module.functions.append(function);
+    let entry = try module.names.intern("entry");
+    let _ = try module.add_block(function, entry);
+    return move module;
+}
+
+/// Returns the first block of the first function.
+fn entry_block(module: &Module) -> Block {
+    let function = module.functions.get_or_panic(0);
+    let node = module.function_nodes.at(function.node);
+    return node.blocks.get_or_panic(0);
+}
+
+/// Reports whether the verifier rejects module with a message carrying
+/// want.
+fn rejects_with(allocator: Allocator, module: &Module, want: []u8) -> !bool {
+    if try verify(allocator, module) |failed| {
+        defer failed.deinit();
+        let message = failed.message.as_bytes();
+        return contains_bytes(message, want);
+    }
+    return false;
+}
+
+fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let length = mem::len(haystack);
+    let needle_length = mem::len(needle);
+    var start = 0;
+    while start + needle_length <= length {
+        if mem::equal_bytes(haystack[start..start + needle_length], needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+test "verify rejects a block without a terminator" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "void");
+    defer module.deinit();
+    testing::expect(try rejects_with(allocator, &module, "caller: block entry has no terminator"));
+}
+
+test "verify rejects a branch to a block that does not exist" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "void");
+    defer module.deinit();
+    let cond = Value { name: try module.names.intern("%c"), type_name: try module.names.intern("bool") };
+    let nowhere = try module.names.intern("nowhere");
+    let exit = try module.names.intern("exit");
+    let entry = entry_block(&module);
+    module.set_terminator(entry, branch_terminator(cond, nowhere, exit));
+    testing::expect(try rejects_with(
+        allocator, &module, "caller: block entry branches to nowhere, which does not exist"
+    ));
+}
+
+test "verify rejects a return of another type" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "i64");
+    defer module.deinit();
+    let value = Value { name: try module.names.intern("%v"), type_name: try module.names.intern("i32") };
+    let entry = entry_block(&module);
+    module.set_terminator(entry, return_terminator(value));
+    testing::expect(try rejects_with(
+        allocator, &module, "caller: return value in block entry is i32, declared i64"
+    ));
+}
+
+test "verify rejects a read above its definition" {
+    let allocator = mem::page_allocator();
+    var module = try caller_module(allocator, "void");
+    defer module.deinit();
+    let i64_type = try module.names.intern("i64");
+    let x = Value { name: try module.names.intern("%x"), type_name: i64_type };
+    let y = Value { name: try module.names.intern("%y"), type_name: i64_type };
+    let one = try module.names.intern("1");
+    let entry = entry_block(&module);
+    // %y reads %x, which is only defined afterwards.
+    let minus = try module.names.intern("-");
+    var read = module.blank_instr(y, Op::Unary, minus, empty_name());
+    errdefer read.deinit();
+    try read.args.append(x);
+    let _ = try module.add_instr(entry, move read);
+    let define = module.blank_instr(x, Op::Const, empty_name(), one);
+    let _ = try module.add_instr(entry, move define);
+    let void_value = Value { name: try module.names.intern("void"), type_name: try module.names.intern("void") };
+    module.set_terminator(entry, return_terminator(void_value));
+    testing::expect(try rejects_with(allocator, &module, "caller: block entry reads %x before it is defined"));
+}

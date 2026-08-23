@@ -1,0 +1,405 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of the generic instantiation half of internal/ir/lower.go:
+// binding a generic declaration's static parameters for one call, requesting
+// and lowering instances, and the symbol an instance lowers under.
+
+/// Is the symbol and signature a generic call resolves to, the Go
+/// `(string, Signature)` pair `requestGenericInstance` returns.
+pub struct ResolvedInstance {
+    pub symbol: Name,
+    pub signature: SignatureHandle
+}
+
+/// Records that one generic function is needed for one type argument, the
+/// Go `requestGenericInstance`, and returns the symbol it will be lowered
+/// under together with the signature the caller sees. Lowering happens after
+/// the current function finishes, so an instantiation never interrupts the
+/// function that asked for it. null carries the failure in out_failed.
+fn (self: &var Lowerer) request_generic_instance(
+    tree: &var ast::Ast,
+    name: Name,
+    type_args: Name,
+    out: &var ResolvedInstance
+) -> !?diagnostic::Diagnostic {
+    var bound = self.blank_binding();
+    if try self.generic_bindings(tree, name, type_args, &var bound) |failed| {
+        return move failed;
+    }
+    let decl = bound.decl;
+    let args = bound.args;
+    let symbol = try self.generic_instance_name(name, args);
+    let retained = name_text(&self.module.names, symbol);
+    let symbol_bytes = retained.as_bytes();
+    if !self.instantiated.contains(symbol_bytes) {
+        try self.instantiated.insert(symbol_bytes, true);
+        try self.pending.append(GenericInstance { decl: decl, args: args, symbol: symbol });
+    }
+    // The signature the caller sees resolves the forms the declaration
+    // wrote, so a `-> std::meta::field_type<T, f>` result arrives as the
+    // field's type.
+    var mark = MetaMark { previous: self.meta_current };
+    if try self.bind_instance_fields(tree, decl, args, &var mark) |failed| {
+        return move failed;
+    }
+    let signature = try self.instance_signature(decl, args);
+    self.restore_meta(mark);
+    out.* = ResolvedInstance { symbol: symbol, signature: signature };
+    return null;
+}
+
+/// Is one generic declaration bound for one call: the declaration and its
+/// arguments, the Go `(*ast.FunctionDecl, genericArguments)` pair.
+pub struct GenericBinding {
+    pub decl: FactsHandle,
+    pub args: GenericArgsHandle
+}
+
+/// Returns the record `generic_bindings` fills, pointing at the scratch
+/// entries until it does.
+fn (self: &Lowerer) blank_binding() -> GenericBinding {
+    return GenericBinding { decl: self.scratch_facts, args: self.scratch_args };
+}
+
+/// Returns an empty binding set, the slot `generic_bindings` fills.
+fn blank_generic_args(allocator: Allocator) -> GenericArgs {
+    return GenericArgs {
+        order: array::new<Name>(allocator),
+        bindings: array::new<TypeBinding>(allocator),
+        binding_names: array::new<string::String>(allocator),
+        binding_types: array::new<string::String>(allocator),
+        values: array::new<StaticValue>(allocator)
+    };
+}
+
+/// Binds one generic declaration's static parameters to the arguments of one
+/// call, the Go `genericBindings`. Every reader of an instantiation -- the
+/// request that lowers its body and the caller that hands arguments to it --
+/// reads this, so they cannot disagree about what the instance is. The
+/// declaration and the bindings are written into the handles given.
+fn (self: &var Lowerer) generic_bindings(
+    tree: &var ast::Ast,
+    name: Name,
+    type_args: Name,
+    out: &var GenericBinding
+) -> !?diagnostic::Diagnostic {
+    let decl = self.generic_decl(name) orelse return try self.fail1(
+        tree, "ir error: `%s` is not a generic function", Arg::Str(name)
+    );
+    let type_args_copy = try self.module.names.copy(type_args);
+    defer type_args_copy.deinit();
+    let bytes = type_args_copy.as_bytes();
+    if try typ::split_args_optional(self.allocator, bytes) |parts| {
+        defer parts.deinit();
+        return self.bind_generic_args(tree, name, decl, &parts, out);
+    }
+    let reason_text = try self.split_args_reason(bytes);
+    defer reason_text.deinit();
+    let reason_bytes = reason_text.as_bytes();
+    let reason = try self.name(reason_bytes);
+    return try self.fail2(tree, "ir error: `%s`: %s", Arg::Str(name), Arg::Str(reason));
+}
+
+/// Binds one generic declaration's static parameters to the split arguments
+/// of one call, the body of `genericBindings` after the split.
+fn (self: &var Lowerer) bind_generic_args(
+    tree: &var ast::Ast,
+    name: Name,
+    decl: FactsHandle,
+    parts: &array::Array<string::String>,
+    out: &var GenericBinding
+) -> !?diagnostic::Diagnostic {
+    let count = self.decl_static_param_count(decl);
+    if parts.len() != count {
+        return try self.fail3(
+            tree, "ir error: `%s` takes %d static parameters, got %d",
+            Arg::Str(name), Arg::Int(count), Arg::Int(parts.len())
+        );
+    }
+    let arg_names = try self.module.names.intern_all(parts);
+    defer arg_names.deinit();
+    let args = GenericArgsHandle { node: self.generic_args.add(blank_generic_args(self.allocator)) };
+    out.* = GenericBinding { decl: decl, args: args };
+    var index = 0;
+    while index < count {
+        let param = self.decl_static_param(decl, index);
+        let arg = arg_names.get(index) orelse empty_name();
+        index = index + 1;
+        if self.generic_args.at_mut(args.node) |node| {
+            try node.order.append(param.name);
+        }
+        if param.is_type {
+            // Resolve first: inside `fn twice<T>` a call to `wrap<T>` needs
+            // the argument T is currently bound to, not the parameter name.
+            let bound = try self.resolve_bound_type(arg);
+            try self.add_type_binding(args, param.name, bound);
+            continue;
+        }
+        // A compile-time value reaches the body as a constant, or -- for a
+        // `Function` parameter -- as the name of the function to forward to.
+        let text = self.resolve_static_value(arg);
+        if self.generic_args.at_mut(args.node) |node| {
+            try node.values.append(StaticValue { name: param.name, typ: param.type_name, text: text });
+        }
+    }
+    return null;
+}
+
+/// Records one type parameter binding in both forms the lowerer reads.
+fn (self: &var Lowerer) add_type_binding(args: GenericArgsHandle, name: Name, bound: Name) -> !void {
+    let name_copy = try self.module.names.copy(name);
+    errdefer name_copy.deinit();
+    let bound_copy = try self.module.names.copy(bound);
+    errdefer bound_copy.deinit();
+    if self.generic_args.at_mut(args.node) |node| {
+        try node.bindings.append(TypeBinding { name: name, bound: bound });
+        try node.binding_names.append(move name_copy);
+        try node.binding_types.append(move bound_copy);
+        return;
+    }
+    name_copy.deinit();
+    bound_copy.deinit();
+    return;
+}
+
+/// Spells why a static argument list could not be split, the Go
+/// `typ.SplitArgs` error text: the reason and the list it was read from.
+fn (self: &Lowerer) split_args_reason(text: []u8) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var depth = 0;
+    var index = 0;
+    var reason = "type error: empty static argument in `";
+    var decided = false;
+    while index < mem::len(text) and !decided {
+        let byte = text[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        }
+        if byte == cast<u8>(62) {
+            depth = depth - 1;
+            if depth < 0 {
+                reason = "type error: unbalanced `>` in `";
+                decided = true;
+            }
+        }
+        index = index + 1;
+    }
+    if !decided and depth != 0 {
+        reason = "type error: unbalanced `<` in `";
+    }
+    try out.append_bytes(reason);
+    try out.append_bytes(text);
+    try out.append_bytes("`");
+    return move out;
+}
+
+/// Returns the parameters a generic declaration has at these type arguments,
+/// without asking for the instance, the Go `declaredInstanceParams`. A
+/// callee that lowers to an instruction of its own never has its body
+/// called, so the caller needs the types it hands over but not the
+/// instantiation.
+fn (self: &var Lowerer) declared_instance_params(
+    tree: &var ast::Ast,
+    name: Name,
+    type_args: Name,
+    out: &var ParamsView
+) -> !?diagnostic::Diagnostic {
+    var bound = self.blank_binding();
+    if try self.generic_bindings(tree, name, type_args, &var bound) |failed| {
+        return move failed;
+    }
+    let signature = try self.instance_signature(bound.decl, bound.args);
+    out.* = params_of(signature);
+    return null;
+}
+
+/// Returns the signature a generic declaration has once its type arguments
+/// are bound, the Go `instanceSignature`. The caller sees the instance's
+/// types, not the declaration's.
+fn (self: &var Lowerer) instance_signature(decl: FactsHandle, args: GenericArgsHandle) -> !SignatureHandle {
+    let previous = self.current_args;
+    self.current_args = args;
+    let signature = try self.lower_signature(decl);
+    self.current_args = previous;
+    return signature;
+}
+
+/// Lowers every requested instantiation, the Go `lowerPendingGenerics`,
+/// including any an instantiation itself requests.
+fn (self: &var Lowerer) lower_pending_generics(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
+    while self.pending.get(self.pending_next) |next| {
+        self.pending_next = self.pending_next + 1;
+        self.current_args = next.args;
+        // A `Field` static argument names a field of the type bound
+        // alongside it, and the body reads it through the `std::meta` forms
+        // written against the parameter. Binding it here is what makes each
+        // field its own instance rather than one generic body.
+        var mark = MetaMark { previous: self.meta_current };
+        if try self.bind_instance_fields(tree, next.decl, next.args, &var mark) |failed| {
+            self.clear_bindings();
+            return move failed;
+        }
+        if try self.lower_function_named(tree, next.decl, next.symbol) |failed| {
+            self.restore_meta(mark);
+            self.clear_bindings();
+            return move failed;
+        }
+        self.restore_meta(mark);
+        self.clear_bindings();
+    }
+    return null;
+}
+
+/// Binds the `Field` static arguments of one instance to the fields they
+/// name, the Go `bindInstanceFields`; `restore_meta(mark)` unbinds them. The
+/// owner is the type argument declared before the parameter, the pairing
+/// `std::meta::field_type<T, f>` is written with.
+fn (self: &var Lowerer) bind_instance_fields(
+    tree: &var ast::Ast,
+    decl: FactsHandle,
+    args: GenericArgsHandle,
+    mark: &var MetaMark
+) -> !?diagnostic::Diagnostic {
+    mark.* = MetaMark { previous: self.meta_current };
+    var owner = empty_name();
+    let count = self.decl_static_param_count(decl);
+    var index = 0;
+    while index < count {
+        let param = self.decl_static_param(decl, index);
+        index = index + 1;
+        if param.is_type {
+            owner = self.bound_type(args, param.name) orelse empty_name();
+            continue;
+        }
+        if !self.name_is(param.type_name, "Field") {
+            continue;
+        }
+        var fields = array::new<MetaField>(self.allocator);
+        defer fields.deinit();
+        if try self.public_fields(tree, owner, &var fields) |failed| {
+            return move failed;
+        }
+        let wanted = self.static_value_in(args, param.name);
+        var found = false;
+        var field_index = 0;
+        while fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            if same_name(field.name, wanted) {
+                try self.bind_meta_field(param.name, field);
+                found = true;
+            }
+        }
+        if !found {
+            return try self.fail2(
+                tree, "ir error: `%s` has no public field `%s`", Arg::Str(owner), Arg::Str(wanted)
+            );
+        }
+    }
+    return null;
+}
+
+/// Returns the text of the static value bound to name in one binding set,
+/// the Go `values[name].text`; empty when none.
+fn (self: &Lowerer) static_value_in(args: GenericArgsHandle, name: Name) -> Name {
+    let node = self.generic_args.at(args.node);
+    var index = 0;
+    while node.values.get(index) |value| {
+        index = index + 1;
+        if same_name(value.name, name) {
+            return value.text;
+        }
+    }
+    return empty_name();
+}
+
+/// Returns the generic function declaration with this IR name, the Go
+/// `genericDecl`.
+fn (self: &Lowerer) generic_decl(name: Name) -> ?FactsHandle {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return self.generic_decls.get(bytes);
+}
+
+/// Returns the symbol one instantiation is lowered under, the Go
+/// `genericInstanceName`. Static parameters are listed in declaration order
+/// so the symbol is stable.
+fn (self: &var Lowerer) generic_instance_name(name: Name, args: GenericArgsHandle) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try self.module.names.append_to(&var out, name);
+    let count = self.order_count(args);
+    var index = 0;
+    while index < count {
+        let param = self.order_at(args, index);
+        index = index + 1;
+        try out.append_byte(cast<u8>(46));
+        if self.bound_type(args, param) |bound| {
+            try self.append_encoded_static_arg(&var out, bound);
+            continue;
+        }
+        let value = self.static_value_in(args, param);
+        try self.append_encoded_static_arg(&var out, value);
+    }
+    return self.module.names.intern_owned(move out);
+}
+
+/// Returns the number of static parameters a binding set orders.
+fn (self: &Lowerer) order_count(args: GenericArgsHandle) -> i64 {
+    let node = self.generic_args.at(args.node);
+    return node.order.len();
+}
+
+/// Returns the static parameter name at position in declaration order.
+fn (self: &Lowerer) order_at(args: GenericArgsHandle, index: i64) -> Name {
+    let node = self.generic_args.at(args.node);
+    return node.order.get(index) orelse empty_name();
+}
+
+/// Spells one static argument in the character set every backend accepts,
+/// the Go `encodeStaticArg`, so a lowered name needs no further mangling on
+/// the way out. A byte a source identifier can hold passes through, which
+/// keeps `i64` and `4096` readable; every other byte is escaped, so two
+/// different arguments cannot collide on one symbol.
+fn (self: &Lowerer) append_encoded_static_arg(out: &var string::String, arg: Name) -> !void {
+    let retained = name_text(&self.module.names, arg);
+    let bytes = retained.as_bytes();
+    var index = 0;
+    while index < mem::len(bytes) {
+        let byte = bytes[index];
+        index = index + 1;
+        if byte == cast<u8>(95) {
+            try out.append_bytes("__");
+            continue;
+        }
+        if (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+            (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+            (byte >= cast<u8>(48) and byte <= cast<u8>(57)) {
+            try out.append_byte(byte);
+            continue;
+        }
+        try out.append_byte(cast<u8>(95));
+        try append_hex_byte(out, byte);
+    }
+    return;
+}
+
+/// Appends one byte as two lowercase hex digits, the Go `%02x`.
+fn append_hex_byte(out: &var string::String, byte: u8) -> !void {
+    let value = cast<i64>(byte);
+    try out.append_byte(hex_digit(value / 16));
+    return out.append_byte(hex_digit(value % 16));
+}
+
+/// Returns the lowercase hex digit for a value below 16.
+fn hex_digit(value: i64) -> u8 {
+    if value < 10 {
+        return cast<u8>(48 + value);
+    }
+    return cast<u8>(87 + value);
+}
