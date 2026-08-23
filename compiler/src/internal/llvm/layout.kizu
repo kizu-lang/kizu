@@ -1,0 +1,230 @@
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/layout.go: the byte size and alignment
+// of a value type under the #991 inline tagged-union payload ABI. Go carries
+// the named aggregates on the recursion path as a slice that grows per call;
+// here the path is one owned list pushed before and popped after each
+// aggregate, which is the same visibility.
+
+/// Bounds the alignment the #991 inline tagged-union payload storage can
+/// guarantee. A union lowers to `{ i64, [N x i8] }`; the i64 tag forces
+/// 8-byte struct alignment, so the inline storage starts at an 8-aligned
+/// offset and can hold any payload whose alignment is at most 8.
+fn max_inline_payload_align() -> i64 {
+    return 8;
+}
+
+/// Is the byte size and alignment of one inline value type.
+struct Layout {
+    size: i64,
+    align: i64
+}
+
+/// Is the inline byte capacity and payload alignment of one union.
+struct PayloadStorage {
+    capacity: i64,
+    align: i64
+}
+
+/// Returns the byte size and alignment of an IR value type when the #991
+/// tagged-union payload ABI can store it inline, the Go `typeLayout`; null
+/// for shapes the ABI does not support inline: unbounded/recursive by-value
+/// aggregates, unknown types, error unions, or integer widths outside the
+/// value layout table.
+fn (self: &Emitter) type_layout(module: &ir::Module, typ_name: []u8) -> !?Layout {
+    var seen = array::new<string::String>(self.allocator);
+    defer seen.deinit();
+    return self.type_layout_visiting(module, typ_name, &var seen);
+}
+
+/// Computes a type layout while tracking the named aggregates already on the
+/// recursion path so a by-value cycle is rejected, not looped, the Go
+/// `typeLayoutVisiting`. It only accepts the shapes the #991 value layout
+/// table defines inline; every other type (error unions, raw pointers,
+/// non-i64/u8 integer widths, and unknown type names) reports null so it
+/// fails visibly rather than being silently treated as a pointer.
+fn (self: &Emitter) type_layout_visiting(
+    module: &ir::Module,
+    typ_name: []u8,
+    seen: &var array::Array<string::String>
+) -> !?Layout {
+    if primitive_layout(typ_name) |layout| {
+        return layout;
+    }
+    if lowers_to_word(module, typ_name) {
+        return Layout { size: 8, align: 8 };
+    }
+    // An optional is the two-field aggregate write_optional_types declares:
+    // `{ i8, elem }`, laid out the C way like any struct.
+    if typ::optional_elem(typ_name) |elem| {
+        let elem_layout = try self.type_layout_visiting(module, elem, seen) orelse return null;
+        return Layout {
+            size: round_up(round_up(1, elem_layout.align) + elem_layout.size, elem_layout.align),
+            align: elem_layout.align
+        };
+    }
+    if module.structs.at(typ_name) |declared| {
+        return self.struct_layout(module, typ_name, declared, seen);
+    }
+    if module.unions.at(typ_name) |declared| {
+        let payload = try self.union_payload_storage(module, typ_name, declared, seen) orelse return null;
+        return Layout {
+            size: round_up(8 + payload.capacity, max_inline_payload_align()),
+            align: max_inline_payload_align()
+        };
+    }
+    return null;
+}
+
+/// Returns the inline layout of a built-in scalar or view type, the Go
+/// `primitiveLayout`.
+fn primitive_layout(typ_name: []u8) -> ?Layout {
+    if mem::equal_bytes(typ_name, "void") {
+        return Layout { size: 0, align: 1 };
+    }
+    if mem::equal_bytes(typ_name, "bool") or mem::equal_bytes(typ_name, "i8") or
+        mem::equal_bytes(typ_name, "u8") {
+        return Layout { size: 1, align: 1 };
+    }
+    if mem::equal_bytes(typ_name, "i64") {
+        return Layout { size: 8, align: 8 };
+    }
+    if mem::equal_bytes(typ_name, "[]u8") {
+        return Layout { size: 16, align: 8 };
+    }
+    return null;
+}
+
+/// Reports whether a type is stored inline as one 8-byte word, the Go
+/// `lowersToWord`: an owned container or arena handle lowering to a pointer,
+/// or a tag lowering to an i64. An enum tag and an error code are the same
+/// shape here.
+fn lowers_to_word(module: &ir::Module, typ_name: []u8) -> bool {
+    if mem::equal_bytes(typ_name, "std::string::String") or is_arena_handle_type(typ_name) {
+        return true;
+    }
+    if is_array_llvm_type(typ_name) or is_map_llvm_type(typ_name) or is_arena_llvm_type(typ_name) or
+        is_box_llvm_type(typ_name) {
+        return true;
+    }
+    if module.enums.contains(typ_name) {
+        return true;
+    }
+    return module.error_sets.contains(typ_name);
+}
+
+/// Computes the C-style layout LLVM uses for a non-packed struct, the Go
+/// `structLayout`.
+fn (self: &Emitter) struct_layout(
+    module: &ir::Module,
+    name: []u8,
+    declared: &ir::Struct,
+    seen: &var array::Array<string::String>
+) -> !?Layout {
+    if contains_name(seen, name) {
+        return null;
+    }
+    let copied = try string::from_bytes(self.allocator, name);
+    errdefer copied.deinit();
+    try seen.append(move copied);
+    var size = 0;
+    var align = 1;
+    var ok = true;
+    var index = 0;
+    while declared.fields.get(index) |field| {
+        index = index + 1;
+        let field_text = ir::name_text(&module.names, field.type_name);
+        let field_bytes = field_text.as_bytes();
+        if try self.type_layout_visiting(module, field_bytes, seen) |field_layout| {
+            size = round_up(size, field_layout.align) + field_layout.size;
+            if field_layout.align > align {
+                align = field_layout.align;
+            }
+        } else {
+            ok = false;
+            break;
+        }
+    }
+    if seen.pop() |last| {
+        last.deinit();
+    }
+    if !ok {
+        return null;
+    }
+    return Layout { size: round_up(size, align), align: align };
+}
+
+/// Returns the inline byte capacity N and payload alignment required to
+/// hold the largest variant payload of a union, the Go
+/// `unionPayloadStorage`; null when any variant payload is an unsupported
+/// inline shape.
+fn (self: &Emitter) union_payload_storage(
+    module: &ir::Module,
+    name: []u8,
+    declared: &ir::Union,
+    seen: &var array::Array<string::String>
+) -> !?PayloadStorage {
+    if contains_name(seen, name) {
+        return null;
+    }
+    let copied = try string::from_bytes(self.allocator, name);
+    errdefer copied.deinit();
+    try seen.append(move copied);
+    var capacity = 0;
+    var align = 1;
+    var ok = true;
+    var index = 0;
+    while declared.variants.key_at(index) |variant_name| {
+        index = index + 1;
+        let variant = declared.variants.get(variant_name) orelse continue;
+        if ir::is_empty(variant.payload) {
+            continue;
+        }
+        let payload_text = ir::name_text(&module.names, variant.payload);
+        let payload_bytes = payload_text.as_bytes();
+        if try self.type_layout_visiting(module, payload_bytes, seen) |layout| {
+            if layout.size > capacity {
+                capacity = layout.size;
+            }
+            if layout.align > align {
+                align = layout.align;
+            }
+        } else {
+            ok = false;
+            break;
+        }
+    }
+    if seen.pop() |last| {
+        last.deinit();
+    }
+    if !ok {
+        return null;
+    }
+    return PayloadStorage { capacity: capacity, align: align };
+}
+
+/// Rounds n up to the next multiple of align, the Go `roundUp`.
+fn round_up(n: i64, align: i64) -> i64 {
+    if align <= 1 {
+        return n;
+    }
+    return ((n + align - 1) / align) * align;
+}
+
+/// Reports whether a named aggregate is already on the layout path, the Go
+/// `containsName`.
+fn contains_name(seen: &array::Array<string::String>, name: []u8) -> bool {
+    var index = 0;
+    while seen.at(index) |candidate| {
+        index = index + 1;
+        let candidate_bytes = candidate.as_bytes();
+        if mem::equal_bytes(candidate_bytes, name) {
+            return true;
+        }
+    }
+    return false;
+}

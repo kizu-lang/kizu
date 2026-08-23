@@ -1,0 +1,1054 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::sort;
+import std::string;
+
+// Mechanical port of the module-level half of internal/llvm/emit.go: the
+// header every emitted module starts with -- named types, string and name
+// tables, runtime declarations -- and the walks over the module that decide
+// which of them it needs. Go sorts map keys with sort.Strings; here the
+// names are copied into an Array of Strings and sorted with std::sort.
+
+/// Returns the global holding one enum's tag spellings, the Go
+/// `enumNameTable`.
+fn (self: &var Emitter) enum_name_table(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, typ_name);
+    let bytes = retained.as_bytes();
+    return self.enum_table_name(bytes);
+}
+
+/// Appends a type name made usable inside an LLVM global identifier, the Go
+/// `mangleGlobalName`: `:`, `<`, `>` and `,` become `_`, and spaces drop.
+fn append_mangled_global_name(out: &var string::String, typ_name: []u8) -> !void {
+    var index = 0;
+    while mem::byte_at(typ_name, index) |ch| {
+        index = index + 1;
+        if ch == cast<u8>(58) or ch == cast<u8>(60) or ch == cast<u8>(62) or ch == cast<u8>(44) {
+            try out.append_byte(cast<u8>(95));
+            continue;
+        }
+        if ch == cast<u8>(32) {
+            continue;
+        }
+        try out.append_byte(ch);
+    }
+    return;
+}
+
+/// Prints an enum by indexing its name table, so a new tag costs a table row
+/// rather than a branch in the backend, the Go `writePrintEnum`.
+fn (self: &var Emitter) write_print_enum(module: &ir::Module, typ_name: ir::Name, operand: ir::Name) -> !void {
+    let table = try self.enum_name_table(module, typ_name);
+    let retained = ir::name_text(&module.names, typ_name);
+    let bytes = retained.as_bytes();
+    var rows = 0;
+    if module.enums.at(bytes) |declared| {
+        rows = declared.tags.len();
+    }
+    return self.write_print_name_table(table, rows, operand);
+}
+
+/// Prints one tag by indexing a table of spellings, the Go
+/// `writePrintNameTable`.
+fn (self: &var Emitter) write_print_name_table(table: ir::Name, rows: i64, operand: ir::Name) -> !void {
+    return self.line3("  call void @kizu_print_enum(ptr %s, i64 %d, i64 %s)", Arg::Str(table), Arg::Int(rows), Arg::Str(operand));
+}
+
+/// Writes globals and runtime declarations, the Go `writeHeader`.
+fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
+    try self.line("; Kizu LLVM IR");
+    if uses_slice_abi(module) {
+        try self.line("%kizu.slice.u8 = type { ptr, i64 }");
+    }
+    // Optionals go first: an `E!?T` union references its `?T` member.
+    try self.write_optional_types(module);
+    try self.write_error_union_types(module);
+    try self.write_union_types(module);
+    try self.write_struct_types(module);
+    try self.write_enum_name_tables(module);
+    try self.write_error_name_table(module);
+    var literals = try self.sorted_string_literals();
+    defer literals.deinit();
+    var index = 0;
+    while literals.at(index) |global| {
+        index = index + 1;
+        let global_bytes = global.as_bytes();
+        let name = try self.names.intern(global_bytes);
+        let literal = self.string_literals.get(global_bytes) orelse continue;
+        let literal_text = ir::name_text(&module.names, literal);
+        let literal_bytes = literal_text.as_bytes();
+        var unquoted = string::new(self.allocator);
+        defer unquoted.deinit();
+        try append_unquoted(&var unquoted, literal_bytes);
+        let unquoted_bytes = unquoted.as_bytes();
+        try self.write_static_string_global(name, unquoted_bytes);
+    }
+    if self.strings.len() > 0 {
+        try self.line("");
+    }
+    try self.line("declare void @kizu_print_string(ptr, i64)");
+    try self.line("declare void @kizu_print_int(i64)");
+    try self.line("declare void @kizu_print_bool(i1)");
+    if try self.prints_named_tag(module) {
+        try self.line("declare void @kizu_print_enum(ptr, i64, i64)");
+    }
+    try self.line("declare void @kizu_main_error_message(ptr, i64)");
+    try self.line("");
+    try self.line("declare void @kizu_runtime_init_args(i32, ptr)");
+    try self.line("");
+    try self.write_array_runtime_decls(module);
+    try self.write_map_runtime_decls(module);
+    try self.write_arena_runtime_decls(module);
+    try self.write_box_runtime_decls(module);
+    try self.write_test_runtime_decls(module);
+    try self.write_external_call_decls(module);
+    return self.write_panic_decls(module);
+}
+
+/// Appends the bytes a quoted IR string literal spells, the Go
+/// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
+/// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
+/// malformed literal; here the output stays empty for one.
+fn append_unquoted(out: &var string::String, literal: []u8) -> !void {
+    let length = mem::len(literal);
+    if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
+        return;
+    }
+    let start = out.len();
+    var index = 1;
+    while index < length - 1 {
+        let ch = literal[index];
+        if ch != cast<u8>(92) {
+            try out.append_byte(ch);
+            index = index + 1;
+            continue;
+        }
+        if index + 1 >= length - 1 {
+            return out.truncate(start);
+        }
+        let escape = literal[index + 1];
+        index = index + 2;
+        if escape == cast<u8>(92) or escape == cast<u8>(34) {
+            try out.append_byte(escape);
+            continue;
+        }
+        if escape == cast<u8>(110) {
+            try out.append_byte(cast<u8>(10));
+            continue;
+        }
+        if escape == cast<u8>(114) {
+            try out.append_byte(cast<u8>(13));
+            continue;
+        }
+        if escape == cast<u8>(116) {
+            try out.append_byte(cast<u8>(9));
+            continue;
+        }
+        if escape == cast<u8>(120) and index + 1 < length - 1 + 1 and index + 2 <= length - 1 {
+            if hex_value(literal[index]) |high| {
+                if hex_value(literal[index + 1]) |low| {
+                    try out.append_byte(cast<u8>(high * 16 + low));
+                    index = index + 2;
+                    continue;
+                }
+            }
+        }
+        return out.truncate(start);
+    }
+    return;
+}
+
+/// Returns the value of one hexadecimal digit, or null.
+fn hex_value(ch: u8) -> ?i64 {
+    if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
+        return cast<i64>(ch) - 48;
+    }
+    if ch >= cast<u8>(65) and ch <= cast<u8>(70) {
+        return cast<i64>(ch) - 55;
+    }
+    if ch >= cast<u8>(97) and ch <= cast<u8>(102) {
+        return cast<i64>(ch) - 87;
+    }
+    return null;
+}
+
+/// Defines the spelling of every error code this module can carry, indexed
+/// by the code itself, the Go `writeErrorNameTable`. Codes are global, so
+/// one table serves all sets; row 0 is the reserved "no error" entry and
+/// stays empty.
+fn (self: &var Emitter) write_error_name_table(module: &ir::Module) -> !void {
+    if !try self.needs_error_name_table(module) {
+        return;
+    }
+    var spellings = map::new<[]u8, ir::Name>(self.allocator);
+    defer spellings.deinit();
+    var set_index = 0;
+    while module.error_sets.key_at(set_index) |set_name| {
+        set_index = set_index + 1;
+        if module.error_sets.at(set_name) |set| {
+            var tag_index = 0;
+            while set.tags.key_at(tag_index) |member| {
+                tag_index = tag_index + 1;
+                let code = set.tags.get(member) orelse continue;
+                var spelling = try module.names.copy(set.name);
+                errdefer spelling.deinit();
+                try spelling.append_bytes("::");
+                try spelling.append_bytes(member);
+                let spelling_name = try self.names.intern_owned(move spelling);
+                var key = string::new(self.allocator);
+                defer key.deinit();
+                try fmt::append_i64(&var key, code);
+                let key_bytes = key.as_bytes();
+                try spellings.insert(key_bytes, spelling_name);
+            }
+        }
+    }
+    let row_count = error_name_table_rows(module);
+    var rows = array::new<string::String>(self.allocator);
+    defer rows.deinit();
+    var code = 0;
+    while code < row_count {
+        var key = string::new(self.allocator);
+        defer key.deinit();
+        try fmt::append_i64(&var key, code);
+        let key_bytes = key.as_bytes();
+        if spellings.get(key_bytes) |spelling| {
+            let global = try self.text1("@.kizu.error.name.%d", Arg::Int(code));
+            var spelling_text = try self.names.copy(spelling);
+            defer spelling_text.deinit();
+            let spelling_bytes = spelling_text.as_bytes();
+            try self.write_static_string_global(global, spelling_bytes);
+            try rows.append(try self.sprint2(
+                "{ ptr, i64 } { ptr %s, i64 %d }", Arg::Str(global), Arg::Int(mem::len(spelling_bytes))
+            ));
+        } else {
+            try rows.append(try string::from_bytes(self.allocator, "{ ptr, i64 } { ptr null, i64 0 }"));
+        }
+        code = code + 1;
+    }
+    let joined = try string::join(self.allocator, &rows, ", ");
+    try self.line3(
+        "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]",
+        Arg::Lit(error_name_table()), Arg::Int(rows.len()), Arg::Owned(move joined)
+    );
+    return self.line("");
+}
+
+/// Declares the failure entries this module reports through, the Go
+/// `writePanicDecls`.
+fn (self: &var Emitter) write_panic_decls(module: &ir::Module) -> !void {
+    var keys = try self.used_panic_entries(module);
+    defer keys.deinit();
+    var index = 0;
+    while keys.at(index) |spelling| {
+        index = index + 1;
+        let spelling_bytes = spelling.as_bytes();
+        let key = parse_panic_key(spelling_bytes) orelse continue;
+        var params = string::new(self.allocator);
+        errdefer params.deinit();
+        try append_panic_params(&var params, key);
+        try self.line2("declare void @%s(%s)", Arg::Lit(panic_entry(key).entry), Arg::Owned(move params));
+    }
+    if keys.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Returns the failure keys the module reports, sorted, the Go
+/// `usedPanicEntries`.
+fn (self: &var Emitter) used_panic_entries(module: &ir::Module) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_panic_entry(module, instr_node) |key| {
+                    try seen.insert(panic_key_spelling(key), true);
+                }
+            }
+        }
+    }
+    return sorted_keys(self.allocator, &seen);
+}
+
+/// Returns the failure key one instruction can report, the Go
+/// `instrPanicEntries`; null for an instruction that reports none. A
+/// `cond_fail` whose kind is not a known entry reports none here; writing
+/// it fails the same way Go's does.
+fn instr_panic_entry(module: &ir::Module, node: &ir::InstrNode) -> ?PanicKey {
+    match node.op {
+        CondFail => {
+            let retained = ir::name_text(&module.names, node.immediate);
+            let bytes = retained.as_bytes();
+            return parse_panic_key(bytes);
+        },
+        ArrayGetOrPanic => return PanicKey::Bounds,
+        MapTakeValueAt => return PanicKey::Bounds,
+        ArrayPopOrPanic => return PanicKey::ArrayEmpty,
+        ArenaPopOrPanic => return PanicKey::ArenaEmpty,
+        ArenaAt => return PanicKey::ArenaHandle,
+        ArenaAdd => return PanicKey::ArenaAdd,
+        TestFail => return PanicKey::TestFail,
+        PanicFail => return PanicKey::PanicFail,
+        TestExpectEqual => return expect_entry_key(module, node),
+        _ => return null,
+    }
+}
+
+/// Selects the reporting entry for one equality assertion, the Go
+/// `expectEntryKey`.
+fn expect_entry_key(module: &ir::Module, node: &ir::InstrNode) -> PanicKey {
+    if node.args.len() == 0 {
+        return PanicKey::ExpectInt;
+    }
+    let first = node.args.get_or_panic(0);
+    if module.names.is(first.type_name, "bool") {
+        return PanicKey::ExpectBool;
+    }
+    if module.names.is(first.type_name, "[]u8") {
+        return PanicKey::ExpectBytes;
+    }
+    return PanicKey::ExpectInt;
+}
+
+/// Writes named recoverable-result ABI definitions, the Go
+/// `writeErrorUnionTypes`.
+fn (self: &var Emitter) write_error_union_types(module: &ir::Module) -> !void {
+    var names = try self.sorted_error_union_names(module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        let parts = try self.error_union_parts(name_bytes) orelse continue;
+        defer parts.deinit();
+        let union_name = try self.llvm_error_union_type_name(name_bytes);
+        let success_bytes = parts.success.as_bytes();
+        if mem::equal_bytes(success_bytes, "void") {
+            try self.line2("%s = type { i8, %s }", Arg::Str(union_name), Arg::Lit("i64"));
+            continue;
+        }
+        let success_type = try self.llvm_type(module, success_bytes);
+        try self.line3("%s = type { i8, %s, %s }", Arg::Str(union_name), Arg::Str(success_type), Arg::Lit("i64"));
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Writes named optional-value ABI definitions, the Go
+/// `writeOptionalTypes`: a presence tag and the payload, the layout `!T`
+/// success already uses.
+fn (self: &var Emitter) write_optional_types(module: &ir::Module) -> !void {
+    var names = try self.sorted_optional_names(module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        let opt_name = try self.llvm_optional_type_name(name_bytes);
+        if typ::optional_elem(name_bytes) |elem| {
+            let elem_type = try self.llvm_type(module, elem);
+            try self.line2("%s = type { i8, %s }", Arg::Str(opt_name), Arg::Str(elem_type));
+        }
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Names what one type-name collector records, the two callbacks the Go
+/// `collectModuleTypeNames` is handed.
+enum TypeCollector {
+    Optional,
+    ErrorUnion,
+}
+
+/// Returns every optional type this module spells, the Go
+/// `sortedOptionalNames`.
+fn (self: &var Emitter) sorted_optional_names(module: &ir::Module) -> !array::Array<string::String> {
+    return self.collect_module_type_names(module, TypeCollector::Optional);
+}
+
+/// Returns all error-union types referenced by this module, the Go
+/// `sortedErrorUnionNames`.
+fn (self: &var Emitter) sorted_error_union_names(module: &ir::Module) -> !array::Array<string::String> {
+    return self.collect_module_type_names(module, TypeCollector::ErrorUnion);
+}
+
+/// Hands a type spelling to one collector, the Go callbacks
+/// `collectOptionalName` and `collectErrorUnionName`.
+fn (self: &var Emitter) collect_type_name(collector: TypeCollector, seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
+    match collector {
+        Optional => return self.collect_optional_name(seen, name),
+        ErrorUnion => return self.collect_error_union_name(seen, name),
+    }
+}
+
+/// Records name when it is an optional value type, or an error union whose
+/// success is one (`E!?T` defines `?T`'s aggregate too), the Go
+/// `collectOptionalName`.
+fn (self: &var Emitter) collect_optional_name(seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
+    if is_optional_type(name) {
+        return seen.insert(name, true);
+    }
+    // Only an error union can hold an optional, and every error-union
+    // spelling contains `!`; the byte check keeps this walk parse-free for
+    // the scalar names that dominate a module.
+    if !contains_bytes(name, "!") {
+        return;
+    }
+    if try self.error_union_success_type(name) |success| {
+        defer success.deinit();
+        let success_bytes = success.as_bytes();
+        return self.collect_optional_name(seen, success_bytes);
+    }
+    return;
+}
+
+/// Records concrete !T / Error!T type names, the Go `collectErrorUnionName`:
+/// an error union nested in a static argument needs its named type too
+/// (`std::array::Array<!i64>` stores `!i64`, so the element has to be
+/// sized), which is what the walk over the parsed type finds.
+fn (self: &var Emitter) collect_error_union_name(seen: &var map::Map<[]u8, bool>, name: []u8) -> !void {
+    if mem::len(name) == 0 {
+        return;
+    }
+    let parsed = try self.types.parse(name);
+    return collect_error_union_nodes(self.allocator, &self.types, parsed, seen);
+}
+
+/// Records the spelling of every error-union node of a parsed type, the Go
+/// `typ.Walk` with its ErrorUnion visitor.
+fn collect_error_union_nodes(
+    allocator: Allocator,
+    types: &typ::Table,
+    value: typ::Type,
+    seen: &var map::Map<[]u8, bool>
+) -> !void {
+    match typ::root_node(types, value) {
+        ErrorUnion(node) => {
+            var rendered = try typ::render(allocator, types, value);
+            defer rendered.deinit();
+            let rendered_bytes = rendered.as_bytes();
+            try seen.insert(rendered_bytes, true);
+            if node.err |err| {
+                try collect_error_union_nodes(allocator, types, typ::child_type(value, err), seen);
+            }
+            return collect_error_union_nodes(allocator, types, typ::child_type(value, node.ok), seen);
+        },
+        Name(node) => {
+            var index = 0;
+            while node.args.get(index) |arg| {
+                index = index + 1;
+                try collect_error_union_nodes(allocator, types, typ::child_type(value, arg), seen);
+            }
+            return;
+        },
+        Slice(node) => return collect_error_union_nodes(allocator, types, typ::child_type(value, node.elem), seen),
+        Buffer(node) => return collect_error_union_nodes(allocator, types, typ::child_type(value, node.elem), seen),
+        Borrow(node) => return collect_error_union_nodes(allocator, types, typ::child_type(value, node.elem), seen),
+        Optional(node) => return collect_error_union_nodes(allocator, types, typ::child_type(value, node.elem), seen),
+        Const(node) => return collect_error_union_nodes(allocator, types, typ::child_type(value, node.elem), seen),
+    }
+}
+
+/// Hands every type spelling the module holds to one collector, then
+/// returns the recorded names sorted, the Go `collectModuleTypeNames`. One
+/// walk serves every named-type collector, so none of them can drop a
+/// position the others scan.
+fn (self: &var Emitter) collect_module_type_names(module: &ir::Module, collector: TypeCollector) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var struct_index = 0;
+    while module.structs.key_at(struct_index) |struct_name| {
+        struct_index = struct_index + 1;
+        if module.structs.at(struct_name) |declared| {
+            var field_index = 0;
+            while declared.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                try self.collect_module_name(module, collector, &var seen, field.type_name);
+            }
+        }
+    }
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        try self.collect_module_name(module, collector, &var seen, node.return_type);
+        var param_index = 0;
+        while node.params.get(param_index) |param| {
+            param_index = param_index + 1;
+            try self.collect_module_name(module, collector, &var seen, param.type_name);
+        }
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                try self.collect_module_name(module, collector, &var seen, instr_node.result.type_name);
+                var arg_index = 0;
+                while instr_node.args.get(arg_index) |arg| {
+                    arg_index = arg_index + 1;
+                    try self.collect_module_name(module, collector, &var seen, arg.type_name);
+                }
+                var field_index = 0;
+                while instr_node.fields.get(field_index) |field| {
+                    field_index = field_index + 1;
+                    try self.collect_module_name(module, collector, &var seen, field.value.type_name);
+                }
+                var incoming_index = 0;
+                while instr_node.incoming.get(incoming_index) |incoming| {
+                    incoming_index = incoming_index + 1;
+                    try self.collect_module_name(module, collector, &var seen, incoming.value.type_name);
+                }
+            }
+            try self.collect_module_name(module, collector, &var seen, block_node.terminator.value.type_name);
+            try self.collect_module_name(module, collector, &var seen, block_node.terminator.cond.type_name);
+        }
+    }
+    return sorted_keys(self.allocator, &seen);
+}
+
+/// Hands the text of one type the module names to a collector.
+fn (self: &var Emitter) collect_module_name(
+    module: &ir::Module,
+    collector: TypeCollector,
+    seen: &var map::Map<[]u8, bool>,
+    name: ir::Name
+) -> !void {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.collect_type_name(collector, seen, bytes);
+}
+
+/// Copies the keys of a set into a sorted list, the Go `sort.Strings` over
+/// a map's keys.
+fn sorted_keys(allocator: Allocator, seen: &map::Map<[]u8, bool>) -> !array::Array<string::String> {
+    var names = array::new<string::String>(allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while seen.key_at(index) |name| {
+        index = index + 1;
+        let copied = try string::from_bytes(allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+    }
+    try sort::strings(&var names);
+    return move names;
+}
+
+/// Rejects unsupported ABI shapes before header emission, the Go
+/// `validateModuleTypes`.
+fn (self: &var Emitter) validate_module_types(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    var names = try self.sorted_error_union_names(module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        if try self.validate_error_union_type(name_bytes) |failed| {
+            return move failed;
+        }
+    }
+    var unions = try sorted_union_names(self.allocator, module);
+    defer unions.deinit();
+    index = 0;
+    while unions.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        let capacity = try self.union_payload_capacity(module, name_bytes);
+        match capacity {
+            Error(failed) => return move failed,
+            Capacity(_) => {},
+        }
+    }
+    return null;
+}
+
+/// Is the inline payload byte capacity of a union, or the #991 diagnostic
+/// that a variant payload is an unsupported shape.
+union CapacityResult {
+    Capacity(i64),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Returns the inline payload byte capacity for a declared union, or a #991
+/// diagnostic when a variant payload is an unsupported shape, the Go
+/// `unionPayloadCapacity`.
+fn (self: &var Emitter) union_payload_capacity(module: &ir::Module, name: []u8) -> !CapacityResult {
+    let shown = try self.names.intern(name);
+    if module.unions.at(name) |declared| {
+        var seen = array::new<string::String>(self.allocator);
+        defer seen.deinit();
+        if try self.union_payload_storage(module, name, declared, &var seen) |storage| {
+            if storage.align > max_inline_payload_align() {
+                return CapacityResult::Error(try self.fail3(
+                    "llvm error: union `%s` requires payload alignment %d, but the #991 inline payload storage only guarantees alignment %d",
+                    Arg::Str(shown), Arg::Int(storage.align), Arg::Int(max_inline_payload_align())
+                ));
+            }
+            return CapacityResult::Capacity(storage.capacity);
+        }
+        return CapacityResult::Error(try self.fail1(
+            "llvm error: union `%s` has an unsupported tagged-union payload shape; inline payload size/alignment must be compile-time known per the #991 ABI (broader shapes tracked by #495)",
+            Arg::Str(shown)
+        ));
+    }
+    return CapacityResult::Error(try self.fail1("llvm error: unknown union `%s`", Arg::Str(shown)));
+}
+
+/// Declares runtime calls that are not defined in the module, the Go
+/// `writeExternalCallDecls`.
+fn (self: &var Emitter) write_external_call_decls(module: &ir::Module) -> !void {
+    var decls = try self.external_call_decls(module);
+    defer decls.deinit();
+    var index = 0;
+    while decls.at(index) |decl| {
+        index = index + 1;
+        let decl_bytes = decl.as_bytes();
+        try self.line(decl_bytes);
+    }
+    if decls.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Returns stable declarations for external call instructions, the Go
+/// `externalCallDecls`: one per callee, in name order, the last call to a
+/// callee deciding its declaration. Go keeps the declaration text in a map
+/// it overwrites; here the text is named so the map holds a copy handle.
+fn (self: &var Emitter) external_call_decls(module: &ir::Module) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, ir::Name>(self.allocator);
+    defer seen.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op != ir::Op::Call {
+                    continue;
+                }
+                if module.names.is(instr_node.operand, "print") {
+                    continue;
+                }
+                if self.function_named(module, instr_node.operand) |_| {
+                    continue;
+                }
+                let decl = try self.external_call_decl(module, instr_node.operand, instr_node);
+                let decl_name = try self.names.intern_owned(move decl);
+                let callee_text = ir::name_text(&module.names, instr_node.operand);
+                let callee_bytes = callee_text.as_bytes();
+                try seen.insert(callee_bytes, decl_name);
+            }
+        }
+    }
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var key_index = 0;
+    while seen.key_at(key_index) |name| {
+        key_index = key_index + 1;
+        let copied = try string::from_bytes(self.allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+    }
+    try sort::strings(&var names);
+    var decls = array::new<string::String>(self.allocator);
+    errdefer decls.deinit();
+    var name_index = 0;
+    while names.at(name_index) |name| {
+        name_index = name_index + 1;
+        let name_bytes = name.as_bytes();
+        let decl = seen.get(name_bytes) orelse continue;
+        try decls.append(try self.names.copy(decl));
+    }
+    return move decls;
+}
+
+/// Writes named LLVM aggregate definitions for declared structs, the Go
+/// `writeStructTypes`.
+fn (self: &var Emitter) write_struct_types(module: &ir::Module) -> !void {
+    var names = try sorted_struct_names(self.allocator, module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        var fields = array::new<string::String>(self.allocator);
+        defer fields.deinit();
+        if module.structs.at(name_bytes) |declared| {
+            var field_index = 0;
+            while declared.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                let field_type = try self.llvm_type_of(module, field.type_name);
+                try fields.append(try self.names.copy(field_type));
+            }
+        }
+        let struct_name = try self.llvm_struct_type_name(name_bytes);
+        let joined = try string::join(self.allocator, &fields, ", ");
+        try self.line2("%s = type { %s }", Arg::Str(struct_name), Arg::Owned(move joined));
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Writes the #991 `tag + inline payload storage` layout for each declared
+/// tagged union, the Go `writeUnionTypes`: `{ i64, [N x i8] }`, where N is
+/// the byte capacity of the largest variant payload. Payload shapes are
+/// validated in validate_module_types, so the capacity is known here.
+fn (self: &var Emitter) write_union_types(module: &ir::Module) -> !void {
+    var names = try sorted_union_names(self.allocator, module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        var capacity = 0;
+        let looked_up = try self.union_payload_capacity(module, name_bytes);
+        match looked_up {
+            Capacity(found) => {
+                capacity = found;
+            },
+            Error(failed) => failed.deinit(),
+        }
+        let union_name = try self.llvm_union_type_name(name_bytes);
+        try self.line2("%s = type { i64, [%d x i8] }", Arg::Str(union_name), Arg::Int(capacity));
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Returns string constants in global-name order, the Go
+/// `sortedStringLiterals`: the globals sorted as text.
+fn (self: &Emitter) sorted_string_literals() -> !array::Array<string::String> {
+    var globals = array::new<string::String>(self.allocator);
+    errdefer globals.deinit();
+    var index = 0;
+    while self.string_literals.key_at(index) |global| {
+        index = index + 1;
+        let copied = try string::from_bytes(self.allocator, global);
+        errdefer copied.deinit();
+        try globals.append(move copied);
+    }
+    try sort::strings(&var globals);
+    return move globals;
+}
+
+/// Returns declared structs in stable order, the Go `sortedStructNames`.
+fn sorted_struct_names(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
+    var names = array::new<string::String>(allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while module.structs.key_at(index) |name| {
+        index = index + 1;
+        let copied = try string::from_bytes(allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+    }
+    try sort::strings(&var names);
+    return move names;
+}
+
+/// Returns declared unions in stable order, the Go `sortedUnionNames`.
+fn sorted_union_names(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
+    var names = array::new<string::String>(allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while module.unions.key_at(index) |name| {
+        index = index + 1;
+        let copied = try string::from_bytes(allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+    }
+    try sort::strings(&var names);
+    return move names;
+}
+
+/// Reports whether this module needs the byte-slice value ABI, the Go
+/// `usesSliceABI`.
+fn uses_slice_abi(module: &ir::Module) -> bool {
+    return module_has_slice_type(module);
+}
+
+/// Reports whether any non-error-union value uses []u8, the Go
+/// `moduleHasSliceType`.
+fn module_has_slice_type(module: &ir::Module) -> bool {
+    var struct_index = 0;
+    while module.structs.key_at(struct_index) |struct_name| {
+        struct_index = struct_index + 1;
+        if module.structs.at(struct_name) |declared| {
+            var field_index = 0;
+            while declared.fields.get(field_index) |field| {
+                field_index = field_index + 1;
+                if is_slice_type(module, field.type_name) {
+                    return true;
+                }
+            }
+        }
+    }
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if function_has_slice_type(module, function) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a function body/signature mentions []u8, the Go
+/// `functionHasSliceType`.
+fn function_has_slice_type(module: &ir::Module, function: ir::Function) -> bool {
+    let node = module.function_nodes.at(function.node);
+    if is_slice_type(module, node.return_type) {
+        return true;
+    }
+    var param_index = 0;
+    while node.params.get(param_index) |param| {
+        param_index = param_index + 1;
+        if is_slice_type(module, param.type_name) {
+            return true;
+        }
+    }
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        if block_has_slice_type(module, block) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a block uses a []u8 value, the Go `blockHasSliceType`.
+fn block_has_slice_type(module: &ir::Module, block: ir::Block) -> bool {
+    let node = module.blocks.at(block.node);
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        if instr_has_slice_type(module, module.instrs.at(instr.node)) {
+            return true;
+        }
+    }
+    return is_slice_type(module, node.terminator.value.type_name) or
+        is_slice_type(module, node.terminator.cond.type_name);
+}
+
+/// Reports whether one instruction uses a []u8 value, the Go
+/// `instrHasSliceType`.
+fn instr_has_slice_type(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    if is_slice_type(module, node.result.type_name) {
+        return true;
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        if is_slice_type(module, arg.type_name) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.fields.get(index) |field| {
+        index = index + 1;
+        if is_slice_type(module, field.value.type_name) {
+            return true;
+        }
+    }
+    index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        if is_slice_type(module, incoming.value.type_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports whether a lowered IR type mentions the byte-slice value type,
+/// itself or inside a wrapper, the Go `isSliceType`: `?[]u8` and `![]u8`
+/// aggregates embed %kizu.slice.u8, so a module whose only slice sits
+/// inside one still needs the declaration.
+fn is_slice_type(module: &ir::Module, typ_name: ir::Name) -> bool {
+    let retained = ir::name_text(&module.names, typ_name);
+    let bytes = retained.as_bytes();
+    return contains_bytes(bytes, "[]u8");
+}
+
+/// Reports whether needle occurs in haystack, the Go `strings.Contains`.
+fn contains_bytes(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = mem::len(needle);
+    var start = 0;
+    while start + needle_len <= mem::len(haystack) {
+        if mem::slice(haystack, start, start + needle_len) |candidate| {
+            if mem::equal_bytes(candidate, needle) {
+                return true;
+            }
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+/// Reports whether the module prints an enum or an error set, both of which
+/// name their value through a table of spellings, the Go `printsNamedTag`.
+fn (self: &var Emitter) prints_named_tag(module: &ir::Module) -> !bool {
+    var enums = try printed_enums(self.allocator, module);
+    defer enums.deinit();
+    if enums.len() > 0 {
+        return true;
+    }
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if !is_print_call(module, instr_node) {
+                    continue;
+                }
+                let first = instr_node.args.get_or_panic(0);
+                if module.has_error_set(first.type_name) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether an instruction is `call.print` with one argument.
+fn is_print_call(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    return node.op == ir::Op::Call and module.names.is(node.operand, "print") and node.args.len() == 1;
+}
+
+/// Returns the enums this module prints, in sorted order, the Go
+/// `printedEnums`.
+fn printed_enums(allocator: Allocator, module: &ir::Module) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, bool>(allocator);
+    defer seen.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if !is_print_call(module, instr_node) {
+                    continue;
+                }
+                let first = instr_node.args.get_or_panic(0);
+                let type_text = ir::name_text(&module.names, first.type_name);
+                let type_bytes = type_text.as_bytes();
+                if module.enums.contains(type_bytes) {
+                    try seen.insert(type_bytes, true);
+                }
+            }
+        }
+    }
+    return sorted_keys(allocator, &seen);
+}
+
+/// Defines the `Enum::Tag` spellings the module prints, the Go
+/// `writeEnumNameTables`.
+fn (self: &var Emitter) write_enum_name_tables(module: &ir::Module) -> !void {
+    var names = try printed_enums(self.allocator, module);
+    defer names.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        let type_name = try self.names.intern(name_bytes);
+        let table = try self.enum_table_name(name_bytes);
+        var rows = array::new<string::String>(self.allocator);
+        defer rows.deinit();
+        if module.enums.at(name_bytes) |declared| {
+            let count = declared.tags.len();
+            var row = 0;
+            while row < count {
+                var tag_index = 0;
+                while declared.tags.key_at(tag_index) |tag| {
+                    tag_index = tag_index + 1;
+                    let tag_value = declared.tags.get(tag) orelse continue;
+                    if tag_value != row {
+                        continue;
+                    }
+                    var spelling = try self.names.copy(type_name);
+                    defer spelling.deinit();
+                    try spelling.append_bytes("::");
+                    try spelling.append_bytes(tag);
+                    let global = try self.text2("%s.%d", Arg::Str(table), Arg::Int(row));
+                    let spelling_bytes = spelling.as_bytes();
+                    try self.write_static_string_global(global, spelling_bytes);
+                    try rows.append(try self.sprint2(
+                        "{ ptr, i64 } { ptr %s, i64 %d }", Arg::Str(global), Arg::Int(spelling.len())
+                    ));
+                }
+                row = row + 1;
+            }
+        }
+        // A literal { ptr, i64 } rather than %kizu.slice.u8: the named type is
+        // only defined when the module otherwise uses slices, and a module can
+        // print an enum without ever touching one.
+        let joined = try string::join(self.allocator, &rows, ", ");
+        try self.line3(
+            "%s = private unnamed_addr constant [%d x { ptr, i64 }] [%s]",
+            Arg::Str(table), Arg::Int(rows.len()), Arg::Owned(move joined)
+        );
+    }
+    if names.len() > 0 {
+        try self.line("");
+    }
+    return;
+}
+
+/// Names the global holding one enum's tag spellings from the enum's bytes,
+/// the Go `enumNameTable` where the type arrives as text.
+fn (self: &var Emitter) enum_table_name(typ_name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "@.kizu.enum.");
+    errdefer out.deinit();
+    try append_mangled_global_name(&var out, typ_name);
+    return self.names.intern_owned(move out);
+}

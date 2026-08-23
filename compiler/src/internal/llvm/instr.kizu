@@ -1,0 +1,897 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of the per-instruction half of internal/llvm/emit.go: the
+// writers for scalar, aggregate and memory instructions -- constants,
+// arithmetic, casts, phi, struct literals and field access, borrow loads and
+// stores, byte slices, stack buffers, checked failures and print. Each one
+// reads its operands through the module's NameTable, spells what it emits
+// into the emitter's own table, and writes the Go `fmt.Fprintf` lines as
+// their format strings.
+
+/// Builds a failure whose one argument is a name the module spells, the Go
+/// `fmt.Errorf("...%s...", irString)`.
+fn (self: &var Emitter) fail_name1(module: &ir::Module, format: []u8, a: ir::Name) -> !diagnostic::Diagnostic {
+    let shown_a = try self.own(module, a);
+    return self.fail1(format, Arg::Str(shown_a));
+}
+
+/// Builds a failure whose two arguments are names the module spells.
+fn (self: &var Emitter) fail_name2(module: &ir::Module, format: []u8, a: ir::Name, b: ir::Name) -> !diagnostic::Diagnostic {
+    let shown_a = try self.own(module, a);
+    let shown_b = try self.own(module, b);
+    return self.fail2(format, Arg::Str(shown_a), Arg::Str(shown_b));
+}
+
+/// Builds a failure whose four arguments are names the module spells; an
+/// argument the format does not place is the empty name.
+fn (self: &var Emitter) fail_name4(
+    module: &ir::Module,
+    format: []u8,
+    a: ir::Name,
+    b: ir::Name,
+    c: ir::Name,
+    d: ir::Name
+) -> !diagnostic::Diagnostic {
+    let shown_a = try self.own(module, a);
+    let shown_b = try self.own(module, b);
+    let shown_c = try self.own(module, c);
+    let shown_d = try self.own(module, d);
+    return self.fail4(format, Arg::Str(shown_a), Arg::Str(shown_b), Arg::Str(shown_c), Arg::Str(shown_d));
+}
+
+/// Writes scalar and string constants, the Go `writeConst`.
+fn (self: &var Emitter) write_const(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if try self.scalar_const_operand(module, node) |operand| {
+        try self.set_value(module, node.result, operand);
+        return null;
+    }
+    if module.names.is(node.result.type_name, "[]u8") {
+        var unquoted = string::new(self.allocator);
+        defer unquoted.deinit();
+        let literal = ir::name_text(&module.names, node.immediate);
+        let literal_bytes = literal.as_bytes();
+        try append_unquoted(&var unquoted, literal_bytes);
+        var global = ir::empty_name();
+        if self.strings.get(literal_bytes) |found| {
+            global = found;
+        }
+        let name = try self.local_name(module, node.result.name);
+        let ptr_name = try self.suffixed(name, ".ptr");
+        let base_name = try self.suffixed(name, ".base");
+        try self.line3(
+            "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0",
+            Arg::Str(ptr_name), Arg::Int(unquoted.len() + 1), Arg::Str(global)
+        );
+        try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(ptr_name));
+        try self.line3(
+            "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1",
+            Arg::Str(name), Arg::Str(base_name), Arg::Int(unquoted.len())
+        );
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: unsupported const type `%s`", node.result.type_name);
+}
+
+/// Writes arithmetic and comparison instructions, the Go `writeBinary`.
+fn (self: &var Emitter) write_binary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: binary expects 2 args");
+    }
+    let left_arg = node.args.get_or_panic(0);
+    let right_arg = node.args.get_or_panic(1);
+    let left = try self.operand(module, left_arg);
+    let right = try self.operand(module, right_arg);
+    if module.names.is(node.result.type_name, "bool") {
+        let left_type = try self.llvm_type_of(module, left_arg.type_name);
+        let right_type = try self.llvm_type_of(module, right_arg.type_name);
+        if !ir::same_name(left_type, right_type) {
+            return try self.fail_name4(
+                module, "llvm error: binary %s operand type mismatch: %s and %s",
+                node.operand, left_arg.type_name, right_arg.type_name, ir::empty_name()
+            );
+        }
+        let name = try self.local_name(module, node.result.name);
+        try self.line5(
+            "  %s = icmp %s %s %s, %s",
+            Arg::Str(name), Arg::Lit(llvm_typed_predicate(&module.names, node.operand, left_arg.type_name)),
+            Arg::Str(left_type), Arg::Str(left.operand), Arg::Str(right.operand)
+        );
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    let name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line5(
+        "  %s = %s %s %s, %s",
+        Arg::Str(name), Arg::Lit(llvm_binary_op(&module.names, node.operand)), Arg::Str(result_type),
+        Arg::Str(left.operand), Arg::Str(right.operand)
+    );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Writes boolean and integer unary operations, the Go `writeUnary`.
+fn (self: &var Emitter) write_unary(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: unary expects 1 arg");
+    }
+    let value = try self.operand(module, node.args.get_or_panic(0));
+    let name = try self.local_name(module, node.result.name);
+    if module.names.is(node.operand, "!") {
+        if !module.names.is(node.result.type_name, "bool") {
+            return try self.fail0("llvm error: unary ! expects bool");
+        }
+        try self.line2("  %s = xor i1 %s, true", Arg::Str(name), Arg::Str(value.operand));
+    } else {
+        if module.names.is(node.operand, "-") {
+            let result_type = try self.llvm_type_of(module, node.result.type_name);
+            try self.line3("  %s = sub %s 0, %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(value.operand));
+        } else {
+            return try self.fail_name1(module, "llvm error: unsupported unary `%s`", node.operand);
+        }
+    }
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Emits scalar no-op casts and explicit error-union ABI adaptation, the Go
+/// `writeCast`.
+fn (self: &var Emitter) write_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: cast expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_bytes = source_text.as_bytes();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    if try self.error_union_success_type(source_bytes) |success| {
+        success.deinit();
+        return try self.fail_name2(
+            module, "llvm error: cannot cast error union %s to %s", source.type_name, node.result.type_name
+        );
+    }
+    if try self.error_union_success_type(result_bytes) |success| {
+        success.deinit();
+        return try self.fail_name2(
+            module, "llvm error: cannot cast %s to error union %s", source.type_name, node.result.type_name
+        );
+    }
+    if cast_forwards_operand(module, node) {
+        let value = try self.operand(module, source);
+        try self.set_value(module, node.result, value.operand);
+        return null;
+    }
+    if integer_bit_width(source_bytes) |_| {
+        if integer_bit_width(result_bytes) |_| {
+            return self.write_integer_cast(module, node);
+        }
+        return self.write_pointer_integer_cast(module, node, "inttoptr");
+    }
+    return self.write_pointer_integer_cast(module, node, "ptrtoint");
+}
+
+/// Emits the address conversion between a raw pointer and an integer, the
+/// Go `writePointerIntegerCast`. Width changes ride the conversion itself:
+/// inttoptr and ptrtoint extend and truncate to the target on their own.
+fn (self: &var Emitter) write_pointer_integer_cast(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    op: []u8
+) -> !?diagnostic::Diagnostic {
+    let source = node.args.get_or_panic(0);
+    let name = try self.local_name(module, node.result.name);
+    let source_type = try self.llvm_type_of(module, source.type_name);
+    let value = try self.operand(module, source);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line5(
+        "  %s = %s %s %s to %s",
+        Arg::Str(name), Arg::Lit(op), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(result_type)
+    );
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Emits explicit truncate/extend casts between scalar integer widths, the
+/// Go `writeIntegerCast`. Same-width casts never reach here:
+/// cast_forwards_operand claims them.
+fn (self: &var Emitter) write_integer_cast(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_bytes = source_text.as_bytes();
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let source_width = integer_bit_width(source_bytes) orelse 0;
+    let target_width = integer_bit_width(result_bytes) orelse 0;
+    let value = try self.operand(module, source);
+    let name = try self.local_name(module, node.result.name);
+    let source_type = try self.llvm_type_of(module, source.type_name);
+    let target_type = try self.llvm_type_of(module, node.result.type_name);
+    if source_width > target_width {
+        try self.line4(
+            "  %s = trunc %s %s to %s",
+            Arg::Str(name), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type)
+        );
+    } else {
+        var op = "sext";
+        if is_unsigned_integer_type(source_bytes) {
+            op = "zext";
+        }
+        try self.line5(
+            "  %s = %s %s %s to %s",
+            Arg::Str(name), Arg::Lit(op), Arg::Str(source_type), Arg::Str(value.operand), Arg::Str(target_type)
+        );
+    }
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Lowers a checked struct literal to an LLVM aggregate value, the Go
+/// `writeStructNew`.
+fn (self: &var Emitter) write_struct_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if module.structs.at(result_type) |declared| {
+        var values = map::new<[]u8, ir::Value>(self.allocator);
+        defer values.deinit();
+        var field_index = 0;
+        while node.fields.get(field_index) |field| {
+            field_index = field_index + 1;
+            let field_text = ir::name_text(&module.names, field.name);
+            let field_bytes = field_text.as_bytes();
+            if struct_field_index(declared, field.name) |_| {
+                if values.contains(field_bytes) {
+                    return try self.fail_name2(
+                        module, "llvm error: duplicate struct field `%s.%s`", declared.name, field.name
+                    );
+                }
+                try values.insert(field_bytes, field.value);
+            } else {
+                return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, field.name);
+            }
+        }
+        let struct_type = try self.llvm_type(module, result_type);
+        var aggregate = try self.names.intern("zeroinitializer");
+        var result_name = try self.local_name(module, node.result.name);
+        var index = 0;
+        while declared.fields.get(index) |field| {
+            let field_text = ir::name_text(&module.names, field.name);
+            let field_bytes = field_text.as_bytes();
+            if values.get(field_bytes) |value| {
+                if !ir::same_name(value.type_name, field.type_name) {
+                    return try self.fail_name4(
+                        module, "llvm error: struct field `%s.%s` expects %s, got %s",
+                        declared.name, field.name, field.type_name, value.type_name
+                    );
+                }
+                let field_value = try self.operand(module, value);
+                var name = try self.text2("%s.field%d", Arg::Str(result_name), Arg::Int(index));
+                if index == declared.fields.len() - 1 {
+                    name = result_name;
+                }
+                let field_type = try self.llvm_type_of(module, field.type_name);
+                try self.line6(
+                    "  %s = insertvalue %s %s, %s %s, %d",
+                    Arg::Str(name), Arg::Str(struct_type), Arg::Str(aggregate),
+                    Arg::Str(field_type), Arg::Str(field_value.operand), Arg::Int(index)
+                );
+                aggregate = name;
+            } else {
+                return try self.fail_name2(module, "llvm error: missing struct field `%s.%s`", declared.name, field.name);
+            }
+            index = index + 1;
+        }
+        if declared.fields.len() == 0 {
+            result_name = try self.names.intern("zeroinitializer");
+        }
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: unknown struct type `%s`", node.result.type_name);
+}
+
+/// Lowers a checked struct field read to an LLVM aggregate extraction, the
+/// Go `writeField`.
+fn (self: &var Emitter) write_field(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: field read expects 1 arg");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    if module.structs.at(receiver_bytes) |declared| {
+        if struct_field_index(declared, node.operand) |index| {
+            let field = declared.fields.get_or_panic(index);
+            if !ir::same_name(node.result.type_name, field.type_name) {
+                return try self.fail_name4(
+                    module, "llvm error: field `%s.%s` returns %s, got %s",
+                    declared.name, node.operand, field.type_name, node.result.type_name
+                );
+            }
+            let value = try self.operand(module, receiver);
+            let name = try self.local_name(module, node.result.name);
+            let receiver_type = try self.llvm_type(module, receiver_bytes);
+            try self.line4(
+                "  %s = extractvalue %s %s, %d",
+                Arg::Str(name), Arg::Str(receiver_type), Arg::Str(value.operand), Arg::Int(index)
+            );
+            try self.set_value(module, node.result, name);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, node.operand);
+    }
+    return try self.fail_name1(module, "llvm error: unknown struct type `%s`", receiver.type_name);
+}
+
+/// Lowers a field read through a borrowed struct pointer, the Go
+/// `writeFieldRef`.
+fn (self: &var Emitter) write_field_ref(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: borrowed field read expects 1 arg");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_type = deref_llvm_type(receiver_bytes);
+    if module.structs.at(struct_type) |declared| {
+        if struct_field_index(declared, node.operand) |index| {
+            let field = declared.fields.get_or_panic(index);
+            if !ir::same_name(node.result.type_name, field.type_name) {
+                return try self.fail_name4(
+                    module, "llvm error: borrowed field `%s.%s` returns %s, got %s",
+                    declared.name, node.operand, field.type_name, node.result.type_name
+                );
+            }
+            let value = try self.operand(module, receiver);
+            let name = try self.local_name(module, node.result.name);
+            let ptr_name = try self.suffixed(name, ".ptr");
+            let llvm_struct = try self.llvm_type(module, struct_type);
+            try self.line4(
+                "  %s = getelementptr %s, ptr %s, i32 0, i32 %d",
+                Arg::Str(ptr_name), Arg::Str(llvm_struct), Arg::Str(value.operand), Arg::Int(index)
+            );
+            let result_type = try self.llvm_type_of(module, node.result.type_name);
+            try self.line3("  %s = load %s, ptr %s", Arg::Str(name), Arg::Str(result_type), Arg::Str(ptr_name));
+            try self.set_value(module, node.result, name);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, node.operand);
+    }
+    return try self.fail_name1(module, "llvm error: unknown borrowed struct type `%s`", receiver.type_name);
+}
+
+/// Lowers a field borrow out of a borrowed struct pointer, the Go
+/// `writeFieldAddr`: the projection is the GEP alone, and the result is the
+/// field's own storage.
+fn (self: &var Emitter) write_field_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: field address expects 1 arg");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_type = deref_llvm_type(receiver_bytes);
+    if module.structs.at(struct_type) |declared| {
+        if struct_field_index(declared, node.operand) |index| {
+            let field = declared.fields.get_or_panic(index);
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_bytes = result_text.as_bytes();
+            let want = deref_llvm_type(result_bytes);
+            if !module.names.is(field.type_name, want) {
+                return try self.fail_name4(
+                    module, "llvm error: field address `%s.%s` returns &var %s, got %s",
+                    declared.name, node.operand, field.type_name, node.result.type_name
+                );
+            }
+            let value = try self.operand(module, receiver);
+            let name = try self.local_name(module, node.result.name);
+            let llvm_struct = try self.llvm_type(module, struct_type);
+            try self.line4(
+                "  %s = getelementptr %s, ptr %s, i32 0, i32 %d",
+                Arg::Str(name), Arg::Str(llvm_struct), Arg::Str(value.operand), Arg::Int(index)
+            );
+            try self.set_value(module, node.result, name);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, node.operand);
+    }
+    return try self.fail_name1(module, "llvm error: unknown borrowed struct type `%s`", receiver.type_name);
+}
+
+/// Lowers a struct field write on a value receiver to an LLVM aggregate
+/// insertion, the Go `writeFieldSet`. The receiver is SSA, so the write
+/// produces a new struct value that the lowerer has already bound in place
+/// of the old one.
+fn (self: &var Emitter) write_field_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: field write expects 2 args");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    if module.structs.at(receiver_bytes) |declared| {
+        if struct_field_index(declared, node.operand) |index| {
+            let field = declared.fields.get_or_panic(index);
+            let new_value = node.args.get_or_panic(1);
+            if !ir::same_name(new_value.type_name, field.type_name) {
+                return try self.fail_name4(
+                    module, "llvm error: field `%s.%s` accepts %s, got %s",
+                    declared.name, node.operand, field.type_name, new_value.type_name
+                );
+            }
+            if !ir::same_name(node.result.type_name, receiver.type_name) {
+                return try self.fail_name4(
+                    module, "llvm error: field write on `%s` returns %s, got %s",
+                    declared.name, receiver.type_name, node.result.type_name, ir::empty_name()
+                );
+            }
+            let value = try self.operand(module, new_value);
+            let name = try self.local_name(module, node.result.name);
+            let receiver_type = try self.llvm_type(module, receiver_bytes);
+            let receiver_value = try self.operand(module, receiver);
+            let value_type = try self.llvm_type_of(module, new_value.type_name);
+            try self.line6(
+                "  %s = insertvalue %s %s, %s %s, %d",
+                Arg::Str(name), Arg::Str(receiver_type), Arg::Str(receiver_value.operand),
+                Arg::Str(value_type), Arg::Str(value.operand), Arg::Int(index)
+            );
+            try self.set_value(module, node.result, name);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, node.operand);
+    }
+    return try self.fail_name1(module, "llvm error: unknown struct type `%s`", receiver.type_name);
+}
+
+/// Lowers a struct field write through a borrowed struct pointer to an
+/// addressed store, the Go `writeFieldRefSet`, so the write lands in the
+/// borrowed storage rather than in a copy of it.
+fn (self: &var Emitter) write_field_ref_set(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: borrowed field write expects 2 args");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let struct_type = deref_llvm_type(receiver_bytes);
+    if module.structs.at(struct_type) |declared| {
+        if struct_field_index(declared, node.operand) |index| {
+            let field = declared.fields.get_or_panic(index);
+            let new_value = node.args.get_or_panic(1);
+            if !ir::same_name(new_value.type_name, field.type_name) {
+                return try self.fail_name4(
+                    module, "llvm error: borrowed field `%s.%s` accepts %s, got %s",
+                    declared.name, node.operand, field.type_name, new_value.type_name
+                );
+            }
+            if !module.names.is(node.result.type_name, "void") {
+                return try self.fail_name1(
+                    module, "llvm error: borrowed field write returns void, got %s", node.result.type_name
+                );
+            }
+            let result_name = try self.local_name(module, node.result.name);
+            let ptr_name = try self.suffixed(result_name, ".ptr");
+            let llvm_struct = try self.llvm_type(module, struct_type);
+            let receiver_value = try self.operand(module, receiver);
+            try self.line4(
+                "  %s = getelementptr %s, ptr %s, i32 0, i32 %d",
+                Arg::Str(ptr_name), Arg::Str(llvm_struct), Arg::Str(receiver_value.operand), Arg::Int(index)
+            );
+            let value_type = try self.llvm_type_of(module, new_value.type_name);
+            let value = try self.operand(module, new_value);
+            try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(ptr_name));
+            try self.set_void_value(module, node.result);
+            return null;
+        }
+        return try self.fail_name2(module, "llvm error: unknown struct field `%s.%s`", declared.name, node.operand);
+    }
+    return try self.fail_name1(module, "llvm error: unknown borrowed struct type `%s`", receiver.type_name);
+}
+
+/// Lowers `receiver.* = value` to a store through the borrow, the Go
+/// `writeRefStore`; a `volatile.store` is the same store marked volatile.
+fn (self: &var Emitter) write_ref_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: dereference write expects 2 args");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let new_value = node.args.get_or_panic(1);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let want = deref_llvm_type(receiver_bytes);
+    if !module.names.is(new_value.type_name, want) {
+        let shown_receiver = try self.own(module, receiver.type_name);
+        let shown_want = try self.names.intern(want);
+        let shown_value = try self.own(module, new_value.type_name);
+        return try self.fail3(
+            "llvm error: dereference write on `%s` accepts %s, got %s",
+            Arg::Str(shown_receiver), Arg::Str(shown_want), Arg::Str(shown_value)
+        );
+    }
+    if !module.names.is(node.result.type_name, "void") {
+        return try self.fail_name1(module, "llvm error: dereference write returns void, got %s", node.result.type_name);
+    }
+    let keyword = volatile_keyword(node.op);
+    let value_type = try self.llvm_type_of(module, new_value.type_name);
+    let value = try self.operand(module, new_value);
+    let receiver_value = try self.operand(module, receiver);
+    try self.line4(
+        "  store %s%s %s, ptr %s",
+        Arg::Lit(keyword), Arg::Str(value_type), Arg::Str(value.operand), Arg::Str(receiver_value.operand)
+    );
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Marks the memory accesses no pass may drop, merge, or reorder against
+/// other volatile accesses, the Go `volatileKeyword`: device registers
+/// change state on access, so each one the source wrote has to happen.
+fn volatile_keyword(op: ir::Op) -> []u8 {
+    if op == ir::Op::VolatileStore or op == ir::Op::VolatileLoad {
+        return "volatile ";
+    }
+    return "";
+}
+
+/// Gives a local storage and puts its first value there, the Go
+/// `writeLocalSlot`. A local only reaches here when the function mutably
+/// borrows it, so the address it yields is what the callee writes through.
+fn (self: &var Emitter) write_local_slot(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: local slot expects 1 arg");
+    }
+    let initial = node.args.get_or_panic(0);
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_bytes = result_text.as_bytes();
+    let want = deref_llvm_type(result_bytes);
+    if !module.names.is(initial.type_name, want) {
+        let shown_result = try self.own(module, node.result.type_name);
+        let shown_want = try self.names.intern(want);
+        let shown_initial = try self.own(module, initial.type_name);
+        return try self.fail3(
+            "llvm error: local slot of %s holds %s, got %s",
+            Arg::Str(shown_result), Arg::Str(shown_want), Arg::Str(shown_initial)
+        );
+    }
+    let slot_name = try self.local_name(module, node.result.name);
+    let value_type = try self.llvm_type_of(module, initial.type_name);
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(value_type));
+    let initial_value = try self.operand(module, initial);
+    try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(initial_value.operand), Arg::Str(slot_name));
+    try self.set_value(module, node.result, slot_name);
+    return null;
+}
+
+/// Reads the value currently behind a borrow, the Go `writeRefLoad`; a
+/// `volatile.load` is the same load marked volatile.
+fn (self: &var Emitter) write_ref_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: borrow read expects 1 arg");
+    }
+    let receiver = node.args.get_or_panic(0);
+    let receiver_text = ir::name_text(&module.names, receiver.type_name);
+    let receiver_bytes = receiver_text.as_bytes();
+    let want = deref_llvm_type(receiver_bytes);
+    if !module.names.is(node.result.type_name, want) {
+        let shown_receiver = try self.own(module, receiver.type_name);
+        let shown_want = try self.names.intern(want);
+        let shown_result = try self.own(module, node.result.type_name);
+        return try self.fail3(
+            "llvm error: borrow read of `%s` gives %s, got %s",
+            Arg::Str(shown_receiver), Arg::Str(shown_want), Arg::Str(shown_result)
+        );
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let keyword = volatile_keyword(node.op);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let receiver_value = try self.operand(module, receiver);
+    try self.line4(
+        "  %s = load %s%s, ptr %s",
+        Arg::Str(result_name), Arg::Lit(keyword), Arg::Str(result_type), Arg::Str(receiver_value.operand)
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Dispatches checked byte-slice operations, the Go `writeSliceInstr`.
+fn (self: &var Emitter) write_slice_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        SliceLen => return self.write_slice_len(module, node),
+        SliceIndex => return self.write_slice_index(module, node),
+        SliceStore => return self.write_slice_store(module, node),
+        SliceSlice => return self.write_slice_slice(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported slice instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Writes one byte through a writable view, the Go `writeSliceStore`. The
+/// bounds test reaches the backend as preceding cond_fail instructions, so
+/// no check is generated here.
+fn (self: &var Emitter) write_slice_store(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.args.get_or_panic(2).type_name, "u8") {
+        return try self.fail0("llvm error: slice.store expects []u8, i64, u8");
+    }
+    let slice = try self.operand(module, node.args.get_or_panic(0));
+    let index = try self.operand(module, node.args.get_or_panic(1));
+    let byte_value = try self.operand(module, node.args.get_or_panic(2));
+    let synthetic = try self.next_synthetic_value("slice.store");
+    let base = try self.percent(synthetic);
+    let ptr_name = try self.suffixed(base, ".ptr");
+    let elem_ptr_name = try self.suffixed(base, ".elem.ptr");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line3(
+        "  %s = getelementptr i8, ptr %s, i64 %s",
+        Arg::Str(elem_ptr_name), Arg::Str(ptr_name), Arg::Str(index.operand)
+    );
+    try self.line2("  store i8 %s, ptr %s", Arg::Str(byte_value.operand), Arg::Str(elem_ptr_name));
+    return null;
+}
+
+/// Extracts the byte length from a []u8 value, the Go `writeSliceLen`.
+fn (self: &var Emitter) write_slice_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: slice.len expects []u8 -> i64");
+    }
+    let slice = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(result_name), Arg::Str(slice.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Loads one byte, the Go `writeSliceIndex`. The bounds test reaches the
+/// backend as a preceding cond_fail instruction, so no check is generated
+/// here.
+fn (self: &var Emitter) write_slice_index(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.result.type_name, "u8") {
+        return try self.fail0("llvm error: slice.index expects []u8, i64 -> u8");
+    }
+    let slice = try self.operand(module, node.args.get_or_panic(0));
+    let index = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    let elem_ptr_name = try self.suffixed(result_name, ".elem.ptr");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line3(
+        "  %s = getelementptr i8, ptr %s, i64 %s",
+        Arg::Str(elem_ptr_name), Arg::Str(ptr_name), Arg::Str(index.operand)
+    );
+    try self.line2("  %s = load i8, ptr %s", Arg::Str(result_name), Arg::Str(elem_ptr_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Builds a sub-slice, the Go `writeSliceSlice`. The bounds test reaches the
+/// backend as preceding cond_fail instructions, so no check is generated
+/// here.
+fn (self: &var Emitter) write_slice_slice(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or
+        !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") or
+        !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.args.get_or_panic(2).type_name, "i64") or
+        !module.names.is(node.result.type_name, "[]u8") {
+        return try self.fail0("llvm error: slice.slice expects []u8, i64, i64 -> []u8");
+    }
+    let slice = try self.operand(module, node.args.get_or_panic(0));
+    let start = try self.operand(module, node.args.get_or_panic(1));
+    let end = try self.operand(module, node.args.get_or_panic(2));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".source.ptr");
+    let slice_ptr_name = try self.suffixed(result_name, ".ptr");
+    let base_name = try self.suffixed(result_name, ".base");
+    let slice_len_name = try self.suffixed(result_name, ".len");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice.operand));
+    try self.line3(
+        "  %s = getelementptr i8, ptr %s, i64 %s",
+        Arg::Str(slice_ptr_name), Arg::Str(ptr_name), Arg::Str(start.operand)
+    );
+    try self.line3("  %s = sub i64 %s, %s", Arg::Str(slice_len_name), Arg::Str(end.operand), Arg::Str(start.operand));
+    try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(slice_ptr_name));
+    try self.line3(
+        "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1",
+        Arg::Str(result_name), Arg::Str(base_name), Arg::Str(slice_len_name)
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Allocates a zero-filled fixed-length stack buffer, the Go
+/// `writeBufferNew`. The value registered for the result is the alloca
+/// pointer: a buffer is its storage, and the views buffer.as_bytes hands out
+/// point into it (ADR-0097).
+fn (self: &var Emitter) write_buffer_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if try self.buffer_size(result_type) |size| {
+        let name = try self.local_name(module, node.result.name);
+        try self.line2("  %s = alloca [%d x i8]", Arg::Str(name), Arg::Int(size));
+        try self.line2("  store [%d x i8] zeroinitializer, ptr %s", Arg::Int(size), Arg::Str(name));
+        try self.set_value(module, node.result, name);
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: buffer.new expects `[N]u8` result, got %s", node.result.type_name);
+}
+
+/// Builds the {ptr, len} view of a stack buffer, the Go `writeBufferAsBytes`.
+fn (self: &var Emitter) write_buffer_as_bytes(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "[]u8") {
+        return try self.fail0("llvm error: buffer.as_bytes expects buffer -> []u8");
+    }
+    let buffer_arg = node.args.get_or_panic(0);
+    let buffer_text = ir::name_text(&module.names, buffer_arg.type_name);
+    let buffer_bytes = buffer_text.as_bytes();
+    if try self.buffer_size(buffer_bytes) |size| {
+        let buffer = try self.operand(module, buffer_arg);
+        let result_name = try self.local_name(module, node.result.name);
+        let base_name = try self.suffixed(result_name, ".base");
+        try self.line2("  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0", Arg::Str(base_name), Arg::Str(buffer.operand));
+        try self.line3(
+            "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1",
+            Arg::Str(result_name), Arg::Str(base_name), Arg::Int(size)
+        );
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: buffer.as_bytes expects `[N]u8`, got %s", buffer_arg.type_name);
+}
+
+/// Parses N from a `[N]u8` spelling, the Go `bufferSize`; null for any other
+/// spelling. Go answers false for a spelling that does not parse; an empty
+/// spelling is the one such case a lowered module holds, and is answered
+/// here before parsing.
+fn (self: &var Emitter) buffer_size(typ_name: []u8) -> !?i64 {
+    if mem::len(typ_name) == 0 {
+        return null;
+    }
+    let parsed = try self.types.parse(typ_name);
+    match typ::root_node(&self.types, parsed) {
+        Buffer(node) => return node.size,
+        _ => return null,
+    }
+}
+
+/// Reports the named failure when the tested condition holds, the Go
+/// `writeCondFail`.
+fn (self: &var Emitter) write_cond_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let imm = ir::name_text(&module.names, node.immediate);
+    let imm_bytes = imm.as_bytes();
+    if parse_panic_key(imm_bytes) |key| {
+        let spec = panic_entry(key);
+        let param_count = panic_param_count(spec.params);
+        if node.args.len() != param_count + 1 or !module.names.is(node.args.get_or_panic(0).type_name, "bool") {
+            let shown = try self.own(module, node.immediate);
+            return try self.fail2(
+                "llvm error: cond_fail `%s` expects bool and %d values", Arg::Str(shown), Arg::Int(param_count)
+            );
+        }
+        let cond_value = node.args.get_or_panic(0);
+        let cond = try self.operand(module, cond_value);
+        var typed = array::new<string::String>(self.allocator);
+        defer typed.deinit();
+        var index = 1;
+        while node.args.get(index) |arg| {
+            let value = try self.operand(module, arg);
+            let param = panic_param_at(spec.params, index - 1);
+            var part = try string::from_bytes(self.allocator, param);
+            errdefer part.deinit();
+            try part.append_bytes(" ");
+            try self.names.append_to(&var part, value.operand);
+            try typed.append(move part);
+            index = index + 1;
+        }
+        let position = try self.panic_position(node.span);
+        try typed.append(try self.names.copy(position));
+        let fail_label = try self.helper_label(module, cond_value.name, "fail");
+        let ok_label = try self.helper_label(module, cond_value.name, "pass");
+        try self.mark_current_block_exit(module, ok_label);
+        try self.line3(
+            "  br i1 %s, label %%%s, label %%%s", Arg::Str(cond.operand), Arg::Str(fail_label), Arg::Str(ok_label)
+        );
+        try self.line1("%s:", Arg::Str(fail_label));
+        let joined = try string::join(self.allocator, &typed, ", ");
+        try self.line2("  call void @%s(%s)", Arg::Lit(spec.entry), Arg::Owned(move joined));
+        try self.line("  unreachable");
+        try self.line1("%s:", Arg::Str(ok_label));
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: unknown cond_fail kind `%s`", node.immediate);
+}
+
+/// Reports an unconditional runtime failure with a message and stops, the Go
+/// `writePanicFail`.
+fn (self: &var Emitter) write_panic_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return try self.fail0("llvm error: panic.fail expects one []u8 message");
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let msg_name = try self.suffixed(result_name, ".msg");
+    let value = try self.operand(module, node.args.get_or_panic(0));
+    let parts = try self.write_slice_parts(msg_name, value.operand);
+    let position = try self.panic_position(node.span);
+    try self.line3(
+        "  call void @kizu_panic_fail(ptr %s, i64 %s, %s)", Arg::Str(parts.ptr), Arg::Str(parts.len), Arg::Str(position)
+    );
+    try self.line("  unreachable");
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Writes an LLVM phi instruction, the Go `writePhi`.
+fn (self: &var Emitter) write_phi(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    var parts = array::new<string::String>(self.allocator);
+    defer parts.deinit();
+    var index = 0;
+    while node.incoming.get(index) |incoming| {
+        index = index + 1;
+        let value = try self.operand(module, incoming.value);
+        let label = try self.incoming_block_label(module, incoming.block);
+        try parts.append(try self.sprint2("[ %s, %%%s ]", Arg::Str(value.operand), Arg::Str(label)));
+    }
+    let name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let joined = try string::join(self.allocator, &parts, ", ");
+    try self.line3("  %s = phi %s %s", Arg::Str(name), Arg::Str(result_type), Arg::Owned(move joined));
+    try self.set_value(module, node.result, name);
+    return null;
+}
+
+/// Writes calls to the Kizu runtime print ABI, the Go `writePrint`; the
+/// arguments are the call's args.
+fn (self: &var Emitter) write_print(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: print expects 1 arg");
+    }
+    let arg = node.args.get_or_panic(0);
+    let value = try self.operand(module, arg);
+    let arg_text = ir::name_text(&module.names, arg.type_name);
+    let arg_bytes = arg_text.as_bytes();
+    if mem::equal_bytes(arg_bytes, "[]u8") {
+        let ptr_synthetic = try self.next_synthetic_value("print.slice.ptr");
+        let ptr_name = try self.percent(ptr_synthetic);
+        let len_synthetic = try self.next_synthetic_value("print.slice.len");
+        let len_name = try self.percent(len_synthetic);
+        try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(value.operand));
+        try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(value.operand));
+        try self.line2("  call void @kizu_print_string(ptr %s, i64 %s)", Arg::Str(ptr_name), Arg::Str(len_name));
+        return null;
+    }
+    if integer_bit_width(arg_bytes) |_| {
+        let operand = try self.runtime_integer_operand(module, arg.type_name, value.operand);
+        try self.line1("  call void @kizu_print_int(i64 %s)", Arg::Str(operand));
+        return null;
+    }
+    if mem::equal_bytes(arg_bytes, "bool") {
+        try self.line1("  call void @kizu_print_bool(i1 %s)", Arg::Str(value.operand));
+        return null;
+    }
+    if module.enums.contains(arg_bytes) {
+        try self.write_print_enum(module, arg.type_name, value.operand);
+        return null;
+    }
+    if module.error_sets.contains(arg_bytes) {
+        // An error is a global code, so its spelling comes from the one
+        // table every error shares rather than from a per-type table.
+        let table = try self.names.intern(error_name_table());
+        try self.write_print_name_table(table, error_name_table_rows(module), value.operand);
+        return null;
+    }
+    return try self.fail_name1(module, "llvm error: print does not support `%s`", arg.type_name);
+}

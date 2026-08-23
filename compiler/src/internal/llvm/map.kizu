@@ -1,0 +1,258 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+
+// Mechanical port of internal/llvm/map.go: the hosted Map runtime
+// declarations and the `map.*` instructions. writeSliceParts, which other
+// files share, lives in llvm.kizu.
+
+/// Reports whether a lowered IR type is a std::map::Map<[]u8, V>, the Go
+/// `isMapLLVMType`.
+fn is_map_llvm_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "std::map::Map<[]u8, ") and ir::ends_with_bytes(typ_name, ">");
+}
+
+/// Writes declarations for the hosted Map runtime, the Go
+/// `writeMapRuntimeDecls`.
+fn (self: &var Emitter) write_map_runtime_decls(module: &ir::Module) -> !void {
+    if !self.uses_map_runtime(module) {
+        return;
+    }
+    try self.line("declare ptr @kizu_map_new(ptr, i64)");
+    try self.line("declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)");
+    try self.line("declare ptr @kizu_map_get(ptr, ptr, i64)");
+    try self.line("declare ptr @kizu_map_value_at(ptr, i64)");
+    try self.line("declare void @kizu_map_key_at(ptr, ptr, i64)");
+    try self.line("declare i1 @kizu_map_contains(ptr, ptr, i64)");
+    try self.line("declare i64 @kizu_map_len(ptr)");
+    try self.line("declare void @kizu_map_deinit(ptr)");
+    return self.line("");
+}
+
+/// Reports whether this module uses std::map::Map lowering, the Go
+/// `usesMapRuntime`.
+fn (self: &Emitter) uses_map_runtime(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if mem::starts_with(ir::op_spelling(instr_node.op), "map.") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Dispatches runtime-backed Map operations, the Go `writeMapInstr`.
+fn (self: &var Emitter) write_map_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        MapNew => return self.write_map_new(module, node),
+        MapInsert => return self.write_map_insert(module, node),
+        MapGet => return self.write_map_get(module, node),
+        MapAt => return self.write_map_at(module, node),
+        MapAtMut => return self.write_map_at(module, node),
+        MapTakeValueAt => return self.write_map_take_value_at(module, node),
+        MapKeyAt => return self.write_map_key_at(module, node),
+        MapContains => return self.write_map_contains(module, node),
+        MapLen => return self.write_map_len(module, node),
+        MapDeinit => return self.write_map_deinit(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported map instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Lowers std::map::new<[]u8, V>(allocator), the Go `writeMapNew`.
+fn (self: &var Emitter) write_map_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    return self.write_container_new(module, node, "kizu_map_new", ContainerKind::Map, "map.new expects allocator -> Map<[]u8, V>");
+}
+
+/// Lowers Map.insert(key, value), the Go `writeMapInsert`.
+fn (self: &var Emitter) write_map_insert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "!void") {
+        return try self.fail0("llvm error: map.insert expects Map, []u8, V -> !void");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let key = try self.slice_value(module, node.args.get_or_panic(1));
+    match key {
+        Error(failed) => return move failed,
+        Operand(key_operand) => {
+            let result_name = try self.local_name(module, node.result.name);
+            let key_base = try self.suffixed(result_name, ".key");
+            let key_parts = try self.write_slice_parts(key_base, key_operand);
+            let value_base = try self.suffixed(result_name, ".value");
+            let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(2));
+            let ok_name = try self.suffixed(result_name, ".ok");
+            try self.line5(
+                "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)",
+                Arg::Str(ok_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(value_slot)
+            );
+            return self.write_array_bool_result(module, node.result, ok_name, FailureKey::MapInsert);
+        },
+    }
+}
+
+/// Lowers Map.get(key), the Go `writeMapGet`.
+fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
+        return try self.fail0("llvm error: map.get expects Map, []u8 -> ?V");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let key = try self.slice_value(module, node.args.get_or_panic(1));
+    match key {
+        Error(failed) => return move failed,
+        Operand(key_operand) => {
+            let result_name = try self.local_name(module, node.result.name);
+            let key_base = try self.suffixed(result_name, ".key");
+            let key_parts = try self.write_slice_parts(key_base, key_operand);
+            let ptr_name = try self.suffixed(result_name, ".ptr");
+            try self.line4(
+                "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
+                Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+            );
+            return self.write_array_optional_load_result(module, node, ptr_name);
+        },
+    }
+}
+
+/// Lowers Map.at(key) and Map.at_mut(key) to a borrow optional, the Go
+/// `writeMapAt`: the runtime's nullable value pointer becomes the payload
+/// and its presence, branch-free. It calls the same kizu_map_get as Map.get
+/// and skips the load.
+fn (self: &var Emitter) write_map_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
+        let op = try self.op_name(module, node);
+        return try self.fail1("llvm error: %s expects Map, []u8 -> ?&V", Arg::Str(op));
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let key = try self.slice_value(module, node.args.get_or_panic(1));
+    match key {
+        Error(failed) => return move failed,
+        Operand(key_operand) => {
+            let result_name = try self.local_name(module, node.result.name);
+            let key_base = try self.suffixed(result_name, ".key");
+            let key_parts = try self.write_slice_parts(key_base, key_operand);
+            let ptr_name = try self.suffixed(result_name, ".ptr");
+            try self.line4(
+                "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
+                Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+            );
+            return self.write_borrow_optional_result(module, node, ptr_name);
+        },
+    }
+}
+
+/// Moves the value at insertion position index out of the map, or traps past
+/// the end, the Go `writeMapTakeValueAt`. Only Map.deinit's cascade reaches
+/// it, and it walks 0..len, so the trap stands for a broken runtime rather
+/// than a reachable state.
+fn (self: &var Emitter) write_map_take_value_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") {
+        return try self.fail0("llvm error: map.take_value_at expects Map, i64 -> V");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let index = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    let len_synthetic = try self.next_synthetic_value("map.take.panic.len");
+    let len_name = try self.percent(len_synthetic);
+    try self.line2("  %s = call i64 @kizu_map_len(ptr %s)", Arg::Str(len_name), Arg::Str(map_value.operand));
+    try self.line3(
+        "  %s = call ptr @kizu_map_value_at(ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(index.operand)
+    );
+    var args = self.no_names();
+    defer args.deinit();
+    try args.append(index.operand);
+    try args.append(len_name);
+    try self.write_null_failure(module, node, ptr_name, "map.take.panic", PanicKey::Bounds, &args);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Map.key_at(index), the Go `writeMapKeyAt`. The runtime fills a
+/// `?[]u8` slot through an out pointer: a by-value struct return would pin
+/// this declaration to the C ABI's aggregate-return rules, and the out
+/// pointer sidesteps that.
+fn (self: &var Emitter) write_map_key_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
+        !module.names.is(node.result.type_name, "?[]u8") {
+        return try self.fail0("llvm error: map.key_at expects Map, i64 -> ?[]u8");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let index = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let slot_name = try self.suffixed(result_name, ".slot");
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    let opt_type = try self.llvm_optional_type_name(result_type);
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(opt_type));
+    try self.line3(
+        "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(slot_name), Arg::Str(map_value.operand), Arg::Str(index.operand)
+    );
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(slot_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Map.contains(key), the Go `writeMapContains`.
+fn (self: &var Emitter) write_map_contains(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
+        !module.names.is(node.result.type_name, "bool") {
+        return try self.fail0("llvm error: map.contains expects Map, []u8 -> bool");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let key = try self.slice_value(module, node.args.get_or_panic(1));
+    match key {
+        Error(failed) => return move failed,
+        Operand(key_operand) => {
+            let result_name = try self.local_name(module, node.result.name);
+            let key_base = try self.suffixed(result_name, ".key");
+            let key_parts = try self.write_slice_parts(key_base, key_operand);
+            try self.line4(
+                "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)",
+                Arg::Str(result_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+            );
+            try self.set_value(module, node.result, result_name);
+            return null;
+        },
+    }
+}
+
+/// Lowers Map.len(), the Go `writeMapLen`.
+fn (self: &var Emitter) write_map_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: map.len expects Map -> i64");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line2("  %s = call i64 @kizu_map_len(ptr %s)", Arg::Str(result_name), Arg::Str(map_value.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Map.deinit(), the Go `writeMapDeinit`.
+fn (self: &var Emitter) write_map_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: map.deinit expects Map -> void");
+    }
+    let map_value = try self.operand(module, node.args.get_or_panic(0));
+    try self.line1("  call void @kizu_map_deinit(ptr %s)", Arg::Str(map_value.operand));
+    try self.set_void_value(module, node.result);
+    return null;
+}

@@ -1,0 +1,1702 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/emit.go's emitter: the walk that formats
+// a typed SSA IR module as LLVM IR text, and the state, naming and failure
+// helpers the per-instruction writers in the other files of this module
+// share. Go holds the module by pointer and spells every operand, label and
+// LLVM type as a string; here the module is borrowed by every method, the
+// texts the emitter itself produces are interned in its own NameTable and
+// handed on as Names, and a value the module names is read through the
+// module's NameTable. Go's `fmt.Fprintf` lines are kept as their format
+// strings with `%s` / `%d` interpolated by `line*`, so the text stays the
+// Go text. The Go package splits into llvm (this file), header, instr, call,
+// error, and the container files named after their Go files.
+
+/// Formats a typed SSA IR module as LLVM IR, the Go `Emit`: the text goes to
+/// out, and a failure comes back as one diagnostic reading `llvm error: ...`.
+/// The module is taken mutably only to name `void` in its table, the type
+/// of the cleanup instructions the emitter builds itself; the walk reads it.
+pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::String) -> !?diagnostic::Diagnostic {
+    let void_name = try module.names.intern("void");
+    var emitter = Emitter {
+        allocator: allocator,
+        void_name: void_name,
+        types: typ::new(allocator),
+        names: ir::new_name_table(allocator),
+        out: string::new(allocator),
+        strings: map::new<[]u8, ir::Name>(allocator),
+        string_literals: map::new<[]u8, ir::Name>(allocator),
+        values: map::new<[]u8, ValueInfo>(allocator),
+        function_names: map::new<[]u8, ir::Function>(allocator),
+        current_return: ir::empty_name(),
+        main_returns_int: false,
+        next_label: 0,
+        current_block: ir::empty_name(),
+        block_exit_label: map::new<[]u8, ExitLabel>(allocator),
+        entry_param_loads: string::new(allocator),
+        wrote_param_loads: false,
+        generation: 0
+    };
+    defer emitter.deinit();
+    if try emitter.emit_module(module) |failed| {
+        return move failed;
+    }
+    while emitter.out.len() > 0 and last_byte_is(&emitter.out, 10) {
+        try emitter.out.truncate(emitter.out.len() - 1);
+    }
+    let text = emitter.out.as_bytes();
+    if try verify_emitted_text(allocator, text) |failed| {
+        return move failed;
+    }
+    try out.append_bytes(text);
+    return null;
+}
+
+/// Reports whether the last byte of a text is byte, the Go `strings.TrimRight` test.
+fn last_byte_is(text: &string::String, byte: i64) -> bool {
+    let bytes = text.as_bytes();
+    return bytes[mem::len(bytes) - 1] == cast<u8>(byte);
+}
+
+/// Holds the state one emission walks with, the Go `emitter`. names owns
+/// every text the emitter spells itself (operands, labels, LLVM types);
+/// strings and string_literals are the two directions of Go's one
+/// `strings` map, the global name a literal got and the literal a global
+/// name spells; function_names stands for Go's functionNames and
+/// functionParams together, as the function handle reaches both.
+struct Emitter {
+    allocator: Allocator,
+    void_name: ir::Name,
+    types: typ::Table,
+    names: ir::NameTable,
+    out: string::String,
+    strings: map::Map<[]u8, ir::Name>,
+    string_literals: map::Map<[]u8, ir::Name>,
+    values: map::Map<[]u8, ValueInfo>,
+    function_names: map::Map<[]u8, ir::Function>,
+    current_return: ir::Name,
+    main_returns_int: bool,
+    next_label: i64,
+    current_block: ir::Name,
+    block_exit_label: map::Map<[]u8, ExitLabel>,
+    entry_param_loads: string::String,
+    wrote_param_loads: bool,
+    generation: i64
+}
+
+/// Is what the emitter knows about one SSA value, the Go `valueInfo`: its
+/// type and the LLVM operand that stands for it, both emitter names. Go
+/// gives every function a fresh values map; a Map cannot be emptied, so an
+/// entry carries the generation (the function count) it was written in and
+/// one from an earlier function is not found.
+struct ValueInfo {
+    typ: ir::Name,
+    operand: ir::Name,
+    generation: i64
+}
+
+/// Is the concrete LLVM label that continues one IR block, the value of
+/// the Go `blockExitLabel` map, stamped with its function's generation the
+/// way a ValueInfo is.
+struct ExitLabel {
+    label: ir::Name,
+    generation: i64
+}
+
+/// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
+/// `%s` takes a Str (a name the emitter spelled), a Lit (a static text) or
+/// an Owned (a text built for this one line), `%d` an Int.
+union Arg {
+    Str(ir::Name),
+    Lit([]u8),
+    Owned(string::String),
+    Int(i64),
+    None,
+}
+
+/// Appends one interpolated argument.
+fn append_arg(out: &var string::String, names: &ir::NameTable, arg: Arg) -> !void {
+    match arg {
+        Str(name) => return names.append_to(out, name),
+        Lit(text) => return out.append_bytes(text),
+        Owned(text) => {
+            defer text.deinit();
+            return out.append_string(&text);
+        },
+        Int(value) => return fmt::append_i64(out, value),
+        None => return,
+    }
+}
+
+/// Appends format with `%s` / `%d` replaced in order by the arguments and
+/// `%%` by `%`, the Go `fmt.Fprintf` / `fmt.Sprintf`; an argument the format
+/// does not place is released.
+fn format_args(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg,
+    e: Arg,
+    f: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    errdefer c.deinit();
+    errdefer d.deinit();
+    errdefer e.deinit();
+    errdefer f.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    try place_arg(out, names, format, &var position, move c);
+    try place_arg(out, names, format, &var position, move d);
+    try place_arg(out, names, format, &var position, move e);
+    try place_arg(out, names, format, &var position, move f);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends the text of format from position up to the next `%s` / `%d`,
+/// then the argument in its place, and moves position past it; an argument
+/// with no placeholder left is released.
+fn place_arg(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    position: &var i64,
+    arg: Arg
+) -> !void {
+    errdefer arg.deinit();
+    var index = position.*;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if format[index + 1] == cast<u8>(37) {
+                try out.append_byte(cast<u8>(37));
+                index = index + 2;
+                continue;
+            }
+            try append_arg(out, names, move arg);
+            position.* = index + 2;
+            return;
+        }
+        try out.append_byte(byte);
+        index = index + 1;
+    }
+    arg.deinit();
+    position.* = index;
+    return;
+}
+
+/// Appends the text of format after its last placeholder.
+fn append_format_rest(out: &var string::String, format: []u8, position: i64) -> !void {
+    var index = position;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) and format[index + 1] == cast<u8>(37) {
+            try out.append_byte(cast<u8>(37));
+            index = index + 2;
+            continue;
+        }
+        try out.append_byte(byte);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Writes one line of LLVM text with no interpolation, the Go
+/// `e.out.WriteString("...\n")`.
+fn (self: &var Emitter) line(text: []u8) -> !void {
+    try self.out.append_bytes(text);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line, the Go `fmt.Fprintf(&e.out, "...\n", a)`.
+fn (self: &var Emitter) line1(format: []u8, a: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, Arg::None, Arg::None, Arg::None, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with two arguments.
+fn (self: &var Emitter) line2(format: []u8, a: Arg, b: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with three arguments.
+fn (self: &var Emitter) line3(format: []u8, a: Arg, b: Arg, c: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with four arguments.
+fn (self: &var Emitter) line4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with five arguments.
+fn (self: &var Emitter) line5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, move d, move e, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with six arguments.
+fn (self: &var Emitter) line6(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg, f: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, move d, move e, move f);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Builds one text the Go `fmt.Sprintf` way and names it, for a line part
+/// that is assembled before the line is written.
+fn (self: &var Emitter) text1(format: []u8, a: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, Arg::None, Arg::None, Arg::None, Arg::None, Arg::None);
+    return self.names.intern_owned(move out);
+}
+
+/// Builds and names one text with two arguments.
+fn (self: &var Emitter) text2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    return self.names.intern_owned(move out);
+}
+
+/// Builds and names one text with three arguments.
+fn (self: &var Emitter) text3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    return self.names.intern_owned(move out);
+}
+
+/// Builds and names one text with four arguments.
+fn (self: &var Emitter) text4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    return self.names.intern_owned(move out);
+}
+
+/// Builds and names one text with five arguments.
+fn (self: &var Emitter) text5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, move d, move e, Arg::None);
+    return self.names.intern_owned(move out);
+}
+
+/// Builds one failure, the Go `fmt.Errorf("llvm error: ...")`: the format
+/// with its arguments interpolated becomes a diagnostic without a span,
+/// which the CLI prints as `error: llvm error: ...`.
+fn (self: &Emitter) fail(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !diagnostic::Diagnostic {
+    var out = string::new(self.allocator);
+    defer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one failure from a finished format.
+fn (self: &Emitter) fail0(format: []u8) -> !diagnostic::Diagnostic {
+    return self.fail(format, Arg::None, Arg::None, Arg::None, Arg::None);
+}
+
+/// Builds one failure from a format and one argument.
+fn (self: &Emitter) fail1(format: []u8, a: Arg) -> !diagnostic::Diagnostic {
+    return self.fail(format, move a, Arg::None, Arg::None, Arg::None);
+}
+
+/// Builds one failure from a format and two arguments.
+fn (self: &Emitter) fail2(format: []u8, a: Arg, b: Arg) -> !diagnostic::Diagnostic {
+    return self.fail(format, move a, move b, Arg::None, Arg::None);
+}
+
+/// Builds one failure from a format and three arguments.
+fn (self: &Emitter) fail3(format: []u8, a: Arg, b: Arg, c: Arg) -> !diagnostic::Diagnostic {
+    return self.fail(format, move a, move b, move c, Arg::None);
+}
+
+/// Builds one failure from a format and four arguments.
+fn (self: &Emitter) fail4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !diagnostic::Diagnostic {
+    return self.fail(format, move a, move b, move c, move d);
+}
+
+/// Wraps an inner failure the Go `fmt.Errorf("...: %w", err)` way: the
+/// format with its arguments, then `: `, then the inner text.
+fn (self: &Emitter) wrap(format: []u8, a: Arg, b: Arg, inner: diagnostic::Diagnostic) -> !diagnostic::Diagnostic {
+    defer inner.deinit();
+    var out = string::new(self.allocator);
+    defer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    try out.append_bytes(": ");
+    if inner.category.len() > 0 {
+        try out.append_string(&inner.category);
+        try out.append_bytes(": ");
+    }
+    try out.append_string(&inner.message);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Names the text of a module name in the emitter's table, so it can be
+/// interpolated and compared with the names the emitter spells.
+fn (self: &var Emitter) own(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.names.intern(bytes);
+}
+
+/// Names name + suffix, the Go `name + ".suffix"` on an emitter name.
+fn (self: &var Emitter) suffixed(name: ir::Name, suffix: []u8) -> !ir::Name {
+    return self.names.wrapped("", name, suffix);
+}
+
+/// Names the decimal spelling of an integer.
+fn (self: &var Emitter) int_name(value: i64) -> !ir::Name {
+    return self.names.intern_i64(value);
+}
+
+/// Writes declarations and function definitions, the Go `emit`.
+fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    try self.collect_function_names(module);
+    try self.collect_strings(module);
+    if try self.validate_module_types(module) |failed| {
+        return move failed;
+    }
+    try self.write_header(module);
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if try self.write_function(module, function) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Records module-local functions before call emission, the Go
+/// `collectFunctionNames`; the handle stands for the name and its params.
+fn (self: &var Emitter) collect_function_names(module: &ir::Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let name = module.function_name(function);
+        let retained = ir::name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try self.function_names.insert(bytes, function);
+    }
+    return;
+}
+
+/// Returns the module-local function named by a callee, or null.
+fn (self: &Emitter) function_named(module: &ir::Module, name: ir::Name) -> ?ir::Function {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.function_names.get(bytes);
+}
+
+/// Assigns stable global names to string constants, the Go `collectStrings`.
+fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
+    var next = 0;
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op == ir::Op::Const and module.names.is(instr_node.result.type_name, "[]u8") {
+                    let literal = ir::name_text(&module.names, instr_node.immediate);
+                    let literal_bytes = literal.as_bytes();
+                    if !self.strings.contains(literal_bytes) {
+                        let global = try self.text1("@.str.%d", Arg::Int(next));
+                        try self.strings.insert(literal_bytes, global);
+                        let global_text = ir::name_text(&self.names, global);
+                        let global_bytes = global_text.as_bytes();
+                        try self.string_literals.insert(global_bytes, instr_node.immediate);
+                        next = next + 1;
+                    }
+                }
+            }
+        }
+    }
+    return;
+}
+
+/// Names the failures a backend can report, the keys of the Go
+/// `panicEntries` map: `cond_fail` takes its key from the IR; the other keys
+/// are chosen by the instruction that reports the failure.
+enum PanicKey {
+    Bounds,
+    Range,
+    ArrayEmpty,
+    ArenaEmpty,
+    ArenaHandle,
+    ArenaAdd,
+    TestFail,
+    PanicFail,
+    ExpectInt,
+    ExpectBool,
+    ExpectBytes,
+}
+
+/// Returns the key spelling of one failure, the Go map key.
+fn panic_key_spelling(key: PanicKey) -> []u8 {
+    return match key {
+        Bounds => "bounds",
+        Range => "range",
+        ArrayEmpty => "array_empty",
+        ArenaEmpty => "arena_empty",
+        ArenaHandle => "arena_handle",
+        ArenaAdd => "arena_add",
+        TestFail => "test_fail",
+        PanicFail => "panic_fail",
+        ExpectInt => "expect_int",
+        ExpectBool => "expect_bool",
+        ExpectBytes => "expect_bytes",
+    };
+}
+
+/// Returns the failure one key spells, or null for a key the backend does
+/// not report, the Go `panicEntries[key]` lookup.
+fn parse_panic_key(spelling: []u8) -> ?PanicKey {
+    if mem::equal_bytes(spelling, "bounds") {
+        return PanicKey::Bounds;
+    }
+    if mem::equal_bytes(spelling, "range") {
+        return PanicKey::Range;
+    }
+    if mem::equal_bytes(spelling, "array_empty") {
+        return PanicKey::ArrayEmpty;
+    }
+    if mem::equal_bytes(spelling, "arena_empty") {
+        return PanicKey::ArenaEmpty;
+    }
+    if mem::equal_bytes(spelling, "arena_handle") {
+        return PanicKey::ArenaHandle;
+    }
+    if mem::equal_bytes(spelling, "arena_add") {
+        return PanicKey::ArenaAdd;
+    }
+    if mem::equal_bytes(spelling, "test_fail") {
+        return PanicKey::TestFail;
+    }
+    if mem::equal_bytes(spelling, "panic_fail") {
+        return PanicKey::PanicFail;
+    }
+    if mem::equal_bytes(spelling, "expect_int") {
+        return PanicKey::ExpectInt;
+    }
+    if mem::equal_bytes(spelling, "expect_bool") {
+        return PanicKey::ExpectBool;
+    }
+    if mem::equal_bytes(spelling, "expect_bytes") {
+        return PanicKey::ExpectBytes;
+    }
+    return null;
+}
+
+/// Is one runtime failure report, the Go `panicEntry`: the entry that prints
+/// it and the values it takes, spelled as the comma-separated LLVM types the
+/// declaration lists. Every checked failure the backend can raise is listed
+/// here, and the wording for all of them lives in the runtime, so a failure
+/// reads the same however the program reached it.
+struct PanicEntry {
+    entry: []u8,
+    params: []u8
+}
+
+/// Returns one failure's entry and parameter types, the Go `panicEntries`.
+fn panic_entry(key: PanicKey) -> PanicEntry {
+    return match key {
+        Bounds => PanicEntry { entry: "kizu_panic_bounds", params: "i64, i64" },
+        Range => PanicEntry { entry: "kizu_panic_range", params: "i64, i64, i64" },
+        ArrayEmpty => PanicEntry { entry: "kizu_panic_array_empty", params: "" },
+        ArenaEmpty => PanicEntry { entry: "kizu_panic_arena_empty", params: "" },
+        ArenaHandle => PanicEntry { entry: "kizu_panic_arena_handle", params: "" },
+        ArenaAdd => PanicEntry { entry: "kizu_panic_arena_add", params: "" },
+        TestFail => PanicEntry { entry: "kizu_panic_test_fail", params: "ptr, i64" },
+        PanicFail => PanicEntry { entry: "kizu_panic_fail", params: "ptr, i64" },
+        ExpectInt => PanicEntry { entry: "kizu_panic_expect_equal_int", params: "i64, i64" },
+        ExpectBool => PanicEntry { entry: "kizu_panic_expect_equal_bool", params: "i1, i1" },
+        ExpectBytes => PanicEntry { entry: "kizu_panic_expect_equal_bytes", params: "ptr, i64, ptr, i64" },
+    };
+}
+
+/// Counts the parameters one entry lists, the Go `len(spec.params)`.
+fn panic_param_count(params: []u8) -> i64 {
+    if mem::len(params) == 0 {
+        return 0;
+    }
+    var count = 1;
+    var index = 0;
+    while mem::byte_at(params, index) |byte| {
+        index = index + 1;
+        if byte == cast<u8>(44) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+/// Returns the type of one entry parameter, the Go `spec.params[i]`.
+fn panic_param_at(params: []u8, position: i64) -> []u8 {
+    var start = 0;
+    var seen = 0;
+    var index = 0;
+    while index < mem::len(params) {
+        if params[index] == cast<u8>(44) {
+            if seen == position {
+                return params[start..index];
+            }
+            seen = seen + 1;
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    return params[start..mem::len(params)];
+}
+
+/// Appends one entry's parameter types, the Go `panicParams` joined by
+/// `, `: every entry takes the source line and column last, so any failure
+/// can say where it happened; the runtime omits the position when the line
+/// is zero.
+fn append_panic_params(out: &var string::String, key: PanicKey) -> !void {
+    let spec = panic_entry(key);
+    if mem::len(spec.params) > 0 {
+        try out.append_bytes(spec.params);
+        try out.append_bytes(", ");
+    }
+    return out.append_bytes("i64, i64");
+}
+
+/// Names the source position arguments for a failure call, the Go
+/// `panicPosition` joined by `, `: `i64 <line>, i64 <column>`.
+fn (self: &var Emitter) panic_position(span: ast::Span) -> !ir::Name {
+    return self.text2("i64 %d, i64 %d", Arg::Int(span.start.line), Arg::Int(span.start.column));
+}
+
+/// Names the error set members a std container returns as a failure
+/// *value* (a recoverable !T), as opposed to the panic entries, which abort;
+/// the keys of the Go `failureErrors` map.
+enum FailureKey {
+    ArrayAppend,
+    ArrayBounds,
+    ArrayReserve,
+    ArraySwap,
+    ArrayTruncate,
+    MapInsert,
+    BoxNew,
+}
+
+/// Is the error set and member one container failure lowers to. The member
+/// is named here; its number comes from the set declaration in std.
+struct FailureError {
+    set: []u8,
+    member: []u8
+}
+
+/// Returns the set and member of one failure, the Go `failureErrors`.
+fn failure_error(key: FailureKey) -> FailureError {
+    return match key {
+        ArrayAppend => FailureError { set: "std::array::Error", member: "OutOfMemory" },
+        ArrayBounds => FailureError { set: "std::array::Error", member: "OutOfBounds" },
+        ArrayReserve => FailureError { set: "std::array::Error", member: "OutOfMemory" },
+        ArraySwap => FailureError { set: "std::array::Error", member: "OutOfBounds" },
+        ArrayTruncate => FailureError { set: "std::array::Error", member: "OutOfBounds" },
+        MapInsert => FailureError { set: "std::map::Error", member: "OutOfMemory" },
+        BoxNew => FailureError { set: "std::mem::Error", member: "OutOfMemory" },
+    };
+}
+
+/// Returns the key spelling of one failure, the Go map key.
+fn failure_key_spelling(key: FailureKey) -> []u8 {
+    return match key {
+        ArrayAppend => "array_append",
+        ArrayBounds => "array_bounds",
+        ArrayReserve => "array_reserve",
+        ArraySwap => "array_swap",
+        ArrayTruncate => "array_truncate",
+        MapInsert => "map_insert",
+        BoxNew => "box_new",
+    };
+}
+
+/// Is the global code one container failure lowers to, or the failure that
+/// it has none.
+union FailureCode {
+    Code(i64),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Returns the global code one container failure lowers to, the Go
+/// `failureErrorCode`.
+fn (self: &Emitter) failure_error_code(module: &ir::Module, key: FailureKey) -> !FailureCode {
+    let target = failure_error(key);
+    if module.error_sets.at(target.set) |set| {
+        if set.tags.get(target.member) |code| {
+            return FailureCode::Code(code);
+        }
+        return FailureCode::Error(try self.fail2(
+            "llvm error: error set `%s` has no member `%s`",
+            Arg::Lit(target.set), Arg::Lit(target.member)
+        ));
+    }
+    return FailureCode::Error(try self.fail2(
+        "llvm error: failure `%s` needs error set `%s`",
+        Arg::Lit(failure_key_spelling(key)), Arg::Lit(target.set)
+    ));
+}
+
+/// Is the global holding every error code's spelling, the Go
+/// `errorNameTable`.
+fn error_name_table() -> []u8 {
+    return "@.kizu.error.names";
+}
+
+/// Reports whether any code in the module reads a spelling out of the
+/// table: a failure leaving `main`, or a printed error value; the Go
+/// `needsErrorNameTable`.
+fn (self: &var Emitter) needs_error_name_table(module: &ir::Module) -> !bool {
+    if module.error_sets.len() > 0 {
+        return true;
+    }
+    var names = try self.sorted_error_union_names(module);
+    defer names.deinit();
+    return names.len() > 0;
+}
+
+/// Returns how many rows the error name table holds, the Go
+/// `errorNameTableRows`. The table is indexed by the error code itself, so
+/// it spans 0..max, and row 0 is the reserved "no error" entry.
+fn error_name_table_rows(module: &ir::Module) -> i64 {
+    var max = 0;
+    var index = 0;
+    while module.error_sets.key_at(index) |set_name| {
+        index = index + 1;
+        if module.error_sets.at(set_name) |set| {
+            var tag_index = 0;
+            while set.tags.key_at(tag_index) |tag| {
+                tag_index = tag_index + 1;
+                if set.tags.get(tag) |code| {
+                    if code > max {
+                        max = code;
+                    }
+                }
+            }
+        }
+    }
+    return max + 1;
+}
+
+/// Writes one LLVM function, the Go `writeFunction`.
+fn (self: &var Emitter) write_function(module: &ir::Module, function: ir::Function) -> !?diagnostic::Diagnostic {
+    let node = module.function_nodes.at(function.node);
+    if try self.validate_function_types(module, node) |failed| {
+        return move failed;
+    }
+    self.generation = self.generation + 1;
+    self.current_return = node.return_type;
+    self.next_label = 0;
+    self.current_block = ir::empty_name();
+    self.entry_param_loads.clear();
+    self.wrote_param_loads = false;
+    try self.precompute_block_exit_labels(module, node);
+    var return_type = try self.llvm_type_of(module, node.return_type);
+    let return_text = ir::name_text(&module.names, node.return_type);
+    let return_bytes = return_text.as_bytes();
+    var returns_error_union = false;
+    if try self.error_union_success_type(return_bytes) |success| {
+        success.deinit();
+        returns_error_union = true;
+    }
+    self.main_returns_int = module.names.is(node.name, "main") and
+        (module.names.is(node.return_type, "void") or returns_error_union);
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit();
+    if self.main_returns_int {
+        return_type = try self.names.intern("i32");
+        try params.append(try string::from_bytes(self.allocator, "i32 %kizu.argc"));
+        try params.append(try string::from_bytes(self.allocator, "ptr %kizu.argv"));
+    } else {
+        var index = 0;
+        while node.params.get(index) |param| {
+            index = index + 1;
+            try params.append(try self.function_param_abi(module, param));
+            let operand = try self.local_name(module, param.name);
+            try self.set_value(module, param.value(), operand);
+        }
+    }
+    try self.register_forwarded_values(module, node);
+    let name_text = ir::name_text(&module.names, node.name);
+    let name_bytes = name_text.as_bytes();
+    let symbol = try self.llvm_function_name(name_bytes);
+    let joined = try string::join(self.allocator, &params, ", ");
+    try self.line3("define %s @%s(%s) {", Arg::Str(return_type), Arg::Str(symbol), Arg::Owned(move joined));
+    let body_start = self.out.len();
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        if try self.write_block(module, block) |failed| {
+            errdefer failed.deinit();
+            let fn_name = try self.own(module, node.name);
+            let block_name = try self.own(module, module.block_name(block));
+            return try self.wrap("llvm error: function `%s` block `%s`", Arg::Str(fn_name), Arg::Str(block_name), move failed);
+        }
+    }
+    var hoisted = string::new(self.allocator);
+    defer hoisted.deinit();
+    if try self.hoist_body(body_start, &var hoisted) |failed| {
+        errdefer failed.deinit();
+        let fn_name = try self.own(module, node.name);
+        return try self.wrap("llvm error: function `%s`", Arg::Str(fn_name), Arg::None, move failed);
+    }
+    try self.out.truncate(body_start);
+    try self.out.append_string(&hoisted);
+    try self.line("}");
+    try self.out.append_byte(cast<u8>(10));
+    self.main_returns_int = false;
+    self.current_return = ir::empty_name();
+    self.current_block = ir::empty_name();
+    self.entry_param_loads.clear();
+    self.wrote_param_loads = false;
+    return null;
+}
+
+/// Moves the allocas of the function body written since body_start into
+/// its entry block, the Go `hoistAllocasToEntry` call on `e.out`.
+fn (self: &Emitter) hoist_body(body_start: i64, out: &var string::String) -> !?diagnostic::Diagnostic {
+    let text = self.out.as_bytes();
+    return hoist_allocas_to_entry(self.allocator, text[body_start..mem::len(text)], out);
+}
+
+/// Returns the LLVM ABI parameter spelling for one Kizu value, the Go
+/// `functionParamABI`.
+fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param) -> !string::String {
+    let param_type = try self.llvm_type_of(module, param.type_name);
+    let param_name = try self.local_name(module, param.name);
+    let type_text = ir::name_text(&module.names, param.type_name);
+    let type_bytes = type_text.as_bytes();
+    if !uses_indirect_struct_param_abi(module, type_bytes) {
+        return self.sprint2("%s %s", Arg::Str(param_type), Arg::Str(param_name));
+    }
+    let addr_name = try self.suffixed(param_name, ".addr");
+    let names = &self.names;
+    try format_args(
+        &var self.entry_param_loads, names, "  %s = load %s, ptr %s",
+        Arg::Str(param_name), Arg::Str(param_type), Arg::Str(addr_name), Arg::None, Arg::None, Arg::None
+    );
+    try self.entry_param_loads.append_byte(cast<u8>(10));
+    return self.sprint2("ptr byval(%s) %s", Arg::Str(param_type), Arg::Str(addr_name));
+}
+
+/// Builds one text the Go `fmt.Sprintf` way, for a text kept as its own
+/// String rather than named.
+fn (self: &Emitter) sprint2(format: []u8, a: Arg, b: Arg) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    return move out;
+}
+
+/// Builds one owned text with three arguments.
+fn (self: &Emitter) sprint3(format: []u8, a: Arg, b: Arg, c: Arg) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    return move out;
+}
+
+/// Resolves every result that never becomes an LLVM instruction — scalar
+/// constants, no-op casts, borrow-shaped box reads — before any block is
+/// written, the Go `registerForwardedValues`. A match merge block is
+/// written before the arms that feed it, and a phi that reads a forwarded
+/// value would otherwise name a register nothing ever defines.
+fn (self: &var Emitter) register_forwarded_values(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var defs = map::new<[]u8, ir::Instr>(self.allocator);
+    defer defs.deinit();
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !ir::is_empty(instr_node.result.name) {
+                let retained = ir::name_text(&module.names, instr_node.result.name);
+                let bytes = retained.as_bytes();
+                try defs.insert(bytes, instr);
+            }
+        }
+    }
+    block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !self.forwards_operand(module, instr_node) {
+                continue;
+            }
+            let operand = try self.forwarded_operand_of(module, &defs, instr_node.result);
+            try self.set_value(module, instr_node.result, operand);
+        }
+    }
+    return;
+}
+
+/// Follows a forwarded value to the operand it stands for, the Go
+/// `operandOf` closure of registerForwardedValues.
+fn (self: &var Emitter) forwarded_operand_of(
+    module: &ir::Module,
+    defs: &map::Map<[]u8, ir::Instr>,
+    value: ir::Value
+) -> !ir::Name {
+    let retained = ir::name_text(&module.names, value.name);
+    let bytes = retained.as_bytes();
+    let instr = defs.get(bytes) orelse return self.local_name(module, value.name);
+    let instr_node = module.instrs.at(instr.node);
+    if !self.forwards_operand(module, instr_node) {
+        return self.local_name(module, value.name);
+    }
+    if instr_node.op == ir::Op::Const {
+        let operand = try self.scalar_const_operand(module, instr_node) orelse return self.local_name(module, value.name);
+        return operand;
+    }
+    return self.forwarded_operand_of(module, defs, instr_node.args.get_or_panic(0));
+}
+
+/// Reports whether an instruction emits no LLVM instruction and instead
+/// hands an operand through under a new name, the Go `forwardsOperand`. Its
+/// cases must stay the exact set of writes that register a value without
+/// printing a definition.
+fn (self: &Emitter) forwards_operand(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    if node.op == ir::Op::Const {
+        return scalar_const_forwards(module, node);
+    }
+    if node.op == ir::Op::Cast {
+        return node.args.len() == 1 and cast_forwards_operand(module, node);
+    }
+    if node.op == ir::Op::BoxBorrow or node.op == ir::Op::BoxBorrowMut {
+        return node.args.len() == 1 and module.names.starts_with(node.result.type_name, "&");
+    }
+    return false;
+}
+
+/// Reports whether a constant's value is a bare scalar the emitter forwards
+/// as its immediate, the `ok` of the Go `scalarConstOperand`.
+fn scalar_const_forwards(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    let type_text = ir::name_text(&module.names, node.result.type_name);
+    let type_bytes = type_text.as_bytes();
+    if module.enums.contains(type_bytes) or module.error_sets.contains(type_bytes) {
+        return true;
+    }
+    if integer_bit_width(type_bytes) |_| {
+        return true;
+    }
+    return mem::equal_bytes(type_bytes, "bool");
+}
+
+/// Returns the LLVM immediate for a constant whose value is a bare scalar,
+/// the Go `scalarConstOperand`: integers at whatever width the type says,
+/// bool, enums, and error set members; null for any other constant.
+fn (self: &var Emitter) scalar_const_operand(module: &ir::Module, node: &ir::InstrNode) -> !?ir::Name {
+    if !scalar_const_forwards(module, node) {
+        return null;
+    }
+    if module.names.is(node.result.type_name, "bool") {
+        return try self.names.intern(llvm_bool(&module.names, node.immediate));
+    }
+    return try self.own(module, node.immediate);
+}
+
+/// Reports whether a cast only changes the Kizu type — a same-width integer
+/// cast, or a cast whose LLVM representation is already the target's — so
+/// write_cast forwards the operand instead of emitting anything, the Go
+/// `castForwardsOperand`.
+fn cast_forwards_operand(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    let source_text = ir::name_text(&module.names, node.args.get_or_panic(0).type_name);
+    let source = source_text.as_bytes();
+    let target_text = ir::name_text(&module.names, node.result.type_name);
+    let target = target_text.as_bytes();
+    if integer_bit_width(source) |source_width| {
+        if integer_bit_width(target) |target_width| {
+            return source_width == target_width;
+        }
+        return !is_raw_pointer_type(target);
+    }
+    if is_raw_pointer_type(source) {
+        if integer_bit_width(target) |_| {
+            return false;
+        }
+        return true;
+    }
+    return true;
+}
+
+/// Rejects ABI shapes this backend cannot lower faithfully, the Go
+/// `validateFunctionTypes`.
+fn (self: &var Emitter) validate_function_types(module: &ir::Module, node: &ir::FunctionNode) -> !?diagnostic::Diagnostic {
+    if try self.validate_error_union_type_of(module, node.return_type) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        if try self.validate_error_union_type_of(module, param.type_name) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Checks the supported error-union ABI subset for a type the module names.
+fn (self: &var Emitter) validate_error_union_type_of(module: &ir::Module, typ_name: ir::Name) -> !?diagnostic::Diagnostic {
+    let retained = ir::name_text(&module.names, typ_name);
+    let bytes = retained.as_bytes();
+    return self.validate_error_union_type(bytes);
+}
+
+/// Checks the supported error-union ABI subset, the Go
+/// `validateErrorUnionType`.
+fn (self: &var Emitter) validate_error_union_type(typ_name: []u8) -> !?diagnostic::Diagnostic {
+    let success = try self.error_union_success_type(typ_name) orelse return null;
+    defer success.deinit();
+    let success_bytes = success.as_bytes();
+    if !is_lowerable_error_union_success(success_bytes) {
+        let shown = try self.names.intern(success_bytes);
+        return try self.fail1(
+            "llvm error: error union success type `%s` is not supported by the LLVM backend yet",
+            Arg::Str(shown)
+        );
+    }
+    return null;
+}
+
+/// Writes one LLVM basic block, the Go `writeBlock`.
+fn (self: &var Emitter) write_block(module: &ir::Module, block: ir::Block) -> !?diagnostic::Diagnostic {
+    let node = module.blocks.at(block.node);
+    let label = try self.own(module, node.name);
+    try self.line1("%s:", Arg::Str(label));
+    self.current_block = node.name;
+    if !self.wrote_param_loads {
+        try self.out.append_string(&self.entry_param_loads);
+        self.wrote_param_loads = true;
+    }
+    if self.main_returns_int and module.names.is(node.name, "entry") {
+        try self.line("  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)");
+    }
+    var index = 0;
+    while node.instrs.get(index) |instr| {
+        index = index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if try self.write_instr(module, instr_node) |failed| {
+            return try self.wrap("llvm error: block `%s`", Arg::Str(label), Arg::None, move failed);
+        }
+    }
+    if try self.write_terminator(module, node.terminator) |failed| {
+        return try self.wrap("llvm error: block `%s`", Arg::Str(label), Arg::None, move failed);
+    }
+    return null;
+}
+
+/// Writes one LLVM instruction, the Go `writeInstr`.
+fn (self: &var Emitter) write_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        Const => return self.write_const(module, node),
+        Binary => return self.write_binary(module, node),
+        Unary => return self.write_unary(module, node),
+        Call => return self.write_call(module, node),
+        Cast => return self.write_cast(module, node),
+        Phi => return self.write_phi(module, node),
+        StructNew => return self.write_struct_new(module, node),
+        Field => return self.write_field(module, node),
+        FieldRef => return self.write_field_ref(module, node),
+        FieldAddr => return self.write_field_addr(module, node),
+        FieldSet => return self.write_field_set(module, node),
+        FieldRefSet => return self.write_field_ref_set(module, node),
+        RefStore => return self.write_ref_store(module, node),
+        VolatileStore => return self.write_ref_store(module, node),
+        RefLoad => return self.write_ref_load(module, node),
+        VolatileLoad => return self.write_ref_load(module, node),
+        LocalSlot => return self.write_local_slot(module, node),
+        BufferNew => return self.write_buffer_new(module, node),
+        BufferAsBytes => return self.write_buffer_as_bytes(module, node),
+        CondFail => return self.write_cond_fail(module, node),
+        _ => return self.write_runtime_instr(module, node),
+    }
+}
+
+/// Dispatches instructions backed by hosted runtime helpers, the Go
+/// `writeRuntimeInstr`.
+fn (self: &var Emitter) write_runtime_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ArrayNew => return self.write_array_instr(module, node),
+        ArrayAppend => return self.write_array_instr(module, node),
+        ArrayAsBytes => return self.write_array_instr(module, node),
+        ArrayAt => return self.write_array_instr(module, node),
+        ArrayAtMut => return self.write_array_instr(module, node),
+        ArrayCapacity => return self.write_array_instr(module, node),
+        ArrayClear => return self.write_array_instr(module, node),
+        ArrayDeinit => return self.write_array_instr(module, node),
+        ArrayGet => return self.write_array_instr(module, node),
+        ArrayGetOrPanic => return self.write_array_instr(module, node),
+        ArrayLen => return self.write_array_instr(module, node),
+        ArrayPop => return self.write_array_instr(module, node),
+        ArrayPopOrPanic => return self.write_array_instr(module, node),
+        ArrayReserve => return self.write_array_instr(module, node),
+        ArraySet => return self.write_array_instr(module, node),
+        ArraySwap => return self.write_array_instr(module, node),
+        ArrayTruncate => return self.write_array_instr(module, node),
+        MapNew => return self.write_map_instr(module, node),
+        MapAt => return self.write_map_instr(module, node),
+        MapAtMut => return self.write_map_instr(module, node),
+        MapContains => return self.write_map_instr(module, node),
+        MapDeinit => return self.write_map_instr(module, node),
+        MapGet => return self.write_map_instr(module, node),
+        MapInsert => return self.write_map_instr(module, node),
+        MapKeyAt => return self.write_map_instr(module, node),
+        MapLen => return self.write_map_instr(module, node),
+        MapTakeValueAt => return self.write_map_instr(module, node),
+        ArenaNew => return self.write_arena_instr(module, node),
+        ArenaAdd => return self.write_arena_instr(module, node),
+        ArenaAt => return self.write_arena_instr(module, node),
+        ArenaAtMut => return self.write_arena_instr(module, node),
+        ArenaDeinit => return self.write_arena_instr(module, node),
+        ArenaLen => return self.write_arena_instr(module, node),
+        ArenaPopOrPanic => return self.write_arena_instr(module, node),
+        BoxNew => return self.write_box_instr(module, node),
+        BoxBorrow => return self.write_box_instr(module, node),
+        BoxBorrowMut => return self.write_box_instr(module, node),
+        BoxDeinit => return self.write_box_instr(module, node),
+        BoxTake => return self.write_box_instr(module, node),
+        UnionNew => return self.write_union_instr(module, node),
+        UnionTag => return self.write_union_instr(module, node),
+        UnionLoad => return self.write_union_instr(module, node),
+        UnionPayload => return self.write_union_instr(module, node),
+        TestFail => return self.write_test_instr(module, node),
+        TestExpectEqual => return self.write_test_instr(module, node),
+        PanicFail => return self.write_panic_fail(module, node),
+        SliceLen => return self.write_slice_instr(module, node),
+        SliceIndex => return self.write_slice_instr(module, node),
+        SliceStore => return self.write_slice_instr(module, node),
+        SliceSlice => return self.write_slice_instr(module, node),
+        ErrorOk => return self.write_error_instr(module, node),
+        ErrorError => return self.write_error_instr(module, node),
+        ErrorTry => return self.write_error_instr(module, node),
+        OptSome => return self.write_opt_instr(module, node),
+        OptNull => return self.write_opt_instr(module, node),
+        OptHas => return self.write_opt_instr(module, node),
+        OptValue => return self.write_opt_instr(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Names the Go spelling of an instruction's op, `call.<f>` and the like,
+/// for a failure that quotes it.
+fn (self: &var Emitter) op_name(module: &ir::Module, node: &ir::InstrNode) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try ir::append_op(&var out, &module.names, node.op, node.operand);
+    return self.names.intern_owned(move out);
+}
+
+/// Emits one deferred void cleanup inside an already-open block, the Go
+/// `writeCleanup`. Cleanup args arrive as values, never `&var` slots: the
+/// lowerer loads slot-backed receivers before attaching cleanups to an
+/// instruction. Go names the synthetic result `%kizu.cleanup.N`; the name
+/// is never read back, so here the counter advances and the result stays
+/// unnamed, typed `void` the way Go types it.
+fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup) -> !?diagnostic::Diagnostic {
+    let _ = try self.next_synthetic_value("cleanup");
+    var instr = module.blank_instr(
+        ir::Value { name: ir::empty_name(), type_name: self.void_name },
+        cleanup.op, cleanup.operand, ir::empty_name()
+    );
+    defer instr.deinit();
+    try instr.args.append(cleanup.arg);
+    return self.write_instr(module, &instr);
+}
+
+/// Returns the concrete LLVM label that reaches a successor, the Go
+/// `incomingBlockLabel`.
+fn (self: &var Emitter) incoming_block_label(module: &ir::Module, block: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, block);
+    let bytes = retained.as_bytes();
+    if self.block_exit_label.get(bytes) |exit| {
+        if exit.generation == self.generation {
+            return exit.label;
+        }
+    }
+    return self.names.intern(bytes);
+}
+
+/// Records helper labels before phi nodes are emitted, the Go
+/// `precomputeBlockExitLabels`.
+fn (self: &var Emitter) precompute_block_exit_labels(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        let label = try self.compute_block_exit_label(module, block_node);
+        if !ir::is_empty(label) {
+            let retained = ir::name_text(&module.names, block_node.name);
+            let bytes = retained.as_bytes();
+            try self.block_exit_label.insert(bytes, ExitLabel { label: label, generation: self.generation });
+        }
+    }
+    return;
+}
+
+/// Returns the final helper label that continues one IR block, the Go
+/// `computeBlockExitLabel`; empty when no instruction continues it.
+fn (self: &var Emitter) compute_block_exit_label(module: &ir::Module, block_node: &ir::BlockNode) -> !ir::Name {
+    var label = ir::empty_name();
+    var index = 0;
+    while block_node.instrs.get(index) |instr| {
+        index = index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        let next = try self.continuation_label(module, instr_node);
+        if !ir::is_empty(next) {
+            label = next;
+        }
+    }
+    return label;
+}
+
+/// Reports helper labels introduced by instruction expansion, the Go
+/// `continuationLabel`; empty for an instruction that introduces none.
+fn (self: &var Emitter) continuation_label(module: &ir::Module, node: &ir::InstrNode) -> !ir::Name {
+    match node.op {
+        ErrorTry => return self.helper_label(module, node.result.name, "try.ok"),
+        CondFail => return self.helper_label(module, node.args.get_or_panic(0).name, "pass"),
+        ArrayPop => return self.helper_label(module, node.result.name, "array.join"),
+        ArrayGet => return self.helper_label(module, node.result.name, "array.join"),
+        MapGet => return self.helper_label(module, node.result.name, "array.join"),
+        ArrayGetOrPanic => return self.result_helper_label(module, node, ".ptr", "ok"),
+        MapTakeValueAt => return self.result_helper_label(module, node, ".ptr", "ok"),
+        ArenaAt => return self.result_helper_label(module, node, ".ptr", "ok"),
+        ArenaPopOrPanic => return self.result_helper_label(module, node, ".ptr", "ok"),
+        ArenaAdd => return self.result_helper_label(module, node, ".bad", "ok"),
+        TestExpectEqual => return self.result_helper_label(module, node, ".ok", "ok"),
+        _ => return ir::empty_name(),
+    }
+}
+
+/// Returns the helper label Go derives from `localName(result) + suffix`.
+fn (self: &var Emitter) result_helper_label(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    suffix: []u8,
+    label_suffix: []u8
+) -> !ir::Name {
+    let result_name = try self.local_name(module, node.result.name);
+    let base = try self.suffixed(result_name, suffix);
+    return self.helper_label_local(base, label_suffix);
+}
+
+/// Records the concrete label where the current IR block continues, the Go
+/// `markCurrentBlockExit`.
+fn (self: &var Emitter) mark_current_block_exit(module: &ir::Module, label: ir::Name) -> !void {
+    if ir::is_empty(self.current_block) {
+        return;
+    }
+    let retained = ir::name_text(&module.names, self.current_block);
+    let bytes = retained.as_bytes();
+    return self.block_exit_label.insert(bytes, ExitLabel { label: label, generation: self.generation });
+}
+
+/// Derives a deterministic local label from an SSA value the module names,
+/// the Go `helperLabel`.
+fn (self: &var Emitter) helper_label(module: &ir::Module, base: ir::Name, suffix: []u8) -> !ir::Name {
+    let retained = ir::name_text(&module.names, base);
+    let bytes = retained.as_bytes();
+    return self.helper_label_bytes(bytes, suffix);
+}
+
+/// Derives a deterministic local label from an operand the emitter spelled,
+/// the Go `helperLabel` on a `%kizu.` name.
+fn (self: &var Emitter) helper_label_local(base: ir::Name, suffix: []u8) -> !ir::Name {
+    let copied = try self.names.copy(base);
+    defer copied.deinit();
+    let bytes = copied.as_bytes();
+    return self.helper_label_bytes(bytes, suffix);
+}
+
+/// Derives a label from the bytes of an SSA value or operand: a `%kizu.`
+/// name loses its `%`, another `%` name becomes its local name without the
+/// `%`, and the suffix follows after a dot.
+fn (self: &var Emitter) helper_label_bytes(base: []u8, suffix: []u8) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    if mem::starts_with(base, "%kizu.") {
+        try out.append_bytes(base[1..mem::len(base)]);
+    } else {
+        if mem::starts_with(base, "%") {
+            try out.append_bytes("kizu.");
+            try out.append_bytes(base[1..mem::len(base)]);
+        } else {
+            try out.append_bytes(base);
+        }
+    }
+    try out.append_byte(cast<u8>(46));
+    try out.append_bytes(suffix);
+    return self.names.intern_owned(move out);
+}
+
+/// Writes one LLVM terminator, the Go `writeTerminator`.
+fn (self: &var Emitter) write_terminator(module: &ir::Module, term: ir::Terminator) -> !?diagnostic::Diagnostic {
+    match term.op {
+        Return => {
+            let return_text = ir::name_text(&module.names, self.current_return);
+            let return_bytes = return_text.as_bytes();
+            if try self.error_union_success_type(return_bytes) |success| {
+                success.deinit();
+                return self.write_error_union_return(module, term.value);
+            }
+            if module.names.is(term.value.type_name, "void") {
+                if self.main_returns_int {
+                    try self.line("  ret i32 0");
+                    return null;
+                }
+                try self.line("  ret void");
+                return null;
+            }
+            let value = try self.operand(module, term.value);
+            let value_type = try self.llvm_type_of(module, term.value.type_name);
+            try self.line2("  ret %s %s", Arg::Str(value_type), Arg::Str(value.operand));
+            return null;
+        },
+        Jump => {
+            let target = try self.own(module, term.target);
+            try self.line1("  br label %%%s", Arg::Str(target));
+            return null;
+        },
+        Branch => {
+            let cond = try self.operand(module, term.cond);
+            let target = try self.own(module, term.target);
+            let else_target = try self.own(module, term.else_target);
+            try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(cond.operand), Arg::Str(target), Arg::Str(else_target));
+            return null;
+        },
+        Unreachable => {
+            try self.line("  unreachable");
+            return null;
+        },
+        None => return try self.fail1("llvm error: unsupported terminator `%s`", Arg::Lit("")),
+    }
+}
+
+/// Materializes a %kizu.slice.u8 from the current ptr+length string view,
+/// the Go `sliceValue`: the operand of a `[]u8` value, or a failure.
+fn (self: &var Emitter) slice_value(module: &ir::Module, value: ir::Value) -> !SliceOperand {
+    let info = try self.operand(module, value);
+    if !module.names.is(value.type_name, "[]u8") {
+        let shown = try self.own(module, value.type_name);
+        return SliceOperand::Error(try self.fail1("llvm error: expected []u8, got %s", Arg::Str(shown)));
+    }
+    return SliceOperand::Operand(info.operand);
+}
+
+/// Is the operand of a byte slice, or the failure that a value is not one.
+union SliceOperand {
+    Operand(ir::Name),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Resolves a field offset in a declared struct, the Go `structFieldIndex`;
+/// null for a field the struct does not declare.
+fn struct_field_index(declared: &ir::Struct, name: ir::Name) -> ?i64 {
+    var index = 0;
+    while declared.fields.get(index) |field| {
+        if ir::same_name(field.name, name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Returns the field index of the failure payload, the Go
+/// `errorUnionFailureIndex`.
+fn (self: &var Emitter) error_union_failure_index(typ_name: []u8) -> !i64 {
+    if try self.error_union_success_type(typ_name) |success| {
+        defer success.deinit();
+        let success_bytes = success.as_bytes();
+        if mem::equal_bytes(success_bytes, "void") {
+            return 1;
+        }
+    }
+    return 2;
+}
+
+/// Returns a unique helper value name without a leading percent, the Go
+/// `nextSyntheticValue`.
+fn (self: &var Emitter) next_synthetic_value(prefix: []u8) -> !ir::Name {
+    self.next_label = self.next_label + 1;
+    return self.text2("kizu.%s.%d", Arg::Lit(prefix), Arg::Int(self.next_label));
+}
+
+/// Returns a unique helper value name whose prefix is two parts, the Go
+/// `nextSyntheticValue(prefix + suffix)`.
+fn (self: &var Emitter) next_synthetic_value_suffixed(prefix: []u8, suffix: []u8) -> !ir::Name {
+    self.next_label = self.next_label + 1;
+    return self.text3("kizu.%s%s.%d", Arg::Lit(prefix), Arg::Lit(suffix), Arg::Int(self.next_label));
+}
+
+/// Names `%` + name, the Go `"%" + e.nextSyntheticValue(...)`.
+fn (self: &var Emitter) percent(name: ir::Name) -> !ir::Name {
+    return self.names.wrapped("%", name, "");
+}
+
+/// Resolves an SSA value to a LLVM operand, the Go `value`.
+fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !ValueInfo {
+    let retained = ir::name_text(&module.names, value.name);
+    let bytes = retained.as_bytes();
+    if self.values.get(bytes) |found| {
+        if found.generation == self.generation {
+            return found;
+        }
+    }
+    let typ_name = try self.own(module, value.type_name);
+    let local = try self.local_name(module, value.name);
+    return ValueInfo { typ: typ_name, operand: local, generation: self.generation };
+}
+
+/// Records the operand that stands for a result, the Go
+/// `e.values[instr.Result.Name] = valueInfo{...}`.
+fn (self: &var Emitter) set_value(module: &ir::Module, result: ir::Value, operand: ir::Name) -> !void {
+    let typ_name = try self.own(module, result.type_name);
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    return self.values.insert(bytes, ValueInfo { typ: typ_name, operand: operand, generation: self.generation });
+}
+
+/// Records that a result is the `void` operand, the Go
+/// `valueInfo{typ: instr.Result.Type, operand: "void"}`.
+fn (self: &var Emitter) set_void_value(module: &ir::Module, result: ir::Value) -> !void {
+    let operand = try self.names.intern("void");
+    return self.set_value(module, result, operand);
+}
+
+/// Wraps a nullable runtime pointer into a borrow optional `{i8, ptr}`
+/// result, branch-free, the Go `writeBorrowOptionalResult`: the pointer
+/// becomes the payload and its non-nullness the presence tag. Array.at,
+/// Map.at, and Arena.at_mut all end here.
+fn (self: &var Emitter) write_borrow_optional_result(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    ptr_name: ir::Name
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if !is_optional_type(result_type) {
+        let op = try self.op_name(module, node);
+        let shown = try self.own(module, node.result.type_name);
+        return try self.fail2("llvm error: %s expects a borrow optional result, got %s", Arg::Str(op), Arg::Str(shown));
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let opt_type = try self.llvm_type(module, result_type);
+    let live_name = try self.suffixed(result_name, ".live");
+    let tag_name = try self.suffixed(result_name, ".tag");
+    let some_name = try self.suffixed(result_name, ".some");
+    try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(live_name), Arg::Str(ptr_name));
+    try self.line2("  %s = zext i1 %s to i8", Arg::Str(tag_name), Arg::Str(live_name));
+    try self.line3("  %s = insertvalue %s zeroinitializer, i8 %s, 0", Arg::Str(some_name), Arg::Str(opt_type), Arg::Str(tag_name));
+    try self.line4("  %s = insertvalue %s %s, ptr %s, 1", Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(some_name), Arg::Str(ptr_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Stores a first-class value in a temporary slot and returns its pointer,
+/// the Go `writeStackValue`.
+fn (self: &var Emitter) write_stack_value(module: &ir::Module, base_name: ir::Name, value: ir::Value) -> !ir::Name {
+    let slot_name = try self.suffixed(base_name, ".slot");
+    let info = try self.operand(module, value);
+    let value_type = try self.llvm_type_of(module, value.type_name);
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(value_type));
+    try self.line3("  store %s %s, ptr %s", Arg::Str(value_type), Arg::Str(info.operand), Arg::Str(slot_name));
+    return slot_name;
+}
+
+/// Is the pointer and length extracted from one byte slice.
+struct SliceParts {
+    ptr: ir::Name,
+    len: ir::Name
+}
+
+/// Extracts a byte-slice pointer and length, the Go `writeSliceParts`.
+fn (self: &var Emitter) write_slice_parts(prefix: ir::Name, slice_operand: ir::Name) -> !SliceParts {
+    let ptr_name = try self.suffixed(prefix, ".ptr");
+    let len_name = try self.suffixed(prefix, ".len");
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 0", Arg::Str(ptr_name), Arg::Str(slice_operand));
+    try self.line2("  %s = extractvalue %%kizu.slice.u8 %s, 1", Arg::Str(len_name), Arg::Str(slice_operand));
+    return SliceParts { ptr: ptr_name, len: len_name };
+}
+
+/// Writes one private string constant, the Go `writeStaticStringGlobal`.
+fn (self: &var Emitter) write_static_string_global(name: ir::Name, value: []u8) -> !void {
+    var escaped = string::new(self.allocator);
+    errdefer escaped.deinit();
+    try append_escaped_string(&var escaped, value);
+    let format =
+        \\%s = private unnamed_addr constant [%d x i8] c"%s\00"
+    ;
+    return self.line3(format, Arg::Str(name), Arg::Int(mem::len(value) + 1), Arg::Owned(move escaped));
+}
+
+/// Returns a LLVM constant expression for sizeof(T), the Go
+/// `elementSizeOperand`.
+fn (self: &var Emitter) element_size_operand(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
+    let llvm_type = try self.llvm_type_of(module, typ_name);
+    if self.names.is(llvm_type, "ptr") {
+        return self.names.intern("8");
+    }
+    return self.text1("ptrtoint (ptr getelementptr (%s, ptr null, i64 1) to i64)", Arg::Str(llvm_type));
+}
+
+/// Names the hosted container a constructor builds, the result shape the
+/// Go `writeContainerNew` is handed as a predicate.
+enum ContainerKind {
+    Array,
+    Map,
+    Arena,
+}
+
+/// Reports whether a lowered IR type is the container a kind names.
+fn is_container_type(kind: ContainerKind, typ_name: []u8) -> bool {
+    return match kind {
+        Array => is_array_llvm_type(typ_name),
+        Map => is_map_llvm_type(typ_name),
+        Arena => is_arena_llvm_type(typ_name),
+    };
+}
+
+/// Lowers one container constructor to its runtime call, the Go
+/// `writeContainerNew`: the allocator handle and the element size are the
+/// whole ABI.
+fn (self: &var Emitter) write_container_new(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    runtime: []u8,
+    kind: ContainerKind,
+    shape: []u8
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if node.args.len() != 1 or !is_container_type(kind, result_type) {
+        return try self.fail1("llvm error: %s", Arg::Lit(shape));
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let allocator = try self.operand(module, node.args.get_or_panic(0));
+    let size = try self.element_size_operand(module, node.immediate);
+    try self.line4(
+        "  %s = call ptr @%s(ptr %s, i64 %s)",
+        Arg::Str(result_name), Arg::Lit(runtime), Arg::Str(allocator.operand), Arg::Str(size)
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Returns an empty operand list, for the failures that report no value.
+fn (self: &Emitter) no_names() -> array::Array<ir::Name> {
+    return array::new<ir::Name>(self.allocator);
+}
+
+/// Reports the named failure when the pointer is null, which is how the
+/// hosted Array runtime signals a refused access, the Go `writeNullFailure`.
+fn (self: &var Emitter) write_null_failure(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    ptr_name: ir::Name,
+    prefix: []u8,
+    key: PanicKey,
+    args: &array::Array<ir::Name>
+) -> !void {
+    let spec = panic_entry(key);
+    let synthetic = try self.next_synthetic_value_suffixed(prefix, ".is_null");
+    let null_name = try self.percent(synthetic);
+    var fail_suffix = try string::from_bytes(self.allocator, prefix);
+    defer fail_suffix.deinit();
+    try fail_suffix.append_bytes(".null");
+    let fail_suffix_bytes = fail_suffix.as_bytes();
+    let fail_label = try self.helper_label_local(ptr_name, fail_suffix_bytes);
+    let ok_label = try self.helper_label_local(ptr_name, "ok");
+    try self.mark_current_block_exit(module, ok_label);
+    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(ptr_name));
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(null_name), Arg::Str(fail_label), Arg::Str(ok_label));
+    try self.line1("%s:", Arg::Str(fail_label));
+    var typed = array::new<string::String>(self.allocator);
+    defer typed.deinit();
+    var index = 0;
+    while args.get(index) |arg| {
+        var part = try string::from_bytes(self.allocator, panic_param_at(spec.params, index));
+        errdefer part.deinit();
+        try part.append_bytes(" ");
+        try self.names.append_to(&var part, arg);
+        try typed.append(move part);
+        index = index + 1;
+    }
+    let position = try self.panic_position(node.span);
+    try typed.append(try self.names.copy(position));
+    let joined = try string::join(self.allocator, &typed, ", ");
+    try self.line2("  call void @%s(%s)", Arg::Lit(spec.entry), Arg::Owned(move joined));
+    try self.line("  unreachable");
+    return self.line1("%s:", Arg::Str(ok_label));
+}
+
+/// Converts a runtime boolean into a !void result, the Go
+/// `writeArrayBoolResult`.
+fn (self: &var Emitter) write_array_bool_result(
+    module: &ir::Module,
+    result: ir::Value,
+    ok_operand: ir::Name,
+    failure_key: FailureKey
+) -> !?diagnostic::Diagnostic {
+    let looked_up = try self.failure_error_code(module, failure_key);
+    match looked_up {
+        Error(failed) => return move failed,
+        Code(code) => {
+            let result_name = try self.local_name(module, result.name);
+            let result_text = ir::name_text(&module.names, result.type_name);
+            let result_type = result_text.as_bytes();
+            let union_type = try self.llvm_type(module, result_type);
+            let failure_index = try self.error_union_failure_index(result_type);
+            let base_name = try self.suffixed(result_name, ".base");
+            let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
+            try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_operand));
+            try self.line3("  %s = insertvalue %s zeroinitializer, i8 %s, 0", Arg::Str(base_name), Arg::Str(union_type), Arg::Str(ok_byte_name));
+            try self.line5(
+                "  %s = insertvalue %s %s, i64 %d, %d",
+                Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Int(code), Arg::Int(failure_index)
+            );
+            try self.set_value(module, result, result_name);
+            return null;
+        },
+    }
+}
+
+/// Is the fail, success, and join label of one checked Array operation.
+struct ResultLabels {
+    fail: ir::Name,
+    ok: ir::Name,
+    join: ir::Name
+}
+
+/// Creates fail, success, and join labels for checked Array operations, the
+/// Go `arrayResultLabels`.
+fn (self: &var Emitter) array_result_labels(module: &ir::Module, result: ir::Name, prefix: []u8) -> !ResultLabels {
+    var fail_suffix = try string::from_bytes(self.allocator, prefix);
+    defer fail_suffix.deinit();
+    try fail_suffix.append_bytes(".fail");
+    let fail_bytes = fail_suffix.as_bytes();
+    var ok_suffix = try string::from_bytes(self.allocator, prefix);
+    defer ok_suffix.deinit();
+    try ok_suffix.append_bytes(".ok");
+    let ok_bytes = ok_suffix.as_bytes();
+    var join_suffix = try string::from_bytes(self.allocator, prefix);
+    defer join_suffix.deinit();
+    try join_suffix.append_bytes(".join");
+    let join_bytes = join_suffix.as_bytes();
+    return ResultLabels {
+        fail: try self.helper_label(module, result, fail_bytes),
+        ok: try self.helper_label(module, result, ok_bytes),
+        join: try self.helper_label(module, result, join_bytes)
+    };
+}
+
+/// Converts a nullable element pointer to ?T, the Go
+/// `writeArrayOptionalLoadResult`: null becomes the all-zero optional and a
+/// live pointer loads the payload.
+fn (self: &var Emitter) write_array_optional_load_result(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    ptr_name: ir::Name
+) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if typ::optional_elem(result_type) |elem| {
+        let result_name = try self.local_name(module, node.result.name);
+        let labels = try self.array_result_labels(module, node.result.name, "array");
+        try self.mark_current_block_exit(module, labels.join);
+        let null_name = try self.suffixed(result_name, ".is_null");
+        try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(ptr_name));
+        try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(null_name), Arg::Str(labels.fail), Arg::Str(labels.ok));
+        let opt_type = try self.llvm_type(module, result_type);
+        try self.line1("%s:", Arg::Str(labels.fail));
+        try self.line1("  br label %%%s", Arg::Str(labels.join));
+        try self.line1("%s:", Arg::Str(labels.ok));
+        let value_name = try self.suffixed(result_name, ".value");
+        let elem_type = try self.llvm_type(module, elem);
+        try self.line3("  %s = load %s, ptr %s", Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name));
+        let some_name = try self.suffixed(result_name, ".some");
+        let ok_name = try self.suffixed(result_name, ".ok");
+        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(some_name), Arg::Str(opt_type));
+        try self.line5(
+            "  %s = insertvalue %s %s, %s %s, 1",
+            Arg::Str(ok_name), Arg::Str(opt_type), Arg::Str(some_name), Arg::Str(elem_type), Arg::Str(value_name)
+        );
+        try self.line1("  br label %%%s", Arg::Str(labels.join));
+        try self.line1("%s:", Arg::Str(labels.join));
+        try self.line5(
+            "  %s = phi %s [ zeroinitializer, %%%s ], [ %s, %%%s ]",
+            Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(labels.fail), Arg::Str(ok_name), Arg::Str(labels.ok)
+        );
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let op = try self.op_name(module, node);
+    let shown = try self.own(module, node.result.type_name);
+    return try self.fail2("llvm error: %s expects a `?T` result, got %s", Arg::Str(op), Arg::Str(shown));
+}
+
+/// Widens a narrow integer to the i64 the runtime helpers take, the Go
+/// `runtimeIntegerOperand`. Every helper that reports a value -- print, an
+/// expectation that failed -- reads one i64, so the widening is the same one
+/// wherever a value crosses into the runtime.
+fn (self: &var Emitter) runtime_integer_operand(module: &ir::Module, typ_name: ir::Name, operand: ir::Name) -> !ir::Name {
+    let source_type = try self.llvm_type_of(module, typ_name);
+    if self.names.is(source_type, "i64") {
+        return operand;
+    }
+    let synthetic = try self.next_synthetic_value("runtime.int");
+    let name = try self.percent(synthetic);
+    let type_text = ir::name_text(&module.names, typ_name);
+    let type_bytes = type_text.as_bytes();
+    var op = "sext";
+    if is_unsigned_integer_type(type_bytes) {
+        op = "zext";
+    }
+    try self.line4("  %s = %s %s %s to i64", Arg::Str(name), Arg::Lit(op), Arg::Str(source_type), Arg::Str(operand));
+    return name;
+}

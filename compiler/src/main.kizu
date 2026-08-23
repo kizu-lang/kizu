@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::lexer;
+import compiler::internal::llvm;
 import compiler::internal::manifest;
 import compiler::internal::ownership;
 import compiler::internal::parser;
@@ -18,10 +19,10 @@ import std::string;
 
 // Port of cmd/kizu for the commands the selfhost compiler can run so far:
 // `parse` prints the program a file parses to, `check` loads a file or a
-// package with its std modules, type-checks it, and ownership-checks it, and
-// `ir` lowers a checked file or package to typed SSA IR and prints it. The
-// later gates `check` runs in the Go compiler (LLVM emit) follow with their
-// modules. Not connected to the shipping CLI.
+// package with its std modules, type-checks it, and ownership-checks it,
+// `ir` lowers a checked file or package to typed SSA IR and prints it, and
+// `build --emit-llvm` prints the LLVM IR the lowered module emits to. The
+// native link follows with its module. Not connected to the shipping CLI.
 
 /// Names the ways a command line run ends without a result.
 error Cli {
@@ -29,8 +30,8 @@ error Cli {
     Failed,
 }
 
-/// Dispatches the command line:
-/// `[--lib-dir PATH] <parse|check> <target>` or `ir [--opt] <target>`.
+/// Dispatches the command line: `[--lib-dir PATH] <parse|check> <target>`,
+/// `ir [--opt] <target>` or `build --emit-llvm [--opt] <target>`.
 fn main() -> !void {
     let allocator = mem::page_allocator();
     let io = io::blocking();
@@ -70,19 +71,43 @@ fn main() -> !void {
                 return Cli::Usage;
             }
             let opt_target = try process::arg(next + 2);
-            return ir_target(io, allocator, lib_dir_bytes, opt_target, true);
+            return ir_target(io, allocator, lib_dir_bytes, opt_target, true, Output::Ir);
         }
-        return ir_target(io, allocator, lib_dir_bytes, target, false);
+        return ir_target(io, allocator, lib_dir_bytes, target, false, Output::Ir);
+    }
+    if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--emit-llvm") {
+        if count - next < 3 {
+            try usage(io);
+            return Cli::Usage;
+        }
+        let third = try process::arg(next + 2);
+        if mem::equal_bytes(third, "--opt") {
+            if count - next < 4 {
+                try usage(io);
+                return Cli::Usage;
+            }
+            let opt_target = try process::arg(next + 3);
+            return ir_target(io, allocator, lib_dir_bytes, opt_target, true, Output::Llvm);
+        }
+        return ir_target(io, allocator, lib_dir_bytes, third, false, Output::Llvm);
     }
     try usage(io);
     return Cli::Usage;
+}
+
+/// Names what a lowered module is printed as: its IR dump, or the LLVM IR
+/// emitted from it.
+enum Output {
+    Ir,
+    Llvm,
 }
 
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] parse <file>");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
-    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
+    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --emit-llvm [--opt] <file|package>");
 }
 
 /// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
@@ -176,9 +201,10 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !v
 }
 
 /// Lowers a checked file or package to typed SSA IR and prints it, the Go
-/// `irCommand` over `lowerFile` / `lowerPackage`: a package also gets the
-/// `main` entry wrapper the native build adds.
-fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool) -> !void {
+/// `irCommand` over `lowerFile` / `lowerPackage`, or the LLVM IR emitted
+/// from it, the Go `emitLLVMFile`: a package also gets the `main` entry
+/// wrapper the native build adds.
+fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit();
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -240,6 +266,17 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
                             try report(io, allocator, &loader.sources, &failed);
                             return Cli::Failed;
                         }
+                    }
+                    if output == Output::Llvm {
+                        var text = string::new(allocator);
+                        defer text.deinit();
+                        if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                        let text_bytes = text.as_bytes();
+                        return io::write_stdout_line(io, text_bytes);
                     }
                     let rendered = try ir::render(allocator, &lowerer.module);
                     defer rendered.deinit();
