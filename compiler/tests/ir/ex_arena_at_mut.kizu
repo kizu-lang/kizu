@@ -1,0 +1,95 @@
+import std::arena;
+import std::mem;
+
+struct User {
+    age: i64,
+    visits: i64,
+}
+
+// `at_mut` returns a borrow of the element behind the handle, and a capture
+// is its one consumer: the arena stays mutably borrowed for the capture's
+// scope, so at, add, and deinit wait until the write is done.
+fn main() {
+    let allocator = mem::page_allocator();
+    var users = arena::new<User>(allocator);
+    let alice = users.add(User { age: 30, visits: 0 });
+
+    if users.at_mut(alice) |u| {
+        u.visits = u.visits + 1;
+    }
+
+    print(users.at(alice).visits);
+    print(users.at(alice).age);
+    users.deinit();
+}
+
+// run
+// features: arena handle borrow optional capture
+// output:
+// 1
+// 30
+
+
+// ir
+// lower:
+// fn main() -> void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<User> = arena.new %1: Allocator, User
+//   %3: i64 = const 30
+//   %4: i64 = const 0
+//   %5: User = struct.new {age: %3: i64, visits: %4: i64}
+//   %6: std::arena::Handle<User> = arena.add %2: std::arena::Arena<User>, %5: User
+//   %7: ?&var User = arena.at_mut %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %8: &var User = opt.value %7: ?&var User
+//   %9: bool = opt.has %7: ?&var User
+//   branch %9: bool, if.then.1, if.else.2
+// if.then.1:
+//   %10: i64 = field.ref.visits %8: &var User
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %10: i64, %11: i64
+//   field.ref.set.visits %8: &var User, %12: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: User = arena.at %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %15: i64 = field.visits %14: User
+//   call.print %15: i64
+//   %17: User = arena.at %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %18: i64 = field.age %17: User
+//   call.print %18: i64
+//   arena.deinit %2: std::arena::Arena<User>
+//   return void: void
+// }
+// opt:
+// fn main() -> void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<User> = arena.new %1: Allocator, User
+//   %3: i64 = const 30
+//   %4: i64 = const 0
+//   %5: User = struct.new {age: %3: i64, visits: %4: i64}
+//   %6: std::arena::Handle<User> = arena.add %2: std::arena::Arena<User>, %5: User
+//   %7: ?&var User = arena.at_mut %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %8: &var User = opt.value %7: ?&var User
+//   %9: bool = opt.has %7: ?&var User
+//   branch %9: bool, if.then.1, if.else.2
+// if.then.1:
+//   %10: i64 = field.ref.visits %8: &var User
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %10: i64, %11: i64
+//   field.ref.set.visits %8: &var User, %12: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: User = arena.at %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %15: i64 = field.visits %14: User
+//   call.print %15: i64
+//   %17: User = arena.at %2: std::arena::Arena<User>, %6: std::arena::Handle<User>
+//   %18: i64 = field.age %17: User
+//   call.print %18: i64
+//   arena.deinit %2: std::arena::Arena<User>
+//   return void: void
+// }

@@ -1,0 +1,137 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+test "ptr_read and ptr_write round-trip a byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe ptr_write(byte, 200);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe ptr_read(byte);
+    testing::expect_equal<i64>(200, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+test "volatile_read and volatile_write round-trip a byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe volatile_write(byte, 3);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe volatile_read(byte);
+    testing::expect_equal<i64>(3, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+test "pointer integer casts preserve the address" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: address の整数化は観測のみで、pointer 自体は使い続けない
+    let address = unsafe int_from_ptr<usize>(byte);
+    // SAFETY: address は直前に有効な pointer から得た値で、指す先は生きている
+    let same = unsafe ptr_from_int<ptr<u8>>(address);
+    // SAFETY: same は byte と同じ有効な 1 バイトを指す
+    unsafe ptr_write(same, 7);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe ptr_read(byte);
+    testing::expect_equal<i64>(7, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+
+// ir
+// lower:
+// fn test.ptr_read_and_ptr_write_round_trip_a_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 200
+//   ref.store %2: ptr<u8>, %3: u8
+//   %5: u8 = ref.load %2: ptr<u8>
+//   %6: i64 = const 200
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.volatile_read_and_volatile_write_round_trip_a_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 3
+//   volatile.store %2: ptr<u8>, %3: u8
+//   %5: u8 = volatile.load %2: ptr<u8>
+//   %6: i64 = const 3
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.pointer_integer_casts_preserve_the_address() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: usize = cast %2: ptr<u8>, usize
+//   %4: ptr<u8> = cast %3: usize, ptr<u8>
+//   %5: u8 = const 7
+//   ref.store %4: ptr<u8>, %5: u8
+//   %7: u8 = ref.load %2: ptr<u8>
+//   %8: i64 = const 7
+//   %9: i64 = cast %7: u8, i64
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.free %2: ptr<u8>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// opt:
+// fn test.ptr_read_and_ptr_write_round_trip_a_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 200
+//   ref.store %2: ptr<u8>, %3: u8
+//   %5: u8 = ref.load %2: ptr<u8>
+//   %6: i64 = const 200
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.volatile_read_and_volatile_write_round_trip_a_byte() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: u8 = const 3
+//   volatile.store %2: ptr<u8>, %3: u8
+//   %5: u8 = volatile.load %2: ptr<u8>
+//   %6: i64 = const 3
+//   %7: i64 = cast %5: u8, i64
+//   test.expect_equal %6: i64, %7: i64, i64
+//   call.free %2: ptr<u8>
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.pointer_integer_casts_preserve_the_address() -> !void {
+// entry:
+//   %1: usize = const 1
+//   %2: ptr<u8> = call.malloc %1: usize
+//   %3: usize = cast %2: ptr<u8>, usize
+//   %4: ptr<u8> = cast %3: usize, ptr<u8>
+//   %5: u8 = const 7
+//   ref.store %4: ptr<u8>, %5: u8
+//   %7: u8 = ref.load %2: ptr<u8>
+//   %8: i64 = const 7
+//   %9: i64 = cast %7: u8, i64
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.free %2: ptr<u8>
+//   %12: !void = error.ok
+//   return %12: !void
+// }

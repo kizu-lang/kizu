@@ -98,8 +98,10 @@ fn (self: &var Lowerer) generic_bindings(
         defer parts.deinit();
         return self.bind_generic_args(tree, name, decl, &parts, out);
     }
-    let reason_text = split_args_reason(bytes);
-    let reason = try self.name(reason_text);
+    let reason_text = try self.split_args_reason(bytes);
+    defer reason_text.deinit();
+    let reason_bytes = reason_text.as_bytes();
+    let reason = try self.name(reason_bytes);
     return try self.fail2(tree, "ir error: `%s`: %s", Arg::Str(name), Arg::Str(reason));
 }
 
@@ -166,11 +168,15 @@ fn (self: &var Lowerer) add_type_binding(args: GenericArgsHandle, name: Name, bo
 }
 
 /// Spells why a static argument list could not be split, the Go
-/// `typ.SplitArgs` error text.
-fn split_args_reason(text: []u8) -> []u8 {
+/// `typ.SplitArgs` error text: the reason and the list it was read from.
+fn (self: &Lowerer) split_args_reason(text: []u8) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
     var depth = 0;
     var index = 0;
-    while index < mem::len(text) {
+    var reason = "type error: empty static argument in `";
+    var decided = false;
+    while index < mem::len(text) and !decided {
         let byte = text[index];
         if byte == cast<u8>(60) {
             depth = depth + 1;
@@ -178,15 +184,19 @@ fn split_args_reason(text: []u8) -> []u8 {
         if byte == cast<u8>(62) {
             depth = depth - 1;
             if depth < 0 {
-                return "type error: unbalanced `>` in static argument list";
+                reason = "type error: unbalanced `>` in `";
+                decided = true;
             }
         }
         index = index + 1;
     }
-    if depth != 0 {
-        return "type error: unbalanced `<` in static argument list";
+    if !decided and depth != 0 {
+        reason = "type error: unbalanced `<` in `";
     }
-    return "type error: empty static argument";
+    try out.append_bytes(reason);
+    try out.append_bytes(text);
+    try out.append_bytes("`");
+    return move out;
 }
 
 /// Returns the parameters a generic declaration has at these type arguments,

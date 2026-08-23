@@ -1,0 +1,2555 @@
+import std::array;
+import std::json;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Counts {
+    pub visits: i64,
+    pub errors: i64,
+}
+
+pub struct Profile {
+    pub name: string::String,
+    pub active: bool,
+}
+
+pub struct Wrapper {
+    pub head: Profile,
+    pub count: i64,
+}
+
+// The document names the fields in whatever order it likes: the object is
+// scanned once into where each value begins, and every field comes back for
+// the one it names.
+test "json decode fills fields in any key order" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"errors": 2, "visits": 41}
+    ;
+    let counts = try json::decode<Counts>(allocator, document);
+    testing::expect_equal<i64>(41, counts.visits);
+    testing::expect_equal<i64>(2, counts.errors);
+}
+
+// A String field owns its bytes, and the escapes are undone on the way in.
+test "json decode undoes string escapes" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "a\tbAé", "active": true}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    testing::expect(profile.active);
+    // a, TAB, b, A, and the two bytes é is in UTF-8.
+    testing::expect_equal<i64>(6, profile.name.len());
+}
+
+// A surrogate pair names one code point, so the two escapes decode to the four
+// bytes of that character rather than to two halves.
+test "json decode joins a surrogate pair" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "😀", "active": false}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    testing::expect_equal<i64>(4, profile.name.len());
+}
+
+test "json decode reads a nested struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"count": 7, "head": {"active": true, "name": "abc"}}
+    ;
+    var wrapper = try json::decode<Wrapper>(allocator, document);
+    defer wrapper.deinit();
+    testing::expect_equal<i64>(7, wrapper.count);
+    testing::expect_equal<i64>(3, wrapper.head.name.len());
+}
+
+// decode and encode read the same set of types, so a value survives the round
+// trip unchanged.
+test "json decode round trips through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name":"alice","active":true}
+    ;
+    var profile = try json::decode<Profile>(allocator, document);
+    defer profile.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Profile>(allocator, profile, out);
+    let bytes = out.as_bytes();
+    testing::expect_equal<[]u8>(document, bytes);
+}
+
+// decode_ignore_unknown is the spelling that drops the keys the type has no
+// field for, at any depth.
+test "json decode_ignore_unknown drops the keys the type lacks" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"visits": 1, "extra": [1, {"deep": 2}], "errors": 0}
+    ;
+    let counts = try json::decode_ignore_unknown<Counts>(allocator, document);
+    testing::expect_equal<i64>(1, counts.visits);
+    testing::expect_equal<i64>(0, counts.errors);
+}
+
+test "json decode reads a negative number" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"visits": -12, "errors": 0}
+    ;
+    let counts = try json::decode<Counts>(allocator, document);
+    testing::expect_equal<i64>(-12, counts.visits);
+}
+
+// A Value is a document read without deciding its type first. It is an
+// ordinary recursive union, so a walk over it is an ordinary match.
+fn value_kind(value: &json::Value) -> []u8 {
+    return match value {
+        Null => "null",
+        Bool(_) => "bool",
+        I64(_) => "i64",
+        Str(_) => "str",
+        Arr(_) => "arr",
+        Obj(_) => "obj",
+    };
+}
+
+fn value_size(value: &json::Value) -> i64 {
+    return match value {
+        Null => 0,
+        Bool(_) => 0,
+        I64(number) => number,
+        Str(text) => text.len(),
+        Arr(items) => items.len(),
+        Obj(entries) => entries.len(),
+    };
+}
+
+// `Obj` is a map, so a key is found by name rather than by walking the whole
+// object. The value is borrowed out: a `Value` owns its contents.
+fn value_at_key(value: &json::Value, key: []u8) -> []u8 {
+    match value {
+        Obj(entries) => {
+            if entries.at(key) |held| {
+                return value_kind(held);
+            }
+            return "missing";
+        },
+        Null => return "null",
+        Bool(_) => return "bool",
+        I64(_) => return "i64",
+        Str(_) => return "str",
+        Arr(_) => return "arr",
+    }
+}
+
+test "json decode finds a Value object member by key" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"user": "alice", "visits": [1, 2]}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("str", value_at_key(&value, "user"));
+    testing::expect_equal<[]u8>("arr", value_at_key(&value, "visits"));
+    testing::expect_equal<[]u8>("missing", value_at_key(&value, "absent"));
+}
+
+test "json decode reads a document as a Value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"n": 1, "arr": [1, "two"], "z": null}
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("obj", value_kind(value));
+    testing::expect_equal<i64>(3, value_size(value));
+}
+
+test "json decode reads a scalar as a Value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\42
+    ;
+    var value = try json::decode<json::Value>(allocator, document);
+    defer value.deinit();
+    testing::expect_equal<[]u8>("i64", value_kind(value));
+    testing::expect_equal<i64>(42, value_size(value));
+}
+
+test "json decode reads an array of scalars" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\[1, 2, 3]
+    ;
+    var numbers = try json::decode<array::Array<i64>>(allocator, document);
+    defer numbers.deinit();
+    testing::expect_equal<i64>(3, numbers.len());
+    testing::expect_equal<i64>(3, numbers.get_or_panic(2));
+}
+
+test "json decode reads an array of owners" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\["ab", "cde"]
+    ;
+    var names = try json::decode<array::Array<string::String>>(allocator, document);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+}
+
+pub struct Row {
+    pub cells: array::Array<i64>,
+}
+
+pub struct Grid {
+    pub rows: array::Array<Row>,
+}
+
+test "json decode reads arrays nested in structs" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"rows": [{"cells": [1, 2]}, {"cells": [3]}]}
+    ;
+    var grid = try json::decode<Grid>(allocator, document);
+    defer grid.deinit();
+    testing::expect_equal<i64>(2, grid.rows.len());
+}
+
+pub enum Level {
+    Low,
+    High,
+}
+
+pub union Cell {
+    Missing,
+    Number(i64),
+    Name(string::String),
+}
+
+fn (self: Cell) deinit() -> void {
+    match self {
+        Missing => return,
+        Number(_) => return,
+        Name(text) => text.deinit(),
+    }
+    return;
+}
+
+pub struct Record {
+    pub level: Level,
+    pub cell: Cell,
+}
+
+test "json decode reads an enum tag from a string" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\"High"
+    ;
+    let level = try json::decode<Level>(allocator, document);
+    let read = match level {
+        Low => 0,
+        High => 1,
+    };
+    testing::expect_equal<i64>(1, read);
+}
+
+test "json decode reads a payload-free union variant from a string" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\"Missing"
+    ;
+    var cell = try json::decode<Cell>(allocator, document);
+    defer cell.deinit();
+    let read = match &cell {
+        Missing => 0,
+        Number(_) => 1,
+        Name(_) => 2,
+    };
+    testing::expect_equal<i64>(0, read);
+}
+
+test "json decode reads a union payload from the object naming it" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"Name": "ab"}
+    ;
+    var cell = try json::decode<Cell>(allocator, document);
+    defer cell.deinit();
+    let read = match &cell {
+        Missing => 0,
+        Number(_) => 0,
+        Name(text) => text.len(),
+    };
+    testing::expect_equal<i64>(2, read);
+}
+
+// A struct with sum cells comes back through the same walk that wrote it, so
+// the round trip closes for every type `encode` accepts.
+test "json decode reads sum cells of a struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"level": "Low", "cell": {"Number": 5}}
+    ;
+    var record = try json::decode<Record>(allocator, document);
+    defer record.deinit();
+    let level = match record.level {
+        Low => 0,
+        High => 1,
+    };
+    testing::expect_equal<i64>(0, level);
+    let number = match &record.cell {
+        Missing => 0,
+        Number(value) => value,
+        Name(_) => 0,
+    };
+    testing::expect_equal<i64>(5, number);
+}
+
+// key_order joins a map's keys in iteration order, so a test can assert the
+// order itself rather than one key at a time.
+fn key_order(
+    allocator: Allocator,
+    counts: &map::Map<[]u8, i64>,
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while counts.key_at(index) |key| {
+        try out.append_bytes(key);
+        try out.append_byte(cast<u8>(44));
+        index = index + 1;
+    }
+    return move out;
+}
+
+// A map reads an object whose keys are its own, so unlike a struct there is no
+// field list to check them against and every key is one the map holds.
+test "json decode reads an object into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"alice": 2, "bob": 1}
+    ;
+    var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
+    defer counts.deinit();
+    testing::expect_equal<i64>(2, counts.len());
+    testing::expect_equal<i64>(2, counts.get("alice") orelse 0);
+    testing::expect_equal<i64>(1, counts.get("bob") orelse 0);
+    // The map keeps the document's order, so the keys come back in it.
+    var order = try key_order(allocator, &counts);
+    defer order.deinit();
+    let joined = order.as_bytes();
+    testing::expect_equal<[]u8>("alice,bob,", joined);
+}
+
+// The key is unescaped on the way in and copied into the map, so what the map
+// holds is a key of its own rather than a view of the document.
+test "json decode undoes escapes in a map key" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"c\u0061rol": 4}
+    ;
+    var counts = try json::decode<map::Map<[]u8, i64>>(allocator, document);
+    defer counts.deinit();
+    var order = try key_order(allocator, &counts);
+    defer order.deinit();
+    let joined = order.as_bytes();
+    testing::expect_equal<[]u8>("carol,", joined);
+    testing::expect_equal<i64>(4, counts.get("carol") orelse 0);
+}
+
+// An object whose values are strings is the common JSON shape, and it needs a
+// map value that owns its bytes: what the string carries is not a run of the
+// document once its escapes are gone (ADR-0123).
+test "json decode reads an object of strings into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"first": "alice", "last": "carol"}
+    ;
+    var names = try json::decode<map::Map<[]u8, string::String>>(allocator, document);
+    defer names.deinit();
+    testing::expect_equal<i64>(2, names.len());
+    if names.at("first") |name| {
+        let bytes = name.as_bytes();
+        testing::expect_equal<[]u8>("alice", bytes);
+    } else {
+        testing::fail("first is missing");
+    }
+
+    // encode reads the same map through the value borrow, so the document
+    // round trips without the map ever handing a value out by copy.
+    let expected =
+        \\{"first":"alice","last":"carol"}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<map::Map<[]u8, string::String>>(allocator, names, out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, text);
+}
+
+test "json decode reads an object of objects into a map" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"alice": {"hit": 2}, "bob": {"hit": 1, "miss": 3}}
+    ;
+    var counts =
+        try json::decode<map::Map<[]u8, map::Map<[]u8, i64>>>(allocator, document);
+    defer counts.deinit();
+    testing::expect_equal<i64>(2, counts.len());
+    if counts.at("bob") |held| {
+        testing::expect_equal<i64>(2, held.len());
+        testing::expect_equal<i64>(3, held.get("miss") orelse 0);
+    } else {
+        testing::fail("bob is missing");
+    }
+}
+
+// A box holds one value and adds no shape of its own, so what it reads is the
+// value the document holds where the box sits.
+test "json decode reads a box as the value it holds" {
+    let allocator = mem::page_allocator();
+    var total = try json::decode<mem::Box<i64>>(allocator, "7");
+    defer total.deinit();
+    let held = total.borrow();
+    testing::expect_equal<i64>(7, held.*);
+}
+
+pub struct Report {
+    pub counts: map::Map<[]u8, i64>,
+    pub total: mem::Box<i64>,
+}
+
+// A map and a box nested in a struct come back through the same walk that wrote
+// them, so the round trip closes for the containers too.
+test "json decode round trips a map and a box through encode" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"counts": {"alice": 2, "bob": 1}, "total": 3}
+    ;
+    var report = try json::decode<Report>(allocator, document);
+    defer report.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Report>(allocator, &report, &var out);
+    let written = out.as_bytes();
+    testing::expect_equal<[]u8>(
+        \\{"counts":{"alice":2,"bob":1},"total":3}
+    , written);
+}
+
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?i64,
+}
+
+test "json decode reads an optional field that has a value" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice", "nick": 7}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(7, visitor.nick orelse 0);
+}
+
+// `?T` cannot hold the difference between the two ways a document says there is
+// no value, so both read as null (ADR-0121).
+test "json decode reads a null optional field" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice", "nick": null}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(-1, visitor.nick orelse -1);
+}
+
+test "json decode reads an omitted optional field as null" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"name": "alice"}
+    ;
+    var visitor = try json::decode<Visitor>(allocator, document);
+    defer visitor.deinit();
+    testing::expect_equal<i64>(-1, visitor.nick orelse -1);
+    testing::expect_equal<i64>(5, visitor.name.len());
+}
+
+pub struct Page {
+    pub head: Visitor,
+    pub count: i64,
+}
+
+// The rule is the field's, not the top level's: a nested struct may leave its
+// own optional out.
+pub struct Named {
+    pub name: string::String,
+    pub nick: ?string::String,
+}
+
+fn (self: Named) deinit() -> void {
+    self.name.deinit();
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn expect_nick(value: &Named, expected: []u8) -> void {
+    if value.nick |held| {
+        let bytes = held.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::expect_equal<[]u8>(expected, "none");
+    }
+    return;
+}
+
+// An optional field whose value owns its bytes: the three document shapes read
+// the same way a `?i64` field does, and the string is released with the struct.
+test "json decode reads an optional string field" {
+    let allocator = mem::page_allocator();
+
+    var given = try json::decode<Named>(allocator, \\{"name": "alice", "nick": "al"}
+    );
+    defer given.deinit();
+    expect_nick(&given, "al");
+
+    var written = try json::decode<Named>(allocator, \\{"name": "alice", "nick": null}
+    );
+    defer written.deinit();
+    expect_nick(&written, "none");
+
+    var omitted = try json::decode<Named>(allocator, \\{"name": "alice"}
+    );
+    defer omitted.deinit();
+    expect_nick(&omitted, "none");
+
+    let expected =
+        \\{"name":"alice","nick":"al"}
+    ;
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Named>(allocator, given, out);
+    let text = out.as_bytes();
+    testing::expect_equal<[]u8>(expected, text);
+}
+
+test "json decode reads an omitted optional field of a nested struct" {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"count": 2, "head": {"name": "alice"}}
+    ;
+    var page = try json::decode<Page>(allocator, document);
+    defer page.deinit();
+    testing::expect_equal<i64>(2, page.count);
+    testing::expect_equal<i64>(-1, page.head.nick orelse -1);
+}
+
+
+// ir
+// lower:
+// fn value_kind(%value: &std::json::Value) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
+//   return %20: []u8
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: []u8 = const "null"
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: bool = union.payload %1: std::json::Value, Bool
+//   %7: []u8 = const "bool"
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   %10: []u8 = const "i64"
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %2: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %12: std::string::String = union.payload %1: std::json::Value, Str
+//   %13: []u8 = const "str"
+//   jump match.end.1
+// match.check.10:
+//   %14: bool = binary.== %2: i64, 4: i64
+//   branch %14: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %15: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %16: []u8 = const "arr"
+//   jump match.end.1
+// match.check.12:
+//   %17: bool = binary.== %2: i64, 5: i64
+//   branch %17: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %18: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %19: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn value_size(%value: &std::json::Value) -> i64 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
+//   return %19: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: bool = union.payload %1: std::json::Value, Bool
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   jump match.end.1
+// match.check.8:
+//   %10: bool = binary.== %2: i64, 3: i64
+//   branch %10: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %11: std::string::String = union.payload %1: std::json::Value, Str
+//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   jump match.end.1
+// match.check.10:
+//   %13: bool = binary.== %2: i64, 4: i64
+//   branch %13: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   jump match.end.1
+// match.check.12:
+//   %16: bool = binary.== %2: i64, 5: i64
+//   branch %16: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %18: i64 = call.std::map::Map.len.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn value_at_key(%value: &std::json::Value, %key: []u8) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   unreachable
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 5: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %5: ?&std::json::Value = call.std::map::Map.at.std_3a_3ajson_3a_3aValue %4: std::map::Map<[]u8, std::json::Value>, %key: []u8
+//   %6: &std::json::Value = opt.value %5: ?&std::json::Value
+//   %7: bool = opt.has %5: ?&std::json::Value
+//   branch %7: bool, if.then.5, if.else.6
+// match.check.4:
+//   %10: bool = binary.== %2: i64, 0: i64
+//   branch %10: bool, match.arm.8, match.check.9
+// if.then.5:
+//   %8: []u8 = call.value_kind %6: &std::json::Value
+//   return %8: []u8
+// if.else.6:
+//   jump if.end.7
+// if.end.7:
+//   %9: []u8 = const "missing"
+//   return %9: []u8
+// match.arm.8:
+//   %11: []u8 = const "null"
+//   return %11: []u8
+// match.check.9:
+//   %12: bool = binary.== %2: i64, 1: i64
+//   branch %12: bool, match.arm.10, match.check.11
+// match.arm.10:
+//   %13: bool = union.payload %1: std::json::Value, Bool
+//   %14: []u8 = const "bool"
+//   return %14: []u8
+// match.check.11:
+//   %15: bool = binary.== %2: i64, 2: i64
+//   branch %15: bool, match.arm.12, match.check.13
+// match.arm.12:
+//   %16: i64 = union.payload %1: std::json::Value, I64
+//   %17: []u8 = const "i64"
+//   return %17: []u8
+// match.check.13:
+//   %18: bool = binary.== %2: i64, 3: i64
+//   branch %18: bool, match.arm.14, match.check.15
+// match.arm.14:
+//   %19: std::string::String = union.payload %1: std::json::Value, Str
+//   %20: []u8 = const "str"
+//   return %20: []u8
+// match.check.15:
+//   %21: bool = binary.== %2: i64, 4: i64
+//   branch %21: bool, match.arm.16, match.unreachable.17
+// match.arm.16:
+//   %22: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %23: []u8 = const "arr"
+//   return %23: []u8
+// match.unreachable.17:
+//   unreachable
+// }
+// fn Cell.deinit(%self: Cell) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Cell
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   return void: void
+// match.check.4:
+//   %3: bool = binary.== %1: i64, 1: i64
+//   branch %3: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %4: i64 = union.payload %self: Cell, Number
+//   return void: void
+// match.check.6:
+//   %5: bool = binary.== %1: i64, 2: i64
+//   branch %5: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %6: std::string::String = union.payload %self: Cell, Name
+//   call.std::string::String.deinit %6: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn key_order(%allocator: Allocator, %counts: std::map::Map<[]u8, i64>) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %2: i64], [while.body.2, %14: i64]
+//   %4: ?[]u8 = call.std::map::Map.key_at.i64 %counts: std::map::Map<[]u8, i64>, %3: i64
+//   %5: []u8 = opt.value %4: ?[]u8
+//   %6: bool = opt.has %4: ?[]u8
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: !void = call.std::string::String.append_bytes %1: std::string::String, %5: []u8
+//   error.try %7: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %9: i64 = const 44
+//   %10: u8 = cast %9: i64, u8
+//   %11: !void = call.std::string::String.append_byte %1: std::string::String, %10: u8
+//   error.try %11: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %3: i64, %13: i64
+//   jump while.header.1
+// while.end.3:
+//   %15: !std::string::String = error.ok %1: std::string::String
+//   return %15: !std::string::String
+// }
+// fn Named.deinit(%self: Named) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Named
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Named
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn expect_nick(%value: Named, %expected: []u8) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %value: Named
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   test.expect_equal %expected: []u8, %4: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %6: []u8 = const "none"
+//   test.expect_equal %expected: []u8, %6: []u8, []u8
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Profile.deinit(%self: Profile) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Profile
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Wrapper.deinit(%self: Wrapper) -> void {
+// entry:
+//   %1: Profile = field.head %self: Wrapper
+//   call.Profile.deinit %1: Profile
+//   return void: void
+// }
+// fn Row.deinit(%self: Row) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.cells %self: Row
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Grid.deinit(%self: Grid) -> void {
+// entry:
+//   %1: std::array::Array<Row> = field.rows %self: Grid
+//   call.std::array::Array.deinit.Row %1: std::array::Array<Row>
+//   return void: void
+// }
+// fn Record.deinit(%self: Record) -> void {
+// entry:
+//   %1: Cell = field.cell %self: Record
+//   call.Cell.deinit %1: Cell
+//   return void: void
+// }
+// fn Report.deinit(%self: Report) -> void {
+// entry:
+//   %1: std::map::Map<[]u8, i64> = field.counts %self: Report
+//   call.std::map::Map.deinit.i64 %1: std::map::Map<[]u8, i64>
+//   %3: std::mem::Box<i64> = field.total %self: Report
+//   call.std::mem::Box.deinit.i64 %3: std::mem::Box<i64>
+//   return void: void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Page.deinit(%self: Page) -> void {
+// entry:
+//   %1: Visitor = field.head %self: Page
+//   call.Visitor.deinit %1: Visitor
+//   return void: void
+// }
+// fn test.json_decode_fills_fields_in_any_key_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"errors\": 2, \"visits\": 41}"
+//   %3: !Counts = call.std::json::decode.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 41
+//   %6: i64 = field.visits %4: Counts
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 2
+//   %9: i64 = field.errors %4: Counts
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_undoes_string_escapes() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"a\\tbAé\", \"active\": true}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: bool = field.active %4: Profile
+//   call.std::testing::expect %5: bool
+//   %7: i64 = const 6
+//   %8: std::string::String = field.name %4: Profile
+//   %9: i64 = call.std::string::String.len %8: std::string::String
+//   test.expect_equal %7: i64, %9: i64, i64
+//   call.Profile.deinit %4: Profile
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_joins_a_surrogate_pair() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"😀\", \"active\": false}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: i64 = const 4
+//   %6: std::string::String = field.name %4: Profile
+//   %7: i64 = call.std::string::String.len %6: std::string::String
+//   test.expect_equal %5: i64, %7: i64, i64
+//   call.Profile.deinit %4: Profile
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.json_decode_reads_a_nested_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"count\": 7, \"head\": {\"active\": true, \"name\": \"abc\"}}"
+//   %3: !Wrapper = call.std::json::decode.Wrapper %1: Allocator, %2: []u8
+//   %4: Wrapper = error.try %3: !Wrapper
+//   %5: i64 = const 7
+//   %6: i64 = field.count %4: Wrapper
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 3
+//   %9: Profile = field.head %4: Wrapper
+//   %10: std::string::String = field.name %9: Profile
+//   %11: i64 = call.std::string::String.len %10: std::string::String
+//   test.expect_equal %8: i64, %11: i64, i64
+//   call.Wrapper.deinit %4: Wrapper
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_decode_round_trips_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\":\"alice\",\"active\":true}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.Profile %1: Allocator, %4: Profile, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.Profile.deinit %4: Profile
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   test.expect_equal %2: []u8, %11: []u8, []u8
+//   %13: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %13: std::string::String
+//   call.Profile.deinit %4: Profile
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.json_decode_ignore_unknown_drops_the_keys_the_type_lacks() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"visits\": 1, \"extra\": [1, {\"deep\": 2}], \"errors\": 0}"
+//   %3: !Counts = call.std::json::decode_ignore_unknown.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 1
+//   %6: i64 = field.visits %4: Counts
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 0
+//   %9: i64 = field.errors %4: Counts
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_reads_a_negative_number() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"visits\": -12, \"errors\": 0}"
+//   %3: !Counts = call.std::json::decode.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 12
+//   %6: i64 = unary.- %5: i64
+//   %7: i64 = field.visits %4: Counts
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_finds_a_Value_object_member_by_key() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"user\": \"alice\", \"visits\": [1, 2]}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "str"
+//   %6: []u8 = const "user"
+//   %7: []u8 = call.value_at_key %4: std::json::Value, %6: []u8
+//   test.expect_equal %5: []u8, %7: []u8, []u8
+//   %9: []u8 = const "arr"
+//   %10: []u8 = const "visits"
+//   %11: []u8 = call.value_at_key %4: std::json::Value, %10: []u8
+//   test.expect_equal %9: []u8, %11: []u8, []u8
+//   %13: []u8 = const "missing"
+//   %14: []u8 = const "absent"
+//   %15: []u8 = call.value_at_key %4: std::json::Value, %14: []u8
+//   test.expect_equal %13: []u8, %15: []u8, []u8
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_decode_reads_a_document_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"n\": 1, \"arr\": [1, \"two\"], \"z\": null}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "obj"
+//   %6: []u8 = call.value_kind %4: std::json::Value
+//   test.expect_equal %5: []u8, %6: []u8, []u8
+//   %8: i64 = const 3
+//   %9: i64 = call.value_size %4: std::json::Value
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_reads_a_scalar_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "42"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "i64"
+//   %6: []u8 = call.value_kind %4: std::json::Value
+//   test.expect_equal %5: []u8, %6: []u8, []u8
+//   %8: i64 = const 42
+//   %9: i64 = call.value_size %4: std::json::Value
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_reads_an_array_of_scalars() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "[1, 2, 3]"
+//   %3: !std::array::Array<i64> = call.std::json::decode.std_3a_3aarray_3a_3aArray_3ci64_3e %1: Allocator, %2: []u8
+//   %4: std::array::Array<i64> = error.try %3: !std::array::Array<i64>
+//   %5: i64 = const 3
+//   %6: i64 = call.std::array::Array.len.i64 %4: std::array::Array<i64>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 3
+//   %9: i64 = const 2
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %9: i64
+//   test.expect_equal %8: i64, %10: i64, i64
+//   array.deinit %4: std::array::Array<i64>
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.json_decode_reads_an_array_of_owners() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "[\"ab\", \"cde\"]"
+//   %3: !std::array::Array<std::string::String> = call.std::json::decode.std_3a_3aarray_3a_3aArray_3cstd_3a_3astring_3a_3aString_3e %1: Allocator, %2: []u8
+//   %4: std::array::Array<std::string::String> = error.try %3: !std::array::Array<std::string::String>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_reads_arrays_nested_in_structs() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"rows\": [{\"cells\": [1, 2]}, {\"cells\": [3]}]}"
+//   %3: !Grid = call.std::json::decode.Grid %1: Allocator, %2: []u8
+//   %4: Grid = error.try %3: !Grid
+//   %5: i64 = const 2
+//   %6: std::array::Array<Row> = field.rows %4: Grid
+//   %7: i64 = call.std::array::Array.len.Row %6: std::array::Array<Row>
+//   test.expect_equal %5: i64, %7: i64, i64
+//   call.Grid.deinit %4: Grid
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.json_decode_reads_an_enum_tag_from_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "\"High\""
+//   %3: !Level = call.std::json::decode.Level %1: Allocator, %2: []u8
+//   %4: Level = error.try %3: !Level
+//   jump match.check.2
+// match.end.1:
+//   %9: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64]
+//   %10: i64 = const 1
+//   test.expect_equal %10: i64, %9: i64, i64
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %5: bool = binary.== %4: Level, 0: Level
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %4: Level, 1: Level
+//   branch %7: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %8: i64 = const 1
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.json_decode_reads_a_payload_free_union_variant_from_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "\"Missing\""
+//   %3: !Cell = call.std::json::decode.Cell %1: Allocator, %2: []u8
+//   %4: Cell = error.try %3: !Cell
+//   %5: i64 = union.tag %4: Cell
+//   jump match.check.2
+// match.end.1:
+//   %14: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %10: i64], [match.arm.7, %13: i64]
+//   %15: i64 = const 0
+//   test.expect_equal %15: i64, %14: i64, i64
+//   call.Cell.deinit %4: Cell
+//   %18: !void = error.ok
+//   return %18: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %9: i64 = union.payload %4: Cell, Number
+//   %10: i64 = const 1
+//   jump match.end.1
+// match.check.6:
+//   %11: bool = binary.== %5: i64, 2: i64
+//   branch %11: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %12: std::string::String = union.payload %4: Cell, Name
+//   %13: i64 = const 2
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.json_decode_reads_a_union_payload_from_the_object_naming_it() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"Name\": \"ab\"}"
+//   %3: !Cell = call.std::json::decode.Cell %1: Allocator, %2: []u8
+//   %4: Cell = error.try %3: !Cell
+//   %5: i64 = union.tag %4: Cell
+//   jump match.check.2
+// match.end.1:
+//   %14: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %10: i64], [match.arm.7, %13: i64]
+//   %15: i64 = const 2
+//   test.expect_equal %15: i64, %14: i64, i64
+//   call.Cell.deinit %4: Cell
+//   %18: !void = error.ok
+//   return %18: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %9: i64 = union.payload %4: Cell, Number
+//   %10: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %11: bool = binary.== %5: i64, 2: i64
+//   branch %11: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %12: std::string::String = union.payload %4: Cell, Name
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.json_decode_reads_sum_cells_of_a_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"level\": \"Low\", \"cell\": {\"Number\": 5}}"
+//   %3: !Record = call.std::json::decode.Record %1: Allocator, %2: []u8
+//   %4: Record = error.try %3: !Record
+//   %5: Level = field.level %4: Record
+//   jump match.check.2
+// match.end.1:
+//   %10: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %9: i64]
+//   %11: i64 = const 0
+//   test.expect_equal %11: i64, %10: i64, i64
+//   %13: Cell = field.cell %4: Record
+//   %14: i64 = union.tag %13: Cell
+//   jump match.check.8
+// match.check.2:
+//   %6: bool = binary.== %5: Level, 0: Level
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: Level, 1: Level
+//   branch %8: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %9: i64 = const 1
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// match.end.7:
+//   %22: i64 = phi [match.arm.9, %16: i64], [match.arm.11, %18: i64], [match.arm.13, %21: i64]
+//   %23: i64 = const 5
+//   test.expect_equal %23: i64, %22: i64, i64
+//   call.Record.deinit %4: Record
+//   %26: !void = error.ok
+//   return %26: !void
+// match.check.8:
+//   %15: bool = binary.== %14: i64, 0: i64
+//   branch %15: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %16: i64 = const 0
+//   jump match.end.7
+// match.check.10:
+//   %17: bool = binary.== %14: i64, 1: i64
+//   branch %17: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %18: i64 = union.payload %13: Cell, Number
+//   jump match.end.7
+// match.check.12:
+//   %19: bool = binary.== %14: i64, 2: i64
+//   branch %19: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %20: std::string::String = union.payload %13: Cell, Name
+//   %21: i64 = const 0
+//   jump match.end.7
+// match.unreachable.14:
+//   unreachable
+// }
+// fn test.json_decode_reads_an_object_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"alice\": 2, \"bob\": 1}"
+//   %3: !std::map::Map<[]u8, i64> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, i64> = error.try %3: !std::map::Map<[]u8, i64>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.i64 %4: std::map::Map<[]u8, i64>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 2
+//   %9: []u8 = const "alice"
+//   %10: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %9: []u8
+//   %11: bool = opt.has %10: ?i64
+//   branch %11: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %12: i64 = opt.value %10: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %13: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %14: i64 = phi [orelse.some.1, %12: i64], [orelse.else.2, %13: i64]
+//   test.expect_equal %8: i64, %14: i64, i64
+//   %16: i64 = const 1
+//   %17: []u8 = const "bob"
+//   %18: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %17: []u8
+//   %19: bool = opt.has %18: ?i64
+//   branch %19: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %20: i64 = opt.value %18: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %21: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %22: i64 = phi [orelse.some.4, %20: i64], [orelse.else.5, %21: i64]
+//   test.expect_equal %16: i64, %22: i64, i64
+//   %24: !std::string::String = call.key_order %1: Allocator, %4: std::map::Map<[]u8, i64>
+//   %25: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %4: std::map::Map<[]u8, i64>
+//   %26: []u8 = call.std::string::String.as_bytes %25: std::string::String
+//   %27: []u8 = const "alice,bob,"
+//   test.expect_equal %27: []u8, %26: []u8, []u8
+//   call.std::string::String.deinit %25: std::string::String
+//   map.deinit %4: std::map::Map<[]u8, i64>
+//   %31: !void = error.ok
+//   return %31: !void
+// }
+// fn test.json_decode_undoes_escapes_in_a_map_key() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"c\\u0061rol\": 4}"
+//   %3: !std::map::Map<[]u8, i64> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, i64> = error.try %3: !std::map::Map<[]u8, i64>
+//   %5: !std::string::String = call.key_order %1: Allocator, %4: std::map::Map<[]u8, i64>
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup map.deinit %4: std::map::Map<[]u8, i64>
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = const "carol,"
+//   test.expect_equal %8: []u8, %7: []u8, []u8
+//   %10: i64 = const 4
+//   %11: []u8 = const "carol"
+//   %12: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %11: []u8
+//   %13: bool = opt.has %12: ?i64
+//   branch %13: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %14: i64 = opt.value %12: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %15: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %16: i64 = phi [orelse.some.1, %14: i64], [orelse.else.2, %15: i64]
+//   test.expect_equal %10: i64, %16: i64, i64
+//   call.std::string::String.deinit %6: std::string::String
+//   map.deinit %4: std::map::Map<[]u8, i64>
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.json_decode_reads_an_object_of_strings_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"first\": \"alice\", \"last\": \"carol\"}"
+//   %3: !std::map::Map<[]u8, std::string::String> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3astring_3a_3aString_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, std::string::String> = error.try %3: !std::map::Map<[]u8, std::string::String>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: []u8 = const "first"
+//   %9: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>, %8: []u8
+//   %10: &std::string::String = opt.value %9: ?&std::string::String
+//   %11: bool = opt.has %9: ?&std::string::String
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: std::string::String = ref.load %10: &std::string::String
+//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
+//   %14: []u8 = const "alice"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %16: []u8 = const "first is missing"
+//   call.std::testing::fail %16: []u8
+//   jump if.end.3
+// if.end.3:
+//   %18: []u8 = const "{\"first\":\"alice\",\"last\":\"carol\"}"
+//   %19: std::string::String = call.std::string::new %1: Allocator
+//   %20: &var std::string::String = local.slot %19: std::string::String
+//   %21: !void = call.std::json::encode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3astring_3a_3aString_3e %1: Allocator, %4: std::map::Map<[]u8, std::string::String>, %20: &var std::string::String
+//   %22: std::string::String = ref.load %20: &var std::string::String
+//   error.try %21: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::map::Map.deinit.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   %24: std::string::String = ref.load %20: &var std::string::String
+//   %25: []u8 = call.std::string::String.as_bytes %24: std::string::String
+//   test.expect_equal %18: []u8, %25: []u8, []u8
+//   %27: std::string::String = ref.load %20: &var std::string::String
+//   call.std::string::String.deinit %27: std::string::String
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.json_decode_reads_an_object_of_objects_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"alice\": {\"hit\": 2}, \"bob\": {\"hit\": 1, \"miss\": 3}}"
+//   %3: !std::map::Map<[]u8, std::map::Map<[]u8, i64>> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>> = error.try %3: !std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: []u8 = const "bob"
+//   %9: ?&std::map::Map<[]u8, i64> = call.std::map::Map.at.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %8: []u8
+//   %10: &std::map::Map<[]u8, i64> = opt.value %9: ?&std::map::Map<[]u8, i64>
+//   %11: bool = opt.has %9: ?&std::map::Map<[]u8, i64>
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: i64 = const 2
+//   %13: std::map::Map<[]u8, i64> = ref.load %10: &std::map::Map<[]u8, i64>
+//   %14: i64 = call.std::map::Map.len.i64 %13: std::map::Map<[]u8, i64>
+//   test.expect_equal %12: i64, %14: i64, i64
+//   %16: i64 = const 3
+//   %17: std::map::Map<[]u8, i64> = ref.load %10: &std::map::Map<[]u8, i64>
+//   %18: []u8 = const "miss"
+//   %19: ?i64 = call.std::map::Map.get.i64 %17: std::map::Map<[]u8, i64>, %18: []u8
+//   %20: bool = opt.has %19: ?i64
+//   branch %20: bool, orelse.some.4, orelse.else.5
+// if.else.2:
+//   %25: []u8 = const "bob is missing"
+//   call.std::testing::fail %25: []u8
+//   jump if.end.3
+// if.end.3:
+//   call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %28: !void = error.ok
+//   return %28: !void
+// orelse.some.4:
+//   %21: i64 = opt.value %19: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %22: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %23: i64 = phi [orelse.some.4, %21: i64], [orelse.else.5, %22: i64]
+//   test.expect_equal %16: i64, %23: i64, i64
+//   jump if.end.3
+// }
+// fn test.json_decode_reads_a_box_as_the_value_it_holds() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "7"
+//   %3: !std::mem::Box<i64> = call.std::json::decode.std_3a_3amem_3a_3aBox_3ci64_3e %1: Allocator, %2: []u8
+//   %4: std::mem::Box<i64> = error.try %3: !std::mem::Box<i64>
+//   %5: i64 = call.std::mem::Box.borrow.i64 %4: std::mem::Box<i64>
+//   %6: i64 = const 7
+//   test.expect_equal %6: i64, %5: i64, i64
+//   box.deinit %4: std::mem::Box<i64>
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_round_trips_a_map_and_a_box_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"counts\": {\"alice\": 2, \"bob\": 1}, \"total\": 3}"
+//   %3: !Report = call.std::json::decode.Report %1: Allocator, %2: []u8
+//   %4: Report = error.try %3: !Report
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.Report %1: Allocator, %4: Report, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.Report.deinit %4: Report
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   %12: []u8 = const "{\"counts\":{\"alice\":2,\"bob\":1},\"total\":3}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String
+//   call.Report.deinit %4: Report
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.json_decode_reads_an_optional_field_that_has_a_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": 7}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 7
+//   %6: ?i64 = field.nick %4: Visitor
+//   %7: bool = opt.has %6: ?i64
+//   branch %7: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %8: i64 = opt.value %6: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %9: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %10: i64 = phi [orelse.some.1, %8: i64], [orelse.else.2, %9: i64]
+//   test.expect_equal %5: i64, %10: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.json_decode_reads_a_null_optional_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": null}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: ?i64 = field.nick %4: Visitor
+//   %8: bool = opt.has %7: ?i64
+//   branch %8: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %9: i64 = opt.value %7: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %12: i64 = phi [orelse.some.1, %9: i64], [orelse.else.2, %11: i64]
+//   test.expect_equal %6: i64, %12: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.json_decode_reads_an_omitted_optional_field_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\"}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: ?i64 = field.nick %4: Visitor
+//   %8: bool = opt.has %7: ?i64
+//   branch %8: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %9: i64 = opt.value %7: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %12: i64 = phi [orelse.some.1, %9: i64], [orelse.else.2, %11: i64]
+//   test.expect_equal %6: i64, %12: i64, i64
+//   %14: i64 = const 5
+//   %15: std::string::String = field.name %4: Visitor
+//   %16: i64 = call.std::string::String.len %15: std::string::String
+//   test.expect_equal %14: i64, %16: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_decode_reads_an_optional_string_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": \"al\"}"
+//   %3: !Named = call.std::json::decode.Named %1: Allocator, %2: []u8
+//   %4: Named = error.try %3: !Named
+//   %5: []u8 = const "al"
+//   call.expect_nick %4: Named, %5: []u8
+//   %7: []u8 = const "{\"name\": \"alice\", \"nick\": null}"
+//   %8: !Named = call.std::json::decode.Named %1: Allocator, %7: []u8
+//   %9: Named = error.try %8: !Named, cleanup call.Named.deinit %4: Named
+//   %10: []u8 = const "none"
+//   call.expect_nick %9: Named, %10: []u8
+//   %12: []u8 = const "{\"name\": \"alice\"}"
+//   %13: !Named = call.std::json::decode.Named %1: Allocator, %12: []u8
+//   %14: Named = error.try %13: !Named, cleanup call.Named.deinit %9: Named; call.Named.deinit %4: Named
+//   %15: []u8 = const "none"
+//   call.expect_nick %14: Named, %15: []u8
+//   %17: []u8 = const "{\"name\":\"alice\",\"nick\":\"al\"}"
+//   %18: std::string::String = call.std::string::new %1: Allocator
+//   %19: &var std::string::String = local.slot %18: std::string::String
+//   %20: !void = call.std::json::encode.Named %1: Allocator, %4: Named, %19: &var std::string::String
+//   %21: std::string::String = ref.load %19: &var std::string::String
+//   error.try %20: !void, cleanup call.std::string::String.deinit %21: std::string::String; call.Named.deinit %14: Named; call.Named.deinit %9: Named; call.Named.deinit %4: Named
+//   %23: std::string::String = ref.load %19: &var std::string::String
+//   %24: []u8 = call.std::string::String.as_bytes %23: std::string::String
+//   test.expect_equal %17: []u8, %24: []u8, []u8
+//   %26: std::string::String = ref.load %19: &var std::string::String
+//   call.std::string::String.deinit %26: std::string::String
+//   call.Named.deinit %14: Named
+//   call.Named.deinit %9: Named
+//   call.Named.deinit %4: Named
+//   %31: !void = error.ok
+//   return %31: !void
+// }
+// fn test.json_decode_reads_an_omitted_optional_field_of_a_nested_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"count\": 2, \"head\": {\"name\": \"alice\"}}"
+//   %3: !Page = call.std::json::decode.Page %1: Allocator, %2: []u8
+//   %4: Page = error.try %3: !Page
+//   %5: i64 = const 2
+//   %6: i64 = field.count %4: Page
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 1
+//   %9: i64 = unary.- %8: i64
+//   %10: Visitor = field.head %4: Page
+//   %11: ?i64 = field.nick %10: Visitor
+//   %12: bool = opt.has %11: ?i64
+//   branch %12: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %13: i64 = opt.value %11: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %14: i64 = const 1
+//   %15: i64 = unary.- %14: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %16: i64 = phi [orelse.some.1, %13: i64], [orelse.else.2, %15: i64]
+//   test.expect_equal %9: i64, %16: i64, i64
+//   call.Page.deinit %4: Page
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// opt:
+// fn value_kind(%value: &std::json::Value) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %20: []u8 = phi [match.arm.3, %4: []u8], [match.arm.5, %7: []u8], [match.arm.7, %10: []u8], [match.arm.9, %13: []u8], [match.arm.11, %16: []u8], [match.arm.13, %19: []u8]
+//   return %20: []u8
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: []u8 = const "null"
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %7: []u8 = const "bool"
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: []u8 = const "i64"
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %2: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %13: []u8 = const "str"
+//   jump match.end.1
+// match.check.10:
+//   %14: bool = binary.== %2: i64, 4: i64
+//   branch %14: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %16: []u8 = const "arr"
+//   jump match.end.1
+// match.check.12:
+//   %17: bool = binary.== %2: i64, 5: i64
+//   branch %17: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %19: []u8 = const "obj"
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn value_size(%value: &std::json::Value) -> i64 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   %19: i64 = phi [match.arm.3, %4: i64], [match.arm.5, %7: i64], [match.arm.7, %9: i64], [match.arm.9, %12: i64], [match.arm.11, %15: i64], [match.arm.13, %18: i64]
+//   return %19: i64
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 0: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %2: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %2: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: i64 = union.payload %1: std::json::Value, I64
+//   jump match.end.1
+// match.check.8:
+//   %10: bool = binary.== %2: i64, 3: i64
+//   branch %10: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %11: std::string::String = union.payload %1: std::json::Value, Str
+//   %12: i64 = call.std::string::String.len %11: std::string::String
+//   jump match.end.1
+// match.check.10:
+//   %13: bool = binary.== %2: i64, 4: i64
+//   branch %13: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %14: std::array::Array<std::json::Value> = union.payload %1: std::json::Value, Arr
+//   %15: i64 = call.std::array::Array.len.std_3a_3ajson_3a_3aValue %14: std::array::Array<std::json::Value>
+//   jump match.end.1
+// match.check.12:
+//   %16: bool = binary.== %2: i64, 5: i64
+//   branch %16: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %17: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %18: i64 = call.std::map::Map.len.std_3a_3ajson_3a_3aValue %17: std::map::Map<[]u8, std::json::Value>
+//   jump match.end.1
+// match.unreachable.14:
+//   unreachable
+// }
+// fn value_at_key(%value: &std::json::Value, %key: []u8) -> []u8 {
+// entry:
+//   %1: std::json::Value = union.load %value: &std::json::Value
+//   %2: i64 = union.tag %1: std::json::Value
+//   jump match.check.2
+// match.end.1:
+//   unreachable
+// match.check.2:
+//   %3: bool = binary.== %2: i64, 5: i64
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: std::map::Map<[]u8, std::json::Value> = union.payload %1: std::json::Value, Obj
+//   %5: ?&std::json::Value = call.std::map::Map.at.std_3a_3ajson_3a_3aValue %4: std::map::Map<[]u8, std::json::Value>, %key: []u8
+//   %6: &std::json::Value = opt.value %5: ?&std::json::Value
+//   %7: bool = opt.has %5: ?&std::json::Value
+//   branch %7: bool, if.then.5, if.else.6
+// match.check.4:
+//   %10: bool = binary.== %2: i64, 0: i64
+//   branch %10: bool, match.arm.8, match.check.9
+// if.then.5:
+//   %8: []u8 = call.value_kind %6: &std::json::Value
+//   return %8: []u8
+// if.else.6:
+//   jump if.end.7
+// if.end.7:
+//   %9: []u8 = const "missing"
+//   return %9: []u8
+// match.arm.8:
+//   %11: []u8 = const "null"
+//   return %11: []u8
+// match.check.9:
+//   %12: bool = binary.== %2: i64, 1: i64
+//   branch %12: bool, match.arm.10, match.check.11
+// match.arm.10:
+//   %14: []u8 = const "bool"
+//   return %14: []u8
+// match.check.11:
+//   %15: bool = binary.== %2: i64, 2: i64
+//   branch %15: bool, match.arm.12, match.check.13
+// match.arm.12:
+//   %17: []u8 = const "i64"
+//   return %17: []u8
+// match.check.13:
+//   %18: bool = binary.== %2: i64, 3: i64
+//   branch %18: bool, match.arm.14, match.check.15
+// match.arm.14:
+//   %20: []u8 = const "str"
+//   return %20: []u8
+// match.check.15:
+//   %21: bool = binary.== %2: i64, 4: i64
+//   branch %21: bool, match.arm.16, match.unreachable.17
+// match.arm.16:
+//   %23: []u8 = const "arr"
+//   return %23: []u8
+// match.unreachable.17:
+//   unreachable
+// }
+// fn Cell.deinit(%self: Cell) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Cell
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   return void: void
+// match.check.4:
+//   %3: bool = binary.== %1: i64, 1: i64
+//   branch %3: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   return void: void
+// match.check.6:
+//   %5: bool = binary.== %1: i64, 2: i64
+//   branch %5: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %6: std::string::String = union.payload %self: Cell, Name
+//   call.std::string::String.deinit %6: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn key_order(%allocator: Allocator, %counts: std::map::Map<[]u8, i64>) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %2: i64], [while.body.2, %14: i64]
+//   %4: ?[]u8 = call.std::map::Map.key_at.i64 %counts: std::map::Map<[]u8, i64>, %3: i64
+//   %5: []u8 = opt.value %4: ?[]u8
+//   %6: bool = opt.has %4: ?[]u8
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: !void = call.std::string::String.append_bytes %1: std::string::String, %5: []u8
+//   error.try %7: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %9: i64 = const 44
+//   %10: u8 = cast %9: i64, u8
+//   %11: !void = call.std::string::String.append_byte %1: std::string::String, %10: u8
+//   error.try %11: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %3: i64, %13: i64
+//   jump while.header.1
+// while.end.3:
+//   %15: !std::string::String = error.ok %1: std::string::String
+//   return %15: !std::string::String
+// }
+// fn Named.deinit(%self: Named) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Named
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Named
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn expect_nick(%value: Named, %expected: []u8) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %value: Named
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   test.expect_equal %expected: []u8, %4: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %6: []u8 = const "none"
+//   test.expect_equal %expected: []u8, %6: []u8, []u8
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Profile.deinit(%self: Profile) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Profile
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Wrapper.deinit(%self: Wrapper) -> void {
+// entry:
+//   %1: Profile = field.head %self: Wrapper
+//   call.Profile.deinit %1: Profile
+//   return void: void
+// }
+// fn Row.deinit(%self: Row) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.cells %self: Row
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn Grid.deinit(%self: Grid) -> void {
+// entry:
+//   %1: std::array::Array<Row> = field.rows %self: Grid
+//   call.std::array::Array.deinit.Row %1: std::array::Array<Row>
+//   return void: void
+// }
+// fn Record.deinit(%self: Record) -> void {
+// entry:
+//   %1: Cell = field.cell %self: Record
+//   call.Cell.deinit %1: Cell
+//   return void: void
+// }
+// fn Report.deinit(%self: Report) -> void {
+// entry:
+//   %1: std::map::Map<[]u8, i64> = field.counts %self: Report
+//   call.std::map::Map.deinit.i64 %1: std::map::Map<[]u8, i64>
+//   %3: std::mem::Box<i64> = field.total %self: Report
+//   call.std::mem::Box.deinit.i64 %3: std::mem::Box<i64>
+//   return void: void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   return void: void
+// }
+// fn Page.deinit(%self: Page) -> void {
+// entry:
+//   %1: Visitor = field.head %self: Page
+//   call.Visitor.deinit %1: Visitor
+//   return void: void
+// }
+// fn test.json_decode_fills_fields_in_any_key_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"errors\": 2, \"visits\": 41}"
+//   %3: !Counts = call.std::json::decode.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 41
+//   %6: i64 = field.visits %4: Counts
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 2
+//   %9: i64 = field.errors %4: Counts
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_undoes_string_escapes() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"a\\tbAé\", \"active\": true}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: bool = field.active %4: Profile
+//   call.std::testing::expect %5: bool
+//   %7: i64 = const 6
+//   %8: std::string::String = field.name %4: Profile
+//   %9: i64 = call.std::string::String.len %8: std::string::String
+//   test.expect_equal %7: i64, %9: i64, i64
+//   call.Profile.deinit %4: Profile
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_joins_a_surrogate_pair() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"😀\", \"active\": false}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: i64 = const 4
+//   %6: std::string::String = field.name %4: Profile
+//   %7: i64 = call.std::string::String.len %6: std::string::String
+//   test.expect_equal %5: i64, %7: i64, i64
+//   call.Profile.deinit %4: Profile
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.json_decode_reads_a_nested_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"count\": 7, \"head\": {\"active\": true, \"name\": \"abc\"}}"
+//   %3: !Wrapper = call.std::json::decode.Wrapper %1: Allocator, %2: []u8
+//   %4: Wrapper = error.try %3: !Wrapper
+//   %5: i64 = const 7
+//   %6: i64 = field.count %4: Wrapper
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 3
+//   %9: Profile = field.head %4: Wrapper
+//   %10: std::string::String = field.name %9: Profile
+//   %11: i64 = call.std::string::String.len %10: std::string::String
+//   test.expect_equal %8: i64, %11: i64, i64
+//   call.Wrapper.deinit %4: Wrapper
+//   %14: !void = error.ok
+//   return %14: !void
+// }
+// fn test.json_decode_round_trips_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\":\"alice\",\"active\":true}"
+//   %3: !Profile = call.std::json::decode.Profile %1: Allocator, %2: []u8
+//   %4: Profile = error.try %3: !Profile
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.Profile %1: Allocator, %4: Profile, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.Profile.deinit %4: Profile
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   test.expect_equal %2: []u8, %11: []u8, []u8
+//   %13: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %13: std::string::String
+//   call.Profile.deinit %4: Profile
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.json_decode_ignore_unknown_drops_the_keys_the_type_lacks() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"visits\": 1, \"extra\": [1, {\"deep\": 2}], \"errors\": 0}"
+//   %3: !Counts = call.std::json::decode_ignore_unknown.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 1
+//   %6: i64 = field.visits %4: Counts
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 0
+//   %9: i64 = field.errors %4: Counts
+//   test.expect_equal %8: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.json_decode_reads_a_negative_number() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"visits\": -12, \"errors\": 0}"
+//   %3: !Counts = call.std::json::decode.Counts %1: Allocator, %2: []u8
+//   %4: Counts = error.try %3: !Counts
+//   %5: i64 = const 12
+//   %6: i64 = unary.- %5: i64
+//   %7: i64 = field.visits %4: Counts
+//   test.expect_equal %6: i64, %7: i64, i64
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_finds_a_Value_object_member_by_key() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"user\": \"alice\", \"visits\": [1, 2]}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "str"
+//   %6: []u8 = const "user"
+//   %7: []u8 = call.value_at_key %4: std::json::Value, %6: []u8
+//   test.expect_equal %5: []u8, %7: []u8, []u8
+//   %9: []u8 = const "arr"
+//   %10: []u8 = const "visits"
+//   %11: []u8 = call.value_at_key %4: std::json::Value, %10: []u8
+//   test.expect_equal %9: []u8, %11: []u8, []u8
+//   %13: []u8 = const "missing"
+//   %14: []u8 = const "absent"
+//   %15: []u8 = call.value_at_key %4: std::json::Value, %14: []u8
+//   test.expect_equal %13: []u8, %15: []u8, []u8
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %18: !void = error.ok
+//   return %18: !void
+// }
+// fn test.json_decode_reads_a_document_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"n\": 1, \"arr\": [1, \"two\"], \"z\": null}"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "obj"
+//   %6: []u8 = call.value_kind %4: std::json::Value
+//   test.expect_equal %5: []u8, %6: []u8, []u8
+//   %8: i64 = const 3
+//   %9: i64 = call.value_size %4: std::json::Value
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_reads_a_scalar_as_a_Value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "42"
+//   %3: !std::json::Value = call.std::json::decode.std_3a_3ajson_3a_3aValue %1: Allocator, %2: []u8
+//   %4: std::json::Value = error.try %3: !std::json::Value
+//   %5: []u8 = const "i64"
+//   %6: []u8 = call.value_kind %4: std::json::Value
+//   test.expect_equal %5: []u8, %6: []u8, []u8
+//   %8: i64 = const 42
+//   %9: i64 = call.value_size %4: std::json::Value
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::json::Value.deinit %4: std::json::Value
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.json_decode_reads_an_array_of_scalars() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "[1, 2, 3]"
+//   %3: !std::array::Array<i64> = call.std::json::decode.std_3a_3aarray_3a_3aArray_3ci64_3e %1: Allocator, %2: []u8
+//   %4: std::array::Array<i64> = error.try %3: !std::array::Array<i64>
+//   %5: i64 = const 3
+//   %6: i64 = call.std::array::Array.len.i64 %4: std::array::Array<i64>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 3
+//   %9: i64 = const 2
+//   %10: i64 = call.std::array::Array.get_or_panic.i64 %4: std::array::Array<i64>, %9: i64
+//   test.expect_equal %8: i64, %10: i64, i64
+//   array.deinit %4: std::array::Array<i64>
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.json_decode_reads_an_array_of_owners() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "[\"ab\", \"cde\"]"
+//   %3: !std::array::Array<std::string::String> = call.std::json::decode.std_3a_3aarray_3a_3aArray_3cstd_3a_3astring_3a_3aString_3e %1: Allocator, %2: []u8
+//   %4: std::array::Array<std::string::String> = error.try %3: !std::array::Array<std::string::String>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::array::Array.len.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %4: std::array::Array<std::string::String>
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_reads_arrays_nested_in_structs() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"rows\": [{\"cells\": [1, 2]}, {\"cells\": [3]}]}"
+//   %3: !Grid = call.std::json::decode.Grid %1: Allocator, %2: []u8
+//   %4: Grid = error.try %3: !Grid
+//   %5: i64 = const 2
+//   %6: std::array::Array<Row> = field.rows %4: Grid
+//   %7: i64 = call.std::array::Array.len.Row %6: std::array::Array<Row>
+//   test.expect_equal %5: i64, %7: i64, i64
+//   call.Grid.deinit %4: Grid
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// fn test.json_decode_reads_an_enum_tag_from_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "\"High\""
+//   %3: !Level = call.std::json::decode.Level %1: Allocator, %2: []u8
+//   %4: Level = error.try %3: !Level
+//   jump match.check.2
+// match.end.1:
+//   %9: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64]
+//   %10: i64 = const 1
+//   test.expect_equal %10: i64, %9: i64, i64
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %5: bool = binary.== %4: Level, 0: Level
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %4: Level, 1: Level
+//   branch %7: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %8: i64 = const 1
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.json_decode_reads_a_payload_free_union_variant_from_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "\"Missing\""
+//   %3: !Cell = call.std::json::decode.Cell %1: Allocator, %2: []u8
+//   %4: Cell = error.try %3: !Cell
+//   %5: i64 = union.tag %4: Cell
+//   jump match.check.2
+// match.end.1:
+//   %14: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %10: i64], [match.arm.7, %13: i64]
+//   %15: i64 = const 0
+//   test.expect_equal %15: i64, %14: i64, i64
+//   call.Cell.deinit %4: Cell
+//   %18: !void = error.ok
+//   return %18: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %10: i64 = const 1
+//   jump match.end.1
+// match.check.6:
+//   %11: bool = binary.== %5: i64, 2: i64
+//   branch %11: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %13: i64 = const 2
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.json_decode_reads_a_union_payload_from_the_object_naming_it() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"Name\": \"ab\"}"
+//   %3: !Cell = call.std::json::decode.Cell %1: Allocator, %2: []u8
+//   %4: Cell = error.try %3: !Cell
+//   %5: i64 = union.tag %4: Cell
+//   jump match.check.2
+// match.end.1:
+//   %14: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %10: i64], [match.arm.7, %13: i64]
+//   %15: i64 = const 2
+//   test.expect_equal %15: i64, %14: i64, i64
+//   call.Cell.deinit %4: Cell
+//   %18: !void = error.ok
+//   return %18: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %10: i64 = const 0
+//   jump match.end.1
+// match.check.6:
+//   %11: bool = binary.== %5: i64, 2: i64
+//   branch %11: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %12: std::string::String = union.payload %4: Cell, Name
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// fn test.json_decode_reads_sum_cells_of_a_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"level\": \"Low\", \"cell\": {\"Number\": 5}}"
+//   %3: !Record = call.std::json::decode.Record %1: Allocator, %2: []u8
+//   %4: Record = error.try %3: !Record
+//   %5: Level = field.level %4: Record
+//   jump match.check.2
+// match.end.1:
+//   %10: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %9: i64]
+//   %11: i64 = const 0
+//   test.expect_equal %11: i64, %10: i64, i64
+//   %13: Cell = field.cell %4: Record
+//   %14: i64 = union.tag %13: Cell
+//   jump match.check.8
+// match.check.2:
+//   %6: bool = binary.== %5: Level, 0: Level
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: Level, 1: Level
+//   branch %8: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %9: i64 = const 1
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// match.end.7:
+//   %22: i64 = phi [match.arm.9, %16: i64], [match.arm.11, %18: i64], [match.arm.13, %21: i64]
+//   %23: i64 = const 5
+//   test.expect_equal %23: i64, %22: i64, i64
+//   call.Record.deinit %4: Record
+//   %26: !void = error.ok
+//   return %26: !void
+// match.check.8:
+//   %15: bool = binary.== %14: i64, 0: i64
+//   branch %15: bool, match.arm.9, match.check.10
+// match.arm.9:
+//   %16: i64 = const 0
+//   jump match.end.7
+// match.check.10:
+//   %17: bool = binary.== %14: i64, 1: i64
+//   branch %17: bool, match.arm.11, match.check.12
+// match.arm.11:
+//   %18: i64 = union.payload %13: Cell, Number
+//   jump match.end.7
+// match.check.12:
+//   %19: bool = binary.== %14: i64, 2: i64
+//   branch %19: bool, match.arm.13, match.unreachable.14
+// match.arm.13:
+//   %21: i64 = const 0
+//   jump match.end.7
+// match.unreachable.14:
+//   unreachable
+// }
+// fn test.json_decode_reads_an_object_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"alice\": 2, \"bob\": 1}"
+//   %3: !std::map::Map<[]u8, i64> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, i64> = error.try %3: !std::map::Map<[]u8, i64>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.i64 %4: std::map::Map<[]u8, i64>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 2
+//   %9: []u8 = const "alice"
+//   %10: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %9: []u8
+//   %11: bool = opt.has %10: ?i64
+//   branch %11: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %12: i64 = opt.value %10: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %13: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %14: i64 = phi [orelse.some.1, %12: i64], [orelse.else.2, %13: i64]
+//   test.expect_equal %8: i64, %14: i64, i64
+//   %16: i64 = const 1
+//   %17: []u8 = const "bob"
+//   %18: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %17: []u8
+//   %19: bool = opt.has %18: ?i64
+//   branch %19: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %20: i64 = opt.value %18: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %21: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %22: i64 = phi [orelse.some.4, %20: i64], [orelse.else.5, %21: i64]
+//   test.expect_equal %16: i64, %22: i64, i64
+//   %24: !std::string::String = call.key_order %1: Allocator, %4: std::map::Map<[]u8, i64>
+//   %25: std::string::String = error.try %24: !std::string::String, cleanup map.deinit %4: std::map::Map<[]u8, i64>
+//   %26: []u8 = call.std::string::String.as_bytes %25: std::string::String
+//   %27: []u8 = const "alice,bob,"
+//   test.expect_equal %27: []u8, %26: []u8, []u8
+//   call.std::string::String.deinit %25: std::string::String
+//   map.deinit %4: std::map::Map<[]u8, i64>
+//   %31: !void = error.ok
+//   return %31: !void
+// }
+// fn test.json_decode_undoes_escapes_in_a_map_key() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"c\\u0061rol\": 4}"
+//   %3: !std::map::Map<[]u8, i64> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, i64> = error.try %3: !std::map::Map<[]u8, i64>
+//   %5: !std::string::String = call.key_order %1: Allocator, %4: std::map::Map<[]u8, i64>
+//   %6: std::string::String = error.try %5: !std::string::String, cleanup map.deinit %4: std::map::Map<[]u8, i64>
+//   %7: []u8 = call.std::string::String.as_bytes %6: std::string::String
+//   %8: []u8 = const "carol,"
+//   test.expect_equal %8: []u8, %7: []u8, []u8
+//   %10: i64 = const 4
+//   %11: []u8 = const "carol"
+//   %12: ?i64 = call.std::map::Map.get.i64 %4: std::map::Map<[]u8, i64>, %11: []u8
+//   %13: bool = opt.has %12: ?i64
+//   branch %13: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %14: i64 = opt.value %12: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %15: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %16: i64 = phi [orelse.some.1, %14: i64], [orelse.else.2, %15: i64]
+//   test.expect_equal %10: i64, %16: i64, i64
+//   call.std::string::String.deinit %6: std::string::String
+//   map.deinit %4: std::map::Map<[]u8, i64>
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.json_decode_reads_an_object_of_strings_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"first\": \"alice\", \"last\": \"carol\"}"
+//   %3: !std::map::Map<[]u8, std::string::String> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3astring_3a_3aString_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, std::string::String> = error.try %3: !std::map::Map<[]u8, std::string::String>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: []u8 = const "first"
+//   %9: ?&std::string::String = call.std::map::Map.at.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>, %8: []u8
+//   %10: &std::string::String = opt.value %9: ?&std::string::String
+//   %11: bool = opt.has %9: ?&std::string::String
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: std::string::String = ref.load %10: &std::string::String
+//   %13: []u8 = call.std::string::String.as_bytes %12: std::string::String
+//   %14: []u8 = const "alice"
+//   test.expect_equal %14: []u8, %13: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %16: []u8 = const "first is missing"
+//   call.std::testing::fail %16: []u8
+//   jump if.end.3
+// if.end.3:
+//   %18: []u8 = const "{\"first\":\"alice\",\"last\":\"carol\"}"
+//   %19: std::string::String = call.std::string::new %1: Allocator
+//   %20: &var std::string::String = local.slot %19: std::string::String
+//   %21: !void = call.std::json::encode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3astring_3a_3aString_3e %1: Allocator, %4: std::map::Map<[]u8, std::string::String>, %20: &var std::string::String
+//   %22: std::string::String = ref.load %20: &var std::string::String
+//   error.try %21: !void, cleanup call.std::string::String.deinit %22: std::string::String; call.std::map::Map.deinit.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   %24: std::string::String = ref.load %20: &var std::string::String
+//   %25: []u8 = call.std::string::String.as_bytes %24: std::string::String
+//   test.expect_equal %18: []u8, %25: []u8, []u8
+//   %27: std::string::String = ref.load %20: &var std::string::String
+//   call.std::string::String.deinit %27: std::string::String
+//   call.std::map::Map.deinit.std_3a_3astring_3a_3aString %4: std::map::Map<[]u8, std::string::String>
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.json_decode_reads_an_object_of_objects_into_a_map() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"alice\": {\"hit\": 2}, \"bob\": {\"hit\": 1, \"miss\": 3}}"
+//   %3: !std::map::Map<[]u8, std::map::Map<[]u8, i64>> = call.std::json::decode.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e_3e %1: Allocator, %2: []u8
+//   %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>> = error.try %3: !std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %5: i64 = const 2
+//   %6: i64 = call.std::map::Map.len.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: []u8 = const "bob"
+//   %9: ?&std::map::Map<[]u8, i64> = call.std::map::Map.at.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>, %8: []u8
+//   %10: &std::map::Map<[]u8, i64> = opt.value %9: ?&std::map::Map<[]u8, i64>
+//   %11: bool = opt.has %9: ?&std::map::Map<[]u8, i64>
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: i64 = const 2
+//   %13: std::map::Map<[]u8, i64> = ref.load %10: &std::map::Map<[]u8, i64>
+//   %14: i64 = call.std::map::Map.len.i64 %13: std::map::Map<[]u8, i64>
+//   test.expect_equal %12: i64, %14: i64, i64
+//   %16: i64 = const 3
+//   %17: std::map::Map<[]u8, i64> = ref.load %10: &std::map::Map<[]u8, i64>
+//   %18: []u8 = const "miss"
+//   %19: ?i64 = call.std::map::Map.get.i64 %17: std::map::Map<[]u8, i64>, %18: []u8
+//   %20: bool = opt.has %19: ?i64
+//   branch %20: bool, orelse.some.4, orelse.else.5
+// if.else.2:
+//   %25: []u8 = const "bob is missing"
+//   call.std::testing::fail %25: []u8
+//   jump if.end.3
+// if.end.3:
+//   call.std::map::Map.deinit.std_3a_3amap_3a_3aMap_3c_5b_5du8_2c_20i64_3e %4: std::map::Map<[]u8, std::map::Map<[]u8, i64>>
+//   %28: !void = error.ok
+//   return %28: !void
+// orelse.some.4:
+//   %21: i64 = opt.value %19: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %22: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %23: i64 = phi [orelse.some.4, %21: i64], [orelse.else.5, %22: i64]
+//   test.expect_equal %16: i64, %23: i64, i64
+//   jump if.end.3
+// }
+// fn test.json_decode_reads_a_box_as_the_value_it_holds() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "7"
+//   %3: !std::mem::Box<i64> = call.std::json::decode.std_3a_3amem_3a_3aBox_3ci64_3e %1: Allocator, %2: []u8
+//   %4: std::mem::Box<i64> = error.try %3: !std::mem::Box<i64>
+//   %5: i64 = call.std::mem::Box.borrow.i64 %4: std::mem::Box<i64>
+//   %6: i64 = const 7
+//   test.expect_equal %6: i64, %5: i64, i64
+//   box.deinit %4: std::mem::Box<i64>
+//   %9: !void = error.ok
+//   return %9: !void
+// }
+// fn test.json_decode_round_trips_a_map_and_a_box_through_encode() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"counts\": {\"alice\": 2, \"bob\": 1}, \"total\": 3}"
+//   %3: !Report = call.std::json::decode.Report %1: Allocator, %2: []u8
+//   %4: Report = error.try %3: !Report
+//   %5: std::string::String = call.std::string::new %1: Allocator
+//   %6: &var std::string::String = local.slot %5: std::string::String
+//   %7: !void = call.std::json::encode.Report %1: Allocator, %4: Report, %6: &var std::string::String
+//   %8: std::string::String = ref.load %6: &var std::string::String
+//   error.try %7: !void, cleanup call.std::string::String.deinit %8: std::string::String; call.Report.deinit %4: Report
+//   %10: std::string::String = ref.load %6: &var std::string::String
+//   %11: []u8 = call.std::string::String.as_bytes %10: std::string::String
+//   %12: []u8 = const "{\"counts\":{\"alice\":2,\"bob\":1},\"total\":3}"
+//   test.expect_equal %12: []u8, %11: []u8, []u8
+//   %14: std::string::String = ref.load %6: &var std::string::String
+//   call.std::string::String.deinit %14: std::string::String
+//   call.Report.deinit %4: Report
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.json_decode_reads_an_optional_field_that_has_a_value() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": 7}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 7
+//   %6: ?i64 = field.nick %4: Visitor
+//   %7: bool = opt.has %6: ?i64
+//   branch %7: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %8: i64 = opt.value %6: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %9: i64 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %10: i64 = phi [orelse.some.1, %8: i64], [orelse.else.2, %9: i64]
+//   test.expect_equal %5: i64, %10: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.json_decode_reads_a_null_optional_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": null}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: ?i64 = field.nick %4: Visitor
+//   %8: bool = opt.has %7: ?i64
+//   branch %8: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %9: i64 = opt.value %7: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %12: i64 = phi [orelse.some.1, %9: i64], [orelse.else.2, %11: i64]
+//   test.expect_equal %6: i64, %12: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %15: !void = error.ok
+//   return %15: !void
+// }
+// fn test.json_decode_reads_an_omitted_optional_field_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\"}"
+//   %3: !Visitor = call.std::json::decode.Visitor %1: Allocator, %2: []u8
+//   %4: Visitor = error.try %3: !Visitor
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: ?i64 = field.nick %4: Visitor
+//   %8: bool = opt.has %7: ?i64
+//   branch %8: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %9: i64 = opt.value %7: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %12: i64 = phi [orelse.some.1, %9: i64], [orelse.else.2, %11: i64]
+//   test.expect_equal %6: i64, %12: i64, i64
+//   %14: i64 = const 5
+//   %15: std::string::String = field.name %4: Visitor
+//   %16: i64 = call.std::string::String.len %15: std::string::String
+//   test.expect_equal %14: i64, %16: i64, i64
+//   call.Visitor.deinit %4: Visitor
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn test.json_decode_reads_an_optional_string_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"name\": \"alice\", \"nick\": \"al\"}"
+//   %3: !Named = call.std::json::decode.Named %1: Allocator, %2: []u8
+//   %4: Named = error.try %3: !Named
+//   %5: []u8 = const "al"
+//   call.expect_nick %4: Named, %5: []u8
+//   %7: []u8 = const "{\"name\": \"alice\", \"nick\": null}"
+//   %8: !Named = call.std::json::decode.Named %1: Allocator, %7: []u8
+//   %9: Named = error.try %8: !Named, cleanup call.Named.deinit %4: Named
+//   %10: []u8 = const "none"
+//   call.expect_nick %9: Named, %10: []u8
+//   %12: []u8 = const "{\"name\": \"alice\"}"
+//   %13: !Named = call.std::json::decode.Named %1: Allocator, %12: []u8
+//   %14: Named = error.try %13: !Named, cleanup call.Named.deinit %9: Named; call.Named.deinit %4: Named
+//   %15: []u8 = const "none"
+//   call.expect_nick %14: Named, %15: []u8
+//   %17: []u8 = const "{\"name\":\"alice\",\"nick\":\"al\"}"
+//   %18: std::string::String = call.std::string::new %1: Allocator
+//   %19: &var std::string::String = local.slot %18: std::string::String
+//   %20: !void = call.std::json::encode.Named %1: Allocator, %4: Named, %19: &var std::string::String
+//   %21: std::string::String = ref.load %19: &var std::string::String
+//   error.try %20: !void, cleanup call.std::string::String.deinit %21: std::string::String; call.Named.deinit %14: Named; call.Named.deinit %9: Named; call.Named.deinit %4: Named
+//   %23: std::string::String = ref.load %19: &var std::string::String
+//   %24: []u8 = call.std::string::String.as_bytes %23: std::string::String
+//   test.expect_equal %17: []u8, %24: []u8, []u8
+//   %26: std::string::String = ref.load %19: &var std::string::String
+//   call.std::string::String.deinit %26: std::string::String
+//   call.Named.deinit %14: Named
+//   call.Named.deinit %9: Named
+//   call.Named.deinit %4: Named
+//   %31: !void = error.ok
+//   return %31: !void
+// }
+// fn test.json_decode_reads_an_omitted_optional_field_of_a_nested_struct() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"count\": 2, \"head\": {\"name\": \"alice\"}}"
+//   %3: !Page = call.std::json::decode.Page %1: Allocator, %2: []u8
+//   %4: Page = error.try %3: !Page
+//   %5: i64 = const 2
+//   %6: i64 = field.count %4: Page
+//   test.expect_equal %5: i64, %6: i64, i64
+//   %8: i64 = const 1
+//   %9: i64 = unary.- %8: i64
+//   %10: Visitor = field.head %4: Page
+//   %11: ?i64 = field.nick %10: Visitor
+//   %12: bool = opt.has %11: ?i64
+//   branch %12: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %13: i64 = opt.value %11: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %14: i64 = const 1
+//   %15: i64 = unary.- %14: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %16: i64 = phi [orelse.some.1, %13: i64], [orelse.else.2, %15: i64]
+//   test.expect_equal %9: i64, %16: i64, i64
+//   call.Page.deinit %4: Page
+//   %19: !void = error.ok
+//   return %19: !void
+// }

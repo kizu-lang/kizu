@@ -1,0 +1,215 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Score {
+    pub value: i64,
+}
+
+// A boxed copyable payload reads back through a shared borrow and hands the
+// cell back with shallow deinit.
+test "box holds one owned value behind an allocator" {
+    let allocator = mem::page_allocator();
+    let boxed = try mem::box<Score>(allocator, Score { value: 41 });
+    let seen = boxed.borrow();
+    testing::expect_equal<i64>(41, seen.value);
+    boxed.deinit();
+}
+
+// borrow_mut writes land in the cell: a later shared borrow observes them.
+test "box borrow_mut writes through to the payload" {
+    let allocator = mem::page_allocator();
+    var boxed = try mem::box<Score>(allocator, Score { value: 1 });
+    let cell = boxed.borrow_mut();
+    cell.value = cell.value + 41;
+    let seen = boxed.borrow();
+    testing::expect_equal<i64>(42, seen.value);
+    boxed.deinit();
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return move name;
+}
+
+// An owner payload is closed the same way an owner-element container is:
+// deinit takes the payload out, consumes it, then releases the cell
+// (ADR-0091).
+test "box deinit consumes an owner payload" {
+    let allocator = mem::page_allocator();
+    let boxed = try mem::box<string::String>(allocator, try make_name(allocator, "alice"));
+    let held = boxed.borrow();
+    testing::expect_equal<i64>(5, held.len());
+    boxed.deinit();
+}
+
+// A fixed-buffer allocator serves Box like every other container, and the
+// cleanup registered with defer runs through the same lowering.
+test "fixed buffer allocator backs box" {
+    var buf = [256]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+    let boxed = try mem::box<Score>(alloc, Score { value: 7 });
+    defer boxed.deinit();
+    let seen = boxed.borrow();
+    testing::expect_equal<i64>(7, seen.value);
+}
+
+
+// ir
+// lower:
+// fn make_name(%allocator: Allocator, %text: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %text: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn test.box_holds_one_owned_value_behind_an_allocator() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 41
+//   %3: Score = struct.new {value: %2: i64}
+//   %4: !std::mem::Box<Score> = call.std::mem::box.Score %1: Allocator, %3: Score
+//   %5: std::mem::Box<Score> = error.try %4: !std::mem::Box<Score>
+//   %6: Score = call.std::mem::Box.borrow.Score %5: std::mem::Box<Score>
+//   %7: i64 = const 41
+//   %8: i64 = field.value %6: Score
+//   test.expect_equal %7: i64, %8: i64, i64
+//   call.std::mem::Box.deinit.Score %5: std::mem::Box<Score>
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.box_borrow_mut_writes_through_to_the_payload() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 1
+//   %3: Score = struct.new {value: %2: i64}
+//   %4: !std::mem::Box<Score> = call.std::mem::box.Score %1: Allocator, %3: Score
+//   %5: std::mem::Box<Score> = error.try %4: !std::mem::Box<Score>
+//   %6: &var Score = call.std::mem::Box.borrow_mut.Score %5: std::mem::Box<Score>
+//   %7: i64 = field.ref.value %6: &var Score
+//   %8: i64 = const 41
+//   %9: i64 = binary.+ %7: i64, %8: i64
+//   field.ref.set.value %6: &var Score, %9: i64
+//   %11: Score = call.std::mem::Box.borrow.Score %5: std::mem::Box<Score>
+//   %12: i64 = const 42
+//   %13: i64 = field.value %11: Score
+//   test.expect_equal %12: i64, %13: i64, i64
+//   call.std::mem::Box.deinit.Score %5: std::mem::Box<Score>
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.box_deinit_consumes_an_owner_payload() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "alice"
+//   %3: !std::string::String = call.make_name %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: !std::mem::Box<std::string::String> = call.std::mem::box.std_3a_3astring_3a_3aString %1: Allocator, %4: std::string::String
+//   %6: std::mem::Box<std::string::String> = error.try %5: !std::mem::Box<std::string::String>
+//   %7: std::string::String = call.std::mem::Box.borrow.std_3a_3astring_3a_3aString %6: std::mem::Box<std::string::String>
+//   %8: i64 = const 5
+//   %9: i64 = call.std::string::String.len %7: std::string::String
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::mem::Box.deinit.std_3a_3astring_3a_3aString %6: std::mem::Box<std::string::String>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.fixed_buffer_allocator_backs_box() -> !void {
+// entry:
+//   %1: [256]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [256]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: i64 = const 7
+//   %5: Score = struct.new {value: %4: i64}
+//   %6: !std::mem::Box<Score> = call.std::mem::box.Score %3: Allocator, %5: Score
+//   %7: std::mem::Box<Score> = error.try %6: !std::mem::Box<Score>
+//   %8: Score = call.std::mem::Box.borrow.Score %7: std::mem::Box<Score>
+//   %9: i64 = const 7
+//   %10: i64 = field.value %8: Score
+//   test.expect_equal %9: i64, %10: i64, i64
+//   box.deinit %7: std::mem::Box<Score>
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// opt:
+// fn make_name(%allocator: Allocator, %text: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %text: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn test.box_holds_one_owned_value_behind_an_allocator() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 41
+//   %3: Score = struct.new {value: %2: i64}
+//   %4: !std::mem::Box<Score> = call.std::mem::box.Score %1: Allocator, %3: Score
+//   %5: std::mem::Box<Score> = error.try %4: !std::mem::Box<Score>
+//   %6: Score = call.std::mem::Box.borrow.Score %5: std::mem::Box<Score>
+//   %7: i64 = const 41
+//   %8: i64 = field.value %6: Score
+//   test.expect_equal %7: i64, %8: i64, i64
+//   call.std::mem::Box.deinit.Score %5: std::mem::Box<Score>
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.box_borrow_mut_writes_through_to_the_payload() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 1
+//   %3: Score = struct.new {value: %2: i64}
+//   %4: !std::mem::Box<Score> = call.std::mem::box.Score %1: Allocator, %3: Score
+//   %5: std::mem::Box<Score> = error.try %4: !std::mem::Box<Score>
+//   %6: &var Score = call.std::mem::Box.borrow_mut.Score %5: std::mem::Box<Score>
+//   %7: i64 = field.ref.value %6: &var Score
+//   %8: i64 = const 41
+//   %9: i64 = binary.+ %7: i64, %8: i64
+//   field.ref.set.value %6: &var Score, %9: i64
+//   %11: Score = call.std::mem::Box.borrow.Score %5: std::mem::Box<Score>
+//   %12: i64 = const 42
+//   %13: i64 = field.value %11: Score
+//   test.expect_equal %12: i64, %13: i64, i64
+//   call.std::mem::Box.deinit.Score %5: std::mem::Box<Score>
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// fn test.box_deinit_consumes_an_owner_payload() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "alice"
+//   %3: !std::string::String = call.make_name %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: !std::mem::Box<std::string::String> = call.std::mem::box.std_3a_3astring_3a_3aString %1: Allocator, %4: std::string::String
+//   %6: std::mem::Box<std::string::String> = error.try %5: !std::mem::Box<std::string::String>
+//   %7: std::string::String = call.std::mem::Box.borrow.std_3a_3astring_3a_3aString %6: std::mem::Box<std::string::String>
+//   %8: i64 = const 5
+//   %9: i64 = call.std::string::String.len %7: std::string::String
+//   test.expect_equal %8: i64, %9: i64, i64
+//   call.std::mem::Box.deinit.std_3a_3astring_3a_3aString %6: std::mem::Box<std::string::String>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn test.fixed_buffer_allocator_backs_box() -> !void {
+// entry:
+//   %1: [256]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [256]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: i64 = const 7
+//   %5: Score = struct.new {value: %4: i64}
+//   %6: !std::mem::Box<Score> = call.std::mem::box.Score %3: Allocator, %5: Score
+//   %7: std::mem::Box<Score> = error.try %6: !std::mem::Box<Score>
+//   %8: Score = call.std::mem::Box.borrow.Score %7: std::mem::Box<Score>
+//   %9: i64 = const 7
+//   %10: i64 = field.value %8: Score
+//   test.expect_equal %9: i64, %10: i64, i64
+//   box.deinit %7: std::mem::Box<Score>
+//   %13: !void = error.ok
+//   return %13: !void
+// }

@@ -12,17 +12,19 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestSelfhostFrontend builds the selfhost compiler with the shipping one and
-// runs its `parse` and `check` commands over the examples, the negative
+// runs its `parse`, `check` and `ir` commands over the examples, the negative
 // examples, tests/behavior, the module examples and compiler/ itself. What it
 // prints must be what the Go front end (parse, load, type check, ownership
-// check) prints for the same target through the same CLI paths. The selfhost
-// `check` stops at the ownership checker, so the Go side here stops there
-// too; the later gates join the comparison with their modules.
+// check, lowering and optimizing to typed SSA IR) prints for the same target
+// through the same CLI paths. The selfhost `check` stops at the ownership
+// checker, so the Go side here stops there too; the later gates join the
+// comparison with their modules.
 func TestSelfhostFrontend(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler")
@@ -47,14 +49,31 @@ func TestSelfhostFrontend(t *testing.T) {
 			t.Parallel()
 			compareSelfhost(t, selfhost, "check", file, goCheckOutput(file))
 		})
+		runSelfhostIRSubtests(t, selfhost, name, file)
 	}
 	for _, pkg := range packages {
 		pkg := pkg
-		t.Run("check/"+strings.TrimPrefix(pkg, "../../"), func(t *testing.T) {
+		name := strings.TrimPrefix(pkg, "../../")
+		t.Run("check/"+name, func(t *testing.T) {
 			t.Parallel()
 			compareSelfhost(t, selfhost, "check", pkg, goCheckOutput(pkg))
 		})
+		runSelfhostIRSubtests(t, selfhost, name, pkg)
 	}
+}
+
+// runSelfhostIRSubtests compares the selfhost `ir` and `ir --opt` output for
+// one target with what the Go lowerer and optimizer print for it.
+func runSelfhostIRSubtests(t *testing.T, selfhost string, name string, target string) {
+	t.Helper()
+	t.Run("ir/"+name, func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostArgs(t, selfhost, goIrOutput(target, false), "ir", target)
+	})
+	t.Run("ir-opt/"+name, func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostArgs(t, selfhost, goIrOutput(target, true), "ir", "--opt", target)
+	})
 }
 
 // cliOutput is what a CLI command wrote and how it ended.
@@ -67,7 +86,14 @@ type cliOutput struct {
 // compareSelfhost runs one selfhost command and compares it with the Go output.
 func compareSelfhost(t *testing.T, selfhost string, command string, target string, want cliOutput) {
 	t.Helper()
-	cmd := exec.Command(selfhost, command, target)
+	compareSelfhostArgs(t, selfhost, want, command, target)
+}
+
+// compareSelfhostArgs runs the selfhost compiler with args and compares what
+// it prints with the Go output.
+func compareSelfhostArgs(t *testing.T, selfhost string, want cliOutput, args ...string) {
+	t.Helper()
+	cmd := exec.Command(selfhost, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -78,9 +104,9 @@ func compareSelfhost(t *testing.T, selfhost string, command string, target strin
 		failed: runErr != nil,
 	}
 	if got != want {
-		t.Errorf("selfhost %s %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
+		t.Errorf("selfhost %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
 			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
-			command, target, want.failed, want.stdout, want.stderr,
+			strings.Join(args, " "), want.failed, want.stdout, want.stderr,
 			got.failed, got.stdout, got.stderr)
 	}
 }
@@ -134,6 +160,26 @@ func goCheckOutput(target string) cliOutput {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: "check: ok\n"}
+}
+
+// goIrOutput renders what `kizu ir` prints for a target: the dump of the
+// lowered module, optimized when opt is set. A package lowers the way build
+// lowers it, with the package main exposed as the entrypoint.
+func goIrOutput(target string, opt bool) cliOutput {
+	module, err := lowerFrontendTarget(target, opt)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	return cliOutput{stdout: ir.Dump(module) + "\n"}
+}
+
+// lowerFrontendTarget lowers a file the way the ir command does, or a package
+// the way build does.
+func lowerFrontendTarget(target string, opt bool) (*ir.Module, error) {
+	if isPackageRoot(target) {
+		return lowerPackage(target, opt)
+	}
+	return lowerFile(target, opt)
 }
 
 // loadFrontendTarget loads a file or a package the way the check command does.

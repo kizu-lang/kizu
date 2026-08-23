@@ -1,0 +1,103 @@
+import std::json;
+import std::mem;
+
+pub union Note {
+    Empty,
+    Count(i64),
+    Text(i64),
+}
+
+// A variant that carries a payload is written as the object naming it, and a
+// value is one variant. Two keys name two variants, so the document does not
+// say which one it is; picking either would invent an answer the bytes never
+// gave.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let document =
+        \\{"Count": 1, "Text": 2}
+    ;
+    let note = try json::decode<Note>(allocator, document);
+    print(match note {
+        Empty => 0,
+        Count(number) => number,
+        Text(number) => number,
+    });
+    return;
+}
+
+// run-fails
+// features: std-json decode union diagnostics
+// error: runtime error: std::json::Error::UnexpectedToken
+
+
+// ir
+// lower:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"Count\": 1, \"Text\": 2}"
+//   %3: !Note = call.std::json::decode.Note %1: Allocator, %2: []u8
+//   %4: Note = error.try %3: !Note
+//   %5: i64 = union.tag %4: Note
+//   jump match.check.2
+// match.end.1:
+//   %12: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %9: i64], [match.arm.7, %11: i64]
+//   call.print %12: i64
+//   %14: !void = error.ok
+//   return %14: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %9: i64 = union.payload %4: Note, Count
+//   jump match.end.1
+// match.check.6:
+//   %10: bool = binary.== %5: i64, 2: i64
+//   branch %10: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %11: i64 = union.payload %4: Note, Text
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// opt:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "{\"Count\": 1, \"Text\": 2}"
+//   %3: !Note = call.std::json::decode.Note %1: Allocator, %2: []u8
+//   %4: Note = error.try %3: !Note
+//   %5: i64 = union.tag %4: Note
+//   jump match.check.2
+// match.end.1:
+//   %12: i64 = phi [match.arm.3, %7: i64], [match.arm.5, %9: i64], [match.arm.7, %11: i64]
+//   call.print %12: i64
+//   %14: !void = error.ok
+//   return %14: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %8: bool = binary.== %5: i64, 1: i64
+//   branch %8: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %9: i64 = union.payload %4: Note, Count
+//   jump match.end.1
+// match.check.6:
+//   %10: bool = binary.== %5: i64, 2: i64
+//   branch %10: bool, match.arm.7, match.unreachable.8
+// match.arm.7:
+//   %11: i64 = union.payload %4: Note, Text
+//   jump match.end.1
+// match.unreachable.8:
+//   unreachable
+// }

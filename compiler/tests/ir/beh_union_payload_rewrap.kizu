@@ -1,0 +1,729 @@
+import std::testing;
+
+// ADR-0090: a match on an owned union copies scalar payloads and moves
+// aggregate payloads out, so both can be rewrapped into another union.
+
+enum FailKind {
+    Bad,
+}
+
+error FsError {
+    NotFound,
+    Denied,
+}
+
+union Value {
+    Flag(bool),
+    Count(i64),
+    Fail(FailKind),
+    Lost(FsError),
+}
+
+union Selection {
+    Selected(bool),
+    Counted(i64),
+    Error(FailKind),
+    Missing(FsError),
+}
+
+fn select_value(value: Value) -> Selection {
+    return match value {
+        Flag(flag) => Selection::Selected(flag),
+        Count(count) => Selection::Counted(count),
+        Fail(kind) => Selection::Error(kind),
+        Lost(failure) => Selection::Missing(failure),
+    };
+}
+
+union Inner {
+    Word([]u8),
+    Number(i64),
+}
+
+union Wrapped {
+    Kept(Inner),
+    Empty,
+}
+
+union Rewrapped {
+    Held(Inner),
+    Vacant,
+}
+
+fn rewrap(wrapped: Wrapped) -> Rewrapped {
+    return match wrapped {
+        Kept(inner) => Rewrapped::Held(move inner),
+        Empty => Rewrapped::Vacant,
+    };
+}
+
+test "scalar payloads rewrap on return" {
+    let selected = match select_value(Value::Flag(true)) {
+        Selected(flag) => flag,
+        Counted(_) => false,
+        Error(_) => false,
+        Missing(_) => false,
+    };
+    testing::expect(selected);
+
+    let counted = match select_value(Value::Count(41)) {
+        Selected(_) => 0,
+        Counted(count) => count,
+        Error(_) => 0,
+        Missing(_) => 0,
+    };
+    testing::expect_equal<i64>(41, counted);
+}
+
+test "scalar match leaves the union alive" {
+    let value = Value::Count(7);
+    let first = match value {
+        Flag(_) => 0,
+        Count(count) => count,
+        Fail(_) => 0,
+        Lost(_) => 0,
+    };
+    let second = match value {
+        Flag(_) => 0,
+        Count(count) => count,
+        Fail(_) => 0,
+        Lost(_) => 0,
+    };
+    testing::expect_equal<i64>(first, second);
+}
+
+test "union payloads rewrap on return" {
+    let held = rewrap(Wrapped::Kept(Inner::Word("hello")));
+    match held {
+        Held(inner) => match inner {
+            Word(word) => testing::expect_equal<[]u8>("hello", word),
+            Number(_) => testing::expect(false),
+        },
+        Vacant => testing::expect(false),
+    }
+}
+
+test "number payloads rewrap through nested unions" {
+    let held = rewrap(Wrapped::Kept(Inner::Number(12)));
+    let number = match held {
+        Held(inner) => match inner {
+            Word(_) => 0,
+            Number(value) => value,
+        },
+        Vacant => 0,
+    };
+    testing::expect_equal<i64>(12, number);
+}
+
+
+// ir
+// lower:
+// fn select_value(%value: Value) -> Selection {
+// entry:
+//   %1: i64 = union.tag %value: Value
+//   jump match.check.2
+// match.end.1:
+//   %14: Selection = phi [match.arm.3, %4: Selection], [match.arm.5, %7: Selection], [match.arm.7, %10: Selection], [match.arm.9, %13: Selection]
+//   return %14: Selection
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: bool = union.payload %value: Value, Flag
+//   %4: Selection = union.new %3: bool, Selected
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: i64 = union.payload %value: Value, Count
+//   %7: Selection = union.new %6: i64, Counted
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %1: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: FailKind = union.payload %value: Value, Fail
+//   %10: Selection = union.new %9: FailKind, Error
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %1: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %12: FsError = union.payload %value: Value, Lost
+//   %13: Selection = union.new %12: FsError, Missing
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// }
+// fn rewrap(%wrapped: Wrapped) -> Rewrapped {
+// entry:
+//   %1: i64 = union.tag %wrapped: Wrapped
+//   jump match.check.2
+// match.end.1:
+//   %7: Rewrapped = phi [match.arm.3, %4: Rewrapped], [match.arm.5, %6: Rewrapped]
+//   return %7: Rewrapped
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: Inner = union.payload %wrapped: Wrapped, Kept
+//   %4: Rewrapped = union.new %3: Inner, Held
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %6: Rewrapped = union.new Vacant
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.scalar_payloads_rewrap_on_return() -> !void {
+// entry:
+//   %1: bool = const true
+//   %2: Value = union.new %1: bool, Flag
+//   %3: Selection = call.select_value %2: Value
+//   %4: i64 = union.tag %3: Selection
+//   jump match.check.2
+// match.end.1:
+//   %16: bool = phi [match.arm.3, %6: bool], [match.arm.5, %9: bool], [match.arm.7, %12: bool], [match.arm.9, %15: bool]
+//   call.std::testing::expect %16: bool
+//   %18: i64 = const 41
+//   %19: Value = union.new %18: i64, Count
+//   %20: Selection = call.select_value %19: Value
+//   %21: i64 = union.tag %20: Selection
+//   jump match.check.12
+// match.check.2:
+//   %5: bool = binary.== %4: i64, 0: i64
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: bool = union.payload %3: Selection, Selected
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %4: i64, 1: i64
+//   branch %7: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %8: i64 = union.payload %3: Selection, Counted
+//   %9: bool = const false
+//   jump match.end.1
+// match.check.6:
+//   %10: bool = binary.== %4: i64, 2: i64
+//   branch %10: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %11: FailKind = union.payload %3: Selection, Error
+//   %12: bool = const false
+//   jump match.end.1
+// match.check.8:
+//   %13: bool = binary.== %4: i64, 3: i64
+//   branch %13: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %14: FsError = union.payload %3: Selection, Missing
+//   %15: bool = const false
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// match.end.11:
+//   %33: i64 = phi [match.arm.13, %24: i64], [match.arm.15, %26: i64], [match.arm.17, %29: i64], [match.arm.19, %32: i64]
+//   %34: i64 = const 41
+//   test.expect_equal %34: i64, %33: i64, i64
+//   %36: !void = error.ok
+//   return %36: !void
+// match.check.12:
+//   %22: bool = binary.== %21: i64, 0: i64
+//   branch %22: bool, match.arm.13, match.check.14
+// match.arm.13:
+//   %23: bool = union.payload %20: Selection, Selected
+//   %24: i64 = const 0
+//   jump match.end.11
+// match.check.14:
+//   %25: bool = binary.== %21: i64, 1: i64
+//   branch %25: bool, match.arm.15, match.check.16
+// match.arm.15:
+//   %26: i64 = union.payload %20: Selection, Counted
+//   jump match.end.11
+// match.check.16:
+//   %27: bool = binary.== %21: i64, 2: i64
+//   branch %27: bool, match.arm.17, match.check.18
+// match.arm.17:
+//   %28: FailKind = union.payload %20: Selection, Error
+//   %29: i64 = const 0
+//   jump match.end.11
+// match.check.18:
+//   %30: bool = binary.== %21: i64, 3: i64
+//   branch %30: bool, match.arm.19, match.unreachable.20
+// match.arm.19:
+//   %31: FsError = union.payload %20: Selection, Missing
+//   %32: i64 = const 0
+//   jump match.end.11
+// match.unreachable.20:
+//   unreachable
+// }
+// fn test.scalar_match_leaves_the_union_alive() -> !void {
+// entry:
+//   %1: i64 = const 7
+//   %2: Value = union.new %1: i64, Count
+//   %3: i64 = union.tag %2: Value
+//   jump match.check.2
+// match.end.1:
+//   %15: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64], [match.arm.7, %11: i64], [match.arm.9, %14: i64]
+//   %16: i64 = union.tag %2: Value
+//   jump match.check.12
+// match.check.2:
+//   %4: bool = binary.== %3: i64, 0: i64
+//   branch %4: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %5: bool = union.payload %2: Value, Flag
+//   %6: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %3: i64, 1: i64
+//   branch %7: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %8: i64 = union.payload %2: Value, Count
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %3: i64, 2: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: FailKind = union.payload %2: Value, Fail
+//   %11: i64 = const 0
+//   jump match.end.1
+// match.check.8:
+//   %12: bool = binary.== %3: i64, 3: i64
+//   branch %12: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %13: FsError = union.payload %2: Value, Lost
+//   %14: i64 = const 0
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// match.end.11:
+//   %28: i64 = phi [match.arm.13, %19: i64], [match.arm.15, %21: i64], [match.arm.17, %24: i64], [match.arm.19, %27: i64]
+//   test.expect_equal %15: i64, %28: i64, i64
+//   %30: !void = error.ok
+//   return %30: !void
+// match.check.12:
+//   %17: bool = binary.== %16: i64, 0: i64
+//   branch %17: bool, match.arm.13, match.check.14
+// match.arm.13:
+//   %18: bool = union.payload %2: Value, Flag
+//   %19: i64 = const 0
+//   jump match.end.11
+// match.check.14:
+//   %20: bool = binary.== %16: i64, 1: i64
+//   branch %20: bool, match.arm.15, match.check.16
+// match.arm.15:
+//   %21: i64 = union.payload %2: Value, Count
+//   jump match.end.11
+// match.check.16:
+//   %22: bool = binary.== %16: i64, 2: i64
+//   branch %22: bool, match.arm.17, match.check.18
+// match.arm.17:
+//   %23: FailKind = union.payload %2: Value, Fail
+//   %24: i64 = const 0
+//   jump match.end.11
+// match.check.18:
+//   %25: bool = binary.== %16: i64, 3: i64
+//   branch %25: bool, match.arm.19, match.unreachable.20
+// match.arm.19:
+//   %26: FsError = union.payload %2: Value, Lost
+//   %27: i64 = const 0
+//   jump match.end.11
+// match.unreachable.20:
+//   unreachable
+// }
+// fn test.union_payloads_rewrap_on_return() -> !void {
+// entry:
+//   %1: []u8 = const "hello"
+//   %2: Inner = union.new %1: []u8, Word
+//   %3: Wrapped = union.new %2: Inner, Kept
+//   %4: Rewrapped = call.rewrap %3: Wrapped
+//   %5: i64 = union.tag %4: Rewrapped
+//   jump match.check.2
+// match.end.1:
+//   %20: !void = error.ok
+//   return %20: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: Inner = union.payload %4: Rewrapped, Held
+//   %8: i64 = union.tag %7: Inner
+//   jump match.check.6
+// match.check.4:
+//   %17: bool = binary.== %5: i64, 1: i64
+//   branch %17: bool, match.arm.11, match.unreachable.12
+// match.end.5:
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %8: i64, 0: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: []u8 = union.payload %7: Inner, Word
+//   %11: []u8 = const "hello"
+//   test.expect_equal %11: []u8, %10: []u8, []u8
+//   jump match.end.5
+// match.check.8:
+//   %13: bool = binary.== %8: i64, 1: i64
+//   branch %13: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %14: i64 = union.payload %7: Inner, Number
+//   %15: bool = const false
+//   call.std::testing::expect %15: bool
+//   jump match.end.5
+// match.unreachable.10:
+//   unreachable
+// match.arm.11:
+//   %18: bool = const false
+//   call.std::testing::expect %18: bool
+//   jump match.end.1
+// match.unreachable.12:
+//   unreachable
+// }
+// fn test.number_payloads_rewrap_through_nested_unions() -> !void {
+// entry:
+//   %1: i64 = const 12
+//   %2: Inner = union.new %1: i64, Number
+//   %3: Wrapped = union.new %2: Inner, Kept
+//   %4: Rewrapped = call.rewrap %3: Wrapped
+//   %5: i64 = union.tag %4: Rewrapped
+//   jump match.check.2
+// match.end.1:
+//   %17: i64 = phi [match.end.5, %14: i64], [match.arm.11, %16: i64]
+//   %18: i64 = const 12
+//   test.expect_equal %18: i64, %17: i64, i64
+//   %20: !void = error.ok
+//   return %20: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: Inner = union.payload %4: Rewrapped, Held
+//   %8: i64 = union.tag %7: Inner
+//   jump match.check.6
+// match.check.4:
+//   %15: bool = binary.== %5: i64, 1: i64
+//   branch %15: bool, match.arm.11, match.unreachable.12
+// match.end.5:
+//   %14: i64 = phi [match.arm.7, %11: i64], [match.arm.9, %13: i64]
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %8: i64, 0: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: []u8 = union.payload %7: Inner, Word
+//   %11: i64 = const 0
+//   jump match.end.5
+// match.check.8:
+//   %12: bool = binary.== %8: i64, 1: i64
+//   branch %12: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %13: i64 = union.payload %7: Inner, Number
+//   jump match.end.5
+// match.unreachable.10:
+//   unreachable
+// match.arm.11:
+//   %16: i64 = const 0
+//   jump match.end.1
+// match.unreachable.12:
+//   unreachable
+// }
+// opt:
+// fn select_value(%value: Value) -> Selection {
+// entry:
+//   %1: i64 = union.tag %value: Value
+//   jump match.check.2
+// match.end.1:
+//   %14: Selection = phi [match.arm.3, %4: Selection], [match.arm.5, %7: Selection], [match.arm.7, %10: Selection], [match.arm.9, %13: Selection]
+//   return %14: Selection
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: bool = union.payload %value: Value, Flag
+//   %4: Selection = union.new %3: bool, Selected
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %6: i64 = union.payload %value: Value, Count
+//   %7: Selection = union.new %6: i64, Counted
+//   jump match.end.1
+// match.check.6:
+//   %8: bool = binary.== %1: i64, 2: i64
+//   branch %8: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %9: FailKind = union.payload %value: Value, Fail
+//   %10: Selection = union.new %9: FailKind, Error
+//   jump match.end.1
+// match.check.8:
+//   %11: bool = binary.== %1: i64, 3: i64
+//   branch %11: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %12: FsError = union.payload %value: Value, Lost
+//   %13: Selection = union.new %12: FsError, Missing
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// }
+// fn rewrap(%wrapped: Wrapped) -> Rewrapped {
+// entry:
+//   %1: i64 = union.tag %wrapped: Wrapped
+//   jump match.check.2
+// match.end.1:
+//   %7: Rewrapped = phi [match.arm.3, %4: Rewrapped], [match.arm.5, %6: Rewrapped]
+//   return %7: Rewrapped
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: Inner = union.payload %wrapped: Wrapped, Kept
+//   %4: Rewrapped = union.new %3: Inner, Held
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %6: Rewrapped = union.new Vacant
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.scalar_payloads_rewrap_on_return() -> !void {
+// entry:
+//   %1: bool = const true
+//   %2: Value = union.new %1: bool, Flag
+//   %3: Selection = call.select_value %2: Value
+//   %4: i64 = union.tag %3: Selection
+//   jump match.check.2
+// match.end.1:
+//   %16: bool = phi [match.arm.3, %6: bool], [match.arm.5, %9: bool], [match.arm.7, %12: bool], [match.arm.9, %15: bool]
+//   call.std::testing::expect %16: bool
+//   %18: i64 = const 41
+//   %19: Value = union.new %18: i64, Count
+//   %20: Selection = call.select_value %19: Value
+//   %21: i64 = union.tag %20: Selection
+//   jump match.check.12
+// match.check.2:
+//   %5: bool = binary.== %4: i64, 0: i64
+//   branch %5: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: bool = union.payload %3: Selection, Selected
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %4: i64, 1: i64
+//   branch %7: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %9: bool = const false
+//   jump match.end.1
+// match.check.6:
+//   %10: bool = binary.== %4: i64, 2: i64
+//   branch %10: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %12: bool = const false
+//   jump match.end.1
+// match.check.8:
+//   %13: bool = binary.== %4: i64, 3: i64
+//   branch %13: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %15: bool = const false
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// match.end.11:
+//   %33: i64 = phi [match.arm.13, %24: i64], [match.arm.15, %26: i64], [match.arm.17, %29: i64], [match.arm.19, %32: i64]
+//   %34: i64 = const 41
+//   test.expect_equal %34: i64, %33: i64, i64
+//   %36: !void = error.ok
+//   return %36: !void
+// match.check.12:
+//   %22: bool = binary.== %21: i64, 0: i64
+//   branch %22: bool, match.arm.13, match.check.14
+// match.arm.13:
+//   %24: i64 = const 0
+//   jump match.end.11
+// match.check.14:
+//   %25: bool = binary.== %21: i64, 1: i64
+//   branch %25: bool, match.arm.15, match.check.16
+// match.arm.15:
+//   %26: i64 = union.payload %20: Selection, Counted
+//   jump match.end.11
+// match.check.16:
+//   %27: bool = binary.== %21: i64, 2: i64
+//   branch %27: bool, match.arm.17, match.check.18
+// match.arm.17:
+//   %29: i64 = const 0
+//   jump match.end.11
+// match.check.18:
+//   %30: bool = binary.== %21: i64, 3: i64
+//   branch %30: bool, match.arm.19, match.unreachable.20
+// match.arm.19:
+//   %32: i64 = const 0
+//   jump match.end.11
+// match.unreachable.20:
+//   unreachable
+// }
+// fn test.scalar_match_leaves_the_union_alive() -> !void {
+// entry:
+//   %1: i64 = const 7
+//   %2: Value = union.new %1: i64, Count
+//   %3: i64 = union.tag %2: Value
+//   jump match.check.2
+// match.end.1:
+//   %15: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64], [match.arm.7, %11: i64], [match.arm.9, %14: i64]
+//   %16: i64 = union.tag %2: Value
+//   jump match.check.12
+// match.check.2:
+//   %4: bool = binary.== %3: i64, 0: i64
+//   branch %4: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: i64 = const 0
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %3: i64, 1: i64
+//   branch %7: bool, match.arm.5, match.check.6
+// match.arm.5:
+//   %8: i64 = union.payload %2: Value, Count
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %3: i64, 2: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %11: i64 = const 0
+//   jump match.end.1
+// match.check.8:
+//   %12: bool = binary.== %3: i64, 3: i64
+//   branch %12: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %14: i64 = const 0
+//   jump match.end.1
+// match.unreachable.10:
+//   unreachable
+// match.end.11:
+//   %28: i64 = phi [match.arm.13, %19: i64], [match.arm.15, %21: i64], [match.arm.17, %24: i64], [match.arm.19, %27: i64]
+//   test.expect_equal %15: i64, %28: i64, i64
+//   %30: !void = error.ok
+//   return %30: !void
+// match.check.12:
+//   %17: bool = binary.== %16: i64, 0: i64
+//   branch %17: bool, match.arm.13, match.check.14
+// match.arm.13:
+//   %19: i64 = const 0
+//   jump match.end.11
+// match.check.14:
+//   %20: bool = binary.== %16: i64, 1: i64
+//   branch %20: bool, match.arm.15, match.check.16
+// match.arm.15:
+//   %21: i64 = union.payload %2: Value, Count
+//   jump match.end.11
+// match.check.16:
+//   %22: bool = binary.== %16: i64, 2: i64
+//   branch %22: bool, match.arm.17, match.check.18
+// match.arm.17:
+//   %24: i64 = const 0
+//   jump match.end.11
+// match.check.18:
+//   %25: bool = binary.== %16: i64, 3: i64
+//   branch %25: bool, match.arm.19, match.unreachable.20
+// match.arm.19:
+//   %27: i64 = const 0
+//   jump match.end.11
+// match.unreachable.20:
+//   unreachable
+// }
+// fn test.union_payloads_rewrap_on_return() -> !void {
+// entry:
+//   %1: []u8 = const "hello"
+//   %2: Inner = union.new %1: []u8, Word
+//   %3: Wrapped = union.new %2: Inner, Kept
+//   %4: Rewrapped = call.rewrap %3: Wrapped
+//   %5: i64 = union.tag %4: Rewrapped
+//   jump match.check.2
+// match.end.1:
+//   %20: !void = error.ok
+//   return %20: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: Inner = union.payload %4: Rewrapped, Held
+//   %8: i64 = union.tag %7: Inner
+//   jump match.check.6
+// match.check.4:
+//   %17: bool = binary.== %5: i64, 1: i64
+//   branch %17: bool, match.arm.11, match.unreachable.12
+// match.end.5:
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %8: i64, 0: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %10: []u8 = union.payload %7: Inner, Word
+//   %11: []u8 = const "hello"
+//   test.expect_equal %11: []u8, %10: []u8, []u8
+//   jump match.end.5
+// match.check.8:
+//   %13: bool = binary.== %8: i64, 1: i64
+//   branch %13: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %15: bool = const false
+//   call.std::testing::expect %15: bool
+//   jump match.end.5
+// match.unreachable.10:
+//   unreachable
+// match.arm.11:
+//   %18: bool = const false
+//   call.std::testing::expect %18: bool
+//   jump match.end.1
+// match.unreachable.12:
+//   unreachable
+// }
+// fn test.number_payloads_rewrap_through_nested_unions() -> !void {
+// entry:
+//   %1: i64 = const 12
+//   %2: Inner = union.new %1: i64, Number
+//   %3: Wrapped = union.new %2: Inner, Kept
+//   %4: Rewrapped = call.rewrap %3: Wrapped
+//   %5: i64 = union.tag %4: Rewrapped
+//   jump match.check.2
+// match.end.1:
+//   %17: i64 = phi [match.end.5, %14: i64], [match.arm.11, %16: i64]
+//   %18: i64 = const 12
+//   test.expect_equal %18: i64, %17: i64, i64
+//   %20: !void = error.ok
+//   return %20: !void
+// match.check.2:
+//   %6: bool = binary.== %5: i64, 0: i64
+//   branch %6: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %7: Inner = union.payload %4: Rewrapped, Held
+//   %8: i64 = union.tag %7: Inner
+//   jump match.check.6
+// match.check.4:
+//   %15: bool = binary.== %5: i64, 1: i64
+//   branch %15: bool, match.arm.11, match.unreachable.12
+// match.end.5:
+//   %14: i64 = phi [match.arm.7, %11: i64], [match.arm.9, %13: i64]
+//   jump match.end.1
+// match.check.6:
+//   %9: bool = binary.== %8: i64, 0: i64
+//   branch %9: bool, match.arm.7, match.check.8
+// match.arm.7:
+//   %11: i64 = const 0
+//   jump match.end.5
+// match.check.8:
+//   %12: bool = binary.== %8: i64, 1: i64
+//   branch %12: bool, match.arm.9, match.unreachable.10
+// match.arm.9:
+//   %13: i64 = union.payload %7: Inner, Number
+//   jump match.end.5
+// match.unreachable.10:
+//   unreachable
+// match.arm.11:
+//   %16: i64 = const 0
+//   jump match.end.1
+// match.unreachable.12:
+//   unreachable
+// }

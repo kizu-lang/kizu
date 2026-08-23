@@ -1,0 +1,2010 @@
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+fn find(bytes: []u8, needle: u8) -> ?i64 {
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// An optional return wraps its value implicitly, and `orelse` supplies the
+// default on null.
+test "orelse takes the value or the default" {
+    testing::expect_equal<i64>(2, find("kizu", cast<u8>(122)) orelse -1);
+    testing::expect_equal<i64>(-1, find("kizu", cast<u8>(120)) orelse -1);
+}
+
+// An if capture opens the payload only when a value is present.
+test "if capture branches on presence" {
+    var hit = 0;
+    if find("kizu", cast<u8>(107)) |at| {
+        hit = at + 10;
+    } else {
+        hit = -1;
+    }
+    testing::expect_equal<i64>(10, hit);
+    if find("kizu", cast<u8>(120)) |at| {
+        hit = at;
+    } else {
+        hit = -2;
+    }
+    testing::expect_equal<i64>(-2, hit);
+}
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: &var BytesIter) next() -> ?u8 {
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+// A single `next() -> ?u8` drives the loop to exhaustion: the iterator
+// protocol needs no separate has_next.
+test "while capture loops until null" {
+    var it = iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+}
+
+error ReadError {
+    Broken,
+}
+
+struct Stream {
+    pub bytes: []u8,
+    pub index: i64,
+    pub broken: bool,
+}
+
+fn (self: &var Stream) next() -> ReadError!?u8 {
+    if self.broken {
+        return ReadError::Broken;
+    }
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+fn drain(bytes: []u8, broken: bool) -> ReadError!i64 {
+    var s = Stream { bytes: bytes, index: 0, broken: broken };
+    var sum = 0;
+    while try s.next() |byte| {
+        sum = sum + cast<i64>(byte);
+    }
+    return sum;
+}
+
+// `E!?T` composes: the call can fail, and succeeding can still find nothing.
+// One signature carries the error member, null, and the payload; the failure
+// path is pinned by examples/negative/optional_stream_broken.kizu.
+test "error union with optional success drives a fallible stream" {
+    testing::expect_equal<i64>(451, try drain("kizu", false));
+    var s = Stream { bytes: "k", index: 0, broken: false };
+    testing::expect_equal<i64>(107, cast<i64>(try s.next() orelse 0));
+    testing::expect_equal<i64>(0, cast<i64>(try s.next() orelse 0));
+}
+
+// Container lookups answer a question, and "not there" is an answer: the
+// miss is null, not an error (docs/style.md).
+test "container lookups miss as null" {
+    let allocator = mem::page_allocator();
+    var values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(41);
+    testing::expect_equal<i64>(41, values.get(0) orelse -1);
+    testing::expect_equal<i64>(-1, values.get(9) orelse -1);
+    testing::expect_equal<i64>(41, values.pop() orelse -1);
+    testing::expect_equal<i64>(-1, values.pop() orelse -1);
+
+    var table = map::new<[]u8, i64>(allocator);
+    defer table.deinit();
+    try table.insert("hit", 7);
+    testing::expect_equal<i64>(7, table.get("hit") orelse -1);
+    testing::expect_equal<i64>(-1, table.get("miss") orelse -1);
+}
+
+// A borrow payload rides the optional too: `at(key) -> ?&V` binds the value
+// borrow as the capture, at_mut writes through it in place, and the else arm
+// runs the miss path with the map no longer borrowed.
+test "map at_mut updates values in place" {
+    let allocator = mem::page_allocator();
+    var counts = map::new<[]u8, i64>(allocator);
+    defer counts.deinit();
+    try counts.insert("kizu", 41);
+
+    if counts.at_mut("kizu") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("kizu", 1);
+    }
+    if counts.at_mut("lang") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("lang", 1);
+    }
+
+    testing::expect_equal<i64>(42, counts.get("kizu") orelse -1);
+    testing::expect_equal<i64>(1, counts.get("lang") orelse -1);
+    if counts.at("miss") |ghost| {
+        testing::expect_equal<i64>(-1, ghost.*);
+    }
+}
+
+struct Visitor {
+    pub age: i64,
+    pub visits: i64,
+}
+
+// An arena borrow payload writes through the handle in place: at_mut binds
+// the element borrow as the capture and releases the arena at its last use.
+test "arena at_mut updates elements in place" {
+    let allocator = mem::page_allocator();
+    var visitors = arena::new<Visitor>(allocator);
+    defer visitors.deinit();
+    let alice = visitors.add(Visitor { age: 30, visits: 0 });
+
+    if visitors.at_mut(alice) |v| {
+        v.visits = v.visits + 1;
+    }
+
+    testing::expect_equal<i64>(1, visitors.at(alice).visits);
+    testing::expect_equal<i64>(30, visitors.at(alice).age);
+}
+
+struct Ledger {
+    pub entries: array::Array<i64>,
+}
+
+fn (self: &var Ledger) bump(index: i64) -> void {
+    if self.entries.at_mut(index) |v| {
+        v.* = v.* + 1;
+    }
+}
+
+// A capture reaches one direct container field of an owner: the borrow lands
+// on that field, and a `&var self` method can hold it.
+test "at_mut captures an owner's container field" {
+    let allocator = mem::page_allocator();
+    var ledger = Ledger { entries: array::new<i64>(allocator) };
+    defer ledger.deinit();
+    try ledger.entries.append(7);
+    ledger.bump(0);
+    if ledger.entries.at(0) |v| {
+        testing::expect_equal<i64>(8, v.*);
+    }
+}
+
+fn (self: &var Ledger) entry(index: i64) -> ?&var i64 {
+    return self.entries.at_mut(index);
+}
+
+// A declared borrow-optional return moves the accessor out of the call site:
+// the capture borrows `self` for its scope, and the body may only return a
+// borrow rooted in a borrowed parameter.
+test "borrow optional returns flow to the caller's capture" {
+    let allocator = mem::page_allocator();
+    var ledger = Ledger { entries: array::new<i64>(allocator) };
+    defer ledger.deinit();
+    try ledger.entries.append(7);
+    if ledger.entry(0) |v| {
+        v.* = v.* + 1;
+    }
+    testing::expect_equal<i64>(8, ledger.entries.get_or_panic(0));
+    if ledger.entry(9) |ghost| {
+        ghost.* = 0;
+        testing::expect(false);
+    }
+}
+
+fn bump_first(items: &var array::Array<i64>) -> void {
+    if items.at_mut(0) |v| {
+        v.* = v.* + 1;
+    }
+}
+
+// A `&var` borrow is a mutable place: a helper taking the container by
+// `&var` consumes at_mut itself, so update logic leaves the call site.
+test "at_mut works through a &var parameter" {
+    let allocator = mem::page_allocator();
+    var items = array::new<i64>(allocator);
+    defer items.deinit();
+    try items.append(7);
+    bump_first(items);
+    testing::expect_equal<i64>(8, items.get_or_panic(0));
+}
+
+// A view payload rides the optional: mem::slice misses as null, and the
+// unset-environment lookup does too.
+test "view payloads miss as null" {
+    testing::expect_equal<[]u8>("ab", mem::slice("abc", 0, 2) orelse "");
+    testing::expect_equal<[]u8>("", mem::slice("abc", 0, 4) orelse "");
+    testing::expect_equal<[]u8>(
+        "",
+        process::env("KIZU_SURELY_UNSET_VAR_12345") orelse "");
+}
+
+fn guarded_find(bytes: []u8, needle: u8) -> i64 {
+    let at = find(bytes, needle) orelse return -1;
+    return at + 100;
+}
+
+// `orelse return/break` is the guard form: the null arm leaves the function
+// or loop, so the payload flows on without a nested capture.
+test "orelse guards exit on null" {
+    testing::expect_equal<i64>(102, guarded_find("kizu", cast<u8>(122)));
+    testing::expect_equal<i64>(-1, guarded_find("kizu", cast<u8>(120)));
+
+    var it = iter("kz");
+    var total = 0;
+    while true {
+        let byte = it.next() orelse break;
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(229, total);
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return move name;
+}
+
+// An owner payload moves out through the capture and owes its cleanup there.
+test "owner payload pops through the capture" {
+    let allocator = mem::page_allocator();
+    var names = array::new<string::String>(allocator);
+    defer names.deinit();
+    try names.append(try make_name(allocator, "kizu"));
+
+    var length = 0;
+    if names.pop() |taken| {
+        length = taken.len();
+        taken.deinit();
+    }
+    testing::expect_equal<i64>(4, length);
+    if names.pop() |ghost| {
+        ghost.deinit();
+        testing::expect(false);
+    }
+}
+
+fn or_one(value: ?u8) -> i64 {
+    return cast<i64>(value orelse cast<u8>(1));
+}
+
+// Optionals travel as arguments, and `null` is legal wherever a `?T` is
+// expected.
+test "optional arguments accept null and values" {
+    testing::expect_equal<i64>(1, or_one(null));
+    testing::expect_equal<i64>(9, or_one(cast<u8>(9)));
+}
+
+
+// ir
+// lower:
+// fn find(%bytes: []u8, %needle: u8) -> ?i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [if.end.6, %12: i64]
+//   %3: i64 = call.std::mem::len %bytes: []u8
+//   %4: bool = binary.< %2: i64, %3: i64
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: i64 = slice.len %bytes: []u8
+//   %6: bool = binary.< %2: i64, 0: i64
+//   cond_fail %6: bool, bounds(%2: i64, %5: i64)
+//   %7: bool = binary.>= %2: i64, %5: i64
+//   cond_fail %7: bool, bounds(%2: i64, %5: i64)
+//   %8: u8 = slice.index %bytes: []u8, %2: i64
+//   %9: bool = binary.== %8: u8, %needle: u8
+//   branch %9: bool, if.then.4, if.else.5
+// while.end.3:
+//   %13: ?i64 = opt.null
+//   return %13: ?i64
+// if.then.4:
+//   %10: ?i64 = opt.some %2: i64
+//   return %10: ?i64
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %2: i64, %11: i64
+//   jump while.header.1
+// }
+// fn iter(%bytes: []u8) -> BytesIter {
+// entry:
+//   %1: i64 = const 0
+//   %2: BytesIter = struct.new {bytes: %bytes: []u8, index: %1: i64}
+//   return %2: BytesIter
+// }
+// fn BytesIter.next(%self: &var BytesIter) -> ?u8 {
+// entry:
+//   %1: i64 = field.ref.index %self: &var BytesIter
+//   %2: []u8 = field.ref.bytes %self: &var BytesIter
+//   %3: i64 = call.std::mem::len %2: []u8
+//   %4: bool = binary.>= %1: i64, %3: i64
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   %5: ?u8 = opt.null
+//   return %5: ?u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: []u8 = field.ref.bytes %self: &var BytesIter
+//   %7: i64 = field.ref.index %self: &var BytesIter
+//   %8: i64 = slice.len %6: []u8
+//   %9: bool = binary.< %7: i64, 0: i64
+//   cond_fail %9: bool, bounds(%7: i64, %8: i64)
+//   %10: bool = binary.>= %7: i64, %8: i64
+//   cond_fail %10: bool, bounds(%7: i64, %8: i64)
+//   %11: u8 = slice.index %6: []u8, %7: i64
+//   %12: i64 = field.ref.index %self: &var BytesIter
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %12: i64, %13: i64
+//   field.ref.set.index %self: &var BytesIter, %14: i64
+//   %16: ?u8 = opt.some %11: u8
+//   return %16: ?u8
+// }
+// fn Stream.next(%self: &var Stream) -> ReadError!?u8 {
+// entry:
+//   %1: bool = field.ref.broken %self: &var Stream
+//   branch %1: bool, if.then.1, if.else.2
+// if.then.1:
+//   %2: ReadError = const 37
+//   %3: ReadError!?u8 = error.error %2: ReadError
+//   return %3: ReadError!?u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %4: i64 = field.ref.index %self: &var Stream
+//   %5: []u8 = field.ref.bytes %self: &var Stream
+//   %6: i64 = call.std::mem::len %5: []u8
+//   %7: bool = binary.>= %4: i64, %6: i64
+//   branch %7: bool, if.then.4, if.else.5
+// if.then.4:
+//   %8: ?u8 = opt.null
+//   %9: ReadError!?u8 = error.ok %8: ?u8
+//   return %9: ReadError!?u8
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %10: []u8 = field.ref.bytes %self: &var Stream
+//   %11: i64 = field.ref.index %self: &var Stream
+//   %12: i64 = slice.len %10: []u8
+//   %13: bool = binary.< %11: i64, 0: i64
+//   cond_fail %13: bool, bounds(%11: i64, %12: i64)
+//   %14: bool = binary.>= %11: i64, %12: i64
+//   cond_fail %14: bool, bounds(%11: i64, %12: i64)
+//   %15: u8 = slice.index %10: []u8, %11: i64
+//   %16: i64 = field.ref.index %self: &var Stream
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %16: i64, %17: i64
+//   field.ref.set.index %self: &var Stream, %18: i64
+//   %20: ?u8 = opt.some %15: u8
+//   %21: ReadError!?u8 = error.ok %20: ?u8
+//   return %21: ReadError!?u8
+// }
+// fn drain(%bytes: []u8, %broken: bool) -> ReadError!i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: Stream = struct.new {bytes: %bytes: []u8, index: %1: i64, broken: %broken: bool}
+//   %3: &var Stream = local.slot %2: Stream
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %11: i64]
+//   %6: ReadError!?u8 = call.Stream.next %3: &var Stream
+//   %7: ?u8 = error.try %6: ReadError!?u8
+//   %8: u8 = opt.value %7: ?u8
+//   %9: bool = opt.has %7: ?u8
+//   branch %9: bool, while.body.2, while.end.3
+// while.body.2:
+//   %10: i64 = cast %8: u8, i64
+//   %11: i64 = binary.+ %5: i64, %10: i64
+//   jump while.header.1
+// while.end.3:
+//   %12: ReadError!i64 = error.ok %5: i64
+//   return %12: ReadError!i64
+// }
+// fn Ledger.bump(%self: &var Ledger, %index: i64) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Ledger
+//   %2: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %index: i64
+//   %3: &var i64 = opt.value %2: ?&var i64
+//   %4: bool = opt.has %2: ?&var i64
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   %5: i64 = ref.load %3: &var i64
+//   %6: i64 = const 1
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   ref.store %3: &var i64, %7: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Ledger.entry(%self: &var Ledger, %index: i64) -> ?&var i64 {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Ledger
+//   %2: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %index: i64
+//   return %2: ?&var i64
+// }
+// fn bump_first(%items: &var std::array::Array<i64>) -> void {
+// entry:
+//   %1: std::array::Array<i64> = ref.load %items: &var std::array::Array<i64>
+//   %2: i64 = const 0
+//   %3: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %2: i64
+//   %4: &var i64 = opt.value %3: ?&var i64
+//   %5: bool = opt.has %3: ?&var i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: i64 = ref.load %4: &var i64
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %6: i64, %7: i64
+//   ref.store %4: &var i64, %8: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn guarded_find(%bytes: []u8, %needle: u8) -> i64 {
+// entry:
+//   %1: ?i64 = call.find %bytes: []u8, %needle: u8
+//   %2: bool = opt.has %1: ?i64
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: i64 = opt.value %1: ?i64
+//   %6: i64 = const 100
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   return %7: i64
+// guard.exit.2:
+//   %3: i64 = const 1
+//   %4: i64 = unary.- %3: i64
+//   return %4: i64
+// }
+// fn make_name(%allocator: Allocator, %text: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %text: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn or_one(%value: ?u8) -> i64 {
+// entry:
+//   %1: bool = opt.has %value: ?u8
+//   branch %1: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %2: u8 = opt.value %value: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %3: i64 = const 1
+//   %4: u8 = cast %3: i64, u8
+//   jump orelse.end.3
+// orelse.end.3:
+//   %5: u8 = phi [orelse.some.1, %2: u8], [orelse.else.2, %4: u8]
+//   %6: i64 = cast %5: u8, i64
+//   return %6: i64
+// }
+// fn Ledger.deinit(%self: Ledger) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Ledger
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn test.orelse_takes_the_value_or_the_default() -> !void {
+// entry:
+//   %1: i64 = const 2
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 122
+//   %4: u8 = cast %3: i64, u8
+//   %5: ?i64 = call.find %2: []u8, %4: u8
+//   %6: bool = opt.has %5: ?i64
+//   branch %6: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %7: i64 = opt.value %5: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %8: i64 = const 1
+//   %9: i64 = unary.- %8: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %10: i64 = phi [orelse.some.1, %7: i64], [orelse.else.2, %9: i64]
+//   test.expect_equal %1: i64, %10: i64, i64
+//   %12: i64 = const 1
+//   %13: i64 = unary.- %12: i64
+//   %14: []u8 = const "kizu"
+//   %15: i64 = const 120
+//   %16: u8 = cast %15: i64, u8
+//   %17: ?i64 = call.find %14: []u8, %16: u8
+//   %18: bool = opt.has %17: ?i64
+//   branch %18: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %19: i64 = opt.value %17: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %20: i64 = const 1
+//   %21: i64 = unary.- %20: i64
+//   jump orelse.end.6
+// orelse.end.6:
+//   %22: i64 = phi [orelse.some.4, %19: i64], [orelse.else.5, %21: i64]
+//   test.expect_equal %13: i64, %22: i64, i64
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.if_capture_branches_on_presence() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 107
+//   %4: u8 = cast %3: i64, u8
+//   %5: ?i64 = call.find %2: []u8, %4: u8
+//   %6: i64 = opt.value %5: ?i64
+//   %7: bool = opt.has %5: ?i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: i64 = const 10
+//   %9: i64 = binary.+ %6: i64, %8: i64
+//   jump if.end.3
+// if.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = phi [if.then.1, %9: i64], [if.else.2, %11: i64]
+//   %13: i64 = const 10
+//   test.expect_equal %13: i64, %12: i64, i64
+//   %15: []u8 = const "kizu"
+//   %16: i64 = const 120
+//   %17: u8 = cast %16: i64, u8
+//   %18: ?i64 = call.find %15: []u8, %17: u8
+//   %19: i64 = opt.value %18: ?i64
+//   %20: bool = opt.has %18: ?i64
+//   branch %20: bool, if.then.4, if.else.5
+// if.then.4:
+//   jump if.end.6
+// if.else.5:
+//   %21: i64 = const 2
+//   %22: i64 = unary.- %21: i64
+//   jump if.end.6
+// if.end.6:
+//   %23: i64 = phi [if.then.4, %19: i64], [if.else.5, %22: i64]
+//   %24: i64 = const 2
+//   %25: i64 = unary.- %24: i64
+//   test.expect_equal %25: i64, %23: i64, i64
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.while_capture_loops_until_null() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: BytesIter = call.iter %1: []u8
+//   %3: &var BytesIter = local.slot %2: BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: ?u8 = call.BytesIter.next %3: &var BytesIter
+//   %7: u8 = opt.value %6: ?u8
+//   %8: bool = opt.has %6: ?u8
+//   branch %8: bool, while.body.2, while.end.3
+// while.body.2:
+//   %9: i64 = cast %7: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.error_union_with_optional_success_drives_a_fallible_stream() -> !void {
+// entry:
+//   %1: i64 = const 451
+//   %2: []u8 = const "kizu"
+//   %3: bool = const false
+//   %4: ReadError!i64 = call.drain %2: []u8, %3: bool
+//   %5: i64 = error.try %4: ReadError!i64
+//   test.expect_equal %1: i64, %5: i64, i64
+//   %7: []u8 = const "k"
+//   %8: i64 = const 0
+//   %9: bool = const false
+//   %10: Stream = struct.new {bytes: %7: []u8, index: %8: i64, broken: %9: bool}
+//   %11: &var Stream = local.slot %10: Stream
+//   %12: i64 = const 107
+//   %13: ReadError!?u8 = call.Stream.next %11: &var Stream
+//   %14: ?u8 = error.try %13: ReadError!?u8
+//   %15: bool = opt.has %14: ?u8
+//   branch %15: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %16: u8 = opt.value %14: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %17: u8 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %18: u8 = phi [orelse.some.1, %16: u8], [orelse.else.2, %17: u8]
+//   %19: i64 = cast %18: u8, i64
+//   test.expect_equal %12: i64, %19: i64, i64
+//   %21: i64 = const 0
+//   %22: ReadError!?u8 = call.Stream.next %11: &var Stream
+//   %23: ?u8 = error.try %22: ReadError!?u8
+//   %24: bool = opt.has %23: ?u8
+//   branch %24: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %25: u8 = opt.value %23: ?u8
+//   jump orelse.end.6
+// orelse.else.5:
+//   %26: u8 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %27: u8 = phi [orelse.some.4, %25: u8], [orelse.else.5, %26: u8]
+//   %28: i64 = cast %27: u8, i64
+//   test.expect_equal %21: i64, %28: i64, i64
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.container_lookups_miss_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 41
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 41
+//   %7: i64 = const 0
+//   %8: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %7: i64
+//   %9: bool = opt.has %8: ?i64
+//   branch %9: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %10: i64 = opt.value %8: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %11: i64 = const 1
+//   %12: i64 = unary.- %11: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %13: i64 = phi [orelse.some.1, %10: i64], [orelse.else.2, %12: i64]
+//   test.expect_equal %6: i64, %13: i64, i64
+//   %15: i64 = const 1
+//   %16: i64 = unary.- %15: i64
+//   %17: i64 = const 9
+//   %18: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %17: i64
+//   %19: bool = opt.has %18: ?i64
+//   branch %19: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %20: i64 = opt.value %18: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %21: i64 = const 1
+//   %22: i64 = unary.- %21: i64
+//   jump orelse.end.6
+// orelse.end.6:
+//   %23: i64 = phi [orelse.some.4, %20: i64], [orelse.else.5, %22: i64]
+//   test.expect_equal %16: i64, %23: i64, i64
+//   %25: i64 = const 41
+//   %26: ?i64 = call.std::array::Array.pop.i64 %2: std::array::Array<i64>
+//   %27: bool = opt.has %26: ?i64
+//   branch %27: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %28: i64 = opt.value %26: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %29: i64 = const 1
+//   %30: i64 = unary.- %29: i64
+//   jump orelse.end.9
+// orelse.end.9:
+//   %31: i64 = phi [orelse.some.7, %28: i64], [orelse.else.8, %30: i64]
+//   test.expect_equal %25: i64, %31: i64, i64
+//   %33: i64 = const 1
+//   %34: i64 = unary.- %33: i64
+//   %35: ?i64 = call.std::array::Array.pop.i64 %2: std::array::Array<i64>
+//   %36: bool = opt.has %35: ?i64
+//   branch %36: bool, orelse.some.10, orelse.else.11
+// orelse.some.10:
+//   %37: i64 = opt.value %35: ?i64
+//   jump orelse.end.12
+// orelse.else.11:
+//   %38: i64 = const 1
+//   %39: i64 = unary.- %38: i64
+//   jump orelse.end.12
+// orelse.end.12:
+//   %40: i64 = phi [orelse.some.10, %37: i64], [orelse.else.11, %39: i64]
+//   test.expect_equal %34: i64, %40: i64, i64
+//   %42: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %43: []u8 = const "hit"
+//   %44: i64 = const 7
+//   %45: !void = call.std::map::Map.insert.i64 %42: std::map::Map<[]u8, i64>, %43: []u8, %44: i64
+//   error.try %45: !void, cleanup map.deinit %42: std::map::Map<[]u8, i64>; array.deinit %2: std::array::Array<i64>
+//   %47: i64 = const 7
+//   %48: []u8 = const "hit"
+//   %49: ?i64 = call.std::map::Map.get.i64 %42: std::map::Map<[]u8, i64>, %48: []u8
+//   %50: bool = opt.has %49: ?i64
+//   branch %50: bool, orelse.some.13, orelse.else.14
+// orelse.some.13:
+//   %51: i64 = opt.value %49: ?i64
+//   jump orelse.end.15
+// orelse.else.14:
+//   %52: i64 = const 1
+//   %53: i64 = unary.- %52: i64
+//   jump orelse.end.15
+// orelse.end.15:
+//   %54: i64 = phi [orelse.some.13, %51: i64], [orelse.else.14, %53: i64]
+//   test.expect_equal %47: i64, %54: i64, i64
+//   %56: i64 = const 1
+//   %57: i64 = unary.- %56: i64
+//   %58: []u8 = const "miss"
+//   %59: ?i64 = call.std::map::Map.get.i64 %42: std::map::Map<[]u8, i64>, %58: []u8
+//   %60: bool = opt.has %59: ?i64
+//   branch %60: bool, orelse.some.16, orelse.else.17
+// orelse.some.16:
+//   %61: i64 = opt.value %59: ?i64
+//   jump orelse.end.18
+// orelse.else.17:
+//   %62: i64 = const 1
+//   %63: i64 = unary.- %62: i64
+//   jump orelse.end.18
+// orelse.end.18:
+//   %64: i64 = phi [orelse.some.16, %61: i64], [orelse.else.17, %63: i64]
+//   test.expect_equal %57: i64, %64: i64, i64
+//   map.deinit %42: std::map::Map<[]u8, i64>
+//   array.deinit %2: std::array::Array<i64>
+//   %68: !void = error.ok
+//   return %68: !void
+// }
+// fn test.map_at_mut_updates_values_in_place() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "kizu"
+//   %4: i64 = const 41
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "kizu"
+//   %8: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %7: []u8
+//   %9: &var i64 = opt.value %8: ?&var i64
+//   %10: bool = opt.has %8: ?&var i64
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = ref.load %9: &var i64
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %11: i64, %12: i64
+//   ref.store %9: &var i64, %13: i64
+//   jump if.end.3
+// if.else.2:
+//   %15: []u8 = const "kizu"
+//   %16: i64 = const 1
+//   %17: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %15: []u8, %16: i64
+//   error.try %17: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.3
+// if.end.3:
+//   %19: []u8 = const "lang"
+//   %20: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %19: []u8
+//   %21: &var i64 = opt.value %20: ?&var i64
+//   %22: bool = opt.has %20: ?&var i64
+//   branch %22: bool, if.then.4, if.else.5
+// if.then.4:
+//   %23: i64 = ref.load %21: &var i64
+//   %24: i64 = const 1
+//   %25: i64 = binary.+ %23: i64, %24: i64
+//   ref.store %21: &var i64, %25: i64
+//   jump if.end.6
+// if.else.5:
+//   %27: []u8 = const "lang"
+//   %28: i64 = const 1
+//   %29: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %27: []u8, %28: i64
+//   error.try %29: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.end.6:
+//   %31: i64 = const 42
+//   %32: []u8 = const "kizu"
+//   %33: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %32: []u8
+//   %34: bool = opt.has %33: ?i64
+//   branch %34: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %35: i64 = opt.value %33: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %36: i64 = const 1
+//   %37: i64 = unary.- %36: i64
+//   jump orelse.end.9
+// orelse.end.9:
+//   %38: i64 = phi [orelse.some.7, %35: i64], [orelse.else.8, %37: i64]
+//   test.expect_equal %31: i64, %38: i64, i64
+//   %40: i64 = const 1
+//   %41: []u8 = const "lang"
+//   %42: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %41: []u8
+//   %43: bool = opt.has %42: ?i64
+//   branch %43: bool, orelse.some.10, orelse.else.11
+// orelse.some.10:
+//   %44: i64 = opt.value %42: ?i64
+//   jump orelse.end.12
+// orelse.else.11:
+//   %45: i64 = const 1
+//   %46: i64 = unary.- %45: i64
+//   jump orelse.end.12
+// orelse.end.12:
+//   %47: i64 = phi [orelse.some.10, %44: i64], [orelse.else.11, %46: i64]
+//   test.expect_equal %40: i64, %47: i64, i64
+//   %49: []u8 = const "miss"
+//   %50: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %49: []u8
+//   %51: &i64 = opt.value %50: ?&i64
+//   %52: bool = opt.has %50: ?&i64
+//   branch %52: bool, if.then.13, if.else.14
+// if.then.13:
+//   %53: i64 = const 1
+//   %54: i64 = unary.- %53: i64
+//   %55: i64 = ref.load %51: &i64
+//   test.expect_equal %54: i64, %55: i64, i64
+//   jump if.end.15
+// if.else.14:
+//   jump if.end.15
+// if.end.15:
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %58: !void = error.ok
+//   return %58: !void
+// }
+// fn test.arena_at_mut_updates_elements_in_place() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Visitor> = arena.new %1: Allocator, Visitor
+//   %3: i64 = const 30
+//   %4: i64 = const 0
+//   %5: Visitor = struct.new {age: %3: i64, visits: %4: i64}
+//   %6: std::arena::Handle<Visitor> = arena.add %2: std::arena::Arena<Visitor>, %5: Visitor
+//   %7: ?&var Visitor = arena.at_mut %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %8: &var Visitor = opt.value %7: ?&var Visitor
+//   %9: bool = opt.has %7: ?&var Visitor
+//   branch %9: bool, if.then.1, if.else.2
+// if.then.1:
+//   %10: i64 = field.ref.visits %8: &var Visitor
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %10: i64, %11: i64
+//   field.ref.set.visits %8: &var Visitor, %12: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = const 1
+//   %15: Visitor = arena.at %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %16: i64 = field.visits %15: Visitor
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: i64 = const 30
+//   %19: Visitor = arena.at %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %20: i64 = field.age %19: Visitor
+//   test.expect_equal %18: i64, %20: i64, i64
+//   arena.deinit %2: std::arena::Arena<Visitor>
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.at_mut_captures_an_owner_s_container_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Ledger = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: &var Ledger = local.slot %3: Ledger
+//   %5: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   %8: Ledger = ref.load %4: &var Ledger
+//   error.try %7: !void, cleanup call.Ledger.deinit %8: Ledger
+//   %10: i64 = const 0
+//   call.Ledger.bump %4: &var Ledger, %10: i64
+//   %12: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %13: i64 = const 0
+//   %14: ?&i64 = call.std::array::Array.at.i64 %12: std::array::Array<i64>, %13: i64
+//   %15: &i64 = opt.value %14: ?&i64
+//   %16: bool = opt.has %14: ?&i64
+//   branch %16: bool, if.then.1, if.else.2
+// if.then.1:
+//   %17: i64 = const 8
+//   %18: i64 = ref.load %15: &i64
+//   test.expect_equal %17: i64, %18: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %20: Ledger = ref.load %4: &var Ledger
+//   call.Ledger.deinit %20: Ledger
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.borrow_optional_returns_flow_to_the_caller_s_capture() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Ledger = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: &var Ledger = local.slot %3: Ledger
+//   %5: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   %8: Ledger = ref.load %4: &var Ledger
+//   error.try %7: !void, cleanup call.Ledger.deinit %8: Ledger
+//   %10: i64 = const 0
+//   %11: ?&var i64 = call.Ledger.entry %4: &var Ledger, %10: i64
+//   %12: &var i64 = opt.value %11: ?&var i64
+//   %13: bool = opt.has %11: ?&var i64
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: i64 = ref.load %12: &var i64
+//   %15: i64 = const 1
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   ref.store %12: &var i64, %16: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %18: i64 = const 8
+//   %19: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %20: i64 = const 0
+//   %21: i64 = call.std::array::Array.get_or_panic.i64 %19: std::array::Array<i64>, %20: i64
+//   test.expect_equal %18: i64, %21: i64, i64
+//   %23: i64 = const 9
+//   %24: ?&var i64 = call.Ledger.entry %4: &var Ledger, %23: i64
+//   %25: &var i64 = opt.value %24: ?&var i64
+//   %26: bool = opt.has %24: ?&var i64
+//   branch %26: bool, if.then.4, if.else.5
+// if.then.4:
+//   %27: i64 = const 0
+//   ref.store %25: &var i64, %27: i64
+//   %29: bool = const false
+//   call.std::testing::expect %29: bool
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %31: Ledger = ref.load %4: &var Ledger
+//   call.Ledger.deinit %31: Ledger
+//   %33: !void = error.ok
+//   return %33: !void
+// }
+// fn test.at_mut_works_through_a__var_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: &var std::array::Array<i64> = local.slot %2: std::array::Array<i64>
+//   %4: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   %5: i64 = const 7
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   %7: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   error.try %6: !void, cleanup array.deinit %7: std::array::Array<i64>
+//   call.bump_first %3: &var std::array::Array<i64>
+//   %10: i64 = const 8
+//   %11: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   %12: i64 = const 0
+//   %13: i64 = call.std::array::Array.get_or_panic.i64 %11: std::array::Array<i64>, %12: i64
+//   test.expect_equal %10: i64, %13: i64, i64
+//   %15: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   array.deinit %15: std::array::Array<i64>
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.view_payloads_miss_as_null() -> !void {
+// entry:
+//   %1: []u8 = const "ab"
+//   %2: []u8 = const "abc"
+//   %3: i64 = const 0
+//   %4: i64 = const 2
+//   %5: ?[]u8 = call.std::mem::slice %2: []u8, %3: i64, %4: i64
+//   %6: bool = opt.has %5: ?[]u8
+//   branch %6: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %7: []u8 = opt.value %5: ?[]u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %8: []u8 = const ""
+//   jump orelse.end.3
+// orelse.end.3:
+//   %9: []u8 = phi [orelse.some.1, %7: []u8], [orelse.else.2, %8: []u8]
+//   test.expect_equal %1: []u8, %9: []u8, []u8
+//   %11: []u8 = const ""
+//   %12: []u8 = const "abc"
+//   %13: i64 = const 0
+//   %14: i64 = const 4
+//   %15: ?[]u8 = call.std::mem::slice %12: []u8, %13: i64, %14: i64
+//   %16: bool = opt.has %15: ?[]u8
+//   branch %16: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %17: []u8 = opt.value %15: ?[]u8
+//   jump orelse.end.6
+// orelse.else.5:
+//   %18: []u8 = const ""
+//   jump orelse.end.6
+// orelse.end.6:
+//   %19: []u8 = phi [orelse.some.4, %17: []u8], [orelse.else.5, %18: []u8]
+//   test.expect_equal %11: []u8, %19: []u8, []u8
+//   %21: []u8 = const ""
+//   %22: []u8 = const "KIZU_SURELY_UNSET_VAR_12345"
+//   %23: ?[]u8 = call.std::process::env %22: []u8
+//   %24: bool = opt.has %23: ?[]u8
+//   branch %24: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %25: []u8 = opt.value %23: ?[]u8
+//   jump orelse.end.9
+// orelse.else.8:
+//   %26: []u8 = const ""
+//   jump orelse.end.9
+// orelse.end.9:
+//   %27: []u8 = phi [orelse.some.7, %25: []u8], [orelse.else.8, %26: []u8]
+//   test.expect_equal %21: []u8, %27: []u8, []u8
+//   %29: !void = error.ok
+//   return %29: !void
+// }
+// fn test.orelse_guards_exit_on_null() -> !void {
+// entry:
+//   %1: i64 = const 102
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 122
+//   %4: u8 = cast %3: i64, u8
+//   %5: i64 = call.guarded_find %2: []u8, %4: u8
+//   test.expect_equal %1: i64, %5: i64, i64
+//   %7: i64 = const 1
+//   %8: i64 = unary.- %7: i64
+//   %9: []u8 = const "kizu"
+//   %10: i64 = const 120
+//   %11: u8 = cast %10: i64, u8
+//   %12: i64 = call.guarded_find %9: []u8, %11: u8
+//   test.expect_equal %8: i64, %12: i64, i64
+//   %14: []u8 = const "kz"
+//   %15: BytesIter = call.iter %14: []u8
+//   %16: &var BytesIter = local.slot %15: BytesIter
+//   %17: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %18: i64 = phi [entry, %17: i64], [guard.some.4, %24: i64]
+//   %19: bool = const true
+//   branch %19: bool, while.body.2, while.end.3
+// while.body.2:
+//   %20: ?u8 = call.BytesIter.next %16: &var BytesIter
+//   %21: bool = opt.has %20: ?u8
+//   branch %21: bool, guard.some.4, guard.exit.5
+// while.end.3:
+//   %25: i64 = phi [while.header.1, %18: i64], [guard.exit.5, %18: i64]
+//   %26: i64 = const 229
+//   test.expect_equal %26: i64, %25: i64, i64
+//   %28: !void = error.ok
+//   return %28: !void
+// guard.some.4:
+//   %22: u8 = opt.value %20: ?u8
+//   %23: i64 = cast %22: u8, i64
+//   %24: i64 = binary.+ %18: i64, %23: i64
+//   jump while.header.1
+// guard.exit.5:
+//   jump while.end.3
+// }
+// fn test.owner_payload_pops_through_the_capture() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const "kizu"
+//   %4: !std::string::String = call.make_name %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %6: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %8: i64 = const 0
+//   %9: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %10: std::string::String = opt.value %9: ?std::string::String
+//   %11: bool = opt.has %9: ?std::string::String
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: i64 = call.std::string::String.len %10: std::string::String
+//   call.std::string::String.deinit %10: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = phi [if.then.1, %12: i64], [if.else.2, %8: i64]
+//   %15: i64 = const 4
+//   test.expect_equal %15: i64, %14: i64, i64
+//   %17: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %18: std::string::String = opt.value %17: ?std::string::String
+//   %19: bool = opt.has %17: ?std::string::String
+//   branch %19: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::string::String.deinit %18: std::string::String
+//   %21: bool = const false
+//   call.std::testing::expect %21: bool
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.optional_arguments_accept_null_and_values() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: ?u8 = opt.null
+//   %3: i64 = call.or_one %2: ?u8
+//   test.expect_equal %1: i64, %3: i64, i64
+//   %5: i64 = const 9
+//   %6: i64 = const 9
+//   %7: u8 = cast %6: i64, u8
+//   %8: ?u8 = opt.some %7: u8
+//   %9: i64 = call.or_one %8: ?u8
+//   test.expect_equal %5: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// opt:
+// fn find(%bytes: []u8, %needle: u8) -> ?i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [if.end.6, %12: i64]
+//   %3: i64 = call.std::mem::len %bytes: []u8
+//   %4: bool = binary.< %2: i64, %3: i64
+//   branch %4: bool, while.body.2, while.end.3
+// while.body.2:
+//   %5: i64 = slice.len %bytes: []u8
+//   %6: bool = binary.< %2: i64, 0: i64
+//   cond_fail %6: bool, bounds(%2: i64, %5: i64)
+//   %7: bool = binary.>= %2: i64, %5: i64
+//   cond_fail %7: bool, bounds(%2: i64, %5: i64)
+//   %8: u8 = slice.index %bytes: []u8, %2: i64
+//   %9: bool = binary.== %8: u8, %needle: u8
+//   branch %9: bool, if.then.4, if.else.5
+// while.end.3:
+//   %13: ?i64 = opt.null
+//   return %13: ?i64
+// if.then.4:
+//   %10: ?i64 = opt.some %2: i64
+//   return %10: ?i64
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %2: i64, %11: i64
+//   jump while.header.1
+// }
+// fn iter(%bytes: []u8) -> BytesIter {
+// entry:
+//   %1: i64 = const 0
+//   %2: BytesIter = struct.new {bytes: %bytes: []u8, index: %1: i64}
+//   return %2: BytesIter
+// }
+// fn BytesIter.next(%self: &var BytesIter) -> ?u8 {
+// entry:
+//   %1: i64 = field.ref.index %self: &var BytesIter
+//   %2: []u8 = field.ref.bytes %self: &var BytesIter
+//   %3: i64 = call.std::mem::len %2: []u8
+//   %4: bool = binary.>= %1: i64, %3: i64
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   %5: ?u8 = opt.null
+//   return %5: ?u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: []u8 = field.ref.bytes %self: &var BytesIter
+//   %7: i64 = field.ref.index %self: &var BytesIter
+//   %8: i64 = slice.len %6: []u8
+//   %9: bool = binary.< %7: i64, 0: i64
+//   cond_fail %9: bool, bounds(%7: i64, %8: i64)
+//   %10: bool = binary.>= %7: i64, %8: i64
+//   cond_fail %10: bool, bounds(%7: i64, %8: i64)
+//   %11: u8 = slice.index %6: []u8, %7: i64
+//   %12: i64 = field.ref.index %self: &var BytesIter
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %12: i64, %13: i64
+//   field.ref.set.index %self: &var BytesIter, %14: i64
+//   %16: ?u8 = opt.some %11: u8
+//   return %16: ?u8
+// }
+// fn Stream.next(%self: &var Stream) -> ReadError!?u8 {
+// entry:
+//   %1: bool = field.ref.broken %self: &var Stream
+//   branch %1: bool, if.then.1, if.else.2
+// if.then.1:
+//   %2: ReadError = const 37
+//   %3: ReadError!?u8 = error.error %2: ReadError
+//   return %3: ReadError!?u8
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %4: i64 = field.ref.index %self: &var Stream
+//   %5: []u8 = field.ref.bytes %self: &var Stream
+//   %6: i64 = call.std::mem::len %5: []u8
+//   %7: bool = binary.>= %4: i64, %6: i64
+//   branch %7: bool, if.then.4, if.else.5
+// if.then.4:
+//   %8: ?u8 = opt.null
+//   %9: ReadError!?u8 = error.ok %8: ?u8
+//   return %9: ReadError!?u8
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %10: []u8 = field.ref.bytes %self: &var Stream
+//   %11: i64 = field.ref.index %self: &var Stream
+//   %12: i64 = slice.len %10: []u8
+//   %13: bool = binary.< %11: i64, 0: i64
+//   cond_fail %13: bool, bounds(%11: i64, %12: i64)
+//   %14: bool = binary.>= %11: i64, %12: i64
+//   cond_fail %14: bool, bounds(%11: i64, %12: i64)
+//   %15: u8 = slice.index %10: []u8, %11: i64
+//   %16: i64 = field.ref.index %self: &var Stream
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %16: i64, %17: i64
+//   field.ref.set.index %self: &var Stream, %18: i64
+//   %20: ?u8 = opt.some %15: u8
+//   %21: ReadError!?u8 = error.ok %20: ?u8
+//   return %21: ReadError!?u8
+// }
+// fn drain(%bytes: []u8, %broken: bool) -> ReadError!i64 {
+// entry:
+//   %1: i64 = const 0
+//   %2: Stream = struct.new {bytes: %bytes: []u8, index: %1: i64, broken: %broken: bool}
+//   %3: &var Stream = local.slot %2: Stream
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %11: i64]
+//   %6: ReadError!?u8 = call.Stream.next %3: &var Stream
+//   %7: ?u8 = error.try %6: ReadError!?u8
+//   %8: u8 = opt.value %7: ?u8
+//   %9: bool = opt.has %7: ?u8
+//   branch %9: bool, while.body.2, while.end.3
+// while.body.2:
+//   %10: i64 = cast %8: u8, i64
+//   %11: i64 = binary.+ %5: i64, %10: i64
+//   jump while.header.1
+// while.end.3:
+//   %12: ReadError!i64 = error.ok %5: i64
+//   return %12: ReadError!i64
+// }
+// fn Ledger.bump(%self: &var Ledger, %index: i64) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Ledger
+//   %2: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %index: i64
+//   %3: &var i64 = opt.value %2: ?&var i64
+//   %4: bool = opt.has %2: ?&var i64
+//   branch %4: bool, if.then.1, if.else.2
+// if.then.1:
+//   %5: i64 = ref.load %3: &var i64
+//   %6: i64 = const 1
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   ref.store %3: &var i64, %7: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Ledger.entry(%self: &var Ledger, %index: i64) -> ?&var i64 {
+// entry:
+//   %1: std::array::Array<i64> = field.ref.entries %self: &var Ledger
+//   %2: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %index: i64
+//   return %2: ?&var i64
+// }
+// fn bump_first(%items: &var std::array::Array<i64>) -> void {
+// entry:
+//   %1: std::array::Array<i64> = ref.load %items: &var std::array::Array<i64>
+//   %2: i64 = const 0
+//   %3: ?&var i64 = call.std::array::Array.at_mut.i64 %1: std::array::Array<i64>, %2: i64
+//   %4: &var i64 = opt.value %3: ?&var i64
+//   %5: bool = opt.has %3: ?&var i64
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   %6: i64 = ref.load %4: &var i64
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %6: i64, %7: i64
+//   ref.store %4: &var i64, %8: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn guarded_find(%bytes: []u8, %needle: u8) -> i64 {
+// entry:
+//   %1: ?i64 = call.find %bytes: []u8, %needle: u8
+//   %2: bool = opt.has %1: ?i64
+//   branch %2: bool, guard.some.1, guard.exit.2
+// guard.some.1:
+//   %5: i64 = opt.value %1: ?i64
+//   %6: i64 = const 100
+//   %7: i64 = binary.+ %5: i64, %6: i64
+//   return %7: i64
+// guard.exit.2:
+//   %3: i64 = const 1
+//   %4: i64 = unary.- %3: i64
+//   return %4: i64
+// }
+// fn make_name(%allocator: Allocator, %text: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %text: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn or_one(%value: ?u8) -> i64 {
+// entry:
+//   %1: bool = opt.has %value: ?u8
+//   branch %1: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %2: u8 = opt.value %value: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %3: i64 = const 1
+//   %4: u8 = cast %3: i64, u8
+//   jump orelse.end.3
+// orelse.end.3:
+//   %5: u8 = phi [orelse.some.1, %2: u8], [orelse.else.2, %4: u8]
+//   %6: i64 = cast %5: u8, i64
+//   return %6: i64
+// }
+// fn Ledger.deinit(%self: Ledger) -> void {
+// entry:
+//   %1: std::array::Array<i64> = field.entries %self: Ledger
+//   call.std::array::Array.deinit.i64 %1: std::array::Array<i64>
+//   return void: void
+// }
+// fn test.orelse_takes_the_value_or_the_default() -> !void {
+// entry:
+//   %1: i64 = const 2
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 122
+//   %4: u8 = cast %3: i64, u8
+//   %5: ?i64 = call.find %2: []u8, %4: u8
+//   %6: bool = opt.has %5: ?i64
+//   branch %6: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %7: i64 = opt.value %5: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %8: i64 = const 1
+//   %9: i64 = unary.- %8: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %10: i64 = phi [orelse.some.1, %7: i64], [orelse.else.2, %9: i64]
+//   test.expect_equal %1: i64, %10: i64, i64
+//   %12: i64 = const 1
+//   %13: i64 = unary.- %12: i64
+//   %14: []u8 = const "kizu"
+//   %15: i64 = const 120
+//   %16: u8 = cast %15: i64, u8
+//   %17: ?i64 = call.find %14: []u8, %16: u8
+//   %18: bool = opt.has %17: ?i64
+//   branch %18: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %19: i64 = opt.value %17: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %20: i64 = const 1
+//   %21: i64 = unary.- %20: i64
+//   jump orelse.end.6
+// orelse.end.6:
+//   %22: i64 = phi [orelse.some.4, %19: i64], [orelse.else.5, %21: i64]
+//   test.expect_equal %13: i64, %22: i64, i64
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.if_capture_branches_on_presence() -> !void {
+// entry:
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 107
+//   %4: u8 = cast %3: i64, u8
+//   %5: ?i64 = call.find %2: []u8, %4: u8
+//   %6: i64 = opt.value %5: ?i64
+//   %7: bool = opt.has %5: ?i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: i64 = const 10
+//   %9: i64 = binary.+ %6: i64, %8: i64
+//   jump if.end.3
+// if.else.2:
+//   %10: i64 = const 1
+//   %11: i64 = unary.- %10: i64
+//   jump if.end.3
+// if.end.3:
+//   %12: i64 = phi [if.then.1, %9: i64], [if.else.2, %11: i64]
+//   %13: i64 = const 10
+//   test.expect_equal %13: i64, %12: i64, i64
+//   %15: []u8 = const "kizu"
+//   %16: i64 = const 120
+//   %17: u8 = cast %16: i64, u8
+//   %18: ?i64 = call.find %15: []u8, %17: u8
+//   %19: i64 = opt.value %18: ?i64
+//   %20: bool = opt.has %18: ?i64
+//   branch %20: bool, if.then.4, if.else.5
+// if.then.4:
+//   jump if.end.6
+// if.else.5:
+//   %21: i64 = const 2
+//   %22: i64 = unary.- %21: i64
+//   jump if.end.6
+// if.end.6:
+//   %23: i64 = phi [if.then.4, %19: i64], [if.else.5, %22: i64]
+//   %24: i64 = const 2
+//   %25: i64 = unary.- %24: i64
+//   test.expect_equal %25: i64, %23: i64, i64
+//   %27: !void = error.ok
+//   return %27: !void
+// }
+// fn test.while_capture_loops_until_null() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: BytesIter = call.iter %1: []u8
+//   %3: &var BytesIter = local.slot %2: BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: ?u8 = call.BytesIter.next %3: &var BytesIter
+//   %7: u8 = opt.value %6: ?u8
+//   %8: bool = opt.has %6: ?u8
+//   branch %8: bool, while.body.2, while.end.3
+// while.body.2:
+//   %9: i64 = cast %7: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: !void = error.ok
+//   return %13: !void
+// }
+// fn test.error_union_with_optional_success_drives_a_fallible_stream() -> !void {
+// entry:
+//   %1: i64 = const 451
+//   %2: []u8 = const "kizu"
+//   %3: bool = const false
+//   %4: ReadError!i64 = call.drain %2: []u8, %3: bool
+//   %5: i64 = error.try %4: ReadError!i64
+//   test.expect_equal %1: i64, %5: i64, i64
+//   %7: []u8 = const "k"
+//   %8: i64 = const 0
+//   %9: bool = const false
+//   %10: Stream = struct.new {bytes: %7: []u8, index: %8: i64, broken: %9: bool}
+//   %11: &var Stream = local.slot %10: Stream
+//   %12: i64 = const 107
+//   %13: ReadError!?u8 = call.Stream.next %11: &var Stream
+//   %14: ?u8 = error.try %13: ReadError!?u8
+//   %15: bool = opt.has %14: ?u8
+//   branch %15: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %16: u8 = opt.value %14: ?u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %17: u8 = const 0
+//   jump orelse.end.3
+// orelse.end.3:
+//   %18: u8 = phi [orelse.some.1, %16: u8], [orelse.else.2, %17: u8]
+//   %19: i64 = cast %18: u8, i64
+//   test.expect_equal %12: i64, %19: i64, i64
+//   %21: i64 = const 0
+//   %22: ReadError!?u8 = call.Stream.next %11: &var Stream
+//   %23: ?u8 = error.try %22: ReadError!?u8
+//   %24: bool = opt.has %23: ?u8
+//   branch %24: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %25: u8 = opt.value %23: ?u8
+//   jump orelse.end.6
+// orelse.else.5:
+//   %26: u8 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %27: u8 = phi [orelse.some.4, %25: u8], [orelse.else.5, %26: u8]
+//   %28: i64 = cast %27: u8, i64
+//   test.expect_equal %21: i64, %28: i64, i64
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn test.container_lookups_miss_as_null() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 41
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 41
+//   %7: i64 = const 0
+//   %8: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %7: i64
+//   %9: bool = opt.has %8: ?i64
+//   branch %9: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %10: i64 = opt.value %8: ?i64
+//   jump orelse.end.3
+// orelse.else.2:
+//   %11: i64 = const 1
+//   %12: i64 = unary.- %11: i64
+//   jump orelse.end.3
+// orelse.end.3:
+//   %13: i64 = phi [orelse.some.1, %10: i64], [orelse.else.2, %12: i64]
+//   test.expect_equal %6: i64, %13: i64, i64
+//   %15: i64 = const 1
+//   %16: i64 = unary.- %15: i64
+//   %17: i64 = const 9
+//   %18: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %17: i64
+//   %19: bool = opt.has %18: ?i64
+//   branch %19: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %20: i64 = opt.value %18: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %21: i64 = const 1
+//   %22: i64 = unary.- %21: i64
+//   jump orelse.end.6
+// orelse.end.6:
+//   %23: i64 = phi [orelse.some.4, %20: i64], [orelse.else.5, %22: i64]
+//   test.expect_equal %16: i64, %23: i64, i64
+//   %25: i64 = const 41
+//   %26: ?i64 = call.std::array::Array.pop.i64 %2: std::array::Array<i64>
+//   %27: bool = opt.has %26: ?i64
+//   branch %27: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %28: i64 = opt.value %26: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %29: i64 = const 1
+//   %30: i64 = unary.- %29: i64
+//   jump orelse.end.9
+// orelse.end.9:
+//   %31: i64 = phi [orelse.some.7, %28: i64], [orelse.else.8, %30: i64]
+//   test.expect_equal %25: i64, %31: i64, i64
+//   %33: i64 = const 1
+//   %34: i64 = unary.- %33: i64
+//   %35: ?i64 = call.std::array::Array.pop.i64 %2: std::array::Array<i64>
+//   %36: bool = opt.has %35: ?i64
+//   branch %36: bool, orelse.some.10, orelse.else.11
+// orelse.some.10:
+//   %37: i64 = opt.value %35: ?i64
+//   jump orelse.end.12
+// orelse.else.11:
+//   %38: i64 = const 1
+//   %39: i64 = unary.- %38: i64
+//   jump orelse.end.12
+// orelse.end.12:
+//   %40: i64 = phi [orelse.some.10, %37: i64], [orelse.else.11, %39: i64]
+//   test.expect_equal %34: i64, %40: i64, i64
+//   %42: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %43: []u8 = const "hit"
+//   %44: i64 = const 7
+//   %45: !void = call.std::map::Map.insert.i64 %42: std::map::Map<[]u8, i64>, %43: []u8, %44: i64
+//   error.try %45: !void, cleanup map.deinit %42: std::map::Map<[]u8, i64>; array.deinit %2: std::array::Array<i64>
+//   %47: i64 = const 7
+//   %48: []u8 = const "hit"
+//   %49: ?i64 = call.std::map::Map.get.i64 %42: std::map::Map<[]u8, i64>, %48: []u8
+//   %50: bool = opt.has %49: ?i64
+//   branch %50: bool, orelse.some.13, orelse.else.14
+// orelse.some.13:
+//   %51: i64 = opt.value %49: ?i64
+//   jump orelse.end.15
+// orelse.else.14:
+//   %52: i64 = const 1
+//   %53: i64 = unary.- %52: i64
+//   jump orelse.end.15
+// orelse.end.15:
+//   %54: i64 = phi [orelse.some.13, %51: i64], [orelse.else.14, %53: i64]
+//   test.expect_equal %47: i64, %54: i64, i64
+//   %56: i64 = const 1
+//   %57: i64 = unary.- %56: i64
+//   %58: []u8 = const "miss"
+//   %59: ?i64 = call.std::map::Map.get.i64 %42: std::map::Map<[]u8, i64>, %58: []u8
+//   %60: bool = opt.has %59: ?i64
+//   branch %60: bool, orelse.some.16, orelse.else.17
+// orelse.some.16:
+//   %61: i64 = opt.value %59: ?i64
+//   jump orelse.end.18
+// orelse.else.17:
+//   %62: i64 = const 1
+//   %63: i64 = unary.- %62: i64
+//   jump orelse.end.18
+// orelse.end.18:
+//   %64: i64 = phi [orelse.some.16, %61: i64], [orelse.else.17, %63: i64]
+//   test.expect_equal %57: i64, %64: i64, i64
+//   map.deinit %42: std::map::Map<[]u8, i64>
+//   array.deinit %2: std::array::Array<i64>
+//   %68: !void = error.ok
+//   return %68: !void
+// }
+// fn test.map_at_mut_updates_values_in_place() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "kizu"
+//   %4: i64 = const 41
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "kizu"
+//   %8: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %7: []u8
+//   %9: &var i64 = opt.value %8: ?&var i64
+//   %10: bool = opt.has %8: ?&var i64
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = ref.load %9: &var i64
+//   %12: i64 = const 1
+//   %13: i64 = binary.+ %11: i64, %12: i64
+//   ref.store %9: &var i64, %13: i64
+//   jump if.end.3
+// if.else.2:
+//   %15: []u8 = const "kizu"
+//   %16: i64 = const 1
+//   %17: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %15: []u8, %16: i64
+//   error.try %17: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.3
+// if.end.3:
+//   %19: []u8 = const "lang"
+//   %20: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %19: []u8
+//   %21: &var i64 = opt.value %20: ?&var i64
+//   %22: bool = opt.has %20: ?&var i64
+//   branch %22: bool, if.then.4, if.else.5
+// if.then.4:
+//   %23: i64 = ref.load %21: &var i64
+//   %24: i64 = const 1
+//   %25: i64 = binary.+ %23: i64, %24: i64
+//   ref.store %21: &var i64, %25: i64
+//   jump if.end.6
+// if.else.5:
+//   %27: []u8 = const "lang"
+//   %28: i64 = const 1
+//   %29: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %27: []u8, %28: i64
+//   error.try %29: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.end.6:
+//   %31: i64 = const 42
+//   %32: []u8 = const "kizu"
+//   %33: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %32: []u8
+//   %34: bool = opt.has %33: ?i64
+//   branch %34: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %35: i64 = opt.value %33: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %36: i64 = const 1
+//   %37: i64 = unary.- %36: i64
+//   jump orelse.end.9
+// orelse.end.9:
+//   %38: i64 = phi [orelse.some.7, %35: i64], [orelse.else.8, %37: i64]
+//   test.expect_equal %31: i64, %38: i64, i64
+//   %40: i64 = const 1
+//   %41: []u8 = const "lang"
+//   %42: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %41: []u8
+//   %43: bool = opt.has %42: ?i64
+//   branch %43: bool, orelse.some.10, orelse.else.11
+// orelse.some.10:
+//   %44: i64 = opt.value %42: ?i64
+//   jump orelse.end.12
+// orelse.else.11:
+//   %45: i64 = const 1
+//   %46: i64 = unary.- %45: i64
+//   jump orelse.end.12
+// orelse.end.12:
+//   %47: i64 = phi [orelse.some.10, %44: i64], [orelse.else.11, %46: i64]
+//   test.expect_equal %40: i64, %47: i64, i64
+//   %49: []u8 = const "miss"
+//   %50: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %49: []u8
+//   %51: &i64 = opt.value %50: ?&i64
+//   %52: bool = opt.has %50: ?&i64
+//   branch %52: bool, if.then.13, if.else.14
+// if.then.13:
+//   %53: i64 = const 1
+//   %54: i64 = unary.- %53: i64
+//   %55: i64 = ref.load %51: &i64
+//   test.expect_equal %54: i64, %55: i64, i64
+//   jump if.end.15
+// if.else.14:
+//   jump if.end.15
+// if.end.15:
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %58: !void = error.ok
+//   return %58: !void
+// }
+// fn test.arena_at_mut_updates_elements_in_place() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Visitor> = arena.new %1: Allocator, Visitor
+//   %3: i64 = const 30
+//   %4: i64 = const 0
+//   %5: Visitor = struct.new {age: %3: i64, visits: %4: i64}
+//   %6: std::arena::Handle<Visitor> = arena.add %2: std::arena::Arena<Visitor>, %5: Visitor
+//   %7: ?&var Visitor = arena.at_mut %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %8: &var Visitor = opt.value %7: ?&var Visitor
+//   %9: bool = opt.has %7: ?&var Visitor
+//   branch %9: bool, if.then.1, if.else.2
+// if.then.1:
+//   %10: i64 = field.ref.visits %8: &var Visitor
+//   %11: i64 = const 1
+//   %12: i64 = binary.+ %10: i64, %11: i64
+//   field.ref.set.visits %8: &var Visitor, %12: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = const 1
+//   %15: Visitor = arena.at %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %16: i64 = field.visits %15: Visitor
+//   test.expect_equal %14: i64, %16: i64, i64
+//   %18: i64 = const 30
+//   %19: Visitor = arena.at %2: std::arena::Arena<Visitor>, %6: std::arena::Handle<Visitor>
+//   %20: i64 = field.age %19: Visitor
+//   test.expect_equal %18: i64, %20: i64, i64
+//   arena.deinit %2: std::arena::Arena<Visitor>
+//   %23: !void = error.ok
+//   return %23: !void
+// }
+// fn test.at_mut_captures_an_owner_s_container_field() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Ledger = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: &var Ledger = local.slot %3: Ledger
+//   %5: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   %8: Ledger = ref.load %4: &var Ledger
+//   error.try %7: !void, cleanup call.Ledger.deinit %8: Ledger
+//   %10: i64 = const 0
+//   call.Ledger.bump %4: &var Ledger, %10: i64
+//   %12: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %13: i64 = const 0
+//   %14: ?&i64 = call.std::array::Array.at.i64 %12: std::array::Array<i64>, %13: i64
+//   %15: &i64 = opt.value %14: ?&i64
+//   %16: bool = opt.has %14: ?&i64
+//   branch %16: bool, if.then.1, if.else.2
+// if.then.1:
+//   %17: i64 = const 8
+//   %18: i64 = ref.load %15: &i64
+//   test.expect_equal %17: i64, %18: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %20: Ledger = ref.load %4: &var Ledger
+//   call.Ledger.deinit %20: Ledger
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// fn test.borrow_optional_returns_flow_to_the_caller_s_capture() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: Ledger = struct.new {entries: %2: std::array::Array<i64>}
+//   %4: &var Ledger = local.slot %3: Ledger
+//   %5: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %5: std::array::Array<i64>, %6: i64
+//   %8: Ledger = ref.load %4: &var Ledger
+//   error.try %7: !void, cleanup call.Ledger.deinit %8: Ledger
+//   %10: i64 = const 0
+//   %11: ?&var i64 = call.Ledger.entry %4: &var Ledger, %10: i64
+//   %12: &var i64 = opt.value %11: ?&var i64
+//   %13: bool = opt.has %11: ?&var i64
+//   branch %13: bool, if.then.1, if.else.2
+// if.then.1:
+//   %14: i64 = ref.load %12: &var i64
+//   %15: i64 = const 1
+//   %16: i64 = binary.+ %14: i64, %15: i64
+//   ref.store %12: &var i64, %16: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %18: i64 = const 8
+//   %19: std::array::Array<i64> = field.ref.entries %4: &var Ledger
+//   %20: i64 = const 0
+//   %21: i64 = call.std::array::Array.get_or_panic.i64 %19: std::array::Array<i64>, %20: i64
+//   test.expect_equal %18: i64, %21: i64, i64
+//   %23: i64 = const 9
+//   %24: ?&var i64 = call.Ledger.entry %4: &var Ledger, %23: i64
+//   %25: &var i64 = opt.value %24: ?&var i64
+//   %26: bool = opt.has %24: ?&var i64
+//   branch %26: bool, if.then.4, if.else.5
+// if.then.4:
+//   %27: i64 = const 0
+//   ref.store %25: &var i64, %27: i64
+//   %29: bool = const false
+//   call.std::testing::expect %29: bool
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %31: Ledger = ref.load %4: &var Ledger
+//   call.Ledger.deinit %31: Ledger
+//   %33: !void = error.ok
+//   return %33: !void
+// }
+// fn test.at_mut_works_through_a__var_parameter() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: &var std::array::Array<i64> = local.slot %2: std::array::Array<i64>
+//   %4: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   %5: i64 = const 7
+//   %6: !void = call.std::array::Array.append.i64 %4: std::array::Array<i64>, %5: i64
+//   %7: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   error.try %6: !void, cleanup array.deinit %7: std::array::Array<i64>
+//   call.bump_first %3: &var std::array::Array<i64>
+//   %10: i64 = const 8
+//   %11: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   %12: i64 = const 0
+//   %13: i64 = call.std::array::Array.get_or_panic.i64 %11: std::array::Array<i64>, %12: i64
+//   test.expect_equal %10: i64, %13: i64, i64
+//   %15: std::array::Array<i64> = ref.load %3: &var std::array::Array<i64>
+//   array.deinit %15: std::array::Array<i64>
+//   %17: !void = error.ok
+//   return %17: !void
+// }
+// fn test.view_payloads_miss_as_null() -> !void {
+// entry:
+//   %1: []u8 = const "ab"
+//   %2: []u8 = const "abc"
+//   %3: i64 = const 0
+//   %4: i64 = const 2
+//   %5: ?[]u8 = call.std::mem::slice %2: []u8, %3: i64, %4: i64
+//   %6: bool = opt.has %5: ?[]u8
+//   branch %6: bool, orelse.some.1, orelse.else.2
+// orelse.some.1:
+//   %7: []u8 = opt.value %5: ?[]u8
+//   jump orelse.end.3
+// orelse.else.2:
+//   %8: []u8 = const ""
+//   jump orelse.end.3
+// orelse.end.3:
+//   %9: []u8 = phi [orelse.some.1, %7: []u8], [orelse.else.2, %8: []u8]
+//   test.expect_equal %1: []u8, %9: []u8, []u8
+//   %11: []u8 = const ""
+//   %12: []u8 = const "abc"
+//   %13: i64 = const 0
+//   %14: i64 = const 4
+//   %15: ?[]u8 = call.std::mem::slice %12: []u8, %13: i64, %14: i64
+//   %16: bool = opt.has %15: ?[]u8
+//   branch %16: bool, orelse.some.4, orelse.else.5
+// orelse.some.4:
+//   %17: []u8 = opt.value %15: ?[]u8
+//   jump orelse.end.6
+// orelse.else.5:
+//   %18: []u8 = const ""
+//   jump orelse.end.6
+// orelse.end.6:
+//   %19: []u8 = phi [orelse.some.4, %17: []u8], [orelse.else.5, %18: []u8]
+//   test.expect_equal %11: []u8, %19: []u8, []u8
+//   %21: []u8 = const ""
+//   %22: []u8 = const "KIZU_SURELY_UNSET_VAR_12345"
+//   %23: ?[]u8 = call.std::process::env %22: []u8
+//   %24: bool = opt.has %23: ?[]u8
+//   branch %24: bool, orelse.some.7, orelse.else.8
+// orelse.some.7:
+//   %25: []u8 = opt.value %23: ?[]u8
+//   jump orelse.end.9
+// orelse.else.8:
+//   %26: []u8 = const ""
+//   jump orelse.end.9
+// orelse.end.9:
+//   %27: []u8 = phi [orelse.some.7, %25: []u8], [orelse.else.8, %26: []u8]
+//   test.expect_equal %21: []u8, %27: []u8, []u8
+//   %29: !void = error.ok
+//   return %29: !void
+// }
+// fn test.orelse_guards_exit_on_null() -> !void {
+// entry:
+//   %1: i64 = const 102
+//   %2: []u8 = const "kizu"
+//   %3: i64 = const 122
+//   %4: u8 = cast %3: i64, u8
+//   %5: i64 = call.guarded_find %2: []u8, %4: u8
+//   test.expect_equal %1: i64, %5: i64, i64
+//   %7: i64 = const 1
+//   %8: i64 = unary.- %7: i64
+//   %9: []u8 = const "kizu"
+//   %10: i64 = const 120
+//   %11: u8 = cast %10: i64, u8
+//   %12: i64 = call.guarded_find %9: []u8, %11: u8
+//   test.expect_equal %8: i64, %12: i64, i64
+//   %14: []u8 = const "kz"
+//   %15: BytesIter = call.iter %14: []u8
+//   %16: &var BytesIter = local.slot %15: BytesIter
+//   %17: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %18: i64 = phi [entry, %17: i64], [guard.some.4, %24: i64]
+//   %19: bool = const true
+//   branch %19: bool, while.body.2, while.end.3
+// while.body.2:
+//   %20: ?u8 = call.BytesIter.next %16: &var BytesIter
+//   %21: bool = opt.has %20: ?u8
+//   branch %21: bool, guard.some.4, guard.exit.5
+// while.end.3:
+//   %25: i64 = phi [while.header.1, %18: i64], [guard.exit.5, %18: i64]
+//   %26: i64 = const 229
+//   test.expect_equal %26: i64, %25: i64, i64
+//   %28: !void = error.ok
+//   return %28: !void
+// guard.some.4:
+//   %22: u8 = opt.value %20: ?u8
+//   %23: i64 = cast %22: u8, i64
+//   %24: i64 = binary.+ %18: i64, %23: i64
+//   jump while.header.1
+// guard.exit.5:
+//   jump while.end.3
+// }
+// fn test.owner_payload_pops_through_the_capture() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const "kizu"
+//   %4: !std::string::String = call.make_name %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %6: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %8: i64 = const 0
+//   %9: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %10: std::string::String = opt.value %9: ?std::string::String
+//   %11: bool = opt.has %9: ?std::string::String
+//   branch %11: bool, if.then.1, if.else.2
+// if.then.1:
+//   %12: i64 = call.std::string::String.len %10: std::string::String
+//   call.std::string::String.deinit %10: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %14: i64 = phi [if.then.1, %12: i64], [if.else.2, %8: i64]
+//   %15: i64 = const 4
+//   test.expect_equal %15: i64, %14: i64, i64
+//   %17: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %18: std::string::String = opt.value %17: ?std::string::String
+//   %19: bool = opt.has %17: ?std::string::String
+//   branch %19: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::string::String.deinit %18: std::string::String
+//   %21: bool = const false
+//   call.std::testing::expect %21: bool
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %24: !void = error.ok
+//   return %24: !void
+// }
+// fn test.optional_arguments_accept_null_and_values() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: ?u8 = opt.null
+//   %3: i64 = call.or_one %2: ?u8
+//   test.expect_equal %1: i64, %3: i64, i64
+//   %5: i64 = const 9
+//   %6: i64 = const 9
+//   %7: u8 = cast %6: i64, u8
+//   %8: ?u8 = opt.some %7: u8
+//   %9: i64 = call.or_one %8: ?u8
+//   test.expect_equal %5: i64, %9: i64, i64
+//   %11: !void = error.ok
+//   return %11: !void
+// }

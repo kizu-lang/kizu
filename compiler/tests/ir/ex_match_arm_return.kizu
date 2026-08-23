@@ -1,0 +1,183 @@
+import std::mem;
+import std::string;
+
+enum Kind {
+    Number,
+    Missing,
+}
+
+fn describe(kind: Kind) -> i64 {
+    match kind {
+        Number => print("number"),
+        Missing => return 0,
+    }
+    return 1;
+}
+
+union Slot {
+    Kept(string::String),
+    Vacant,
+}
+
+// A hand-written mixed-variant deinit: `Vacant => return` is the explicit
+// nothing-to-clean arm (ADR-0093).
+fn (self: Slot) deinit() -> void {
+    match self {
+        Kept(payload) => payload.deinit(),
+        Vacant => return,
+    }
+}
+
+fn main() -> !void {
+    print(describe(Kind::Number));
+    print(describe(Kind::Missing));
+
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes("kept");
+    let kept = Slot::Kept(move name);
+    kept.deinit();
+
+    let vacant = Slot::Vacant;
+    vacant.deinit();
+    return;
+}
+
+// run
+// features: match arm-return union deinit
+// output:
+// number
+// 1
+// 0
+
+
+// ir
+// lower:
+// fn describe(%kind: Kind) -> i64 {
+// entry:
+//   jump match.check.2
+// match.end.1:
+//   %6: i64 = const 1
+//   return %6: i64
+// match.check.2:
+//   %1: bool = binary.== %kind: Kind, 0: Kind
+//   branch %1: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %2: []u8 = const "number"
+//   call.print %2: []u8
+//   jump match.end.1
+// match.check.4:
+//   %4: bool = binary.== %kind: Kind, 1: Kind
+//   branch %4: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %5: i64 = const 0
+//   return %5: i64
+// match.unreachable.6:
+//   unreachable
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   return void: void
+// match.unreachable.6:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Kind = const 0
+//   %2: i64 = call.describe %1: Kind
+//   call.print %2: i64
+//   %4: Kind = const 1
+//   %5: i64 = call.describe %4: Kind
+//   call.print %5: i64
+//   %7: Allocator = call.std::mem::page_allocator
+//   %8: std::string::String = call.std::string::new %7: Allocator
+//   %9: []u8 = const "kept"
+//   %10: !void = call.std::string::String.append_bytes %8: std::string::String, %9: []u8
+//   error.try %10: !void, cleanup call.std::string::String.deinit %8: std::string::String
+//   %12: Slot = union.new %8: std::string::String, Kept
+//   call.Slot.deinit %12: Slot
+//   %14: Slot = union.new Vacant
+//   call.Slot.deinit %14: Slot
+//   %16: !void = error.ok
+//   return %16: !void
+// }
+// opt:
+// fn describe(%kind: Kind) -> i64 {
+// entry:
+//   jump match.check.2
+// match.end.1:
+//   %6: i64 = const 1
+//   return %6: i64
+// match.check.2:
+//   %1: bool = binary.== %kind: Kind, 0: Kind
+//   branch %1: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %2: []u8 = const "number"
+//   call.print %2: []u8
+//   jump match.end.1
+// match.check.4:
+//   %4: bool = binary.== %kind: Kind, 1: Kind
+//   branch %4: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %5: i64 = const 0
+//   return %5: i64
+// match.unreachable.6:
+//   unreachable
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   return void: void
+// match.unreachable.6:
+//   unreachable
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Kind = const 0
+//   %2: i64 = call.describe %1: Kind
+//   call.print %2: i64
+//   %4: Kind = const 1
+//   %5: i64 = call.describe %4: Kind
+//   call.print %5: i64
+//   %7: Allocator = call.std::mem::page_allocator
+//   %8: std::string::String = call.std::string::new %7: Allocator
+//   %9: []u8 = const "kept"
+//   %10: !void = call.std::string::String.append_bytes %8: std::string::String, %9: []u8
+//   error.try %10: !void, cleanup call.std::string::String.deinit %8: std::string::String
+//   %12: Slot = union.new %8: std::string::String, Kept
+//   call.Slot.deinit %12: Slot
+//   %14: Slot = union.new Vacant
+//   call.Slot.deinit %14: Slot
+//   %16: !void = error.ok
+//   return %16: !void
+// }

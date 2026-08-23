@@ -1,0 +1,157 @@
+import std::mem;
+import std::string;
+
+pub struct Pair {
+    pub eager: bool,
+    pub first: string::String,
+    pub second: string::String,
+}
+
+// Both paths release `second`, so what is left after the if does not depend on
+// which one ran. This is the shape the disagreement rule must not refuse.
+fn (self: Pair) deinit() -> void {
+    self.first.deinit();
+    if self.eager {
+        self.second.deinit();
+    } else {
+        self.second.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var eager = Pair {
+        eager: true,
+        first: try owned(allocator, "a"),
+        second: try owned(allocator, "b"),
+    };
+    eager.deinit();
+    var lazy = Pair {
+        eager: false,
+        first: try owned(allocator, "c"),
+        second: try owned(allocator, "d"),
+    };
+    lazy.deinit();
+    print("released");
+    return;
+}
+
+// run
+// features: owner cleanup std-string
+// output:
+// released
+
+
+// ir
+// lower:
+// fn Pair.deinit(%self: Pair) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Pair
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: bool = field.eager %self: Pair
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: std::string::String = field.second %self: Pair
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   %6: std::string::String = field.second %self: Pair
+//   call.std::string::String.deinit %6: std::string::String
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: bool = const true
+//   %3: []u8 = const "a"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: []u8 = const "b"
+//   %7: !std::string::String = call.owned %1: Allocator, %6: []u8
+//   %8: std::string::String = error.try %7: !std::string::String
+//   %9: Pair = struct.new {eager: %2: bool, first: %5: std::string::String, second: %8: std::string::String}
+//   call.Pair.deinit %9: Pair
+//   %11: bool = const false
+//   %12: []u8 = const "c"
+//   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
+//   %14: std::string::String = error.try %13: !std::string::String
+//   %15: []u8 = const "d"
+//   %16: !std::string::String = call.owned %1: Allocator, %15: []u8
+//   %17: std::string::String = error.try %16: !std::string::String
+//   %18: Pair = struct.new {eager: %11: bool, first: %14: std::string::String, second: %17: std::string::String}
+//   call.Pair.deinit %18: Pair
+//   %20: []u8 = const "released"
+//   call.print %20: []u8
+//   %22: !void = error.ok
+//   return %22: !void
+// }
+// opt:
+// fn Pair.deinit(%self: Pair) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Pair
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: bool = field.eager %self: Pair
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: std::string::String = field.second %self: Pair
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   %6: std::string::String = field.second %self: Pair
+//   call.std::string::String.deinit %6: std::string::String
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: bool = const true
+//   %3: []u8 = const "a"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: []u8 = const "b"
+//   %7: !std::string::String = call.owned %1: Allocator, %6: []u8
+//   %8: std::string::String = error.try %7: !std::string::String
+//   %9: Pair = struct.new {eager: %2: bool, first: %5: std::string::String, second: %8: std::string::String}
+//   call.Pair.deinit %9: Pair
+//   %11: bool = const false
+//   %12: []u8 = const "c"
+//   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
+//   %14: std::string::String = error.try %13: !std::string::String
+//   %15: []u8 = const "d"
+//   %16: !std::string::String = call.owned %1: Allocator, %15: []u8
+//   %17: std::string::String = error.try %16: !std::string::String
+//   %18: Pair = struct.new {eager: %11: bool, first: %14: std::string::String, second: %17: std::string::String}
+//   call.Pair.deinit %18: Pair
+//   %20: []u8 = const "released"
+//   call.print %20: []u8
+//   %22: !void = error.ok
+//   return %22: !void
+// }

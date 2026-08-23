@@ -1,0 +1,157 @@
+import std::mem;
+import std::string;
+
+// Neither type declares a `deinit`, so what each owes is what its fields owe.
+// That makes `finish` writable: the caller of a value parameter has already let
+// go, so taking a field out of `partial` frees nothing twice -- the obligation
+// moves from the aggregate to the field, and the literal takes it from there.
+struct Partial {
+    first: string::String,
+    last: string::String,
+}
+
+struct Full {
+    first: string::String,
+    last: string::String,
+}
+
+fn finish(partial: Partial) -> Full {
+    return Full { first: move partial.first, last: move partial.last };
+}
+
+fn build(allocator: Allocator, byte: u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_byte(byte);
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let partial = Partial {
+        first: try build(allocator, cast<u8>(97)),
+        last: try build(allocator, cast<u8>(98)),
+    };
+    let full = finish(move partial);
+    defer full.deinit();
+    print(full.first.len() + full.last.len());
+    return;
+}
+
+// run
+// features: ownership move field-move derived deinit std-string errdefer
+// output:
+// 2
+
+
+// ir
+// lower:
+// fn finish(%partial: Partial) -> Full {
+// entry:
+//   %1: std::string::String = field.first %partial: Partial
+//   %2: std::string::String = field.last %partial: Partial
+//   %3: Full = struct.new {first: %1: std::string::String, last: %2: std::string::String}
+//   return %3: Full
+// }
+// fn build(%allocator: Allocator, %byte: u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_byte %1: std::string::String, %byte: u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !std::string::String = call.build %1: Allocator, %3: u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: i64 = const 98
+//   %7: u8 = cast %6: i64, u8
+//   %8: !std::string::String = call.build %1: Allocator, %7: u8
+//   %9: std::string::String = error.try %8: !std::string::String
+//   %10: Partial = struct.new {first: %5: std::string::String, last: %9: std::string::String}
+//   %11: Full = call.finish %10: Partial
+//   %12: std::string::String = field.first %11: Full
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   %14: std::string::String = field.last %11: Full
+//   %15: i64 = call.std::string::String.len %14: std::string::String
+//   %16: i64 = binary.+ %13: i64, %15: i64
+//   call.print %16: i64
+//   call.Full.deinit %11: Full
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn Partial.deinit(%self: Partial) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Partial
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.last %self: Partial
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn Full.deinit(%self: Full) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Full
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.last %self: Full
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// opt:
+// fn finish(%partial: Partial) -> Full {
+// entry:
+//   %1: std::string::String = field.first %partial: Partial
+//   %2: std::string::String = field.last %partial: Partial
+//   %3: Full = struct.new {first: %1: std::string::String, last: %2: std::string::String}
+//   return %3: Full
+// }
+// fn build(%allocator: Allocator, %byte: u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_byte %1: std::string::String, %byte: u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !std::string::String = call.build %1: Allocator, %3: u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: i64 = const 98
+//   %7: u8 = cast %6: i64, u8
+//   %8: !std::string::String = call.build %1: Allocator, %7: u8
+//   %9: std::string::String = error.try %8: !std::string::String
+//   %10: Partial = struct.new {first: %5: std::string::String, last: %9: std::string::String}
+//   %11: Full = call.finish %10: Partial
+//   %12: std::string::String = field.first %11: Full
+//   %13: i64 = call.std::string::String.len %12: std::string::String
+//   %14: std::string::String = field.last %11: Full
+//   %15: i64 = call.std::string::String.len %14: std::string::String
+//   %16: i64 = binary.+ %13: i64, %15: i64
+//   call.print %16: i64
+//   call.Full.deinit %11: Full
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn Partial.deinit(%self: Partial) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Partial
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.last %self: Partial
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn Full.deinit(%self: Full) -> void {
+// entry:
+//   %1: std::string::String = field.first %self: Full
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: std::string::String = field.last %self: Full
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }

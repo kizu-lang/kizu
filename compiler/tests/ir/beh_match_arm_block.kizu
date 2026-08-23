@@ -1,0 +1,335 @@
+import std::testing;
+
+enum Kind {
+    Count,
+    Skip,
+}
+
+fn kind_of(index: i64) -> Kind {
+    if index - (index / 2) * 2 == 0 {
+        return Kind::Count;
+    }
+    return Kind::Skip;
+}
+
+// A statement match arm block runs its statements in place (ADR-0107):
+// assignments mutate the enclosing scope and the loop keeps running.
+test "statement match arm block runs assignments in place" {
+    var count = 0;
+    var i = 0;
+    while i < 6 {
+        match kind_of(i) {
+            Count => {
+                count = count + 1;
+            },
+            Skip => {},
+        }
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(3, count);
+    testing::expect_equal<i64>(6, i);
+}
+
+// An expression match arm block yields its trailing value, like an if
+// expression branch.
+test "expression match arm block ends with a value" {
+    let doubled = match kind_of(0) {
+        Count => {
+            let base = 2;
+            base * 2
+        },
+        Skip => 0,
+    };
+    testing::expect_equal<i64>(4, doubled);
+}
+
+// `return` inside an arm block leaves the function like any block return.
+fn first_skip(limit: i64) -> i64 {
+    var i = 0;
+    while i < limit {
+        match kind_of(i) {
+            Count => {},
+            Skip => {
+                return i;
+            },
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+test "return inside a match arm block leaves the function" {
+    testing::expect_equal<i64>(1, first_skip(6));
+    testing::expect_equal<i64>(-1, first_skip(0));
+}
+
+
+// ir
+// lower:
+// fn kind_of(%index: i64) -> Kind {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Kind = const 0
+//   return %8: Kind
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Kind = const 1
+//   return %9: Kind
+// }
+// fn first_skip(%limit: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [match.end.4, %8: i64]
+//   %3: bool = binary.< %2: i64, %limit: i64
+//   branch %3: bool, while.body.2, while.end.3
+// while.body.2:
+//   %4: Kind = call.kind_of %2: i64
+//   jump match.check.5
+// while.end.3:
+//   %9: i64 = const 1
+//   %10: i64 = unary.- %9: i64
+//   return %10: i64
+// match.end.4:
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %2: i64, %7: i64
+//   jump while.header.1
+// match.check.5:
+//   %5: bool = binary.== %4: Kind, 0: Kind
+//   branch %5: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   jump match.end.4
+// match.check.7:
+//   %6: bool = binary.== %4: Kind, 1: Kind
+//   branch %6: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   return %2: i64
+// match.unreachable.9:
+//   unreachable
+// }
+// fn test.statement_match_arm_block_runs_assignments_in_place() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %1: i64], [match.end.4, %12: i64]
+//   %4: i64 = phi [entry, %2: i64], [match.end.4, %14: i64]
+//   %5: i64 = const 6
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: Kind = call.kind_of %4: i64
+//   jump match.check.5
+// while.end.3:
+//   %15: i64 = const 3
+//   test.expect_equal %15: i64, %3: i64, i64
+//   %17: i64 = const 6
+//   test.expect_equal %17: i64, %4: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
+// match.end.4:
+//   %12: i64 = phi [match.arm.6, %10: i64], [match.arm.8, %3: i64]
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %4: i64, %13: i64
+//   jump while.header.1
+// match.check.5:
+//   %8: bool = binary.== %7: Kind, 0: Kind
+//   branch %8: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %9: i64 = const 1
+//   %10: i64 = binary.+ %3: i64, %9: i64
+//   jump match.end.4
+// match.check.7:
+//   %11: bool = binary.== %7: Kind, 1: Kind
+//   branch %11: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// fn test.expression_match_arm_block_ends_with_a_value() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Kind = call.kind_of %1: i64
+//   jump match.check.2
+// match.end.1:
+//   %9: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64]
+//   %10: i64 = const 4
+//   test.expect_equal %10: i64, %9: i64, i64
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %3: bool = binary.== %2: Kind, 0: Kind
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %4: i64 = const 2
+//   %5: i64 = const 2
+//   %6: i64 = binary.* %4: i64, %5: i64
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %2: Kind, 1: Kind
+//   branch %7: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %8: i64 = const 0
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.return_inside_a_match_arm_block_leaves_the_function() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 6
+//   %3: i64 = call.first_skip %2: i64
+//   test.expect_equal %1: i64, %3: i64, i64
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: i64 = const 0
+//   %8: i64 = call.first_skip %7: i64
+//   test.expect_equal %6: i64, %8: i64, i64
+//   %10: !void = error.ok
+//   return %10: !void
+// }
+// opt:
+// fn kind_of(%index: i64) -> Kind {
+// entry:
+//   %1: i64 = const 2
+//   %2: i64 = binary./ %index: i64, %1: i64
+//   %3: i64 = const 2
+//   %4: i64 = binary.* %2: i64, %3: i64
+//   %5: i64 = binary.- %index: i64, %4: i64
+//   %6: i64 = const 0
+//   %7: bool = binary.== %5: i64, %6: i64
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: Kind = const 0
+//   return %8: Kind
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %9: Kind = const 1
+//   return %9: Kind
+// }
+// fn first_skip(%limit: i64) -> i64 {
+// entry:
+//   %1: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %2: i64 = phi [entry, %1: i64], [match.end.4, %8: i64]
+//   %3: bool = binary.< %2: i64, %limit: i64
+//   branch %3: bool, while.body.2, while.end.3
+// while.body.2:
+//   %4: Kind = call.kind_of %2: i64
+//   jump match.check.5
+// while.end.3:
+//   %9: i64 = const 1
+//   %10: i64 = unary.- %9: i64
+//   return %10: i64
+// match.end.4:
+//   %7: i64 = const 1
+//   %8: i64 = binary.+ %2: i64, %7: i64
+//   jump while.header.1
+// match.check.5:
+//   %5: bool = binary.== %4: Kind, 0: Kind
+//   branch %5: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   jump match.end.4
+// match.check.7:
+//   %6: bool = binary.== %4: Kind, 1: Kind
+//   branch %6: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   return %2: i64
+// match.unreachable.9:
+//   unreachable
+// }
+// fn test.statement_match_arm_block_runs_assignments_in_place() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %3: i64 = phi [entry, %1: i64], [match.end.4, %12: i64]
+//   %4: i64 = phi [entry, %2: i64], [match.end.4, %14: i64]
+//   %5: i64 = const 6
+//   %6: bool = binary.< %4: i64, %5: i64
+//   branch %6: bool, while.body.2, while.end.3
+// while.body.2:
+//   %7: Kind = call.kind_of %4: i64
+//   jump match.check.5
+// while.end.3:
+//   %15: i64 = const 3
+//   test.expect_equal %15: i64, %3: i64, i64
+//   %17: i64 = const 6
+//   test.expect_equal %17: i64, %4: i64, i64
+//   %19: !void = error.ok
+//   return %19: !void
+// match.end.4:
+//   %12: i64 = phi [match.arm.6, %10: i64], [match.arm.8, %3: i64]
+//   %13: i64 = const 1
+//   %14: i64 = binary.+ %4: i64, %13: i64
+//   jump while.header.1
+// match.check.5:
+//   %8: bool = binary.== %7: Kind, 0: Kind
+//   branch %8: bool, match.arm.6, match.check.7
+// match.arm.6:
+//   %9: i64 = const 1
+//   %10: i64 = binary.+ %3: i64, %9: i64
+//   jump match.end.4
+// match.check.7:
+//   %11: bool = binary.== %7: Kind, 1: Kind
+//   branch %11: bool, match.arm.8, match.unreachable.9
+// match.arm.8:
+//   jump match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// fn test.expression_match_arm_block_ends_with_a_value() -> !void {
+// entry:
+//   %1: i64 = const 0
+//   %2: Kind = call.kind_of %1: i64
+//   jump match.check.2
+// match.end.1:
+//   %9: i64 = phi [match.arm.3, %6: i64], [match.arm.5, %8: i64]
+//   %10: i64 = const 4
+//   test.expect_equal %10: i64, %9: i64, i64
+//   %12: !void = error.ok
+//   return %12: !void
+// match.check.2:
+//   %3: bool = binary.== %2: Kind, 0: Kind
+//   branch %3: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %6: i64 = const 4
+//   jump match.end.1
+// match.check.4:
+//   %7: bool = binary.== %2: Kind, 1: Kind
+//   branch %7: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   %8: i64 = const 0
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn test.return_inside_a_match_arm_block_leaves_the_function() -> !void {
+// entry:
+//   %1: i64 = const 1
+//   %2: i64 = const 6
+//   %3: i64 = call.first_skip %2: i64
+//   test.expect_equal %1: i64, %3: i64, i64
+//   %5: i64 = const 1
+//   %6: i64 = unary.- %5: i64
+//   %7: i64 = const 0
+//   %8: i64 = call.first_skip %7: i64
+//   test.expect_equal %6: i64, %8: i64, i64
+//   %10: !void = error.ok
+//   return %10: !void
+// }

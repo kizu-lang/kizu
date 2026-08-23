@@ -1,0 +1,181 @@
+import std::arena;
+import std::mem;
+
+struct Node {
+    value: i64,
+    left: ?arena::Handle<Node>,
+    right: ?arena::Handle<Node>,
+}
+
+struct Tree {
+    nodes: arena::Arena<Node>,
+}
+
+fn (self: &Tree) sum(h: arena::Handle<Node>) -> i64 {
+    var total = self.nodes.at(h).value;
+    if self.nodes.at(h).left |l| {
+        total = total + self.sum(l);
+    }
+    if self.nodes.at(h).right |r| {
+        total = total + self.sum(r);
+    }
+    return total;
+}
+
+fn main() {
+    let allocator = mem::page_allocator();
+    var tree = Tree { nodes: arena::new<Node>(allocator) };
+    let left = tree.nodes.add(Node { value: 1, left: null, right: null });
+    let right = tree.nodes.add(Node { value: 4, left: null, right: null });
+    let root = tree.nodes.add(Node { value: 2, left: left, right: right });
+    print(tree.sum(root));
+    tree.deinit();
+}
+
+// run
+// features: arena handle optional struct
+// output:
+// 7
+
+
+// ir
+// lower:
+// fn Tree.sum(%self: Tree, %h: std::arena::Handle<Node>) -> i64 {
+// entry:
+//   %1: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %2: Node = arena.at %1: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %3: i64 = field.value %2: Node
+//   %4: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %5: Node = arena.at %4: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %6: ?std::arena::Handle<Node> = field.left %5: Node
+//   %7: std::arena::Handle<Node> = opt.value %6: ?std::arena::Handle<Node>
+//   %8: bool = opt.has %6: ?std::arena::Handle<Node>
+//   branch %8: bool, if.then.1, if.else.2
+// if.then.1:
+//   %9: i64 = call.Tree.sum %self: Tree, %7: std::arena::Handle<Node>
+//   %10: i64 = binary.+ %3: i64, %9: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %11: i64 = phi [if.then.1, %10: i64], [if.else.2, %3: i64]
+//   %12: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %13: Node = arena.at %12: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %14: ?std::arena::Handle<Node> = field.right %13: Node
+//   %15: std::arena::Handle<Node> = opt.value %14: ?std::arena::Handle<Node>
+//   %16: bool = opt.has %14: ?std::arena::Handle<Node>
+//   branch %16: bool, if.then.4, if.else.5
+// if.then.4:
+//   %17: i64 = call.Tree.sum %self: Tree, %15: std::arena::Handle<Node>
+//   %18: i64 = binary.+ %11: i64, %17: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %19: i64 = phi [if.then.4, %18: i64], [if.else.5, %11: i64]
+//   return %19: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Node> = arena.new %1: Allocator, Node
+//   %3: Tree = struct.new {nodes: %2: std::arena::Arena<Node>}
+//   %4: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %5: i64 = const 1
+//   %6: ?std::arena::Handle<Node> = opt.null
+//   %7: ?std::arena::Handle<Node> = opt.null
+//   %8: Node = struct.new {value: %5: i64, left: %6: ?std::arena::Handle<Node>, right: %7: ?std::arena::Handle<Node>}
+//   %9: std::arena::Handle<Node> = arena.add %4: std::arena::Arena<Node>, %8: Node
+//   %10: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %11: i64 = const 4
+//   %12: ?std::arena::Handle<Node> = opt.null
+//   %13: ?std::arena::Handle<Node> = opt.null
+//   %14: Node = struct.new {value: %11: i64, left: %12: ?std::arena::Handle<Node>, right: %13: ?std::arena::Handle<Node>}
+//   %15: std::arena::Handle<Node> = arena.add %10: std::arena::Arena<Node>, %14: Node
+//   %16: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %17: i64 = const 2
+//   %18: ?std::arena::Handle<Node> = opt.some %9: std::arena::Handle<Node>
+//   %19: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %20: Node = struct.new {value: %17: i64, left: %18: ?std::arena::Handle<Node>, right: %19: ?std::arena::Handle<Node>}
+//   %21: std::arena::Handle<Node> = arena.add %16: std::arena::Arena<Node>, %20: Node
+//   %22: i64 = call.Tree.sum %3: Tree, %21: std::arena::Handle<Node>
+//   call.print %22: i64
+//   call.Tree.deinit %3: Tree
+//   return void: void
+// }
+// fn Tree.deinit(%self: Tree) -> void {
+// entry:
+//   %1: std::arena::Arena<Node> = field.nodes %self: Tree
+//   arena.deinit %1: std::arena::Arena<Node>
+//   return void: void
+// }
+// opt:
+// fn Tree.sum(%self: Tree, %h: std::arena::Handle<Node>) -> i64 {
+// entry:
+//   %1: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %2: Node = arena.at %1: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %3: i64 = field.value %2: Node
+//   %4: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %5: Node = arena.at %4: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %6: ?std::arena::Handle<Node> = field.left %5: Node
+//   %7: std::arena::Handle<Node> = opt.value %6: ?std::arena::Handle<Node>
+//   %8: bool = opt.has %6: ?std::arena::Handle<Node>
+//   branch %8: bool, if.then.1, if.else.2
+// if.then.1:
+//   %9: i64 = call.Tree.sum %self: Tree, %7: std::arena::Handle<Node>
+//   %10: i64 = binary.+ %3: i64, %9: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %11: i64 = phi [if.then.1, %10: i64], [if.else.2, %3: i64]
+//   %12: std::arena::Arena<Node> = field.nodes %self: Tree
+//   %13: Node = arena.at %12: std::arena::Arena<Node>, %h: std::arena::Handle<Node>
+//   %14: ?std::arena::Handle<Node> = field.right %13: Node
+//   %15: std::arena::Handle<Node> = opt.value %14: ?std::arena::Handle<Node>
+//   %16: bool = opt.has %14: ?std::arena::Handle<Node>
+//   branch %16: bool, if.then.4, if.else.5
+// if.then.4:
+//   %17: i64 = call.Tree.sum %self: Tree, %15: std::arena::Handle<Node>
+//   %18: i64 = binary.+ %11: i64, %17: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %19: i64 = phi [if.then.4, %18: i64], [if.else.5, %11: i64]
+//   return %19: i64
+// }
+// fn main() -> void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::arena::Arena<Node> = arena.new %1: Allocator, Node
+//   %3: Tree = struct.new {nodes: %2: std::arena::Arena<Node>}
+//   %4: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %5: i64 = const 1
+//   %6: ?std::arena::Handle<Node> = opt.null
+//   %7: ?std::arena::Handle<Node> = opt.null
+//   %8: Node = struct.new {value: %5: i64, left: %6: ?std::arena::Handle<Node>, right: %7: ?std::arena::Handle<Node>}
+//   %9: std::arena::Handle<Node> = arena.add %4: std::arena::Arena<Node>, %8: Node
+//   %10: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %11: i64 = const 4
+//   %12: ?std::arena::Handle<Node> = opt.null
+//   %13: ?std::arena::Handle<Node> = opt.null
+//   %14: Node = struct.new {value: %11: i64, left: %12: ?std::arena::Handle<Node>, right: %13: ?std::arena::Handle<Node>}
+//   %15: std::arena::Handle<Node> = arena.add %10: std::arena::Arena<Node>, %14: Node
+//   %16: std::arena::Arena<Node> = field.nodes %3: Tree
+//   %17: i64 = const 2
+//   %18: ?std::arena::Handle<Node> = opt.some %9: std::arena::Handle<Node>
+//   %19: ?std::arena::Handle<Node> = opt.some %15: std::arena::Handle<Node>
+//   %20: Node = struct.new {value: %17: i64, left: %18: ?std::arena::Handle<Node>, right: %19: ?std::arena::Handle<Node>}
+//   %21: std::arena::Handle<Node> = arena.add %16: std::arena::Arena<Node>, %20: Node
+//   %22: i64 = call.Tree.sum %3: Tree, %21: std::arena::Handle<Node>
+//   call.print %22: i64
+//   call.Tree.deinit %3: Tree
+//   return void: void
+// }
+// fn Tree.deinit(%self: Tree) -> void {
+// entry:
+//   %1: std::arena::Arena<Node> = field.nodes %self: Tree
+//   arena.deinit %1: std::arena::Arena<Node>
+//   return void: void
+// }

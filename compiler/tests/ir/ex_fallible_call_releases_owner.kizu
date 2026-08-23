@@ -1,0 +1,113 @@
+import std::mem;
+import std::string;
+
+struct Noisy {
+    pub name: string::String,
+}
+
+fn (self: Noisy) deinit() -> void {
+    print("released");
+    self.name.deinit();
+    return;
+}
+
+// `box` takes its value by value, so `name` is moved into the struct and the
+// struct into the call: this frame has nothing left to clean up. When the
+// allocation fails, the value was written nowhere, and the obligation is the
+// callee's — `box` releases it before the error leaves. `released` is that
+// cleanup running.
+fn attempt(alloc: Allocator) -> !void {
+    var name = string::new(alloc);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+
+    let boxed = try mem::box<Noisy>(alloc, Noisy { name: move name });
+    defer boxed.deinit();
+    print("unreachable");
+    return;
+}
+
+fn main() -> !void {
+    var buf = [160]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+    try attempt(alloc);
+    return;
+}
+
+// run-fails
+// features: ownership deinit errdefer box fixed-buffer allocator error-union
+// error: runtime error: std::mem::Error::OutOfMemory
+
+
+// ir
+// lower:
+// fn Noisy.deinit(%self: Noisy) -> void {
+// entry:
+//   %1: []u8 = const "released"
+//   call.print %1: []u8
+//   %3: std::string::String = field.name %self: Noisy
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn attempt(%alloc: Allocator) -> !void {
+// entry:
+//   %1: std::string::String = call.std::string::new %alloc: Allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !void = call.std::string::String.append_byte %1: std::string::String, %3: u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %6: Noisy = struct.new {name: %1: std::string::String}
+//   %7: !std::mem::Box<Noisy> = call.std::mem::box.Noisy %alloc: Allocator, %6: Noisy
+//   %8: std::mem::Box<Noisy> = error.try %7: !std::mem::Box<Noisy>
+//   %9: []u8 = const "unreachable"
+//   call.print %9: []u8
+//   call.std::mem::Box.deinit.Noisy %8: std::mem::Box<Noisy>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %1: [160]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [160]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: !void = call.attempt %3: Allocator
+//   error.try %4: !void
+//   %6: !void = error.ok
+//   return %6: !void
+// }
+// opt:
+// fn Noisy.deinit(%self: Noisy) -> void {
+// entry:
+//   %1: []u8 = const "released"
+//   call.print %1: []u8
+//   %3: std::string::String = field.name %self: Noisy
+//   call.std::string::String.deinit %3: std::string::String
+//   return void: void
+// }
+// fn attempt(%alloc: Allocator) -> !void {
+// entry:
+//   %1: std::string::String = call.std::string::new %alloc: Allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !void = call.std::string::String.append_byte %1: std::string::String, %3: u8
+//   error.try %4: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %6: Noisy = struct.new {name: %1: std::string::String}
+//   %7: !std::mem::Box<Noisy> = call.std::mem::box.Noisy %alloc: Allocator, %6: Noisy
+//   %8: std::mem::Box<Noisy> = error.try %7: !std::mem::Box<Noisy>
+//   %9: []u8 = const "unreachable"
+//   call.print %9: []u8
+//   call.std::mem::Box.deinit.Noisy %8: std::mem::Box<Noisy>
+//   %12: !void = error.ok
+//   return %12: !void
+// }
+// fn main() -> !void {
+// entry:
+//   %1: [160]u8 = buffer.new
+//   %2: []u8 = buffer.as_bytes %1: [160]u8
+//   %3: Allocator = call.std::mem::fixed_buffer %2: []u8
+//   %4: !void = call.attempt %3: Allocator
+//   error.try %4: !void
+//   %6: !void = error.ok
+//   return %6: !void
+// }

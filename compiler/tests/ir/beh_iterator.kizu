@@ -1,0 +1,493 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::testing;
+
+// std::mem::bytes_iter is the std spelling of the iterator protocol: a
+// `next() -> ?u8` cursor drives `while` to exhaustion, no has_next needed.
+test "std bytes_iter walks a view to exhaustion" {
+    var it = mem::bytes_iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+    if it.next() |ghost| {
+        testing::expect_equal<i64>(-1, cast<i64>(ghost));
+    }
+}
+
+// Map.key_at(index) walks keys in insertion order (ADR-0088). The key is a
+// view into map storage, so the capture holds the map share-borrowed for the
+// key's scope.
+test "map key_at walks keys in insertion order" {
+    let allocator = mem::page_allocator();
+    let scores = map::new<[]u8, i64>(allocator);
+    defer scores.deinit();
+    try scores.insert("one", 1);
+    try scores.insert("two", 2);
+    try scores.insert("three", 3);
+
+    var lengths = 0;
+    var total = 0;
+    var index = 0;
+    while scores.key_at(index) |key| {
+        lengths = lengths * 10 + mem::len(key);
+        total = total + (scores.get(key) orelse 0);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(335, lengths);
+    testing::expect_equal<i64>(6, total);
+    testing::expect_equal<i64>(3, index);
+}
+
+// Non-copy elements iterate the same way: `at(index) -> ?&T` binds the
+// element borrow as the capture, null past the end stops the loop, and the
+// capture holds the array borrowed for the element's scope.
+test "array at drives non-copy element iteration" {
+    let allocator = mem::page_allocator();
+    var words = array::new<Word>(allocator);
+    defer words.deinit();
+    try words.append(Word { text: "kizu" });
+    try words.append(Word { text: "at" });
+
+    if words.at_mut(1) |slot| {
+        slot.* = Word { text: "iter" };
+    }
+
+    var lengths = 0;
+    var index = 0;
+    while words.at(index) |word| {
+        lengths = lengths * 10 + mem::len(word.text);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(44, lengths);
+    testing::expect_equal<i64>(2, index);
+    if words.at(9) |ghost| {
+        testing::expect_equal<i64>(-1, mem::len(ghost.text));
+    }
+}
+
+struct Word {
+    pub text: []u8,
+}
+
+// Array iteration needs no cursor type: `get(index) -> ?T` already drives a
+// while capture, and null past the end stops the loop.
+test "array get drives index iteration" {
+    let allocator = mem::page_allocator();
+    let values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(5);
+    try values.append(7);
+    try values.append(11);
+
+    var product = 1;
+    var index = 0;
+    while values.get(index) |value| {
+        product = product * value;
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(385, product);
+}
+
+
+// ir
+// lower:
+// fn test.std_bytes_iter_walks_a_view_to_exhaustion() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: std::mem::BytesIter = call.std::mem::bytes_iter %1: []u8
+//   %3: &var std::mem::BytesIter = local.slot %2: std::mem::BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: ?u8 = call.std::mem::BytesIter.next %3: &var std::mem::BytesIter
+//   %7: u8 = opt.value %6: ?u8
+//   %8: bool = opt.has %6: ?u8
+//   branch %8: bool, while.body.2, while.end.3
+// while.body.2:
+//   %9: i64 = cast %7: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: ?u8 = call.std::mem::BytesIter.next %3: &var std::mem::BytesIter
+//   %14: u8 = opt.value %13: ?u8
+//   %15: bool = opt.has %13: ?u8
+//   branch %15: bool, if.then.4, if.else.5
+// if.then.4:
+//   %16: i64 = const 1
+//   %17: i64 = unary.- %16: i64
+//   %18: i64 = cast %14: u8, i64
+//   test.expect_equal %17: i64, %18: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.map_key_at_walks_keys_in_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "one"
+//   %4: i64 = const 1
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "two"
+//   %8: i64 = const 2
+//   %9: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %7: []u8, %8: i64
+//   error.try %9: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %11: []u8 = const "three"
+//   %12: i64 = const 3
+//   %13: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %11: []u8, %12: i64
+//   error.try %13: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %15: i64 = const 0
+//   %16: i64 = const 0
+//   %17: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %18: i64 = phi [entry, %15: i64], [orelse.end.6, %27: i64]
+//   %19: i64 = phi [entry, %16: i64], [orelse.end.6, %33: i64]
+//   %20: i64 = phi [entry, %17: i64], [orelse.end.6, %35: i64]
+//   %21: ?[]u8 = call.std::map::Map.key_at.i64 %2: std::map::Map<[]u8, i64>, %20: i64
+//   %22: []u8 = opt.value %21: ?[]u8
+//   %23: bool = opt.has %21: ?[]u8
+//   branch %23: bool, while.body.2, while.end.3
+// while.body.2:
+//   %24: i64 = const 10
+//   %25: i64 = binary.* %18: i64, %24: i64
+//   %26: i64 = call.std::mem::len %22: []u8
+//   %27: i64 = binary.+ %25: i64, %26: i64
+//   %28: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %22: []u8
+//   %29: bool = opt.has %28: ?i64
+//   branch %29: bool, orelse.some.4, orelse.else.5
+// while.end.3:
+//   %36: i64 = const 335
+//   test.expect_equal %36: i64, %18: i64, i64
+//   %38: i64 = const 6
+//   test.expect_equal %38: i64, %19: i64, i64
+//   %40: i64 = const 3
+//   test.expect_equal %40: i64, %20: i64, i64
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %43: !void = error.ok
+//   return %43: !void
+// orelse.some.4:
+//   %30: i64 = opt.value %28: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %31: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %32: i64 = phi [orelse.some.4, %30: i64], [orelse.else.5, %31: i64]
+//   %33: i64 = binary.+ %19: i64, %32: i64
+//   %34: i64 = const 1
+//   %35: i64 = binary.+ %20: i64, %34: i64
+//   jump while.header.1
+// }
+// fn test.array_at_drives_non_copy_element_iteration() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Word> = array.new %1: Allocator, Word
+//   %3: []u8 = const "kizu"
+//   %4: Word = struct.new {text: %3: []u8}
+//   %5: !void = call.std::array::Array.append.Word %2: std::array::Array<Word>, %4: Word
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Word>
+//   %7: []u8 = const "at"
+//   %8: Word = struct.new {text: %7: []u8}
+//   %9: !void = call.std::array::Array.append.Word %2: std::array::Array<Word>, %8: Word
+//   error.try %9: !void, cleanup array.deinit %2: std::array::Array<Word>
+//   %11: i64 = const 1
+//   %12: ?&var Word = call.std::array::Array.at_mut.Word %2: std::array::Array<Word>, %11: i64
+//   %13: &var Word = opt.value %12: ?&var Word
+//   %14: bool = opt.has %12: ?&var Word
+//   branch %14: bool, if.then.1, if.else.2
+// if.then.1:
+//   %15: []u8 = const "iter"
+//   %16: Word = struct.new {text: %15: []u8}
+//   ref.store %13: &var Word, %16: Word
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %18: i64 = const 0
+//   %19: i64 = const 0
+//   jump while.header.4
+// while.header.4:
+//   %20: i64 = phi [if.end.3, %18: i64], [while.body.5, %29: i64]
+//   %21: i64 = phi [if.end.3, %19: i64], [while.body.5, %31: i64]
+//   %22: ?&Word = call.std::array::Array.at.Word %2: std::array::Array<Word>, %21: i64
+//   %23: &Word = opt.value %22: ?&Word
+//   %24: bool = opt.has %22: ?&Word
+//   branch %24: bool, while.body.5, while.end.6
+// while.body.5:
+//   %25: i64 = const 10
+//   %26: i64 = binary.* %20: i64, %25: i64
+//   %27: []u8 = field.ref.text %23: &Word
+//   %28: i64 = call.std::mem::len %27: []u8
+//   %29: i64 = binary.+ %26: i64, %28: i64
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %21: i64, %30: i64
+//   jump while.header.4
+// while.end.6:
+//   %32: i64 = const 44
+//   test.expect_equal %32: i64, %20: i64, i64
+//   %34: i64 = const 2
+//   test.expect_equal %34: i64, %21: i64, i64
+//   %36: i64 = const 9
+//   %37: ?&Word = call.std::array::Array.at.Word %2: std::array::Array<Word>, %36: i64
+//   %38: &Word = opt.value %37: ?&Word
+//   %39: bool = opt.has %37: ?&Word
+//   branch %39: bool, if.then.7, if.else.8
+// if.then.7:
+//   %40: i64 = const 1
+//   %41: i64 = unary.- %40: i64
+//   %42: []u8 = field.ref.text %38: &Word
+//   %43: i64 = call.std::mem::len %42: []u8
+//   test.expect_equal %41: i64, %43: i64, i64
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   array.deinit %2: std::array::Array<Word>
+//   %46: !void = error.ok
+//   return %46: !void
+// }
+// fn test.array_get_drives_index_iteration() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 5
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: i64 = const 11
+//   %10: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %9: i64
+//   error.try %10: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %12: i64 = const 1
+//   %13: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %14: i64 = phi [entry, %12: i64], [while.body.2, %19: i64]
+//   %15: i64 = phi [entry, %13: i64], [while.body.2, %21: i64]
+//   %16: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %15: i64
+//   %17: i64 = opt.value %16: ?i64
+//   %18: bool = opt.has %16: ?i64
+//   branch %18: bool, while.body.2, while.end.3
+// while.body.2:
+//   %19: i64 = binary.* %14: i64, %17: i64
+//   %20: i64 = const 1
+//   %21: i64 = binary.+ %15: i64, %20: i64
+//   jump while.header.1
+// while.end.3:
+//   %22: i64 = const 385
+//   test.expect_equal %22: i64, %14: i64, i64
+//   array.deinit %2: std::array::Array<i64>
+//   %25: !void = error.ok
+//   return %25: !void
+// }
+// opt:
+// fn test.std_bytes_iter_walks_a_view_to_exhaustion() -> !void {
+// entry:
+//   %1: []u8 = const "kizu"
+//   %2: std::mem::BytesIter = call.std::mem::bytes_iter %1: []u8
+//   %3: &var std::mem::BytesIter = local.slot %2: std::mem::BytesIter
+//   %4: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %5: i64 = phi [entry, %4: i64], [while.body.2, %10: i64]
+//   %6: ?u8 = call.std::mem::BytesIter.next %3: &var std::mem::BytesIter
+//   %7: u8 = opt.value %6: ?u8
+//   %8: bool = opt.has %6: ?u8
+//   branch %8: bool, while.body.2, while.end.3
+// while.body.2:
+//   %9: i64 = cast %7: u8, i64
+//   %10: i64 = binary.+ %5: i64, %9: i64
+//   jump while.header.1
+// while.end.3:
+//   %11: i64 = const 451
+//   test.expect_equal %11: i64, %5: i64, i64
+//   %13: ?u8 = call.std::mem::BytesIter.next %3: &var std::mem::BytesIter
+//   %14: u8 = opt.value %13: ?u8
+//   %15: bool = opt.has %13: ?u8
+//   branch %15: bool, if.then.4, if.else.5
+// if.then.4:
+//   %16: i64 = const 1
+//   %17: i64 = unary.- %16: i64
+//   %18: i64 = cast %14: u8, i64
+//   test.expect_equal %17: i64, %18: i64, i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %20: !void = error.ok
+//   return %20: !void
+// }
+// fn test.map_key_at_walks_keys_in_insertion_order() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "one"
+//   %4: i64 = const 1
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "two"
+//   %8: i64 = const 2
+//   %9: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %7: []u8, %8: i64
+//   error.try %9: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %11: []u8 = const "three"
+//   %12: i64 = const 3
+//   %13: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %11: []u8, %12: i64
+//   error.try %13: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %15: i64 = const 0
+//   %16: i64 = const 0
+//   %17: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %18: i64 = phi [entry, %15: i64], [orelse.end.6, %27: i64]
+//   %19: i64 = phi [entry, %16: i64], [orelse.end.6, %33: i64]
+//   %20: i64 = phi [entry, %17: i64], [orelse.end.6, %35: i64]
+//   %21: ?[]u8 = call.std::map::Map.key_at.i64 %2: std::map::Map<[]u8, i64>, %20: i64
+//   %22: []u8 = opt.value %21: ?[]u8
+//   %23: bool = opt.has %21: ?[]u8
+//   branch %23: bool, while.body.2, while.end.3
+// while.body.2:
+//   %24: i64 = const 10
+//   %25: i64 = binary.* %18: i64, %24: i64
+//   %26: i64 = call.std::mem::len %22: []u8
+//   %27: i64 = binary.+ %25: i64, %26: i64
+//   %28: ?i64 = call.std::map::Map.get.i64 %2: std::map::Map<[]u8, i64>, %22: []u8
+//   %29: bool = opt.has %28: ?i64
+//   branch %29: bool, orelse.some.4, orelse.else.5
+// while.end.3:
+//   %36: i64 = const 335
+//   test.expect_equal %36: i64, %18: i64, i64
+//   %38: i64 = const 6
+//   test.expect_equal %38: i64, %19: i64, i64
+//   %40: i64 = const 3
+//   test.expect_equal %40: i64, %20: i64, i64
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %43: !void = error.ok
+//   return %43: !void
+// orelse.some.4:
+//   %30: i64 = opt.value %28: ?i64
+//   jump orelse.end.6
+// orelse.else.5:
+//   %31: i64 = const 0
+//   jump orelse.end.6
+// orelse.end.6:
+//   %32: i64 = phi [orelse.some.4, %30: i64], [orelse.else.5, %31: i64]
+//   %33: i64 = binary.+ %19: i64, %32: i64
+//   %34: i64 = const 1
+//   %35: i64 = binary.+ %20: i64, %34: i64
+//   jump while.header.1
+// }
+// fn test.array_at_drives_non_copy_element_iteration() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Word> = array.new %1: Allocator, Word
+//   %3: []u8 = const "kizu"
+//   %4: Word = struct.new {text: %3: []u8}
+//   %5: !void = call.std::array::Array.append.Word %2: std::array::Array<Word>, %4: Word
+//   error.try %5: !void, cleanup array.deinit %2: std::array::Array<Word>
+//   %7: []u8 = const "at"
+//   %8: Word = struct.new {text: %7: []u8}
+//   %9: !void = call.std::array::Array.append.Word %2: std::array::Array<Word>, %8: Word
+//   error.try %9: !void, cleanup array.deinit %2: std::array::Array<Word>
+//   %11: i64 = const 1
+//   %12: ?&var Word = call.std::array::Array.at_mut.Word %2: std::array::Array<Word>, %11: i64
+//   %13: &var Word = opt.value %12: ?&var Word
+//   %14: bool = opt.has %12: ?&var Word
+//   branch %14: bool, if.then.1, if.else.2
+// if.then.1:
+//   %15: []u8 = const "iter"
+//   %16: Word = struct.new {text: %15: []u8}
+//   ref.store %13: &var Word, %16: Word
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %18: i64 = const 0
+//   %19: i64 = const 0
+//   jump while.header.4
+// while.header.4:
+//   %20: i64 = phi [if.end.3, %18: i64], [while.body.5, %29: i64]
+//   %21: i64 = phi [if.end.3, %19: i64], [while.body.5, %31: i64]
+//   %22: ?&Word = call.std::array::Array.at.Word %2: std::array::Array<Word>, %21: i64
+//   %23: &Word = opt.value %22: ?&Word
+//   %24: bool = opt.has %22: ?&Word
+//   branch %24: bool, while.body.5, while.end.6
+// while.body.5:
+//   %25: i64 = const 10
+//   %26: i64 = binary.* %20: i64, %25: i64
+//   %27: []u8 = field.ref.text %23: &Word
+//   %28: i64 = call.std::mem::len %27: []u8
+//   %29: i64 = binary.+ %26: i64, %28: i64
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %21: i64, %30: i64
+//   jump while.header.4
+// while.end.6:
+//   %32: i64 = const 44
+//   test.expect_equal %32: i64, %20: i64, i64
+//   %34: i64 = const 2
+//   test.expect_equal %34: i64, %21: i64, i64
+//   %36: i64 = const 9
+//   %37: ?&Word = call.std::array::Array.at.Word %2: std::array::Array<Word>, %36: i64
+//   %38: &Word = opt.value %37: ?&Word
+//   %39: bool = opt.has %37: ?&Word
+//   branch %39: bool, if.then.7, if.else.8
+// if.then.7:
+//   %40: i64 = const 1
+//   %41: i64 = unary.- %40: i64
+//   %42: []u8 = field.ref.text %38: &Word
+//   %43: i64 = call.std::mem::len %42: []u8
+//   test.expect_equal %41: i64, %43: i64, i64
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   array.deinit %2: std::array::Array<Word>
+//   %46: !void = error.ok
+//   return %46: !void
+// }
+// fn test.array_get_drives_index_iteration() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 5
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 7
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: i64 = const 11
+//   %10: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %9: i64
+//   error.try %10: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %12: i64 = const 1
+//   %13: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %14: i64 = phi [entry, %12: i64], [while.body.2, %19: i64]
+//   %15: i64 = phi [entry, %13: i64], [while.body.2, %21: i64]
+//   %16: ?i64 = call.std::array::Array.get.i64 %2: std::array::Array<i64>, %15: i64
+//   %17: i64 = opt.value %16: ?i64
+//   %18: bool = opt.has %16: ?i64
+//   branch %18: bool, while.body.2, while.end.3
+// while.body.2:
+//   %19: i64 = binary.* %14: i64, %17: i64
+//   %20: i64 = const 1
+//   %21: i64 = binary.+ %15: i64, %20: i64
+//   jump while.header.1
+// while.end.3:
+//   %22: i64 = const 385
+//   test.expect_equal %22: i64, %14: i64, i64
+//   array.deinit %2: std::array::Array<i64>
+//   %25: !void = error.ok
+//   return %25: !void
+// }

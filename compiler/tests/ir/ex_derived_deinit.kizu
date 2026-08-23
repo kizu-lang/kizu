@@ -1,0 +1,206 @@
+import std::mem;
+import std::string;
+
+// None of these declares a `deinit`. A type whose obligations are its fields'
+// obligations has only one body it could write -- consume each of them -- so
+// the compiler writes it. `Visitor` holds one plainly and one conditionally,
+// `Slot` holds one in a variant, and `Party` holds a `Visitor`, which is what
+// makes `Party` an owner in turn.
+struct Visitor {
+    name: string::String,
+    nick: ?string::String,
+}
+
+union Slot {
+    Kept(string::String),
+    Vacant,
+}
+
+struct Party {
+    host: Visitor,
+    seat: Slot,
+}
+
+fn build(allocator: Allocator, byte: u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_byte(byte);
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let host = Visitor {
+        name: try build(allocator, cast<u8>(97)),
+        nick: null,
+    };
+    let party = Party {
+        host: move host,
+        seat: Slot::Kept(try build(allocator, cast<u8>(98))),
+    };
+    defer party.deinit();
+    print(party.host.name.len());
+    return;
+}
+
+// run
+// features: ownership deinit derived optional union std-string errdefer
+// output:
+// 1
+
+
+// ir
+// lower:
+// fn build(%allocator: Allocator, %byte: u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_byte %1: std::string::String, %byte: u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !std::string::String = call.build %1: Allocator, %3: u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: ?std::string::String = opt.null
+//   %7: Visitor = struct.new {name: %5: std::string::String, nick: %6: ?std::string::String}
+//   %8: i64 = const 98
+//   %9: u8 = cast %8: i64, u8
+//   %10: !std::string::String = call.build %1: Allocator, %9: u8
+//   %11: std::string::String = error.try %10: !std::string::String
+//   %12: Slot = union.new %11: std::string::String, Kept
+//   %13: Party = struct.new {host: %7: Visitor, seat: %12: Slot}
+//   %14: Visitor = field.host %13: Party
+//   %15: std::string::String = field.name %14: Visitor
+//   %16: i64 = call.std::string::String.len %15: std::string::String
+//   call.print %16: i64
+//   call.Party.deinit %13: Party
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Visitor
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn Party.deinit(%self: Party) -> void {
+// entry:
+//   %1: Visitor = field.host %self: Party
+//   call.Visitor.deinit %1: Visitor
+//   %3: Slot = field.seat %self: Party
+//   call.Slot.deinit %3: Slot
+//   return void: void
+// }
+// opt:
+// fn build(%allocator: Allocator, %byte: u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_byte %1: std::string::String, %byte: u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: i64 = const 97
+//   %3: u8 = cast %2: i64, u8
+//   %4: !std::string::String = call.build %1: Allocator, %3: u8
+//   %5: std::string::String = error.try %4: !std::string::String
+//   %6: ?std::string::String = opt.null
+//   %7: Visitor = struct.new {name: %5: std::string::String, nick: %6: ?std::string::String}
+//   %8: i64 = const 98
+//   %9: u8 = cast %8: i64, u8
+//   %10: !std::string::String = call.build %1: Allocator, %9: u8
+//   %11: std::string::String = error.try %10: !std::string::String
+//   %12: Slot = union.new %11: std::string::String, Kept
+//   %13: Party = struct.new {host: %7: Visitor, seat: %12: Slot}
+//   %14: Visitor = field.host %13: Party
+//   %15: std::string::String = field.name %14: Visitor
+//   %16: i64 = call.std::string::String.len %15: std::string::String
+//   call.print %16: i64
+//   call.Party.deinit %13: Party
+//   %19: !void = error.ok
+//   return %19: !void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Visitor
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Slot.deinit(%self: Slot) -> void {
+// entry:
+//   %1: i64 = union.tag %self: Slot
+//   jump match.check.2
+// match.end.1:
+//   return void: void
+// match.check.2:
+//   %2: bool = binary.== %1: i64, 0: i64
+//   branch %2: bool, match.arm.3, match.check.4
+// match.arm.3:
+//   %3: std::string::String = union.payload %self: Slot, Kept
+//   call.std::string::String.deinit %3: std::string::String
+//   jump match.end.1
+// match.check.4:
+//   %5: bool = binary.== %1: i64, 1: i64
+//   branch %5: bool, match.arm.5, match.unreachable.6
+// match.arm.5:
+//   jump match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// fn Party.deinit(%self: Party) -> void {
+// entry:
+//   %1: Visitor = field.host %self: Party
+//   call.Visitor.deinit %1: Visitor
+//   %3: Slot = field.seat %self: Party
+//   call.Slot.deinit %3: Slot
+//   return void: void
+// }

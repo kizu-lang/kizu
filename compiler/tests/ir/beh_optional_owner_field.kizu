@@ -1,0 +1,891 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+import std::testing;
+
+pub struct Visitor {
+    pub name: string::String,
+    pub nick: ?string::String,
+}
+
+pub struct Bag {
+    pub items: ?array::Array<i64>,
+    pub counts: ?map::Map<[]u8, i64>,
+    pub held: ?mem::Box<i64>,
+}
+
+fn (self: Bag) deinit() -> void {
+    if self.items |items| {
+        items.deinit();
+    }
+    if self.counts |counts| {
+        counts.deinit();
+    }
+    if self.held |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+// The capture borrows the visitor's storage, so a view taken from it cannot
+// escape this scope. The comparison happens where the borrow is live.
+fn expect_nick(visitor: &Visitor, expected: []u8) -> void {
+    if visitor.nick |held| {
+        let bytes = held.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::expect_equal<[]u8>(expected, "none");
+    }
+    return;
+}
+
+test "optional owner field holds a string" {
+    let allocator = mem::page_allocator();
+
+    var known = Visitor {
+        name: try owned(allocator, "alice"),
+        nick: try owned(allocator, "al"),
+    };
+    defer known.deinit();
+    expect_nick(&known, "al");
+
+    var plain = Visitor { name: try owned(allocator, "bob"), nick: null };
+    defer plain.deinit();
+    expect_nick(&plain, "none");
+}
+
+// Every owner shape reaches the field, not just String: what the rule reads is
+// whether the element owes cleanup.
+test "optional owner field holds containers" {
+    let allocator = mem::page_allocator();
+
+    var items = array::new<i64>(allocator);
+    errdefer items.deinit();
+    try items.append(7);
+    try items.append(9);
+
+    var counts = map::new<[]u8, i64>(allocator);
+    errdefer counts.deinit();
+    try counts.insert("hit", 3);
+
+    var bag = Bag {
+        items: move items,
+        counts: move counts,
+        held: try mem::box<i64>(allocator, 5),
+    };
+    defer bag.deinit();
+
+    if bag.items |held| {
+        testing::expect_equal<i64>(2, held.len());
+    } else {
+        testing::fail("items is missing");
+    }
+    if bag.counts |held| {
+        testing::expect_equal<i64>(3, held.get("hit") orelse 0);
+    } else {
+        testing::fail("counts is missing");
+    }
+    if bag.held |held| {
+        let number = held.borrow();
+        testing::expect_equal<i64>(5, number.*);
+    } else {
+        testing::fail("held is missing");
+    }
+}
+
+test "optional owner field is null when empty" {
+    var bag = Bag { items: null, counts: null, held: null };
+    defer bag.deinit();
+    if bag.items |_| {
+        testing::fail("items should be null");
+    }
+}
+
+fn maybe(allocator: Allocator, want: bool) -> !?string::String {
+    if want {
+        let text = try owned(allocator, "made");
+        return move text;
+    }
+    return null;
+}
+
+// The borrow is the default answer for an owner payload, so the shapes that do
+// hand one over have to stay owned: `pop` moves the element out, and a call
+// that built one hands back what it built.
+test "optional owner produced by a call stays owned" {
+    let allocator = mem::page_allocator();
+
+    var items = array::new<string::String>(allocator);
+    errdefer items.deinit();
+    try items.append(try owned(allocator, "a"));
+    try items.append(try owned(allocator, "b"));
+
+    var drained = 0;
+    while items.pop() |item| {
+        item.deinit();
+        drained = drained + 1;
+    }
+    items.deinit();
+    testing::expect_equal<i64>(2, drained);
+
+    if try maybe(allocator, true) |made| {
+        made.deinit();
+    } else {
+        testing::fail("maybe should have made one");
+    }
+    if try maybe(allocator, false) |made| {
+        made.deinit();
+        testing::fail("maybe should have made nothing");
+    }
+}
+
+pub struct Held {
+    pub nick: ?string::String,
+}
+
+fn (self: Held) deinit() -> void {
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+// A container releases what its elements hold by calling their deinit, and a
+// `?Owner` field is released by that deinit like any other field.
+test "optional owner field inside containers" {
+    let allocator = mem::page_allocator();
+
+    var list = array::new<Held>(allocator);
+    defer list.deinit();
+    try list.append(Held { nick: try owned(allocator, "al") });
+    try list.append(Held { nick: null });
+    testing::expect_equal<i64>(2, list.len());
+
+    var table = map::new<[]u8, Held>(allocator);
+    defer table.deinit();
+    try table.insert("alice", Held { nick: try owned(allocator, "al") });
+    if table.at("alice") |entry| {
+        if entry.nick |nick| {
+            let bytes = nick.as_bytes();
+            testing::expect_equal<[]u8>("al", bytes);
+        } else {
+            testing::fail("nick is missing");
+        }
+    } else {
+        testing::fail("alice is missing");
+    }
+}
+
+
+// ir
+// lower:
+// fn Bag.deinit(%self: Bag) -> void {
+// entry:
+//   %1: ?std::array::Array<i64> = field.items %self: Bag
+//   %2: std::array::Array<i64> = opt.value %1: ?std::array::Array<i64>
+//   %3: bool = opt.has %1: ?std::array::Array<i64>
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %5: ?std::map::Map<[]u8, i64> = field.counts %self: Bag
+//   %6: std::map::Map<[]u8, i64> = opt.value %5: ?std::map::Map<[]u8, i64>
+//   %7: bool = opt.has %5: ?std::map::Map<[]u8, i64>
+//   branch %7: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::map::Map.deinit.i64 %6: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %9: ?std::mem::Box<i64> = field.held %self: Bag
+//   %10: std::mem::Box<i64> = opt.value %9: ?std::mem::Box<i64>
+//   %11: bool = opt.has %9: ?std::mem::Box<i64>
+//   branch %11: bool, if.then.7, if.else.8
+// if.then.7:
+//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   return void: void
+// }
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn expect_nick(%visitor: Visitor, %expected: []u8) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %visitor: Visitor
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   test.expect_equal %expected: []u8, %4: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %6: []u8 = const "none"
+//   test.expect_equal %expected: []u8, %6: []u8, []u8
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn maybe(%allocator: Allocator, %want: bool) -> !?std::string::String {
+// entry:
+//   branch %want: bool, if.then.1, if.else.2
+// if.then.1:
+//   %1: []u8 = const "made"
+//   %2: !std::string::String = call.owned %allocator: Allocator, %1: []u8
+//   %3: std::string::String = error.try %2: !std::string::String
+//   %4: ?std::string::String = opt.some %3: std::string::String
+//   %5: !?std::string::String = error.ok %4: ?std::string::String
+//   return %5: !?std::string::String
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: ?std::string::String = opt.null
+//   %7: !?std::string::String = error.ok %6: ?std::string::String
+//   return %7: !?std::string::String
+// }
+// fn Held.deinit(%self: Held) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %self: Held
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %2: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Visitor
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn test.optional_owner_field_holds_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "alice"
+//   %3: !std::string::String = call.owned %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: []u8 = const "al"
+//   %6: !std::string::String = call.owned %1: Allocator, %5: []u8
+//   %7: std::string::String = error.try %6: !std::string::String
+//   %8: ?std::string::String = opt.some %7: std::string::String
+//   %9: Visitor = struct.new {name: %4: std::string::String, nick: %8: ?std::string::String}
+//   %10: []u8 = const "al"
+//   call.expect_nick %9: Visitor, %10: []u8
+//   %12: []u8 = const "bob"
+//   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
+//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor
+//   %15: ?std::string::String = opt.null
+//   %16: Visitor = struct.new {name: %14: std::string::String, nick: %15: ?std::string::String}
+//   %17: []u8 = const "none"
+//   call.expect_nick %16: Visitor, %17: []u8
+//   call.Visitor.deinit %16: Visitor
+//   call.Visitor.deinit %9: Visitor
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.optional_owner_field_holds_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 7
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 9
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %10: []u8 = const "hit"
+//   %11: i64 = const 3
+//   %12: !void = call.std::map::Map.insert.i64 %9: std::map::Map<[]u8, i64>, %10: []u8, %11: i64
+//   error.try %12: !void, cleanup map.deinit %9: std::map::Map<[]u8, i64>; array.deinit %2: std::array::Array<i64>
+//   %14: ?std::array::Array<i64> = opt.some %2: std::array::Array<i64>
+//   %15: ?std::map::Map<[]u8, i64> = opt.some %9: std::map::Map<[]u8, i64>
+//   %16: i64 = const 5
+//   %17: !std::mem::Box<i64> = call.std::mem::box.i64 %1: Allocator, %16: i64
+//   %18: std::mem::Box<i64> = error.try %17: !std::mem::Box<i64>
+//   %19: ?std::mem::Box<i64> = opt.some %18: std::mem::Box<i64>
+//   %20: Bag = struct.new {items: %14: ?std::array::Array<i64>, counts: %15: ?std::map::Map<[]u8, i64>, held: %19: ?std::mem::Box<i64>}
+//   %21: ?std::array::Array<i64> = field.items %20: Bag
+//   %22: std::array::Array<i64> = opt.value %21: ?std::array::Array<i64>
+//   %23: bool = opt.has %21: ?std::array::Array<i64>
+//   branch %23: bool, if.then.1, if.else.2
+// if.then.1:
+//   %24: i64 = const 2
+//   %25: i64 = call.std::array::Array.len.i64 %22: std::array::Array<i64>
+//   test.expect_equal %24: i64, %25: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %27: []u8 = const "items is missing"
+//   call.std::testing::fail %27: []u8
+//   jump if.end.3
+// if.end.3:
+//   %29: ?std::map::Map<[]u8, i64> = field.counts %20: Bag
+//   %30: std::map::Map<[]u8, i64> = opt.value %29: ?std::map::Map<[]u8, i64>
+//   %31: bool = opt.has %29: ?std::map::Map<[]u8, i64>
+//   branch %31: bool, if.then.4, if.else.5
+// if.then.4:
+//   %32: i64 = const 3
+//   %33: []u8 = const "hit"
+//   %34: ?i64 = call.std::map::Map.get.i64 %30: std::map::Map<[]u8, i64>, %33: []u8
+//   %35: bool = opt.has %34: ?i64
+//   branch %35: bool, orelse.some.7, orelse.else.8
+// if.else.5:
+//   %40: []u8 = const "counts is missing"
+//   call.std::testing::fail %40: []u8
+//   jump if.end.6
+// if.end.6:
+//   %42: ?std::mem::Box<i64> = field.held %20: Bag
+//   %43: std::mem::Box<i64> = opt.value %42: ?std::mem::Box<i64>
+//   %44: bool = opt.has %42: ?std::mem::Box<i64>
+//   branch %44: bool, if.then.10, if.else.11
+// orelse.some.7:
+//   %36: i64 = opt.value %34: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %37: i64 = const 0
+//   jump orelse.end.9
+// orelse.end.9:
+//   %38: i64 = phi [orelse.some.7, %36: i64], [orelse.else.8, %37: i64]
+//   test.expect_equal %32: i64, %38: i64, i64
+//   jump if.end.6
+// if.then.10:
+//   %45: i64 = call.std::mem::Box.borrow.i64 %43: std::mem::Box<i64>
+//   %46: i64 = const 5
+//   test.expect_equal %46: i64, %45: i64, i64
+//   jump if.end.12
+// if.else.11:
+//   %48: []u8 = const "held is missing"
+//   call.std::testing::fail %48: []u8
+//   jump if.end.12
+// if.end.12:
+//   call.Bag.deinit %20: Bag
+//   %51: !void = error.ok
+//   return %51: !void
+// }
+// fn test.optional_owner_field_is_null_when_empty() -> !void {
+// entry:
+//   %1: ?std::array::Array<i64> = opt.null
+//   %2: ?std::map::Map<[]u8, i64> = opt.null
+//   %3: ?std::mem::Box<i64> = opt.null
+//   %4: Bag = struct.new {items: %1: ?std::array::Array<i64>, counts: %2: ?std::map::Map<[]u8, i64>, held: %3: ?std::mem::Box<i64>}
+//   %5: ?std::array::Array<i64> = field.items %4: Bag
+//   %6: std::array::Array<i64> = opt.value %5: ?std::array::Array<i64>
+//   %7: bool = opt.has %5: ?std::array::Array<i64>
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: []u8 = const "items should be null"
+//   call.std::testing::fail %8: []u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   call.Bag.deinit %4: Bag
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.optional_owner_produced_by_a_call_stays_owned() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const "a"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %6: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %8: []u8 = const "b"
+//   %9: !std::string::String = call.owned %1: Allocator, %8: []u8
+//   %10: std::string::String = error.try %9: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %11: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %10: std::string::String
+//   error.try %11: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %13: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %14: i64 = phi [entry, %13: i64], [while.body.2, %20: i64]
+//   %15: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %16: std::string::String = opt.value %15: ?std::string::String
+//   %17: bool = opt.has %15: ?std::string::String
+//   branch %17: bool, while.body.2, while.end.3
+// while.body.2:
+//   call.std::string::String.deinit %16: std::string::String
+//   %19: i64 = const 1
+//   %20: i64 = binary.+ %14: i64, %19: i64
+//   jump while.header.1
+// while.end.3:
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %22: i64 = const 2
+//   test.expect_equal %22: i64, %14: i64, i64
+//   %24: bool = const true
+//   %25: !?std::string::String = call.maybe %1: Allocator, %24: bool
+//   %26: ?std::string::String = error.try %25: !?std::string::String
+//   %27: std::string::String = opt.value %26: ?std::string::String
+//   %28: bool = opt.has %26: ?std::string::String
+//   branch %28: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::string::String.deinit %27: std::string::String
+//   jump if.end.6
+// if.else.5:
+//   %30: []u8 = const "maybe should have made one"
+//   call.std::testing::fail %30: []u8
+//   jump if.end.6
+// if.end.6:
+//   %32: bool = const false
+//   %33: !?std::string::String = call.maybe %1: Allocator, %32: bool
+//   %34: ?std::string::String = error.try %33: !?std::string::String
+//   %35: std::string::String = opt.value %34: ?std::string::String
+//   %36: bool = opt.has %34: ?std::string::String
+//   branch %36: bool, if.then.7, if.else.8
+// if.then.7:
+//   call.std::string::String.deinit %35: std::string::String
+//   %38: []u8 = const "maybe should have made nothing"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   %40: !void = error.ok
+//   return %40: !void
+// }
+// fn test.optional_owner_field_inside_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Held> = array.new %1: Allocator, Held
+//   %3: []u8 = const "al"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %6: ?std::string::String = opt.some %5: std::string::String
+//   %7: Held = struct.new {nick: %6: ?std::string::String}
+//   %8: !void = call.std::array::Array.append.Held %2: std::array::Array<Held>, %7: Held
+//   error.try %8: !void, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %10: ?std::string::String = opt.null
+//   %11: Held = struct.new {nick: %10: ?std::string::String}
+//   %12: !void = call.std::array::Array.append.Held %2: std::array::Array<Held>, %11: Held
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %14: i64 = const 2
+//   %15: i64 = call.std::array::Array.len.Held %2: std::array::Array<Held>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: std::map::Map<[]u8, Held> = map.new %1: Allocator, Held
+//   %18: []u8 = const "alice"
+//   %19: []u8 = const "al"
+//   %20: !std::string::String = call.owned %1: Allocator, %19: []u8
+//   %21: std::string::String = error.try %20: !std::string::String, cleanup call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %22: ?std::string::String = opt.some %21: std::string::String
+//   %23: Held = struct.new {nick: %22: ?std::string::String}
+//   %24: !void = call.std::map::Map.insert.Held %17: std::map::Map<[]u8, Held>, %18: []u8, %23: Held
+//   error.try %24: !void, cleanup call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %26: []u8 = const "alice"
+//   %27: ?&Held = call.std::map::Map.at.Held %17: std::map::Map<[]u8, Held>, %26: []u8
+//   %28: &Held = opt.value %27: ?&Held
+//   %29: bool = opt.has %27: ?&Held
+//   branch %29: bool, if.then.1, if.else.2
+// if.then.1:
+//   %30: ?std::string::String = field.ref.nick %28: &Held
+//   %31: std::string::String = opt.value %30: ?std::string::String
+//   %32: bool = opt.has %30: ?std::string::String
+//   branch %32: bool, if.then.4, if.else.5
+// if.else.2:
+//   %38: []u8 = const "alice is missing"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.3
+// if.end.3:
+//   call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>
+//   call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %42: !void = error.ok
+//   return %42: !void
+// if.then.4:
+//   %33: []u8 = call.std::string::String.as_bytes %31: std::string::String
+//   %34: []u8 = const "al"
+//   test.expect_equal %34: []u8, %33: []u8, []u8
+//   jump if.end.6
+// if.else.5:
+//   %36: []u8 = const "nick is missing"
+//   call.std::testing::fail %36: []u8
+//   jump if.end.6
+// if.end.6:
+//   jump if.end.3
+// }
+// opt:
+// fn Bag.deinit(%self: Bag) -> void {
+// entry:
+//   %1: ?std::array::Array<i64> = field.items %self: Bag
+//   %2: std::array::Array<i64> = opt.value %1: ?std::array::Array<i64>
+//   %3: bool = opt.has %1: ?std::array::Array<i64>
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::array::Array.deinit.i64 %2: std::array::Array<i64>
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %5: ?std::map::Map<[]u8, i64> = field.counts %self: Bag
+//   %6: std::map::Map<[]u8, i64> = opt.value %5: ?std::map::Map<[]u8, i64>
+//   %7: bool = opt.has %5: ?std::map::Map<[]u8, i64>
+//   branch %7: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::map::Map.deinit.i64 %6: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %9: ?std::mem::Box<i64> = field.held %self: Bag
+//   %10: std::mem::Box<i64> = opt.value %9: ?std::mem::Box<i64>
+//   %11: bool = opt.has %9: ?std::mem::Box<i64>
+//   branch %11: bool, if.then.7, if.else.8
+// if.then.7:
+//   call.std::mem::Box.deinit.i64 %10: std::mem::Box<i64>
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   return void: void
+// }
+// fn owned(%allocator: Allocator, %bytes: []u8) -> !std::string::String {
+// entry:
+//   %1: std::string::String = call.std::string::new %allocator: Allocator
+//   %2: !void = call.std::string::String.append_bytes %1: std::string::String, %bytes: []u8
+//   error.try %2: !void, cleanup call.std::string::String.deinit %1: std::string::String
+//   %4: !std::string::String = error.ok %1: std::string::String
+//   return %4: !std::string::String
+// }
+// fn expect_nick(%visitor: Visitor, %expected: []u8) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %visitor: Visitor
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   %4: []u8 = call.std::string::String.as_bytes %2: std::string::String
+//   test.expect_equal %expected: []u8, %4: []u8, []u8
+//   jump if.end.3
+// if.else.2:
+//   %6: []u8 = const "none"
+//   test.expect_equal %expected: []u8, %6: []u8, []u8
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn maybe(%allocator: Allocator, %want: bool) -> !?std::string::String {
+// entry:
+//   branch %want: bool, if.then.1, if.else.2
+// if.then.1:
+//   %1: []u8 = const "made"
+//   %2: !std::string::String = call.owned %allocator: Allocator, %1: []u8
+//   %3: std::string::String = error.try %2: !std::string::String
+//   %4: ?std::string::String = opt.some %3: std::string::String
+//   %5: !?std::string::String = error.ok %4: ?std::string::String
+//   return %5: !?std::string::String
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %6: ?std::string::String = opt.null
+//   %7: !?std::string::String = error.ok %6: ?std::string::String
+//   return %7: !?std::string::String
+// }
+// fn Held.deinit(%self: Held) -> void {
+// entry:
+//   %1: ?std::string::String = field.nick %self: Held
+//   %2: std::string::String = opt.value %1: ?std::string::String
+//   %3: bool = opt.has %1: ?std::string::String
+//   branch %3: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %2: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn Visitor.deinit(%self: Visitor) -> void {
+// entry:
+//   %1: std::string::String = field.name %self: Visitor
+//   call.std::string::String.deinit %1: std::string::String
+//   %3: ?std::string::String = field.nick %self: Visitor
+//   %4: std::string::String = opt.value %3: ?std::string::String
+//   %5: bool = opt.has %3: ?std::string::String
+//   branch %5: bool, if.then.1, if.else.2
+// if.then.1:
+//   call.std::string::String.deinit %4: std::string::String
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   return void: void
+// }
+// fn test.optional_owner_field_holds_a_string() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: []u8 = const "alice"
+//   %3: !std::string::String = call.owned %1: Allocator, %2: []u8
+//   %4: std::string::String = error.try %3: !std::string::String
+//   %5: []u8 = const "al"
+//   %6: !std::string::String = call.owned %1: Allocator, %5: []u8
+//   %7: std::string::String = error.try %6: !std::string::String
+//   %8: ?std::string::String = opt.some %7: std::string::String
+//   %9: Visitor = struct.new {name: %4: std::string::String, nick: %8: ?std::string::String}
+//   %10: []u8 = const "al"
+//   call.expect_nick %9: Visitor, %10: []u8
+//   %12: []u8 = const "bob"
+//   %13: !std::string::String = call.owned %1: Allocator, %12: []u8
+//   %14: std::string::String = error.try %13: !std::string::String, cleanup call.Visitor.deinit %9: Visitor
+//   %15: ?std::string::String = opt.null
+//   %16: Visitor = struct.new {name: %14: std::string::String, nick: %15: ?std::string::String}
+//   %17: []u8 = const "none"
+//   call.expect_nick %16: Visitor, %17: []u8
+//   call.Visitor.deinit %16: Visitor
+//   call.Visitor.deinit %9: Visitor
+//   %21: !void = error.ok
+//   return %21: !void
+// }
+// fn test.optional_owner_field_holds_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<i64> = array.new %1: Allocator, i64
+//   %3: i64 = const 7
+//   %4: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %3: i64
+//   error.try %4: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %6: i64 = const 9
+//   %7: !void = call.std::array::Array.append.i64 %2: std::array::Array<i64>, %6: i64
+//   error.try %7: !void, cleanup array.deinit %2: std::array::Array<i64>
+//   %9: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %10: []u8 = const "hit"
+//   %11: i64 = const 3
+//   %12: !void = call.std::map::Map.insert.i64 %9: std::map::Map<[]u8, i64>, %10: []u8, %11: i64
+//   error.try %12: !void, cleanup map.deinit %9: std::map::Map<[]u8, i64>; array.deinit %2: std::array::Array<i64>
+//   %14: ?std::array::Array<i64> = opt.some %2: std::array::Array<i64>
+//   %15: ?std::map::Map<[]u8, i64> = opt.some %9: std::map::Map<[]u8, i64>
+//   %16: i64 = const 5
+//   %17: !std::mem::Box<i64> = call.std::mem::box.i64 %1: Allocator, %16: i64
+//   %18: std::mem::Box<i64> = error.try %17: !std::mem::Box<i64>
+//   %19: ?std::mem::Box<i64> = opt.some %18: std::mem::Box<i64>
+//   %20: Bag = struct.new {items: %14: ?std::array::Array<i64>, counts: %15: ?std::map::Map<[]u8, i64>, held: %19: ?std::mem::Box<i64>}
+//   %21: ?std::array::Array<i64> = field.items %20: Bag
+//   %22: std::array::Array<i64> = opt.value %21: ?std::array::Array<i64>
+//   %23: bool = opt.has %21: ?std::array::Array<i64>
+//   branch %23: bool, if.then.1, if.else.2
+// if.then.1:
+//   %24: i64 = const 2
+//   %25: i64 = call.std::array::Array.len.i64 %22: std::array::Array<i64>
+//   test.expect_equal %24: i64, %25: i64, i64
+//   jump if.end.3
+// if.else.2:
+//   %27: []u8 = const "items is missing"
+//   call.std::testing::fail %27: []u8
+//   jump if.end.3
+// if.end.3:
+//   %29: ?std::map::Map<[]u8, i64> = field.counts %20: Bag
+//   %30: std::map::Map<[]u8, i64> = opt.value %29: ?std::map::Map<[]u8, i64>
+//   %31: bool = opt.has %29: ?std::map::Map<[]u8, i64>
+//   branch %31: bool, if.then.4, if.else.5
+// if.then.4:
+//   %32: i64 = const 3
+//   %33: []u8 = const "hit"
+//   %34: ?i64 = call.std::map::Map.get.i64 %30: std::map::Map<[]u8, i64>, %33: []u8
+//   %35: bool = opt.has %34: ?i64
+//   branch %35: bool, orelse.some.7, orelse.else.8
+// if.else.5:
+//   %40: []u8 = const "counts is missing"
+//   call.std::testing::fail %40: []u8
+//   jump if.end.6
+// if.end.6:
+//   %42: ?std::mem::Box<i64> = field.held %20: Bag
+//   %43: std::mem::Box<i64> = opt.value %42: ?std::mem::Box<i64>
+//   %44: bool = opt.has %42: ?std::mem::Box<i64>
+//   branch %44: bool, if.then.10, if.else.11
+// orelse.some.7:
+//   %36: i64 = opt.value %34: ?i64
+//   jump orelse.end.9
+// orelse.else.8:
+//   %37: i64 = const 0
+//   jump orelse.end.9
+// orelse.end.9:
+//   %38: i64 = phi [orelse.some.7, %36: i64], [orelse.else.8, %37: i64]
+//   test.expect_equal %32: i64, %38: i64, i64
+//   jump if.end.6
+// if.then.10:
+//   %45: i64 = call.std::mem::Box.borrow.i64 %43: std::mem::Box<i64>
+//   %46: i64 = const 5
+//   test.expect_equal %46: i64, %45: i64, i64
+//   jump if.end.12
+// if.else.11:
+//   %48: []u8 = const "held is missing"
+//   call.std::testing::fail %48: []u8
+//   jump if.end.12
+// if.end.12:
+//   call.Bag.deinit %20: Bag
+//   %51: !void = error.ok
+//   return %51: !void
+// }
+// fn test.optional_owner_field_is_null_when_empty() -> !void {
+// entry:
+//   %1: ?std::array::Array<i64> = opt.null
+//   %2: ?std::map::Map<[]u8, i64> = opt.null
+//   %3: ?std::mem::Box<i64> = opt.null
+//   %4: Bag = struct.new {items: %1: ?std::array::Array<i64>, counts: %2: ?std::map::Map<[]u8, i64>, held: %3: ?std::mem::Box<i64>}
+//   %5: ?std::array::Array<i64> = field.items %4: Bag
+//   %7: bool = opt.has %5: ?std::array::Array<i64>
+//   branch %7: bool, if.then.1, if.else.2
+// if.then.1:
+//   %8: []u8 = const "items should be null"
+//   call.std::testing::fail %8: []u8
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   call.Bag.deinit %4: Bag
+//   %11: !void = error.ok
+//   return %11: !void
+// }
+// fn test.optional_owner_produced_by_a_call_stays_owned() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<std::string::String> = array.new %1: Allocator, std::string::String
+//   %3: []u8 = const "a"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %6: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %5: std::string::String
+//   error.try %6: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %8: []u8 = const "b"
+//   %9: !std::string::String = call.owned %1: Allocator, %8: []u8
+//   %10: std::string::String = error.try %9: !std::string::String, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %11: !void = call.std::array::Array.append.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>, %10: std::string::String
+//   error.try %11: !void, cleanup call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %13: i64 = const 0
+//   jump while.header.1
+// while.header.1:
+//   %14: i64 = phi [entry, %13: i64], [while.body.2, %20: i64]
+//   %15: ?std::string::String = call.std::array::Array.pop.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %16: std::string::String = opt.value %15: ?std::string::String
+//   %17: bool = opt.has %15: ?std::string::String
+//   branch %17: bool, while.body.2, while.end.3
+// while.body.2:
+//   call.std::string::String.deinit %16: std::string::String
+//   %19: i64 = const 1
+//   %20: i64 = binary.+ %14: i64, %19: i64
+//   jump while.header.1
+// while.end.3:
+//   call.std::array::Array.deinit.std_3a_3astring_3a_3aString %2: std::array::Array<std::string::String>
+//   %22: i64 = const 2
+//   test.expect_equal %22: i64, %14: i64, i64
+//   %24: bool = const true
+//   %25: !?std::string::String = call.maybe %1: Allocator, %24: bool
+//   %26: ?std::string::String = error.try %25: !?std::string::String
+//   %27: std::string::String = opt.value %26: ?std::string::String
+//   %28: bool = opt.has %26: ?std::string::String
+//   branch %28: bool, if.then.4, if.else.5
+// if.then.4:
+//   call.std::string::String.deinit %27: std::string::String
+//   jump if.end.6
+// if.else.5:
+//   %30: []u8 = const "maybe should have made one"
+//   call.std::testing::fail %30: []u8
+//   jump if.end.6
+// if.end.6:
+//   %32: bool = const false
+//   %33: !?std::string::String = call.maybe %1: Allocator, %32: bool
+//   %34: ?std::string::String = error.try %33: !?std::string::String
+//   %35: std::string::String = opt.value %34: ?std::string::String
+//   %36: bool = opt.has %34: ?std::string::String
+//   branch %36: bool, if.then.7, if.else.8
+// if.then.7:
+//   call.std::string::String.deinit %35: std::string::String
+//   %38: []u8 = const "maybe should have made nothing"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.9
+// if.else.8:
+//   jump if.end.9
+// if.end.9:
+//   %40: !void = error.ok
+//   return %40: !void
+// }
+// fn test.optional_owner_field_inside_containers() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<Held> = array.new %1: Allocator, Held
+//   %3: []u8 = const "al"
+//   %4: !std::string::String = call.owned %1: Allocator, %3: []u8
+//   %5: std::string::String = error.try %4: !std::string::String, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %6: ?std::string::String = opt.some %5: std::string::String
+//   %7: Held = struct.new {nick: %6: ?std::string::String}
+//   %8: !void = call.std::array::Array.append.Held %2: std::array::Array<Held>, %7: Held
+//   error.try %8: !void, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %10: ?std::string::String = opt.null
+//   %11: Held = struct.new {nick: %10: ?std::string::String}
+//   %12: !void = call.std::array::Array.append.Held %2: std::array::Array<Held>, %11: Held
+//   error.try %12: !void, cleanup call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %14: i64 = const 2
+//   %15: i64 = call.std::array::Array.len.Held %2: std::array::Array<Held>
+//   test.expect_equal %14: i64, %15: i64, i64
+//   %17: std::map::Map<[]u8, Held> = map.new %1: Allocator, Held
+//   %18: []u8 = const "alice"
+//   %19: []u8 = const "al"
+//   %20: !std::string::String = call.owned %1: Allocator, %19: []u8
+//   %21: std::string::String = error.try %20: !std::string::String, cleanup call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %22: ?std::string::String = opt.some %21: std::string::String
+//   %23: Held = struct.new {nick: %22: ?std::string::String}
+//   %24: !void = call.std::map::Map.insert.Held %17: std::map::Map<[]u8, Held>, %18: []u8, %23: Held
+//   error.try %24: !void, cleanup call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>; call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %26: []u8 = const "alice"
+//   %27: ?&Held = call.std::map::Map.at.Held %17: std::map::Map<[]u8, Held>, %26: []u8
+//   %28: &Held = opt.value %27: ?&Held
+//   %29: bool = opt.has %27: ?&Held
+//   branch %29: bool, if.then.1, if.else.2
+// if.then.1:
+//   %30: ?std::string::String = field.ref.nick %28: &Held
+//   %31: std::string::String = opt.value %30: ?std::string::String
+//   %32: bool = opt.has %30: ?std::string::String
+//   branch %32: bool, if.then.4, if.else.5
+// if.else.2:
+//   %38: []u8 = const "alice is missing"
+//   call.std::testing::fail %38: []u8
+//   jump if.end.3
+// if.end.3:
+//   call.std::map::Map.deinit.Held %17: std::map::Map<[]u8, Held>
+//   call.std::array::Array.deinit.Held %2: std::array::Array<Held>
+//   %42: !void = error.ok
+//   return %42: !void
+// if.then.4:
+//   %33: []u8 = call.std::string::String.as_bytes %31: std::string::String
+//   %34: []u8 = const "al"
+//   test.expect_equal %34: []u8, %33: []u8, []u8
+//   jump if.end.6
+// if.else.5:
+//   %36: []u8 = const "nick is missing"
+//   call.std::testing::fail %36: []u8
+//   jump if.end.6
+// if.end.6:
+//   jump if.end.3
+// }

@@ -1,0 +1,161 @@
+import std::array;
+import std::mem;
+
+struct User {
+    age: i64,
+    visits: i64,
+}
+
+struct Registry {
+    users: array::Array<User>,
+}
+
+// A borrow-optional return makes the accessor a function: the contract is
+// derived from the signature (the result borrows `self`), the body may only
+// return a borrow rooted in a borrowed parameter, and the caller's capture
+// holds `self` borrowed for its scope.
+fn (self: &var Registry) user(id: i64) -> ?&var User {
+    return self.users.at_mut(id);
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var reg = Registry { users: array::new<User>(allocator) };
+    defer reg.deinit();
+    try reg.users.append(User { age: 30, visits: 0 });
+    if reg.user(0) |u| {
+        u.visits = u.visits + 1;
+    }
+    if reg.user(0) |u| {
+        print(u.visits);
+        print(u.age);
+    }
+    return;
+}
+
+// run
+// features: borrow optional signature accessor
+// output:
+// 1
+// 30
+
+
+// ir
+// lower:
+// fn Registry.user(%self: &var Registry, %id: i64) -> ?&var User {
+// entry:
+//   %1: std::array::Array<User> = field.ref.users %self: &var Registry
+//   %2: ?&var User = call.std::array::Array.at_mut.User %1: std::array::Array<User>, %id: i64
+//   return %2: ?&var User
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<User> = array.new %1: Allocator, User
+//   %3: Registry = struct.new {users: %2: std::array::Array<User>}
+//   %4: &var Registry = local.slot %3: Registry
+//   %5: std::array::Array<User> = field.ref.users %4: &var Registry
+//   %6: i64 = const 30
+//   %7: i64 = const 0
+//   %8: User = struct.new {age: %6: i64, visits: %7: i64}
+//   %9: !void = call.std::array::Array.append.User %5: std::array::Array<User>, %8: User
+//   %10: Registry = ref.load %4: &var Registry
+//   error.try %9: !void, cleanup call.Registry.deinit %10: Registry
+//   %12: i64 = const 0
+//   %13: ?&var User = call.Registry.user %4: &var Registry, %12: i64
+//   %14: &var User = opt.value %13: ?&var User
+//   %15: bool = opt.has %13: ?&var User
+//   branch %15: bool, if.then.1, if.else.2
+// if.then.1:
+//   %16: i64 = field.ref.visits %14: &var User
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %16: i64, %17: i64
+//   field.ref.set.visits %14: &var User, %18: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %20: i64 = const 0
+//   %21: ?&var User = call.Registry.user %4: &var Registry, %20: i64
+//   %22: &var User = opt.value %21: ?&var User
+//   %23: bool = opt.has %21: ?&var User
+//   branch %23: bool, if.then.4, if.else.5
+// if.then.4:
+//   %24: i64 = field.ref.visits %22: &var User
+//   call.print %24: i64
+//   %26: i64 = field.ref.age %22: &var User
+//   call.print %26: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %28: Registry = ref.load %4: &var Registry
+//   call.Registry.deinit %28: Registry
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Registry.deinit(%self: Registry) -> void {
+// entry:
+//   %1: std::array::Array<User> = field.users %self: Registry
+//   call.std::array::Array.deinit.User %1: std::array::Array<User>
+//   return void: void
+// }
+// opt:
+// fn Registry.user(%self: &var Registry, %id: i64) -> ?&var User {
+// entry:
+//   %1: std::array::Array<User> = field.ref.users %self: &var Registry
+//   %2: ?&var User = call.std::array::Array.at_mut.User %1: std::array::Array<User>, %id: i64
+//   return %2: ?&var User
+// }
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::array::Array<User> = array.new %1: Allocator, User
+//   %3: Registry = struct.new {users: %2: std::array::Array<User>}
+//   %4: &var Registry = local.slot %3: Registry
+//   %5: std::array::Array<User> = field.ref.users %4: &var Registry
+//   %6: i64 = const 30
+//   %7: i64 = const 0
+//   %8: User = struct.new {age: %6: i64, visits: %7: i64}
+//   %9: !void = call.std::array::Array.append.User %5: std::array::Array<User>, %8: User
+//   %10: Registry = ref.load %4: &var Registry
+//   error.try %9: !void, cleanup call.Registry.deinit %10: Registry
+//   %12: i64 = const 0
+//   %13: ?&var User = call.Registry.user %4: &var Registry, %12: i64
+//   %14: &var User = opt.value %13: ?&var User
+//   %15: bool = opt.has %13: ?&var User
+//   branch %15: bool, if.then.1, if.else.2
+// if.then.1:
+//   %16: i64 = field.ref.visits %14: &var User
+//   %17: i64 = const 1
+//   %18: i64 = binary.+ %16: i64, %17: i64
+//   field.ref.set.visits %14: &var User, %18: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %20: i64 = const 0
+//   %21: ?&var User = call.Registry.user %4: &var Registry, %20: i64
+//   %22: &var User = opt.value %21: ?&var User
+//   %23: bool = opt.has %21: ?&var User
+//   branch %23: bool, if.then.4, if.else.5
+// if.then.4:
+//   %24: i64 = field.ref.visits %22: &var User
+//   call.print %24: i64
+//   %26: i64 = field.ref.age %22: &var User
+//   call.print %26: i64
+//   jump if.end.6
+// if.else.5:
+//   jump if.end.6
+// if.end.6:
+//   %28: Registry = ref.load %4: &var Registry
+//   call.Registry.deinit %28: Registry
+//   %30: !void = error.ok
+//   return %30: !void
+// }
+// fn Registry.deinit(%self: Registry) -> void {
+// entry:
+//   %1: std::array::Array<User> = field.users %self: Registry
+//   call.std::array::Array.deinit.User %1: std::array::Array<User>
+//   return void: void
+// }

@@ -1,0 +1,219 @@
+import std::map;
+import std::mem;
+
+// Map.at/at_mut return a borrow optional `?&V`: the value borrow when the key
+// is present, null when it is absent. A capture is the only consumer, and it
+// holds the map borrowed for the value borrow's scope, so an in-place update
+// costs one lookup instead of a get/insert pair.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var counts = map::new<[]u8, i64>(allocator);
+    defer counts.deinit();
+
+    try counts.insert("kizu", 41);
+
+    if counts.at("kizu") |count| {
+        print(count.*);
+    }
+
+    if counts.at_mut("kizu") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("kizu", 1);
+    }
+
+    if counts.at_mut("lang") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("lang", 1);
+    }
+
+    if counts.at("kizu") |count| {
+        print(count.*);
+    }
+    if counts.at("lang") |count| {
+        print(count.*);
+    }
+
+    return;
+}
+
+// run
+// features: std-map borrow mutation optional capture
+// output:
+// 41
+// 42
+// 1
+
+
+// ir
+// lower:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "kizu"
+//   %4: i64 = const 41
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "kizu"
+//   %8: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %7: []u8
+//   %9: &i64 = opt.value %8: ?&i64
+//   %10: bool = opt.has %8: ?&i64
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = ref.load %9: &i64
+//   call.print %11: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %13: []u8 = const "kizu"
+//   %14: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %13: []u8
+//   %15: &var i64 = opt.value %14: ?&var i64
+//   %16: bool = opt.has %14: ?&var i64
+//   branch %16: bool, if.then.4, if.else.5
+// if.then.4:
+//   %17: i64 = ref.load %15: &var i64
+//   %18: i64 = const 1
+//   %19: i64 = binary.+ %17: i64, %18: i64
+//   ref.store %15: &var i64, %19: i64
+//   jump if.end.6
+// if.else.5:
+//   %21: []u8 = const "kizu"
+//   %22: i64 = const 1
+//   %23: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %21: []u8, %22: i64
+//   error.try %23: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.end.6:
+//   %25: []u8 = const "lang"
+//   %26: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %25: []u8
+//   %27: &var i64 = opt.value %26: ?&var i64
+//   %28: bool = opt.has %26: ?&var i64
+//   branch %28: bool, if.then.7, if.else.8
+// if.then.7:
+//   %29: i64 = ref.load %27: &var i64
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %29: i64, %30: i64
+//   ref.store %27: &var i64, %31: i64
+//   jump if.end.9
+// if.else.8:
+//   %33: []u8 = const "lang"
+//   %34: i64 = const 1
+//   %35: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %33: []u8, %34: i64
+//   error.try %35: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.9
+// if.end.9:
+//   %37: []u8 = const "kizu"
+//   %38: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %37: []u8
+//   %39: &i64 = opt.value %38: ?&i64
+//   %40: bool = opt.has %38: ?&i64
+//   branch %40: bool, if.then.10, if.else.11
+// if.then.10:
+//   %41: i64 = ref.load %39: &i64
+//   call.print %41: i64
+//   jump if.end.12
+// if.else.11:
+//   jump if.end.12
+// if.end.12:
+//   %43: []u8 = const "lang"
+//   %44: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %43: []u8
+//   %45: &i64 = opt.value %44: ?&i64
+//   %46: bool = opt.has %44: ?&i64
+//   branch %46: bool, if.then.13, if.else.14
+// if.then.13:
+//   %47: i64 = ref.load %45: &i64
+//   call.print %47: i64
+//   jump if.end.15
+// if.else.14:
+//   jump if.end.15
+// if.end.15:
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %50: !void = error.ok
+//   return %50: !void
+// }
+// opt:
+// fn main() -> !void {
+// entry:
+//   %1: Allocator = call.std::mem::page_allocator
+//   %2: std::map::Map<[]u8, i64> = map.new %1: Allocator, i64
+//   %3: []u8 = const "kizu"
+//   %4: i64 = const 41
+//   %5: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %3: []u8, %4: i64
+//   error.try %5: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   %7: []u8 = const "kizu"
+//   %8: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %7: []u8
+//   %9: &i64 = opt.value %8: ?&i64
+//   %10: bool = opt.has %8: ?&i64
+//   branch %10: bool, if.then.1, if.else.2
+// if.then.1:
+//   %11: i64 = ref.load %9: &i64
+//   call.print %11: i64
+//   jump if.end.3
+// if.else.2:
+//   jump if.end.3
+// if.end.3:
+//   %13: []u8 = const "kizu"
+//   %14: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %13: []u8
+//   %15: &var i64 = opt.value %14: ?&var i64
+//   %16: bool = opt.has %14: ?&var i64
+//   branch %16: bool, if.then.4, if.else.5
+// if.then.4:
+//   %17: i64 = ref.load %15: &var i64
+//   %18: i64 = const 1
+//   %19: i64 = binary.+ %17: i64, %18: i64
+//   ref.store %15: &var i64, %19: i64
+//   jump if.end.6
+// if.else.5:
+//   %21: []u8 = const "kizu"
+//   %22: i64 = const 1
+//   %23: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %21: []u8, %22: i64
+//   error.try %23: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.6
+// if.end.6:
+//   %25: []u8 = const "lang"
+//   %26: ?&var i64 = call.std::map::Map.at_mut.i64 %2: std::map::Map<[]u8, i64>, %25: []u8
+//   %27: &var i64 = opt.value %26: ?&var i64
+//   %28: bool = opt.has %26: ?&var i64
+//   branch %28: bool, if.then.7, if.else.8
+// if.then.7:
+//   %29: i64 = ref.load %27: &var i64
+//   %30: i64 = const 1
+//   %31: i64 = binary.+ %29: i64, %30: i64
+//   ref.store %27: &var i64, %31: i64
+//   jump if.end.9
+// if.else.8:
+//   %33: []u8 = const "lang"
+//   %34: i64 = const 1
+//   %35: !void = call.std::map::Map.insert.i64 %2: std::map::Map<[]u8, i64>, %33: []u8, %34: i64
+//   error.try %35: !void, cleanup map.deinit %2: std::map::Map<[]u8, i64>
+//   jump if.end.9
+// if.end.9:
+//   %37: []u8 = const "kizu"
+//   %38: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %37: []u8
+//   %39: &i64 = opt.value %38: ?&i64
+//   %40: bool = opt.has %38: ?&i64
+//   branch %40: bool, if.then.10, if.else.11
+// if.then.10:
+//   %41: i64 = ref.load %39: &i64
+//   call.print %41: i64
+//   jump if.end.12
+// if.else.11:
+//   jump if.end.12
+// if.end.12:
+//   %43: []u8 = const "lang"
+//   %44: ?&i64 = call.std::map::Map.at.i64 %2: std::map::Map<[]u8, i64>, %43: []u8
+//   %45: &i64 = opt.value %44: ?&i64
+//   %46: bool = opt.has %44: ?&i64
+//   branch %46: bool, if.then.13, if.else.14
+// if.then.13:
+//   %47: i64 = ref.load %45: &i64
+//   call.print %47: i64
+//   jump if.end.15
+// if.else.14:
+//   jump if.end.15
+// if.end.15:
+//   map.deinit %2: std::map::Map<[]u8, i64>
+//   %50: !void = error.ok
+//   return %50: !void
+// }
