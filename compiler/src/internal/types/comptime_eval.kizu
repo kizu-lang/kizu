@@ -1,0 +1,643 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
+import std::string;
+
+// The compile-time evaluator is one private Checker work unit. Its value is
+// copy-only; a semantic failure is constructed once and moved to the caller.
+union ComptimeValue {
+    Integer(i64),
+    Boolean(bool),
+    Bytes(ast::Text),
+    TypeValue(Type),
+}
+
+// Evaluates the side-effect-free expression subset accepted at compile time.
+fn (self: &var Checker) eval_comptime(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        Comptime(value) => return self.eval_comptime(tree, value.expr, out),
+        Int(value) => {
+            let retained = tree.texts.at(value.value.node);
+            let bytes = retained.as_bytes();
+            if decimal_i64(bytes) |integer| {
+                out.* = ComptimeValue::Integer(integer);
+                return null;
+            }
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes("invalid integer `");
+            try message.append_bytes(bytes);
+            try message.append_byte(cast<u8>(96));
+            return try self.comptime_message(move message);
+        },
+        Bool(value) => {
+            out.* = ComptimeValue::Boolean(value.value);
+            return null;
+        },
+        String(value) => {
+            out.* = ComptimeValue::Bytes(value.value);
+            return null;
+        },
+        Type(value) => {
+            let retained = tree.texts.at(value.type_name.node);
+            let bytes = retained.as_bytes();
+            match try self.resolve_type(tree, bytes) {
+                Value(resolved) => {
+                    out.* = ComptimeValue::TypeValue(resolved);
+                    return null;
+                },
+                Issue(issue) => {
+                    return try self.type_resolution_diagnostic(issue);
+                },
+            }
+        },
+        Ident(value) => {
+            let retained = tree.texts.at(value.name.node);
+            let bytes = retained.as_bytes();
+            if self.type_arg_values.get(bytes) |resolved| {
+                out.* = ComptimeValue::TypeValue(resolved);
+                return null;
+            }
+            return try self.comptime_error(
+                "runtime value cannot be used"
+            );
+        },
+        Prefix(value) => return self.eval_comptime_prefix(tree, value, out),
+        Binary(value) => return self.eval_comptime_binary(tree, value, out),
+        Call(value) => return self.eval_comptime_meta_call(tree, value, out),
+        _ => {
+            return try self.comptime_error(
+                "runtime value cannot be used"
+            );
+        },
+    }
+}
+
+// Evaluates std::meta predicates, the only calls available in comptime.
+fn (self: &var Checker) eval_comptime_meta_call(
+    tree: &ast::Ast,
+    expression: &ast::CallExpr,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.callee.node) {
+        TypeApply(applied) => {
+            if try qualified_name(
+                self.allocator, tree, applied.callee
+            ) |name| {
+                defer name.deinit();
+                return self.eval_comptime_named_meta_call(
+                    tree, expression, applied, &name, out
+                );
+            }
+        },
+        _ => {},
+    }
+    return try self.comptime_error(
+        "runtime value cannot be used"
+    );
+}
+
+fn (self: &var Checker) eval_comptime_named_meta_call(
+    tree: &ast::Ast,
+    expression: &ast::CallExpr,
+    applied: &ast::TypeApplyExpr,
+    name: &string::String,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    let name_bytes = name.as_bytes();
+    if stdmeta::identify(name_bytes) |identified| {
+        if stdmeta::predicate(name_bytes) {
+            let arguments = tree.expression_lists.at(expression.args.node);
+            if arguments.len() != 0 {
+                return try self.comptime_form_error(
+                    identified.form, "` takes no arguments"
+                );
+            }
+            let instantiated = try self.instantiate_type_arg_text(
+                tree, applied.type_arg
+            );
+            defer instantiated.deinit();
+            let argument_text = instantiated.as_bytes();
+            if try typ::split_args_optional(
+                self.allocator, argument_text
+            ) |static_arguments| {
+                defer static_arguments.deinit();
+                var value = false;
+                if try self.meta_predicate(
+                    tree, identified.form, &static_arguments, &var value
+                ) |problem| {
+                    return move problem;
+                }
+                out.* = ComptimeValue::Boolean(value);
+                return null;
+            }
+            return try self.comptime_form_error(
+                identified.form,
+                "` has an unreadable static argument list"
+            );
+        }
+    }
+    return try self.comptime_error(
+        "runtime value cannot be used"
+    );
+}
+
+fn (self: &var Checker) eval_comptime_prefix(
+    tree: &ast::Ast,
+    expression: &ast::PrefixExpr,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    var right = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.right, &var right) |problem| {
+        return move problem;
+    }
+    let retained = tree.texts.at(expression.operator.node);
+    let operator = retained.as_bytes();
+    if mem::equal_bytes(operator, "-") {
+        match right {
+            Integer(integer) => {
+                out.* = ComptimeValue::Integer(-integer);
+                return null;
+            },
+            _ => {
+                return try self.comptime_error(
+                    "unary - expects integer"
+                );
+            },
+        }
+    }
+    if mem::equal_bytes(operator, "!") {
+        match right {
+            Boolean(boolean) => {
+                out.* = ComptimeValue::Boolean(!boolean);
+                return null;
+            },
+            _ => {
+                return try self.comptime_error(
+                    "unary ! expects bool"
+                );
+            },
+        }
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unsupported unary `");
+    try message.append_bytes(operator);
+    try message.append_byte(cast<u8>(96));
+    return try self.comptime_message(move message);
+}
+
+fn (self: &var Checker) eval_comptime_binary(
+    tree: &ast::Ast,
+    expression: &ast::BinaryExpr,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(expression.operator.node);
+    let operator = retained.as_bytes();
+    if mem::equal_bytes(operator, "and") or
+        mem::equal_bytes(operator, "or") {
+        return self.eval_comptime_logical(tree, expression, out);
+    }
+    var left = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.left, &var left) |problem| {
+        return move problem;
+    }
+    var right = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.right, &var right) |problem| {
+        return move problem;
+    }
+    if mem::equal_bytes(operator, "==") or
+        mem::equal_bytes(operator, "!=") {
+        if comptime_equality(tree, expression.operator, left, right) |value| {
+            out.* = ComptimeValue::Boolean(value);
+            return null;
+        }
+        return try self.comptime_error(
+            "equality operands must have same type"
+        );
+    }
+    match left {
+        Integer(left_integer) => match right {
+            Integer(right_integer) => return self.eval_comptime_int_binary(
+                operator, left_integer, right_integer, out
+            ),
+            _ => {},
+        },
+        _ => {},
+    }
+    return try self.comptime_operator_error(operator, "integers");
+}
+
+fn (self: &var Checker) eval_comptime_logical(
+    tree: &ast::Ast,
+    expression: &ast::BinaryExpr,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(expression.operator.node);
+    let operator = retained.as_bytes();
+    var left = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.left, &var left) |problem| {
+        return move problem;
+    }
+    match left {
+        Boolean(boolean) => {
+            if mem::equal_bytes(operator, "and") and !boolean {
+                out.* = ComptimeValue::Boolean(false);
+                return null;
+            }
+            if mem::equal_bytes(operator, "or") and boolean {
+                out.* = ComptimeValue::Boolean(true);
+                return null;
+            }
+        },
+        _ => {
+            return try self.comptime_operator_error(
+                operator, "bools"
+            );
+        },
+    }
+    var right = ComptimeValue::Integer(0);
+    if try self.eval_comptime(tree, expression.right, &var right) |problem| {
+        return move problem;
+    }
+    match right {
+        Boolean(boolean) => {
+            out.* = ComptimeValue::Boolean(boolean);
+            return null;
+        },
+        _ => {
+            return try self.comptime_operator_error(
+                operator, "bools"
+            );
+        },
+    }
+}
+
+fn comptime_equality(
+    tree: &ast::Ast,
+    operator: ast::Text,
+    left: ComptimeValue,
+    right: ComptimeValue
+) -> ?bool {
+    var equal = false;
+    match left {
+        Integer(left_value) => match right {
+            Integer(right_value) => { equal = left_value == right_value; },
+            _ => return null,
+        },
+        Boolean(left_value) => match right {
+            Boolean(right_value) => { equal = left_value == right_value; },
+            _ => return null,
+        },
+        Bytes(left_text) => match right {
+            Bytes(right_text) => {
+                let left_retained = tree.texts.at(left_text.node);
+                let right_retained = tree.texts.at(right_text.node);
+                let left_bytes = left_retained.as_bytes();
+                let right_bytes = right_retained.as_bytes();
+                equal = mem::equal_bytes(left_bytes, right_bytes);
+            },
+            _ => return null,
+        },
+        TypeValue(left_type) => match right {
+            TypeValue(right_type) => {
+                equal = same_type(left_type, right_type);
+            },
+            _ => return null,
+        },
+    }
+    let retained = tree.texts.at(operator.node);
+    let operator_bytes = retained.as_bytes();
+    if mem::equal_bytes(operator_bytes, "!=") {
+        return !equal;
+    }
+    return equal;
+}
+
+fn (self: &Checker) eval_comptime_int_binary(
+    operator: []u8,
+    left: i64,
+    right: i64,
+    out: &var ComptimeValue
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(operator, "+") {
+        out.* = ComptimeValue::Integer(left + right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "-") {
+        out.* = ComptimeValue::Integer(left - right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "*") {
+        out.* = ComptimeValue::Integer(left * right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "/") {
+        if right == 0 {
+            return try self.comptime_error("division by zero");
+        }
+        out.* = ComptimeValue::Integer(left / right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "%") {
+        if right == 0 {
+            return try self.comptime_error("modulo by zero");
+        }
+        out.* = ComptimeValue::Integer(left % right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "<") {
+        out.* = ComptimeValue::Boolean(left < right);
+        return null;
+    }
+    if mem::equal_bytes(operator, "<=") {
+        out.* = ComptimeValue::Boolean(left <= right);
+        return null;
+    }
+    if mem::equal_bytes(operator, ">") {
+        out.* = ComptimeValue::Boolean(left > right);
+        return null;
+    }
+    if mem::equal_bytes(operator, ">=") {
+        out.* = ComptimeValue::Boolean(left >= right);
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unsupported operator `");
+    try message.append_bytes(operator);
+    try message.append_byte(cast<u8>(96));
+    return try self.comptime_message(move message);
+}
+
+// Answers one recognized compile-time predicate after static-argument split.
+fn (self: &var Checker) meta_predicate(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    arguments: &array::Array<string::String>,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if form == stdmeta::Form::HasPayload {
+        var resolved_arguments = array::new<Type>(self.allocator);
+        defer resolved_arguments.deinit();
+        var index = 0;
+        while arguments.at(index) |argument| {
+            let bytes = argument.as_bytes();
+            let retained = try self.types.intern(bytes);
+            try resolved_arguments.append(retained);
+            index = index + 1;
+        }
+        match try self.resolve_meta_capture(
+            tree, form, &resolved_arguments
+        ) {
+            Issue(issue) => {
+                return try self.type_resolution_diagnostic(issue);
+            },
+            Value(handle) => {
+                let field = self.meta_field_entries.at(handle.node);
+                out.* = !same_type(field.type_name, empty_type());
+                return null;
+            },
+        }
+    }
+    if arguments.len() != 1 {
+        return try self.comptime_form_error(
+            form, "` expects 1 static argument"
+        );
+    }
+    if arguments.at(0) |argument| {
+        let bytes = argument.as_bytes();
+        return self.meta_predicate_subject(tree, form, bytes, out);
+    }
+    return try self.comptime_form_error(
+        form, "` expects 1 static argument"
+    );
+}
+
+fn (self: &var Checker) meta_predicate_subject(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    bytes: []u8,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    match try self.resolve_type(tree, bytes) {
+        Value(subject) => {
+            if subject.node |handle| {
+                let entry = self.types.entries.at(handle);
+                let name = entry.spelling.as_bytes();
+                if self.meta_predicate_value(
+                    tree, form, subject, name
+                ) |value| {
+                    out.* = value;
+                    return null;
+                }
+            }
+            return try self.comptime_form_error(
+                form, "` is not a predicate"
+            );
+        },
+        Issue(issue) => {
+            return try self.type_resolution_diagnostic(issue);
+        },
+    }
+}
+
+fn (self: &Checker) meta_predicate_value(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    subject: Type,
+    name: []u8
+) -> ?bool {
+    match form {
+        IsStruct => return self.metadata.structs.contains(name),
+        IsEnum => return self.metadata.enums_by_name.contains(name),
+        IsUnion => return self.metadata.unions_by_name.contains(name),
+        IsOptional => {
+            if typ::optional_elem(name) |_| {
+                return true;
+            }
+            return false;
+        },
+        IsArray => return generic_type_is(name, "std::array::Array"),
+        IsBox => return generic_type_is(name, "std::mem::Box"),
+        IsMap => return generic_type_is(name, "std::map::Map"),
+        IsOwner => return self.type_is_owner_from_current_map(subject),
+        HasPublicFields => return metadata_has_public_fields(
+            tree, &self.metadata, name
+        ),
+        _ => {},
+    }
+    return null;
+}
+
+fn (self: &Checker) type_is_owner_from_current_map(value: Type) -> bool {
+    let owners_handle = self.deinit_owners orelse return false;
+    let owners = self.deinit_owner_maps.at(owners_handle);
+    return self.type_is_owner(owners, value);
+}
+
+fn generic_type_is(name: []u8, expected: []u8) -> bool {
+    if split_generic_type(name) |parts| {
+        return mem::equal_bytes(parts.base, expected);
+    }
+    return false;
+}
+
+fn metadata_has_public_fields(
+    tree: &ast::Ast,
+    metadata: &CheckerMetadata,
+    name: []u8
+) -> bool {
+    if metadata.structs.get(name) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Struct(value) => {
+                var index = 0;
+                while value.fields.at(index) |field| {
+                    if field.public {
+                        return true;
+                    }
+                    index = index + 1;
+                }
+            },
+            _ => {},
+        }
+    }
+    return false;
+}
+
+// Replaces in-scope type parameters in one parsed static-argument spelling.
+fn (self: &var Checker) instantiate_type_arg_text(
+    tree: &ast::Ast,
+    text: ast::Text
+) -> !string::String {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    if self.type_arg_values.len() == 0 {
+        return string::from_bytes(self.allocator, bytes);
+    }
+    if try typ::split_args_optional(self.allocator, bytes) |arguments| {
+        defer arguments.deinit();
+        var out = string::new(self.allocator);
+        errdefer out.deinit();
+        var index = 0;
+        while arguments.at(index) |argument| {
+            if index > 0 {
+                try out.append_bytes(", ");
+            }
+            let argument_bytes = argument.as_bytes();
+            let declared = try self.types.intern(argument_bytes);
+            let substituted = try self.types.substitute_type_params(
+                declared, &self.type_arg_values
+            );
+            if substituted.node |handle| {
+                let entry = self.types.entries.at(handle);
+                let bytes = entry.spelling.as_bytes();
+                try out.append_bytes(bytes);
+            }
+            index = index + 1;
+        }
+        return move out;
+    }
+    return string::from_bytes(self.allocator, bytes);
+}
+
+// Renders a namespace chain into the key used by checker metadata.
+fn qualified_name(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?string::String {
+    if qualified_name_shape(tree, expression) {
+        return try ast::render_expression(allocator, tree, expression);
+    }
+    return null;
+}
+
+fn qualified_name_shape(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> bool {
+    match tree.expressions.at(expression.node) {
+        Ident(_) => return true,
+        Field(value) => {
+            if !value.namespace {
+                return false;
+            }
+            return qualified_name_shape(tree, value.receiver);
+        },
+        _ => return false,
+    }
+}
+
+fn decimal_i64(text: []u8) -> ?i64 {
+    if mem::len(text) == 0 {
+        return null;
+    }
+    var value = 0;
+    var index = 0;
+    while index < mem::len(text) {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value > (9223372036854775807 - digit) / 10 {
+            return null;
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn (self: &Checker) comptime_error(
+    message: []u8
+) -> !diagnostic::Diagnostic {
+    return diagnostic::new(
+        self.allocator,
+        diagnostic::Severity::Error,
+        "comptime error",
+        ast::zero_span(),
+        message
+    );
+}
+
+fn (self: &Checker) comptime_message(
+    message: string::String
+) -> !diagnostic::Diagnostic {
+    return new_checker_diagnostic(
+        self.allocator, "comptime error", move message
+    );
+}
+
+fn (self: &Checker) comptime_operator_error(
+    operator: []u8,
+    expected: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("operator `");
+    try message.append_bytes(operator);
+    try message.append_bytes("` expects ");
+    try message.append_bytes(expected);
+    return self.comptime_message(move message);
+}
+
+fn (self: &Checker) comptime_form_error(
+    form: stdmeta::Form,
+    suffix: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(stdmeta::spelling(form));
+    try message.append_bytes(suffix);
+    return self.comptime_message(move message);
+}

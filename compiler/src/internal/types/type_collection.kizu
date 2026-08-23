@@ -631,6 +631,12 @@ fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::
 }
 
 fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeCollectionIssue) -> !diagnostic::Diagnostic {
+    match issue {
+        Resolution(resolution_issue) => return self.type_resolution_diagnostic(
+            resolution_issue
+        ),
+        _ => {},
+    }
     var message = string::new(self.allocator);
     errdefer message.deinit();
     var category = "type error";
@@ -718,10 +724,8 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             );
             try message.append_byte(cast<u8>(96));
         },
-        Resolution(resolution_issue) => {
-            category = try self.append_type_resolution_diagnostic(
-                &var message, resolution_issue
-            );
+        Resolution(_) => {
+            // Handled before message storage is created.
         },
         UnionOptional(member) => {
             try message.append_bytes("union payload `");
@@ -838,7 +842,7 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
             try message.append_bytes(" cannot borrow an optional yet");
         },
     }
-    var value = try new_collection_diagnostic(self.allocator, category, move message);
+    var value = try new_checker_diagnostic(self.allocator, category, move message);
     errdefer value.deinit();
     match issue {
         StructObligationDoc(_) => try value.with_help(
@@ -861,13 +865,24 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
     return move value;
 }
 
-fn new_collection_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {
+fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {
     defer message.deinit();
     let message_text = message.as_bytes();
     return diagnostic::new(
         allocator, diagnostic::Severity::Error, category,
         ast::zero_span(), message_text
     );
+}
+
+fn (self: &Checker) type_resolution_diagnostic(
+    issue: TypeResolutionIssue
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    let category = try self.append_type_resolution_diagnostic(
+        &var message, issue
+    );
+    return new_checker_diagnostic(self.allocator, category, move message);
 }
 
 fn append_collection_text(out: &var string::String, tree: &ast::Ast, text: ast::Text) -> !void {

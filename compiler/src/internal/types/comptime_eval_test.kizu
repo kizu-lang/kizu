@@ -1,0 +1,482 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::mem;
+import std::testing;
+
+enum ExpectedComptimeKind {
+    Integer,
+    Boolean,
+    Bytes,
+    TypeValue,
+    Diagnostic,
+}
+
+struct ExpectedComptime {
+    kind: ExpectedComptimeKind,
+    integer: i64,
+    boolean: bool,
+    text: []u8,
+    category: []u8
+}
+
+fn first_comptime_expression(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> ?ast::Expression {
+    var declaration_index = 0;
+    while program.declarations.get(declaration_index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                if function.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => {
+                            var statement_index = 0;
+                            while block.statements.get(statement_index) |statement| {
+                                match tree.statements.at(statement.node) {
+                                    Let(binding) => {
+                                        match tree.expressions.at(binding.value.node) {
+                                            Comptime(_) => return binding.value,
+                                            _ => {},
+                                        }
+                                    },
+                                    _ => {},
+                                }
+                                statement_index = statement_index + 1;
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+        declaration_index = declaration_index + 1;
+    }
+    return null;
+}
+
+fn expect_comptime_evaluation(
+    allocator: Allocator,
+    input: []u8,
+    substitution: []u8,
+    expected: ExpectedComptime
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |problem| {
+        defer problem.deinit();
+        let message = problem.message.as_bytes();
+        testing::fail(message);
+    }
+    if mem::len(substitution) > 0 {
+        let retained = try state.types.intern(substitution);
+        try state.type_arg_values.insert("T", retained);
+    }
+    if first_comptime_expression(&tree, &program) |expression| {
+        return expect_comptime_result(
+            &var state, &tree, expression, move expected
+        );
+    }
+    testing::fail("test source has no comptime expression");
+    return;
+}
+
+fn expect_comptime_result(
+    state: &var Checker,
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    expected: ExpectedComptime
+) -> !void {
+    var value = ComptimeValue::Integer(0);
+    if try state.eval_comptime(tree, expression, &var value) |problem| {
+        defer problem.deinit();
+        testing::expect(expected.kind == ExpectedComptimeKind::Diagnostic);
+        let category = problem.category.as_bytes();
+        let message = problem.message.as_bytes();
+        testing::expect_equal<[]u8>(expected.category, category);
+        testing::expect_equal<[]u8>(expected.text, message);
+        return;
+    }
+    if expected.kind == ExpectedComptimeKind::Diagnostic {
+        testing::fail(expected.text);
+    }
+    match value {
+        Integer(integer) => {
+            testing::expect(expected.kind == ExpectedComptimeKind::Integer);
+            testing::expect_equal<i64>(expected.integer, integer);
+        },
+        Boolean(boolean) => {
+            testing::expect(expected.kind == ExpectedComptimeKind::Boolean);
+            testing::expect(boolean == expected.boolean);
+        },
+        Bytes(text) => {
+            testing::expect(expected.kind == ExpectedComptimeKind::Bytes);
+            let retained = tree.texts.at(text.node);
+            let bytes = retained.as_bytes();
+            testing::expect_equal<[]u8>(expected.text, bytes);
+        },
+        TypeValue(type_name) => {
+            testing::expect(expected.kind == ExpectedComptimeKind::TypeValue);
+            if type_name.node |handle| {
+                let entry = state.types.entries.at(handle);
+                let bytes = entry.spelling.as_bytes();
+                testing::expect_equal<[]u8>(expected.text, bytes);
+            } else {
+                testing::fail("comptime type value lost its type");
+            }
+        },
+    }
+    return;
+}
+
+fn expected_integer(value: i64) -> ExpectedComptime {
+    return ExpectedComptime {
+        kind: ExpectedComptimeKind::Integer,
+        integer: value,
+        boolean: false,
+        text: "",
+        category: ""
+    };
+}
+
+fn expected_boolean(value: bool) -> ExpectedComptime {
+    return ExpectedComptime {
+        kind: ExpectedComptimeKind::Boolean,
+        integer: 0,
+        boolean: value,
+        text: "",
+        category: ""
+    };
+}
+
+fn expected_text(kind: ExpectedComptimeKind, value: []u8) -> ExpectedComptime {
+    return ExpectedComptime {
+        kind: kind,
+        integer: 0,
+        boolean: false,
+        text: value,
+        category: ""
+    };
+}
+
+fn expected_diagnostic(category: []u8, message: []u8) -> ExpectedComptime {
+    return ExpectedComptime {
+        kind: ExpectedComptimeKind::Diagnostic,
+        integer: 0,
+        boolean: false,
+        text: message,
+        category: category
+    };
+}
+
+fn expect_comptime_has_payload(
+    allocator: Allocator,
+    payload: bool,
+    expected: bool
+) -> !void {
+    let input =
+        \\union Choice { Empty, Value(i64) }
+        \\fn main() { let value = comptime std::meta::has_payload<Choice, v>(); }
+    ;
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |problem| {
+        defer problem.deinit();
+        let message = problem.message.as_bytes();
+        testing::fail(message);
+    }
+    var owner = empty_type();
+    match try state.resolve_type(&tree, "Choice") {
+        Value(value) => { owner = value; },
+        Issue(_) => testing::fail("capture owner did not resolve"),
+    }
+    var held = empty_type();
+    if payload {
+        match try state.resolve_type(&tree, "i64") {
+            Value(value) => { held = value; },
+            Issue(_) => testing::fail("capture payload did not resolve"),
+        }
+    }
+    var variant = "Empty";
+    if payload {
+        variant = "Value";
+    }
+    let field = try state.retain_meta_field(
+        owner, variant, held, true
+    );
+    try state.bind_meta_field("v", field);
+    if first_comptime_expression(&tree, &program) |expression| {
+        return expect_comptime_result(
+            &var state,
+            &tree,
+            expression,
+            expected_boolean(expected)
+        );
+    }
+    testing::fail("test source has no comptime expression");
+    return;
+}
+
+test "comptime evaluator preserves scalar and short-circuit behavior" {
+    let allocator = mem::page_allocator();
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 4 * 1024; }",
+        "",
+        expected_integer(4096)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 9223372036854775807 + 1; }",
+        "",
+        expected_integer(-9223372036854775807 - 1)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 1 + 1 == 2; }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime false and runtime; }",
+        "",
+        expected_boolean(false)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime true or runtime; }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime -7 + 10 % 4; }",
+        "",
+        expected_integer(-5)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime !false and 2 <= 3; }",
+        "",
+        expected_boolean(true)
+    );
+    let string_equality =
+        \\fn main() { let value = comptime "same" == "same"; }
+    ;
+    try expect_comptime_evaluation(
+        allocator, string_equality, "", expected_boolean(true)
+    );
+    let string_value =
+        \\fn main() { let value = comptime "bytes"; }
+    ;
+    try expect_comptime_evaluation(
+        allocator, string_value, "",
+        expected_text(ExpectedComptimeKind::Bytes, "bytes")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime type<i64>; }",
+        "",
+        expected_text(ExpectedComptimeKind::TypeValue, "i64")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime T == type<i64>; }",
+        "i64",
+        expected_boolean(true)
+    );
+}
+
+test "comptime evaluator reports runtime and arithmetic failures" {
+    let allocator = mem::page_allocator();
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let runtime = 1; let value = comptime runtime + 1; }",
+        "",
+        expected_diagnostic("comptime error", "runtime value cannot be used")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 1 / 0; }",
+        "",
+        expected_diagnostic("comptime error", "division by zero")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 1 % 0; }",
+        "",
+        expected_diagnostic("comptime error", "modulo by zero")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime -true; }",
+        "",
+        expected_diagnostic("comptime error", "unary - expects integer")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime true + false; }",
+        "",
+        expected_diagnostic(
+            "comptime error", "operator `+` expects integers"
+        )
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime true and 1; }",
+        "",
+        expected_diagnostic(
+            "comptime error", "operator `and` expects bools"
+        )
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 1 == true; }",
+        "",
+        expected_diagnostic(
+            "comptime error", "equality operands must have same type"
+        )
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime 9223372036854775808; }",
+        "",
+        expected_diagnostic(
+            "comptime error", "invalid integer `9223372036854775808`"
+        )
+    );
+}
+
+test "comptime evaluator resolves meta predicates and type substitutions" {
+    let allocator = mem::page_allocator();
+    try expect_comptime_evaluation(
+        allocator,
+        "pub struct Item { pub count: i64 } fn main() { let value = comptime std::meta::is_struct<Item>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "pub struct Item { pub count: i64 } fn main() { let value = comptime std::meta::has_public_fields<Item>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_optional<?T>(); }",
+        "i64",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_optional<?ptr<i64>>(); }",
+        "",
+        expected_boolean(false)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_array<std::array::Array<T>>(); }",
+        "i64",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "enum Shade { Light } fn main() { let value = comptime std::meta::is_enum<Shade>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "union Choice { Empty, Value(i64) } fn main() { let value = comptime std::meta::is_union<Choice>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_box<std::mem::Box<i64>>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_map<std::map::Map<[]u8, i64>>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_owner<std::arena::Arena<i64>>(); }",
+        "",
+        expected_boolean(true)
+    );
+    try expect_comptime_has_payload(allocator, true, true);
+    try expect_comptime_has_payload(allocator, false, false);
+}
+
+test "comptime evaluator keeps meta diagnostics at the evaluator boundary" {
+    let allocator = mem::page_allocator();
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_struct<i64, bool>(); }",
+        "",
+        expected_diagnostic(
+            "comptime error", "`std::meta::is_struct` expects 1 static argument"
+        )
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_struct<i64>(1); }",
+        "",
+        expected_diagnostic(
+            "comptime error", "`std::meta::is_struct` takes no arguments"
+        )
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::public_fields<i64>(); }",
+        "",
+        expected_diagnostic("comptime error", "runtime value cannot be used")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime type<Missing>; }",
+        "",
+        expected_diagnostic("type error", "unknown type `Missing`")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime type<1>; }",
+        "",
+        expected_diagnostic("type error", "unknown type `1`")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "fn main() { let value = comptime std::meta::is_struct<1>(); }",
+        "",
+        expected_diagnostic("type error", "unknown type `1`")
+    );
+    try expect_comptime_evaluation(
+        allocator,
+        "union Choice { Empty } fn main() { let value = comptime std::meta::has_payload<T, 1>(); }",
+        "Choice",
+        expected_diagnostic(
+            "comptime error", "`1` is not a comptime capture"
+        )
+    );
+}
