@@ -75,12 +75,13 @@ union DeclaredFunctionResult {
 // source-order passes as the shipping Checker's collectTypesAndMethods.
 fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     let owners = try ast::deinit_owners(self.allocator, tree, program);
-    defer owners.deinit();
+    errdefer owners.deinit();
     try self.predeclare_type_names(tree, program);
     var index = 0;
     while program.declarations.get(index) |declaration| {
         if try self.collect_type_decl(tree, declaration, &owners) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
+            owners.deinit();
             return move value;
         }
         index = index + 1;
@@ -89,6 +90,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
     while program.declarations.get(index) |declaration| {
         if try self.collect_method_decl(tree, declaration) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
+            owners.deinit();
             return move value;
         }
         index = index + 1;
@@ -99,6 +101,7 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
             Impl(value) => {
                 if try self.collect_impl(tree, value) |issue| {
                     let diagnostic = try self.type_collection_diagnostic(tree, issue);
+                    owners.deinit();
                     return move diagnostic;
                 }
             },
@@ -106,6 +109,8 @@ fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast
         }
         index = index + 1;
     }
+    let handle = self.deinit_owner_maps.add(move owners);
+    self.deinit_owners = handle;
     return null;
 }
 
