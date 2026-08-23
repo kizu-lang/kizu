@@ -185,6 +185,19 @@ cycle が出たら Go 側の実際の ownership を調べ、共有型の owner �
 4. check: target module を Kizu compiler で check する
 5. behavior: 対象の公開挙動を Kizu test で実行する
 
+`kizu check compiler` と `kizu test compiler` は pre-commit hook `selfhost` が回します。
+
+### Behavior corpus
+
+module の公開挙動は、Go test の white-box 構造を Kizu に写すのではなく、両 compiler が
+同じ入力 corpus を読む形で検査します。parser の corpus は `compiler/tests/parser/` で、
+1 file = 入力 + 空行 + `// parse` + 期待 block(失敗なら `// L:C-L:C message` の
+diagnostics、成功なら `// ast:` 以下に rendered program)です。期待 block は Go の
+`go test ./internal/parser -run TestParserCorpus -update` が生成し、Kizu 側は
+`compiler/src/internal/parser/corpus_test.kizu` の runner が同じ file を読んで比較します。
+Go の挙動を変えたら `-update` で期待 block を作り直し、Kizu 側を同じ commit で追従させます。
+Kizu の unit test に残すのは、入出力で表せない ownership / lifecycle の invariant だけです。
+
 並列 agent は同じ file を編集しません。shared type と ownership 表は一人の
 integrator だけが変更し、他の agent は変更要求を返します。
 
