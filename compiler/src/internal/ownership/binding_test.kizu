@@ -1,0 +1,79 @@
+import std::mem;
+import std::testing;
+
+// Port of internal/ownership/clone_test.go: a clone's per-field facts are
+// real copies, so a branch's writes stay in that branch. The Go reflection
+// guard over the binding layout has no Kizu counterpart; the copy itself is
+// what this checks.
+
+fn field_name() -> []u8 {
+    return "a";
+}
+
+test "clone does not share field facts" {
+    let allocator = mem::page_allocator();
+    var store = new_scope_store(allocator);
+    defer store.deinit();
+    var names = new_name_table(allocator);
+    defer names.deinit();
+    let self_name = try names.intern("self");
+    let origin = store.new_scope(null);
+    var value = store.new_binding(self_name, self_name);
+    errdefer value.deinit();
+    try value.field_borrows.insert(field_name(), 1);
+    try value.field_mut_borrows.insert(field_name(), 1);
+    try value.field_deinit.insert(field_name(), true);
+    try value.field_arena_ids.insert(field_name(), 7);
+    let handle = try store.define(origin, "self", move value);
+    try value_handle_targets(&var store, handle, handle);
+    let branch = try store.clone_scope(origin);
+    let changed = store.resolve(branch, "self") orelse return testing::fail("clone lost the binding");
+    testing::expect(!same_binding(changed, handle));
+    try store.activate_borrow(changed, field_name(), false);
+    try store.activate_borrow(changed, field_name(), true);
+    try store.clear_field_deinit(changed, field_name());
+    if store.binding_mut(changed) |record| {
+        while record.borrow_targets.pop() |_| {}
+        if record.field_arena_ids.at_mut(field_name()) |slot| {
+            slot.* = 9;
+        }
+    }
+    let original = store.at(handle);
+    testing::expect_equal<i64>(1, original.field_borrows.get(field_name()) orelse 0);
+    testing::expect_equal<i64>(1, original.field_mut_borrows.get(field_name()) orelse 0);
+    testing::expect(original.field_deinit.get(field_name()) orelse false);
+    testing::expect_equal<i64>(7, original.field_arena_ids.get(field_name()) orelse 0);
+    testing::expect_equal<i64>(1, original.borrow_targets.len());
+}
+
+fn same_binding(left: BindingHandle, right: BindingHandle) -> bool {
+    return left.node == right.node;
+}
+
+fn value_handle_targets(store: &var ScopeStore, value: BindingHandle, target: BindingHandle) -> !void {
+    if store.binding_mut(value) |record| {
+        return record.borrow_targets.append(BorrowSource { target: target, field: empty_name() });
+    }
+    return;
+}
+
+test "merge carries moves, releases, and cleaned fields back" {
+    let allocator = mem::page_allocator();
+    var store = new_scope_store(allocator);
+    defer store.deinit();
+    var names = new_name_table(allocator);
+    defer names.deinit();
+    let owner_name = try names.intern("owner");
+    let origin = store.new_scope(null);
+    let value = store.new_binding(owner_name, owner_name);
+    let handle = try store.define(origin, "owner", move value);
+    let branch = try store.clone_scope(origin);
+    let in_branch = store.resolve(branch, "owner") orelse return testing::fail("clone lost the binding");
+    try store.set_moved(in_branch, true);
+    try store.mark_field_deinit(in_branch, field_name());
+    testing::expect(!store.at(handle).moved);
+    try store.merge_moved_from(origin, branch);
+    testing::expect(store.at(handle).moved);
+    testing::expect(store.field_deinit(handle, field_name()));
+    testing::expect(!store.at(handle).deinitialized);
+}

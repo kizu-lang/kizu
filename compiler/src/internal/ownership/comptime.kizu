@@ -1,0 +1,345 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+
+// Mechanical port of internal/ownership/comptime.go: the compile-time branch
+// selection of `comptime if` and the minimal constant evaluation it needs.
+// Go's `(value, ok)` pairs come back as optionals; the Go `string` type
+// values are Names.
+
+/// Checks ownership effects for the selected compile-time branch, the Go
+/// `checkComptimeIfStmt`.
+fn (self: &var Checker) check_comptime_if_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ComptimeIfStmt
+) -> !?diagnostic::Diagnostic {
+    var condition_type = empty_name();
+    if try self.read_comptime_only(tree, statement.condition, &var condition_type) |failed| {
+        return move failed;
+    }
+    if try self.comptime_bool(tree, statement.condition) |value| {
+        if !value {
+            let alternative = statement.alternative orelse return null;
+            let scope = self.store.child(env);
+            return self.check_block(tree, scope, alternative);
+        }
+    }
+    let scope = self.store.child(env);
+    return self.check_block(tree, scope, statement.consequence);
+}
+
+/// Evaluates integer-only compile-time arithmetic used in branch conditions,
+/// the Go `intLiteral`.
+pub fn int_literal(tree: &ast::Ast, expression: ast::Expression) -> ?i64 {
+    if comptime_expr(tree, expression) |wrapped| {
+        return int_literal(tree, wrapped.expr);
+    }
+    if int_expr(tree, expression) |literal| {
+        let retained = tree.texts.at(literal.value.node);
+        let bytes = retained.as_bytes();
+        return decimal_i64(bytes);
+    }
+    if prefix_expr(tree, expression) |prefix| {
+        let value = int_literal(tree, prefix.right);
+        if text_equals(tree, prefix.operator, "-") {
+            let present = value orelse return null;
+            return 0 - present;
+        }
+        return null;
+    }
+    if binary_expr(tree, expression) |binary| {
+        let left = int_literal(tree, binary.left) orelse return null;
+        let right = int_literal(tree, binary.right) orelse return null;
+        return eval_comptime_int(tree, binary.operator, left, right);
+    }
+    return null;
+}
+
+/// Evaluates simple integer arithmetic for ownership branch selection, the
+/// Go `evalComptimeInt`.
+pub fn eval_comptime_int(tree: &ast::Ast, op: ast::Text, left: i64, right: i64) -> ?i64 {
+    if text_equals(tree, op, "+") {
+        return left + right;
+    }
+    if text_equals(tree, op, "-") {
+        return left - right;
+    }
+    if text_equals(tree, op, "*") {
+        return left * right;
+    }
+    if text_equals(tree, op, "/") {
+        if right == 0 {
+            return null;
+        }
+        return left / right;
+    }
+    if text_equals(tree, op, "%") {
+        if right == 0 {
+            return null;
+        }
+        return left % right;
+    }
+    return null;
+}
+
+/// Evaluates integer comparisons for ownership branch selection, the Go
+/// `compareComptimeInts`.
+pub fn compare_comptime_ints(tree: &ast::Ast, op: ast::Text, left: i64, right: i64) -> ?bool {
+    if text_equals(tree, op, "==") {
+        return left == right;
+    }
+    if text_equals(tree, op, "!=") {
+        return left != right;
+    }
+    if text_equals(tree, op, "<") {
+        return left < right;
+    }
+    if text_equals(tree, op, "<=") {
+        return left <= right;
+    }
+    if text_equals(tree, op, ">") {
+        return left > right;
+    }
+    if text_equals(tree, op, ">=") {
+        return left >= right;
+    }
+    return null;
+}
+
+/// Reads a compile-time expression without moving runtime values, the Go
+/// `readComptimeExpr`.
+fn (self: &var Checker) read_comptime_expr(
+    tree: &ast::Ast,
+    expression: ast::ComptimeExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    return self.read_comptime_only(tree, expression.expr, out);
+}
+
+/// Rejects runtime locals inside compile-time expressions, the Go
+/// `readComptimeOnly`.
+fn (self: &var Checker) read_comptime_only(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        Comptime(value) => return self.read_comptime_only(tree, value.expr, out),
+        Int(_) => {
+            out.* = self.common.i64_name;
+            return null;
+        },
+        String(_) => {
+            out.* = self.common.bytes_name;
+            return null;
+        },
+        Bool(_) => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        Type(_) => {
+            out.* = self.common.type_value_name;
+            return null;
+        },
+        Ident(value) => {
+            let retained = tree.texts.at(value.name.node);
+            let bytes = retained.as_bytes();
+            if self.type_arg_values.contains(bytes) {
+                out.* = self.common.type_value_name;
+                return null;
+            }
+            return try self.error0(
+                ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
+            );
+        },
+        Prefix(value) => return self.read_comptime_only(tree, value.right, out),
+        Binary(value) => {
+            let copied = value;
+            var left = empty_name();
+            if try self.read_comptime_only(tree, copied.left, &var left) |failed| {
+                return move failed;
+            }
+            var right = empty_name();
+            if try self.read_comptime_only(tree, copied.right, &var right) |failed| {
+                return move failed;
+            }
+            out.* = left;
+            return null;
+        },
+        Call(value) => {
+            let copied = value;
+            if try self.meta_predicate_call(tree, copied) |_| {
+                out.* = self.common.bool_name;
+                return null;
+            }
+            return try self.error0(
+                ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
+            );
+        },
+        _ => return try self.error0(
+            ast::zero_span(), "borrow error: runtime value cannot cross comptime boundary"
+        ),
+    }
+}
+
+/// Answers the predicates that ask which declaration a type came from, the
+/// Go `declaredKindPredicate`; null reports that the form was not one of
+/// them.
+fn (self: &Checker) declared_kind_predicate(form: stdmeta::Form, subject: Name) -> ?bool {
+    match form {
+        IsStruct => return self.is_struct(subject),
+        IsEnum => return self.is_enum(subject),
+        IsUnion => return self.is_union(subject),
+        _ => return null,
+    }
+}
+
+/// Answers a `std::meta` predicate written as a compile-time condition, the
+/// Go `metaPredicateCall`; null reports that the call was not one.
+fn (self: &var Checker) meta_predicate_call(tree: &ast::Ast, call: ast::CallExpr) -> !?bool {
+    let apply = type_apply_expr(tree, call.callee) orelse return null;
+    let name = try self.qualified_name(tree, apply.callee) orelse return null;
+    let owned = try self.names.copy(name);
+    defer owned.deinit();
+    let name_bytes = owned.as_bytes();
+    if !stdmeta::predicate(name_bytes) or arg_count(tree, call.args) != 0 {
+        return null;
+    }
+    let raw = try self.names.intern_text(tree, apply.type_arg);
+    let subject = try self.instantiate_type_arg_text(raw);
+    let form = self.meta_form(name) orelse return null;
+    if form == stdmeta::Form::HasPayload {
+        let args = try self.names.split_generic_args(subject) orelse return null;
+        defer args.deinit();
+        var variant = MetaField {
+            owner: empty_name(),
+            name: empty_name(),
+            typ: empty_name(),
+            variant: false
+        };
+        if try self.meta_capture(tree, form, &args, &var variant) |failed| {
+            failed.deinit();
+            return null;
+        }
+        return !is_empty(variant.typ);
+    }
+    if self.declared_kind_predicate(form, subject) |known| {
+        return known;
+    }
+    match form {
+        IsOptional => return self.names.is_optional(subject),
+        IsArray => return self.names.generic_base_is(subject, "std::array::Array"),
+        IsBox => return self.names.generic_base_is(subject, "std::mem::Box"),
+        IsMap => return self.names.generic_base_is(subject, "std::map::Map"),
+        IsOwner => return self.owner_type(subject),
+        HasPublicFields => return self.struct_has_public_fields(subject),
+        _ => return null,
+    }
+}
+
+/// Reports whether a type spelling carries a cleanup contract, the Go
+/// `ast.OwnerType(c.deinitOwners, subject)`.
+fn (self: &Checker) owner_type(type_name: Name) -> bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return ast::owner_type(&self.deinit_owners, bytes);
+}
+
+/// Evaluates simple compile-time boolean expressions for ownership branch
+/// checks, the Go `comptimeBool`.
+fn (self: &var Checker) comptime_bool(tree: &ast::Ast, expression: ast::Expression) -> !?bool {
+    match tree.expressions.at(expression.node) {
+        Comptime(value) => return self.comptime_bool(tree, value.expr),
+        Bool(value) => return value.value,
+        Call(value) => {
+            let copied = value;
+            return self.meta_predicate_call(tree, copied);
+        },
+        Prefix(value) => {
+            let copied = value;
+            let inner = try self.comptime_bool(tree, copied.right) orelse return null;
+            if !text_equals(tree, copied.operator, "!") {
+                return null;
+            }
+            return !inner;
+        },
+        Binary(value) => {
+            let copied = value;
+            let logical = text_equals(tree, copied.operator, "and") or
+                text_equals(tree, copied.operator, "or");
+            if logical {
+                return self.comptime_logical_bool(tree, copied);
+            }
+            if try self.comptime_type_value(tree, copied.left) |left_type| {
+                if try self.comptime_type_value(tree, copied.right) |right_type| {
+                    return compare_comptime_types(tree, copied.operator, left_type, right_type);
+                }
+            }
+            let left = int_literal(tree, copied.left) orelse return null;
+            let right = int_literal(tree, copied.right) orelse return null;
+            return compare_comptime_ints(tree, copied.operator, left, right);
+        },
+        _ => return null,
+    }
+}
+
+/// Returns a type value from the minimal compile-time type subset, the Go
+/// `comptimeTypeValue`.
+fn (self: &var Checker) comptime_type_value(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?Name {
+    match tree.expressions.at(expression.node) {
+        Comptime(value) => return self.comptime_type_value(tree, value.expr),
+        Type(value) => {
+            let copied = value;
+            let raw = try self.names.intern_text(tree, copied.type_name);
+            let name = try self.instantiate_type_arg_text(raw);
+            if is_empty(name) {
+                return null;
+            }
+            return name;
+        },
+        Ident(value) => {
+            let retained = tree.texts.at(value.name.node);
+            let bytes = retained.as_bytes();
+            return self.type_arg_values.get(bytes);
+        },
+        _ => return null,
+    }
+}
+
+/// Evaluates equality on compile-time type values, the Go
+/// `compareComptimeTypes`.
+pub fn compare_comptime_types(
+    tree: &ast::Ast,
+    op: ast::Text,
+    left: Name,
+    right: Name
+) -> ?bool {
+    if text_equals(tree, op, "==") {
+        return same_name(left, right);
+    }
+    if text_equals(tree, op, "!=") {
+        return !same_name(left, right);
+    }
+    return null;
+}
+
+/// Evaluates constant boolean logical expressions, the Go
+/// `comptimeLogicalBool`.
+fn (self: &var Checker) comptime_logical_bool(tree: &ast::Ast, binary: ast::BinaryExpr) -> !?bool {
+    let left = try self.comptime_bool(tree, binary.left) orelse return null;
+    if text_equals(tree, binary.operator, "and") and !left {
+        return false;
+    }
+    if text_equals(tree, binary.operator, "or") and left {
+        return true;
+    }
+    let right = try self.comptime_bool(tree, binary.right) orelse return null;
+    if text_equals(tree, binary.operator, "and") {
+        return left and right;
+    }
+    return left or right;
+}

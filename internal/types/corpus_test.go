@@ -12,6 +12,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
 )
 
@@ -67,7 +68,10 @@ func TestCheckCorpus(t *testing.T) {
 // renderCheckCase loads input as a program outside any package and renders the
 // expectation block: `// load:` with the qualified user declarations (std
 // declarations are loaded but not listed) or the module error, then `// check:`
-// with `ok` or one line per CheckAll diagnostic, with its notes and help.
+// with `ok` or one line per CheckAll diagnostic, with its notes and help. The
+// type checker runs first; a program it accepts goes on to the ownership
+// checker, the same gate order the CLI uses, so the block lists whichever
+// stage stopped it.
 func renderCheckCase(input string) string {
 	var out bytes.Buffer
 	out.WriteString("// load:\n")
@@ -88,6 +92,9 @@ func renderCheckCase(input string) string {
 	}
 	out.WriteString("// check:\n")
 	errs := New().CheckAll(program)
+	if len(errs) == 0 {
+		errs = ownership.New().CheckAll(program)
+	}
 	if len(errs) == 0 {
 		out.WriteString("// ok\n")
 		return out.String()

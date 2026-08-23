@@ -1,7 +1,9 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
 import compiler::internal::project;
 import compiler::internal::types;
+import std::array;
 import std::fmt;
 import std::fs;
 import std::io;
@@ -10,10 +12,11 @@ import std::string;
 import std::testing;
 
 // The check corpus in compiler/tests/check is shared with the Go loader and
-// checker, which generate each case's expectation block. This runner loads
+// checkers, which generate each case's expectation block. This runner loads
 // every case through this loader and requires the same qualified user
 // declarations or the same module error, then type-checks the loaded program
-// and requires the same diagnostics.
+// and, when the types pass, ownership-checks it, and requires the same
+// diagnostics from whichever stage stopped it.
 
 /// The blank line plus `// check` line that ends a case input.
 fn check_marker() -> []u8 {
@@ -139,6 +142,8 @@ fn render_load_section(
 
 /// Appends the `check:` section: `ok`, or one line per diagnostic of
 /// check_all as `L:C-L:C [code] category: message` with its notes and help.
+/// The type checker runs first; a program it accepts goes on to the
+/// ownership checker, the gate order the CLI uses.
 fn append_check_section(
     out: &var string::String,
     allocator: Allocator,
@@ -149,6 +154,19 @@ fn append_check_section(
     try out.append_byte(cast<u8>(10));
     var diagnostics = try types::check_all(allocator, tree, program);
     defer diagnostics.deinit();
+    if diagnostics.len() == 0 {
+        var moves = try ownership::check_all(allocator, tree, program);
+        defer moves.deinit();
+        return append_diagnostic_lines(out, &moves);
+    }
+    return append_diagnostic_lines(out, &diagnostics);
+}
+
+/// Appends `ok` for no diagnostics, or one line per diagnostic.
+fn append_diagnostic_lines(
+    out: &var string::String,
+    diagnostics: &array::Array<diagnostic::Diagnostic>
+) -> !void {
     if diagnostics.len() == 0 {
         try out.append_bytes("// ok");
         return out.append_byte(cast<u8>(10));

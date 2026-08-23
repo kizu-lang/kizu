@@ -12,16 +12,17 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestSelfhostFrontend builds the selfhost compiler with the shipping one and
 // runs its `parse` and `check` commands over the examples, the negative
 // examples, tests/behavior, the module examples and compiler/ itself. What it
-// prints must be what the Go front end (parse, load, type check) prints for
-// the same target through the same CLI paths. The selfhost `check` stops at
-// the type checker, so the Go side here stops there too; the later gates join
-// the comparison with their modules.
+// prints must be what the Go front end (parse, load, type check, ownership
+// check) prints for the same target through the same CLI paths. The selfhost
+// `check` stops at the ownership checker, so the Go side here stops there
+// too; the later gates join the comparison with their modules.
 func TestSelfhostFrontend(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler")
@@ -120,13 +121,16 @@ func goParseOutput(file string) cliOutput {
 }
 
 // goCheckOutput renders what `kizu check` prints for a target, stopping at the
-// type checker like the selfhost command does.
+// ownership checker like the selfhost command does.
 func goCheckOutput(target string) cliOutput {
 	program, err := loadFrontendTarget(target)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	if err := types.New().Check(program); err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	if err := ownership.New().Check(program); err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: "check: ok\n"}

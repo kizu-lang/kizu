@@ -1,0 +1,628 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::mem;
+import std::string;
+
+// Port of the field, namespace, and dereference access checks of
+// internal/ownership/checker.go (readFieldExpr through
+// checkUnionConstructor): reading and moving out of fields, the `::`
+// namespace lookups, assignment roots and their borrow conflicts, and the
+// `.*` reads through borrows and raw pointers.
+
+/// Reads a field without moving the receiver, the Go `readFieldExpr`.
+fn (self: &var Checker) read_field_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if field.namespace {
+        return self.read_namespace_expr(tree, field, out);
+    }
+    if ident_expr(tree, field.receiver) |ident| {
+        if self.text_is_enum(tree, ident.name) {
+            return try self.error2(
+                tree, field.span, "move error: enum tag `%s.%s` must use `::`",
+                Arg::Text(ident.name), Arg::Text(field.name)
+            );
+        }
+        if self.text_is_error_set(tree, ident.name) {
+            return try self.error2(
+                tree, field.span, "move error: error `%s.%s` must use `::`",
+                Arg::Text(ident.name), Arg::Text(field.name)
+            );
+        }
+        if self.text_is_union(tree, ident.name) {
+            return try self.error2(
+                tree, field.span, "move error: union variant `%s.%s` must use `::`",
+                Arg::Text(ident.name), Arg::Text(field.name)
+            );
+        }
+    }
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var receiver_type) |failed| {
+        return move failed;
+    }
+    receiver_type = try self.names.borrowed_value(receiver_type);
+    if try self.direct_field_root_of_field(tree, env, field) |found| {
+        if !is_empty(found.path) and self.field_deinit_name(found.root, found.path) {
+            return try self.error2(
+                tree, field.span, "move error: field `%s.%s` was deinitialized",
+                Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
+            );
+        }
+        if self.binding(found.root).active_mut_borrows > 0 {
+            return try self.error1(
+                tree, field.span, "borrow error: value `%s` cannot be read while mutably borrowed",
+                Arg::Str(self.binding(found.root).name)
+            );
+        }
+        if self.field_borrow_count(found.root, found.path, true) > 0 {
+            return try self.error2(
+                tree, field.span, "borrow error: field `%s.%s` cannot be read while mutably borrowed",
+                Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
+            );
+        }
+    }
+    if self.struct_field_type_text(receiver_type, tree, field.name) |field_type| {
+        out.* = field_type;
+        return null;
+    }
+    if self.read_fs_field_type(receiver_type, tree, field.name) |field_type| {
+        out.* = field_type;
+        return null;
+    }
+    out.* = receiver_type;
+    return null;
+}
+
+/// Returns ownership types for builtin filesystem structs, the Go
+/// `readFsFieldType`.
+fn (self: &Checker) read_fs_field_type(receiver_type: Name, tree: &ast::Ast, field: ast::Text) -> ?Name {
+    if self.names.is(receiver_type, "std::fs::Metadata") {
+        return self.read_fs_metadata_field_type(tree, field);
+    }
+    if self.names.is(receiver_type, "std::fs::DirEntry") {
+        return self.read_fs_dir_entry_field_type(tree, field);
+    }
+    return null;
+}
+
+/// Returns ownership types for std::fs::Metadata fields, the Go
+/// `readFsMetadataFieldType`.
+fn (self: &Checker) read_fs_metadata_field_type(tree: &ast::Ast, field: ast::Text) -> ?Name {
+    if text_equals(tree, field, "size") {
+        return self.common.i64_name;
+    }
+    if text_equals(tree, field, "is_dir") {
+        return self.common.bool_name;
+    }
+    return null;
+}
+
+/// Returns ownership types for std::fs::DirEntry fields, the Go
+/// `readFsDirEntryFieldType`.
+fn (self: &Checker) read_fs_dir_entry_field_type(tree: &ast::Ast, field: ast::Text) -> ?Name {
+    if text_equals(tree, field, "name") or text_equals(tree, field, "path") {
+        return self.common.bytes_name;
+    }
+    if text_equals(tree, field, "is_dir") {
+        return self.common.bool_name;
+    }
+    return null;
+}
+
+/// Reads enum or payload-free union namespace lookup, the Go
+/// `readNamespaceExpr`.
+fn (self: &var Checker) read_namespace_expr(tree: &ast::Ast, field: ast::FieldExpr, out: &var Name) -> !?diagnostic::Diagnostic {
+    var dotted = empty_name();
+    if try self.qualified_name(tree, field.receiver) |found| {
+        dotted = found;
+    } else {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error1(tree, field.span, "move error: invalid namespace lookup `%s`", Arg::Str(text));
+    }
+    let name = try self.namespace_key(dotted);
+    if self.is_enum(name) {
+        if !self.enum_has_tag_text(name, tree, field.name) {
+            return try self.error2(
+                tree, field.span, "move error: unknown enum tag `%s::%s`",
+                Arg::Str(name), Arg::Text(field.name)
+            );
+        }
+        out.* = name;
+        return null;
+    }
+    if self.is_error_set(name) {
+        if !self.error_set_has_text(name, tree, field.name) {
+            return try self.error2(
+                tree, field.span, "move error: unknown error `%s::%s`",
+                Arg::Str(name), Arg::Text(field.name)
+            );
+        }
+        out.* = name;
+        return null;
+    }
+    if self.is_union(name) {
+        var payload = empty_name();
+        if self.union_variant_payload_text(name, tree, field.name) |found| {
+            payload = found;
+        } else {
+            return try self.error2(
+                tree, field.span, "move error: unknown union variant `%s::%s`",
+                Arg::Str(name), Arg::Text(field.name)
+            );
+        }
+        if !is_empty(payload) {
+            return try self.error2(
+                tree, field.span, "move error: union variant `%s::%s` expects payload",
+                Arg::Str(name), Arg::Text(field.name)
+            );
+        }
+        out.* = name;
+        return null;
+    }
+    return try self.error1(tree, field.span, "move error: unknown namespace `%s`", Arg::Str(name));
+}
+
+/// Rejects partial moves from borrowed or aggregate values, the Go
+/// `moveFieldExpr`.
+fn (self: &var Checker) move_field_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if try self.read_field_expr(tree, env, field, out) |failed| {
+        return move failed;
+    }
+    // A `[]u8` field of a borrow-class value is a view of the same backing;
+    // copying it out in a move context would shed the tie.
+    if self.names.is(out.*, "[]u8") {
+        if try self.borrow_class_view_root_of_field(tree, env, field) |_| {
+            let text = try self.field_expression_text(tree, field);
+            return try self.error1(
+                tree, field.span, "borrow error: view field `%s` cannot escape its borrowed owner",
+                Arg::Str(text)
+            );
+        }
+    }
+    if try self.is_copy_type(out.*) {
+        return null;
+    }
+    if self.borrowed_field_root(tree, env, field.receiver) |name| {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error2(
+            tree, field.span, "borrow error: field `%s` cannot be moved out of borrowed value `%s`",
+            Arg::Str(text), Arg::Text(name)
+        );
+    }
+    if try self.contains_arena_at(tree, env, field.receiver) {
+        return try self.error0(field.span, "arena error: arena.at returns &T, so its fields cannot be moved");
+    }
+    return self.consume_owner_field(tree, env, field);
+}
+
+/// Takes one owner field out of a value the frame holds, the Go
+/// `consumeOwnerField`. The caller of a value parameter has already let go,
+/// and a local is the frame's own, so taking a field apart cannot free
+/// anything twice: the obligation moves from the aggregate to the field, and
+/// every field still has to be consumed before the block ends.
+///
+/// A type that declares its own `deinit` is taken whole. Its obligation is
+/// the type's -- memory it took from an allocator, a descriptor -- and no
+/// sequence of field consumes discharges it, so taking it apart would leave
+/// a value with no way out (#1633).
+fn (self: &var Checker) consume_owner_field(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr
+) -> !?diagnostic::Diagnostic {
+    var root = self.scratch_binding;
+    var path = empty_name();
+    var located = false;
+    if try self.direct_field_root_of_field(tree, env, field) |found| {
+        root = found.root;
+        path = found.path;
+        located = true;
+    }
+    if !located or is_empty(path) {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error1(
+            tree, field.span, "move error: field `%s` cannot be moved out of aggregate", Arg::Str(text)
+        );
+    }
+    if self.names.contains_byte(path, cast<u8>(46)) {
+        // A nested field belongs to the value in between, which is still whole
+        // here. Take that one out first and the field comes with it.
+        let text = try self.field_expression_text(tree, field);
+        let dot = self.names.last_index_of(path, cast<u8>(46));
+        let owner = try self.names.intern_slice(path, 0, dot);
+        return try self.error2(
+            tree, field.span, "move error: field `%s` belongs to `%s`; move that one out first",
+            Arg::Str(text), Arg::Str(owner)
+        );
+    }
+    let root_type = self.binding(root).type_name;
+    if self.declares_deinit(root_type) {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error2(
+            tree, field.span,
+            "move error: `%s` declares its own deinit and is consumed whole, so field `%s` cannot be moved out",
+            Arg::Str(root_type), Arg::Str(text)
+        );
+    }
+    if self.binding(root).moved or self.binding(root).deinitialized {
+        return try self.error1(
+            tree, field.span, "move error: moved value `%s` was used", Arg::Str(self.binding(root).name)
+        );
+    }
+    if self.store.has_any_borrow(root) {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error2(
+            tree, field.span, "borrow error: field `%s` cannot be moved while `%s` is borrowed",
+            Arg::Str(text), Arg::Str(self.binding(root).name)
+        );
+    }
+    if self.field_deinit_name(root, path) {
+        let text = try self.field_expression_text(tree, field);
+        return try self.error1(tree, field.span, "move error: field `%s` was already consumed", Arg::Str(text));
+    }
+    try self.mark_field_deinit(root, path);
+    return null;
+}
+
+/// Rejects writes that overlap active borrows, the Go
+/// `checkAssignmentBorrowConflict`.
+fn (self: &var Checker) check_assignment_borrow_conflict(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    target: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let found = try self.direct_field_root(tree, env, target) orelse return null;
+    if is_empty(found.path) {
+        if self.store.has_any_borrow(found.root) {
+            return try self.error1(
+                tree, ast::zero_span(), "borrow error: value `%s` cannot be assigned while borrowed",
+                Arg::Str(self.binding(found.root).name)
+            );
+        }
+        return null;
+    }
+    if self.binding(found.root).borrowed_param and !self.binding(found.root).mut_borrow {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: cannot assign field through shared borrow `%s`",
+            Arg::Str(self.binding(found.root).name)
+        );
+    }
+    if self.binding(found.root).active_borrows > 0 or self.binding(found.root).active_mut_borrows > 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "borrow error: field `%s.%s` cannot be assigned while value is borrowed",
+            Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
+        );
+    }
+    if self.overlapping_field_borrows(found.root, found.path, false) > 0 or
+        self.overlapping_field_borrows(found.root, found.path, true) > 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "borrow error: field `%s.%s` cannot be assigned while borrowed",
+            Arg::Str(self.binding(found.root).name), Arg::Str(found.path)
+        );
+    }
+    return null;
+}
+
+/// Returns the borrowed identifier at the root of a field chain, the Go
+/// `borrowedFieldRoot`; null when the root is not a borrowed parameter.
+fn (self: &Checker) borrowed_field_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?ast::Text {
+    if field_expr(tree, expression) |field| {
+        return self.borrowed_field_root(tree, env, field.receiver);
+    }
+    if deref_expr(tree, expression) |deref| {
+        return self.borrowed_field_root(tree, env, deref.receiver);
+    }
+    let ident = ident_expr(tree, expression) orelse return null;
+    let value = self.lookup_text(tree, env, ident.name) orelse return null;
+    if !self.binding(value).borrowed_param {
+        return null;
+    }
+    return ident.name;
+}
+
+/// Reads the value behind a local borrow or raw pointer, the Go
+/// `readDerefExpr`.
+fn (self: &var Checker) read_deref_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    deref: ast::DerefExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if ident_expr(tree, deref.receiver) |ident| {
+        let value = self.lookup_text(tree, env, ident.name) orelse
+            return try self.error1(tree, ident.span, "move error: undefined variable `%s`", Arg::Text(ident.name));
+        if self.binding(value).borrowed_param {
+            out.* = self.binding(value).type_name;
+            return null;
+        }
+    }
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, deref.receiver, &var receiver_type) |failed| {
+        return move failed;
+    }
+    if try self.names.explicit_borrow(receiver_type) |parts| {
+        out.* = parts.inner;
+        return null;
+    }
+    var handled = false;
+    if try self.raw_pointer_deref_expr_type(tree, env, deref, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if ident_expr(tree, deref.receiver) |ident| {
+        return try self.error1(
+            tree, ident.span, "borrow error: `%s` is not a borrow or raw pointer", Arg::Text(ident.name)
+        );
+    }
+    return try self.error0(deref.operator_span, "borrow error: dereference expects a local borrow or raw pointer");
+}
+
+/// Returns the element type for unchecked pointer dereference, the Go
+/// `rawPointerDerefExprType`; handled reports whether the receiver was a raw
+/// pointer at all.
+fn (self: &var Checker) raw_pointer_deref_expr_type(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    deref: ast::DerefExpr,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    if ident_expr(tree, deref.receiver) |ident| {
+        if self.lookup_text(tree, env, ident.name) |value| {
+            if self.binding(value).borrowed_param {
+                return null;
+            }
+        }
+    }
+    var receiver_type = empty_name();
+    if try self.read_expr(tree, env, deref.receiver, &var receiver_type) |failed| {
+        return move failed;
+    }
+    let elem = try self.names.raw_pointer_element(receiver_type) orelse return null;
+    if self.names.starts_with(receiver_type, "?") {
+        handled.* = true;
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: nullable raw pointer `%s` cannot be dereferenced",
+            Arg::Str(receiver_type)
+        );
+    }
+    out.* = try self.names.trim_prefix(elem, "const ");
+    handled.* = true;
+    return null;
+}
+
+/// Finds the binding invalidated by an assignment target, the Go
+/// `assignmentRoot`.
+fn (self: &Checker) assignment_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?BindingHandle {
+    if ident_expr(tree, expression) |ident| {
+        return self.lookup_text(tree, env, ident.name);
+    }
+    if field_expr(tree, expression) |field| {
+        return self.assignment_root(tree, env, field.receiver);
+    }
+    if deref_expr(tree, expression) |deref| {
+        return self.assignment_root(tree, env, deref.receiver);
+    }
+    return null;
+}
+
+/// Returns a binding only for whole-binding assignment, the Go
+/// `directAssignmentRoot`.
+fn (self: &Checker) direct_assignment_root(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?BindingHandle {
+    // `n.*` through a `&var` parameter names the same storage `n` does, so
+    // both spellings take the direct-assignment path and its rules.
+    if deref_expr(tree, expression) |deref| {
+        let ident = ident_expr(tree, deref.receiver) orelse return null;
+        let value = self.lookup_text(tree, env, ident.name) orelse return null;
+        if !self.is_mut_borrow_param(value) {
+            return null;
+        }
+        return value;
+    }
+    let ident = ident_expr(tree, expression) orelse return null;
+    return self.lookup_text(tree, env, ident.name);
+}
+
+/// Validates ownership effects of Union.Variant(payload), the Go
+/// `checkUnionConstructor`.
+fn (self: &var Checker) check_union_constructor(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    if !field.namespace {
+        if ident_expr(tree, field.receiver) |ident| {
+            if self.text_is_enum(tree, ident.name) {
+                handled.* = true;
+                return try self.error2(
+                    tree, ast::zero_span(), "move error: enum tag `%s.%s` must use `::`",
+                    Arg::Text(ident.name), Arg::Text(field.name)
+                );
+            }
+            if self.text_is_union(tree, ident.name) {
+                handled.* = true;
+                return try self.error2(
+                    tree, ast::zero_span(), "move error: union variant `%s.%s` must use `::`",
+                    Arg::Text(ident.name), Arg::Text(field.name)
+                );
+            }
+        }
+        return null;
+    }
+    let ident = ident_expr(tree, field.receiver) orelse return null;
+    if !self.text_is_union(tree, ident.name) {
+        return null;
+    }
+    let union_name = try self.names.intern_text(tree, ident.name);
+    handled.* = true;
+    var payload = empty_name();
+    if self.union_variant_payload_text(union_name, tree, field.name) |found| {
+        payload = found;
+    } else {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: unknown union variant `%s::%s`",
+            Arg::Text(ident.name), Arg::Text(field.name)
+        );
+    }
+    if is_empty(payload) {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: union variant `%s::%s` expects 0 args",
+            Arg::Text(ident.name), Arg::Text(field.name)
+        );
+    }
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error3(
+            tree, ast::zero_span(), "move error: union variant `%s::%s` expects 1 arg, got %d",
+            Arg::Text(ident.name), Arg::Text(field.name), Arg::Int(count)
+        );
+    }
+    var ignored = empty_name();
+    if arg_at(tree, args, 0) |payload_arg| {
+        if try self.move_expr(tree, env, payload_arg, &var ignored) |failed| {
+            return move failed;
+        }
+    }
+    out.* = union_name;
+    return null;
+}
+
+/// Names the rendering of one field access, the Go `expr.String()` of a
+/// `*ast.FieldExpr`: the receiver, then `::` or `.`, then the field name. The
+/// access group receives the node copy, not its handle, so the text is
+/// rebuilt here.
+fn (self: &var Checker) field_expression_text(tree: &ast::Ast, field: ast::FieldExpr) -> !Name {
+    var out = try ast::render_expression(self.allocator, tree, field.receiver);
+    errdefer out.deinit();
+    if field.namespace {
+        try out.append_bytes("::");
+    } else {
+        try out.append_byte(cast<u8>(46));
+    }
+    let name = tree.texts.at(field.name.node);
+    try out.append_string(name);
+    return self.names.intern_owned(move out);
+}
+
+/// Returns the root binding and dotted field path of one field access, the
+/// Go `directFieldRoot(expr, env)` on a `*ast.FieldExpr`: `ast.FieldPathRoot`
+/// accepts a chain of runtime field hops that ends in an identifier, and the
+/// path is that identifier's relative dotted path. Null when the chain has a
+/// namespace hop, bottoms out in something else, or the root is unbound.
+fn (self: &var Checker) direct_field_root_of_field(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr
+) -> !?DirectFieldRoot {
+    if field.namespace {
+        return null;
+    }
+    if ident_expr(tree, field.receiver) |ident| {
+        let root = self.lookup_text(tree, env, ident.name) orelse return null;
+        let path = try self.names.intern_text(tree, field.name);
+        return DirectFieldRoot { root: root, path: path };
+    }
+    if field_expr(tree, field.receiver) |_| {
+        let inner = try ast::field_path_root(self.allocator, tree, field.receiver) orelse return null;
+        var path = move inner.path;
+        errdefer path.deinit();
+        try path.append_byte(cast<u8>(46));
+        let name = tree.texts.at(field.name.node);
+        try path.append_string(name);
+        let interned = try self.names.intern_owned(move path);
+        let root = self.lookup_text(tree, env, inner.root.name) orelse return null;
+        return DirectFieldRoot { root: root, path: interned };
+    }
+    return null;
+}
+
+/// Resolves the borrow-class owner whose `[]u8` storage one field access
+/// views, the Go `borrowClassViewRoot(expr, env)` on a `*ast.FieldExpr`
+/// whose node handle the caller no longer holds; the expression form lives
+/// with the call group.
+fn (self: &var Checker) borrow_class_view_root_of_field(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr
+) -> !?BindingHandle {
+    let found = try self.direct_field_root_of_field(tree, env, field) orelse return null;
+    if !self.binding(found.root).local_borrow and !self.has_borrow_targets(found.root) {
+        return null;
+    }
+    let root_type = self.binding(found.root).type_name;
+    if is_empty(found.path) {
+        if !self.names.is(root_type, "[]u8") {
+            return null;
+        }
+        return found.root;
+    }
+    let field_type = self.field_path_type(root_type, found.path) orelse return null;
+    if !self.names.is(field_type, "[]u8") {
+        return null;
+    }
+    return found.root;
+}
+
+/// Names a dotted namespace chain as the `::` key the declaration tables
+/// use, the Go `strings.ReplaceAll(dotted, ".", "::")`.
+fn (self: &var Checker) namespace_key(dotted: Name) -> !Name {
+    let replaced = try self.namespace_key_copy(dotted);
+    return self.names.intern_owned(move replaced);
+}
+
+fn (self: &Checker) namespace_key_copy(dotted: Name) -> !string::String {
+    let retained = name_text(&self.names, dotted);
+    let bytes = retained.as_bytes();
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == cast<u8>(46) {
+            try out.append_bytes("::");
+        } else {
+            try out.append_byte(bytes[index]);
+        }
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Reports whether an enum declares the tag an Ast text names, the Go
+/// `c.enums[name][expr.Name]`.
+fn (self: &Checker) enum_has_tag_text(enum_name: Name, tree: &ast::Ast, tag: ast::Text) -> bool {
+    let retained = tree.texts.at(tag.node);
+    let bytes = retained.as_bytes();
+    return self.enum_has_tag(enum_name, bytes);
+}
+
+/// Reports whether an error set declares the member an Ast text names, the
+/// Go `c.errorSets[name][expr.Name]`.
+fn (self: &Checker) error_set_has_text(set_name: Name, tree: &ast::Ast, member: ast::Text) -> bool {
+    let retained = tree.texts.at(member.node);
+    let bytes = retained.as_bytes();
+    return self.error_set_has(set_name, bytes);
+}
+
+/// Returns the payload type of the union variant an Ast text names, the Go
+/// `c.unions[name][expr.Name]`: null for no such variant, the empty name for
+/// a variant without payload.
+fn (self: &Checker) union_variant_payload_text(union_name: Name, tree: &ast::Ast, variant: ast::Text) -> ?Name {
+    let retained = tree.texts.at(variant.node);
+    let bytes = retained.as_bytes();
+    return self.union_variant_payload(union_name, bytes);
+}

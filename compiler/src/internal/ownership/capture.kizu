@@ -1,0 +1,226 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+
+// Port of the borrow-optional capture recognizers of internal/ownership/
+// checker.go: the `if x.at(k) |v|` conditions whose payload is a borrow of
+// the containers and parameters the call read.
+
+/// Names one binding (or one field of it) a recognized capture condition
+/// borrows, and how, the Go `borrowCaptureTarget`.
+pub struct BorrowCaptureTarget {
+    pub name: Name,
+    pub field: Name,
+    pub mutable: bool
+}
+
+/// Describes a recognized borrow-optional capture condition, the Go
+/// `containerBorrowCondition`: which bindings it borrows and what payload the
+/// capture binds.
+pub struct ContainerBorrowCondition {
+    pub targets: array::Array<BorrowCaptureTarget>,
+    pub elem: Name,
+    pub mutable: bool
+}
+
+fn (self: ContainerBorrowCondition) deinit() -> void {
+    self.targets.deinit();
+    return;
+}
+
+/// Recognizes capture conditions whose call produces a borrow optional — a
+/// container capture accessor, or a function declaring a `?&T` / `?&var T`
+/// return — the Go `matchContainerBorrowCondition`. The call is read exactly
+/// once through the normal call path with the capture context set, so each
+/// callee's own checker validates receiver and arguments; this recognizer
+/// reads the payload type that comes back and the bindings the borrow ties
+/// to (ADR-0098: conservative union of borrow-capable arguments).
+fn (self: &var Checker) match_container_borrow_condition(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    condition: ast::Expression,
+    out: &var ContainerBorrowCondition,
+    ok: &var bool
+) -> !?diagnostic::Diagnostic {
+    ok.* = false;
+    let call = call_expr(tree, condition) orelse return null;
+    var from_accessor = false;
+    if !try self.borrow_optional_call_targets(tree, env, call, &var out.targets, &var from_accessor) {
+        return null;
+    }
+    let saved = self.capture_condition;
+    self.capture_condition = true;
+    var result = empty_name();
+    if try self.read_expr(tree, env, condition, &var result) |failed| {
+        self.capture_condition = saved;
+        return move failed;
+    }
+    self.capture_condition = saved;
+    let parts = try self.names.borrow_optional_elem(result) orelse
+        return try self.error2(
+        tree, ast::zero_span(), "move error: capture accessor `%s` returned %s, not a borrow optional",
+        Arg::Str(try self.names.intern_expression(tree, call.callee)), Arg::Str(result)
+    );
+    if from_accessor {
+        // A container accessor borrows its container the way the payload
+        // says: `at` shared, `at_mut` mutable.
+        var index = 0;
+        while out.targets.at_mut(index) |target| {
+            target.mutable = parts.mutable;
+            index = index + 1;
+        }
+    }
+    out.elem = parts.inner;
+    out.mutable = parts.mutable;
+    ok.* = true;
+    return null;
+}
+
+/// Pre-gates a capture condition without reading it, the Go
+/// `borrowOptionalCallTargets`: whether the call can produce a borrow
+/// optional, and which bindings the capture would borrow. from_accessor
+/// separates container capture accessors, whose one target follows the
+/// payload's mutability, from declared returns, whose targets follow each
+/// borrow parameter's kind.
+fn (self: &var Checker) borrow_optional_call_targets(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    call: ast::CallExpr,
+    targets: &var array::Array<BorrowCaptureTarget>,
+    from_accessor: &var bool
+) -> !bool {
+    from_accessor.* = false;
+    if field_expr(tree, call.callee) |callee| {
+        let place = try self.capture_receiver_place(tree, env, callee.receiver) orelse return false;
+        if try self.container_capture_accessor(tree, place.type_name, callee.name) {
+            try targets.append(BorrowCaptureTarget { name: place.name, field: place.field, mutable: false });
+            from_accessor.* = true;
+            return true;
+        }
+        let method = self.impl_method_text(place.type_name, tree, callee.name) orelse return false;
+        if !self.names.is_borrow_optional(self.return_type_name(method)) {
+            return false;
+        }
+        if self.param_at(method, 0) |receiver| {
+            if receiver.borrow {
+                try targets.append(BorrowCaptureTarget {
+                    name: place.name, field: place.field, mutable: receiver.mut_borrow
+                });
+            }
+        }
+        try self.borrow_arg_targets(tree, env, method, 1, call.args, targets);
+        return true;
+    }
+    if ident_text(tree, call.callee) |text| {
+        let function = self.function_for_text(tree, text) orelse return false;
+        if !self.names.is_borrow_optional(self.return_type_name(function)) {
+            return false;
+        }
+        try self.borrow_arg_targets(tree, env, function, 0, call.args, targets);
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether a method name on a generic container type is one of its
+/// capture accessors, the Go `containerAccessTables[base].methods[name] ==
+/// accessCapture`.
+fn (self: &var Checker) container_capture_accessor(tree: &ast::Ast, type_name: Name, method: ast::Text) -> !bool {
+    let parts = try self.names.split_generic(type_name) orelse return false;
+    let method_name = try self.names.intern_text(tree, method);
+    let access = self.container_method_access(parts.base, method_name) orelse return false;
+    return access == ContainerAccess::Capture;
+}
+
+/// Resolves the bindings borrow parameters tie a returned borrow to, the Go
+/// `borrowArgTargets`; first_param skips a method receiver. An argument that
+/// is not a nameable place carries no tie.
+fn (self: &var Checker) borrow_arg_targets(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    first_param: i64,
+    args: ast::ExpressionList,
+    targets: &var array::Array<BorrowCaptureTarget>
+) -> !void {
+    var index = 0;
+    while self.param_at(function, first_param + index) |param| {
+        let position = index;
+        index = index + 1;
+        let arg = arg_at(tree, args, position) orelse continue;
+        if !param.borrow {
+            continue;
+        }
+        var target = self.new_borrow_target();
+        var found = false;
+        if try self.call_borrow_target(tree, env, arg, &var found, &var target) |failed| {
+            failed.deinit();
+            continue;
+        }
+        if !found {
+            continue;
+        }
+        try targets.append(BorrowCaptureTarget {
+            name: self.binding(target.value).name, field: target.field, mutable: param.mut_borrow
+        });
+    }
+    return;
+}
+
+/// Is the borrowable place a capture-condition receiver names, the Go
+/// `captureReceiverPlace` result: the binding name, the field path (empty
+/// for the whole value), and the type at that place.
+pub struct CaptureReceiverPlace {
+    pub name: Name,
+    pub field: Name,
+    pub type_name: Name
+}
+
+/// Resolves the borrowable place a capture-condition receiver names, the Go
+/// `captureReceiverPlace`: a live local binding, or a field path on a live
+/// owner — the same shape field method receivers support.
+fn (self: &var Checker) capture_receiver_place(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    receiver: ast::Expression
+) -> !?CaptureReceiverPlace {
+    let direct = try self.direct_field_root(tree, env, receiver) orelse return null;
+    if self.binding(direct.root).moved {
+        return null;
+    }
+    let name = self.binding(direct.root).name;
+    if is_empty(direct.path) {
+        return CaptureReceiverPlace { name: name, field: empty_name(), type_name: self.binding(direct.root).type_name };
+    }
+    let field_type = self.field_path_type(self.binding(direct.root).type_name, direct.path) orelse return null;
+    return CaptureReceiverPlace { name: name, field: direct.path, type_name: field_type };
+}
+
+/// Builds the capture binding for a recognized borrow-optional condition and
+/// activates the payload borrow on the branch scope's clones of every tied
+/// binding — whole bindings and owner fields alike — so the branch body sees
+/// mutation and deinit wait on the capture, the Go
+/// `tieContainerBorrowCapture`. The capture record's type and span were set
+/// by the caller; this fills in its borrow class and targets.
+fn (self: &var Checker) tie_container_borrow_capture(
+    tree: &ast::Ast,
+    capture: &var Binding,
+    condition: &ContainerBorrowCondition,
+    branch: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    capture.borrowed_param = true;
+    capture.local_borrow = true;
+    capture.mut_borrow = condition.mutable;
+    var index = 0;
+    while condition.targets.get(index) |target| {
+        index = index + 1;
+        let holder = self.lookup_name(branch, target.name) orelse
+            return try self.error1(tree, ast::zero_span(), "move error: unknown value `%s`", Arg::Str(target.name));
+        if try self.check_borrow_conflict_for_field(tree, holder, target.field, target.mutable) |failed| {
+            return move failed;
+        }
+        try self.activate_borrow(holder, target.field, target.mutable);
+        try capture.borrow_targets.append(BorrowSource { target: holder, field: target.field });
+    }
+    return null;
+}

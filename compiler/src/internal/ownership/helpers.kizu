@@ -1,0 +1,659 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Port of the binding, arena-provenance, and type helpers at the end of
+// internal/ownership/checker.go (newBinding through splitGenericArgs), plus
+// the small shared readers the other files lean on.
+
+/// Returns no binding; `var x = none_binding()` declares an optional local.
+pub fn none_binding() -> ?BindingHandle {
+    return null;
+}
+
+/// Returns no name; `var x = none_name()` declares an optional local.
+pub fn none_name() -> ?Name {
+    return null;
+}
+
+/// Is the field path used as a method receiver, the Go
+/// `directFieldReceiver`: the root binding, the dotted path of the field the
+/// method runs on, that field's type, and `root.path` for diagnostics.
+pub struct DirectFieldReceiver {
+    pub owner: BindingHandle,
+    pub field: Name,
+    pub type_name: Name,
+    pub path: Name
+}
+
+/// Returns a receiver record to fill in; its owner is the checker's scratch
+/// binding until a resolver replaces it.
+fn (self: &Checker) empty_direct_field_receiver() -> DirectFieldReceiver {
+    return DirectFieldReceiver {
+        owner: self.scratch_binding,
+        field: empty_name(),
+        type_name: empty_name(),
+        path: empty_name()
+    };
+}
+
+/// Is the root binding and dotted field path of a local field-path
+/// assignment or read target, the Go `directFieldRoot` result.
+pub struct DirectFieldRoot {
+    pub root: BindingHandle,
+    pub path: Name
+}
+
+/// Returns a local field-path assignment or read target: the root binding
+/// and the dotted field path relative to it (empty for a bare identifier),
+/// the Go `directFieldRoot`; null when the root is unbound or the expression
+/// is neither an identifier nor a field path.
+fn (self: &var Checker) direct_field_root(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?DirectFieldRoot {
+    if ident_text(tree, expression) |text| {
+        let root = self.lookup_text(tree, env, text) orelse return null;
+        return DirectFieldRoot { root: root, path: empty_name() };
+    }
+    let field_path = try ast::field_path_root(self.allocator, tree, expression) orelse return null;
+    let path = try self.names.intern_owned(move field_path.path);
+    let root = self.lookup_text(tree, env, field_path.root.name) orelse return null;
+    return DirectFieldRoot { root: root, path: path };
+}
+
+/// Reports whether a path has handed the value's cleanup obligation on, by
+/// move or by explicit cleanup, the Go `bindingConsumed`.
+fn (self: &Checker) binding_consumed(value: BindingHandle) -> bool {
+    let record = self.binding(value);
+    return record.moved or record.deinitialized;
+}
+
+/// Reports whether a binding is a place a mutable borrow may come from, the
+/// Go `mutablePlace`: a `var` local or a `&var` borrow.
+fn (self: &Checker) mutable_place(value: BindingHandle) -> bool {
+    let record = self.binding(value);
+    return record.mutable or record.mut_borrow;
+}
+
+/// Reports an owner allocated from a frame-tied allocator, the Go
+/// `binding.allocTied`: it keeps its owner obligations (deinit) but cannot
+/// escape the frame.
+fn (self: &Checker) alloc_tied(value: BindingHandle) -> bool {
+    return !self.binding(value).borrowed_param and self.has_borrow_targets(value);
+}
+
+/// Reports whether the binding is itself a `&var` parameter, the Go
+/// `binding.isMutBorrowParam`: the caller's storage, which assigning the
+/// binding stores into.
+fn (self: &Checker) is_mut_borrow_param(value: BindingHandle) -> bool {
+    let record = self.binding(value);
+    return record.borrowed_param and !record.local_borrow and record.mut_borrow;
+}
+
+/// Records arena and handle origins for local bindings, the Go
+/// `setArenaProvenance`.
+fn (self: &var Checker) set_arena_provenance(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    value: BindingHandle,
+    expression: ast::Expression
+) -> !void {
+    if try self.is_arena_constructor_expr(tree, expression) {
+        let id = self.binding(value).id;
+        if self.store.binding_mut(value) |record| {
+            record.arena_id = id;
+        }
+        return;
+    }
+    if try self.arena_add_receiver(tree, env, expression) |arena| {
+        let arena_id = self.binding(arena).arena_id;
+        if self.store.binding_mut(value) |record| {
+            record.handle_arena_id = arena_id;
+        }
+        return;
+    }
+    // A copied handle still points into the arena the original came from, so
+    // the copy carries the source's provenance.
+    let provenance = self.known_handle_provenance(tree, env, expression);
+    if self.store.binding_mut(value) |record| {
+        record.handle_arena_id = provenance;
+    }
+    return;
+}
+
+/// Reports the public std::arena::new<T>(allocator) constructor, the Go
+/// `isArenaConstructorExpr`.
+fn (self: &var Checker) is_arena_constructor_expr(tree: &ast::Ast, expression: ast::Expression) -> !bool {
+    let call = call_expr(tree, expression) orelse return false;
+    let apply = type_apply_expr(tree, call.callee) orelse return false;
+    let name = try self.qualified_name(tree, apply.callee) orelse return false;
+    return self.names.is(name, "std::arena::new");
+}
+
+/// Reports whether the arena with this provenance id is storage the caller
+/// keeps, the Go `arenaOutlivesFrame`: a field arena of a borrowed parameter.
+fn (self: &Checker) arena_outlives_frame(arena_id: i64, env: ScopeHandle) -> bool {
+    let owner = self.store.field_arena_owner(env, arena_id) orelse return false;
+    return self.binding(owner).borrowed_param;
+}
+
+/// Returns a stable arena identity for one owner field, the Go
+/// `directFieldArenaID`.
+fn (self: &var Checker) direct_field_arena_id(receiver: DirectFieldReceiver) -> !i64 {
+    let known = self.field_arena_id(receiver.owner, receiver.field);
+    if known != 0 {
+        return known;
+    }
+    let id = self.store.next_binding_id();
+    try self.set_field_arena_id(receiver.owner, receiver.field, id);
+    return id;
+}
+
+/// Reports whether field.deinit is inside owner deinit, the Go
+/// `allowsDirectFieldCleanup`.
+fn (self: &Checker) allows_direct_field_cleanup(receiver: DirectFieldReceiver) -> bool {
+    return self.allows_owner_field_cleanup(receiver.owner);
+}
+
+/// Reports whether a field of this binding may be consumed here, the Go
+/// `allowsOwnerFieldCleanup`. The value has to be one the frame holds -- a
+/// borrow is someone else's and taking it apart would free what the lender
+/// still has -- and its type has to be one whose obligation is its fields'
+/// obligations. A type that declares its own deinit is taken whole everywhere
+/// but inside that deinit, which is where the declared obligation is being
+/// discharged.
+fn (self: &Checker) allows_owner_field_cleanup(owner: BindingHandle) -> bool {
+    let record = self.binding(owner);
+    if record.borrowed_param or record.local_borrow {
+        return false;
+    }
+    if !self.declares_deinit(record.type_name) {
+        return true;
+    }
+    return self.inside_deinit_of(owner);
+}
+
+/// Reports whether the current function is this binding's own declared
+/// deinit, the Go `insideDeinitOf`.
+fn (self: &Checker) inside_deinit_of(owner: BindingHandle) -> bool {
+    let function = self.current_function orelse return false;
+    if !self.current_is_void_deinit(function) {
+        return false;
+    }
+    let first = self.param_at(function, 0) orelse return false;
+    if !same_name(first.name, self.binding(owner).name) {
+        return false;
+    }
+    if first.borrow or first.mut_borrow {
+        return false;
+    }
+    return same_name(first.type_name, self.binding(owner).type_name);
+}
+
+/// Reports whether a function is a `deinit` method returning void.
+fn (self: &Checker) current_is_void_deinit(function: FunctionHandle) -> bool {
+    let info = self.functions.at(function.index);
+    if !self.call_name_is(info.name, "deinit") {
+        return false;
+    }
+    return is_empty(info.return_type) or self.names.is(info.return_type, "void");
+}
+
+/// Reports whether the name a call spells for a declared function is want,
+/// the Go `stdmethod.CallName(name) == want`: the part after the last `.`,
+/// or the whole name without one.
+fn (self: &Checker) call_name_is(name: Name, want: []u8) -> bool {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    let start = last_index_of_byte(bytes, cast<u8>(46)) + 1;
+    return mem::equal_bytes(bytes[start..mem::len(bytes)], want);
+}
+
+/// Reports whether a `match` consumes the active variant of a union inside
+/// that union's own `deinit(self: T) -> void`, the Go
+/// `matchesOwnerUnionDeinit`. Only there is the active payload owned and
+/// cleanable; everywhere else it stays a borrow.
+fn (self: &Checker) matches_owner_union_deinit(
+    tree: &ast::Ast,
+    value: ast::Expression,
+    value_type: Name
+) -> bool {
+    let function = self.current_function orelse return false;
+    if !self.current_is_void_deinit(function) {
+        return false;
+    }
+    let first = self.param_at(function, 0) orelse return false;
+    if first.borrow or first.mut_borrow {
+        return false;
+    }
+    if !same_name(first.type_name, value_type) {
+        return false;
+    }
+    let ident = ident_text(tree, value) orelse return false;
+    if !self.names.is_text(first.name, tree, ident) {
+        return false;
+    }
+    return self.is_union(value_type);
+}
+
+/// Returns the arena binding for arena.add(value) expressions, the Go
+/// `arenaAddReceiver`.
+fn (self: &var Checker) arena_add_receiver(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?BindingHandle {
+    let call = call_expr(tree, expression) orelse return null;
+    let field = field_expr(tree, call.callee) orelse return null;
+    if !text_equals(tree, field.name, "add") {
+        return null;
+    }
+    if ident_text(tree, field.receiver) |text| {
+        return self.lookup_text(tree, env, text);
+    }
+    let field_receiver = field_expr(tree, field.receiver) orelse return null;
+    var direct = self.empty_direct_field_receiver();
+    if try self.direct_field_receiver(tree, env, field_receiver, &var direct) |failed| {
+        failed.deinit();
+        return null;
+    }
+    if !self.names.generic_base_is(direct.type_name, "std::arena::Arena") {
+        return null;
+    }
+    return try self.binding_for_direct_field_receiver(direct);
+}
+
+/// Reports whether expr is an arena.at call, the Go `isArenaAtExpr`.
+fn (self: &var Checker) is_arena_at_expr(tree: &var ast::Ast, env: ScopeHandle, expression: ast::Expression) -> !bool {
+    let call = call_expr(tree, expression) orelse return false;
+    let field = field_expr(tree, call.callee) orelse return false;
+    if !text_equals(tree, field.name, "at") {
+        return false;
+    }
+    var receiver = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var receiver) |failed| {
+        failed.deinit();
+        return false;
+    }
+    return self.names.generic_base_is(receiver, "std::arena::Arena");
+}
+
+/// Reports whether an expression reads through arena.at, the Go
+/// `containsArenaAt`.
+fn (self: &var Checker) contains_arena_at(tree: &var ast::Ast, env: ScopeHandle, expression: ast::Expression) -> !bool {
+    if transparent_expr_value(tree, expression) |inner| {
+        return self.contains_arena_at(tree, env, inner);
+    }
+    if call_expr(tree, expression) |call| {
+        if try self.is_arena_at_expr(tree, env, expression) {
+            return true;
+        }
+        var index = 0;
+        while arg_at(tree, call.args, index) |arg| {
+            if try self.contains_arena_at(tree, env, arg) {
+                return true;
+            }
+            index = index + 1;
+        }
+        return false;
+    }
+    if field_expr(tree, expression) |field| {
+        return self.contains_arena_at(tree, env, field.receiver);
+    }
+    if binary_expr(tree, expression) |binary| {
+        if try self.contains_arena_at(tree, env, binary.left) {
+            return true;
+        }
+        return self.contains_arena_at(tree, env, binary.right);
+    }
+    if cast_expr(tree, expression) |cast| {
+        return self.contains_arena_at(tree, env, cast.value);
+    }
+    if try_expr(tree, expression) |tried| {
+        return self.contains_arena_at(tree, env, tried.value);
+    }
+    if comptime_expr(tree, expression) |wrapped| {
+        return self.contains_arena_at(tree, env, wrapped.expr);
+    }
+    return false;
+}
+
+/// Resolves a variable reference without moving it, the Go `readIdent`.
+fn (self: &var Checker) read_ident(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    ident: ast::IdentExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.lookup_text(tree, env, ident.name) |value| {
+        if try self.check_deinitialized_use(tree, env, ident.name, value, ident.span) |failed| {
+            return move failed;
+        }
+        if self.binding(value).moved {
+            return try self.error1(tree, ident.span, "move error: moved value `%s` was used", Arg::Text(ident.name));
+        }
+        if self.binding(value).active_mut_borrows > 0 or self.store.has_field_borrows(value, true) {
+            return try self.error1(
+                tree, ident.span, "borrow error: value `%s` cannot be read while mutably borrowed",
+                Arg::Text(ident.name)
+            );
+        }
+        out.* = self.binding(value).type_name;
+        return null;
+    }
+    if text_equals(tree, ident.name, "void") {
+        return try self.error0(ident.span, "move error: void is not a value");
+    }
+    return try self.error1(tree, ident.span, "move error: undefined variable `%s`", Arg::Text(ident.name));
+}
+
+/// Rejects arenas and known handles after arena cleanup, the Go
+/// `checkDeinitializedUse`.
+fn (self: &Checker) check_deinitialized_use(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    name: ast::Text,
+    value: BindingHandle,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if self.binding(value).deinitialized {
+        return try self.error1(tree, span, "arena error: arena `%s` was deinitialized", Arg::Text(name));
+    }
+    let handle_arena_id = self.binding(value).handle_arena_id;
+    if handle_arena_id == 0 {
+        return null;
+    }
+    let arena = self.store.lookup_arena_id(env, handle_arena_id) orelse return null;
+    if self.binding(arena).deinitialized {
+        return try self.error2(
+            tree, span, "arena error: handle `%s` cannot be used after arena `%s` deinit",
+            Arg::Text(name), Arg::Str(self.binding(arena).name)
+        );
+    }
+    return null;
+}
+
+/// Rejects borrowing an arena after cleanup, the Go `checkDeinitializedBorrow`.
+fn (self: &Checker) check_deinitialized_borrow(
+    tree: &ast::Ast,
+    name: ast::Text,
+    value: BindingHandle,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    if self.binding(value).deinitialized {
+        return try self.error1(tree, span, "arena error: arena `%s` was deinitialized", Arg::Text(name));
+    }
+    return null;
+}
+
+/// Reports whether values of a type can be reused after move contexts, the
+/// Go `isCopyType`.
+fn (self: &var Checker) is_copy_type(type_name: Name) -> !bool {
+    if self.names.is(type_name, "[]u8") {
+        return true;
+    }
+    if self.names.is_raw_pointer(type_name) {
+        return true;
+    }
+    // An error carries nothing, so reading one leaves nothing behind to move.
+    if self.is_error_set(type_name) {
+        return true;
+    }
+    if self.is_enum(type_name) {
+        return true;
+    }
+    if self.names.is_scalar_type(type_name) or self.names.is(type_name, "Io") or
+        self.names.is(type_name, "Allocator") or self.names.is(type_name, "std::fs::Metadata") or
+        self.names.is(type_name, "std::fs::DirEntry") {
+        return true;
+    }
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    return self.is_plain_data(type_name, &var seen);
+}
+
+/// Reports whether a type is plain copy data, the Go `isPlainDataType`: a
+/// scalar, enum, error set, arena handle, or a declared struct / union whose
+/// fields and payloads are all plain copy data. Views, capabilities, and
+/// owners are not plain data, and a type that declares an explicit deinit
+/// stays move-only. seen holds the current recursion path only: a revisit is
+/// a recursive aggregate, which needs indirection and is never plain data.
+fn (self: &var Checker) is_plain_data(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
+    if try self.names.optional_elem(type_name) |inner| {
+        return self.is_plain_data(inner, seen);
+    }
+    if self.names.is_scalar_type(type_name) {
+        return true;
+    }
+    if self.is_enum(type_name) or self.is_error_set(type_name) {
+        return true;
+    }
+    // An arena handle is an opaque id; the arena owns the value, so
+    // duplicating the id creates no cleanup obligation.
+    if self.names.starts_with(type_name, "std::arena::Handle<") {
+        return true;
+    }
+    if self.seen_contains(seen, type_name) {
+        return false;
+    }
+    return self.is_plain_data_aggregate(type_name, seen);
+}
+
+fn (self: &Checker) seen_contains(seen: &map::Map<[]u8, bool>, type_name: Name) -> bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return seen.get(bytes) orelse false;
+}
+
+fn (self: &Checker) mark_seen(seen: &var map::Map<[]u8, bool>, type_name: Name, flag: bool) -> !void {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    if seen.at_mut(bytes) |slot| {
+        slot.* = flag;
+        return;
+    }
+    return seen.insert(bytes, flag);
+}
+
+/// Walks a declared struct / union for is_plain_data, the Go
+/// `isPlainDataAggregate`. A declared deinit keeps the type move-only
+/// regardless of its fields.
+fn (self: &var Checker) is_plain_data_aggregate(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
+    let is_struct = self.is_struct(type_name);
+    let is_union = self.is_union(type_name);
+    if !is_struct and !is_union {
+        return false;
+    }
+    if self.impl_method_bytes_of(type_name, "deinit") |_| {
+        return false;
+    }
+    try self.mark_seen(seen, type_name, true);
+    let plain = try self.is_plain_data_members(type_name, is_struct, seen);
+    try self.mark_seen(seen, type_name, false);
+    return plain;
+}
+
+fn (self: &var Checker) is_plain_data_members(type_name: Name, is_struct: bool, seen: &var map::Map<[]u8, bool>) -> !bool {
+    var index = 0;
+    if is_struct {
+        while self.struct_field_at(type_name, index) |field| {
+            index = index + 1;
+            let field_type = self.struct_field_type(type_name, field) orelse continue;
+            if !try self.is_plain_data(field_type, seen) {
+                return false;
+            }
+        }
+        return true;
+    }
+    while self.union_variant_at(type_name, index) |variant| {
+        index = index + 1;
+        let payload = self.union_variant_payload_name(type_name, variant) orelse continue;
+        if !is_empty(payload) and !try self.is_plain_data(payload, seen) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Returns the payload type of the union variant named by a Name.
+fn (self: &Checker) union_variant_payload_name(union_name: Name, variant: Name) -> ?Name {
+    let retained = name_text(&self.names, variant);
+    let bytes = retained.as_bytes();
+    return self.union_variant_payload(union_name, bytes);
+}
+
+/// Admits an expression already typed as &T only where the callee borrows
+/// T, the Go `coerceOwnershipBorrowArgument`. Explicit prefix borrows are
+/// transparent to this checker; borrow-return calls need the equivalent
+/// conversion here.
+fn (self: &var Checker) coerce_ownership_borrow_argument(
+    got: Name,
+    want: Name,
+    want_borrow: bool,
+    want_mutable: bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    out.* = got;
+    let parts = try self.names.explicit_borrow(got) orelse return null;
+    if !want_borrow {
+        return try self.error0(ast::zero_span(), "move error: borrow argument cannot be passed to owning parameter");
+    }
+    if parts.mutable and !want_mutable {
+        return try self.error0(ast::zero_span(), "move error: argument expects &T, got &var");
+    }
+    if !parts.mutable and want_mutable {
+        return try self.error0(ast::zero_span(), "move error: argument expects &var T, got &T");
+    }
+    if same_name(parts.inner, want) {
+        out.* = parts.inner;
+    }
+    return null;
+}
+
+/// Validates a zero-argument builtin constructor, the Go
+/// `checkNoArgOwnershipCall`.
+fn (self: &var Checker) check_no_arg_ownership_call(
+    tree: &ast::Ast,
+    name: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects 0 args, got %d",
+            Arg::Str(name), Arg::Int(count)
+        );
+    }
+    return null;
+}
+
+/// Renders a namespace chain as an internal key such as std::task::Group,
+/// the Go `qualifiedName`; null for any other expression shape.
+fn (self: &var Checker) qualified_name(tree: &ast::Ast, expression: ast::Expression) -> !?Name {
+    if !qualified_name_shape(tree, expression) {
+        return null;
+    }
+    return try self.names.intern_expression(tree, expression);
+}
+
+fn qualified_name_shape(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    if ident_text(tree, expression) |_| {
+        return true;
+    }
+    let field = field_expr(tree, expression) orelse return false;
+    if !field.namespace {
+        return false;
+    }
+    return qualified_name_shape(tree, field.receiver);
+}
+
+/// Validates and returns Map key/value static type arguments, the Go
+/// `checkedMapArgs`.
+fn (self: &var Checker) checked_map_args(
+    tree: &ast::Ast,
+    arg: Name,
+    out: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    let args = try self.names.split_generic_args(arg) orelse
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    defer args.deinit();
+    if args.len() != 2 {
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    }
+    if !self.names.is(args.get_or_panic(0), "[]u8") {
+        return try self.error0(ast::zero_span(), "map error: std::map::Map key type must be []u8");
+    }
+    try out.append(args.get_or_panic(0));
+    try out.append(args.get_or_panic(1));
+    return null;
+}
+
+/// Instantiates simple generic wrapper type spellings against the active
+/// instantiation, the Go `substituteOwnershipType(name, c.typeArgValues)`.
+fn (self: &var Checker) substitute_ownership_type(type_name: Name) -> !Name {
+    let handle = self.type_arg_values.current orelse return type_name;
+    if self.subst_replacement(handle, type_name) |replacement| {
+        return replacement;
+    }
+    let frame = self.type_arg_values.frames.at(handle);
+    return self.names.substitute_text(type_name, &frame.names, &frame.replacements);
+}
+
+fn (self: &Checker) subst_replacement(handle: arena::Handle<Subst>, type_name: Name) -> ?Name {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    let frame = self.type_arg_values.frames.at(handle);
+    return frame.by_name.get(bytes);
+}
+
+/// Instantiates a spelling against an explicit substitution, the Go
+/// `substituteOwnershipType(name, subst)` for a callee's own substitution.
+fn (self: &var Checker) substitute_with(type_name: Name, subst: &Subst) -> !Name {
+    if self.subst_lookup(subst, type_name) |replacement| {
+        return replacement;
+    }
+    return self.names.substitute_text(type_name, &subst.names, &subst.replacements);
+}
+
+fn (self: &Checker) subst_lookup(subst: &Subst, type_name: Name) -> ?Name {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return subst.by_name.get(bytes);
+}
+
+/// Replaces in-scope generic type parameters in a static list, the Go
+/// `instantiateTypeArgText`.
+fn (self: &var Checker) instantiate_type_arg_text(type_arg: Name) -> !Name {
+    let args = try self.names.split_generic_args(type_arg) orelse return self.instantiate_one_type_arg(type_arg);
+    defer args.deinit();
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while args.get(index) |arg| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        let resolved = try self.instantiate_one_type_arg(arg);
+        try self.names.append_to(&var out, resolved);
+        index = index + 1;
+    }
+    return self.names.intern_owned(move out);
+}
+
+/// Instantiates and resolves one static argument, the Go
+/// `c.resolveMetaTypeText(substituteOwnershipType(arg, c.typeArgValues))`.
+fn (self: &var Checker) instantiate_one_type_arg(arg: Name) -> !Name {
+    let substituted = try self.substitute_ownership_type(arg);
+    return self.resolve_meta_type_text(substituted);
+}
+
+/// Reads one retained static parameter text as a Name.
+fn (self: &var Checker) type_arg_name(tree: &ast::Ast, text: ast::Text) -> !Name {
+    return self.names.intern_text(tree, text);
+}

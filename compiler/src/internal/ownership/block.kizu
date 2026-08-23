@@ -1,0 +1,845 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::array;
+
+// Port of the block, statement dispatch, cleanup registration, consume
+// obligation, and return checks of internal/ownership/checker.go.
+
+/// Validates statements in a lexical block, the Go `checkBlock`. The errdefer
+/// entries the block registers are dropped again on every exit.
+fn (self: &var Checker) check_block(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    block: ast::Block
+) -> !?diagnostic::Diagnostic {
+    let err_defer_mark = self.live_err_defers.len();
+    if try self.check_block_statements(tree, env, block) |failed| {
+        self.restore_err_defers(err_defer_mark);
+        return move failed;
+    }
+    self.restore_err_defers(err_defer_mark);
+    return null;
+}
+
+fn (self: &var Checker) check_block_statements(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    block: ast::Block
+) -> !?diagnostic::Diagnostic {
+    var last_uses = try block_last_uses(self.allocator, tree, block);
+    defer last_uses.deinit();
+    var defers = array::new<ast::Expression>(self.allocator);
+    defer defers.deinit();
+    // Bindings declared inside this block carry ids above the watermark; the
+    // fall-through leak check below is scoped to exactly those.
+    let binding_mark = self.store.id_mark();
+    var index = 0;
+    while block_statement_at(tree, block, index) |statement| {
+        if defer_stmt(tree, statement) |deferred| {
+            if try self.check_defer_stmt(tree, env, deferred) |failed| {
+                return move failed;
+            }
+            try defers.append(deferred.expr);
+            try self.release_last_use_borrows(env, index, &last_uses);
+            index = index + 1;
+            continue;
+        }
+        if errdefer_stmt(tree, statement) |deferred| {
+            if try self.check_err_defer_stmt(tree, env, deferred) |failed| {
+                return move failed;
+            }
+            try self.release_last_use_borrows(env, index, &last_uses);
+            index = index + 1;
+            continue;
+        }
+        if try self.check_stmt(tree, env, statement) |failed| {
+            return move failed;
+        }
+        if self.pending_alloc_taints.get(0) |taint| {
+            while self.pending_alloc_taints.pop() |_| {}
+            return try self.error0(
+                taint.span,
+                "borrow error: a value allocated from a tied allocator must be bound with `let`"
+            );
+        }
+        try self.release_last_use_borrows(env, index, &last_uses);
+        index = index + 1;
+    }
+    if try self.check_deferred_cleanups(tree, env, &defers) |failed| {
+        return move failed;
+    }
+    if self.block_terminates(tree, block) {
+        return null;
+    }
+    return self.check_owners_consumed(tree, env, binding_mark, plain_exit());
+}
+
+/// Drops errdefer entries registered inside an exited block, the Go
+/// `restoreErrDefers`.
+fn (self: &var Checker) restore_err_defers(mark: i64) -> void {
+    while self.live_err_defers.len() > mark {
+        let _ = self.live_err_defers.pop();
+    }
+    return;
+}
+
+/// Validates one statement, the Go `checkStmt`.
+fn (self: &var Checker) check_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::Statement
+) -> !?diagnostic::Diagnostic {
+    if let_stmt(tree, statement) |value| {
+        return self.check_let_stmt(tree, env, value);
+    }
+    if assign_stmt(tree, statement) |value| {
+        return self.check_assign_stmt(tree, env, value);
+    }
+    if return_stmt(tree, statement) |value| {
+        return self.check_return_stmt(tree, env, statement, value);
+    }
+    if defer_stmt(tree, statement) |_| {
+        return try self.error0(ast::zero_span(), "move error: defer statement must appear directly in a block");
+    }
+    if errdefer_stmt(tree, statement) |_| {
+        return try self.error0(ast::zero_span(), "move error: errdefer statement must appear directly in a block");
+    }
+    if expr_stmt(tree, statement) |value| {
+        return self.check_expr_stmt(tree, env, value.expr);
+    }
+    return self.check_body_stmt(tree, env, statement);
+}
+
+/// Checks the statements that carry a body of their own, and the branches
+/// that leave one, the Go `checkBodyStmt`.
+fn (self: &var Checker) check_body_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::Statement
+) -> !?diagnostic::Diagnostic {
+    if if_stmt(tree, statement) |value| {
+        return self.check_if_stmt(tree, env, value);
+    }
+    if while_stmt(tree, statement) |value| {
+        return self.check_while_stmt(tree, env, value);
+    }
+    if for_stmt(tree, statement) |value| {
+        return self.check_for_stmt(tree, env, value);
+    }
+    if break_stmt(tree, statement) |value| {
+        return self.check_loop_branch_label(tree, value.label);
+    }
+    if continue_stmt(tree, statement) |value| {
+        return self.check_loop_branch_label(tree, value.label);
+    }
+    if is_match_stmt(tree, statement) {
+        return self.check_match_stmt(tree, env, statement);
+    }
+    if is_block_stmt(tree, statement) {
+        // Only a match arm body is a bare block statement (SPEC §6.12).
+        return self.check_block(tree, env, ast::Block { node: statement.node });
+    }
+    if comptime_if_stmt(tree, statement) |value| {
+        return self.check_comptime_if_stmt(tree, env, value);
+    }
+    if comptime_match_stmt(tree, statement) |value| {
+        return self.check_comptime_match_stmt(tree, env, value);
+    }
+    if comptime_for_stmt(tree, statement) |value| {
+        return self.check_comptime_for_stmt(tree, env, value);
+    }
+    return try self.error0(ast::zero_span(), "move error: unsupported statement *ast.RecoveredStmt");
+}
+
+/// Validates a deferred cleanup registration without running it, the Go
+/// `checkDeferStmt`.
+fn (self: &var Checker) check_defer_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::DeferStmt
+) -> !?diagnostic::Diagnostic {
+    let call = call_expr(tree, statement.expr) orelse
+        return try self.error0(ast::zero_span(), "move error: defer expects cleanup method call");
+    let field = field_expr(tree, call.callee) orelse
+        return try self.error0(ast::zero_span(), "move error: defer expects cleanup method call");
+    if !text_equals(tree, field.name, typ::cleanup_method()) {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: defer cleanup must be `%s`, got `%s`",
+            Arg::Str(self.common.deinit_name), Arg::Text(field.name)
+        );
+    }
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var ignored) |failed| {
+        return move failed;
+    }
+    // A registered defer runs on every later exit of this block, so from
+    // here on the receiver's consume obligation (ADR-0091) is discharged.
+    if self.lookup_ident(tree, env, field.receiver) |value| {
+        if self.store.binding_mut(value) |record| {
+            record.defer_cleanup = true;
+        }
+    }
+    return null;
+}
+
+/// Validates an error-path cleanup registration, the Go `checkErrDeferStmt`.
+/// The receiver must be a readable owned local at registration. Unlike defer,
+/// the cleanup is not applied at normal block exit, so it never blocks a
+/// success-path move; its receiver is instead re-validated at each
+/// error-return path that can run it.
+fn (self: &var Checker) check_err_defer_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ErrDeferStmt
+) -> !?diagnostic::Diagnostic {
+    let call = call_expr(tree, statement.expr) orelse
+        return try self.error0(ast::zero_span(), "move error: errdefer expects cleanup method call");
+    let field = field_expr(tree, call.callee) orelse
+        return try self.error0(ast::zero_span(), "move error: errdefer expects cleanup method call");
+    if !text_equals(tree, field.name, typ::cleanup_method()) {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: errdefer cleanup must be `%s`, got `%s`",
+            Arg::Str(self.common.deinit_name), Arg::Text(field.name)
+        );
+    }
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, field.receiver, &var ignored) |failed| {
+        return move failed;
+    }
+    var name = empty_name();
+    if ident_text(tree, field.receiver) |text| {
+        name = try self.names.intern_text(tree, text);
+    }
+    try self.live_err_defers.append(ErrDeferEntry { receiver: field.receiver, name: name });
+    return null;
+}
+
+/// Reports the active errdefer cleanups that this error-return path must
+/// skip, and rejects the ones it cannot run, the Go
+/// `validateErrDeferReceivers`.
+///
+/// A consumed receiver retires its cleanup (ADR-0114). A move hands the
+/// obligation to a new owner and an explicit `deinit` discharges it outright;
+/// either way the value is gone, so running the cleanup here would release
+/// what this frame no longer holds. A borrowed receiver is different: it is
+/// still live and cannot be consumed at all, so it stays an error.
+fn (self: &var Checker) validate_err_defer_receivers(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    retired: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while self.live_err_defers.get(index) |entry| {
+        index = index + 1;
+        if is_empty(entry.name) {
+            continue;
+        }
+        let value = self.lookup_name(env, entry.name) orelse continue;
+        if self.binding_consumed(value) {
+            try retired.append(entry.name);
+            continue;
+        }
+        if self.binding(value).active_borrows > 0 or self.binding(value).active_mut_borrows > 0 {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "borrow error: errdefer cleanup receiver `%s` is borrowed on an error path",
+                Arg::Str(entry.name)
+            );
+        }
+    }
+    return null;
+}
+
+/// Reports whether a type carries a deinit contract, the class of values
+/// ADR-0091 requires every exit path to consume, the Go
+/// `valueTypeNeedsConsume`. Owner-ness has one definition, ast.DeinitOwners,
+/// seeded per program.
+fn (self: &var Checker) value_type_needs_consume(type_name: Name) -> !bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    if self.consume_needs.get(bytes) |needs| {
+        return needs;
+    }
+    let needs = ast::owner_type(&self.deinit_owners, bytes);
+    try self.consume_needs.insert(bytes, needs);
+    return needs;
+}
+
+/// Reports whether a struct field owes cleanup, the Go
+/// `fieldTypeNeedsConsume`. A `?Owner` field owes it on the path where the
+/// value is there, so the field carries the obligation the same way a plain
+/// owner field does; the deinit that discharges it opens the optional first.
+fn (self: &var Checker) field_type_needs_consume(type_name: Name) -> !bool {
+    if try self.names.optional_elem(type_name) |elem| {
+        return self.value_type_needs_consume(elem);
+    }
+    return self.value_type_needs_consume(type_name);
+}
+
+/// Reports whether a produced value owes cleanup once it is unwrapped, the Go
+/// `resultTypeNeedsConsume`: `?T` and `E!T` are the two ways an owner reaches
+/// a caller without being the type itself, and both are consumed the moment
+/// the value is bound, so the obligation is the element's.
+fn (self: &var Checker) result_type_needs_consume(type_name: Name) -> !bool {
+    var current = type_name;
+    while true {
+        if try self.names.error_union_parts(current) |parts| {
+            current = parts.success;
+            continue;
+        }
+        if try self.names.optional_elem(current) |elem| {
+            current = elem;
+            continue;
+        }
+        return self.value_type_needs_consume(current);
+    }
+    return false;
+}
+
+/// Reports whether a binding still owes its cleanup, the Go
+/// `bindingNeedsConsume`: an owned deinit-carrying value that no move,
+/// deinit, or registered defer has discharged yet.
+fn (self: &var Checker) binding_needs_consume(value: BindingHandle) -> !bool {
+    let record = self.binding(value);
+    if record.moved or record.deinitialized or record.defer_cleanup {
+        return false;
+    }
+    if record.borrowed_param or record.local_borrow or record.consume_exempt {
+        return false;
+    }
+    if record.handle_arena_id != 0 {
+        return false;
+    }
+    if try self.all_owner_fields_consumed(value) {
+        return false;
+    }
+    return self.value_type_needs_consume(record.type_name);
+}
+
+/// Reports whether a value taken apart field by field has nothing left to
+/// consume, the Go `allOwnerFieldsConsumed`. A type that declares its own
+/// deinit holds one more obligation that no field consume reaches, so it
+/// never reads as done here.
+fn (self: &var Checker) all_owner_fields_consumed(value: BindingHandle) -> !bool {
+    let type_name = self.binding(value).type_name;
+    if !self.store.has_field_deinit(value) or self.declares_deinit(type_name) {
+        return false;
+    }
+    if !self.is_struct(type_name) {
+        return false;
+    }
+    var index = 0;
+    while self.struct_field_at(type_name, index) |field| {
+        index = index + 1;
+        let field_type = self.struct_field_type(type_name, field) orelse continue;
+        if try self.field_type_needs_consume(field_type) and !self.field_deinit_name(value, field) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Reports whether a type's author wrote its cleanup, the Go
+/// `ast.OwnerType(c.declaredDeinits, name)`.
+fn (self: &Checker) declares_deinit(type_name: Name) -> bool {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return ast::owner_type(&self.declared_deinits, bytes);
+}
+
+/// Names the exit a leak check guards, the Go `leakExitKind`. An early error
+/// exit points its diagnostic at the exit that leaks — a later cleanup exists
+/// but is never reached — while a plain exit points at the declaration
+/// nothing ever cleans.
+pub enum LeakExitKind {
+    Plain,
+    Try,
+    ErrorReturn,
+}
+
+pub struct LeakExit {
+    pub kind: LeakExitKind,
+    pub span: ast::Span
+}
+
+pub fn plain_exit() -> LeakExit {
+    return LeakExit { kind: LeakExitKind::Plain, span: ast::zero_span() };
+}
+
+/// Rejects an exit that would leak a live owner, the Go
+/// `checkOwnersConsumed`. since_id limits the check to bindings declared
+/// after that watermark: a function exit passes 0 and checks everything live,
+/// a block fall-through passes the id the block started at. On an error path
+/// a registered errdefer cleanup counts as the consume.
+fn (self: &var Checker) check_owners_consumed(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    since_id: i64,
+    exit: LeakExit
+) -> !?diagnostic::Diagnostic {
+    let error_path = exit.kind != LeakExitKind::Plain;
+    var leaked = none_binding();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        if self.binding(value).id <= since_id or !try self.binding_needs_consume(value) {
+            continue;
+        }
+        if error_path and self.err_defer_covers(self.binding(value).name) {
+            continue;
+        }
+        if leaked |seen| {
+            if self.binding(value).id > self.binding(seen).id {
+                leaked = value;
+            }
+        } else {
+            leaked = value;
+        }
+    }
+    let found = leaked orelse return null;
+    return try self.leak_error(tree, found, exit);
+}
+
+/// Reports one unconsumed owner, the Go `leakError`: at the early error exit
+/// that skips its cleanup, or at its declaration when nothing ever cleans it.
+fn (self: &Checker) leak_error(tree: &ast::Ast, value: BindingHandle, exit: LeakExit) -> !diagnostic::Diagnostic {
+    let name = self.binding(value).name;
+    if exit.kind == LeakExitKind::Try {
+        return self.error1(
+            tree, exit.span,
+            "move error: owned value `%s` would leak on this `try`'s error exit; register `defer` or `errdefer` cleanup before it",
+            Arg::Str(name)
+        );
+    }
+    if exit.kind == LeakExitKind::ErrorReturn {
+        return self.error1(
+            tree, exit.span,
+            "move error: owned value `%s` would leak on this error return; register `defer` or `errdefer` cleanup before it",
+            Arg::Str(name)
+        );
+    }
+    return self.error1(
+        tree, self.binding(value).decl_span,
+        "move error: owned value `%s` is never deinitialized", Arg::Str(name)
+    );
+}
+
+/// Rejects assigning over a binding that a `defer` or `errdefer` names, the
+/// Go `checkCleanupReceiverOverwrite`. A registered cleanup releases the
+/// value that was live when it was written, not whatever the name later
+/// stands for, so an overwrite would leave the cleanup holding a value the
+/// name no longer means.
+fn (self: &var Checker) check_cleanup_receiver_overwrite(
+    tree: &ast::Ast,
+    target: BindingHandle,
+    statement: ast::AssignStmt
+) -> !?diagnostic::Diagnostic {
+    let name = self.binding(target).name;
+    var keyword = "";
+    if self.binding(target).defer_cleanup {
+        keyword = "defer";
+    } else {
+        if self.err_defer_covers(name) {
+            keyword = "errdefer";
+        } else {
+            return null;
+        }
+    }
+    return try self.error2(
+        tree, expression_span(tree, statement.value),
+        "move error: `%s` cleanup receiver `%s` cannot be assigned over; bind the new value to its own name",
+        Arg::Str(try self.names.intern(keyword)), Arg::Str(name)
+    );
+}
+
+/// Reports whether an active errdefer cleans up the named owner, the Go
+/// `errDeferCovers`.
+fn (self: &Checker) err_defer_covers(name: Name) -> bool {
+    if is_empty(name) {
+        return false;
+    }
+    var index = 0;
+    while self.live_err_defers.get(index) |entry| {
+        if same_name(entry.name, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Reports whether a block always exits through a return, the Go
+/// `blockTerminates`, in which case its fall-through path is unreachable and
+/// branch effects cannot leak past it.
+fn (self: &Checker) block_terminates(tree: &ast::Ast, block: ast::Block) -> bool {
+    let count = block_len(tree, block);
+    if count == 0 {
+        return false;
+    }
+    let last = block_statement_at(tree, block, count - 1) orelse return false;
+    return self.stmt_terminates(tree, last);
+}
+
+/// Reports whether a statement always returns, the Go `stmtTerminates`.
+/// Exhaustiveness of a match is the type checker's promise, so all arms
+/// returning is enough here.
+fn (self: &Checker) stmt_terminates(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    if is_return_stmt(tree, statement) {
+        return true;
+    }
+    if is_block_stmt(tree, statement) {
+        return self.block_terminates(tree, ast::Block { node: statement.node });
+    }
+    if if_stmt(tree, statement) |value| {
+        let alternative = value.alternative orelse return false;
+        return self.block_terminates(tree, value.consequence) and
+            self.block_terminates(tree, alternative);
+    }
+    if match_stmt_head(tree, statement) |head| {
+        if head.arm_count == 0 {
+            return false;
+        }
+        var index = 0;
+        while self.match_arm_body(tree, statement, index) |body| {
+            if !self.stmt_terminates(tree, body) {
+                return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn (self: &Checker) match_arm_body(tree: &ast::Ast, statement: ast::Statement, index: i64) -> ?ast::Statement {
+    match tree.statements.at(statement.node) {
+        Match(value) => {
+            let arm = value.arms.get(index) orelse return null;
+            return arm.body;
+        },
+        _ => return null,
+    }
+}
+
+/// Applies deferred cleanup effects in reverse order, the Go
+/// `checkDeferredCleanups`.
+fn (self: &var Checker) check_deferred_cleanups(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    defers: &array::Array<ast::Expression>
+) -> !?diagnostic::Diagnostic {
+    var index = defers.len();
+    while index > 0 {
+        index = index - 1;
+        let deferred = defers.get_or_panic(index);
+        if try self.check_expr_stmt(tree, env, deferred) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Rejects borrowed values before applying normal move rules, the Go
+/// `checkReturnStmt`.
+fn (self: &var Checker) check_return_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::Statement,
+    value: ast::ReturnStmt
+) -> !?diagnostic::Diagnostic {
+    // A deinit owes its receiver's owner fields on every path that leaves
+    // it, not only on the one that falls off the end.
+    if self.current_function |function| {
+        if try self.check_deinit_completeness(tree, function, env) |failed| {
+            return move failed;
+        }
+    }
+    let returned = value.value orelse return self.check_owners_consumed(tree, env, 0, plain_exit());
+    var done = false;
+    if try self.check_return_value_escapes(tree, env, returned, &var done) |failed| {
+        return move failed;
+    }
+    if done {
+        return null;
+    }
+    // An error return runs active errdefer cleanups before the function
+    // exits, so their receivers must still be valid here. A success return
+    // transfers the owner instead and must not be blocked by the cleanup it
+    // skips.
+    let error_path = try self.return_takes_error_path(tree, env, returned);
+    if error_path {
+        var retired = array::new<Name>(self.allocator);
+        errdefer retired.deinit();
+        if try self.validate_err_defer_receivers(tree, env, &var retired) |failed| {
+            retired.deinit();
+            return move failed;
+        }
+        try self.result.return_retired_err_defers.append(RetiredErrDefers {
+            node: statement.node, names: move retired
+        });
+    }
+    let saved = self.borrow_return;
+    if self.current_function |function| {
+        if self.names.is_borrow_optional(self.return_type_name(function)) {
+            // A declared borrow-optional return is the second consumer of
+            // `?&T`: the returned borrow flows on to the caller's capture.
+            self.borrow_return = true;
+        }
+    }
+    var ignored = empty_name();
+    if try self.move_expr(tree, env, returned, &var ignored) |failed| {
+        self.borrow_return = saved;
+        return move failed;
+    }
+    self.borrow_return = saved;
+    var exit = plain_exit();
+    if error_path {
+        exit = LeakExit { kind: LeakExitKind::ErrorReturn, span: expression_span(tree, returned) };
+    }
+    return self.check_owners_consumed(tree, env, 0, exit);
+}
+
+/// Reports whether returning expr exits through the error path, the Go
+/// `returnTakesErrorPath`. What decides it is the type of the returned
+/// value: a member of an error set fails, and so does an error union being
+/// propagated, whether either is written out or bound to a local first.
+fn (self: &var Checker) return_takes_error_path(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !bool {
+    let type_name = try self.returned_type_name(tree, env, expression) orelse return false;
+    if self.is_error_set(type_name) {
+        return true;
+    }
+    if try self.names.error_union_parts(type_name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Reads the type of a returned expression without moving it, the Go
+/// `returnedTypeName`.
+fn (self: &var Checker) returned_type_name(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?Name {
+    if self.lookup_ident(tree, env, expression) |value| {
+        return self.binding(value).type_name;
+    }
+    if ident_text(tree, expression) |_| {
+        return null;
+    }
+    let field = field_expr(tree, expression) orelse return null;
+    if !field.namespace {
+        return null;
+    }
+    var out = empty_name();
+    if try self.read_namespace_expr(tree, field, &var out) |failed| {
+        failed.deinit();
+        return null;
+    }
+    return out;
+}
+
+/// Vets a returned value for frame escapes, the Go `checkReturnValueEscapes`:
+/// borrowed bindings, arena handles, and tied-allocator factory calls. done
+/// means the return is fully checked here, including any consume checking it
+/// needs; every error comes back with done set.
+fn (self: &var Checker) check_return_value_escapes(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    returned: ast::Expression,
+    done: &var bool
+) -> !?diagnostic::Diagnostic {
+    done.* = true;
+    if ident_expr(tree, returned) |ident| {
+        if self.lookup_text(tree, env, ident.name) |value| {
+            if self.binding(value).borrowed_param {
+                if try self.borrowed_return_allowed(tree, ident.name, value) {
+                    return null;
+                }
+                return try self.error1(
+                    tree, ident.span, "borrow error: borrowed value `%s` cannot escape",
+                    Arg::Text(ident.name)
+                );
+            }
+            let handle_arena_id = self.binding(value).handle_arena_id;
+            if handle_arena_id != 0 and !self.arena_outlives_frame(handle_arena_id, env) {
+                return try self.error1(
+                    tree, ident.span, "arena error: handle `%s` cannot outlive its arena",
+                    Arg::Text(ident.name)
+                );
+            }
+        }
+    }
+    if try self.arena_add_receiver(tree, env, returned) |arena| {
+        let arena_id = self.binding(arena).arena_id;
+        if arena_id != 0 and !self.arena_outlives_frame(arena_id, env) {
+            return try self.error1(
+                tree, ast::zero_span(), "arena error: handle from `%s` cannot outlive its arena",
+                Arg::Str(self.binding(arena).name)
+            );
+        }
+    }
+    var handled = false;
+    if try self.check_arena_borrow_return_exit(tree, env, returned, &var handled) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if call_expr(tree, returned) |call| {
+        if try self.check_tied_allocator_return(tree, env, call, &var handled) |failed| {
+            return move failed;
+        }
+        if handled {
+            return self.check_owners_consumed(tree, env, 0, plain_exit());
+        }
+    }
+    done.* = false;
+    return null;
+}
+
+/// Completes the return path once Arena.at is known to be the returned
+/// borrow, including the ordinary owner-exit check, the Go
+/// `checkArenaBorrowReturnExit`.
+fn (self: &var Checker) check_arena_borrow_return_exit(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    if try self.check_arena_borrow_return(tree, env, expression, handled) |failed| {
+        return move failed;
+    }
+    if !handled.* {
+        return null;
+    }
+    return self.check_owners_consumed(tree, env, 0, plain_exit());
+}
+
+/// Validates the structural source of a direct Arena.at borrow return, the
+/// Go `checkArenaBorrowReturn`. A source rooted in a borrow parameter
+/// outlives the frame by contract; a source rooted in local state would
+/// dangle.
+fn (self: &var Checker) check_arena_borrow_return(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let function = self.current_function orelse return null;
+    let parts = try self.names.explicit_borrow(self.return_type_name(function)) orelse return null;
+    if parts.mutable {
+        return null;
+    }
+    var source = ArenaAtSource { target: null, field: empty_name(), elem: empty_name() };
+    if try self.arena_at_borrow_source(tree, env, expression, &var source) |failed| {
+        handled.* = true;
+        return move failed;
+    }
+    let target = source.target orelse return null;
+    if !same_name(source.elem, parts.inner) {
+        return null;
+    }
+    handled.* = true;
+    if !self.param_rooted_binding(target) {
+        return try self.error1(
+            tree, expression_span(tree, expression),
+            "borrow error: arena.at borrow from local `%s` cannot escape",
+            Arg::Str(self.binding(target).name)
+        );
+    }
+    return null;
+}
+
+/// Handles `return <factory>(...)` for tied-allocator factories, the Go
+/// `checkTiedAllocatorReturn`. Sources rooted in the caller's own parameters
+/// travel with the signature — the caller re-derives the tie from its
+/// arguments — while a source rooted in local state would dangle and is
+/// rejected. Every error comes back with handled set.
+fn (self: &var Checker) check_tied_allocator_return(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    call: ast::CallExpr,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let called = try self.called_user_function(tree, call.callee) orelse return null;
+    if !self.names.is(self.return_type_name(called.function), "Allocator") {
+        return null;
+    }
+    var sources = array::new<BorrowSource>(self.allocator);
+    defer sources.deinit();
+    handled.* = true;
+    if try self.call_borrow_return_sources(
+        tree, env, called.name, called.function, call, true, true, false, &var sources
+    ) |failed| {
+        return move failed;
+    }
+    if sources.len() == 0 {
+        handled.* = false;
+        return null;
+    }
+    var index = 0;
+    while sources.get(index) |source| {
+        if !self.param_rooted_binding(source.target) {
+            return try self.error1(
+                tree, ast::zero_span(),
+                "borrow error: `%s` returns an allocator tied to local state and cannot escape",
+                Arg::Str(called.name)
+            );
+        }
+        index = index + 1;
+    }
+    var ignored = empty_name();
+    return self.check_user_call(tree, env, called.name, call.args, true, &var ignored);
+}
+
+/// Reports whether a binding's provenance chain ends only in function
+/// parameters, the Go `paramRootedBinding`.
+fn (self: &Checker) param_rooted_binding(value: BindingHandle) -> bool {
+    if self.has_borrow_targets(value) {
+        var index = 0;
+        while self.borrow_target_at(value, index) |source| {
+            if !self.param_rooted_binding(source.target) {
+                return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    }
+    let record = self.binding(value);
+    return record.borrowed_param and !record.local_borrow;
+}
+
+/// Permits returning a borrowed source parameter, the Go
+/// `borrowedReturnAllowed`. Every borrow parameter is a presumed provenance
+/// source (ADR-0098), so what remains to check is that the parameter's shape
+/// matches the declared borrow return.
+fn (self: &var Checker) borrowed_return_allowed(
+    tree: &ast::Ast,
+    name: ast::Text,
+    value: BindingHandle
+) -> !bool {
+    let function = self.current_function orelse return false;
+    let parts = try self.names.explicit_borrow(self.return_type_name(function)) orelse return false;
+    if parts.mutable and !self.binding(value).mut_borrow {
+        return false;
+    }
+    if !same_name(self.binding(value).type_name, parts.inner) {
+        return false;
+    }
+    var index = 0;
+    while self.param_at(function, index) |param| {
+        index = index + 1;
+        if !self.names.is_text(param.name, tree, name) or !param.borrow {
+            continue;
+        }
+        return !parts.mutable or param.mut_borrow;
+    }
+    return false;
+}

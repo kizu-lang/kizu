@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
+import compiler::internal::ownership;
 import compiler::internal::parser;
 import compiler::internal::project;
 import compiler::internal::source;
@@ -15,9 +16,9 @@ import std::string;
 
 // Port of cmd/kizu for the commands the selfhost compiler can run so far:
 // `parse` prints the program a file parses to, `check` loads a file or a
-// package with its std modules and type-checks it. The later gates `check`
-// runs in the Go compiler (ownership, IR, LLVM emit) follow with their
-// modules. Not connected to the shipping CLI.
+// package with its std modules, type-checks it, and ownership-checks it. The
+// later gates `check` runs in the Go compiler (IR, LLVM emit) follow with
+// their modules. Not connected to the shipping CLI.
 
 /// Names the ways a command line run ends without a result.
 error Cli {
@@ -125,8 +126,8 @@ fn parse_file(io: Io, allocator: Allocator, file: []u8) -> !void {
     return;
 }
 
-/// Loads a file or a package with the std modules it imports and type-checks
-/// the merged program.
+/// Loads a file or a package with the std modules it imports, type-checks
+/// the merged program, and then checks its ownership rules.
 fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !void {
     var tree = ast::new(allocator);
     defer tree.deinit();
@@ -142,6 +143,11 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !v
         Program(program) => {
             defer program.deinit();
             if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            if try ownership::check(allocator, &var tree, &program) |failed| {
                 defer failed.deinit();
                 try report(io, allocator, &loader.sources, &failed);
                 return Cli::Failed;

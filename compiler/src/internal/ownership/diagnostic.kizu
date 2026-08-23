@@ -1,0 +1,198 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ownership/diagnostic.go. The Go checker formats
+// its messages with fmt.Sprintf; here a format interpolates up to four Args
+// (`%s` takes a Name or an Ast text, `%d` an integer) so each diagnostic site
+// stays one statement. `%w` wraps of an inner diagnostic use wrap_error.
+
+/// Is one value a diagnostic format interpolates.
+pub union Arg {
+    Str(Name),
+    Text(ast::Text),
+    Int(i64),
+}
+
+fn (self: &Checker) append_arg(out: &var string::String, tree: &ast::Ast, arg: Arg) -> !void {
+    match arg {
+        Str(name) => return self.names.append_to(out, name),
+        Text(text) => {
+            let retained = tree.texts.at(text.node);
+            return out.append_string(retained);
+        },
+        Int(value) => return fmt::append_i64(out, value),
+    }
+}
+
+/// Renders format with `%s` / `%d` replaced in order by the arguments, the
+/// Go `fmt.Sprintf` of one diagnostic; unused arguments are ignored.
+fn (self: &Checker) format_message(
+    tree: &ast::Ast,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg
+) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var used = 0;
+    var index = 0;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if used == 0 {
+                try self.append_arg(&var out, tree, a);
+            }
+            if used == 1 {
+                try self.append_arg(&var out, tree, b);
+            }
+            if used == 2 {
+                try self.append_arg(&var out, tree, c);
+            }
+            if used == 3 {
+                try self.append_arg(&var out, tree, d);
+            }
+            used = used + 1;
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
+        }
+    }
+    return move out;
+}
+
+/// Builds one structured ownership diagnostic from finished text, the Go
+/// `errorf` / `errorAt` without arguments.
+fn (self: &Checker) error0(span: ast::Span, text: []u8) -> !diagnostic::Diagnostic {
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, span, text);
+}
+
+fn (self: &Checker) error_message(span: ast::Span, message: string::String) -> !diagnostic::Diagnostic {
+    defer message.deinit();
+    let text = message.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, span, text);
+}
+
+/// Builds one diagnostic from a format and one argument.
+fn (self: &Checker) error1(tree: &ast::Ast, span: ast::Span, format: []u8, a: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, Arg::Int(0), Arg::Int(0), Arg::Int(0));
+    return self.error_message(span, move message);
+}
+
+/// Builds one diagnostic from a format and two arguments.
+fn (self: &Checker) error2(tree: &ast::Ast, span: ast::Span, format: []u8, a: Arg, b: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, b, Arg::Int(0), Arg::Int(0));
+    return self.error_message(span, move message);
+}
+
+/// Builds one diagnostic from a format and three arguments.
+fn (self: &Checker) error3(tree: &ast::Ast, span: ast::Span, format: []u8, a: Arg, b: Arg, c: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, b, c, Arg::Int(0));
+    return self.error_message(span, move message);
+}
+
+/// Builds one diagnostic from a format and four arguments.
+fn (self: &Checker) error4(tree: &ast::Ast, span: ast::Span, format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !diagnostic::Diagnostic {
+    let message = try self.format_message(tree, format, a, b, c, d);
+    return self.error_message(span, move message);
+}
+
+/// Builds one diagnostic whose text ends with an inner diagnostic's text, the
+/// Go `errorf("...: %w", err)`: the format's arguments come first and the
+/// inner `category: message` is appended where the format ends.
+fn (self: &Checker) wrap_error(
+    tree: &ast::Ast,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    inner: diagnostic::Diagnostic
+) -> !diagnostic::Diagnostic {
+    defer inner.deinit();
+    var message = try self.format_message(tree, format, a, b, Arg::Int(0), Arg::Int(0));
+    errdefer message.deinit();
+    if inner.category.len() > 0 {
+        try message.append_string(&inner.category);
+        try message.append_bytes(": ");
+    }
+    try message.append_string(&inner.message);
+    return self.error_message(ast::zero_span(), move message);
+}
+
+/// Returns the best source span stored on an expression.
+pub fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => return value.span,
+        Binary(value) => return value.operator_span,
+        Cast(value) => return value.keyword_span,
+        Field(value) => return value.span,
+        Deref(value) => return value.operator_span,
+        _ => return nested_expression_span(tree, expression),
+    }
+}
+
+/// Unwraps compound expressions until it finds a stored span.
+fn nested_expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
+    if transparent_expr_value(tree, expression) |inner| {
+        return expression_span(tree, inner);
+    }
+    match tree.expressions.at(expression.node) {
+        Call(value) => return expression_span(tree, value.callee),
+        TypeApply(value) => return expression_span(tree, value.callee),
+        Try(value) => return expression_span(tree, value.value),
+        Index(value) => return first_non_zero_span(tree, value.target, value.index, value.start, value.end),
+        StructLiteral(value) => {
+            if value.fields.at(0) |field| {
+                return expression_span(tree, field.value);
+            }
+            return ast::zero_span();
+        },
+        Comptime(value) => return expression_span(tree, value.expr),
+        _ => return ast::zero_span(),
+    }
+}
+
+/// Returns the first nested expression span that carries source info.
+fn first_non_zero_span(
+    tree: &ast::Ast,
+    target: ast::Expression,
+    index: ?ast::Expression,
+    start: ?ast::Expression,
+    end: ?ast::Expression
+) -> ast::Span {
+    let target_span = expression_span(tree, target);
+    if !target_span.is_zero() {
+        return target_span;
+    }
+    if index |present| {
+        let span = expression_span(tree, present);
+        if !span.is_zero() {
+            return span;
+        }
+    }
+    if start |present| {
+        let span = expression_span(tree, present);
+        if !span.is_zero() {
+            return span;
+        }
+    }
+    if end |present| {
+        return expression_span(tree, present);
+    }
+    return ast::zero_span();
+}
+
+/// Returns the operand of a wrapper that reads as its inner expression, the
+/// Go `transparentExprValue`: `unsafe` says who owns an obligation and
+/// carries no value of its own, and `&` / `!` / `-` read their operand.
+pub fn transparent_expr_value(tree: &ast::Ast, expression: ast::Expression) -> ?ast::Expression {
+    match tree.expressions.at(expression.node) {
+        Unsafe(value) => return value.value,
+        Prefix(value) => return value.right,
+        _ => return null,
+    }
+}

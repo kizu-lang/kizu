@@ -1,0 +1,1194 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdprim;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Port of the call funnel of internal/ownership/checker.go: the call
+// dispatch, declared-function calls and their argument lends, the view and
+// allocation carrier predicates, qualified builtin and fs / io primitive
+// checks, and the call-scoped borrow activation and conflict rules.
+
+/// Validates ownership effects of builtin and user calls, the Go
+/// `checkCallExpr`. It is the funnel every call form passes through, so the
+/// tied-allocator taint of the result is recorded here once, and no call path
+/// can forget it.
+fn (self: &var Checker) check_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if try self.dispatch_call_expr(tree, env, expression, call, out) |failed| {
+        return move failed;
+    }
+    let result = out.*;
+    if try self.check_borrow_optional_result(tree, env, call, result) |failed| {
+        return move failed;
+    }
+    try self.pend_tied_allocator_args(tree, env, call.args, result);
+    return null;
+}
+
+/// Is the one gate for every call that produces a borrow optional, the Go
+/// `checkBorrowOptionalResult`: legal inside a capture condition, legal as
+/// the value of a declared borrow-optional return when every tied binding is
+/// a borrowed parameter (the borrow must survive the frame), refused
+/// everywhere else.
+fn (self: &var Checker) check_borrow_optional_result(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    call: ast::CallExpr,
+    result: Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is_borrow_optional(result) {
+        return null;
+    }
+    if self.capture_condition {
+        return null;
+    }
+    if !self.borrow_return {
+        return try self.error1(
+            tree, ast::zero_span(),
+            "move error: a call returning %s must be consumed by a capture (`if call |name|` or `while call |name|`)",
+            Arg::Str(result)
+        );
+    }
+    var targets = array::new<BorrowCaptureTarget>(self.allocator);
+    defer targets.deinit();
+    var from_accessor = false;
+    if !try self.borrow_optional_call_targets(tree, env, call, &var targets, &var from_accessor) {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: returned %s has no recognizable borrow source",
+            Arg::Str(result)
+        );
+    }
+    var index = 0;
+    while targets.get(index) |target| {
+        index = index + 1;
+        var borrowed_param = false;
+        if self.lookup_name(env, target.name) |holder| {
+            borrowed_param = self.binding(holder).borrowed_param;
+        }
+        if !borrowed_param {
+            return try self.error2(
+                tree, ast::zero_span(),
+                "borrow error: returned %s must borrow a borrowed parameter, not local `%s`",
+                Arg::Str(result), Arg::Str(target.name)
+            );
+        }
+    }
+    return null;
+}
+
+/// Routes a call expression to its checker by callee shape, the Go
+/// `dispatchCallExpr`.
+fn (self: &var Checker) dispatch_call_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var sanctioned = false;
+    if self.view_capture_call |sanctioned_call| {
+        sanctioned = sanctioned_call.node == expression.node;
+    }
+    if field_expr(tree, call.callee) |field| {
+        return self.check_field_call(tree, env, field, call.args, sanctioned, out);
+    }
+    if type_apply_expr(tree, call.callee) |apply| {
+        return self.check_type_apply_call_expr(tree, env, apply, call.args, out);
+    }
+    let name = ident_text(tree, call.callee) orelse
+        return try self.error0(ast::zero_span(), "move error: callee must be a function name");
+    var handled = false;
+    if try self.check_builtin_call(tree, env, name, call, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    let user_name = try self.names.intern_text(tree, name);
+    return self.check_user_call(tree, env, user_name, call.args, sanctioned, out);
+}
+
+/// Validates one declared-function call, the Go `checkUserCall`. sanctioned
+/// marks the callers that tie a factory result themselves and so may skip
+/// the tied-allocator let-binding requirement.
+fn (self: &var Checker) check_user_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    args: ast::ExpressionList,
+    sanctioned: bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let function = self.function_named(name) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: undefined function `%s`", Arg::Str(name));
+    if self.has_type_params(function) {
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` requires explicit static arguments", Arg::Str(name)
+        );
+    }
+    let info = self.functions.at(function.index);
+    let param_count = info.params.len();
+    let count = arg_count(tree, args);
+    if count != param_count {
+        return try self.error3(
+            tree, ast::zero_span(), "move error: `%s` expects %d args, got %d",
+            Arg::Str(name), Arg::Int(param_count), Arg::Int(count)
+        );
+    }
+    let none = self.empty_subst();
+    defer none.deinit();
+    if try self.check_call_handle_pairing(tree, env, function, 0, &none, args) |failed| {
+        return move failed;
+    }
+    // A tied-allocator factory call is only legal where something ties its
+    // result (the let recognizer, a param-rooted return — those pass
+    // sanctioned); anywhere else the tie would silently drop.
+    if !sanctioned and self.names.is(self.return_type_name(function), "Allocator") and
+        try self.call_ties_allocator(tree, function, args, env) {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: `%s` returns a tied allocator; bind it with `let`",
+            Arg::Str(name)
+        );
+    }
+    var borrowed = array::new<TemporaryBorrow>(self.allocator);
+    defer borrowed.deinit();
+    if try self.activate_borrow_args(tree, env, function, 0, args, &var borrowed) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        if try self.check_user_call_arg(tree, env, function, index, arg, sanctioned) |failed| {
+            errdefer failed.deinit();
+            try self.release_temporary_borrows(&borrowed);
+            return move failed;
+        }
+        index = index + 1;
+    }
+    try self.release_temporary_borrows(&borrowed);
+    out.* = self.return_type_name(function);
+    return null;
+}
+
+/// Applies one argument's ownership effect for a user call, the Go
+/// `checkUserCallArg`: a shared borrow reads, a lent view or allocator
+/// reads, anything else moves.
+fn (self: &var Checker) check_user_call_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    index: i64,
+    arg: ast::Expression,
+    sanctioned: bool
+) -> !?diagnostic::Diagnostic {
+    let param = self.param_at(function, index) orelse return null;
+    var ignored = empty_name();
+    if param.borrow {
+        if param.mut_borrow {
+            return null;
+        }
+        return self.read_expr(tree, env, arg, &var ignored);
+    }
+    if try self.view_arg_lend(tree, env, function, index, arg) or
+        self.allocator_arg_lend(tree, env, function, index, arg) or
+        try self.sanctioned_view_lend(tree, env, sanctioned, function, index, arg) {
+        return self.read_expr(tree, env, arg, &var ignored);
+    }
+    return self.move_expr(tree, env, arg, &var ignored);
+}
+
+/// Reports whether arg is a borrow-class view lent to a `[]u8` parameter
+/// under a caller that ties the result itself, the Go `sanctionedViewLend`
+/// — the let recognizer, which records the view as a borrow source of the
+/// binding. In every other context the view would escape untracked, so the
+/// lend stays refused and the move path rejects it.
+fn (self: &var Checker) sanctioned_view_lend(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    sanctioned: bool,
+    function: FunctionHandle,
+    index: i64,
+    arg: ast::Expression
+) -> !bool {
+    let param = self.param_at(function, index) orelse return false;
+    if !sanctioned or !self.names.is(param.type_name, "[]u8") {
+        return false;
+    }
+    if try self.borrow_class_view_root(tree, env, arg) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether arg is a tied allocator binding lent to an Allocator
+/// parameter, the Go `allocatorArgLend`. The lend itself is free; what the
+/// callee's result may carry out is covered by pend_tied_allocator_args at
+/// the call site.
+fn (self: &Checker) allocator_arg_lend(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    index: i64,
+    arg: ast::Expression
+) -> bool {
+    let param = self.param_at(function, index) orelse return false;
+    if !self.names.is(param.type_name, "Allocator") {
+        return false;
+    }
+    if self.tied_allocator_arg(tree, env, arg) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Records the tie obligation of a call that consumed a tied allocator
+/// argument and returns something that can carry its memory, the Go
+/// `pendTiedAllocatorArgs`. The obligation is discharged by the `let` that
+/// binds the result; anything else leaves it pending and check_block rejects
+/// the statement.
+fn (self: &var Checker) pend_tied_allocator_args(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    return_type: Name
+) -> !void {
+    if !try self.allocation_carrying_return_type(return_type) {
+        return;
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        let alloc = self.tied_allocator_arg(tree, env, arg) orelse continue;
+        let span = expression_span(tree, arg);
+        try self.pending_alloc_taints.append(AllocTaint { alloc: alloc, span: span });
+    }
+    return;
+}
+
+/// Reports a return type that can hold memory the callee allocated, the Go
+/// `allocationCarryingReturnType`: owners and aggregates. Scalars carry
+/// nothing, a view carries only the view channel (a view of
+/// callee-allocated memory cannot leave the callee — its owner would leak
+/// there), and an Allocator result is the factory recognizer's job, not a
+/// taint.
+fn (self: &var Checker) allocation_carrying_return_type(type_name: Name) -> !bool {
+    if try self.view_free_return_type(type_name) or self.names.is(type_name, "Allocator") {
+        return false;
+    }
+    let payload = try self.names.after_bang(type_name);
+    return !self.names.starts_with(payload, "&") and !self.names.starts_with(payload, "[]");
+}
+
+/// Reports whether arg is a tracked view binding lent to a plain `[]u8`
+/// parameter for the call's duration, the Go `viewArgLend` (SPEC §9: a
+/// borrow argument ends with the call statement). Lending is only safe when
+/// the callee cannot retain the view past the statement: neither the return
+/// type nor any `&var` parameter it could write into may carry a view out.
+fn (self: &var Checker) view_arg_lend(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    index: i64,
+    arg: ast::Expression
+) -> !bool {
+    let param = self.param_at(function, index) orelse return false;
+    if !self.names.is(param.type_name, "[]u8") {
+        return false;
+    }
+    var lent_view = false;
+    if try self.borrow_class_view_root(tree, env, arg) |_| {
+        lent_view = true;
+    }
+    if !lent_view and !self.borrowed_view_param_arg(tree, env, arg) {
+        return false;
+    }
+    return !try self.view_carrying_type(self.return_type_name(function)) and
+        !try self.view_smuggling_params(function);
+}
+
+/// Reports whether arg names a `&var []u8` borrow parameter, the Go
+/// `borrowedViewParamArg`: its backing outlives the frame, but the binding
+/// itself cannot move, so passing it on is a lend rather than a copy.
+fn (self: &Checker) borrowed_view_param_arg(tree: &ast::Ast, env: ScopeHandle, arg: ast::Expression) -> bool {
+    let value = self.lookup_ident(tree, env, arg) orelse return false;
+    let record = self.binding(value);
+    return record.borrowed_param and self.names.is(record.type_name, "[]u8");
+}
+
+/// Reports whether fn declares a `&var` parameter whose type can hold a
+/// view, the Go `viewSmugglingParams`: a callee could store a lent view
+/// through it, so the storage outliving the call makes lending unsafe. A
+/// `&var []u8` slot cannot be re-pointed (ADR-0096) and is exempt.
+fn (self: &var Checker) view_smuggling_params(function: FunctionHandle) -> !bool {
+    var index = 0;
+    while self.param_at(function, index) |param| {
+        index = index + 1;
+        if !param.borrow or !param.mut_borrow or self.names.is(param.type_name, "[]u8") {
+            continue;
+        }
+        if try self.view_carrying_type(param.type_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports a return type that cannot carry a view out, the Go
+/// `viewFreeReturnType`: scalars and void, with or without an error union.
+fn (self: &var Checker) view_free_return_type(type_name: Name) -> !bool {
+    let payload = try self.names.after_bang(type_name);
+    return self.names.is(payload, "void") or self.names.is(payload, "bool") or
+        self.names.is(payload, "u8") or self.names.is(payload, "i64") or
+        self.names.is(payload, "i32") or self.names.is(payload, "u32") or
+        self.names.is(payload, "u64") or self.names.is(payload, "f64");
+}
+
+/// Reports whether a value of type_name can hold a view, the Go
+/// `viewCarryingType`: view spellings themselves, and declared structs or
+/// unions any of whose field types carry one. Generic containers follow the
+/// storage they actually retain: Map copies its byte key and Handle stores
+/// only an opaque ID.
+fn (self: &var Checker) view_carrying_type(type_name: Name) -> !bool {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    return self.view_carrying_type_seen(type_name, &var seen);
+}
+
+/// Strips the wrappers a view rides through, the Go `viewCarrierPayload`:
+/// the success of `!T` and the payload of `?T` carry their views the same
+/// way.
+fn (self: &var Checker) view_carrier_payload(type_name: Name) -> !Name {
+    let after = try self.names.after_bang(type_name);
+    return self.names.optional_payload_name(after);
+}
+
+/// Is view_carrying_type with a cycle guard over named types, the Go
+/// `viewCarryingTypeSeen`.
+fn (self: &var Checker) view_carrying_type_seen(type_name: Name, seen: &var map::Map<[]u8, bool>) -> !bool {
+    let payload = try self.view_carrier_payload(type_name);
+    if self.names.is(payload, "[]u8") or self.names.starts_with(payload, "&") {
+        return true;
+    }
+    if self.seen_contains(seen, payload) {
+        return false;
+    }
+    try self.mark_seen(seen, payload, true);
+    var base = payload;
+    if try self.names.split_generic(payload) |parts| {
+        base = parts.base;
+        if try self.generic_args_carry_view(base, parts.args, seen) {
+            return true;
+        }
+    }
+    var index = 0;
+    while self.struct_field_at(base, index) |field| {
+        index = index + 1;
+        let field_type = self.struct_field_type(base, field) orelse continue;
+        if try self.view_carrying_type_seen(field_type, seen) {
+            return true;
+        }
+    }
+    index = 0;
+    while self.union_variant_at(base, index) |variant| {
+        index = index + 1;
+        let variant_payload = self.union_variant_payload_name(base, variant) orelse continue;
+        if !is_empty(variant_payload) and try self.view_carrying_type_seen(variant_payload, seen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Follows only the generic values the runtime type retains, the Go
+/// `genericArgsCarryView`. Map copies its byte key, and Handle retains no
+/// value of T.
+fn (self: &var Checker) generic_args_carry_view(
+    base: Name,
+    text: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !bool {
+    var args = array::new<Name>(self.allocator);
+    defer args.deinit();
+    if try self.names.split_generic_args(text) |split| {
+        defer split.deinit();
+        var copied = 0;
+        while split.get(copied) |arg| {
+            try args.append(arg);
+            copied = copied + 1;
+        }
+    } else {
+        try args.append(text);
+    }
+    if self.names.is(base, "std::arena::Handle") {
+        return false;
+    }
+    if self.names.is(base, "std::map::Map") and args.len() == 2 {
+        return self.view_carrying_type_seen(args.get_or_panic(1), seen);
+    }
+    var index = 0;
+    while args.get(index) |arg_type| {
+        index = index + 1;
+        if try self.view_carrying_type_seen(arg_type, seen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Reports a struct type a let binding may capture views into, the Go
+/// `viewCaptureStructType`. View-only values ride the borrow class; owner
+/// values keep both their explicit deinit obligation and their borrow
+/// targets.
+fn (self: &var Checker) view_capture_struct_type(type_name: Name) -> !bool {
+    if self.names.contains_byte(type_name, cast<u8>(33)) {
+        return false;
+    }
+    if !self.is_struct(type_name) {
+        return false;
+    }
+    return self.view_carrying_type(type_name);
+}
+
+/// Resolves expr to the borrow-class binding backing a view read, the Go
+/// `borrowClassViewRoot` — a local view binding, or a view-capturing struct
+/// whose `[]u8` field is read — or null for params, statics, and owned
+/// values, whose views are free: a parameter outlives the frame, so what it
+/// backs cannot dangle here.
+fn (self: &var Checker) borrow_class_view_root(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?BindingHandle {
+    let direct = try self.direct_field_root(tree, env, expression) orelse return null;
+    let root = direct.root;
+    if !self.binding(root).local_borrow and !self.has_borrow_targets(root) {
+        return null;
+    }
+    if is_empty(direct.path) {
+        if !self.names.is(self.binding(root).type_name, "[]u8") {
+            return null;
+        }
+        return root;
+    }
+    let field_type = self.field_path_type(self.binding(root).type_name, direct.path) orelse return null;
+    if !self.names.is(field_type, "[]u8") {
+        return null;
+    }
+    return root;
+}
+
+/// Validates calls whose callee is a dotted expression, the Go
+/// `checkFieldCallExpr`.
+fn (self: &var Checker) check_field_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    sanctioned: bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var handled = false;
+    if try self.check_union_constructor(tree, env, field, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_qualified_source_call(tree, env, field, args, sanctioned, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_qualified_builtin(tree, env, field, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    return self.check_method_call_expr(tree, env, field, args, out);
+}
+
+/// Validates ownership for source-loaded qualified calls, the Go
+/// `checkQualifiedUserCall`.
+fn (self: &var Checker) check_qualified_source_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    sanctioned: bool,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let name = try self.qualified_field_callee(tree, field) orelse return null;
+    let function = self.function_named(name) orelse return null;
+    if self.has_type_params(function) {
+        return null;
+    }
+    handled.* = true;
+    return self.check_user_call(tree, env, name, args, sanctioned, out);
+}
+
+/// Validates ownership for std:: namespace prototype calls, the Go
+/// `checkQualifiedBuiltin`.
+fn (self: &var Checker) check_qualified_builtin(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let name = try self.qualified_field_callee(tree, field) orelse return null;
+    let owned = try self.names.copy(name);
+    defer owned.deinit();
+    let bytes = owned.as_bytes();
+    if try self.reject_unknown_builtin(tree, bytes) |failed| {
+        handled.* = true;
+        return move failed;
+    }
+    if try self.check_qualified_std_builtin(tree, env, bytes, args, handled, out) |failed| {
+        return move failed;
+    }
+    if handled.* {
+        return null;
+    }
+    return self.check_io_builtin(tree, bytes, args, handled, out);
+}
+
+/// Renders the qualified name a dotted callee spells, the Go
+/// `qualifiedName(field)` on a call's FieldExpr callee: the namespace chain
+/// joined by `::`, or null when the callee is not one.
+fn (self: &var Checker) qualified_field_callee(tree: &ast::Ast, field: ast::FieldExpr) -> !?Name {
+    if !field.namespace or !qualified_name_shape(tree, field.receiver) {
+        return null;
+    }
+    let receiver = try self.names.intern_expression(tree, field.receiver);
+    let name = try self.names.intern_text(tree, field.name);
+    return try self.names.format("%s::%s", receiver, name, empty_name());
+}
+
+/// Refuses a primitive the Go implementation does not have, the Go
+/// `rejectUnknownBuiltin`. The type checker rejects these first in a full
+/// run; this keeps the rule true of this checker on its own, which is how
+/// its own tests read it.
+fn (self: &var Checker) reject_unknown_builtin(tree: &ast::Ast, name: []u8) -> !?diagnostic::Diagnostic {
+    if !mem::starts_with(name, "std::internal::builtin::") or stdprim::primitive(name) {
+        return null;
+    }
+    let spelled = try self.names.intern(name);
+    return try self.error1(tree, ast::zero_span(), "move error: `%s` is not a primitive", Arg::Str(spelled));
+}
+
+/// Validates declarative core and fs ownership effects, the Go
+/// `checkQualifiedStdBuiltin`.
+fn (self: &var Checker) check_qualified_std_builtin(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if try self.check_simple_core_builtin(tree, env, name, args, handled, out) |failed| {
+        return move failed;
+    }
+    if handled.* {
+        return null;
+    }
+    return self.check_fs_builtin(tree, env, name, args, handled, out);
+}
+
+/// Validates declarative core primitive ownership effects, the Go
+/// `checkSimpleCoreBuiltin`.
+fn (self: &var Checker) check_simple_core_builtin(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let signature = stdprim::simple_core_signature(name) orelse return null;
+    handled.* = true;
+    let count = arg_count(tree, args);
+    if count != signature.args_len() {
+        var args_text = string::new(self.allocator);
+        errdefer args_text.deinit();
+        try core_ownership_args_text(&var args_text, &signature);
+        let spelled = try self.names.intern(name);
+        let expects = try self.names.intern_owned(move args_text);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects %s", Arg::Str(spelled), Arg::Str(expects)
+        );
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        let want = signature.arg_at(index) orelse break;
+        if try self.check_core_arg(tree, env, name, index, want, arg) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern(signature.return_type);
+    return null;
+}
+
+/// Reads one declarative primitive argument without moving it, the Go
+/// `checkCoreArg`.
+fn (self: &var Checker) check_core_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: []u8,
+    index: i64,
+    want: stdprim::ArgKind,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    if want == stdprim::ArgKind::Io {
+        return self.check_io_arg(tree, env, arg, name);
+    }
+    if want == stdprim::ArgKind::StringOut {
+        return self.check_string_out_arg(tree, env, name, arg);
+    }
+    let spelling = stdprim::arg_kind_spelling(want);
+    let want_name = try self.names.intern(spelling);
+    var got = empty_name();
+    if try self.read_contextual_expr(tree, env, arg, want_name, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, want_name) {
+        let spelled = try self.names.intern(name);
+        return try self.error4(
+            tree, ast::zero_span(), "move error: `%s` arg %d expects %s, got %s",
+            Arg::Str(spelled), Arg::Int(index + 1), Arg::Str(want_name), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Renders declarative primitive arguments for diagnostics, the Go
+/// `coreOwnershipArgsText`.
+fn core_ownership_args_text(out: &var string::String, signature: &stdprim::CoreSignature) -> !void {
+    if signature.args_len() == 0 {
+        return out.append_bytes("0 args");
+    }
+    var index = 0;
+    while signature.arg_at(index) |kind| {
+        if index > 0 {
+            try out.append_bytes(" and ");
+        }
+        if kind == stdprim::ArgKind::Io {
+            try out.append_bytes("io");
+        } else {
+            try out.append_bytes(stdprim::arg_kind_spelling(kind));
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Validates ownership for filesystem host primitives, the Go
+/// `checkFsBuiltin`.
+fn (self: &var Checker) check_fs_builtin(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    if mem::equal_bytes(name, "std::internal::builtin::fs_write_file") {
+        return self.check_fs_write_file(tree, env, args, out);
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_exists") {
+        return self.check_fs_path_only(tree, env, "std::fs::exists", args, "std::fs::Error!bool", out);
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_metadata") {
+        return self.check_fs_path_only(
+            tree, env, "std::fs::metadata", args, "std::fs::Error!std::fs::Metadata", out
+        );
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_read_dir") {
+        return self.check_fs_path_only(
+            tree, env, "std::fs::read_dir", args,
+            "std::fs::Error!std::array::Array<std::fs::DirEntry>", out
+        );
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_create_dir") or
+        mem::equal_bytes(name, "std::internal::builtin::fs_remove_dir") or
+        mem::equal_bytes(name, "std::internal::builtin::fs_remove_file") {
+        return self.check_fs_path_only(tree, env, name, args, "std::fs::Error!void", out);
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_rename") {
+        return self.check_fs_rename(tree, env, args, out);
+    }
+    handled.* = false;
+    return null;
+}
+
+/// Reads a &var std::string::String destination argument without moving the
+/// buffer behind it, the Go `checkStringOutArg`.
+fn (self: &var Checker) check_string_out_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: []u8,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let string_type = self.common.string_name;
+    let label_name = try self.names.intern(label);
+    if borrow_prefix(tree, arg) |prefix| {
+        if !text_equals(tree, prefix.operator, "&var") {
+            return try self.error2(
+                tree, ast::zero_span(), "move error: `%s` expects &var %s out",
+                Arg::Str(label_name), Arg::Str(string_type)
+            );
+        }
+        var got = empty_name();
+        if try self.read_expr(tree, env, prefix.right, &var got) |failed| {
+            return move failed;
+        }
+        if !same_name(got, string_type) {
+            return try self.error3(
+                tree, ast::zero_span(), "move error: `%s` expects &var %s out, got &var %s",
+                Arg::Str(label_name), Arg::Str(string_type), Arg::Str(got)
+            );
+        }
+        return null;
+    }
+    var got = empty_name();
+    if try self.read_expr(tree, env, arg, &var got) |failed| {
+        return move failed;
+    }
+    if ident_text(tree, arg) |ident| {
+        if same_name(got, string_type) {
+            if self.lookup_text(tree, env, ident) |value| {
+                if self.binding(value).mut_borrow {
+                    return null;
+                }
+            }
+        }
+    }
+    return try self.error3(
+        tree, ast::zero_span(), "move error: `%s` expects &var %s out, got %s",
+        Arg::Str(label_name), Arg::Str(string_type), Arg::Str(got)
+    );
+}
+
+/// Validates ownership effects for std::fs::write_file, the Go
+/// `checkFsWriteFile`.
+fn (self: &var Checker) check_fs_write_file(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) != 3 {
+        return try self.error0(ast::zero_span(), "move error: `std::fs::write_file` expects io, path, and bytes");
+    }
+    let io_arg = arg_at(tree, args, 0) orelse return null;
+    if try self.check_io_arg(tree, env, io_arg, "std::fs::write_file") |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while index < 2 {
+        let arg = arg_at(tree, args, index + 1) orelse break;
+        var got = empty_name();
+        if try self.read_expr(tree, env, arg, &var got) |failed| {
+            return move failed;
+        }
+        if !self.names.is(got, "[]u8") {
+            var label = "path";
+            if index == 1 {
+                label = "bytes";
+            }
+            let label_name = try self.names.intern(label);
+            return try self.error2(
+                tree, ast::zero_span(), "move error: `std::fs::write_file` expects []u8 %s, got %s",
+                Arg::Str(label_name), Arg::Str(got)
+            );
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern("std::fs::Error!void");
+    return null;
+}
+
+/// Validates ownership effects for std::fs::rename, the Go `checkFsRename`.
+fn (self: &var Checker) check_fs_rename(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) != 3 {
+        return try self.error0(ast::zero_span(), "move error: `std::fs::rename` expects io, from, and to");
+    }
+    let io_arg = arg_at(tree, args, 0) orelse return null;
+    if try self.check_io_arg(tree, env, io_arg, "std::fs::rename") |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while index < 2 {
+        let arg = arg_at(tree, args, index + 1) orelse break;
+        var got = empty_name();
+        if try self.read_expr(tree, env, arg, &var got) |failed| {
+            return move failed;
+        }
+        if !self.names.is(got, "[]u8") {
+            var label = "from";
+            if index == 1 {
+                label = "to";
+            }
+            let label_name = try self.names.intern(label);
+            return try self.error2(
+                tree, ast::zero_span(), "move error: `std::fs::rename` expects []u8 %s, got %s",
+                Arg::Str(label_name), Arg::Str(got)
+            );
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern("std::fs::Error!void");
+    return null;
+}
+
+/// Validates common std::fs Io and path arguments, the Go `checkFsPathOnly`.
+fn (self: &var Checker) check_fs_path_only(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    result: []u8,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) != 2 {
+        let spelled = try self.names.intern(name);
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` expects io and path", Arg::Str(spelled));
+    }
+    let io_arg = arg_at(tree, args, 0) orelse return null;
+    if try self.check_io_arg(tree, env, io_arg, name) |failed| {
+        return move failed;
+    }
+    let path_arg = arg_at(tree, args, 1) orelse return null;
+    var path = empty_name();
+    if try self.read_expr(tree, env, path_arg, &var path) |failed| {
+        return move failed;
+    }
+    if !self.names.is(path, "[]u8") {
+        let spelled = try self.names.intern(name);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects []u8 path, got %s",
+            Arg::Str(spelled), Arg::Str(path)
+        );
+    }
+    out.* = try self.names.intern(result);
+    return null;
+}
+
+/// Reads and validates an explicit Io argument, the Go `checkIoArg`.
+fn (self: &var Checker) check_io_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arg: ast::Expression,
+    name: []u8
+) -> !?diagnostic::Diagnostic {
+    var got = empty_name();
+    if try self.read_expr(tree, env, arg, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Io") {
+        let spelled = try self.names.intern(name);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects Io, got %s", Arg::Str(spelled), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Validates std::io constructor ownership effects, the Go `checkIoBuiltin`.
+fn (self: &var Checker) check_io_builtin(
+    tree: &ast::Ast,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    if mem::equal_bytes(name, "std::internal::builtin::io_blocking") or
+        mem::equal_bytes(name, "std::internal::builtin::io_failing") {
+        let spelled = try self.names.intern(name);
+        if try self.check_no_arg_ownership_call(tree, spelled, args) |failed| {
+            return move failed;
+        }
+        out.* = self.common.io_name;
+        return null;
+    }
+    if mem::equal_bytes(name, "std::io::evented") or
+        mem::equal_bytes(name, "std::internal::builtin::io_evented") {
+        return try self.error0(ast::zero_span(), "move error: `std::io::evented` is not implemented");
+    }
+    handled.* = false;
+    return null;
+}
+
+/// Validates ownership effects for builtin calls, the Go `checkBuiltinCall`.
+fn (self: &var Checker) check_builtin_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: ast::Text,
+    call: ast::CallExpr,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    if text_equals(tree, name, "print") {
+        return self.check_print_call(tree, env, call, out);
+    }
+    if text_equals(tree, name, "ptr_read") or text_equals(tree, name, "ptr_write") or
+        text_equals(tree, name, "volatile_read") or text_equals(tree, name, "volatile_write") {
+        return self.check_pointer_builtin(tree, env, call, out);
+    }
+    if text_equals(tree, name, "Io") {
+        return try self.error0(ast::zero_span(), "move error: use `std::io::blocking()`");
+    }
+    handled.* = false;
+    return null;
+}
+
+/// Marks identifier arguments that are borrowed for this call, the Go
+/// `activateBorrowArgs`; first_param skips a method receiver. On an error
+/// every borrow activated so far is released again.
+fn (self: &var Checker) activate_borrow_args(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    first_param: i64,
+    args: ast::ExpressionList,
+    borrowed: &var array::Array<TemporaryBorrow>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        let position = index;
+        index = index + 1;
+        let param = self.param_at(function, first_param + position) orelse break;
+        if !param.borrow {
+            continue;
+        }
+        var target = self.new_borrow_target();
+        var found = false;
+        if try self.call_borrow_target(tree, env, arg, &var found, &var target) |failed| {
+            errdefer failed.deinit();
+            try self.release_activated_args(borrowed);
+            return move failed;
+        }
+        if !found and param.mut_borrow {
+            try self.release_activated_args(borrowed);
+            return try self.error0(
+                ast::zero_span(), "borrow error: mutable borrow argument must be a local binding or direct field"
+            );
+        }
+        if !found {
+            continue;
+        }
+        let value = target.value;
+        if param.mut_borrow and self.binding(value).borrowed_param and !self.binding(value).mut_borrow {
+            try self.release_activated_args(borrowed);
+            return try self.error1(
+                tree, ast::zero_span(), "borrow error: shared borrow `%s` cannot be forwarded as mutable",
+                Arg::Str(self.binding(value).name)
+            );
+        }
+        let mutable = param.mut_borrow;
+        if try self.check_borrow_conflict_for_field(tree, value, target.field, mutable) |failed| {
+            errdefer failed.deinit();
+            try self.release_activated_args(borrowed);
+            return move failed;
+        }
+        try self.activate_borrow(value, target.field, mutable);
+        try borrowed.append(TemporaryBorrow { value: value, field: target.field, mutable: mutable });
+    }
+    return null;
+}
+
+/// Releases and forgets every borrow activate_borrow_args recorded before it
+/// failed, the Go `releaseTemporaryBorrows(borrowed)` followed by returning
+/// no list: the caller sees no borrow left to release.
+fn (self: &var Checker) release_activated_args(borrowed: &var array::Array<TemporaryBorrow>) -> !void {
+    try self.release_temporary_borrows(borrowed);
+    while borrowed.pop() |_| {}
+    return;
+}
+
+/// Resolves call-scoped borrowable places and ignores non-place shared
+/// values, the Go `callBorrowTarget`; found reports whether a place was
+/// resolved into out.
+fn (self: &var Checker) call_borrow_target(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    arg: ast::Expression,
+    found: &var bool,
+    out: &var BorrowTarget
+) -> !?diagnostic::Diagnostic {
+    found.* = false;
+    if borrow_prefix(tree, arg) |prefix| {
+        if try self.borrow_target(tree, env, prefix.right, out) |failed| {
+            return move failed;
+        }
+        found.* = true;
+        return null;
+    }
+    if field_expr(tree, arg) |field| {
+        if field.namespace {
+            return null;
+        }
+    }
+    var place = false;
+    if ident_expr(tree, arg) |_| {
+        place = true;
+    }
+    if field_expr(tree, arg) |_| {
+        place = true;
+    }
+    if !place {
+        return null;
+    }
+    if try self.borrow_target(tree, env, arg, out) |failed| {
+        return move failed;
+    }
+    found.* = true;
+    return null;
+}
+
+/// Rejects aliasing that would overlap a mutable borrow, the Go
+/// `checkBorrowConflict`.
+fn (self: &var Checker) check_borrow_conflict(
+    tree: &ast::Ast,
+    value: BindingHandle,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    return self.check_borrow_conflict_for_field(tree, value, empty_name(), mutable);
+}
+
+/// Rejects overlapping whole-value or field borrows, the Go
+/// `checkBorrowConflictForField`. Field paths conflict when they alias: one
+/// path names the other or a struct containing it, so `a.b` collides with
+/// `a.b.c` while `a.b` and `a.c` stay disjoint.
+fn (self: &var Checker) check_borrow_conflict_for_field(
+    tree: &ast::Ast,
+    value: BindingHandle,
+    field: Name,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    // A value one of whose fields has been taken out no longer matches its
+    // own type, and a borrow hands the whole of it to someone who will read
+    // the field that is gone.
+    if try self.partially_consumed_field(value) |consumed| {
+        if !same_name(consumed, field) {
+            return try self.error3(
+                tree, ast::zero_span(),
+                "borrow error: field `%s.%s` is already consumed, so `%s` cannot be borrowed",
+                Arg::Str(self.binding(value).name), Arg::Str(consumed), Arg::Str(self.binding(value).name)
+            );
+        }
+    }
+    if !is_empty(field) {
+        return self.check_field_borrow_conflict(tree, value, field, mutable);
+    }
+    return self.check_value_borrow_conflict(tree, value, mutable);
+}
+
+/// Rejects a field borrow that overlaps a live one, the Go
+/// `checkFieldBorrowConflict`.
+fn (self: &Checker) check_field_borrow_conflict(
+    tree: &ast::Ast,
+    value: BindingHandle,
+    field: Name,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    let record = self.binding(value);
+    if record.active_mut_borrows > 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: value `%s` cannot be borrowed while mutably borrowed",
+            Arg::Str(record.name)
+        );
+    }
+    if mutable and record.active_borrows > 0 {
+        return try self.error2(
+            tree, ast::zero_span(),
+            "borrow error: field `%s.%s` cannot be mutably borrowed while value is borrowed",
+            Arg::Str(record.name), Arg::Str(field)
+        );
+    }
+    if mutable and self.overlapping_field_borrows(value, field, false) > 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
+            Arg::Str(record.name), Arg::Str(field)
+        );
+    }
+    if self.overlapping_field_borrows(value, field, true) > 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
+            Arg::Str(record.name), Arg::Str(field)
+        );
+    }
+    return null;
+}
+
+/// Rejects a whole-value borrow that overlaps a live one, including a borrow
+/// of any of its fields, the Go `checkValueBorrowConflict`.
+fn (self: &Checker) check_value_borrow_conflict(
+    tree: &ast::Ast,
+    value: BindingHandle,
+    mutable: bool
+) -> !?diagnostic::Diagnostic {
+    let record = self.binding(value);
+    if mutable and record.active_borrows > 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: value `%s` cannot be mutably borrowed while borrowed",
+            Arg::Str(record.name)
+        );
+    }
+    if record.active_mut_borrows > 0 or self.store.has_field_borrows(value, true) {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: value `%s` cannot be borrowed while mutably borrowed",
+            Arg::Str(record.name)
+        );
+    }
+    if mutable and self.store.has_field_borrows(value, false) {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: value `%s` cannot be mutably borrowed while field is borrowed",
+            Arg::Str(record.name)
+        );
+    }
+    return null;
+}
+
+/// Reads the printed value without taking ownership, the Go
+/// `checkPrintCall`.
+fn (self: &var Checker) check_print_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    var index = 0;
+    while arg_at(tree, call.args, index) |arg| {
+        if try self.read_expr(tree, env, arg, &var ignored) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = self.common.void_name;
+    return null;
+}

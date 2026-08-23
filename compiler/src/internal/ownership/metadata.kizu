@@ -1,0 +1,482 @@
+import compiler::internal::ast;
+import std::array;
+import std::mem;
+import std::string;
+
+// Accessors over the declaration tables the Go Checker keeps as maps keyed by
+// spelling (`c.structs[name]`, `c.enums[name]`, ...). Every accessor takes the
+// Name or Ast text a caller holds and binds the key bytes itself, so call
+// sites stay one expression, and returns copy values rather than borrows of
+// the Checker so the caller keeps its `&var self`.
+
+/// Is the handful of spellings the checker produces most often, interned
+/// once so result positions need no table lookup.
+pub struct CommonNames {
+    pub void_name: Name,
+    pub error_void_name: Name,
+    pub bool_name: Name,
+    pub i64_name: Name,
+    pub u8_name: Name,
+    pub bytes_name: Name,
+    pub type_value_name: Name,
+    pub null_name: Name,
+    pub allocator_name: Name,
+    pub io_name: Name,
+    pub string_name: Name,
+    pub unknown_name: Name,
+    pub deinit_name: Name
+}
+
+fn intern_common(names: &var NameTable) -> !CommonNames {
+    return CommonNames {
+        void_name: try names.intern("void"),
+        error_void_name: try names.intern("!void"),
+        bool_name: try names.intern("bool"),
+        i64_name: try names.intern("i64"),
+        u8_name: try names.intern("u8"),
+        bytes_name: try names.intern("[]u8"),
+        type_value_name: try names.intern("type"),
+        null_name: try names.intern("null"),
+        allocator_name: try names.intern("Allocator"),
+        io_name: try names.intern("Io"),
+        string_name: try names.intern("std::string::String"),
+        unknown_name: try names.intern("!unknown"),
+        deinit_name: try names.intern("deinit")
+    };
+}
+
+/// Resolves a function by its registered name.
+fn (self: &Checker) function_named(name: Name) -> ?FunctionHandle {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.functions_by_name.get(bytes);
+}
+
+/// Resolves a function by the Ast text of its name.
+fn (self: &Checker) function_for_text(tree: &ast::Ast, text: ast::Text) -> ?FunctionHandle {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.functions_by_name.get(bytes);
+}
+
+/// Returns the concrete method signature for a type when known, the Go
+/// `implMethod`.
+fn (self: &Checker) impl_method(type_name: Name, method: Name) -> ?FunctionHandle {
+    let method_text = name_text(&self.names, method);
+    let method_bytes = method_text.as_bytes();
+    return self.impl_method_bytes_of(type_name, method_bytes);
+}
+
+fn (self: &Checker) impl_method_bytes_of(type_name: Name, method: []u8) -> ?FunctionHandle {
+    let retained = name_text(&self.names, type_name);
+    let bytes = retained.as_bytes();
+    return self.impl_method_bytes(bytes, method);
+}
+
+/// Returns the method named by an Ast text on a type when known.
+fn (self: &Checker) impl_method_text(type_name: Name, tree: &ast::Ast, method: ast::Text) -> ?FunctionHandle {
+    let method_text = tree.texts.at(method.node);
+    let method_bytes = method_text.as_bytes();
+    return self.impl_method_bytes_of(type_name, method_bytes);
+}
+
+fn (self: &Checker) impl_method_bytes(receiver: []u8, method: []u8) -> ?FunctionHandle {
+    if self.impls.at(receiver) |methods| {
+        return methods.get(method);
+    }
+    return null;
+}
+
+/// Reports whether a type name is a declared struct.
+fn (self: &Checker) is_struct(name: Name) -> bool {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.structs.contains(bytes);
+}
+
+/// Reports whether a type name is a declared enum.
+fn (self: &Checker) is_enum(name: Name) -> bool {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.enums.contains(bytes);
+}
+
+/// Reports whether a type name is a declared error set.
+fn (self: &Checker) is_error_set(name: Name) -> bool {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.error_sets.contains(bytes);
+}
+
+/// Reports whether a type name is a declared union.
+fn (self: &Checker) is_union(name: Name) -> bool {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.unions.contains(bytes);
+}
+
+/// Reports whether an Ast text names a declared struct / enum / error set /
+/// union, for the `Enum.tag` spelling refusals.
+fn (self: &Checker) text_is_enum(tree: &ast::Ast, text: ast::Text) -> bool {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.enums.contains(bytes);
+}
+
+fn (self: &Checker) text_is_error_set(tree: &ast::Ast, text: ast::Text) -> bool {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.error_sets.contains(bytes);
+}
+
+fn (self: &Checker) text_is_union(tree: &ast::Ast, text: ast::Text) -> bool {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.unions.contains(bytes);
+}
+
+/// Returns the declared type of one struct field, the Go
+/// `c.structs[name][field]`.
+fn (self: &Checker) struct_field_type(struct_name: Name, field: Name) -> ?Name {
+    let field_text = name_text(&self.names, field);
+    let field_bytes = field_text.as_bytes();
+    return self.struct_field_type_bytes(struct_name, field_bytes);
+}
+
+fn (self: &Checker) struct_field_type_bytes(struct_name: Name, field: []u8) -> ?Name {
+    let retained = name_text(&self.names, struct_name);
+    let bytes = retained.as_bytes();
+    if self.structs.at(bytes) |info| {
+        return info.fields.get(field);
+    }
+    return null;
+}
+
+/// Returns the declared type of the struct field an Ast text names.
+fn (self: &Checker) struct_field_type_text(struct_name: Name, tree: &ast::Ast, field: ast::Text) -> ?Name {
+    let field_text = tree.texts.at(field.node);
+    let field_bytes = field_text.as_bytes();
+    return self.struct_field_type_bytes(struct_name, field_bytes);
+}
+
+/// Returns the field a struct declares at index in source order, the Go
+/// `c.structOrder[name][index]`.
+fn (self: &Checker) struct_field_at(struct_name: Name, index: i64) -> ?Name {
+    let retained = name_text(&self.names, struct_name);
+    let bytes = retained.as_bytes();
+    if self.structs.at(bytes) |info| {
+        return info.order.get(index);
+    }
+    return null;
+}
+
+/// Returns the public field a struct declares at index in source order.
+fn (self: &Checker) struct_public_field_at(struct_name: Name, index: i64) -> ?Name {
+    let retained = name_text(&self.names, struct_name);
+    let bytes = retained.as_bytes();
+    if self.structs.at(bytes) |info| {
+        return info.public_order.get(index);
+    }
+    return null;
+}
+
+/// Reports whether a struct declares any public field.
+fn (self: &Checker) struct_has_public_fields(struct_name: Name) -> bool {
+    if self.struct_public_field_at(struct_name, 0) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether an enum declares a tag, the Go `c.enums[name][tag]`.
+fn (self: &Checker) enum_has_tag(enum_name: Name, tag: []u8) -> bool {
+    let retained = name_text(&self.names, enum_name);
+    let bytes = retained.as_bytes();
+    if self.enums.at(bytes) |info| {
+        return info.tags.get(tag) orelse false;
+    }
+    return false;
+}
+
+/// Returns the tag an enum declares at index in source order.
+fn (self: &Checker) enum_tag_at(enum_name: Name, index: i64) -> ?Name {
+    let retained = name_text(&self.names, enum_name);
+    let bytes = retained.as_bytes();
+    if self.enums.at(bytes) |info| {
+        return info.order.get(index);
+    }
+    return null;
+}
+
+/// Reports whether an error set declares a member.
+fn (self: &Checker) error_set_has(set_name: Name, member: []u8) -> bool {
+    let retained = name_text(&self.names, set_name);
+    let bytes = retained.as_bytes();
+    if self.error_sets.at(bytes) |members| {
+        return members.get(member) orelse false;
+    }
+    return false;
+}
+
+/// Returns the payload type of a union variant: null when the union or
+/// variant does not exist, the empty name for a variant without payload.
+fn (self: &Checker) union_variant_payload(union_name: Name, variant: []u8) -> ?Name {
+    let retained = name_text(&self.names, union_name);
+    let bytes = retained.as_bytes();
+    if self.unions.at(bytes) |info| {
+        return info.variants.get(variant);
+    }
+    return null;
+}
+
+/// Returns the variant a union declares at index in source order.
+fn (self: &Checker) union_variant_at(union_name: Name, index: i64) -> ?Name {
+    let retained = name_text(&self.names, union_name);
+    let bytes = retained.as_bytes();
+    if self.unions.at(bytes) |info| {
+        return info.order.get(index);
+    }
+    return null;
+}
+
+/// Resolves a local name by walking parent scopes, the Go `env.lookup`.
+fn (self: &Checker) lookup_name(env: ScopeHandle, name: Name) -> ?BindingHandle {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.store.resolve(env, bytes);
+}
+
+/// Resolves the local an Ast text names.
+fn (self: &Checker) lookup_text(tree: &ast::Ast, env: ScopeHandle, text: ast::Text) -> ?BindingHandle {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.store.resolve(env, bytes);
+}
+
+/// Resolves the local an identifier expression names, or null when the
+/// expression is not an identifier or the name is unbound.
+fn (self: &Checker) lookup_ident(tree: &ast::Ast, env: ScopeHandle, expression: ast::Expression) -> ?BindingHandle {
+    let ident = ident_text(tree, expression) orelse return null;
+    return self.lookup_text(tree, env, ident);
+}
+
+/// Returns the name text of an identifier expression.
+pub fn ident_text(tree: &ast::Ast, expression: ast::Expression) -> ?ast::Text {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => return value.name,
+        _ => return null,
+    }
+}
+
+/// Resolves a Name in one scope only, the Go `s.values[name]`.
+fn (self: &Checker) lookup_local_name(env: ScopeHandle, name: Name) -> ?BindingHandle {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.store.lookup_local(env, bytes);
+}
+
+/// Resolves a name in one scope only, the Go `scope.values[name]`.
+fn (self: &Checker) lookup_local_text(tree: &ast::Ast, env: ScopeHandle, text: ast::Text) -> ?BindingHandle {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.store.lookup_local(env, bytes);
+}
+
+/// Binds a record in a scope under its own name, the Go `env.define(value)`.
+fn (self: &var Checker) define(env: ScopeHandle, value: Binding) -> !BindingHandle {
+    let retained = name_text(&self.names, value.name);
+    let bytes = retained.as_bytes();
+    return self.store.define(env, bytes, move value);
+}
+
+/// Reads one binding.
+fn (self: &Checker) binding(handle: BindingHandle) -> &Binding {
+    return self.store.at(handle);
+}
+
+/// Reports whether a field of a binding has been deinitialized.
+fn (self: &Checker) field_deinit_name(handle: BindingHandle, field: Name) -> bool {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    return self.store.field_deinit(handle, bytes);
+}
+
+/// Records that an owned direct field has been cleaned up.
+fn (self: &var Checker) mark_field_deinit(handle: BindingHandle, field: Name) -> !void {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    return self.store.mark_field_deinit(handle, bytes);
+}
+
+/// Records assignment of a fresh value into a direct field.
+fn (self: &var Checker) clear_field_deinit(handle: BindingHandle, field: Name) -> !void {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    return self.store.clear_field_deinit(handle, bytes);
+}
+
+/// Names one field already taken out of a value that still holds others,
+/// the Go `partiallyConsumedField`.
+fn (self: &var Checker) partially_consumed_field(handle: BindingHandle) -> !?Name {
+    let index = self.store.partially_consumed_field_index(handle) orelse return null;
+    let copied = try self.field_deinit_key_copy(handle, index);
+    return try self.names.intern_owned(move copied);
+}
+
+fn (self: &Checker) field_deinit_key_copy(handle: BindingHandle, index: i64) -> !string::String {
+    let value = self.store.at(handle);
+    if value.field_deinit.key_at(index) |field| {
+        return string::from_bytes(self.allocator, field);
+    }
+    return string::new(self.allocator);
+}
+
+/// Records one active whole-value or field borrow on a target, the Go
+/// `activateBorrow`.
+fn (self: &var Checker) activate_borrow(target: BindingHandle, field: Name, mutable: bool) -> !void {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    return self.store.activate_borrow(target, bytes, mutable);
+}
+
+/// Clears one call-scoped whole-value or field borrow, the Go
+/// `releaseTemporaryBorrow`.
+fn (self: &var Checker) release_temporary_borrow(borrow: TemporaryBorrow) -> !void {
+    let retained = name_text(&self.names, borrow.field);
+    let bytes = retained.as_bytes();
+    return self.store.release_temporary_borrow(borrow.value, bytes, borrow.mutable);
+}
+
+/// Clears every temporary borrow of a completed call, the Go
+/// `releaseTemporaryBorrows`.
+fn (self: &var Checker) release_temporary_borrows(values: &array::Array<TemporaryBorrow>) -> !void {
+    var index = 0;
+    while values.get(index) |borrow| {
+        try self.release_temporary_borrow(borrow);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Clears one local borrow from each of its owners, the Go `releaseBorrow`.
+fn (self: &var Checker) release_borrow(value: BindingHandle) -> !void {
+    let mutable = self.store.at(value).mut_borrow;
+    var index = 0;
+    while self.borrow_target_at(value, index) |source| {
+        let retained = name_text(&self.names, source.field);
+        let bytes = retained.as_bytes();
+        try self.store.release_borrow_source(mutable, source.target, bytes);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Reads one borrow source of a binding.
+fn (self: &Checker) borrow_target_at(value: BindingHandle, index: i64) -> ?BorrowSource {
+    let retained = self.store.at(value);
+    return retained.borrow_targets.get(index);
+}
+
+/// Reports whether a binding keeps any borrow source.
+fn (self: &Checker) has_borrow_targets(value: BindingHandle) -> bool {
+    let retained = self.store.at(value);
+    return retained.borrow_targets.len() > 0;
+}
+
+/// Is one call-duration borrow, the Go `temporaryBorrow`.
+pub struct TemporaryBorrow {
+    pub value: BindingHandle,
+    pub field: Name,
+    pub mutable: bool
+}
+
+/// Sums the borrow counts of every tracked field path that aliases the
+/// field on a binding, the Go `overlappingFieldCount(value.fieldBorrows, f)`.
+fn (self: &Checker) overlapping_field_borrows(handle: BindingHandle, field: Name, mutable: bool) -> i64 {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    let value = self.store.at(handle);
+    if mutable {
+        return overlapping_field_count(&value.field_mut_borrows, bytes);
+    }
+    return overlapping_field_count(&value.field_borrows, bytes);
+}
+
+/// Reads the count of one exact field path in a per-field borrow map, the
+/// Go `value.fieldMutBorrows[field]`.
+fn (self: &Checker) field_borrow_count(handle: BindingHandle, field: Name, mutable: bool) -> i64 {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    let value = self.store.at(handle);
+    if mutable {
+        return value.field_mut_borrows.get(bytes) orelse 0;
+    }
+    return value.field_borrows.get(bytes) orelse 0;
+}
+
+/// Returns a deinitialized field path that aliases path, the Go
+/// `overlappingFieldDeinit`.
+fn (self: &var Checker) overlapping_field_deinit(handle: BindingHandle, path: Name) -> !?Name {
+    let index = self.overlapping_field_deinit_index(handle, path) orelse return null;
+    let copied = try self.field_deinit_key_copy(handle, index);
+    return try self.names.intern_owned(move copied);
+}
+
+fn (self: &Checker) overlapping_field_deinit_index(handle: BindingHandle, path: Name) -> ?i64 {
+    let retained = name_text(&self.names, path);
+    let bytes = retained.as_bytes();
+    let value = self.store.at(handle);
+    var index = 0;
+    while value.field_deinit.key_at(index) |key| {
+        if (value.field_deinit.get(key) orelse false) and field_paths_overlap(key, bytes) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Reads the stable arena identity of one owner field, or 0 when none was
+/// given yet, the Go `receiver.owner.fieldArenaIDs[receiver.field]`.
+fn (self: &Checker) field_arena_id(handle: BindingHandle, field: Name) -> i64 {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    let value = self.store.at(handle);
+    return value.field_arena_ids.get(bytes) orelse 0;
+}
+
+/// Records the stable arena identity of one owner field.
+fn (self: &var Checker) set_field_arena_id(handle: BindingHandle, field: Name, id: i64) -> !void {
+    let retained = name_text(&self.names, field);
+    let bytes = retained.as_bytes();
+    if self.store.binding_mut(handle) |value| {
+        if value.field_arena_ids.at_mut(bytes) |slot| {
+            slot.* = id;
+            return;
+        }
+        return value.field_arena_ids.insert(bytes, id);
+    }
+    return;
+}
+
+/// Resolves a dotted field path against struct declarations, hop by hop,
+/// starting from the root's type, the Go `fieldPathType`.
+fn (self: &Checker) field_path_type(type_name: Name, path: Name) -> ?Name {
+    let retained = name_text(&self.names, path);
+    let bytes = retained.as_bytes();
+    return self.field_path_type_bytes(type_name, bytes);
+}
+
+fn (self: &Checker) field_path_type_bytes(type_name: Name, path: []u8) -> ?Name {
+    var current = type_name;
+    var start = 0;
+    var index = 0;
+    while index <= mem::len(path) {
+        if index == mem::len(path) or path[index] == cast<u8>(46) {
+            current = self.struct_field_type_bytes(current, path[start..index]) orelse return null;
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return current;
+}

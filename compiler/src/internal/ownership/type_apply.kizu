@@ -1,0 +1,1324 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Port of the `<...>` type application checks of internal/ownership/
+// checker.go: the Array / Map / Box / Arena constructors and the std-only
+// container primitives behind them, and the generic wrapper instantiation
+// path (checkGenericUserTypeApply through checkGenericUserArg).
+
+/// Is the resolved callee and instantiated static arguments of a `<...>`
+/// call, the Go `typeApplyTarget` result.
+pub struct TypeApplyTarget {
+    pub name: Name,
+    pub type_arg: Name
+}
+
+pub fn empty_type_apply_target() -> TypeApplyTarget {
+    return TypeApplyTarget { name: empty_name(), type_arg: empty_name() };
+}
+
+/// Validates `std::array::new<T>(allocator)` ownership, the Go
+/// `checkArrayConstructor`.
+fn (self: &var Checker) check_array_constructor(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is(elem, "T") {
+        if try self.reject_array_element_type(tree, elem) |failed| {
+            return move failed;
+        }
+    }
+    if arg_count(tree, args) != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `std::array::Array<%s>` expects allocator", Arg::Str(elem)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `std::array::Array<%s>` expects Allocator, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Validates std source Map wrapper construction, the Go
+/// `checkMapConstructorAllowTypeParams`.
+fn (self: &var Checker) check_map_constructor_allow_type_params(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args_text: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let map_args = try self.names.split_generic_args(args_text) orelse
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    defer map_args.deinit();
+    if map_args.len() != 2 {
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    }
+    if arg_count(tree, args) != 1 {
+        return try self.error0(ast::zero_span(), "map error: `std::map::Map` expects allocator");
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error1(
+            tree, ast::zero_span(), "map error: `std::map::Map` expects Allocator, got %s", Arg::Str(got)
+        );
+    }
+    let key_type = map_args.get_or_panic(0);
+    let value_type = map_args.get_or_panic(1);
+    out.* = try self.names.format("std::map::Map<%s, %s>", key_type, value_type, empty_name());
+    return null;
+}
+
+/// Rejects element types with unresolved ownership hazards, the Go
+/// `rejectArrayElementType`.
+fn (self: &var Checker) reject_array_element_type(tree: &ast::Ast, elem: Name) -> !?diagnostic::Diagnostic {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    if try self.reject_array_storage_type(tree, elem, &var seen) |failed| {
+        return try self.wrap_error(
+            tree, "array error: Array element is not safe: ", Arg::Int(0), Arg::Int(0), move failed
+        );
+    }
+    return null;
+}
+
+/// Rejects values that are not Array-safe yet, the Go
+/// `rejectArrayStorageType`.
+fn (self: &var Checker) reject_array_storage_type(
+    tree: &ast::Ast,
+    type_name: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !?diagnostic::Diagnostic {
+    if self.seen_contains(seen, type_name) {
+        return null;
+    }
+    try self.mark_seen(seen, type_name, true);
+    if self.names.is_raw_pointer(type_name) {
+        return try self.error0(ast::zero_span(), "array error: Array element cannot be raw pointer");
+    }
+    if try self.names.split_generic(type_name) |parts| {
+        if self.names.is(parts.base, "option") {
+            if try self.reject_array_storage_type(tree, parts.args, seen) |failed| {
+                return move failed;
+            }
+        }
+    }
+    if try self.reject_array_storage_struct(tree, type_name, seen) |failed| {
+        return move failed;
+    }
+    return self.reject_array_storage_union(tree, type_name, seen);
+}
+
+/// Checks struct fields recursively for Array storage, the Go
+/// `rejectArrayStorageStruct`.
+fn (self: &var Checker) reject_array_storage_struct(
+    tree: &ast::Ast,
+    type_name: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while self.struct_field_at(type_name, index) |field| {
+        index = index + 1;
+        let field_type = self.struct_field_type(type_name, field) orelse continue;
+        if try self.reject_array_storage_type(tree, field_type, seen) |failed| {
+            return try self.wrap_error(
+                tree, "array error: struct `%s.%s` cannot be Array element: ",
+                Arg::Str(type_name), Arg::Str(field), move failed
+            );
+        }
+    }
+    return null;
+}
+
+/// Checks union payloads recursively for Array storage, the Go
+/// `rejectArrayStorageUnion`.
+fn (self: &var Checker) reject_array_storage_union(
+    tree: &ast::Ast,
+    type_name: Name,
+    seen: &var map::Map<[]u8, bool>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while self.union_variant_at(type_name, index) |variant| {
+        index = index + 1;
+        let payload = self.union_variant_payload_name(type_name, variant) orelse continue;
+        if is_empty(payload) {
+            continue;
+        }
+        if try self.reject_array_storage_type(tree, payload, seen) |failed| {
+            return try self.wrap_error(
+                tree, "array error: union `%s::%s` cannot be Array element: ",
+                Arg::Str(type_name), Arg::Str(variant), move failed
+            );
+        }
+    }
+    return null;
+}
+
+/// Resolves the callee and static arguments of a `<...>` call, and refuses
+/// an unknown primitive before any of them is looked at, the Go
+/// `typeApplyTarget`.
+fn (self: &var Checker) type_apply_target(
+    tree: &ast::Ast,
+    apply: ast::TypeApplyExpr,
+    out: &var TypeApplyTarget
+) -> !?diagnostic::Diagnostic {
+    let raw = try self.names.intern_text(tree, apply.type_arg);
+    if try self.qualified_name(tree, apply.callee) |name| {
+        let owned = try self.names.copy(name);
+        defer owned.deinit();
+        let bytes = owned.as_bytes();
+        if try self.reject_unknown_builtin(tree, bytes) |failed| {
+            return move failed;
+        }
+        out.name = name;
+        out.type_arg = try self.instantiate_type_arg_text(raw);
+        return null;
+    }
+    let callee = try self.names.intern_expression(tree, apply.callee);
+    let rendered = try self.names.format("%s<%s>", callee, raw, empty_name());
+    return try self.error1(
+        tree, ast::zero_span(), "move error: unsupported type application `%s`", Arg::Str(rendered)
+    );
+}
+
+/// Validates typed std constructor ownership effects, the Go
+/// `checkTypeApplyCallExpr`.
+fn (self: &var Checker) check_type_apply_call_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    apply: ast::TypeApplyExpr,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var target = empty_type_apply_target();
+    if try self.type_apply_target(tree, apply, &var target) |failed| {
+        return move failed;
+    }
+    let name = target.name;
+    let type_arg = target.type_arg;
+    var handled = false;
+    if try self.check_meta_apply(tree, env, name, type_arg, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if self.names.is(name, "ptr_from_int") or self.names.is(name, "int_from_ptr") {
+        return self.check_pointer_int_cast_builtin(tree, env, type_arg, args, out);
+    }
+    if try self.check_generic_user_type_apply(tree, env, name, type_arg, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_builtin_map_type_apply(tree, env, name, type_arg, args, &var handled, out) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_builtin_container_type_apply(
+        tree, env, name, type_arg, args, &var handled, out
+    ) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    return try self.error1(
+        tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
+    );
+}
+
+/// Validates std::arena::new<T>(allocator) ownership, the Go
+/// `checkArenaTypeApply`.
+fn (self: &var Checker) check_arena_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let parts = try self.names.split_generic_args(type_arg) orelse
+        return try self.error0(ast::zero_span(), "arena error: std::arena::new expects 1 type argument");
+    defer parts.deinit();
+    if parts.len() != 1 {
+        return try self.error0(ast::zero_span(), "arena error: std::arena::new expects 1 type argument");
+    }
+    let elem = parts.get_or_panic(0);
+    if arg_count(tree, args) != 1 {
+        return try self.error1(
+            tree, ast::zero_span(),
+            "arena error: `std::arena::new<%s>` expects exactly one allocator argument", Arg::Str(elem)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "arena error: `std::arena::new<%s>` expects Allocator, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = try self.names.format("std::arena::Arena<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Validates std-only generic container primitives, the Go
+/// `checkBuiltinContainerTypeApply`.
+fn (self: &var Checker) check_builtin_container_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.starts_with(name, "std::internal::builtin::arena") {
+        return self.check_builtin_arena_type_apply(tree, env, name, type_arg, args, handled, out);
+    }
+    if try self.check_builtin_box_type_apply(tree, env, name, type_arg, args, handled, out) |failed| {
+        return move failed;
+    }
+    if handled.* {
+        return null;
+    }
+    if try self.check_builtin_array_type_apply(tree, env, name, type_arg, args, handled, out) |failed| {
+        return move failed;
+    }
+    if handled.* {
+        return null;
+    }
+    return self.check_builtin_testing_type_apply(tree, env, name, type_arg, args, handled, out);
+}
+
+/// Validates the Arena constructor and the storage primitives reserved to
+/// std::arena's owner-element cleanup wrapper, the Go
+/// `checkBuiltinArenaTypeApply`.
+fn (self: &var Checker) check_builtin_arena_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    if self.names.is(name, "std::internal::builtin::arena") {
+        return self.check_arena_type_apply(tree, env, type_arg, args, out);
+    }
+    let receiver = try self.names.format("std::arena::Arena<%s>", type_arg, empty_name(), empty_name());
+    let method = try self.names.trim_prefix(name, "std::internal::builtin::arena_");
+    if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
+        return move failed;
+    }
+    let rest = try self.rest_args(tree, args, 1);
+    let count = arg_count(tree, rest);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "arena error: `Arena.%s` expects 0 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    if self.names.is(method, "len") {
+        out.* = self.common.i64_name;
+        return null;
+    }
+    if self.names.is(method, "pop_or_panic") {
+        out.* = type_arg;
+        return null;
+    }
+    if self.names.is(method, "deinit") {
+        out.* = self.common.void_name;
+        return null;
+    }
+    return try self.error1(
+        tree, ast::zero_span(), "arena error: Arena has no storage primitive `%s`", Arg::Str(method)
+    );
+}
+
+/// Validates typed std::testing primitives, the Go
+/// `checkBuiltinTestingTypeApply`.
+fn (self: &var Checker) check_builtin_testing_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if !self.names.is(name, "std::internal::builtin::test_fail_equal") {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    return self.check_builtin_test_fail_equal(tree, env, type_arg, args, out);
+}
+
+/// Validates ownership for the typed testing failure primitive, the Go
+/// `checkBuiltinTestFailEqual`.
+fn (self: &var Checker) check_builtin_test_fail_equal(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `std::testing::expect_equal<%s>` expects 2 args",
+            Arg::Str(type_arg)
+        );
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        var got = empty_name();
+        if try self.read_contextual_expr(tree, env, arg, type_arg, &var got) |failed| {
+            return move failed;
+        }
+        if !same_name(got, type_arg) {
+            return try self.error4(
+                tree, ast::zero_span(),
+                "move error: arg %d of `std::testing::expect_equal<%s>` expects %s, got %s",
+                Arg::Int(index + 1), Arg::Str(type_arg), Arg::Str(type_arg), Arg::Str(got)
+            );
+        }
+        index = index + 1;
+    }
+    out.* = self.common.void_name;
+    return null;
+}
+
+/// Validates std-only generic Array primitives, the Go
+/// `checkBuiltinArrayTypeApply`.
+fn (self: &var Checker) check_builtin_array_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(name, "std::internal::builtin::array") {
+        handled.* = true;
+        return self.check_array_constructor(tree, env, type_arg, args, out);
+    }
+    if self.is_builtin_array_primitive(name) {
+        return self.check_builtin_array_method(tree, env, name, type_arg, args, handled, out);
+    }
+    handled.* = false;
+    return null;
+}
+
+/// Names the Array method primitives the Go `checkBuiltinArrayTypeApply`
+/// switch routes to `checkBuiltinArrayMethod`.
+fn (self: &Checker) is_builtin_array_primitive(name: Name) -> bool {
+    return self.names.is(name, "std::internal::builtin::array_append") or
+        self.names.is(name, "std::internal::builtin::array_len") or
+        self.names.is(name, "std::internal::builtin::array_capacity") or
+        self.names.is(name, "std::internal::builtin::array_pop") or
+        self.names.is(name, "std::internal::builtin::array_pop_or_panic") or
+        self.names.is(name, "std::internal::builtin::array_get") or
+        self.names.is(name, "std::internal::builtin::array_get_or_panic") or
+        self.names.is(name, "std::internal::builtin::array_at") or
+        self.names.is(name, "std::internal::builtin::array_at_mut") or
+        self.names.is(name, "std::internal::builtin::array_set") or
+        self.names.is(name, "std::internal::builtin::array_swap") or
+        self.names.is(name, "std::internal::builtin::array_deinit");
+}
+
+/// Validates std-only generic Box primitives, the Go
+/// `checkBuiltinBoxTypeApply`.
+fn (self: &var Checker) check_builtin_box_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(name, "std::internal::builtin::box") {
+        handled.* = true;
+        return self.check_box_constructor(tree, env, type_arg, args, out);
+    }
+    if self.names.is(name, "std::internal::builtin::box_borrow") or
+        self.names.is(name, "std::internal::builtin::box_borrow_mut") or
+        self.names.is(name, "std::internal::builtin::box_deinit") or
+        self.names.is(name, "std::internal::builtin::box_take") {
+        return self.check_builtin_box_method(tree, env, name, type_arg, args, handled, out);
+    }
+    handled.* = false;
+    return null;
+}
+
+/// Validates std::mem::box<T>(allocator, value) ownership, the Go
+/// `checkBoxConstructor`.
+fn (self: &var Checker) check_box_constructor(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "box error: `std::mem::Box<%s>` expects allocator and value",
+            Arg::Str(elem)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error2(
+            tree, ast::zero_span(), "box error: `std::mem::Box<%s>` expects Allocator, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    let second = args.get_or_panic(tree, 1);
+    if try self.move_contextual_expr(tree, env, second, elem, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, elem) {
+        return try self.error3(
+            tree, ast::zero_span(), "box error: `std::mem::Box<%s>` expects %s value, got %s",
+            Arg::Str(elem), Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = try self.names.format("!std::mem::Box<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Validates std-only Box method primitives, the Go `checkBuiltinBoxMethod`.
+fn (self: &var Checker) check_builtin_box_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    // The Go reassignment of `borrow_mut` to itself is a no-op and has no
+    // counterpart here.
+    let method = try self.names.trim_prefix(name, "std::internal::builtin::box_");
+    let receiver = try self.names.format("std::mem::Box<%s>", type_arg, empty_name(), empty_name());
+    if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
+        return move failed;
+    }
+    let rest = try self.rest_args(tree, args, 1);
+    let count = arg_count(tree, rest);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "box error: `Box.%s` expects 0 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    if self.names.is(method, "borrow") {
+        out.* = try self.names.prefixed("&", type_arg);
+        return null;
+    }
+    if self.names.is(method, "borrow_mut") {
+        out.* = try self.names.prefixed("&var ", type_arg);
+        return null;
+    }
+    if self.names.is(method, "deinit") {
+        out.* = self.common.void_name;
+        return null;
+    }
+    if self.names.is(method, "take") {
+        out.* = type_arg;
+        return null;
+    }
+    return try self.error1(tree, ast::zero_span(), "box error: Box has no method `%s`", Arg::Str(method));
+}
+
+/// Validates std-only Array method primitives, the Go
+/// `checkBuiltinArrayMethod`.
+fn (self: &var Checker) check_builtin_array_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    let method = try self.names.trim_prefix(name, "std::internal::builtin::array_");
+    let receiver = try self.names.format("std::array::Array<%s>", type_arg, empty_name(), empty_name());
+    if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
+        return move failed;
+    }
+    let rest = try self.rest_args(tree, args, 1);
+    return self.check_array_primitive_call(tree, env, type_arg, method, rest, out);
+}
+
+/// Validates a trusted primitive receiver argument, the Go
+/// `checkBuiltinReceiverMethod`. The Go `checkRest` closure is the caller's
+/// own check over `rest_args(tree, args, 1)` once this returns null.
+fn (self: &var Checker) check_builtin_receiver_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    receiver: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    if arg_count(tree, args) == 0 {
+        return try self.error1(tree, ast::zero_span(), "move error: `%s` expects receiver", Arg::Str(name));
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, receiver) {
+        return try self.error3(
+            tree, ast::zero_span(), "move error: `%s` expects %s receiver, got %s",
+            Arg::Str(name), Arg::Str(receiver), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Copies `args[from..]` into a list of its own, the slice the Go
+/// `checkRest` closures receive after the receiver argument.
+fn (self: &Checker) rest_args(
+    tree: &var ast::Ast,
+    args: ast::ExpressionList,
+    from: i64
+) -> !ast::ExpressionList {
+    var values = array::new<ast::Expression>(self.allocator);
+    errdefer values.deinit();
+    var index = from;
+    while arg_at(tree, args, index) |arg| {
+        try values.append(arg);
+        index = index + 1;
+    }
+    return tree.add_expression_list(move values);
+}
+
+/// Validates Array primitives that back source wrappers, the Go
+/// `checkArrayPrimitiveMethod`.
+fn (self: &var Checker) check_array_primitive_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    if self.names.is(method, "at") {
+        if try self.check_one_i64_arg(tree, env, "Array.at", args, &var ignored) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.prefixed("?&", elem);
+        return null;
+    }
+    if self.names.is(method, "at_mut") {
+        if try self.check_one_i64_arg(tree, env, "Array.at_mut", args, &var ignored) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.prefixed("?&var ", elem);
+        return null;
+    }
+    if self.names.is(method, "get") or self.names.is(method, "get_or_panic") {
+        let count = arg_count(tree, args);
+        if count != 1 {
+            return try self.error2(
+                tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
+                Arg::Str(method), Arg::Int(count)
+            );
+        }
+        let first = args.get_or_panic(tree, 0);
+        var got = empty_name();
+        if try self.read_expr(tree, env, first, &var got) |failed| {
+            return move failed;
+        }
+        if !self.names.is(got, "i64") {
+            return try self.error2(
+                tree, ast::zero_span(), "array error: `Array.%s` expects i64 index, got %s",
+                Arg::Str(method), Arg::Str(got)
+            );
+        }
+        if !self.names.is_generic_param_name(elem) and !try self.is_copy_type(elem) {
+            return try self.error1(
+                tree, ast::zero_span(), "array error: `Array.%s` requires copy element", Arg::Str(method)
+            );
+        }
+        if self.names.is(method, "get") {
+            out.* = try self.names.prefixed("?", elem);
+            return null;
+        }
+        out.* = elem;
+        return null;
+    }
+    let array_type = try self.names.format("std::array::Array<%s>", elem, empty_name(), empty_name());
+    let blank = self.store.blank_binding(0, empty_name(), array_type);
+    let array = self.store.retain(move blank);
+    return self.check_array_method(tree, env, array, elem, method, args, out);
+}
+
+/// Validates the std-only Map runtime primitive, the Go
+/// `checkBuiltinMapTypeApply`.
+fn (self: &var Checker) check_builtin_map_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.starts_with(name, "std::internal::builtin::map_") {
+        return self.check_builtin_map_method(tree, env, name, type_arg, args, handled, out);
+    }
+    if !self.names.is(name, "std::internal::builtin::map") {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    return self.check_map_constructor_allow_type_params(tree, env, type_arg, args, out);
+}
+
+/// Validates std-only Map method primitives, the Go `checkBuiltinMapMethod`.
+fn (self: &var Checker) check_builtin_map_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = true;
+    var map_args = array::new<Name>(self.allocator);
+    defer map_args.deinit();
+    if try self.checked_map_args_allow_type_params(tree, type_arg, &var map_args) |failed| {
+        return move failed;
+    }
+    let key_type = map_args.get_or_panic(0);
+    let value_type = map_args.get_or_panic(1);
+    let receiver = try self.names.format("std::map::Map<%s, %s>", key_type, value_type, empty_name());
+    let method = try self.names.trim_prefix(name, "std::internal::builtin::map_");
+    if try self.check_builtin_receiver_method(tree, env, name, receiver, args) |failed| {
+        return move failed;
+    }
+    let rest = try self.rest_args(tree, args, 1);
+    let blank = self.store.blank_binding(0, empty_name(), receiver);
+    let map_value = self.store.retain(move blank);
+    return self.check_map_primitive_method(tree, env, map_value, key_type, value_type, method, rest, out);
+}
+
+/// Validates Map primitives that back source wrappers, the Go
+/// `checkMapPrimitiveMethod`.
+fn (self: &var Checker) check_map_primitive_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    map_value: BindingHandle,
+    key_type: Name,
+    value_type: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    // at/at_mut come first: only the std wrapper body reaches the primitive,
+    // and routing a concrete instantiation to check_map_method would hit the
+    // user-facing capture-only refusal.
+    if self.names.is(method, "at") {
+        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.prefixed("?&", value_type);
+        return null;
+    }
+    if self.names.is(method, "at_mut") {
+        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.prefixed("?&var ", value_type);
+        return null;
+    }
+    if self.names.is(method, "take_value_at") {
+        // Reserved to Map.deinit's cascade, so it is answered here and never
+        // reaches check_map_method: a caller outside std spells no name for it.
+        if try self.check_map_index_arg(tree, env, method, args) |failed| {
+            return move failed;
+        }
+        out.* = value_type;
+        return null;
+    }
+    if !self.names.is_generic_param_name(key_type) and !self.names.is_generic_param_name(value_type) {
+        let args_text = try self.map_args_text(map_value);
+        return self.check_map_method(tree, env, map_value, args_text, method, args, out);
+    }
+    return self.check_generic_map_primitive_method(
+        tree, env, map_value, key_type, value_type, method, args, out
+    );
+}
+
+/// Names the static arguments of a Map binding's type, the Go
+/// `mapValue.typeName[len("std::map::Map<") : len(mapValue.typeName)-1]`.
+fn (self: &var Checker) map_args_text(map_value: BindingHandle) -> !Name {
+    let type_name = self.binding(map_value).type_name;
+    let end = self.names.len(type_name);
+    return self.names.intern_slice(type_name, mem::len("std::map::Map<"), end - 1);
+}
+
+/// Validates Map primitives applied to generic static arguments, which only
+/// a std wrapper body can spell, the Go `checkGenericMapPrimitiveMethod`.
+fn (self: &var Checker) check_generic_map_primitive_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    map_value: BindingHandle,
+    key_type: Name,
+    value_type: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(method, "insert") {
+        let count = arg_count(tree, args);
+        if count != 2 {
+            return try self.error1(
+                tree, ast::zero_span(), "map error: `Map.insert` expects 2 args, got %d", Arg::Int(count)
+            );
+        }
+        let first = args.get_or_panic(tree, 0);
+        var got = empty_name();
+        if try self.read_expr(tree, env, first, &var got) |failed| {
+            return move failed;
+        }
+        if !same_name(got, key_type) {
+            return try self.error2(
+                tree, ast::zero_span(), "map error: `Map.insert` expects %s key, got %s",
+                Arg::Str(key_type), Arg::Str(got)
+            );
+        }
+        let second = args.get_or_panic(tree, 1);
+        if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
+            return move failed;
+        }
+        if !same_name(got, value_type) {
+            return try self.error2(
+                tree, ast::zero_span(), "map error: `Map.insert` expects %s value, got %s",
+                Arg::Str(value_type), Arg::Str(got)
+            );
+        }
+        out.* = self.common.error_void_name;
+        return null;
+    }
+    if self.names.is(method, "get") {
+        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.prefixed("?", value_type);
+        return null;
+    }
+    if self.names.is(method, "contains") {
+        if try self.check_map_primitive_key_arg(tree, env, method, key_type, args) |failed| {
+            return move failed;
+        }
+        out.* = self.common.bool_name;
+        return null;
+    }
+    let args_text = try self.map_args_text(map_value);
+    return self.check_map_method(tree, env, map_value, args_text, method, args, out);
+}
+
+/// Validates a generic Map wrapper key argument, the Go
+/// `checkMapPrimitiveKeyArg`.
+fn (self: &var Checker) check_map_primitive_key_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    key_type: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, key_type) {
+        return try self.error3(
+            tree, ast::zero_span(), "map error: `Map.%s` expects %s key, got %s",
+            Arg::Str(method), Arg::Str(key_type), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Validates Map arguments inside std generic wrappers, the Go
+/// `checkedMapArgsAllowTypeParams`.
+fn (self: &var Checker) checked_map_args_allow_type_params(
+    tree: &ast::Ast,
+    arg: Name,
+    out: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    let args = try self.names.split_generic_args(arg) orelse
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    defer args.deinit();
+    if args.len() != 2 {
+        return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
+    }
+    let key_type = args.get_or_panic(0);
+    let value_type = args.get_or_panic(1);
+    if self.names.is_generic_param_name(key_type) or self.names.is_generic_param_name(value_type) {
+        try out.append(key_type);
+        try out.append(value_type);
+        return null;
+    }
+    return self.checked_map_args(tree, arg, out);
+}
+
+/// Validates ownership for source std generic wrappers, the Go
+/// `checkGenericUserTypeApply`.
+fn (self: &var Checker) check_generic_user_type_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let function = self.function_named(name) orelse return null;
+    if self.static_param_count(function) == 0 {
+        return null;
+    }
+    handled.* = true;
+    let param_count = self.param_count(function);
+    let count = arg_count(tree, args);
+    if count != param_count {
+        return try self.error3(
+            tree, ast::zero_span(), "move error: `%s` expects %d args, got %d",
+            Arg::Str(name), Arg::Int(param_count), Arg::Int(count)
+        );
+    }
+    var subst = self.empty_subst();
+    errdefer subst.deinit();
+    if try self.generic_call_subst(tree, name, function, type_arg, &var subst) |failed| {
+        subst.deinit();
+        return move failed;
+    }
+    if try self.check_call_handle_pairing(tree, env, function, 0, &subst, args) |failed| {
+        subst.deinit();
+        return move failed;
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        if try self.check_generic_user_arg(tree, env, name, function, &subst, index, arg) |failed| {
+            subst.deinit();
+            return move failed;
+        }
+        index = index + 1;
+    }
+    // The instantiation takes the substitution with it, so the return type is
+    // instantiated first; substitute_with only reads the substitution.
+    let declared = self.return_type_name(function);
+    let result = try self.substitute_with(declared, &subst);
+    let restore = try self.bind_generic_call_fields(tree, function, type_arg);
+    if try self.check_generic_instantiation(tree, function, move subst) |failed| {
+        self.meta_fields.restore(restore);
+        return move failed;
+    }
+    self.meta_fields.restore(restore);
+    // No recognizer ties a generic factory's result, so a tied result would
+    // silently lose its buffer tie. Nothing needs this shape yet.
+    if self.names.is(result, "Allocator") and try self.call_ties_allocator(tree, function, args, env) {
+        return try self.error1(
+            tree, ast::zero_span(), "borrow error: generic function `%s` cannot return a tied allocator",
+            Arg::Str(name)
+        );
+    }
+    out.* = result;
+    return null;
+}
+
+/// Counts the static parameters of a collected function, the Go
+/// `len(fn.sig.StaticParams)`.
+fn (self: &Checker) static_param_count(function: FunctionHandle) -> i64 {
+    let info = self.functions.at(function.index);
+    return info.static_params.len();
+}
+
+/// Counts the runtime parameters of a collected function, the Go
+/// `len(fn.params)`.
+fn (self: &Checker) param_count(function: FunctionHandle) -> i64 {
+    let info = self.functions.at(function.index);
+    return info.params.len();
+}
+
+/// Resolves a generic call's static arguments into the type-parameter
+/// substitution the ownership check applies, the Go `genericCallSubst`.
+fn (self: &var Checker) generic_call_subst(
+    tree: &ast::Ast,
+    name: Name,
+    function: FunctionHandle,
+    type_arg: Name,
+    out: &var Subst
+) -> !?diagnostic::Diagnostic {
+    let static_count = self.static_param_count(function);
+    let static_args = try self.names.split_generic_args(type_arg) orelse
+        return try self.static_args_count_error(tree, name, static_count);
+    defer static_args.deinit();
+    if static_args.len() != static_count {
+        return try self.static_args_count_error(tree, name, static_count);
+    }
+    // Only the entries that declare types take part in substitution; a
+    // compile-time value carries no ownership.
+    var type_args = array::new<Name>(self.allocator);
+    defer type_args.deinit();
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        if param.is_type {
+            try type_args.append(static_args.get_or_panic(index));
+        }
+        index = index + 1;
+    }
+    if try self.check_generic_wrapper_type_args(tree, name, &type_args) |failed| {
+        return move failed;
+    }
+    index = 0;
+    var type_index = 0;
+    while self.static_param_at(function, index) |param| {
+        index = index + 1;
+        if !param.is_type {
+            continue;
+        }
+        try self.bind_subst_param(out, param.name, type_args.get_or_panic(type_index));
+        type_index = type_index + 1;
+    }
+    return null;
+}
+
+/// Builds the static argument count refusal of the Go `genericCallSubst`.
+fn (self: &Checker) static_args_count_error(
+    tree: &ast::Ast,
+    name: Name,
+    count: i64
+) -> !diagnostic::Diagnostic {
+    return self.error2(
+        tree, ast::zero_span(), "move error: `%s` expects %d static arguments",
+        Arg::Str(name), Arg::Int(count)
+    );
+}
+
+/// Records one `param -> replacement` pair of a substitution, the Go
+/// `subst[param] = typeArgs[idx]`, as both the handle map and the owned
+/// texts the type parser substitutes with.
+fn (self: &Checker) bind_subst_param(out: &var Subst, param: Name, replacement: Name) -> !void {
+    let retained = name_text(&self.names, param);
+    let bytes = retained.as_bytes();
+    try put_name(&var out.by_name, bytes, replacement);
+    let key = try self.names.copy(param);
+    errdefer key.deinit();
+    let value = try self.names.copy(replacement);
+    errdefer value.deinit();
+    try out.names.append(move key);
+    try out.replacements.append(move value);
+    return;
+}
+
+/// Reads the `Field` static arguments of one call and makes them readable by
+/// the forms written against them, the Go `genericCallFields` and
+/// `bindMetaFields`. A field token instantiates like a type argument, not like
+/// the other compile-time values: the body reads it through the `std::meta`
+/// forms written against it, so each bound field is its own instance. The
+/// result is the binding to restore once the instantiation has been checked.
+fn (self: &var Checker) bind_generic_call_fields(
+    tree: &ast::Ast,
+    function: FunctionHandle,
+    type_arg: Name
+) -> !?arena::Handle<MetaBinding> {
+    let previous = self.meta_fields.current;
+    let static_count = self.static_param_count(function);
+    let static_args = try self.names.split_generic_args(type_arg) orelse return previous;
+    defer static_args.deinit();
+    if static_args.len() != static_count {
+        return previous;
+    }
+    // The fields are collected first and bound after, as the Go map is, so a
+    // later argument's lookup does not see an earlier parameter's binding.
+    var names = array::new<Name>(self.allocator);
+    defer names.deinit();
+    var fields = array::new<MetaField>(self.allocator);
+    defer fields.deinit();
+    var owner = empty_name();
+    var index = 0;
+    while self.static_param_at(function, index) |param| {
+        let arg = static_args.get_or_panic(index);
+        index = index + 1;
+        if param.is_type {
+            owner = arg;
+            continue;
+        }
+        if !self.names.is(param.type_name, "Field") {
+            continue;
+        }
+        if self.bound_meta_field(arg) |bound| {
+            try names.append(param.name);
+            try fields.append(bound);
+            continue;
+        }
+        var owned = array::new<MetaField>(self.allocator);
+        defer owned.deinit();
+        if try self.public_fields(tree, owner, &var owned) |failed| {
+            failed.deinit();
+            continue;
+        }
+        var field_index = 0;
+        while owned.get(field_index) |field| {
+            field_index = field_index + 1;
+            if same_name(field.name, arg) {
+                try names.append(param.name);
+                try fields.append(field);
+            }
+        }
+    }
+    index = 0;
+    while names.get(index) |name| {
+        try self.bind_generic_field(name, fields.get_or_panic(index));
+        index = index + 1;
+    }
+    return previous;
+}
+
+/// Reads the capture bound to a name, the Go `c.metaFields[name]`.
+fn (self: &Checker) bound_meta_field(name: Name) -> ?MetaField {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.meta_fields.get(bytes);
+}
+
+/// Binds one `Field` argument under its parameter name, the Go
+/// `c.metaFields[name] = field` of `bindMetaFields`.
+fn (self: &var Checker) bind_generic_field(name: Name, field: MetaField) -> !void {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    let _ = try self.meta_fields.bind(bytes, field);
+    return;
+}
+
+/// Checks a generic function body for one static type set, the Go
+/// `checkGenericInstantiation`. The substitution becomes the active one for
+/// the body, so the parameters are defined once it is entered.
+fn (self: &var Checker) check_generic_instantiation(
+    tree: &var ast::Ast,
+    function: FunctionHandle,
+    subst: Subst
+) -> !?diagnostic::Diagnostic {
+    errdefer subst.deinit();
+    var done = false;
+    if try self.enter_instantiation(tree, function, &subst, &var done) |failed| {
+        subst.deinit();
+        return move failed;
+    }
+    if done {
+        subst.deinit();
+        return null;
+    }
+    let env = self.store.new_scope(null);
+    let previous = self.enter_function(function, move subst);
+    if try self.define_params(tree, function, env, true) |failed| {
+        self.restore_function(previous);
+        self.instantiation_depth = self.instantiation_depth - 1;
+        return move failed;
+    }
+    let body = self.functions.at(function.index).body;
+    if body |block| {
+        if try self.check_block(tree, env, block) |failed| {
+            self.restore_function(previous);
+            self.instantiation_depth = self.instantiation_depth - 1;
+            return move failed;
+        }
+    }
+    self.restore_function(previous);
+    self.instantiation_depth = self.instantiation_depth - 1;
+    return null;
+}
+
+/// Bounds how deep generic instantiation may nest, the Go
+/// `maxInstantiationDepth`, for the reason the type checker's bound of the
+/// same name gives (#1627). The two checkers walk the same instantiations,
+/// so they carry the same bound.
+fn max_instantiation_depth() -> i64 {
+    return 64;
+}
+
+/// Records one instantiation and reports whether it has already been
+/// checked, the Go `enterInstantiation`.
+fn (self: &var Checker) enter_instantiation(
+    tree: &ast::Ast,
+    function: FunctionHandle,
+    subst: &Subst,
+    done: &var bool
+) -> !?diagnostic::Diagnostic {
+    done.* = false;
+    let name = self.functions.at(function.index).name;
+    var key = try self.names.copy(name);
+    defer key.deinit();
+    try key.append_bytes("<");
+    var index = 0;
+    var first = true;
+    while self.static_param_at(function, index) |param| {
+        index = index + 1;
+        if !param.is_type {
+            continue;
+        }
+        if !first {
+            try key.append_bytes(", ");
+        }
+        first = false;
+        if self.subst_lookup(subst, param.name) |replacement| {
+            try self.names.append_to(&var key, replacement);
+        }
+    }
+    try key.append_bytes(">");
+    let key_bytes = key.as_bytes();
+    if self.checked_instances.get(key_bytes) orelse false {
+        done.* = true;
+        return null;
+    }
+    if self.instantiation_depth >= max_instantiation_depth() {
+        done.* = true;
+        let key_name = try self.names.intern(key_bytes);
+        let elided = try self.names.elide(key_name);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: generic instantiation nested deeper than %d at `%s`",
+            Arg::Int(max_instantiation_depth()), Arg::Str(elided)
+        );
+    }
+    try put_flag(&var self.checked_instances, key_bytes, true);
+    self.instantiation_depth = self.instantiation_depth + 1;
+    return null;
+}
+
+/// Validates std wrapper-specific static ownership contracts, the Go
+/// `checkGenericWrapperTypeArgs`.
+fn (self: &var Checker) check_generic_wrapper_type_args(
+    tree: &ast::Ast,
+    name: Name,
+    type_args: &array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(name, "std::array::Array") {
+        return self.reject_array_element_type(tree, type_args.get_or_panic(0));
+    }
+    if self.names.is(name, "std::map::Map") {
+        let joined = try self.join_type_args(type_args);
+        var ignored = array::new<Name>(self.allocator);
+        defer ignored.deinit();
+        if try self.checked_map_args(tree, joined, &var ignored) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Names the comma-joined spelling of a static argument list, the Go
+/// `strings.Join(typeArgs, ", ")`.
+fn (self: &var Checker) join_type_args(type_args: &array::Array<Name>) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while type_args.get(index) |arg| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try self.names.append_to(&var out, arg);
+        index = index + 1;
+    }
+    return self.names.intern_owned(move out);
+}
+
+/// Validates an instantiated generic wrapper argument, the Go
+/// `checkGenericUserArg`.
+fn (self: &var Checker) check_generic_user_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    function: FunctionHandle,
+    subst: &Subst,
+    index: i64,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let param = self.param_at(function, index) orelse return null;
+    let want = try self.substitute_with(param.type_name, subst);
+    // `std::mem::box<T>(allocator, value)` takes ownership of its value, and a
+    // consume primitive moves its argument (ADR-0091); every other generic
+    // wrapper argument is read in place.
+    var got = empty_name();
+    if (self.names.is(name, "std::mem::box") and index == 1) or
+        (self.is_consume_primitive(name) and index == 0) {
+        if try self.move_contextual_expr(tree, env, arg, want, &var got) |failed| {
+            return move failed;
+        }
+    } else {
+        if try self.read_contextual_expr(tree, env, arg, want, &var got) |failed| {
+            return move failed;
+        }
+    }
+    var coerced = empty_name();
+    if try self.coerce_ownership_borrow_argument(
+        got, want, param.borrow, param.mut_borrow, &var coerced
+    ) |failed| {
+        return move failed;
+    }
+    if !same_name(coerced, want) {
+        return try self.error4(
+            tree, ast::zero_span(), "move error: arg %d of `%s` expects %s, got %s",
+            Arg::Int(index + 1), Arg::Str(name), Arg::Str(want), Arg::Str(coerced)
+        );
+    }
+    return null;
+}
+
+/// Names the std functions whose whole job is consuming an owner, the Go
+/// `isConsumePrimitive`: their param carries no obligation and their
+/// argument is moved.
+fn (self: &Checker) is_consume_primitive(name: Name) -> bool {
+    return self.names.is(name, "std::mem::leak");
+}
