@@ -329,6 +329,19 @@ func TestMultilineString(t *testing.T) {
 	}
 }
 
+// TestMultilineStringKeepsLeadingEmptyLines verifies that `\\` segments with no
+// content are kept wherever they appear, including before the first non-empty one.
+func TestMultilineStringKeepsLeadingEmptyLines(t *testing.T) {
+	input := "    \\\\\n" +
+		"    \\\\\n" +
+		"    \\\\// parse\n" +
+		"    \\\\\n"
+	tok := New(input).NextToken()
+	if tok.Type != token.String || tok.Literal != "\n\n// parse\n" {
+		t.Fatalf("got (%q, %q), want (%q, %q)", tok.Type, tok.Literal, token.String, "\n\n// parse\n")
+	}
+}
+
 // TestMultilineStringFollowedByStatement verifies the lexer resumes after multi-line strings.
 func TestMultilineStringFollowedByStatement(t *testing.T) {
 	input := "let text =\n" +

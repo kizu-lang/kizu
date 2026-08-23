@@ -352,6 +352,7 @@ func (l *Lexer) readString() string {
 // separated only by whitespace and a single newline are concatenated with `\n`.
 func (l *Lexer) readMultilineString() string {
 	var out []rune
+	first := true
 	for {
 		l.readChar() // consume first '\\'
 		l.readChar() // consume second '\\'
@@ -359,9 +360,10 @@ func (l *Lexer) readMultilineString() string {
 		for l.ch != '\n' && l.ch != 0 {
 			l.readChar()
 		}
-		if len(out) > 0 {
+		if !first {
 			out = append(out, '\n')
 		}
+		first = false
 		out = append(out, l.input[start:l.position]...)
 		if !l.peekMultilineContinuation() {
 			break
