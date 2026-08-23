@@ -64,10 +64,11 @@ struct Verifier {
 }
 
 /// Is one value a verify failure interpolates: a Name for `%s`, an integer
-/// for `%d`.
+/// for `%d`; None fills the arguments a shorter format leaves unused.
 union VerifyArg {
     Str(Name),
     Int(i64),
+    None,
 }
 
 /// Checks one function's blocks and the SSA property across them, the Go
@@ -300,10 +301,11 @@ fn (self: &Verifier) verify_terminator(
 ) -> !?diagnostic::Diagnostic {
     let term = module.block_terminator(block);
     if term.op == TermOp::None {
-        var args = array::new<VerifyArg>(self.allocator);
-        defer args.deinit();
-        try args.append(VerifyArg::Str(self.block_name));
-        return try self.failure(module, "block %s has no terminator", &args);
+        return try self.failure(
+            module, "block %s has no terminator",
+            VerifyArg::Str(self.block_name), VerifyArg::None, VerifyArg::None, VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None
+        );
     }
     var position = 0;
     while term.successor(position) |target| {
@@ -311,11 +313,11 @@ fn (self: &Verifier) verify_terminator(
         let target_text = name_text(&module.names, target);
         let target_bytes = target_text.as_bytes();
         if !blocks.contains(target_bytes) {
-            var args = array::new<VerifyArg>(self.allocator);
-            defer args.deinit();
-            try args.append(VerifyArg::Str(self.block_name));
-            try args.append(VerifyArg::Str(target));
-            return try self.failure(module, "block %s branches to %s, which does not exist", &args);
+            return try self.failure(
+                module, "block %s branches to %s, which does not exist",
+                VerifyArg::Str(self.block_name), VerifyArg::Str(target), VerifyArg::None,
+                VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
+            );
         }
     }
     let got = term.value.type_name;
@@ -389,8 +391,19 @@ fn (self: &Verifier) fail_text(
 /// Builds one verify failure from a Go format and its arguments in order,
 /// the `fmt.Errorf("%w: %s: ...", ErrVerify, v.fn.Name, ...)` of every rule
 /// that is not a type rule: the ErrVerify prefix and the function name are
-/// written first, then `%s` takes a Name and `%d` an integer.
-fn (self: &Verifier) failure(module: &Module, format: []u8, args: &array::Array<VerifyArg>) -> !diagnostic::Diagnostic {
+/// written first, then `%s` takes a Name and `%d` an integer. A format with
+/// fewer than seven verbs passes None for the rest.
+fn (self: &Verifier) failure(
+    module: &Module,
+    format: []u8,
+    a: VerifyArg,
+    b: VerifyArg,
+    c: VerifyArg,
+    d: VerifyArg,
+    e: VerifyArg,
+    f: VerifyArg,
+    g: VerifyArg
+) -> !diagnostic::Diagnostic {
     var out = try string::from_bytes(self.allocator, "ir verify error: ");
     defer out.deinit();
     try module.names.append_to(&var out, self.fn_name);
@@ -400,15 +413,26 @@ fn (self: &Verifier) failure(module: &Module, format: []u8, args: &array::Array<
     while index < mem::len(format) {
         let byte = format[index];
         if byte == cast<u8>(37) and index + 1 < mem::len(format) {
-            if args.get(used) |arg| {
-                match arg {
-                    Str(name) => {
-                        try module.names.append_to(&var out, name);
-                    },
-                    Int(value) => {
-                        try fmt::append_i64(&var out, value);
-                    },
-                }
+            if used == 0 {
+                try append_verify_arg(&var out, module, a);
+            }
+            if used == 1 {
+                try append_verify_arg(&var out, module, b);
+            }
+            if used == 2 {
+                try append_verify_arg(&var out, module, c);
+            }
+            if used == 3 {
+                try append_verify_arg(&var out, module, d);
+            }
+            if used == 4 {
+                try append_verify_arg(&var out, module, e);
+            }
+            if used == 5 {
+                try append_verify_arg(&var out, module, f);
+            }
+            if used == 6 {
+                try append_verify_arg(&var out, module, g);
             }
             used = used + 1;
             index = index + 2;
@@ -419,6 +443,14 @@ fn (self: &Verifier) failure(module: &Module, format: []u8, args: &array::Array<
     }
     let text = out.as_bytes();
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+fn append_verify_arg(out: &var string::String, module: &Module, arg: VerifyArg) -> !void {
+    match arg {
+        Str(name) => return module.names.append_to(out, name),
+        Int(value) => return fmt::append_i64(out, value),
+        None => return,
+    }
 }
 
 /// Checks the other half of what LLVM's verifier asks of a phi, the Go
@@ -480,13 +512,12 @@ fn (self: &Verifier) phi_edges(
         let incoming_text = name_text(&module.names, incoming.block);
         let incoming_bytes = incoming_text.as_bytes();
         if !arrives.contains(incoming_bytes) {
-            var args = array::new<VerifyArg>(self.allocator);
-            defer args.deinit();
-            try args.append(VerifyArg::Str(instr_node.result.name));
-            try args.append(VerifyArg::Str(block_name));
-            try args.append(VerifyArg::Str(incoming.block));
-            try args.append(VerifyArg::Str(block_name));
-            return try self.failure(module, "phi %s in block %s takes a value from %s, which does not jump to %s", &args);
+            return try self.failure(
+                module, "phi %s in block %s takes a value from %s, which does not jump to %s",
+                VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+                VerifyArg::Str(incoming.block), VerifyArg::Str(block_name), VerifyArg::None,
+                VerifyArg::None, VerifyArg::None
+            );
         }
         try named.insert(incoming_bytes, true);
     }
@@ -498,24 +529,21 @@ fn (self: &Verifier) phi_edges(
         if named.contains(pred_bytes) {
             continue;
         }
-        var args = array::new<VerifyArg>(self.allocator);
-        defer args.deinit();
-        try args.append(VerifyArg::Str(instr_node.result.name));
-        try args.append(VerifyArg::Str(block_name));
-        try args.append(VerifyArg::Str(pred));
-        try args.append(VerifyArg::Str(block_name));
-        return try self.failure(module, "phi %s in block %s has no value for %s, which jumps to %s", &args);
+        return try self.failure(
+            module, "phi %s in block %s has no value for %s, which jumps to %s",
+            VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+            VerifyArg::Str(pred), VerifyArg::Str(block_name), VerifyArg::None, VerifyArg::None,
+            VerifyArg::None
+        );
     }
     let count = pred_count(module, preds, block_name);
     if instr_node.incoming.len() != count {
-        var args = array::new<VerifyArg>(self.allocator);
-        defer args.deinit();
-        try args.append(VerifyArg::Str(instr_node.result.name));
-        try args.append(VerifyArg::Str(block_name));
-        try args.append(VerifyArg::Int(instr_node.incoming.len()));
-        try args.append(VerifyArg::Int(count));
-        try args.append(VerifyArg::Str(block_name));
-        return try self.failure(module, "phi %s in block %s has %d incoming for %d edges into %s", &args);
+        return try self.failure(
+            module, "phi %s in block %s has %d incoming for %d edges into %s",
+            VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_name),
+            VerifyArg::Int(instr_node.incoming.len()), VerifyArg::Int(count), VerifyArg::Str(block_name),
+            VerifyArg::None, VerifyArg::None
+        );
     }
     return null;
 }
@@ -603,16 +631,13 @@ fn (self: &Verifier) phi_incoming_dominates(
                 if tree.dominates(module, definition, incoming.block) {
                     continue;
                 }
-                var args = array::new<VerifyArg>(self.allocator);
-                defer args.deinit();
-                try args.append(VerifyArg::Str(instr_node.result.name));
-                try args.append(VerifyArg::Str(block_node.name));
-                try args.append(VerifyArg::Str(incoming.value.name));
-                try args.append(VerifyArg::Str(incoming.block));
-                try args.append(VerifyArg::Str(incoming.value.name));
-                try args.append(VerifyArg::Str(definition));
-                try args.append(VerifyArg::Str(incoming.block));
-                return try self.failure(module, "phi %s in block %s takes %s from %s, but %s is defined in %s, which does not dominate %s", &args);
+                return try self.failure(
+                    module, "phi %s in block %s takes %s from %s, but %s is defined in %s, which does not dominate %s",
+                    VerifyArg::Str(instr_node.result.name), VerifyArg::Str(block_node.name),
+                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(incoming.block),
+                    VerifyArg::Str(incoming.value.name), VerifyArg::Str(definition),
+                    VerifyArg::Str(incoming.block)
+                );
             }
         }
     }
@@ -695,23 +720,20 @@ fn (self: &Verifier) dominates_use(
         if above.contains(operand_bytes) {
             return null;
         }
-        var args = array::new<VerifyArg>(self.allocator);
-        defer args.deinit();
-        try args.append(VerifyArg::Str(block_name));
-        try args.append(VerifyArg::Str(operand.name));
-        return try self.failure(module, "block %s reads %s before it is defined", &args);
+        return try self.failure(
+            module, "block %s reads %s before it is defined",
+            VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::None,
+            VerifyArg::None, VerifyArg::None, VerifyArg::None, VerifyArg::None
+        );
     }
     if tree.dominates(module, definition, block_name) {
         return null;
     }
-    var args = array::new<VerifyArg>(self.allocator);
-    defer args.deinit();
-    try args.append(VerifyArg::Str(block_name));
-    try args.append(VerifyArg::Str(operand.name));
-    try args.append(VerifyArg::Str(definition));
-    try args.append(VerifyArg::Str(definition));
-    try args.append(VerifyArg::Str(block_name));
-    return try self.failure(module, "block %s reads %s, which is defined in %s, and %s does not dominate %s", &args);
+    return try self.failure(
+        module, "block %s reads %s, which is defined in %s, and %s does not dominate %s",
+        VerifyArg::Str(block_name), VerifyArg::Str(operand.name), VerifyArg::Str(definition),
+        VerifyArg::Str(definition), VerifyArg::Str(block_name), VerifyArg::None, VerifyArg::None
+    );
 }
 
 /// Returns the values an instruction reads where it stands, the Go
