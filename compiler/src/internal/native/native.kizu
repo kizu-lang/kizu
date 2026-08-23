@@ -3,6 +3,7 @@ import compiler::internal::diagnostic;
 import std::array;
 import std::fmt;
 import std::fs;
+import std::json;
 import std::map;
 import std::mem;
 import std::path;
@@ -44,12 +45,12 @@ pub struct TempDirs {
 
 /// Returns the temporary directory maker for this process.
 pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
+    let dir = process::env("TMPDIR") orelse "/tmp";
     var base = string::new(allocator);
     errdefer base.deinit();
-    if process::env("TMPDIR") |dir| {
+    if mem::len(dir) > 0 {
         try base.append_bytes(dir);
-    }
-    if base.len() == 0 {
+    } else {
         try base.append_bytes("/tmp");
     }
     return TempDirs { base: move base, stamp: process::monotonic_millis(), next: 0 };
@@ -88,7 +89,7 @@ pub fn build(
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>
 ) -> !?diagnostic::Diagnostic {
     if options.output.len() == 0 {
-        return try fail_text(allocator, "native error: output path is required");
+        return try fail_parts(allocator, "native error: output path is required", "", "");
     }
     if try validate_options(allocator, options) |failed| {
         return move failed;
@@ -121,8 +122,8 @@ pub fn build(
 
 /// Returns an executable for one lowered program, the Go `Executable`
 /// without the build cache: the program is linked into a claimed temporary
-/// directory every time, and the caller removes the directory with
-/// `clean_build_dir` once the program has run.
+/// directory every time, and the caller removes that directory (the
+/// executable's parent) with `clean_build_dir` once the program has run.
 pub fn executable(
     io: Io,
     allocator: Allocator,
@@ -130,7 +131,6 @@ pub fn executable(
     options: &Options,
     llvm_ir: &string::String,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
-    out_dir: &var string::String,
     out_exe: &var string::String
 ) -> !?diagnostic::Diagnostic {
     if try validate_options(allocator, options) |failed| {
@@ -157,7 +157,6 @@ pub fn executable(
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
     }
-    try out_dir.append_string(&dir);
     try out_exe.append_string(&exe);
     return null;
 }
@@ -232,25 +231,25 @@ fn link(
 fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
     let libc = options.libc.as_bytes();
     if !mem::equal_bytes(libc, "on") {
-        return try fail_option(allocator, "native error: --libc ", &options.libc, " is not implemented yet");
+        return try fail_parts(allocator, "native error: --libc ", libc, " is not implemented yet");
     }
     let runtime_mode = options.runtime.as_bytes();
     if !mem::equal_bytes(runtime_mode, "hosted") {
-        return try fail_option(allocator, "native error: --runtime ", &options.runtime, " is not implemented yet");
+        return try fail_parts(allocator, "native error: --runtime ", runtime_mode, " is not implemented yet");
     }
     let emit = options.emit.as_bytes();
     if !mem::equal_bytes(emit, "exe") {
-        return try fail_option(allocator, "native error: --emit ", &options.emit, " is not implemented yet");
+        return try fail_parts(allocator, "native error: --emit ", emit, " is not implemented yet");
     }
     if options.cpu.len() != 0 {
-        return try fail_text(allocator, "native error: --cpu is not implemented yet");
+        return try fail_parts(allocator, "native error: --cpu is not implemented yet", "", "");
     }
     if options.abi.len() != 0 {
-        return try fail_text(allocator, "native error: --abi is not implemented yet");
+        return try fail_parts(allocator, "native error: --abi is not implemented yet", "", "");
     }
     let linker = options.linker.as_bytes();
     if !mem::equal_bytes(linker, "clang") {
-        return try fail_option(allocator, "native error: --linker ", &options.linker, " is not implemented yet");
+        return try fail_parts(allocator, "native error: --linker ", linker, " is not implemented yet");
     }
     return null;
 }
@@ -284,7 +283,9 @@ fn runtime_object(
 }
 
 /// Compiles the runtime source into one object file, the Go
-/// `compileRuntime`.
+/// `compileRuntime`. The toolchain is spawned with the views already in
+/// hand: `clang [-target T] -O<n> -c runtime.c -o runtime.o` fits the
+/// eight-argument shape of std::process::spawn_wait8 exactly.
 fn compile_runtime(
     io: Io,
     allocator: Allocator,
@@ -298,16 +299,15 @@ fn compile_runtime(
     let source_bytes = source_path.as_bytes();
     let text = source.as_bytes();
     try fs::write_file(io, source_bytes, text);
-    var command = array::new<string::String>(allocator);
-    defer command.deinit();
     let linker = options.linker.as_bytes();
-    try append_copy(allocator, &var command, linker);
-    try clang_flags(allocator, options, &var command);
-    try append_copy(allocator, &var command, "-c");
-    try append_copy(allocator, &var command, source_bytes);
-    try append_copy(allocator, &var command, "-o");
-    try append_copy(allocator, &var command, object);
-    let code = try spawn_command(allocator, &command);
+    let level = clang_optimization_flag(options.opt);
+    var code = 0;
+    if options.triple.len() > 0 {
+        let triple = options.triple.as_bytes();
+        code = try process::spawn_wait8(8, linker, "-target", triple, level, "-c", source_bytes, "-o", object);
+    } else {
+        code = try process::spawn_wait8(6, linker, level, "-c", source_bytes, "-o", object, "", "");
+    }
     if code != 0 {
         return try fail_linker(allocator, options, code);
     }
@@ -342,18 +342,13 @@ fn require_error_set(
             return null;
         }
     }
-    var message = try string::from_bytes(allocator, "native error: error set `");
-    defer message.deinit();
-    try message.append_bytes(name);
-    try message.append_bytes("` is missing");
-    let text = message.as_bytes();
-    let failed = try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+    let failed = try fail_parts(allocator, "native error: error set `", name, "` is missing");
     return move failed;
 }
 
 /// Writes the number each error set member lowers to, the Go
 /// `errorSetConstants`, so the runtime names a failure the same way the
-/// program that reads it does.
+/// program that reads it does: set names and member names in byte order.
 fn error_set_constants(
     allocator: Allocator,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
@@ -364,101 +359,88 @@ fn error_set_constants(
     }
     var names = array::new<string::String>(allocator);
     defer names.deinit();
-    var index = 0;
-    while sets.key_at(index) |key| {
-        index = index + 1;
-        let name = try string::from_bytes(allocator, key);
-        try names.append(move name);
-    }
-    try sort::strings(&var names);
+    try sorted_keys<map::Map<[]u8, i64>>(allocator, sets, &var names);
     try out.append_bytes("/* Generated from the error set declarations. */");
     try out.append_byte(cast<u8>(10));
-    index = 0;
+    var index = 0;
     while names.at(index) |name| {
         index = index + 1;
         let name_bytes = name.as_bytes();
         if sets.at(name_bytes) |members| {
-            try append_set_constants(allocator, name_bytes, members, out);
+            var spellings = array::new<string::String>(allocator);
+            defer spellings.deinit();
+            try sorted_keys<i64>(allocator, members, &var spellings);
+            var spelling_index = 0;
+            while spellings.at(spelling_index) |member| {
+                spelling_index = spelling_index + 1;
+                let member_bytes = member.as_bytes();
+                let code = members.get(member_bytes) orelse 0;
+                try out.append_bytes("#define ");
+                try append_error_constant(allocator, name_bytes, member_bytes, out);
+                try out.append_bytes(" ");
+                try fmt::append_i64(out, code);
+                try out.append_byte(cast<u8>(10));
+            }
         }
     }
     try out.append_byte(cast<u8>(10));
     return;
 }
 
-/// Writes the `#define` lines of one error set in member name order.
-fn append_set_constants(
+/// Collects the keys of one map in byte lexical order, the Go
+/// `sort.Strings` over collected key strings.
+fn sorted_keys<V>(
     allocator: Allocator,
-    set: []u8,
-    members: &map::Map<[]u8, i64>,
-    out: &var string::String
+    source: &map::Map<[]u8, V>,
+    out: &var array::Array<string::String>
 ) -> !void {
-    var spellings = array::new<string::String>(allocator);
-    defer spellings.deinit();
     var index = 0;
-    while members.key_at(index) |member| {
+    while source.key_at(index) |key| {
         index = index + 1;
-        let spelling = try string::from_bytes(allocator, member);
-        try spellings.append(move spelling);
+        let name = try string::from_bytes(allocator, key);
+        try out.append(move name);
     }
-    try sort::strings(&var spellings);
-    index = 0;
-    while spellings.at(index) |member| {
+    return sort::strings(out);
+}
+
+/// Spells one member as a C identifier, the Go `errorConstantName`:
+/// `::` and `.` in the set name become `_`, and everything is uppercased,
+/// written straight into the constants text.
+fn append_error_constant(allocator: Allocator, set: []u8, member: []u8, out: &var string::String) -> !void {
+    try out.append_bytes("KIZU_ERR_");
+    var index = 0;
+    while index < mem::len(set) {
+        let byte = set[index];
         index = index + 1;
-        let member_bytes = member.as_bytes();
-        if members.get(member_bytes) |code| {
-            try out.append_bytes("#define ");
-            let constant = try error_constant_name(allocator, set, member_bytes);
-            defer constant.deinit();
-            try out.append_string(&constant);
-            try out.append_bytes(" ");
-            try fmt::append_i64(out, code);
-            try out.append_byte(cast<u8>(10));
+        if byte == cast<u8>(46) or (byte == cast<u8>(58) and index < mem::len(set) and set[index] == cast<u8>(58)) {
+            if byte == cast<u8>(58) {
+                index = index + 1;
+            }
+            try out.append_byte(cast<u8>(95));
+            continue;
         }
+        try append_upper_byte(out, byte);
+    }
+    try out.append_byte(cast<u8>(95));
+    let snake = try camel_to_snake(allocator, member);
+    defer snake.deinit();
+    let total = snake.len();
+    index = 0;
+    while index < total {
+        let snake_bytes = snake.as_bytes();
+        let byte = snake_bytes[index];
+        index = index + 1;
+        try append_upper_byte(out, byte);
     }
     return;
 }
 
-/// Spells one member as a C identifier, the Go `errorConstantName`.
-fn error_constant_name(allocator: Allocator, set: []u8, member: []u8) -> !string::String {
-    var raw = string::new(allocator);
-    defer raw.deinit();
-    var index = 0;
-    while index < mem::len(set) {
-        let byte = set[index];
-        if byte == cast<u8>(58) and index + 1 < mem::len(set) and set[index + 1] == cast<u8>(58) {
-            try raw.append_byte(cast<u8>(95));
-            index = index + 2;
-            continue;
-        }
-        if byte == cast<u8>(46) {
-            try raw.append_byte(cast<u8>(95));
-            index = index + 1;
-            continue;
-        }
-        try raw.append_byte(byte);
-        index = index + 1;
+/// Appends one byte with a lowercase letter raised to uppercase.
+fn append_upper_byte(out: &var string::String, byte: u8) -> !void {
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return out.append_byte(byte - cast<u8>(32));
     }
-    try raw.append_byte(cast<u8>(95));
-    let snake = try camel_to_snake(allocator, member);
-    defer snake.deinit();
-    try raw.append_string(&snake);
-    var out = try string::from_bytes(allocator, "KIZU_ERR_");
-    errdefer out.deinit();
-    // The view has to be taken again each iteration: a view read inside a
-    // `while` conflicts with the same block's `defer raw.deinit()`.
-    let total = raw.len();
-    index = 0;
-    while index < total {
-        let raw_bytes = raw.as_bytes();
-        let byte = raw_bytes[index];
-        index = index + 1;
-        if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
-            try out.append_byte(byte - cast<u8>(32));
-            continue;
-        }
-        try out.append_byte(byte);
-    }
-    return move out;
+    return out.append_byte(byte);
 }
 
 /// Separates the words in a member name for the C spelling, the Go
@@ -480,6 +462,9 @@ fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
 
 /// Invokes the configured C/LLVM toolchain with explicit inputs, the Go
 /// `runClang`, and leaves the command it ran in command for the caller.
+/// The spawn passes the same views the command records:
+/// `clang [-target T] -O<n> main.ll runtime.o -o output` is eight
+/// arguments at most, the shape std::process::spawn_wait8 carries.
 fn run_clang(
     allocator: Allocator,
     options: &Options,
@@ -495,7 +480,14 @@ fn run_clang(
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     try append_copy(allocator, command, output);
-    let code = try spawn_command(allocator, command);
+    let level = clang_optimization_flag(options.opt);
+    var code = 0;
+    if options.triple.len() > 0 {
+        let triple = options.triple.as_bytes();
+        code = try process::spawn_wait8(8, linker, "-target", triple, level, ir_path, runtime_path, "-o", output);
+    } else {
+        code = try process::spawn_wait8(6, linker, level, ir_path, runtime_path, "-o", output, "", "");
+    }
     if code != 0 {
         return try fail_linker(allocator, options, code);
     }
@@ -538,63 +530,6 @@ fn append_copy(
     return;
 }
 
-/// Runs one command line and returns the child's exit status. The child
-/// inherits stdout and stderr, so what the toolchain prints has already
-/// reached the terminal when a failure comes back.
-fn spawn_command(allocator: Allocator, command: &array::Array<string::String>) -> !i64 {
-    var a0 = string::new(allocator);
-    defer a0.deinit();
-    var a1 = string::new(allocator);
-    defer a1.deinit();
-    var a2 = string::new(allocator);
-    defer a2.deinit();
-    var a3 = string::new(allocator);
-    defer a3.deinit();
-    var a4 = string::new(allocator);
-    defer a4.deinit();
-    var a5 = string::new(allocator);
-    defer a5.deinit();
-    var a6 = string::new(allocator);
-    defer a6.deinit();
-    var a7 = string::new(allocator);
-    defer a7.deinit();
-    if command.at(0) |arg| {
-        try a0.append_string(arg);
-    }
-    if command.at(1) |arg| {
-        try a1.append_string(arg);
-    }
-    if command.at(2) |arg| {
-        try a2.append_string(arg);
-    }
-    if command.at(3) |arg| {
-        try a3.append_string(arg);
-    }
-    if command.at(4) |arg| {
-        try a4.append_string(arg);
-    }
-    if command.at(5) |arg| {
-        try a5.append_string(arg);
-    }
-    if command.at(6) |arg| {
-        try a6.append_string(arg);
-    }
-    if command.at(7) |arg| {
-        try a7.append_string(arg);
-    }
-    let b0 = a0.as_bytes();
-    let b1 = a1.as_bytes();
-    let b2 = a2.as_bytes();
-    let b3 = a3.as_bytes();
-    let b4 = a4.as_bytes();
-    let b5 = a5.as_bytes();
-    let b6 = a6.as_bytes();
-    let b7 = a7.as_bytes();
-    let argc = command.len();
-    let code = try process::spawn_wait8(argc, b0, b1, b2, b3, b4, b5, b6, b7);
-    return code;
-}
-
 /// Builds the failure one toolchain run reports, the Go
 /// `fmt.Errorf("native error: %s failed: %w\n%s", ...)`. The Go error
 /// carries the toolchain's combined output after the message line;
@@ -611,40 +546,15 @@ fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnosti
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
 
-/// Builds one failure from a finished message.
-fn fail_text(allocator: Allocator, text: []u8) -> !diagnostic::Diagnostic {
-    return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
-}
-
-/// Builds one failure around the value of an option.
-fn fail_option(
-    allocator: Allocator,
-    before: []u8,
-    value: &string::String,
-    after: []u8
-) -> !diagnostic::Diagnostic {
+/// Builds one failure from up to three message parts, the Go inline
+/// `fmt.Errorf("native error: ...")`.
+fn fail_parts(allocator: Allocator, before: []u8, value: []u8, after: []u8) -> !diagnostic::Diagnostic {
     var message = try string::from_bytes(allocator, before);
     defer message.deinit();
-    try message.append_string(value);
+    try message.append_bytes(value);
     try message.append_bytes(after);
     let text = message.as_bytes();
     return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
-}
-
-/// Records explicit native build inputs next to the output artifact, the Go
-/// `Metadata`.
-pub struct Metadata {
-    pub target: string::String,
-    pub triple: string::String,
-    pub cpu: string::String,
-    pub abi: string::String,
-    pub libc: string::String,
-    pub runtime: string::String,
-    pub emit: string::String,
-    pub linker: string::String,
-    pub opt_mode: string::String,
-    pub output: string::String,
-    pub command: array::Array<string::String>
 }
 
 /// Records the native optimization mode in artifact metadata, the Go
@@ -656,111 +566,43 @@ fn optimization_mode_name(opt: bool) -> []u8 {
     return "debug";
 }
 
-/// Fills the metadata record for one build.
-fn metadata_of(
-    allocator: Allocator,
-    options: &Options,
-    command: &array::Array<string::String>
-) -> !Metadata {
-    var target = try string::from_bytes(allocator, "native");
-    errdefer target.deinit();
-    var triple = string::new(allocator);
-    errdefer triple.deinit();
-    try triple.append_string(&options.triple);
-    var cpu = string::new(allocator);
-    errdefer cpu.deinit();
-    try cpu.append_string(&options.cpu);
-    var abi = string::new(allocator);
-    errdefer abi.deinit();
-    try abi.append_string(&options.abi);
-    var libc = string::new(allocator);
-    errdefer libc.deinit();
-    try libc.append_string(&options.libc);
-    var runtime_mode = string::new(allocator);
-    errdefer runtime_mode.deinit();
-    try runtime_mode.append_string(&options.runtime);
-    var emit = string::new(allocator);
-    errdefer emit.deinit();
-    try emit.append_string(&options.emit);
-    var linker = string::new(allocator);
-    errdefer linker.deinit();
-    try linker.append_string(&options.linker);
-    let mode = optimization_mode_name(options.opt);
-    var opt_mode = try string::from_bytes(allocator, mode);
-    errdefer opt_mode.deinit();
-    var output = string::new(allocator);
-    errdefer output.deinit();
-    try output.append_string(&options.output);
-    var copied = array::new<string::String>(allocator);
-    errdefer copied.deinit();
-    var index = 0;
-    while command.at(index) |argument| {
-        index = index + 1;
-        var one = string::new(allocator);
-        errdefer one.deinit();
-        try one.append_string(argument);
-        try copied.append(move one);
-    }
-    return Metadata {
-        target: move target,
-        triple: move triple,
-        cpu: move cpu,
-        abi: move abi,
-        libc: move libc,
-        runtime: move runtime_mode,
-        emit: move emit,
-        linker: move linker,
-        opt_mode: move opt_mode,
-        output: move output,
-        command: move copied
-    };
-}
-
 /// Writes the explicit build configuration used for one artifact, the Go
-/// `writeMetadata`: the same JSON `encoding/json` renders, two-space
-/// indented, next to the output as `<output>.kizu-build.json`.
+/// `Metadata` and `writeMetadata`: the same two-space indented JSON
+/// `encoding/json` renders, next to the output as
+/// `<output>.kizu-build.json`. The Go `Metadata` struct exists to carry
+/// json tags, so it maps to the field sequence the encoder writes here.
 fn write_metadata(
     io: Io,
     allocator: Allocator,
     options: &Options,
     command: &array::Array<string::String>
 ) -> !void {
-    let metadata = try metadata_of(allocator, options, command);
-    defer metadata.deinit();
+    var encoder = json::encoder_with_spaces(allocator, 2);
+    defer encoder.deinit();
+    try encoder.begin_object();
+    try encoder.write_bytes_field("target", "native");
+    try write_field(&var encoder, "triple", &options.triple);
+    try write_field(&var encoder, "cpu", &options.cpu);
+    try write_field(&var encoder, "abi", &options.abi);
+    try write_field(&var encoder, "libc", &options.libc);
+    try write_field(&var encoder, "runtime", &options.runtime);
+    try write_field(&var encoder, "emit", &options.emit);
+    try write_field(&var encoder, "linker", &options.linker);
+    let mode = optimization_mode_name(options.opt);
+    try encoder.write_bytes_field("optimization_mode", mode);
+    try write_field(&var encoder, "output", &options.output);
+    try encoder.begin_array_field("command");
+    var index = 0;
+    while command.at(index) |argument| {
+        index = index + 1;
+        let argument_bytes = argument.as_bytes();
+        try encoder.write_bytes(argument_bytes);
+    }
+    try encoder.end_array();
+    try encoder.end_object();
     var out = string::new(allocator);
     defer out.deinit();
-    try out.append_bytes("{");
-    try out.append_byte(cast<u8>(10));
-    try append_json_field(&var out, "target", &metadata.target);
-    try append_json_field(&var out, "triple", &metadata.triple);
-    try append_json_field(&var out, "cpu", &metadata.cpu);
-    try append_json_field(&var out, "abi", &metadata.abi);
-    try append_json_field(&var out, "libc", &metadata.libc);
-    try append_json_field(&var out, "runtime", &metadata.runtime);
-    try append_json_field(&var out, "emit", &metadata.emit);
-    try append_json_field(&var out, "linker", &metadata.linker);
-    try append_json_field(&var out, "optimization_mode", &metadata.opt_mode);
-    try append_json_field(&var out, "output", &metadata.output);
-    try out.append_bytes("  ");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes("command");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes(": [");
-    try out.append_byte(cast<u8>(10));
-    var index = 0;
-    while metadata.command.at(index) |argument| {
-        index = index + 1;
-        try out.append_bytes("    ");
-        let argument_bytes = argument.as_bytes();
-        try append_json_string(&var out, argument_bytes);
-        if index < metadata.command.len() {
-            try out.append_bytes(",");
-        }
-        try out.append_byte(cast<u8>(10));
-    }
-    try out.append_bytes("  ]");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
+    try encoder.finish_into(&var out);
     try out.append_byte(cast<u8>(10));
     var target = string::new(allocator);
     defer target.deinit();
@@ -772,97 +614,8 @@ fn write_metadata(
     return;
 }
 
-/// Writes one `  "name": "value",` metadata line.
-fn append_json_field(out: &var string::String, name: []u8, value: &string::String) -> !void {
-    try out.append_bytes("  ");
-    let quote = cast<u8>(34);
-    try out.append_byte(quote);
-    try out.append_bytes(name);
-    try out.append_byte(quote);
-    try out.append_bytes(": ");
-    let value_bytes = value.as_bytes();
-    try append_json_string(out, value_bytes);
-    try out.append_bytes(",");
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-/// Writes one JSON string the way `encoding/json` spells it: quotes,
-/// backslashes and control characters escaped, and `<`, `>`, `&` written as
-/// unicode escapes.
-fn append_json_string(out: &var string::String, value: []u8) -> !void {
-    let quote = cast<u8>(34);
-    let backslash = cast<u8>(92);
-    try out.append_byte(quote);
-    var index = 0;
-    while index < mem::len(value) {
-        let byte = value[index];
-        index = index + 1;
-        if byte == quote {
-            try out.append_byte(backslash);
-            try out.append_byte(quote);
-            continue;
-        }
-        if byte == backslash {
-            try out.append_byte(backslash);
-            try out.append_byte(backslash);
-            continue;
-        }
-        if byte == cast<u8>(10) {
-            try out.append_byte(backslash);
-            try out.append_bytes("n");
-            continue;
-        }
-        if byte == cast<u8>(13) {
-            try out.append_byte(backslash);
-            try out.append_bytes("r");
-            continue;
-        }
-        if byte == cast<u8>(9) {
-            try out.append_byte(backslash);
-            try out.append_bytes("t");
-            continue;
-        }
-        if byte == cast<u8>(60) {
-            try out.append_byte(backslash);
-            try out.append_bytes("u003c");
-            continue;
-        }
-        if byte == cast<u8>(62) {
-            try out.append_byte(backslash);
-            try out.append_bytes("u003e");
-            continue;
-        }
-        if byte == cast<u8>(38) {
-            try out.append_byte(backslash);
-            try out.append_bytes("u0026");
-            continue;
-        }
-        if byte < cast<u8>(32) {
-            try out.append_byte(backslash);
-            try out.append_bytes("u00");
-            try append_hex_byte(out, byte);
-            continue;
-        }
-        try out.append_byte(byte);
-    }
-    try out.append_byte(quote);
-    return;
-}
-
-/// Writes the two lowercase hex digits of one byte.
-fn append_hex_byte(out: &var string::String, byte: u8) -> !void {
-    try append_hex_digit(out, byte / cast<u8>(16));
-    try append_hex_digit(out, byte % cast<u8>(16));
-    return;
-}
-
-/// Writes one lowercase hex digit.
-fn append_hex_digit(out: &var string::String, digit: u8) -> !void {
-    if digit < cast<u8>(10) {
-        try out.append_byte(digit + cast<u8>(48));
-        return;
-    }
-    try out.append_byte(digit - cast<u8>(10) + cast<u8>(97));
-    return;
+/// Writes one owned option value as a metadata field.
+fn write_field(encoder: &var json::Encoder, name: []u8, value: &string::String) -> !void {
+    let bytes = value.as_bytes();
+    return encoder.write_bytes_field(name, bytes);
 }

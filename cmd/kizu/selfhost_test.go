@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -262,4 +263,199 @@ func globDirs(t *testing.T, pattern string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestSelfhostNative builds the selfhost compiler with the shipping one and
+// compares its native backend commands with the Go CLI: `run` and `test`
+// over the examples that check, tests/behavior and the module example
+// packages, and `build --target native` on the same targets, executing
+// both artifacts and comparing their build metadata. Exit status is
+// compared as failed-or-not: the selfhost `main` returns `!void`, so a
+// child's exact exit status collapses to the Cli error (see the gap table
+// in docs/selfhost-porting.md). Targets whose Go build fails in the
+// toolchain are skipped: the Go error carries clang's captured output,
+// which std::process cannot capture.
+func TestSelfhostNative(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the selfhost compiler and clang")
+	}
+	selfhost := filepath.Join(t.TempDir(), "selfhost-kizu")
+	build := kizuCommand("build", "--target", "native", "-o", selfhost, "../../compiler")
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build selfhost compiler: %v\n%s", err, out)
+	}
+	targets := globFiles(t, "../../examples/*.kizu")
+	targets = append(targets, "../../tests/behavior")
+	targets = append(targets, globDirs(t, "../../examples/modules/*")...)
+	for _, target := range targets {
+		target := target
+		name := strings.TrimPrefix(target, "../../")
+		t.Run("run/"+name, func(t *testing.T) {
+			t.Parallel()
+			compareNativeCommand(t, selfhost, "run", target)
+		})
+		t.Run("test/"+name, func(t *testing.T) {
+			t.Parallel()
+			compareNativeCommand(t, selfhost, "test", target)
+		})
+		t.Run("build/"+name, func(t *testing.T) {
+			t.Parallel()
+			compareNativeBuild(t, selfhost, target, false)
+		})
+	}
+	t.Run("build-opt/examples/hello.kizu", func(t *testing.T) {
+		t.Parallel()
+		compareNativeBuild(t, selfhost, "../../examples/hello.kizu", true)
+	})
+}
+
+// nativeCLIResult is one command run: what it printed, whether it failed,
+// and the exact status it exited with.
+type nativeCLIResult struct {
+	output cliOutput
+	code   int
+}
+
+// runNativeCLI runs one binary with its own TMPDIR, so the selfhost
+// temporary build directories of parallel cases cannot collide.
+func runNativeCLI(t *testing.T, name string, args ...string) nativeCLIResult {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	code := 0
+	if runErr != nil {
+		var exit *exec.ExitError
+		if errors.As(runErr, &exit) {
+			code = exit.ExitCode()
+		} else {
+			t.Fatalf("run %s: %v", name, runErr)
+		}
+	}
+	return nativeCLIResult{
+		output: cliOutput{stdout: stdout.String(), stderr: stderr.String(), failed: runErr != nil},
+		code:   code,
+	}
+}
+
+// clangNoise matches the toolchain lines the Go CLI captures and discards
+// on success, which the selfhost CLI lets through because std::process
+// inherits the child's streams.
+var clangNoise = regexp.MustCompile(
+	`^(warning: overriding the module target triple .*|\d+ warnings? generated\.)$`)
+
+// selfhostNativeStderr drops what only the selfhost path prints on stderr:
+// the runtime error line for the Cli error (the exit status carries that
+// fact) and the inherited toolchain noise.
+func selfhostNativeStderr(text string) string {
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(line, "runtime error: compiler::Cli::") || clangNoise.MatchString(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == 0 || (len(kept) == 1 && kept[0] == "") {
+		return ""
+	}
+	return strings.Join(kept, "\n") + "\n"
+}
+
+// isClangFailure reports whether a CLI run failed inside the C/LLVM
+// toolchain. Those cases are excluded from the comparison: the Go error
+// carries clang's captured output, which the selfhost CLI cannot capture.
+func isClangFailure(out cliOutput) bool {
+	return out.failed && strings.Contains(out.stderr, " failed: exit status ")
+}
+
+// compareNativeCommand runs one native command through both compilers and
+// compares what they print and whether they fail.
+func compareNativeCommand(t *testing.T, selfhost string, command string, target string) {
+	t.Helper()
+	if goCheckOutput(target).failed {
+		t.Skip("target does not check")
+	}
+	want := runNativeCLI(t, kizuBinaryPath, command, target)
+	if isClangFailure(want.output) {
+		t.Skip("clang failure output cannot be captured by the selfhost CLI")
+	}
+	got := runNativeCLI(t, selfhost, command, target)
+	got.output.stderr = selfhostNativeStderr(got.output.stderr)
+	if got.output != want.output {
+		t.Errorf("selfhost %s %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
+			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
+			command, target, want.output.failed, want.output.stdout, want.output.stderr,
+			got.output.failed, got.output.stdout, got.output.stderr)
+	}
+}
+
+// compareNativeBuild builds one target with both compilers, compares the
+// command output, then runs both artifacts and compares what they print
+// and their exact exit status, and compares the build metadata with every
+// absolute path normalized.
+func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) {
+	t.Helper()
+	if goCheckOutput(target).failed {
+		t.Skip("target does not check")
+	}
+	goOut := filepath.Join(t.TempDir(), "program")
+	selfOut := filepath.Join(t.TempDir(), "program")
+	args := []string{"build", "--target", "native"}
+	if opt {
+		args = append(args, "--opt")
+	}
+	wantArgs := append(append([]string{}, args...), "-o", goOut, target)
+	want := runNativeCLI(t, kizuBinaryPath, wantArgs...)
+	if isClangFailure(want.output) {
+		t.Skip("clang failure output cannot be captured by the selfhost CLI")
+	}
+	gotArgs := append(append([]string{}, args...), "-o", selfOut, target)
+	got := runNativeCLI(t, selfhost, gotArgs...)
+	got.output.stderr = selfhostNativeStderr(got.output.stderr)
+	want.output.stdout = strings.ReplaceAll(want.output.stdout, goOut, "OUTPUT")
+	got.output.stdout = strings.ReplaceAll(got.output.stdout, selfOut, "OUTPUT")
+	if got.output != want.output {
+		t.Errorf("selfhost build %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
+			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
+			target, want.output.failed, want.output.stdout, want.output.stderr,
+			got.output.failed, got.output.stdout, got.output.stderr)
+		return
+	}
+	if want.output.failed {
+		return
+	}
+	wantRun := runNativeCLI(t, goOut)
+	gotRun := runNativeCLI(t, selfOut)
+	if gotRun.output != wantRun.output || gotRun.code != wantRun.code {
+		t.Errorf("built executables for %s differ\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			target, wantRun.code, wantRun.output.stdout, wantRun.output.stderr,
+			gotRun.code, gotRun.output.stdout, gotRun.output.stderr)
+	}
+	wantMetadata := normalizedMetadata(t, goOut+".kizu-build.json")
+	gotMetadata := normalizedMetadata(t, selfOut+".kizu-build.json")
+	if gotMetadata != wantMetadata {
+		t.Errorf("metadata for %s differs\n--- want\n%s\n--- got\n%s", target, wantMetadata, gotMetadata)
+	}
+}
+
+// metadataAbsPath matches a JSON string holding an absolute path: the
+// output the two builds are asked for and the temporary paths the IR and
+// runtime object are written to differ between the two compilers by design.
+var metadataAbsPath = regexp.MustCompile(`"/[^"]*"`)
+
+// normalizedMetadata reads one build metadata file with every absolute
+// path replaced, leaving the shape and the explicit build inputs.
+func normalizedMetadata(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return metadataAbsPath.ReplaceAllString(string(data), `"PATH"`)
 }
