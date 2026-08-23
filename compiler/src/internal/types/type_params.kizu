@@ -22,8 +22,7 @@ fn new_type_param_store(allocator: Allocator) -> TypeParamStore {
 // Selects params and returns the frame the caller must restore. An empty list
 // selects no parameters rather than capturing names from the outer generic.
 fn (self: &var TypeParamStore) enter_ast(
-    tree: &ast::Ast,
-    params: &array::Array<ast::Text>
+    tree: &ast::Ast, params: &array::Array<ast::Text>
 ) -> !?arena::Handle<map::Map<[]u8, bool>> {
     let previous = self.current;
     if params.len() == 0 {
@@ -39,9 +38,29 @@ fn (self: &var TypeParamStore) enter_ast(
         try names.insert(name, true);
         index = index + 1;
     }
-    let handle = self.frames.add(move names);
-    self.current = handle;
-    return previous;
+    return self.install_frame(move names, previous);
+}
+
+// Selects only type-valued entries from one parser-owned signature.
+fn (self: &var TypeParamStore) enter_ast_signature(tree: &ast::Ast, signature: &ast::FunctionSignature) -> !?arena::Handle<map::Map<[]u8, bool>> {
+    let previous = self.current;
+    if signature.static_params.len() == 0 {
+        self.current = null;
+        return previous;
+    }
+    var names = map::new<[]u8, bool>(self.allocator);
+    errdefer names.deinit();
+    var index = 0;
+    while signature.static_params.at(index) |parameter| {
+        if parameter.type_name |_| {
+        } else {
+            let retained = tree.texts.at(parameter.name.node);
+            let name = retained.as_bytes();
+            try names.insert(name, true);
+        }
+        index = index + 1;
+    }
+    return self.install_frame(move names, previous);
 }
 
 // Selects only type-valued static parameters from a cached signature.
@@ -63,6 +82,10 @@ fn (self: &var TypeParamStore) enter_signature(
         }
         index = index + 1;
     }
+    return self.install_frame(move names, previous);
+}
+
+fn (self: &var TypeParamStore) install_frame(names: map::Map<[]u8, bool>, previous: ?arena::Handle<map::Map<[]u8, bool>>) -> ?arena::Handle<map::Map<[]u8, bool>> {
     if names.len() == 0 {
         names.deinit();
         self.current = null;

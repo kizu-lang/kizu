@@ -96,6 +96,25 @@ fn expect_no_element_type(
     return;
 }
 
+fn expect_resolved_element_type_forms(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(input);
+    let resolved = try resolve_element_type_forms(
+        allocator,
+        &table,
+        parsed
+    );
+    defer resolved.deinit();
+    let bytes = resolved.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
 fn expect_no_apply(allocator: Allocator, text: []u8) -> !void {
     if try split_apply(allocator, text) |parts| {
         parts.deinit();
@@ -312,4 +331,33 @@ test "stdmeta reads element types from valid closed containers" {
         "V"
     );
     try expect_no_element_type(allocator, "i64");
+}
+
+test "element forms resolve recursively without hiding invalid maps" {
+    let allocator = mem::page_allocator();
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::array::Array<i64>>",
+        "i64"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "?std::array::Array<std::meta::element<std::mem::Box<i64>>>",
+        "?std::array::Array<i64>"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<[]u8, std::string::String>>",
+        "std::string::String"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<i64, bool>>",
+        "std::meta::element<std::map::Map<i64, bool>>"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<K, bool>>",
+        "std::meta::element<std::map::Map<K, bool>>"
+    );
 }

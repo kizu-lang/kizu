@@ -230,8 +230,11 @@ test "name spelling helpers split only their documented seam" {
 }
 
 pub struct Qualifier {
-    pub calls: i64
+    pub calls: i64,
+    pub order: string::String
 }
+
+fn (self: Qualifier) deinit() -> void { self.order.deinit(); }
 
 fn qualified_part(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
@@ -244,6 +247,11 @@ fn (self: &var Qualifier) rename_path(
     allocator: Allocator,
     path: &array::Array<string::String>
 ) -> !array::Array<string::String> {
+    if self.calls > 0 { try self.order.append_byte(cast<u8>(44)); }
+    if path.at(0) |part| {
+        let source = part.as_bytes();
+        try self.order.append_bytes(source);
+    }
     self.calls = self.calls + 1;
     var out = array::new<string::String>(allocator);
     errdefer out.deinit();
@@ -262,7 +270,8 @@ test "map names rewrites every name and preserves surrounding structure" {
     var table = new(allocator);
     defer table.deinit();
     let parsed = try table.parse("Error![4]Pair<T, bool>");
-    var qualifier = Qualifier { calls: 0 };
+    var qualifier = Qualifier { calls: 0, order: string::new(allocator) };
+    defer qualifier.deinit();
     let mapped = try map_names<Qualifier>(
         &var table,
         parsed,
@@ -276,6 +285,8 @@ test "map names rewrites every name and preserves surrounding structure" {
         "resolved::Error![4]resolved::Pair<resolved::T, resolved::bool>"
     ));
     testing::expect_equal<i64>(4, qualifier.calls);
+    let order = qualifier.order.as_bytes();
+    testing::expect_equal<[]u8>("Pair,T,bool,Error", order);
 }
 
 test "substitute text parses replacements once and renders canonically" {
