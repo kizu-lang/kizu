@@ -1,0 +1,169 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn expect_public_api_diagnostic(
+    allocator: Allocator,
+    input: []u8,
+    expected_category: []u8,
+    expected_message: []u8,
+    expected_help: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        testing::fail("function collection rejected public API fixture");
+    }
+    if try state.check_public_api(&tree, &program) |value| {
+        defer value.deinit();
+        let category = value.category.as_bytes();
+        let message = value.message.as_bytes();
+        let help = value.help.as_bytes();
+        testing::expect_equal<[]u8>(expected_category, category);
+        testing::expect_equal<[]u8>(expected_message, message);
+        testing::expect_equal<[]u8>(expected_help, help);
+    } else {
+        testing::fail(expected_message);
+    }
+    return;
+}
+
+fn expect_public_api_success(allocator: Allocator, input: []u8) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        testing::fail("function collection rejected public API fixture");
+    }
+    if try state.check_public_api(&tree, &program) |value| {
+        defer value.deinit();
+        let message = value.message.as_bytes();
+        testing::fail(message);
+    }
+    return;
+}
+
+test "checker accepts public API composed from public types" {
+    let allocator = mem::page_allocator();
+    try expect_public_api_success(
+        allocator,
+        "pub enum Kind { Value } pub struct Token { pub kind: Kind } pub fn take(token: Token) -> Token { return token; }"
+    );
+    try expect_public_api_success(
+        allocator,
+        "struct Secret {} fn hidden(value: Secret) -> Secret { return value; } union Hidden { Value(Secret) } contract HiddenContract { fn read() -> Secret; }"
+    );
+}
+
+test "private type lookup compares qualified paths without joining" {
+    let allocator = mem::page_allocator();
+    var path = array::new<string::String>(allocator);
+    defer path.deinit();
+    let module = try string::from_bytes(allocator, "app");
+    errdefer module.deinit();
+    try path.append(move module);
+    let name = try string::from_bytes(allocator, "Secret");
+    errdefer name.deinit();
+    try path.append(move name);
+    testing::expect(compare_type_path(&path, "app::Secret") == 0);
+    testing::expect(compare_type_path(&path, "app::T") < 0);
+    testing::expect(compare_type_path(&path, "app::A") > 0);
+    testing::expect(compare_type_path(&path, "app") > 0);
+    testing::expect(compare_type_path(&path, "app::Secret::Nested") < 0);
+}
+
+test "public API private-type diagnostics match the shipping checker" {
+    let allocator = mem::page_allocator();
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct Secret {} pub fn leak(value: &[]Secret) {}",
+        "type error",
+        "public function `leak` parameter exposes private type `Secret`",
+        ""
+    );
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct Secret {} pub struct Token { pub secret: Secret }",
+        "type error",
+        "public field `Token.secret` exposes private type `Secret`",
+        ""
+    );
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct Secret {} struct Hidden { pub secret: Secret }",
+        "type error",
+        "public field `Hidden.secret` exposes private type `Secret`",
+        ""
+    );
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct Secret {} pub union Result { Ok(Secret) }",
+        "type error",
+        "public union variant `Result::Ok` exposes private type `Secret`",
+        ""
+    );
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct Secret {} pub contract Peek { fn peek() -> &[]Secret; }",
+        "type error",
+        "public function `peek` return type exposes private type `Secret`",
+        ""
+    );
+}
+
+test "public API stops at the first parameter before the return" {
+    let allocator = mem::page_allocator();
+    try expect_public_api_diagnostic(
+        allocator,
+        "struct First {} struct Later {} pub fn leak(value: First) -> Later {}",
+        "type error",
+        "public function `leak` parameter exposes private type `First`",
+        ""
+    );
+}
+
+test "public API walks error names before success names" {
+    let allocator = mem::page_allocator();
+    try expect_public_api_diagnostic(
+        allocator,
+        "error Failure { Bad } struct Secret {} pub fn reveal() -> Failure!Secret {}",
+        "type error",
+        "public function `reveal` return type exposes private type `Failure`",
+        ""
+    );
+}
+
+test "unsafe structs cannot expose fields" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\/// invariant
+        \\unsafe struct Buf { pub data: ptr<u8>, len: usize, }
+        \\fn main() {}
+    ;
+    try expect_public_api_diagnostic(
+        allocator,
+        input,
+        "unsafe error",
+        "`unsafe struct Buf` cannot have `pub` field `data`",
+        "drop `pub` so only this file can break the invariant"
+    );
+}
