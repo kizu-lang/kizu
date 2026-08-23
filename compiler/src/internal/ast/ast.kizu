@@ -596,11 +596,11 @@ fn (self: &var Ast) add_expression_list(
     };
 }
 
-fn (self: ExpressionList) len(ast: &Ast) -> i64 {
+pub fn (self: ExpressionList) len(ast: &Ast) -> i64 {
     return expression_list_len(ast.expression_lists.at(self.node));
 }
 
-fn (self: ExpressionList) get_or_panic(ast: &Ast, index: i64) -> Expression {
+pub fn (self: ExpressionList) get_or_panic(ast: &Ast, index: i64) -> Expression {
     return expression_list_get_or_panic(
         ast.expression_lists.at(self.node),
         index
@@ -723,14 +723,14 @@ fn (self: &FunctionSignature) type_param_names(
 }
 
 /// Reports whether this arm is the fallback match branch.
-fn (self: &MatchArm) is_wildcard(ast: &Ast) -> bool {
+pub fn (self: &MatchArm) is_wildcard(ast: &Ast) -> bool {
     let retained = ast.texts.at(self.tag.node);
     let bytes = retained.as_bytes();
     return mem::equal_bytes(bytes, "_");
 }
 
 /// Returns this fixed buffer literal's type spelling.
-fn (self: &BufferLiteralExpr) type_text(
+pub fn (self: &BufferLiteralExpr) type_text(
     allocator: Allocator
 ) -> !string::String {
     var out = string::new(allocator);
@@ -2497,6 +2497,89 @@ fn add_construct_field(
     };
 }
 
+// Accumulates the statements and literal fields of one construct expansion
+// so callers that hold field descriptions in different shapes share one
+// expansion.
+struct ConstructBuilder {
+    statements: array::Array<Statement>,
+    values: array::Array<FieldValue>,
+    type_name: Text,
+    worker_name: Text,
+    cleanup_method: Text,
+    empty_args: ExpressionList
+}
+
+fn begin_construct(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    worker: []u8,
+    field_count: i64
+) -> !ConstructBuilder {
+    var statements = array::new<Statement>(allocator);
+    errdefer statements.deinit();
+    try statements.reserve(field_count * 2);
+    var values = array::new<FieldValue>(allocator);
+    errdefer values.deinit();
+    try values.reserve(field_count);
+    let type_name = try ast.add_text_from_bytes(owner);
+    let worker_name = try ast.add_text_from_bytes(worker);
+    let cleanup_method = try ast.add_text_from_bytes(
+        typ::cleanup_method()
+    );
+    let empty_args = ast.add_expression_list(array::new<Expression>(allocator));
+    return ConstructBuilder {
+        statements: move statements,
+        values: move values,
+        type_name: type_name,
+        worker_name: worker_name,
+        cleanup_method: cleanup_method,
+        empty_args: empty_args
+    };
+}
+
+fn (self: &var ConstructBuilder) add_field(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    field: &ConstructField,
+    args: ExpressionList,
+    owners: &map::Map<[]u8, bool>
+) -> !void {
+    let built = try add_construct_field(
+        allocator,
+        ast,
+        owner,
+        self.worker_name,
+        self.cleanup_method,
+        self.empty_args,
+        field,
+        args,
+        owners
+    );
+    try self.statements.append(built.statement);
+    if built.cleanup |cleanup| {
+        try self.statements.append(cleanup);
+    }
+    try self.values.append(built.field);
+    return;
+}
+
+fn finish_construct(
+    ast: &var Ast,
+    builder: ConstructBuilder
+) -> ConstructResult {
+    let literal = ast.add_expression(ExpressionNode::StructLiteral(StructLiteralExpr {
+        type_name: builder.type_name,
+        fields: move builder.values,
+        span: zero_span()
+    }));
+    return ConstructResult {
+        statements: move builder.statements,
+        literal: literal
+    };
+}
+
 /// Expands one reflected struct construction into ordinary AST nodes.
 pub fn construct_expansion(
     allocator: Allocator,
@@ -2507,47 +2590,45 @@ pub fn construct_expansion(
     args: ExpressionList,
     owners: &map::Map<[]u8, bool>
 ) -> !ConstructResult {
-    var statements = array::new<Statement>(allocator);
-    errdefer statements.deinit();
-    try statements.reserve(fields.len() * 2);
-    var values = array::new<FieldValue>(allocator);
-    errdefer values.deinit();
-    try values.reserve(fields.len());
-    let type_name = try ast.add_text_from_bytes(owner);
-    let worker_name = try ast.add_text_from_bytes(worker);
-    let cleanup_method = try ast.add_text_from_bytes(
-        typ::cleanup_method()
+    var builder = try begin_construct(
+        allocator, ast, owner, worker, fields.len()
     );
-    let empty_args = ast.add_expression_list(array::new<Expression>(allocator));
+    errdefer builder.deinit();
     var index = 0;
     while fields.at(index) |field| {
-        let built = try add_construct_field(
-            allocator,
-            ast,
-            owner,
-            worker_name,
-            cleanup_method,
-            empty_args,
-            field,
-            args,
-            owners
-        );
-        try statements.append(built.statement);
-        if built.cleanup |cleanup| {
-            try statements.append(cleanup);
-        }
-        try values.append(built.field);
+        try builder.add_field(allocator, ast, owner, field, args, owners);
         index = index + 1;
     }
-    let literal = ast.add_expression(ExpressionNode::StructLiteral(StructLiteralExpr {
-        type_name: type_name,
-        fields: move values,
-        span: zero_span()
-    }));
-    return ConstructResult {
-        statements: move statements,
-        literal: literal
-    };
+    return finish_construct(ast, move builder);
+}
+
+/// Expands one reflected struct construction whose field names and type
+/// spellings are retained Strings, paired by index.
+pub fn construct_expansion_from_names(
+    allocator: Allocator,
+    ast: &var Ast,
+    owner: []u8,
+    worker: []u8,
+    names: &array::Array<string::String>,
+    type_names: &array::Array<string::String>,
+    args: ExpressionList,
+    owners: &map::Map<[]u8, bool>
+) -> !ConstructResult {
+    var builder = try begin_construct(
+        allocator, ast, owner, worker, names.len()
+    );
+    errdefer builder.deinit();
+    var index = 0;
+    while names.at(index) |retained_name| {
+        let name = retained_name.as_bytes();
+        if type_names.at(index) |retained_type_name| {
+            let type_name = retained_type_name.as_bytes();
+            let field = ConstructField { name: name, type_name: type_name };
+            try builder.add_field(allocator, ast, owner, &field, args, owners);
+        }
+        index = index + 1;
+    }
+    return finish_construct(ast, move builder);
 }
 
 /// Returns the expression covered by a value-transparent marker.

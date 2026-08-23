@@ -1,0 +1,165 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::map;
+import std::mem;
+import std::sort;
+import std::string;
+
+// Validates the entry point result contract before its body is checked.
+fn (self: &var Checker) check_main_return_type(
+    name: []u8,
+    return_type: Type
+) -> !?diagnostic::Diagnostic {
+    if !mem::equal_bytes(name, "main") {
+        return null;
+    }
+    if self.types.is_text(return_type, "void") {
+        return null;
+    }
+    if try self.types.error_union_parts(return_type) |parts| {
+        if self.types.is_text(parts.success, "void") {
+            return null;
+        }
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`main` returns `");
+    try self.append_checker_type(&var message, return_type);
+    try message.append_bytes("`, expected `void` or `!void`");
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+// Binds a parameter and derives root provenance from its type.
+fn (self: &var Checker) define_scope_param(
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    name: []u8,
+    type_name: Type,
+    borrowed: bool,
+    mut_borrow: bool,
+    signature_param: bool
+) -> !bool {
+    var sources = array::new<string::String>(self.allocator);
+    errdefer sources.deinit();
+    if borrowed or
+        try self.types.is_borrowed_view_return_type(type_name) {
+        let source = try string::from_bytes(self.allocator, name);
+        errdefer source.deinit();
+        try sources.append(move source);
+    }
+    return scopes.define_param_with_source(
+        scope,
+        name,
+        type_name,
+        borrowed,
+        mut_borrow,
+        move sources,
+        signature_param
+    );
+}
+
+// Places compile-time value parameters in lexical scope and indexes their
+// declared types for static-argument forwarding. Parameters are copied out
+// of metadata one at a time so the scope definition can mutate the checker.
+fn (self: &var Checker) define_static_value_params(
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    function: FunctionHandle,
+    out: &var map::Map<[]u8, Type>
+) -> !?diagnostic::Diagnostic {
+    let count = self.function_static_param_count(function);
+    var index = 0;
+    while index < count {
+        let parameter = try self.copy_static_param(function, index) orelse
+            return try self.checker_error_at(
+            "type error", ast::zero_span(), "missing static parameter metadata"
+        );
+        defer parameter.deinit();
+        if !parameter.is_type {
+            let name = parameter.name.as_bytes();
+            let defined = try self.define_scope_param(
+                scopes,
+                scope,
+                name,
+                parameter.type_name,
+                false,
+                false,
+                false
+            );
+            if try self.require_scope_definition(name, defined) |problem| {
+                return move problem;
+            }
+            try out.insert(name, parameter.type_name);
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// Turns the scope's duplicate decision into the source-facing diagnostic.
+fn (self: &Checker) require_scope_definition(
+    name: []u8,
+    defined: bool
+) -> !?diagnostic::Diagnostic {
+    if defined {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("duplicate variable `");
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+// Reports the stable first unread binding declared directly in one scope.
+fn (self: &Checker) unread_local_error(
+    scopes: &ScopeStore,
+    scope: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    let retained = scopes.scopes.at(scope.node);
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var index = 0;
+    while retained.bindings.key_at(index) |name| {
+        if retained.bindings.at(name) |binding| {
+            if binding.unread |_| {
+                let copied = try string::from_bytes(self.allocator, name);
+                errdefer copied.deinit();
+                try names.append(move copied);
+            }
+        }
+        index = index + 1;
+    }
+    if names.len() == 0 {
+        return null;
+    }
+    try sort::strings(&var names);
+    if names.at(0) |first| {
+        let name = first.as_bytes();
+        if retained.bindings.at(name) |binding| {
+            if binding.unread |span| {
+                var message = string::new(self.allocator);
+                errdefer message.deinit();
+                try message.append_bytes("local `");
+                try message.append_bytes(name);
+                try message.append_bytes("` is never read");
+                var problem = try self.checker_message_at(
+                    "type error", span, move message
+                );
+                errdefer problem.deinit();
+                try problem.with_code("type.unused_local");
+                try problem.with_help(
+                    "remove it, or write `let _ = ...` to drop the value on purpose"
+                );
+                return move problem;
+            }
+        }
+    }
+    return null;
+}

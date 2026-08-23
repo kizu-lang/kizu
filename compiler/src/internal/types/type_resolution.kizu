@@ -97,9 +97,16 @@ struct Checker {
     types: TypeTable,
     metadata: CheckerMetadata,
     type_params: TypeParamStore,
-    type_arg_values: map::Map<[]u8, Type>,
+    type_args: TypeValueFrameStore,
     meta_field_entries: arena::Arena<MetaField>,
-    meta_fields: map::Map<[]u8, MetaFieldHandle>,
+    meta_bindings: MetaBindingStore,
+    body_contexts: arena::Arena<BodyContext>,
+    current_body: ?arena::Handle<BodyContext>,
+    static_values: TypeValueFrameStore,
+    checked_instances: map::Map<[]u8, bool>,
+    checked_instance_keys: arena::Arena<string::String>,
+    instantiation_depth: i64,
+    capture_condition: bool,
     deinit_owner_maps: arena::Arena<map::Map<[]u8, bool>>,
     deinit_owners: ?arena::Handle<map::Map<[]u8, bool>>
 }
@@ -110,9 +117,16 @@ fn new_checker(allocator: Allocator) -> Checker {
         types: new_type_table(allocator),
         metadata: new_checker_metadata(allocator),
         type_params: new_type_param_store(allocator),
-        type_arg_values: map::new<[]u8, Type>(allocator),
+        type_args: new_type_value_frame_store(allocator),
         meta_field_entries: arena::new<MetaField>(allocator),
-        meta_fields: map::new<[]u8, MetaFieldHandle>(allocator),
+        meta_bindings: new_meta_binding_store(allocator),
+        body_contexts: arena::new<BodyContext>(allocator),
+        current_body: null,
+        static_values: new_type_value_frame_store(allocator),
+        checked_instances: map::new<[]u8, bool>(allocator),
+        checked_instance_keys: arena::new<string::String>(allocator),
+        instantiation_depth: 0,
+        capture_condition: false,
         deinit_owner_maps: arena::new<map::Map<[]u8, bool>>(allocator),
         deinit_owners: null
     };
@@ -140,7 +154,16 @@ fn (self: &var Checker) bind_meta_field(
     capture: []u8,
     field: MetaFieldHandle
 ) -> !void {
-    return self.meta_fields.insert(capture, field);
+    let previous = try self.meta_bindings.bind(capture, field);
+    if previous |_| {}
+    return;
+}
+
+fn (self: &var Checker) bind_type_arg_value(
+    name: []u8,
+    value: Type
+) -> !void {
+    return self.type_args.bind(name, value);
 }
 
 // Copies one retained type at the checker diagnostic boundary.
@@ -660,9 +683,8 @@ fn (self: &var Checker) resolve_meta_name_type(
     while node.args.get(index) |argument| {
         let child = typ::child_type(parsed, argument);
         let retained = try self.types.retain_parsed(child);
-        let substituted = try self.types.substitute_type_params(
-            retained,
-            &self.type_arg_values
+        let substituted = try self.type_args.substitute(
+            &var self.types, retained
         );
         match try self.resolve_meta_type(tree, substituted) {
             Value(resolved) => try args.append(resolved),
@@ -765,7 +787,7 @@ fn (self: &Checker) meta_field_handle(
     let handle = capture.node orelse return null;
     let entry = self.types.entries.at(handle);
     let bytes = entry.spelling.as_bytes();
-    return self.meta_fields.get(bytes);
+    return self.meta_bindings.get(bytes);
 }
 
 fn (self: &var Checker) resolve_meta_element(

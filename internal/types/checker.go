@@ -70,9 +70,6 @@ type Checker struct {
 	// than in a scope: the only thing that may read it is a `std::meta` form.
 	metaFields map[string]metaField
 	loopLabels []string
-	// stdMethods indexes the signatures std declares for its container methods,
-	// so this checker reads them instead of restating them.
-	stdMethods stdmethod.MethodIndex
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
@@ -106,7 +103,6 @@ func New() *Checker {
 
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
-	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
@@ -141,7 +137,6 @@ func (c *Checker) Check(program *ast.Program) error {
 // every independent type error at once. Setup phases that the body checks
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
-	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
@@ -385,6 +380,16 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 		if c.isTypeName(fn.Name) {
 			return errorf("type error: `%s` is a type and cannot name a function",
 				fn.Name)
+		}
+		if fn.Receiver {
+			receiver, name, ok := stdmethod.SplitMethodName(fn.Name)
+			if ok {
+				method := c.implMethod(receiver, name)
+				if method != nil {
+					c.functions[fn.Name] = method
+					continue
+				}
+			}
 		}
 		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
@@ -5734,29 +5739,33 @@ func (c *Checker) checkStdMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	method, ok := c.stdMethods[receiver][name]
-	if !ok {
+	method := c.implMethod(receiver, name)
+	if method == nil || len(method.params) == 0 {
 		return "", errorf("type error: %s has no method `%s`", label, name)
 	}
 	if err := c.checkStdMethodBody(method, typeArgs); err != nil {
 		return "", err
 	}
-	if len(args) != len(method.Params) {
+	if len(args) != len(method.params)-1 {
 		return "", errorf("type error: `%s.%s` expects %d args, got %d",
-			label, name, len(method.Params), len(args))
+			label, name, len(method.params)-1, len(args))
 	}
-	subst := make([]string, 0, len(typeArgs))
-	for _, arg := range typeArgs {
-		subst = append(subst, string(arg))
+	typeParams := method.sig.TypeParamNames()
+	subst := make(map[string]Type, len(typeArgs))
+	if len(typeParams) == len(typeArgs) {
+		for idx, param := range typeParams {
+			subst[param] = typeArgs[idx]
+		}
 	}
 	for idx, arg := range args {
-		want := Type(method.Substitute(method.Params[idx].TypeName, subst))
+		paramIndex := idx + 1
+		want := c.types.substituteTypeParams(method.params[paramIndex], subst)
 		got, err := c.checkContextualExpr(arg, want, env, unsafe)
 		if err != nil {
 			return "", err
 		}
 		got, err = coerceReturnedBorrowArgument(
-			got, want, method.Params[idx].Borrow, method.Params[idx].MutBorrow,
+			got, want, method.borrowParams[paramIndex], method.mutBorrowParams[paramIndex],
 		)
 		if err != nil {
 			return "", err
@@ -5765,7 +5774,7 @@ func (c *Checker) checkStdMethod(
 			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
 		}
 	}
-	result := Type(method.Substitute(method.Return, subst))
+	result := c.types.substituteTypeParams(method.returnType, subst)
 	if err := c.revalidateSubstituted(result); err != nil {
 		return "", err
 	}
@@ -5793,12 +5802,12 @@ func (c *Checker) revalidateSubstituted(t Type) error {
 // declares and lowered from the method name. That left the body unchecked, so
 // `return std::internal::builtin::array_apend<T>(self, value)` -- or anything else -- sat
 // in std reading like the implementation while meaning nothing.
-func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
-	fn := c.functions[method.Sig.Name]
-	if fn == nil || fn.body == nil || len(method.TypeParams) != len(typeArgs) {
+func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
+	typeParams := fn.sig.TypeParamNames()
+	if fn.body == nil || len(typeParams) != len(typeArgs) {
 		return nil
 	}
-	key := method.Sig.Name + "<" + joinTypes(typeArgs) + ">"
+	key := fn.sig.Name + "<" + joinTypes(typeArgs) + ">"
 	if c.checkedStdBodies[key] {
 		return nil
 	}
@@ -5806,7 +5815,7 @@ func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) e
 	// another wrapper stops here instead of recurring.
 	c.checkedStdBodies[key] = true
 	subst := make(map[string]Type, len(typeArgs))
-	for idx, param := range method.TypeParams {
+	for idx, param := range typeParams {
 		subst[param] = typeArgs[idx]
 	}
 	return c.checkGenericInstantiation(fn, subst, nil)

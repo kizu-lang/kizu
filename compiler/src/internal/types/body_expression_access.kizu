@@ -1,0 +1,1079 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::map;
+import std::mem;
+import std::sort;
+import std::string;
+
+struct CheckedStructField {
+    expression: ast::Expression,
+    typ: Type
+}
+
+// Validates a struct literal against the retained declaration.
+fn (self: &var Checker) check_struct_literal_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: ast::Expression,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        StructLiteral(literal) => {
+            let type_name = literal.type_name;
+            let span = literal.span;
+            let field_count = literal.fields.len();
+            return self.check_struct_literal_parts(
+                tree,
+                scopes,
+                scope,
+                mark,
+                expression,
+                type_name,
+                span,
+                field_count,
+                out
+            );
+        },
+        _ => return try self.checker_error_at(
+            "type error", expression_span(tree, expression),
+            "expected struct literal"
+        ),
+    }
+}
+
+fn (self: &var Checker) check_struct_literal_parts(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: ast::Expression,
+    type_name_handle: ast::Text,
+    span: ast::Span,
+    field_count: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained_name = tree.texts.at(type_name_handle.node);
+    let source_type_name = retained_name.as_bytes();
+    let owned_type_name = try string::from_bytes(
+        self.allocator, source_type_name
+    );
+    defer owned_type_name.deinit();
+    let type_name = owned_type_name.as_bytes();
+    let handle = self.metadata.structs.get(type_name) orelse
+        return try self.unknown_struct_error(
+        type_name
+    );
+    match tree.declarations.at(handle.node) {
+        Struct(declaration) => {
+            if try self.require_unsafe_struct_invariant(
+                mark,
+                declaration,
+                type_name,
+                "construction of",
+                "",
+                span
+            ) |problem| {
+                return move problem;
+            }
+        },
+        _ => return try self.unknown_struct_error(type_name),
+    }
+    var values = map::new<[]u8, CheckedStructField>(self.allocator);
+    defer values.deinit();
+    var written_index = 0;
+    while written_index < field_count {
+        let struct_name = owned_type_name.as_bytes();
+        if try self.check_struct_literal_written_field(
+            tree,
+            scopes,
+            scope,
+            mark,
+            expression,
+            written_index,
+            handle,
+            struct_name,
+            &var values
+        ) |problem| {
+            return move problem;
+        }
+        written_index = written_index + 1;
+    }
+    match tree.declarations.at(handle.node) {
+        Struct(declaration) => {
+            var field_index = 0;
+            while declaration.fields.at(field_index) |field| {
+                let retained_field_name = tree.texts.at(field.name.node);
+                let field_name = retained_field_name.as_bytes();
+                let checked = values.get(field_name);
+                if checked |_| {} else {
+                    return try self.struct_member_error(
+                        "missing field", type_name, field_name
+                    );
+                }
+                if try self.check_private_field_access(
+                    tree, type_name, field
+                ) |problem| {
+                    return move problem;
+                }
+                var want = empty_type();
+                match try self.resolve_instance_field_type(tree, field) {
+                    Value(value) => {
+                        want = value;
+                    },
+                    Issue(issue) => return try self.type_resolution_diagnostic(issue),
+                }
+                let checked_field = checked orelse return try self.struct_member_error(
+                    "missing field", type_name, field_name
+                );
+                var got = empty_type();
+                if try self.coerce_contextual_integer_literal(
+                    tree,
+                    checked_field.expression,
+                    want,
+                    checked_field.typ,
+                    &var got
+                ) |problem| {
+                    return move problem;
+                }
+                var matches = false;
+                if try self.struct_literal_field_matches(
+                    tree,
+                    scopes,
+                    scope,
+                    checked_field.expression,
+                    want,
+                    got,
+                    &var matches
+                ) |problem| {
+                    return move problem;
+                }
+                if !matches {
+                    return try self.struct_field_type_error(
+                        type_name, field_name, want, got
+                    );
+                }
+                field_index = field_index + 1;
+            }
+            var value_index = 0;
+            while values.key_at(value_index) |field_name| {
+                if !struct_declares_field(tree, declaration, field_name) {
+                    return try self.struct_member_error(
+                        "unknown field", type_name, field_name
+                    );
+                }
+                value_index = value_index + 1;
+            }
+        },
+        _ => return try self.unknown_struct_error(type_name),
+    }
+    out.* = try self.types.intern(type_name);
+    return null;
+}
+
+fn (self: &var Checker) check_struct_literal_written_field(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: ast::Expression,
+    index: i64,
+    declaration: ast::Declaration,
+    type_name: []u8,
+    values: &var map::Map<[]u8, CheckedStructField>
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        StructLiteral(literal) => {
+            if literal.fields.at(index) |field| {
+                let copied = ast::FieldValue {
+                    name: field.name,
+                    value: field.value
+                };
+                return self.check_struct_literal_written_value(
+                    tree,
+                    scopes,
+                    scope,
+                    mark,
+                    declaration,
+                    type_name,
+                    &copied,
+                    values
+                );
+            }
+        },
+        _ => {},
+    }
+    return try self.checker_error_at(
+        "type error", expression_span(tree, expression),
+        "invalid struct literal field"
+    );
+}
+
+fn (self: &var Checker) check_struct_literal_written_value(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    declaration: ast::Declaration,
+    type_name: []u8,
+    field: &ast::FieldValue,
+    values: &var map::Map<[]u8, CheckedStructField>
+) -> !?diagnostic::Diagnostic {
+    let retained_name = tree.texts.at(field.name.node);
+    let source_name = retained_name.as_bytes();
+    let owned_name = try string::from_bytes(self.allocator, source_name);
+    defer owned_name.deinit();
+    let field_name = owned_name.as_bytes();
+    if values.contains(field_name) {
+        return try self.struct_member_error(
+            "duplicate field", type_name, field_name
+        );
+    }
+    var got = empty_type();
+    if try self.check_struct_literal_field_value(
+        tree,
+        scopes,
+        scope,
+        mark,
+        declaration,
+        type_name,
+        field,
+        &var got
+    ) |problem| {
+        return move problem;
+    }
+    try values.insert(field_name, CheckedStructField {
+        expression: field.value,
+        typ: got
+    });
+    return null;
+}
+
+fn (self: &Checker) unknown_struct_error(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unknown struct `");
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) struct_member_error(
+    kind: []u8,
+    type_name: []u8,
+    field_name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes(kind);
+    try message.append_bytes(" `");
+    try message.append_bytes(type_name);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field_name);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn struct_declares_field(
+    tree: &ast::Ast,
+    declaration: &ast::StructDecl,
+    name: []u8
+) -> bool {
+    var index = 0;
+    while declaration.fields.at(index) |field| {
+        let retained = tree.texts.at(field.name.node);
+        let field_name = retained.as_bytes();
+        if mem::equal_bytes(field_name, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn (self: &var Checker) resolve_instance_field_type(
+    tree: &ast::Ast,
+    field: &ast::Field
+) -> !TypeResolution {
+    let declared = try self.types.remember(&tree.types, field.type_name);
+    let wrapped = try self.types.borrow_wrapped_type(
+        field.borrow, field.mut_borrow, declared
+    );
+    let substituted = try self.type_args.substitute(&var self.types, wrapped);
+    return self.resolve_retained_type(tree, substituted);
+}
+
+fn (self: &var Checker) check_struct_literal_field_value(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    declaration_handle: ast::Declaration,
+    type_name: []u8,
+    field: &ast::FieldValue,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if !expression_is_null(tree, field.value) {
+        return self.check_expr(
+            tree, scopes, scope, mark, field.value, out
+        );
+    }
+    let retained_name = tree.texts.at(field.name.node);
+    let field_name = retained_name.as_bytes();
+    match tree.declarations.at(declaration_handle.node) {
+        Struct(declaration) => {
+            var index = 0;
+            while declaration.fields.at(index) |declared| {
+                let retained_declared_name = tree.texts.at(declared.name.node);
+                let declared_name = retained_declared_name.as_bytes();
+                if mem::equal_bytes(declared_name, field_name) {
+                    var want = empty_type();
+                    match try self.resolve_instance_field_type(tree, declared) {
+                        Value(value) => {
+                            want = value;
+                        },
+                        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+                    }
+                    if try self.types.optional_elem(want) |_| {
+                        out.* = want;
+                        return null;
+                    }
+                    return try self.struct_null_field_error(
+                        type_name, field_name, want
+                    );
+                }
+                index = index + 1;
+            }
+        },
+        _ => return try self.unknown_struct_error(type_name),
+    }
+    return try self.struct_member_error(
+        "unknown field", type_name, field_name
+    );
+}
+
+fn expression_is_null(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> bool {
+    return match tree.expressions.at(expression.node) {
+        Null(_) => true,
+        _ => false,
+    };
+}
+
+fn (self: &var Checker) struct_literal_field_matches(
+    tree: &ast::Ast,
+    scopes: &ScopeStore,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if same_type(got, want) {
+        out.* = true;
+        return null;
+    }
+    if try self.types.optional_elem(want) |_| {
+        if try self.wraps_into_optional(
+            tree, expression, want, got, out
+        ) |problem| {
+            return move problem;
+        }
+        if out.* {
+            return null;
+        }
+    }
+    out.* = try self.return_value_matches_borrow_param(
+        tree, scopes, scope, expression, want, got
+    );
+    return null;
+}
+
+fn (self: &Checker) struct_null_field_error(
+    type_name: []u8,
+    field_name: []u8,
+    want: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("field `");
+    try message.append_bytes(type_name);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field_name);
+    try message.append_bytes("` expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got null");
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) struct_field_type_error(
+    type_name: []u8,
+    field_name: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("field `");
+    try message.append_bytes(type_name);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field_name);
+    try message.append_bytes("` expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+// Resolves a field read, including enum/error/union namespace diagnostics.
+fn (self: &var Checker) check_field_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: &ast::FieldExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    return self.resolve_field_expr(
+        tree, scopes, scope, mark, expression, out
+    );
+}
+
+fn (self: &var Checker) resolve_field_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: &ast::FieldExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if expression.namespace {
+        return self.check_namespace_expr(tree, expression, out);
+    }
+    if self.enum_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.enums.at(handle.index) |tagged| {
+            let retained = tree.texts.at(tagged.name.node);
+            let name = retained.as_bytes();
+            let field_name = tree.texts.at(expression.name.node);
+            let member = field_name.as_bytes();
+            return try self.namespace_separator_error(
+                "enum tag", name, member
+            );
+        }
+    }
+    if try self.error_set_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.error_sets.at(handle.index) |set| {
+            let retained = tree.texts.at(set.name.node);
+            let name = retained.as_bytes();
+            let field_name = tree.texts.at(expression.name.node);
+            let member = field_name.as_bytes();
+            return try self.namespace_separator_error(
+                "error", name, member
+            );
+        }
+    }
+    if self.union_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.unions.at(handle.index) |tagged| {
+            let name = tagged.name.as_bytes();
+            let field_name = tree.texts.at(expression.name.node);
+            let member = field_name.as_bytes();
+            return try self.namespace_separator_error(
+                "union variant", name, member
+            );
+        }
+    }
+    var receiver = empty_type();
+    if try self.check_expr(
+        tree, scopes, scope, mark, expression.receiver, &var receiver
+    ) |problem| {
+        return move problem;
+    }
+    receiver = try self.types.borrowed_value_type(receiver);
+    let retained_field_name = tree.texts.at(expression.name.node);
+    let field_name = retained_field_name.as_bytes();
+    if self.types.is_text(receiver, "std::fs::Metadata") {
+        return self.check_fs_metadata_field(field_name, out);
+    }
+    if self.types.is_text(receiver, "std::fs::DirEntry") {
+        return self.check_fs_dir_entry_field(field_name, out);
+    }
+    let receiver_text = try self.types.copy_text(self.allocator, receiver);
+    defer receiver_text.deinit();
+    let receiver_name = receiver_text.as_bytes();
+    let declaration = self.metadata.structs.get(receiver_name) orelse
+        return try self.no_fields_error(
+        receiver
+    );
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => {
+            var index = 0;
+            while value.fields.at(index) |field| {
+                let retained = tree.texts.at(field.name.node);
+                let name = retained.as_bytes();
+                if mem::equal_bytes(name, field_name) {
+                    if try self.check_private_field_access(
+                        tree, receiver_name, field
+                    ) |problem| {
+                        return move problem;
+                    }
+                    match try self.resolve_instance_field_type(tree, field) {
+                        Value(field_type) => {
+                            out.* = field_type;
+                            return null;
+                        },
+                        Issue(issue) => return try self.type_resolution_diagnostic(
+                            issue
+                        ),
+                    }
+                }
+                index = index + 1;
+            }
+        },
+        _ => return try self.no_fields_error(receiver),
+    }
+    return try self.unknown_field_error(receiver, field_name);
+}
+
+fn (self: &Checker) namespace_separator_error(
+    kind: []u8,
+    owner: []u8,
+    member: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes(kind);
+    try message.append_bytes(" `");
+    try message.append_bytes(owner);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(member);
+    try message.append_bytes("` must use `::`");
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) check_private_field_access(
+    tree: &ast::Ast,
+    type_name: []u8,
+    field: &ast::Field
+) -> !?diagnostic::Diagnostic {
+    if field.public or
+        (is_std_type_name(type_name) and self.checking_std_body()) or
+        (!is_std_type_name(type_name) and
+        self.same_user_module(type_name)) {
+        return null;
+    }
+    let retained = tree.texts.at(field.name.node);
+    let field_name = retained.as_bytes();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("field `");
+    try message.append_bytes(type_name);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field_name);
+    try message.append_bytes("` is private");
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn is_std_type_name(name: []u8) -> bool {
+    return mem::starts_with(name, "std::");
+}
+
+fn (self: &Checker) same_user_module(type_name: []u8) -> bool {
+    let type_end = user_module_end(type_name) orelse return true;
+    let function_handle = self.current_function_handle() orelse return false;
+    if self.metadata.functions.at(function_handle.index) |function| {
+        let function_name = function.name.as_bytes();
+        let function_end = user_module_end(function_name) orelse return false;
+        return mem::equal_bytes(
+            function_name[0..function_end], type_name[0..type_end]
+        );
+    }
+    return false;
+}
+
+// Returns the length of the module prefix before the last `::`, or null when
+// name has no module path.
+fn user_module_end(name: []u8) -> ?i64 {
+    var index = mem::len(name);
+    while index > 1 {
+        index = index - 1;
+        if name[index - 1] == cast<u8>(58) and
+            name[index] == cast<u8>(58) {
+            return index - 1;
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_fs_metadata_field(
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "size") {
+        out.* = try self.types.i64_type();
+        return null;
+    }
+    if mem::equal_bytes(name, "is_dir") {
+        out.* = try self.types.bool_type();
+        return null;
+    }
+    return try self.unknown_builtin_field_error(
+        "std::fs::Metadata", name
+    );
+}
+
+fn (self: &var Checker) check_fs_dir_entry_field(
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "name") or mem::equal_bytes(name, "path") {
+        out.* = try self.types.byte_string_type();
+        return null;
+    }
+    if mem::equal_bytes(name, "is_dir") {
+        out.* = try self.types.bool_type();
+        return null;
+    }
+    return try self.unknown_builtin_field_error(
+        "std::fs::DirEntry", name
+    );
+}
+
+fn (self: &Checker) unknown_builtin_field_error(
+    owner: []u8,
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unknown field `");
+    try message.append_bytes(owner);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_namespace_expr(
+    tree: &ast::Ast,
+    expression: &ast::FieldExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained_member = tree.texts.at(expression.name.node);
+    let member = retained_member.as_bytes();
+    if self.enum_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.enums.at(handle.index) |tagged| {
+            let retained_name = tree.texts.at(tagged.name.node);
+            let name = retained_name.as_bytes();
+            if !tagged.tags.contains(member) {
+                return try self.unknown_namespace_member_error(
+                    "enum tag", name, member
+                );
+            }
+            out.* = try self.types.intern(name);
+            return null;
+        }
+    }
+    if try self.error_set_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.error_sets.at(handle.index) |set| {
+            let retained_name = tree.texts.at(set.name.node);
+            let name = retained_name.as_bytes();
+            if self.metadata.enums.at(set.tagged.index) |value| {
+                if !value.tags.contains(member) {
+                    return try self.unknown_namespace_member_error(
+                        "error", name, member
+                    );
+                }
+                out.* = try self.types.intern(name);
+                return null;
+            }
+        }
+    }
+    if self.union_receiver(tree, expression.receiver) |handle| {
+        if self.metadata.unions.at(handle.index) |tagged| {
+            let name = tagged.name.as_bytes();
+            let payload = tagged.variants.get(member);
+            if payload |_| {} else {
+                return try self.unknown_namespace_member_error(
+                    "union variant", name, member
+                );
+            }
+            let payload_type = payload orelse empty_type();
+            if !same_type(payload_type, empty_type()) {
+                var message = string::new(self.allocator);
+                errdefer message.deinit();
+                try message.append_bytes("union variant `");
+                try message.append_bytes(name);
+                try message.append_bytes("::");
+                try message.append_bytes(member);
+                try message.append_bytes("` expects payload");
+                return try self.checker_message_at(
+                    "type error", ast::zero_span(), move message
+                );
+            }
+            out.* = try self.types.intern(name);
+            return null;
+        }
+    }
+    let rendered = try ast::render_expression(
+        self.allocator, tree, expression.receiver
+    );
+    defer rendered.deinit();
+    let name = rendered.as_bytes();
+    return try self.unknown_namespace_error(
+        name, expression_span(tree, expression.receiver)
+    );
+}
+
+fn (self: &Checker) enum_receiver(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> ?EnumHandle {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            return self.metadata.enums_by_name.get(name);
+        },
+        _ => return null,
+    }
+}
+
+fn (self: &Checker) union_receiver(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> ?UnionHandle {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            return self.metadata.unions_by_name.get(name);
+        },
+        _ => return null,
+    }
+}
+
+fn (self: &Checker) error_set_receiver(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?ErrorSetHandle {
+    if try qualified_name(self.allocator, tree, expression) |name| {
+        defer name.deinit();
+        let bytes = name.as_bytes();
+        return self.metadata.error_sets_by_name.get(bytes);
+    }
+    return null;
+}
+
+fn (self: &Checker) unknown_namespace_member_error(
+    kind: []u8,
+    owner: []u8,
+    member: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unknown ");
+    try message.append_bytes(kind);
+    try message.append_bytes(" `");
+    try message.append_bytes(owner);
+    try message.append_bytes("::");
+    try message.append_bytes(member);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) unknown_namespace_error(
+    name: []u8,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unknown namespace `");
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    var problem = try self.checker_message_at(
+        "type error", span, move message
+    );
+    errdefer problem.deinit();
+    if !span.is_zero() {
+        try problem.with_code("type.unknown_namespace");
+    }
+    try problem.with_help(
+        "use an enum/union name or import a module that defines this namespace"
+    );
+    let known = try self.known_namespace_summary();
+    defer known.deinit();
+    let known_bytes = known.as_bytes();
+    if mem::len(known_bytes) > 0 {
+        var note = string::new(self.allocator);
+        defer note.deinit();
+        try note.append_bytes("known namespaces: ");
+        try note.append_bytes(known_bytes);
+        let note_bytes = note.as_bytes();
+        try problem.with_note(self.allocator, note_bytes);
+    }
+    return move problem;
+}
+
+fn (self: &Checker) known_namespace_summary() -> !string::String {
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var index = 0;
+    while self.metadata.enums_by_name.key_at(index) |name| {
+        let copied = try string::from_bytes(self.allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+        index = index + 1;
+    }
+    index = 0;
+    while self.metadata.unions_by_name.key_at(index) |name| {
+        let copied = try string::from_bytes(self.allocator, name);
+        errdefer copied.deinit();
+        try names.append(move copied);
+        index = index + 1;
+    }
+    try sort::strings(&var names);
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    index = 0;
+    while index < names.len() and index < 5 {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        if names.at(index) |name| {
+            let bytes = name.as_bytes();
+            try out.append_bytes(bytes);
+        }
+        index = index + 1;
+    }
+    if names.len() > 5 {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try out.append_bytes("...");
+    }
+    return move out;
+}
+
+// Returns the value behind an explicit borrow or a marked raw pointer.
+fn (self: &var Checker) check_deref_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: &ast::DerefExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.receiver.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            if scopes.is_borrowed(scope, name) {
+                if scopes.lookup(scope, name) |value| {
+                    out.* = value;
+                    return null;
+                }
+            }
+        },
+        _ => {},
+    }
+    var receiver = empty_type();
+    if try self.check_expr(
+        tree, scopes, scope, mark, expression.receiver, &var receiver
+    ) |problem| {
+        return move problem;
+    }
+    if try self.types.explicit_borrow_type(receiver) |parts| {
+        out.* = parts.inner;
+        return null;
+    }
+    if self.types.is_pointer_type(receiver) {
+        if try self.require_unsafe_capability_at(
+            mark,
+            UnsafeCapability::PtrDeref,
+            "raw pointer dereference",
+            expression.operator_span
+        ) |problem| {
+            return move problem;
+        }
+        match try self.types.raw_pointer_deref_type(receiver) {
+            Value(value) => {
+                out.* = value;
+                return null;
+            },
+            Error(reason) => return try self.pointer_deref_error(
+                receiver, reason, false
+            ),
+        }
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try self.append_checker_type(&var message, receiver);
+    try message.append_bytes(
+        "` is not a borrow or raw pointer and cannot be dereferenced"
+    );
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) pointer_deref_error(
+    receiver: Type,
+    reason: PointerDerefError,
+    assignment: bool
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    match reason {
+        NotPointer => {
+            try message.append_byte(cast<u8>(96));
+            try self.append_checker_type(&var message, receiver);
+            try message.append_bytes("` is not a raw pointer");
+        },
+        Nullable => {
+            try message.append_bytes("nullable raw pointer `");
+            try self.append_checker_type(&var message, receiver);
+            try message.append_bytes("` cannot be dereferenced");
+        },
+        Const => {
+            if assignment {
+                try message.append_bytes("cannot assign through const raw pointer `");
+                try self.append_checker_type(&var message, receiver);
+                try message.append_byte(cast<u8>(96));
+            } else {
+                try message.append_byte(cast<u8>(96));
+                try self.append_checker_type(&var message, receiver);
+                try message.append_bytes("` is not a raw pointer");
+            }
+        },
+    }
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) require_unsafe_struct_invariant(
+    mark: &var UnsafeMark,
+    declaration: &ast::StructDecl,
+    type_name: []u8,
+    action: []u8,
+    field_name: []u8,
+    span: ast::Span
+) -> !?diagnostic::Diagnostic {
+    match unsafe_struct_invariant_requirement(
+        true,
+        declaration.requires_unsafe,
+        declaration.span,
+        span
+    ) {
+        None => return null,
+        Marker => {
+            let operation = try unsafe_struct_operation(
+                self.allocator,
+                action,
+                type_name,
+                field_name
+            );
+            defer operation.deinit();
+            let bytes = operation.as_bytes();
+            return self.require_unsafe_capability_at(
+                mark,
+                UnsafeCapability::StructInvariant,
+                bytes,
+                span
+            );
+        },
+        FileBoundary => {
+            let operation = try unsafe_struct_operation(
+                self.allocator,
+                action,
+                type_name,
+                field_name
+            );
+            defer operation.deinit();
+            let operation_bytes = operation.as_bytes();
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes(operation_bytes);
+            try message.append_bytes(" is confined to its declaration file");
+            var problem = try self.checker_message_at(
+                "unsafe error", span, move message
+            );
+            errdefer problem.deinit();
+            try problem.with_code("unsafe.invariant_file_boundary");
+            return move problem;
+        },
+    }
+}
+
+fn unsafe_struct_operation(
+    allocator: Allocator,
+    action: []u8,
+    type_name: []u8,
+    field_name: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(action);
+    try out.append_bytes(" `");
+    if mem::len(field_name) == 0 {
+        try out.append_bytes("unsafe struct ");
+    }
+    try out.append_bytes(type_name);
+    if mem::len(field_name) > 0 {
+        try out.append_byte(cast<u8>(46));
+        try out.append_bytes(field_name);
+    }
+    try out.append_byte(cast<u8>(96));
+    return move out;
+}
+
+fn (self: &Checker) no_fields_error(
+    receiver: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try self.append_checker_type(&var message, receiver);
+    try message.append_bytes("` has no fields");
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) unknown_field_error(
+    receiver: Type,
+    field_name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unknown field `");
+    try self.append_checker_type(&var message, receiver);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field_name);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}

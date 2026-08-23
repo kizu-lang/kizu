@@ -1,0 +1,568 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::fmt;
+import std::mem;
+import std::string;
+
+struct CallableFacts {
+    extern_call: bool,
+    requires_unsafe: bool,
+    has_type_params: bool,
+    parameter_count: i64,
+    return_type: Type
+}
+
+struct CallableParamFacts {
+    typ: Type,
+    borrow: bool,
+    mutable: bool
+}
+
+// Validates a direct or qualified source function call.
+fn (self: &var Checker) check_user_call(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    name: []u8,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let function_handle = self.metadata.functions_by_name.get(name) orelse
+        return try self.undefined_function_error(
+        name
+    );
+    let facts = self.callable_facts(function_handle) orelse
+        return try self.undefined_function_error(name);
+    if facts.extern_call or facts.requires_unsafe {
+        let operation = try call_operation(self.allocator, name);
+        defer operation.deinit();
+        let operation_bytes = operation.as_bytes();
+        if facts.extern_call {
+            if try self.require_unsafe_capability_at(
+                mark,
+                UnsafeCapability::ExternCall,
+                operation_bytes,
+                span
+            ) |problem| {
+                return move problem;
+            }
+        }
+        if facts.requires_unsafe {
+            if try self.require_unsafe_capability_at(
+                mark,
+                UnsafeCapability::UnsafeCall,
+                operation_bytes,
+                span
+            ) |problem| {
+                return move problem;
+            }
+        }
+    }
+    if facts.has_type_params {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` requires explicit static arguments");
+        return try self.checker_message_at(
+            "type error", ast::zero_span(), move message
+        );
+    }
+    if args.len(tree) != facts.parameter_count {
+        return try self.user_call_arity_error(
+            function_handle, name, args.len(tree)
+        );
+    }
+    var index = 0;
+    while index < facts.parameter_count {
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_user_call_arg(
+            tree,
+            scopes,
+            scope,
+            mark,
+            function_handle,
+            name,
+            index,
+            argument
+        ) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
+    out.* = facts.return_type;
+    return null;
+}
+
+fn (self: &Checker) callable_facts(
+    handle: FunctionHandle
+) -> ?CallableFacts {
+    if self.metadata.functions.at(handle.index) |function| {
+        let abi = function.signature.extern_abi.as_bytes();
+        return CallableFacts {
+            extern_call: mem::len(abi) > 0,
+            requires_unsafe: function.signature.requires_unsafe,
+            has_type_params: function_has_type_params(function),
+            parameter_count: function.params.len(),
+            return_type: function.return_type
+        };
+    }
+    return null;
+}
+
+fn (self: &Checker) callable_param_facts(
+    handle: FunctionHandle,
+    index: i64
+) -> ?CallableParamFacts {
+    if self.metadata.functions.at(handle.index) |function| {
+        if function.params.get(index) |parameter_type| {
+            return CallableParamFacts {
+                typ: parameter_type,
+                borrow: function.borrow_params.get_or_panic(index),
+                mutable: function.mut_borrow_params.get_or_panic(index)
+            };
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_user_call_arg(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    function: FunctionHandle,
+    name: []u8,
+    index: i64,
+    argument: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let parameter = self.callable_param_facts(function, index) orelse
+        return try self.undefined_function_error(name);
+    var checked_argument = argument;
+    if try self.prepare_borrow_argument(
+        tree,
+        scopes,
+        scope,
+        argument,
+        parameter.borrow,
+        parameter.mutable,
+        &var checked_argument
+    ) |problem| {
+        return move problem;
+    }
+    if parameter.mutable {
+        if try self.require_mutable_borrow_arg(
+            tree,
+            scopes,
+            scope,
+            checked_argument,
+            parameter.typ
+        ) |problem| {
+            return move problem;
+        }
+    }
+    var got = empty_type();
+    if try self.check_contextual_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        checked_argument,
+        parameter.typ,
+        &var got
+    ) |problem| {
+        return move problem;
+    }
+    match try self.types.coerce_returned_borrow_argument(
+        got,
+        parameter.typ,
+        parameter.borrow,
+        parameter.mutable
+    ) {
+        Value(value) => {
+            got = value;
+        },
+        Error(reason) => return try self.borrow_argument_error(reason),
+    }
+    if !same_type(got, parameter.typ) {
+        return try self.user_call_arg_error(
+            function, name, index, parameter.typ, got
+        );
+    }
+    return null;
+}
+
+fn (self: &Checker) prepare_borrow_argument(
+    tree: &var ast::Ast,
+    scopes: &ScopeStore,
+    scope: ScopeHandle,
+    argument: ast::Expression,
+    want_borrow: bool,
+    want_mutable: bool,
+    out: &var ast::Expression
+) -> !?diagnostic::Diagnostic {
+    out.* = argument;
+    match borrow_prefix(tree, argument) {
+        None => return null,
+        Value(borrow) => return self.prepare_borrow_prefix_argument(
+            tree,
+            scopes,
+            scope,
+            borrow,
+            want_borrow,
+            want_mutable,
+            out
+        ),
+    }
+}
+
+fn (self: &Checker) prepare_borrow_prefix_argument(
+    tree: &var ast::Ast,
+    scopes: &ScopeStore,
+    scope: ScopeHandle,
+    borrow: &ast::PrefixExpr,
+    want_borrow: bool,
+    want_mutable: bool,
+    out: &var ast::Expression
+) -> !?diagnostic::Diagnostic {
+    if !want_borrow {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "borrow argument cannot be passed to owning parameter"
+        );
+    }
+    if try self.check_borrow_target_shape(
+        tree, borrow.right
+    ) |problem| {
+        return move problem;
+    }
+    let retained = tree.texts.at(borrow.operator.node);
+    let operator = retained.as_bytes();
+    if mem::equal_bytes(operator, "&var") and !want_mutable {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "argument expects &T, got &var"
+        );
+    }
+    if mem::equal_bytes(operator, "&") and want_mutable {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "argument expects &var T, got &T"
+        );
+    }
+    if want_mutable {
+        if try self.require_mutable_borrow_arg(
+            tree,
+            scopes,
+            scope,
+            borrow.right,
+            empty_type()
+        ) |problem| {
+            return move problem;
+        }
+    }
+    out.* = borrow.right;
+    return null;
+}
+
+fn (self: &Checker) borrow_argument_error(
+    reason: BorrowCoercionError
+) -> !diagnostic::Diagnostic {
+    return match reason {
+        OwningParameter => try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "borrow argument cannot be passed to owning parameter"
+        ),
+        WantsShared => try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "argument expects &T, got &var"
+        ),
+        WantsMutable => try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "argument expects &var T, got &T"
+        ),
+    };
+}
+
+fn (self: &Checker) undefined_function_error(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("undefined function `");
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn call_operation(
+    allocator: Allocator,
+    name: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("call to `");
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(96));
+    return move out;
+}
+
+fn (self: &Checker) user_call_arity_error(
+    handle: FunctionHandle,
+    name: []u8,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    if self.metadata.functions.at(handle.index) |function| {
+        if function.params.len() == 1 {
+            if function.signature.params.at(0) |parameter| {
+                let parameter_name = parameter.name.as_bytes();
+                if mem::len(parameter_name) > 0 {
+                    var message = string::new(self.allocator);
+                    errdefer message.deinit();
+                    try message.append_byte(cast<u8>(96));
+                    try message.append_bytes(name);
+                    try message.append_bytes("` expects ");
+                    try message.append_bytes(parameter_name);
+                    return self.checker_message_at(
+                        "type error", ast::zero_span(), move message
+                    );
+                }
+            }
+        }
+        return self.named_arity_error(name, function.params.len(), got);
+    }
+    return self.undefined_function_error(name);
+}
+
+fn (self: &Checker) user_call_arg_error(
+    handle: FunctionHandle,
+    name: []u8,
+    index: i64,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    if mem::starts_with(name, "std::") {
+        if self.metadata.functions.at(handle.index) |function| {
+            if function.signature.params.at(index) |parameter| {
+                let parameter_name = parameter.name.as_bytes();
+                if mem::len(parameter_name) > 0 {
+                    return self.named_user_call_arg_error(
+                        name,
+                        parameter_name,
+                        mem::starts_with(name, "std::fs::"),
+                        want,
+                        got
+                    );
+                }
+            }
+        }
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("arg ");
+    try fmt::append_i64(&var message, index + 1);
+    try message.append_bytes(" of `");
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) named_user_call_arg_error(
+    name: []u8,
+    parameter: []u8,
+    fs_order: bool,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` ");
+    if fs_order {
+        try message.append_bytes("expects ");
+        try self.append_checker_type(&var message, want);
+        try message.append_byte(cast<u8>(32));
+        try message.append_bytes(parameter);
+    } else {
+        try message.append_bytes(parameter);
+        try message.append_bytes(" expects ");
+        try self.append_checker_type(&var message, want);
+    }
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+// Validates enum/union separator mistakes and union payload construction.
+fn (self: &var Checker) check_union_constructor_call(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    field: &ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained_member = tree.texts.at(field.name.node);
+    let source_member = retained_member.as_bytes();
+    let owned_member = try string::from_bytes(
+        self.allocator, source_member
+    );
+    defer owned_member.deinit();
+    let member = owned_member.as_bytes();
+    if !field.namespace {
+        if self.enum_receiver(tree, field.receiver) |handle| {
+            if self.metadata.enums.at(handle.index) |tagged| {
+                let retained_name = tree.texts.at(tagged.name.node);
+                let name = retained_name.as_bytes();
+                handled.* = true;
+                return try self.namespace_separator_error(
+                    "enum tag", name, member
+                );
+            }
+        }
+        if self.union_receiver(tree, field.receiver) |handle| {
+            if self.metadata.unions.at(handle.index) |tagged| {
+                let name = tagged.name.as_bytes();
+                handled.* = true;
+                return try self.namespace_separator_error(
+                    "union variant", name, member
+                );
+            }
+        }
+        handled.* = false;
+        return null;
+    }
+    let union_handle = self.union_receiver(tree, field.receiver);
+    handled.* = false;
+    let handle = union_handle orelse return null;
+    handled.* = true;
+    var union_name = string::new(self.allocator);
+    defer union_name.deinit();
+    var payload_type = empty_type();
+    var known_variant = false;
+    if self.metadata.unions.at(handle.index) |union_type| {
+        let name_bytes = union_type.name.as_bytes();
+        try union_name.append_bytes(name_bytes);
+        if union_type.variants.get(member) |value| {
+            payload_type = value;
+            known_variant = true;
+        }
+    } else {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(), "unknown union"
+        );
+    }
+    let union_name_bytes = union_name.as_bytes();
+    if !known_variant {
+        return try self.unknown_namespace_member_error(
+            "union variant", union_name_bytes, member
+        );
+    }
+    if same_type(payload_type, empty_type()) {
+        return try self.union_constructor_zero_arg_error(
+            union_name_bytes, member
+        );
+    }
+    if args.len(tree) != 1 {
+        return try self.union_constructor_arity_error(
+            union_name_bytes, member, args.len(tree)
+        );
+    }
+    let argument = args.get_or_panic(tree, 0);
+    var got = empty_type();
+    if try self.check_expr(
+        tree, scopes, scope, mark, argument, &var got
+    ) |problem| {
+        return move problem;
+    }
+    var coerced = empty_type();
+    if try self.coerce_contextual_integer_literal(
+        tree, argument, payload_type, got, &var coerced
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(coerced, payload_type) and
+        !try self.return_value_matches_borrow_param(
+        tree, scopes, scope, argument, payload_type, coerced
+    ) {
+        return try self.union_constructor_type_error(
+            union_name_bytes, member, payload_type, coerced
+        );
+    }
+    out.* = try self.types.intern(union_name_bytes);
+    return null;
+}
+
+fn (self: &Checker) union_constructor_zero_arg_error(
+    owner: []u8,
+    member: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try append_union_member(&var message, owner, member);
+    try message.append_bytes(" expects 0 args");
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) union_constructor_arity_error(
+    owner: []u8,
+    member: []u8,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try append_union_member(&var message, owner, member);
+    try message.append_bytes(" expects 1 arg, got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) union_constructor_type_error(
+    owner: []u8,
+    member: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try append_union_member(&var message, owner, member);
+    try message.append_bytes(" expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn append_union_member(
+    out: &var string::String,
+    owner: []u8,
+    member: []u8
+) -> !void {
+    try out.append_bytes("union variant `");
+    try out.append_bytes(owner);
+    try out.append_bytes("::");
+    try out.append_bytes(member);
+    try out.append_byte(cast<u8>(96));
+    return;
+}

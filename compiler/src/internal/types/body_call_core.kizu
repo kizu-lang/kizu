@@ -1,0 +1,1167 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdprim;
+import compiler::internal::typ;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Validates one call and enforces the single borrow-optional consumption gate.
+fn (self: &var Checker) check_call_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: &ast::CallExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var result = empty_type();
+    if try self.check_call_expr_dispatch(
+        tree, scopes, scope, mark, expression, &var result
+    ) |problem| {
+        return move problem;
+    }
+    let text = try self.types.copy_text(self.allocator, result);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    if typ::borrow_optional_elem(bytes) |_| {
+        if !self.capture_condition {
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes("a call returning ");
+            try message.append_bytes(bytes);
+            try message.append_bytes(
+                " must be consumed by a capture (`if call |name|` or `while call |name|`)"
+            );
+            return try self.checker_message_at(
+                "type error", ast::zero_span(), move message
+            );
+        }
+    }
+    out.* = result;
+    return null;
+}
+
+fn (self: &var Checker) check_call_expr_dispatch(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    expression: &ast::CallExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.callee.node) {
+        Field(field) => {
+            let copied = ast::FieldExpr {
+                receiver: field.receiver,
+                name: field.name,
+                namespace: field.namespace,
+                span: field.span
+            };
+            return self.check_field_call_expr(
+                tree, scopes, scope, mark, &copied, expression.args, out
+            );
+        },
+        TypeApply(apply) => {
+            let copied = ast::TypeApplyExpr {
+                callee: apply.callee,
+                type_arg: apply.type_arg
+            };
+            return self.check_type_apply_call_expr(
+                tree, scopes, scope, mark, &copied, expression.args, out
+            );
+        },
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let source_name = retained.as_bytes();
+            let owned_name = try string::from_bytes(
+                self.allocator, source_name
+            );
+            defer owned_name.deinit();
+            let name = owned_name.as_bytes();
+            let span = identifier.span;
+            if mem::equal_bytes(name, "print") {
+                return self.check_print_call(
+                    tree, scopes, scope, mark, expression.args, out
+                );
+            }
+            if mem::equal_bytes(name, "ptr_read") {
+                return self.check_ptr_read(
+                    tree, scopes, scope, mark, span,
+                    expression.args, out
+                );
+            }
+            if mem::equal_bytes(name, "ptr_write") {
+                return self.check_ptr_write(
+                    tree, scopes, scope, mark, span,
+                    expression.args, out
+                );
+            }
+            if mem::equal_bytes(name, "volatile_read") {
+                return self.check_volatile_read(
+                    tree, scopes, scope, mark, span,
+                    expression.args, out
+                );
+            }
+            if mem::equal_bytes(name, "volatile_write") {
+                return self.check_volatile_write(
+                    tree, scopes, scope, mark, span,
+                    expression.args, out
+                );
+            }
+            if mem::equal_bytes(name, "Io") {
+                return try self.checker_error_at(
+                    "type error",
+                    ast::zero_span(),
+                    "use `std::io::blocking()`"
+                );
+            }
+            return self.check_user_call(
+                tree,
+                scopes,
+                scope,
+                mark,
+                name,
+                span,
+                expression.args,
+                out
+            );
+        },
+        _ => return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "callee must be a function name"
+        ),
+    }
+}
+
+fn (self: &var Checker) check_field_call_expr(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    field: &ast::FieldExpr,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var handled = false;
+    if try self.check_union_constructor_call(
+        tree, scopes, scope, mark, field, args, &var handled, out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_qualified_user_call(
+        tree, scopes, scope, mark, field, args, &var handled, out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_qualified_builtin(
+        tree, scopes, scope, mark, field, args, &var handled, out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    return self.check_method_call_expr(
+        tree, scopes, scope, mark, field, args, out
+    );
+}
+
+fn (self: &var Checker) check_qualified_user_call(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    field: &ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if try qualified_name(self.allocator, tree, field.receiver) |prefix| {
+        defer prefix.deinit();
+        var name = string::new(self.allocator);
+        defer name.deinit();
+        let prefix_bytes = prefix.as_bytes();
+        try name.append_bytes(prefix_bytes);
+        try name.append_bytes("::");
+        let retained_field = tree.texts.at(field.name.node);
+        let field_name = retained_field.as_bytes();
+        try name.append_bytes(field_name);
+        let bytes = name.as_bytes();
+        if self.metadata.functions_by_name.get(bytes) |function_handle| {
+            if self.metadata.functions.at(function_handle.index) |function| {
+                if function_has_type_params(function) {
+                    handled.* = false;
+                    return null;
+                }
+            }
+            handled.* = true;
+            let span = expression_span(tree, field.receiver);
+            return self.check_user_call(
+                tree,
+                scopes,
+                scope,
+                mark,
+                bytes,
+                span,
+                args,
+                out
+            );
+        }
+    }
+    handled.* = false;
+    return null;
+}
+
+fn function_has_type_params(function: &FunctionType) -> bool {
+    var index = 0;
+    while function.signature.static_params.at(index) |parameter| {
+        if parameter.is_type {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn (self: &var Checker) check_qualified_builtin(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    field: &ast::FieldExpr,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if try qualified_field_name(self.allocator, tree, field) |qualified| {
+        defer qualified.deinit();
+        let bytes = qualified.as_bytes();
+        if try self.reject_unknown_builtin(bytes) |problem| {
+            handled.* = true;
+            return move problem;
+        }
+        if try self.check_fs_builtin(
+            tree,
+            scopes,
+            scope,
+            mark,
+            bytes,
+            args,
+            handled,
+            out
+        ) |problem| {
+            return move problem;
+        }
+        if handled.* {
+            return null;
+        }
+        if try self.check_simple_core_builtin(
+            tree,
+            scopes,
+            scope,
+            mark,
+            bytes,
+            args,
+            handled,
+            out
+        ) |problem| {
+            return move problem;
+        }
+        if handled.* {
+            return null;
+        }
+        return self.check_std_constructor_builtin(
+            tree, bytes, args, handled, out
+        );
+    }
+    handled.* = false;
+    return null;
+}
+
+fn qualified_field_name(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    field: &ast::FieldExpr
+) -> !?string::String {
+    if try qualified_name(allocator, tree, field.receiver) |prefix| {
+        defer prefix.deinit();
+        var out = string::new(allocator);
+        errdefer out.deinit();
+        let prefix_bytes = prefix.as_bytes();
+        try out.append_bytes(prefix_bytes);
+        try out.append_bytes("::");
+        let retained = tree.texts.at(field.name.node);
+        let name = retained.as_bytes();
+        try out.append_bytes(name);
+        return move out;
+    }
+    return null;
+}
+
+fn (self: &Checker) reject_unknown_builtin(
+    name: []u8
+) -> !?diagnostic::Diagnostic {
+    if !mem::starts_with(name, "std::internal::builtin::") or
+        stdprim::primitive(name) {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` is not a primitive");
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_std_constructor_builtin(
+    tree: &var ast::Ast,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "std::internal::builtin::io_blocking") or
+        mem::equal_bytes(name, "std::internal::builtin::io_failing") {
+        handled.* = true;
+        if args.len(tree) != 0 {
+            return try self.constructor_arity_error(name, 0, args.len(tree));
+        }
+        out.* = try self.types.intern("Io");
+        return null;
+    }
+    if mem::equal_bytes(name, "std::io::evented") or
+        mem::equal_bytes(name, "std::internal::builtin::io_evented") {
+        handled.* = true;
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::io::evented` is not implemented"
+        );
+    }
+    handled.* = false;
+    return null;
+}
+
+fn (self: &var Checker) check_simple_core_builtin(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let retained_signature = stdprim::simple_core_signature(name) orelse
+        return null;
+    handled.* = true;
+    if args.len(tree) != retained_signature.args_len() {
+        return try self.core_signature_arity_error(
+            name, &retained_signature
+        );
+    }
+    var index = 0;
+    while retained_signature.arg_at(index) |want| {
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_core_arg(
+            tree,
+            scopes,
+            scope,
+            mark,
+            name,
+            index,
+            want,
+            argument
+        ) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.intern(retained_signature.return_type);
+    return null;
+}
+
+fn (self: &var Checker) check_core_arg(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    name: []u8,
+    index: i64,
+    want: stdprim::ArgKind,
+    argument: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    if want == stdprim::ArgKind::Io {
+        return self.check_io_arg(
+            tree, scopes, scope, mark, argument, name
+        );
+    }
+    if want == stdprim::ArgKind::StringOut {
+        return self.check_string_out_arg(
+            tree, scopes, scope, mark, name, argument
+        );
+    }
+    let spelling = stdprim::arg_kind_spelling(want);
+    let expected = try self.types.intern(spelling);
+    var got = empty_type();
+    if try self.check_contextual_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        expected,
+        &var got
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(got, expected) {
+        return try self.call_arg_type_error(
+            name, index + 1, expected, got
+        );
+    }
+    return null;
+}
+
+fn (self: &Checker) core_signature_arity_error(
+    name: []u8,
+    signature: &stdprim::CoreSignature
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    if signature.args_len() == 0 {
+        try message.append_bytes("0 args");
+    } else {
+        var index = 0;
+        while signature.arg_at(index) |kind| {
+            if index > 0 {
+                try message.append_bytes(" and ");
+            }
+            if kind == stdprim::ArgKind::Io {
+                try message.append_bytes("io");
+            } else {
+                try message.append_bytes(stdprim::arg_kind_spelling(kind));
+            }
+            index = index + 1;
+        }
+    }
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) constructor_arity_error(
+    name: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_bytes(" args, got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) call_arg_type_error(
+    name: []u8,
+    index: i64,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` arg ");
+    try fmt::append_i64(&var message, index);
+    try message.append_bytes(" expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_fs_builtin(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    name: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "std::internal::builtin::fs_write_file") {
+        handled.* = true;
+        return self.check_fs_write_file(
+            tree, scopes, scope, mark, args, out
+        );
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_rename") {
+        handled.* = true;
+        return self.check_fs_rename(
+            tree, scopes, scope, mark, args, out
+        );
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_exists") {
+        handled.* = true;
+        if try self.check_fs_path_args(
+            tree, scopes, scope, mark, "std::fs::exists", args
+        ) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.intern("std::fs::Error!bool");
+        return null;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_metadata") {
+        handled.* = true;
+        if try self.check_fs_path_args(
+            tree, scopes, scope, mark, "std::fs::metadata", args
+        ) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.intern(
+            "std::fs::Error!std::fs::Metadata"
+        );
+        return null;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_read_dir") {
+        handled.* = true;
+        if try self.check_fs_path_args(
+            tree, scopes, scope, mark, "std::fs::read_dir", args
+        ) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.intern(
+            "std::fs::Error!std::array::Array<std::fs::DirEntry>"
+        );
+        return null;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::fs_create_dir") or
+        mem::equal_bytes(name, "std::internal::builtin::fs_remove_dir") or
+        mem::equal_bytes(name, "std::internal::builtin::fs_remove_file") {
+        handled.* = true;
+        if try self.check_fs_path_args(
+            tree, scopes, scope, mark, name, args
+        ) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.intern("std::fs::Error!void");
+        return null;
+    }
+    handled.* = false;
+    return null;
+}
+
+fn (self: &var Checker) check_string_out_arg(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    label: []u8,
+    argument: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let string_type = try self.types.intern("std::string::String");
+    match borrow_prefix(tree, argument) {
+        Value(prefix) => {
+            let retained_operator = tree.texts.at(prefix.operator.node);
+            let operator = retained_operator.as_bytes();
+            let explicit_mutable = mem::equal_bytes(operator, "&var");
+            if explicit_mutable {
+                var got = empty_type();
+                var mutable = false;
+                if try self.check_borrow_prefix(
+                    tree,
+                    scopes,
+                    scope,
+                    mark,
+                    prefix,
+                    &var got,
+                    &var mutable
+                ) |problem| {
+                    return move problem;
+                }
+                if same_type(got, string_type) {
+                    return null;
+                }
+                return try self.string_out_type_error(
+                    label, got, true
+                );
+            }
+        },
+        None => {},
+    }
+    var got = empty_type();
+    if try self.check_expr(
+        tree, scopes, scope, mark, argument, &var got
+    ) |problem| {
+        return move problem;
+    }
+    match tree.expressions.at(argument.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            if same_type(got, string_type) and
+                scopes.is_mut_borrowed(scope, name) {
+                return null;
+            }
+        },
+        _ => {},
+    }
+    return try self.string_out_type_error(label, got, false);
+}
+
+fn (self: &Checker) string_out_type_error(
+    label: []u8,
+    got: Type,
+    explicit: bool
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(label);
+    try message.append_bytes(
+        "` expects &var std::string::String out, got "
+    );
+    if explicit {
+        try message.append_bytes("&var ");
+    }
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_fs_write_file(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 3 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::fs::write_file` expects io, path, and bytes"
+        );
+    }
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        "std::fs::write_file"
+    ) |problem| {
+        return move problem;
+    }
+    var index = 1;
+    while index < 3 {
+        var got = empty_type();
+        let next_argument = args.get_or_panic(tree, index);
+        if try self.check_expr(
+            tree,
+            scopes,
+            scope,
+            mark,
+            next_argument,
+            &var got
+        ) |problem| {
+            return move problem;
+        }
+        if !self.types.is_text(got, "[]u8") {
+            let label = if index == 1 {
+                "path"
+            } else {
+                "bytes"
+            };
+            return try self.fs_bytes_arg_error(
+                "std::fs::write_file", label, got
+            );
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.intern("std::fs::Error!void");
+    return null;
+}
+
+fn (self: &var Checker) check_fs_rename(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 3 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::fs::rename` expects io, from, and to"
+        );
+    }
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        "std::fs::rename"
+    ) |problem| {
+        return move problem;
+    }
+    var index = 1;
+    while index < 3 {
+        var got = empty_type();
+        let next_argument = args.get_or_panic(tree, index);
+        if try self.check_expr(
+            tree,
+            scopes,
+            scope,
+            mark,
+            next_argument,
+            &var got
+        ) |problem| {
+            return move problem;
+        }
+        if !self.types.is_text(got, "[]u8") {
+            let label = if index == 1 {
+                "from"
+            } else {
+                "to"
+            };
+            return try self.fs_bytes_arg_error(
+                "std::fs::rename", label, got
+            );
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.intern("std::fs::Error!void");
+    return null;
+}
+
+fn (self: &Checker) fs_bytes_arg_error(
+    name: []u8,
+    label: []u8,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects []u8 ");
+    try message.append_bytes(label);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_fs_path_args(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    name: []u8,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 2 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` expects io and path");
+        return try self.checker_message_at(
+            "type error", ast::zero_span(), move message
+        );
+    }
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_io_arg(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        name
+    ) |problem| {
+        return move problem;
+    }
+    var path = empty_type();
+    let second_argument = args.get_or_panic(tree, 1);
+    if try self.check_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        second_argument,
+        &var path
+    ) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(path, "[]u8") {
+        return try self.fs_bytes_arg_error(name, "path", path);
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_io_arg(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    argument: ast::Expression,
+    name: []u8
+) -> !?diagnostic::Diagnostic {
+    var got = empty_type();
+    if try self.check_expr(
+        tree, scopes, scope, mark, argument, &var got
+    ) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Io") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` expects Io, got ");
+        try self.append_checker_type(&var message, got);
+        return try self.checker_message_at(
+            "type error", ast::zero_span(), move message
+        );
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_print_call(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 1 {
+        return try self.named_arity_error(
+            "print", 1, args.len(tree)
+        );
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        &var got
+    ) |problem| {
+        return move problem;
+    }
+    if self.types.is_text(got, "void") {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(), "`print` cannot print void"
+        );
+    }
+    out.* = try self.types.void_type();
+    return null;
+}
+
+fn (self: &Checker) named_arity_error(
+    name: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_bytes(" arg");
+    if expected != 1 {
+        try message.append_byte(cast<u8>(115));
+    }
+    try message.append_bytes(", got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &var Checker) check_ptr_read(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    return self.check_pointer_read(
+        tree,
+        scopes,
+        scope,
+        mark,
+        span,
+        args,
+        UnsafeCapability::PtrRead,
+        "ptr_read",
+        out
+    );
+}
+
+fn (self: &var Checker) check_volatile_read(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    return self.check_pointer_read(
+        tree,
+        scopes,
+        scope,
+        mark,
+        span,
+        args,
+        UnsafeCapability::Volatile,
+        "volatile_read",
+        out
+    );
+}
+
+fn (self: &var Checker) check_pointer_read(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    capability: UnsafeCapability,
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let operation = try quoted_name(self.allocator, name);
+    defer operation.deinit();
+    let operation_bytes = operation.as_bytes();
+    if try self.require_unsafe_capability_at(
+        mark, capability, operation_bytes, span
+    ) |problem| {
+        return move problem;
+    }
+    if args.len(tree) != 1 {
+        return try self.named_arity_error(name, 1, args.len(tree));
+    }
+    var pointer_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        &var pointer_type
+    ) |problem| {
+        return move problem;
+    }
+    match try self.types.raw_pointer_deref_type(pointer_type) {
+        Value(value) => {
+            out.* = value;
+            return null;
+        },
+        Error(_) => return try self.pointer_read_type_error(
+            name, pointer_type
+        ),
+    }
+}
+
+fn (self: &var Checker) check_ptr_write(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    return self.check_pointer_write(
+        tree,
+        scopes,
+        scope,
+        mark,
+        span,
+        args,
+        UnsafeCapability::PtrWrite,
+        "ptr_write",
+        out
+    );
+}
+
+fn (self: &var Checker) check_volatile_write(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    return self.check_pointer_write(
+        tree,
+        scopes,
+        scope,
+        mark,
+        span,
+        args,
+        UnsafeCapability::Volatile,
+        "volatile_write",
+        out
+    );
+}
+
+fn (self: &var Checker) check_pointer_write(
+    tree: &var ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    mark: &var UnsafeMark,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    capability: UnsafeCapability,
+    name: []u8,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let operation = try quoted_name(self.allocator, name);
+    defer operation.deinit();
+    let operation_bytes = operation.as_bytes();
+    if try self.require_unsafe_capability_at(
+        mark, capability, operation_bytes, span
+    ) |problem| {
+        return move problem;
+    }
+    if args.len(tree) != 2 {
+        return try self.named_arity_error(name, 2, args.len(tree));
+    }
+    var pointer_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        argument,
+        &var pointer_type
+    ) |problem| {
+        return move problem;
+    }
+    var element = empty_type();
+    match try self.types.assignable_raw_pointer_deref_type(pointer_type) {
+        Value(value) => {
+            element = value;
+        },
+        Error(_) => return try self.pointer_write_type_error(name),
+    }
+    var value_type = empty_type();
+    let second_argument = args.get_or_panic(tree, 1);
+    if try self.check_contextual_expr(
+        tree,
+        scopes,
+        scope,
+        mark,
+        second_argument,
+        element,
+        &var value_type
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(value_type, element) {
+        return try self.pointer_write_value_error(
+            name, element, value_type
+        );
+    }
+    out.* = try self.types.void_type();
+    return null;
+}
+
+fn quoted_name(allocator: Allocator, name: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_byte(cast<u8>(96));
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(96));
+    return move out;
+}
+
+fn (self: &Checker) pointer_read_type_error(
+    name: []u8,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects non-null raw pointer, got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) pointer_write_type_error(
+    name: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects mutable non-null raw pointer");
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+fn (self: &Checker) pointer_write_value_error(
+    name: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}

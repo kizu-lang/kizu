@@ -1,0 +1,128 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+
+// Port of the Check / CheckAll drivers of internal/types/checker.go. The
+// setup phases that body checks depend on fail fast; body checks report one
+// diagnostic per top-level declaration so editors can show every independent
+// type error at once.
+
+// Names the body check one top-level declaration needs.
+union BodyCheckTarget {
+    None,
+    Missing,
+    Function(FunctionHandle),
+    Test(ast::TestDecl),
+}
+
+/// Validates the program and returns the first type error.
+pub fn check(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program
+) -> !?diagnostic::Diagnostic {
+    var checker = new_checker(allocator);
+    defer checker.deinit();
+    if try checker.check_setup(tree, program) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try checker.check_declaration_body(tree, declaration) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Validates the program like `check` but accumulates one diagnostic per
+/// top-level declaration instead of stopping at the first.
+pub fn check_all(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &ast::Program
+) -> !array::Array<diagnostic::Diagnostic> {
+    var checker = new_checker(allocator);
+    defer checker.deinit();
+    var out = array::new<diagnostic::Diagnostic>(allocator);
+    errdefer out.deinit();
+    if try checker.check_setup(tree, program) |failed| {
+        try out.append(move failed);
+        return move out;
+    }
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try checker.check_declaration_body(tree, declaration) |failed| {
+            try out.append(move failed);
+        }
+        index = index + 1;
+    }
+    return move out;
+}
+
+// Runs the setup phases every body check depends on; the first failure
+// stops the check since later errors would be noise without them.
+fn (self: &var Checker) check_setup(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> !?diagnostic::Diagnostic {
+    if try self.collect_functions(tree, program) |failed| {
+        return move failed;
+    }
+    if try self.check_public_api(tree, program) |failed| {
+        return move failed;
+    }
+    return self.check_owner_union_contracts(tree, program);
+}
+
+// Checks the body one top-level declaration carries, if any.
+fn (self: &var Checker) check_declaration_body(
+    tree: &var ast::Ast,
+    declaration: ast::Declaration
+) -> !?diagnostic::Diagnostic {
+    match self.body_check_target(tree, declaration) {
+        None => return null,
+        Missing => return try self.checker_error_at(
+            "type error", ast::zero_span(), "missing function metadata"
+        ),
+        Function(handle) => return self.check_function(tree, handle),
+        Test(test) => return self.check_test_decl(tree, &test),
+    }
+}
+
+// Selects the body check of one declaration: generic functions are checked
+// per instantiation, every other function and every test once.
+fn (self: &Checker) body_check_target(
+    tree: &ast::Ast,
+    declaration: ast::Declaration
+) -> BodyCheckTarget {
+    match tree.declarations.at(declaration.node) {
+        Function(function) => {
+            if signature_has_type_params(&function.signature) {
+                return BodyCheckTarget::None;
+            }
+            let retained = tree.texts.at(function.signature.name.node);
+            let name = retained.as_bytes();
+            let handle = self.metadata.functions_by_name.get(name) orelse
+                return BodyCheckTarget::Missing;
+            return BodyCheckTarget::Function(handle);
+        },
+        Test(test) => return BodyCheckTarget::Test(ast::TestDecl {
+            name: test.name,
+            body: test.body
+        }),
+        _ => return BodyCheckTarget::None,
+    }
+}
+
+fn signature_has_type_params(signature: &ast::FunctionSignature) -> bool {
+    var index = 0;
+    while signature.static_params.at(index) |parameter| {
+        if parameter.is_type() {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}

@@ -1,0 +1,354 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::mem;
+import std::string;
+
+// Ports the scalar, identifier, operator, and contextual-integer leaves used
+// by Checker.checkExpr. They stay private to the Checker module; the later
+// expression dispatcher calls them without an intermediate policy API.
+
+// Computes the static type of one literal-like expression.
+fn (self: &var Checker) check_scalar_expr(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        Int(_) => {
+            out.* = try self.types.i64_type();
+            return null;
+        },
+        String(_) => {
+            out.* = try self.types.byte_string_type();
+            return null;
+        },
+        Bool(_) => {
+            out.* = try self.types.bool_type();
+            return null;
+        },
+        Type(value) => {
+            let retained = tree.texts.at(value.type_name.node);
+            let bytes = retained.as_bytes();
+            match try self.resolve_type(tree, bytes) {
+                Value(_) => {
+                    out.* = try self.types.type_value_type();
+                    return null;
+                },
+                Issue(issue) => {
+                    return try self.type_resolution_diagnostic(issue);
+                },
+            }
+        },
+        Null(_) => {
+            return try self.checker_error_at(
+                "type error",
+                ast::zero_span(),
+                "`null` needs an optional context (a `?T` return or argument)"
+            );
+        },
+        _ => {
+            return try self.checker_error_at(
+                "type error", ast::zero_span(), "unsupported literal"
+            );
+        },
+    }
+}
+
+// Resolves a local name or an instantiated compile-time type parameter.
+fn (self: &var Checker) check_ident_expr(
+    tree: &ast::Ast,
+    scopes: &var ScopeStore,
+    scope: ScopeHandle,
+    expression: &ast::IdentExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(expression.name.node);
+    let name = retained.as_bytes();
+    if scopes.lookup(scope, name) |resolved| {
+        out.* = resolved;
+        return null;
+    }
+    if self.type_args.contains(name) {
+        out.* = try self.types.type_value_type();
+        return null;
+    }
+    if mem::equal_bytes(name, "void") {
+        return try self.checker_error_at(
+            "type error", expression.span, "void is not a value"
+        );
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("undefined variable `");
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    return try self.checker_message_at(
+        "type error", expression.span, move message
+    );
+}
+
+// Treats a fit-checked integer literal as the expected integer type.
+fn (self: &Checker) coerce_contextual_integer_literal(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if same_type(got, want) or
+        !self.types.is_text(got, "i64") or
+        !self.checker_integer_type(want) {
+        out.* = got;
+        return null;
+    }
+    var value = 0;
+    if integer_literal_value(tree, expression) |literal| {
+        value = literal;
+    } else {
+        out.* = got;
+        return null;
+    }
+    if integer_literal_fits_type(&self.types, value, want) {
+        out.* = want;
+        return null;
+    }
+    let rendered = try ast::render_expression(
+        self.allocator, tree, expression
+    );
+    defer rendered.deinit();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("integer literal `");
+    try message.append_string(&rendered);
+    try message.append_bytes("` does not fit ");
+    try self.append_checker_type(&var message, want);
+    return try self.checker_message_at(
+        "type error", ast::zero_span(), move message
+    );
+}
+
+// Returns an interpreter-representable integer literal written at expression.
+fn integer_literal_value(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> ?i64 {
+    match tree.expressions.at(expression.node) {
+        Int(value) => {
+            let retained = tree.texts.at(value.value.node);
+            let bytes = retained.as_bytes();
+            return decimal_i64(bytes);
+        },
+        Prefix(value) => {
+            let retained = tree.texts.at(value.operator.node);
+            let operator = retained.as_bytes();
+            if !mem::equal_bytes(operator, "-") {
+                return null;
+            }
+            if integer_literal_value(tree, value.right) |inner| {
+                return 0 - inner;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+// Checks the fixed-width bounds used by contextual integer typing.
+fn integer_literal_fits_type(
+    table: &TypeTable,
+    value: i64,
+    type_name: Type
+) -> bool {
+    if table.is_text(type_name, "i8") {
+        return value >= -128 and value <= 127;
+    }
+    if table.is_text(type_name, "i16") {
+        return value >= -32768 and value <= 32767;
+    }
+    if table.is_text(type_name, "i32") {
+        return value >= -2147483648 and value <= 2147483647;
+    }
+    if table.is_text(type_name, "i64") or
+        table.is_text(type_name, "isize") {
+        return true;
+    }
+    if table.is_text(type_name, "u8") {
+        return value >= 0 and value <= 255;
+    }
+    if table.is_text(type_name, "u16") {
+        return value >= 0 and value <= 65535;
+    }
+    if table.is_text(type_name, "u32") {
+        return value >= 0 and value <= 4294967295;
+    }
+    if table.is_text(type_name, "u64") or
+        table.is_text(type_name, "usize") {
+        return value >= 0;
+    }
+    return false;
+}
+
+fn (self: &Checker) checker_integer_type(value: Type) -> bool {
+    if value.node |handle| {
+        let entry = self.types.entries.at(handle);
+        let bytes = entry.spelling.as_bytes();
+        return is_integer_type(bytes);
+    }
+    return false;
+}
+
+// Validates boolean logical operands.
+fn (self: &var Checker) check_logical(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if self.types.is_text(left, "bool") and
+        self.types.is_text(right, "bool") {
+        out.* = try self.types.bool_type();
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type error: operator `");
+    try message.append_bytes(operator);
+    try message.append_bytes("` expects bool operands");
+    try self.append_operand_text(&var message, left, right);
+    return try self.checker_text_diagnostic_at(span, move message);
+}
+
+// Validates equality operands.
+fn (self: &var Checker) check_equality(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if !same_type(left, right) {
+        return try self.operator_type_mismatch(
+            operator, left, right, span
+        );
+    }
+    out.* = try self.types.bool_type();
+    return null;
+}
+
+// Reports both operand types for a binary mismatch.
+fn (self: &Checker) operator_type_mismatch(
+    operator: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type error: operator `");
+    try message.append_bytes(operator);
+    try message.append_bytes("` operands must have same type");
+    try self.append_operand_text(&var message, left, right);
+    var problem = try self.checker_text_diagnostic_at(
+        span, move message
+    );
+    errdefer problem.deinit();
+    try problem.with_code("type.operator_type_mismatch");
+    return move problem;
+}
+
+// Reports operands that do not belong to the required category.
+fn (self: &Checker) operator_operand_kind_error(
+    operator: []u8,
+    want: []u8,
+    left: Type,
+    right: Type,
+    span: ast::Span
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type error: operator `");
+    try message.append_bytes(operator);
+    try message.append_bytes("` expects ");
+    try message.append_bytes(want);
+    try message.append_bytes(" operands");
+    try self.append_operand_text(&var message, left, right);
+    return self.checker_text_diagnostic_at(span, move message);
+}
+
+fn (self: &Checker) append_operand_text(
+    message: &var string::String,
+    left: Type,
+    right: Type
+) -> !void {
+    try message.append_byte(cast<u8>(10));
+    try message.append_bytes("note: left operand has type ");
+    try self.append_checker_type(message, left);
+    try message.append_byte(cast<u8>(10));
+    try message.append_bytes("note: right operand has type ");
+    return self.append_checker_type(message, right);
+}
+
+// Reports whether operator returns bool for numeric operands.
+fn is_comparison(operator: []u8) -> bool {
+    return mem::equal_bytes(operator, "<") or
+        mem::equal_bytes(operator, "<=") or
+        mem::equal_bytes(operator, ">") or
+        mem::equal_bytes(operator, ">=");
+}
+
+// Returns the best source span retained on an expression.
+fn expression_span(tree: &ast::Ast, expression: ast::Expression) -> ast::Span {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => return value.span,
+        Binary(value) => return value.operator_span,
+        Call(value) => return expression_span(tree, value.callee),
+        TypeApply(value) => return expression_span(tree, value.callee),
+        Cast(value) => return value.keyword_span,
+        Field(value) => return value.span,
+        Deref(value) => return value.operator_span,
+        StructLiteral(value) => return value.span,
+        _ => return ast::zero_span(),
+    }
+}
+
+fn (self: &Checker) checker_error_at(
+    category: []u8,
+    span: ast::Span,
+    message: []u8
+) -> !diagnostic::Diagnostic {
+    return diagnostic::new(
+        self.allocator,
+        diagnostic::Severity::Error,
+        category,
+        span,
+        message
+    );
+}
+
+fn (self: &Checker) checker_message_at(
+    category: []u8,
+    span: ast::Span,
+    message: string::String
+) -> !diagnostic::Diagnostic {
+    defer message.deinit();
+    let text = message.as_bytes();
+    return diagnostic::new(
+        self.allocator,
+        diagnostic::Severity::Error,
+        category,
+        span,
+        text
+    );
+}
+
+fn (self: &Checker) checker_text_diagnostic_at(
+    span: ast::Span,
+    message: string::String
+) -> !diagnostic::Diagnostic {
+    defer message.deinit();
+    let text = message.as_bytes();
+    return diagnostic::from_text(
+        self.allocator, diagnostic::Severity::Error, span, text
+    );
+}
