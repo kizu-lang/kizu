@@ -322,6 +322,7 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 		}
 		p.nextToken()
 	}
+	p.expectListClose("contract")
 	return methods
 }
 
@@ -431,6 +432,7 @@ func (p *Parser) parseStructFields() []ast.Field {
 		}
 		p.nextToken()
 	}
+	p.expectListClose("struct")
 	return fields
 }
 
@@ -545,6 +547,7 @@ func (p *Parser) parseNameList(label string) ([]string, map[string]string) {
 		}
 		p.nextToken()
 	}
+	p.expectListClose(label + " list")
 	return names, tagDocsOrNil(docs)
 }
 
@@ -597,6 +600,7 @@ func (p *Parser) parseUnionVariants() []ast.UnionVariant {
 		}
 		p.nextToken()
 	}
+	p.expectListClose("union")
 	return variants
 }
 
@@ -682,6 +686,7 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 		block.Statements = append(block.Statements, stmt)
 		p.nextToken()
 	}
+	p.expectListClose("block")
 	return block
 }
 
@@ -1117,6 +1122,16 @@ func (p *Parser) consumeListDelimiter(context string) bool {
 	}
 }
 
+// expectListClose reports a brace-delimited list or block that reached the
+// end of the file before its closing brace. The loops stop at EOF so they
+// cannot spin, but stopping is not closing: a file cut off inside a body must
+// not parse clean.
+func (p *Parser) expectListClose(context string) {
+	if p.cur.Type == token.EOF {
+		p.errorf("expected `}` to close %s, got end of file", context)
+	}
+}
+
 // parseMatchStmt parses a simple enum tag match statement.
 func (p *Parser) parseMatchStmt() *ast.MatchStmt {
 	stmt := &ast.MatchStmt{}
@@ -1144,6 +1159,7 @@ func (p *Parser) parseMatchArms() []ast.MatchArm {
 		}
 		p.nextToken()
 	}
+	p.expectListClose("match")
 	return arms
 }
 
@@ -1854,6 +1870,7 @@ func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
 		}
 		p.nextToken()
 	}
+	p.expectListClose("struct literal")
 	return expr
 }
 
