@@ -645,6 +645,114 @@ fn (self: &var Checker) resolve_meta_type_form(
     }
 }
 
+// resolve_meta_type_deep resolves the forms inside a wrapped spelling. A worker
+// returns `!std::meta::field_type<T, f>`, so the form sits under the error
+// union rather than at the top, and the wrapper has to be rebuilt around what
+// the form resolved to.
+fn (self: &var Checker) resolve_meta_type_deep(
+    tree: &ast::Ast,
+    value: Type
+) -> !TypeResolution {
+    match try self.resolve_meta_type(tree, value) {
+        Value(resolved) => {
+            if !same_type(resolved, value) {
+                return TypeResolution::Value(resolved);
+            }
+        },
+        Issue(issue) => return TypeResolution::Issue(issue),
+    }
+    let parsed = self.types.lookup(value) orelse
+        return TypeResolution::Value(value);
+    var out = string::new(self.allocator);
+    defer out.deinit();
+    match typ::root_node(&self.types.parsed, parsed) {
+        ErrorUnion(node) => {
+            if node.err |error_node| {
+                try typ::append_render(
+                    &var out,
+                    &self.types.parsed,
+                    typ::child_type(parsed, error_node)
+                );
+            }
+            try out.append_bytes("!");
+            let ok = try self.types.retain_parsed(
+                typ::child_type(parsed, node.ok)
+            );
+            if try self.append_meta_type_deep(
+                tree, &var out, ok
+            ) |issue| {
+                return TypeResolution::Issue(issue);
+            }
+        },
+        Optional(node) => {
+            try out.append_bytes("?");
+            let elem = try self.types.retain_parsed(
+                typ::child_type(parsed, node.elem)
+            );
+            if try self.append_meta_type_deep(
+                tree, &var out, elem
+            ) |issue| {
+                return TypeResolution::Issue(issue);
+            }
+        },
+        Slice(node) => {
+            try out.append_bytes("[]");
+            let elem = try self.types.retain_parsed(
+                typ::child_type(parsed, node.elem)
+            );
+            if try self.append_meta_type_deep(
+                tree, &var out, elem
+            ) |issue| {
+                return TypeResolution::Issue(issue);
+            }
+        },
+        Name(node) => {
+            if node.args.len() == 0 {
+                return TypeResolution::Value(value);
+            }
+            let base = try copy_name_path(self.allocator, node);
+            defer base.deinit();
+            try out.append_string(&base);
+            try out.append_bytes("<");
+            var index = 0;
+            while node.args.get(index) |argument| {
+                if index > 0 {
+                    try out.append_bytes(", ");
+                }
+                let arg = try self.types.retain_parsed(
+                    typ::child_type(parsed, argument)
+                );
+                if try self.append_meta_type_deep(
+                    tree, &var out, arg
+                ) |issue| {
+                    return TypeResolution::Issue(issue);
+                }
+                index = index + 1;
+            }
+            try out.append_bytes(">");
+        },
+        _ => return TypeResolution::Value(value),
+    }
+    let bytes = out.as_bytes();
+    return TypeResolution::Value(try self.types.intern(bytes));
+}
+
+// append_meta_type_deep appends one deeply resolved child spelling, or reports
+// the issue that stopped it.
+fn (self: &var Checker) append_meta_type_deep(
+    tree: &ast::Ast,
+    out: &var string::String,
+    value: Type
+) -> !?TypeResolutionIssue {
+    match try self.resolve_meta_type_deep(tree, value) {
+        Value(inner) => {
+            try self.append_checker_type(out, inner);
+            return null;
+        },
+        Issue(issue) => return issue,
+    }
+}
+
 fn (self: &var Checker) resolve_meta_type(
     tree: &ast::Ast,
     value: Type

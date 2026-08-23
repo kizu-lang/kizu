@@ -1954,7 +1954,7 @@ fn (self: &var Checker) check_array_constructor(
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if !self.type_is_generic_param(element) {
+    if !self.is_type_parameter(element) {
         if try self.reject_array_element_type(
             tree, element
         ) |problem| {
@@ -2361,12 +2361,27 @@ fn (self: &var Checker) check_instantiated_body(
     return null;
 }
 
+// resolve_instance_type rewrites the `std::meta` forms a declaration wrote into
+// the types they name, now that this instantiation has bound what they read.
+// A declaration writes `std::meta::field_type<T, f>` because neither name is
+// bound where it is written; the instance is where both are.
 fn (self: &var Checker) resolve_instance_type(
     tree: &ast::Ast,
     declared: Type,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    match try self.resolve_retained_type(tree, declared) {
+    var resolved = declared;
+    match try self.resolve_meta_type_deep(tree, declared) {
+        Value(value) => {
+            resolved = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if same_type(resolved, declared) {
+        out.* = declared;
+        return null;
+    }
+    match try self.resolve_retained_type(tree, resolved) {
         Value(value) => {
             out.* = value;
             return null;
