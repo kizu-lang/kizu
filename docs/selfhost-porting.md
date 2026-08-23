@@ -274,7 +274,7 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | llvm | 3897 | 5761 | 1.48(words 24,388 / 14,875 = 1.64) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
-| native | 249 | 513 | 2.06(words 1,833 / 869 = 2.11) | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / 正規化 stderr / failed、build は両 exe を実行して exact exit code、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
+| native | 249 | 494 | 1.98(words 1,755 / 869 = 2.02) | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / 正規化 stderr / failed、build は両 exe を実行して exact exit code、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
 | compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test) | 1041(全 command) | 797 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
@@ -333,17 +333,17 @@ tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` 
 ので圧縮 pass は置かず、後続 module(native link)を優先する。
 
 
-native の増分(+264 行、509 + runtime_source wrapper 4 に対して Go 249。Go 側には未移植の
-cache key 3 関数 14 行を含む)の分類。buildcache を移植しない代替(`TempDirs` /
-`claim_dir` / `clean_build_dir` / `remove_temp_file` / `create_dir_all`)が 69 行で、Go の
-`os.MkdirTemp` / `RemoveAll` / `MkdirAll` 8 行に当たる std gap。signature の 1 引数 1 行
-折返しが 60 行、`as_bytes()` の view 束縛が 33 行、`defer` / `errdefer` が 29 行(API shape
-と ownership の明示)。spawn_wait8 の固定 8 引数形(triple 有無の分岐 ×2)が 20 行、
-map の sorted iteration が無いことによる `sorted_keys` の copy-sort が 13 行、
-`fmt.Errorf` 相当の無い fail helper が 17 行(std gap)。圧縮 pass 済み(手書き JSON
-escaper と Metadata copy を `std::json` encoder に、8 slot argv copy を view 直渡しに
-置換して 752 → 513)だが 2.0 を切れておらず、残りは std の fs 一時 directory / 再帰削除
-primitive と signature 折返しで、module 完了の gate 判断は保留。
+native の増分(+245 行、490 + runtime_source wrapper 4 に対して Go 249。Go 側には
+buildcache module へ回した cache key 3 関数 14 行を含む)の分類。buildcache を移植しない
+代替(`TempDirs` / `claim_dir` / `clean_build_dir` / `remove_temp_file` / `create_dir_all`)が
+65 行で、Go の `os.MkdirTemp` / `RemoveAll` / `MkdirAll` 8 行に当たる std gap。signature の
+1 引数 1 行折返しが 60 行、`as_bytes()` の view 束縛が 30 行、`defer` / `errdefer` が 26 行
+(API shape と ownership の明示)。spawn_wait8 の固定 8 引数形(`spawn_clang` の triple
+有無の分岐)が 15 行、map の sorted iteration が無いことによる `sorted_keys` の copy-sort が
+13 行、`fmt.Errorf` 相当の無い fail helper が 17 行(std gap)。圧縮 pass 済み: 手書き JSON
+escaper と Metadata copy を `std::json` encoder に、8 slot argv copy を view 直渡しの
+`spawn_clang` に置換し、752 → 494 で 2.0 未満に入った。words 比 2.02 は spawn の 8 引数
+呼び出しと encoder の field 列が語数を持つためで、行の折返しでは動いていない。
 
 
 ## 見つかった gap

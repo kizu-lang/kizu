@@ -46,11 +46,9 @@ pub struct TempDirs {
 /// Returns the temporary directory maker for this process.
 pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
     let dir = process::env("TMPDIR") orelse "/tmp";
-    var base = string::new(allocator);
+    var base = try string::from_bytes(allocator, dir);
     errdefer base.deinit();
-    if mem::len(dir) > 0 {
-        try base.append_bytes(dir);
-    } else {
+    if base.len() == 0 {
         try base.append_bytes("/tmp");
     }
     return TempDirs { base: move base, stamp: process::monotonic_millis(), next: 0 };
@@ -58,16 +56,14 @@ pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
 
 /// Creates and returns the next temporary build directory.
 pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string::String {
-    var name = try string::from_bytes(allocator, "kizu-native-");
-    defer name.deinit();
-    try fmt::append_i64(&var name, self.stamp);
-    try name.append_bytes("-");
-    try fmt::append_i64(&var name, self.next);
-    self.next = self.next + 1;
-    let base = self.base.as_bytes();
-    let name_bytes = name.as_bytes();
-    let dir = try path::join(allocator, base, name_bytes);
+    var dir = string::new(allocator);
     defer dir.deinit();
+    try dir.append_string(&self.base);
+    try dir.append_bytes("/kizu-native-");
+    try fmt::append_i64(&var dir, self.stamp);
+    try dir.append_bytes("-");
+    try fmt::append_i64(&var dir, self.next);
+    self.next = self.next + 1;
     let dir_bytes = dir.as_bytes();
     try fs::create_dir(io, dir_bytes);
     var out = string::new(allocator);
@@ -146,9 +142,9 @@ pub fn executable(
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
     }
-    let exe = try path::join(allocator, dir_bytes, "program");
-    defer exe.deinit();
-    let exe_bytes = exe.as_bytes();
+    try out_exe.append_string(&dir);
+    try out_exe.append_bytes("/program");
+    let exe_bytes = out_exe.as_bytes();
     var command = array::new<string::String>(allocator);
     defer command.deinit();
     let runtime_bytes = runtime_path.as_bytes();
@@ -157,7 +153,6 @@ pub fn executable(
         try clean_build_dir(io, allocator, dir_bytes);
         return move failed;
     }
-    try out_exe.append_string(&exe);
     return null;
 }
 
@@ -272,14 +267,10 @@ fn runtime_object(
     defer source.deinit();
     try error_set_constants(allocator, sets, &var source);
     try source.append_bytes(runtime_source());
-    let object = try path::join(allocator, dir, "runtime.o");
-    defer object.deinit();
-    let object_bytes = object.as_bytes();
-    if try compile_runtime(io, allocator, dir, &source, object_bytes, options) |failed| {
-        return move failed;
-    }
-    try out.append_string(&object);
-    return null;
+    try out.append_bytes(dir);
+    try out.append_bytes("/runtime.o");
+    let object_bytes = out.as_bytes();
+    return compile_runtime(io, allocator, dir, &source, object_bytes, options);
 }
 
 /// Compiles the runtime source into one object file, the Go
@@ -299,14 +290,21 @@ fn compile_runtime(
     let source_bytes = source_path.as_bytes();
     let text = source.as_bytes();
     try fs::write_file(io, source_bytes, text);
+    return spawn_clang(allocator, options, "-c", source_bytes, object);
+}
+
+/// Spawns the toolchain in its two spellings, the exec of `runClang` and
+/// `compileRuntime`: `clang [-target T] -O<n> <a> <b> -o <output>` is at
+/// most eight arguments, the fixed shape std::process::spawn_wait8 takes.
+fn spawn_clang(allocator: Allocator, options: &Options, a: []u8, b: []u8, output: []u8) -> !?diagnostic::Diagnostic {
     let linker = options.linker.as_bytes();
     let level = clang_optimization_flag(options.opt);
     var code = 0;
     if options.triple.len() > 0 {
         let triple = options.triple.as_bytes();
-        code = try process::spawn_wait8(8, linker, "-target", triple, level, "-c", source_bytes, "-o", object);
+        code = try process::spawn_wait8(8, linker, "-target", triple, level, a, b, "-o", output);
     } else {
-        code = try process::spawn_wait8(6, linker, level, "-c", source_bytes, "-o", object, "", "");
+        code = try process::spawn_wait8(6, linker, level, a, b, "-o", output, "", "");
     }
     if code != 0 {
         return try fail_linker(allocator, options, code);
@@ -342,8 +340,7 @@ fn require_error_set(
             return null;
         }
     }
-    let failed = try fail_parts(allocator, "native error: error set `", name, "` is missing");
-    return move failed;
+    return try fail_parts(allocator, "native error: error set `", name, "` is missing");
 }
 
 /// Writes the number each error set member lowers to, the Go
@@ -480,18 +477,7 @@ fn run_clang(
     try append_copy(allocator, command, runtime_path);
     try append_copy(allocator, command, "-o");
     try append_copy(allocator, command, output);
-    let level = clang_optimization_flag(options.opt);
-    var code = 0;
-    if options.triple.len() > 0 {
-        let triple = options.triple.as_bytes();
-        code = try process::spawn_wait8(8, linker, "-target", triple, level, ir_path, runtime_path, "-o", output);
-    } else {
-        code = try process::spawn_wait8(6, linker, level, ir_path, runtime_path, "-o", output, "", "");
-    }
-    if code != 0 {
-        return try fail_linker(allocator, options, code);
-    }
-    return null;
+    return spawn_clang(allocator, options, ir_path, runtime_path, output);
 }
 
 /// Spells what the toolchain is asked to produce, the Go `clangFlags`.
@@ -506,8 +492,7 @@ fn clang_flags(
         try append_copy(allocator, out, triple);
     }
     let level = clang_optimization_flag(options.opt);
-    try append_copy(allocator, out, level);
-    return;
+    return append_copy(allocator, out, level);
 }
 
 /// Selects the native toolchain optimization level, the Go
