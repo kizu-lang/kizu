@@ -244,6 +244,7 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
 | types | 7768 | 15293 | 1.97 | check corpus 635 case(diagnostics) |
+| compiler(cmd/kizu の parse / check) | 1041(全 command) | 180 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check と tests/behavior・compiler/・examples/modules の check を Go の front end と byte 比較(938 case) |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -280,4 +281,6 @@ message builder の共通化(parser の `error_*` と同じ融合)と `tree` 引
 | `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
 | expression の match arm で `return` できない | loader / checker body | statement の match に包む |
 | closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
+| `main` は exit status を選べず、error を返すと runtime が `runtime error: <名前>` を stderr に足す(ADR-0085) | CLI の失敗終了 | error set `Cli` を返す。差分テストはその 1 行を除いて比較。cutover までに `std::process::exit` 相当の判断が要る |
+| `std::process` は argv[0](実行ファイルの path)を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
 
