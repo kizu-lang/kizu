@@ -127,6 +127,8 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | `ir.Module` / `Function` / `Block` / `Instr` の pointer graph と `string` の op / 名前 | `Module` 所有の arena + copy handle(`Function` / `Block` / `Instr`)、`Op` enum + `operand: Name` + spelling 関数、`Module` 所有の `NameTable` に intern した `Name`(value の name / type、block label、call 先、immediate) | `call.<f>` / `field.<f>` / `binary.<op>` は `Op` の種類と運ぶ名前に分ける。llvm / wasm emitter も同じ型を読む。`Cleanup` の `Args` は常に receiver 1 つなので `arg: Value` |
 | `llvm.emitter` の `string` operand / label / LLVM 型名と、SSA 名で引く `map[string]valueInfo` / `blockExitLabel` / `strings` | `Emitter` 所有の `NameTable` に intern した `Name`(operand、label、LLVM 型名、`valueInfo` の typ / operand)、SSA 名・label 名・literal の bytes を key にした `Map`(Go が関数ごとに作り直す map は entry に関数の generation 番号を持たせて区別する。`Map` は空にできない)、IR の型綴りは `module.names` の bytes view を関数間で渡す | `fmt.Fprintf` の format 文字列を `%s` / `%d` / `%%` を展開する `line1..line6` にそのまま渡し(末尾 `\n` だけ helper が足す)、`fmt.Sprintf` は `text*` / `sprint*`。Go に無い template・形状分岐は作らない。`module` は全 method が `&ir::Module` で受け、`emit` だけが cleanup 命令の `void` 型名を intern するため `&var`。emit.go は llvm.kizu(emitter・walk・dispatch・共有 helper)/ header.kizu(module 宣言)/ instr.kizu(scalar・aggregate・memory 命令)/ call.kizu(`call.*` と extern 宣言)/ error.kizu(`error.*` / `opt.*` / return)に分け、他の Go file は同名の .kizu |
 
+| `internal/native` の埋め込み runtime C(`//go:embed runtime/runtime.c`)と build cache | 生成 file `runtime_source.kizu`(multi-line literal を返す 1 関数)。cache は移植せず、runtime object と executable は TMPDIR の `kizu-native-<monotonic_millis>-<連番>` に毎回 build し、run / test が終わったら `clean_build_dir` で片付ける | runtime C の byte 一致は `go test ./internal/native -run TestRuntimeSourceKizu -update` が gate する(data の同一性 gate であって構造 pin ではない)。`Metadata` は json tag の担体なので `std::json` encoder の field 列に写す。cache 統合は buildcache module の goal で扱う |
+
 Go の `panic`、reflection、goroutine、shared mutable global、unsafe pointer が現れた
 場合は local mapping を発明しません。移植全体で一つの判断が必要な境界として
 止めます。
@@ -272,7 +274,8 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | llvm | 3897 | 5761 | 1.48(words 24,388 / 14,875 = 1.64) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
-| compiler(cmd/kizu の parse / check / ir / build --emit-llvm) | 1041(全 command) | 352 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case) |
+| native | 249 | 494 | 1.98(words 1,755 / 869 = 2.02) | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / 正規化 stderr / failed、build は両 exe を実行して exact exit code、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
+| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test) | 1041(全 command) | 797 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -330,6 +333,19 @@ tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` 
 ので圧縮 pass は置かず、後続 module(native link)を優先する。
 
 
+native の増分(+245 行、490 + runtime_source wrapper 4 に対して Go 249。Go 側には
+buildcache module へ回した cache key 3 関数 14 行を含む)の分類。buildcache を移植しない
+代替(`TempDirs` / `claim_dir` / `clean_build_dir` / `remove_temp_file` / `create_dir_all`)が
+65 行で、Go の `os.MkdirTemp` / `RemoveAll` / `MkdirAll` 8 行に当たる std gap。signature の
+1 引数 1 行折返しが 60 行、`as_bytes()` の view 束縛が 30 行、`defer` / `errdefer` が 26 行
+(API shape と ownership の明示)。spawn_wait8 の固定 8 引数形(`spawn_clang` の triple
+有無の分岐)が 15 行、map の sorted iteration が無いことによる `sorted_keys` の copy-sort が
+13 行、`fmt.Errorf` 相当の無い fail helper が 17 行(std gap)。圧縮 pass 済み: 手書き JSON
+escaper と Metadata copy を `std::json` encoder に、8 slot argv copy を view 直渡しの
+`spawn_clang` に置換し、752 → 494 で 2.0 未満に入った。words 比 2.02 は spawn の 8 引数
+呼び出しと encoder の field 列が語数を持つためで、行の折返しでは動いていない。
+
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
@@ -354,7 +370,7 @@ tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` 
 | `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
 | expression の match arm で `return` できない | loader / checker body | statement の match に包む |
 | closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
-| `main` は exit status を選べず、error を返すと runtime が `runtime error: <名前>` を stderr に足す(ADR-0085) | CLI の失敗終了 | error set `Cli` を返す。差分テストはその 1 行を除いて比較。cutover までに `std::process::exit` 相当の判断が要る |
+| `main` は exit status を選べず、error を返すと runtime が `runtime error: <名前>` を stderr に足す(ADR-0085) | CLI の失敗終了。native の `run` / `test` は子 process の exit code(1 以外や signal 死)をそのまま伝えられず 0 / 1 に潰れる | error set `Cli` を返す。差分テストはその 1 行を除き、exit status は failed か否かで比較。cutover までに `std::process::exit` 相当の判断が要る |
 | `std::process` は argv[0](実行ファイルの path)を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
 | method の `&T` 戻り値は ownership checker が borrow として追跡しない(`calledFunction` が free function と namespace 修飾名しか解決せず、`let s = self.text(n); s.as_bytes()` が view 初期化子と認識されない) | ownership の `NameTable`: intern した綴りの bytes を読む accessor | free function `name_text(names: &NameTable, name) -> &string::String` にし、call site で `let retained = ...; let bytes = retained.as_bytes();` と束縛する |
 | IR lowering が `&var` 引数の slot 判定を method 名だけで program 全体に union する(`internal/ir/slots.go` `markLentMethodArgs`)ため、別 module に同名で `&var` 位置が違う method があると capture / payload binding の lowering が壊れる(`clone`、`is_plain_data_type` で project / types の関数が clang error になった) | ownership module の `ScopeStore.clone` / `Checker.is_plain_data_type` ほか | 衝突した method だけ名前を変えた(`clone_scope`、`binding_mut`、`check_call`、`check_value_block`、`is_plain_data`、`check_owned_string_method` など)。同名 method の `&var` 位置差を列挙する確認を module 完了時に行う |
@@ -379,3 +395,8 @@ tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` 
 | union payload / struct field に local binding 由来の `[]u8` view を置けない(literal と literal 由来の戻り値だけ) | llvm の `Arg::Lit`(Go の string 引数) | 生成 text は `Name` に intern(`Arg::Str`)か owned `String`(`Arg::Owned`)で渡し、`[]u8` を返す helper(`llvm_binary_op` など)は `&NameTable` + `Name` を受けて literal だけ返す |
 | closure / function value が無いので callback を取る Go 関数(`collectModuleTypeNames(collect func)`、`writeContainerNew(isResultType func)`)を写せない | llvm の header / container | 呼び分けを enum(`TypeCollector`、`ContainerKind`)で受け、中で match する |
 | `typ::walk` の visitor は `&Node` しか受けず、部分木を render する `Type` handle を持てない | llvm の `collectErrorUnionName`(`typ.Walk` で ErrorUnion node を `String()` する) | `root_node` / `child_type` で明示的に再帰する |
+| 子 process の出力 capture が無い(`spawn_wait8` は stdout / stderr 継承) | native の `runClang` / `compileRuntime`: Go は clang の CombinedOutput を成功時は捨て、失敗時は error に載せる。selfhost では clang の `-Woverride-module` warning が毎回 stderr に流れ、失敗出力を message に運べない | 失敗 message は「native error: clang failed: exit status N」の行だけ合わせる。`TestSelfhostNative` は selfhost 側 stderr から toolchain noise を落とし、Go の build が clang で失敗する case は比較から除外 |
+| fs に `os.MkdirTemp` / `RemoveAll` / `MkdirAll` 相当が無い | native の一時 build directory 管理 | `TempDirs`(TMPDIR + `kizu-native-<monotonic_millis>-<連番>`)と `create_dir_all` / `clean_build_dir`(既知 file の削除 + rmdir)を module 内に書いた。buildcache module でも要るなら std gap として切り出す |
+| `spawn_wait8` は引数 8 個の固定形 | clang の link argv は `--triple` 付きでちょうど 8。`run` の child args は exe + 7 個まで | clang は triple 有無で 2 つの呼び出し形に分岐。8 個を超える構成が要る場合は止めて報告する |
+| `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostNative` は絶対 path を正規化して比較する |
+| generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
