@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -479,18 +480,25 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	defer c.typeParams.restore(previousTypeParams)
 	union := &unionType{
 		name: decl.Name, typeParams: decl.TypeParams,
-		variants: map[string]string{}, public: decl.Public,
+		variants: map[string]Type{}, public: decl.Public,
 	}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
 			return errorf("type error: duplicate union variant `%s::%s`",
 				decl.Name, variant.Name)
 		}
+		payloadType := Type("")
 		if variant.Payload != nil {
-			payload := typ.Text(variant.Payload)
-			parsed, err := c.parseType(payload)
+			parsed, err := c.parseTypeNode(variant.Payload)
 			if err != nil {
 				return err
+			}
+			written := typ.Text(variant.Payload)
+			if payload := stdmeta.ResolveElementTypeForms(written); payload != written {
+				parsed, err = c.parseType(payload)
+				if err != nil {
+					return err
+				}
 			}
 			if _, ok := optionalElem(parsed); ok {
 				return errorf("type error: union payload `%s::%s` cannot store an optional yet",
@@ -504,8 +512,9 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
+			payloadType = parsed
 		}
-		union.variants[variant.Name] = typ.Text(variant.Payload)
+		union.variants[variant.Name] = payloadType
 		union.order = append(union.order, variant.Name)
 	}
 	c.unions[decl.Name] = union
@@ -609,7 +618,8 @@ func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bo
 	if st, ok := c.structs[base]; ok {
 		visited[base] = true
 		for _, field := range st.Fields {
-			if c.typeContainsOwner(typ.Text(field.TypeName), visited) {
+			fieldType := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
+			if c.typeContainsOwner(fieldType, visited) {
 				return true
 			}
 		}
@@ -618,7 +628,7 @@ func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bo
 	if union, ok := c.unions[base]; ok {
 		visited[base] = true
 		for _, payload := range union.variants {
-			if payload != "" && c.typeContainsOwner(payload, visited) {
+			if payload != "" && c.typeContainsOwner(string(payload), visited) {
 				return true
 			}
 		}
@@ -629,11 +639,13 @@ func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bo
 
 // unionHasOwnerPayload reports whether any variant payload is an owner payload.
 func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
-	for _, variant := range decl.Variants {
-		if variant.Payload == nil {
-			continue
-		}
-		if c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
+	union := c.unions[decl.Name]
+	if union == nil {
+		return false
+	}
+	for _, payload := range union.variants {
+		if payload != "" && c.typeContainsOwner(
+			string(payload), map[string]bool{decl.Name: true}) {
 			return true
 		}
 	}
@@ -728,8 +740,9 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		armByTag[arm.Tag] = arm
 	}
 	for _, variant := range decl.Variants {
-		if variant.Payload == nil ||
-			!c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
+		payload := c.unions[decl.Name].variants[variant.Name]
+		if payload == "" || !c.typeContainsOwner(
+			string(payload), map[string]bool{decl.Name: true}) {
 			continue
 		}
 		arm, ok := armByTag[variant.Name]
@@ -2027,6 +2040,11 @@ func (c *Checker) structLiteralFieldValue(
 	if want == "" {
 		return "", errorf("type error: unknown field `%s.%s`", typeName, field.Name)
 	}
+	var err error
+	want, err = c.resolveInstanceType(want)
+	if err != nil {
+		return "", err
+	}
 	if _, isOptional := optionalElem(want); !isOptional {
 		return "", errorf("type error: field `%s.%s` expects %s, got null",
 			typeName, field.Name, want)
@@ -2391,7 +2409,7 @@ func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm
 		return "", errorf("type error: union variant `%s::%s` has no payload",
 			unionType.name, arm.Tag)
 	}
-	return payload, nil
+	return string(payload), nil
 }
 
 // matchTypeName returns the matched enum or union type name.
@@ -3639,11 +3657,7 @@ func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
 		if payload == "" {
 			continue
 		}
-		payloadType, err := c.parseType(payload)
-		if err != nil {
-			return err
-		}
-		if err := c.rejectArrayStorageType(payloadType, seen); err != nil {
+		if err := c.rejectArrayStorageType(payload, seen); err != nil {
 			return errorf("type error: union `%s::%s` cannot be Array element: %w",
 				typ, variant, err)
 		}
@@ -4891,12 +4905,12 @@ func (c *Checker) checkUnionConstructorCall(
 	if err != nil {
 		return "", true, err
 	}
-	got, err = c.coerceContextualIntegerLiteral(args[0], Type(payload), got)
+	got, err = c.coerceContextualIntegerLiteral(args[0], payload, got)
 	if err != nil {
 		return "", true, err
 	}
-	if !sameType(got, Type(payload)) &&
-		!c.returnValueMatchesBorrowParam(args[0], env, Type(payload), got) {
+	if !sameType(got, payload) &&
+		!c.returnValueMatchesBorrowParam(args[0], env, payload, got) {
 		return "", true, errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
@@ -4943,8 +4957,11 @@ func (c *Checker) checkStructLiteralExpr(
 		if err := c.checkPrivateFieldAccess(expr.TypeName, field); err != nil {
 			return "", err
 		}
-		want := fieldDeclaredType(field)
-		got, err := c.coerceContextualIntegerLiteral(exprs[field.Name], want, got)
+		want, err := c.resolveInstanceType(fieldDeclaredType(field))
+		if err != nil {
+			return "", err
+		}
+		got, err = c.coerceContextualIntegerLiteral(exprs[field.Name], want, got)
 		if err != nil {
 			return "", err
 		}
@@ -5016,7 +5033,8 @@ func (c *Checker) resolveFieldExpr(
 			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
 				return "", nil, err
 			}
-			return Type(typ.Text(field.TypeName)), decl, nil
+			fieldType, err := c.resolveInstanceType(Type(typ.Text(field.TypeName)))
+			return fieldType, decl, err
 		}
 	}
 	return "", nil, errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
@@ -6622,14 +6640,15 @@ func (c *Checker) isPlainDataAggregate(name string, seen map[string]bool) bool {
 	defer delete(seen, name)
 	if isStruct {
 		for _, field := range st.Fields {
-			if field.Borrow || !c.isPlainDataType(typ.Text(field.TypeName), seen) {
+			fieldType := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
+			if field.Borrow || !c.isPlainDataType(fieldType, seen) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, payload := range union.variants {
-		if payload != "" && !c.isPlainDataType(payload, seen) {
+		if payload != "" && !c.isPlainDataType(string(payload), seen) {
 			return false
 		}
 	}

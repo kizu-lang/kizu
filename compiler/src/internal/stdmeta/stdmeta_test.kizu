@@ -1,3 +1,4 @@
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -61,6 +62,38 @@ fn expect_one_form(
 
 fn expect_spelling(form: Form, expected: []u8) -> void {
     testing::expect_equal<[]u8>(expected, spelling(form));
+}
+
+fn expect_element_type(
+    allocator: Allocator,
+    container: []u8,
+    expected: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(container);
+    if element_type(&table, parsed) |element| {
+        let rendered = try typ::render(allocator, &table, element);
+        defer rendered.deinit();
+        let bytes = rendered.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::fail("stdmeta element type was not found");
+    }
+    return;
+}
+
+fn expect_no_element_type(
+    allocator: Allocator,
+    container: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(container);
+    if element_type(&table, parsed) |_| {
+        testing::fail("invalid stdmeta element container was accepted");
+    }
+    return;
 }
 
 fn expect_no_apply(allocator: Allocator, text: []u8) -> !void {
@@ -253,4 +286,30 @@ test "stdmeta rejects ordinary and malformed applications" {
     try expect_no_apply(allocator, "std::meta::field_type<T, f");
     try expect_no_apply(allocator, "std::meta::field_type<T>, f>");
     try expect_no_apply(allocator, "std::meta::field_type<T<f>");
+}
+
+test "stdmeta reads element types from valid closed containers" {
+    let allocator = mem::page_allocator();
+    try expect_element_type(allocator, "?i64", "i64");
+    try expect_element_type(
+        allocator,
+        "std::array::Array<i64>",
+        "i64"
+    );
+    try expect_element_type(
+        allocator,
+        "std::mem::Box<bool>",
+        "bool"
+    );
+    try expect_element_type(
+        allocator,
+        "std::map::Map<[]u8, bool>",
+        "bool"
+    );
+    try expect_element_type(
+        allocator,
+        "std::map::Map<K, V>",
+        "V"
+    );
+    try expect_no_element_type(allocator, "i64");
 }

@@ -115,7 +115,7 @@ func (c *Checker) variants(typeArg string) ([]metaField, error) {
 		out = append(out, metaField{
 			owner:   owner,
 			name:    name,
-			typ:     Type(union.variants[name]),
+			typ:     union.variants[name],
 			variant: true,
 		})
 	}

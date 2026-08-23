@@ -497,20 +497,9 @@ func (c *Checker) resolveMetaElement(args []Type) (Type, typeResolutionIssue) {
 	if issue.present() {
 		return "", issue
 	}
-	if elem, ok := optionalElem(container); ok {
-		return elem, typeResolutionIssue{}
-	}
-	parsed, ok := c.types.lookup(container)
-	if ok {
-		if node, ok := parsed.(*typ.Name); ok {
-			base := strings.Join(node.Path, "::")
-			switch {
-			case (base == "std::array::Array" || base == "std::mem::Box") &&
-				len(node.Args) == 1:
-				return c.types.remember(node.Args[0]), typeResolutionIssue{}
-			case base == "std::map::Map" && len(node.Args) == 2:
-				return c.types.remember(node.Args[1]), typeResolutionIssue{}
-			}
+	if parsed, ok := c.types.lookup(container); ok {
+		if element, ok := stdmeta.ElementType(parsed); ok {
+			return c.resolveType(element.String())
 		}
 	}
 	return "", typeResolutionIssue{

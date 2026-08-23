@@ -163,7 +163,7 @@ type errorSetType struct {
 type unionType struct {
 	name       string
 	typeParams []string
-	variants   map[string]string
+	variants   map[string]Type
 	// order lists the variants as they were declared, for the same reason an
 	// enum keeps one.
 	order  []string

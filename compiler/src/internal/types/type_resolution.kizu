@@ -778,41 +778,13 @@ fn (self: &var Checker) resolve_meta_element(
         Issue(issue) => return TypeResolution::Issue(issue),
         Value(_) => {},
     }
-    if try self.types.optional_elem(container) |elem| {
-        return TypeResolution::Value(elem);
-    }
     let parsed = self.types.lookup(container) orelse
         return TypeResolution::Issue(
         TypeResolutionIssue::MetaElementUnsupported(container)
     );
-    match typ::root_node(&self.types.parsed, parsed) {
-        Name(node) => return self.resolve_meta_name_element(
-            container,
-            parsed,
-            node
-        ),
-        _ => return TypeResolution::Issue(
-            TypeResolutionIssue::MetaElementUnsupported(container)
-        ),
-    }
-}
-
-fn (self: &var Checker) resolve_meta_name_element(
-    container: Type,
-    parsed: typ::Type,
-    node: &typ::Name
-) -> !TypeResolution {
-    let base = try copy_name_path(self.allocator, node);
-    defer base.deinit();
-    let bytes = base.as_bytes();
-    if (mem::equal_bytes(bytes, "std::array::Array") or
-        mem::equal_bytes(bytes, "std::mem::Box")) and node.args.len() == 1 {
-        let element = typ::child_type(parsed, node.args.get_or_panic(0));
-        return TypeResolution::Value(try self.types.retain_parsed(element));
-    }
-    if mem::equal_bytes(bytes, "std::map::Map") and node.args.len() == 2 {
-        let value = typ::child_type(parsed, node.args.get_or_panic(1));
-        return TypeResolution::Value(try self.types.retain_parsed(value));
+    if stdmeta::element_type(&self.types.parsed, parsed) |element| {
+        let retained = try self.types.retain_parsed(element);
+        return self.resolve_retained_type(tree, retained);
     }
     return TypeResolution::Issue(
         TypeResolutionIssue::MetaElementUnsupported(container)

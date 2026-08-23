@@ -437,6 +437,43 @@ fn main() {}`
 	}
 }
 
+// TestCheckResolvesMetaUnionPayloadTypes keeps a concrete std::meta type form
+// equivalent to the type it names at later constructor sites.
+func TestCheckResolvesMetaUnionPayloadTypes(t *testing.T) {
+	source := `import std::array;
+union Holder { Value(std::meta::element<array::Array<i64>>) }
+fn make() -> Holder { return Holder::Value(1); }
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("resolved meta union payload rejected: %v", err)
+	}
+}
+
+// TestCheckValidatesMetaUnionPayloadBeforeProjection keeps element<T> from
+// erasing an invalid container while the payload's semantic type is cached.
+func TestCheckValidatesMetaUnionPayloadBeforeProjection(t *testing.T) {
+	source := `import std::map;
+union Holder { Value(std::meta::element<map::Map<i64, bool>>) }
+fn main() {}`
+	err := checkSource(source)
+	if err == nil || !strings.Contains(err.Error(), "Map key type must be []u8") {
+		t.Fatalf("invalid Map payload returned %v", err)
+	}
+}
+
+// TestCheckDefersMetaMapKeyType keeps a validated generic Map<K, V>
+// available until an instantiation supplies the []u8 key K must become.
+func TestCheckDefersMetaMapKeyType(t *testing.T) {
+	source := `import std::map;
+fn held<K, V>(value: std::meta::element<map::Map<K, V>>) -> V {
+    return value;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("deferred Map element rejected: %v", err)
+	}
+}
+
 // TestCheckRejectsNameAndCallErrors checks scope and call errors.
 func TestCheckRejectsNameAndCallErrors(t *testing.T) {
 	cases := []struct {

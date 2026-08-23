@@ -1,3 +1,4 @@
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -123,6 +124,61 @@ pub fn variant_form(form: Form) -> bool {
         Variant => true,
         _ => false,
     };
+}
+
+/// Returns the child type held by one valid, closed container type.
+/// The returned handle remains owned by table.
+pub fn element_type(
+    table: &typ::Table,
+    container: typ::Type
+) -> ?typ::Type {
+    match typ::root_node(table, container) {
+        Optional(node) => return typ::child_type(container, node.elem),
+        Name(node) => {
+            if (name_path_is(node, "array", "Array") or
+                name_path_is(node, "mem", "Box")) and
+                node.args.len() == 1 {
+                return typ::child_type(
+                    container,
+                    node.args.get_or_panic(0)
+                );
+            }
+            if name_path_is(node, "map", "Map") and
+                node.args.len() == 2 {
+                return typ::child_type(
+                    container,
+                    node.args.get_or_panic(1)
+                );
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+fn name_path_is(
+    node: &typ::Name,
+    module: []u8,
+    name: []u8
+) -> bool {
+    if node.path.len() != 3 {
+        return false;
+    }
+    return name_part_is(node, 0, "std") and
+        name_part_is(node, 1, module) and
+        name_part_is(node, 2, name);
+}
+
+fn name_part_is(
+    node: &typ::Name,
+    index: i64,
+    expected: []u8
+) -> bool {
+    if node.path.at(index) |part| {
+        let bytes = part.as_bytes();
+        return mem::equal_bytes(bytes, expected);
+    }
+    return false;
 }
 
 /// Returns every form.

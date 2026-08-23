@@ -1,6 +1,7 @@
 package ast
 
 import (
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -63,14 +64,16 @@ func declaredHolder(owners map[string]bool, decl Decl) (string, bool) {
 	switch d := decl.(type) {
 	case *StructDecl:
 		for _, field := range d.Fields {
-			if holdsOwner(owners, typ.Text(field.TypeName)) {
+			fieldType := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
+			if holdsOwner(owners, fieldType) {
 				return d.Name, true
 			}
 		}
 		return d.Name, false
 	case *UnionDecl:
 		for _, variant := range d.Variants {
-			if variant.Payload != nil && holdsOwner(owners, typ.Text(variant.Payload)) {
+			payload := stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload))
+			if variant.Payload != nil && holdsOwner(owners, payload) {
 				return d.Name, true
 			}
 		}

@@ -147,7 +147,13 @@ func (c *Checker) resolveMetaTypeText(text string) string {
 		if len(args) != 1 {
 			return text
 		}
-		return metaElementType(args[0])
+		container, err := c.types.Parse(args[0])
+		if err == nil {
+			if element, ok := stdmeta.ElementType(container); ok {
+				return element.String()
+			}
+		}
+		return text
 	default:
 		return text
 	}
@@ -161,23 +167,6 @@ func metaGenericBase(typeName string) string {
 		return ""
 	}
 	return typeName[:open]
-}
-
-// metaElementType names what a container holds.
-func metaElementType(container string) string {
-	if elem, ok := typ.OptionalElem(container); ok {
-		return elem
-	}
-	base, elem, ok := splitGenericType(container)
-	if ok && (base == "std::array::Array" || base == "std::mem::Box") {
-		return elem
-	}
-	if ok && base == "std::map::Map" {
-		if args, err := typ.SplitArgs(elem); err == nil && len(args) == 2 {
-			return args[1]
-		}
-	}
-	return container
 }
 
 // metaCapture resolves the capture named in a form's static arguments.
