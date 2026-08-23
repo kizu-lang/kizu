@@ -584,59 +584,6 @@ func (c *Checker) optionalFieldElemAllowed(elem Type) bool {
 	return c.isPlainDataType(string(elem), nil) || c.ownerType(elem)
 }
 
-// ownedContainerBases lists the inline-stored std containers that own heap
-// storage and must be released through their explicit `deinit`. A payload
-// built from one of these (directly or nested) is an owner payload of the
-// inline tagged-union payload ABI.
-//
-// std::mem::Box is intentionally excluded: a boxed (heap-indirected) or
-// recursive union payload is deferred to #495, so it is outside this contract
-// and is left to ordinary move/borrow checking.
-var ownedContainerBases = map[string]bool{
-	"std::array::Array":   true,
-	"std::string::String": true,
-	"std::map::Map":       true,
-	"std::arena::Arena":   true,
-}
-
-// typeContainsOwner reports whether typeName transitively holds an owned
-// container. Scalars, enums, copy AST nodes, and arena handles are not owners;
-// structs and unions are owners only when a field or variant payload is one.
-func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bool {
-	name := strings.TrimSpace(typeName)
-	name = strings.TrimPrefix(name, "!")
-	base := name
-	if b, _, ok := splitGenericType(name); ok {
-		base = b
-	}
-	if ownedContainerBases[base] {
-		return true
-	}
-	if visited[base] {
-		return false
-	}
-	if st, ok := c.structs[base]; ok {
-		visited[base] = true
-		for _, field := range st.Fields {
-			fieldType := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
-			if c.typeContainsOwner(fieldType, visited) {
-				return true
-			}
-		}
-		return false
-	}
-	if union, ok := c.unions[base]; ok {
-		visited[base] = true
-		for _, payload := range union.variants {
-			if payload != "" && c.typeContainsOwner(string(payload), visited) {
-				return true
-			}
-		}
-		return false
-	}
-	return false
-}
-
 // unionHasOwnerPayload reports whether any variant payload is an owner payload.
 func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
 	union := c.unions[decl.Name]
@@ -644,8 +591,7 @@ func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
 		return false
 	}
 	for _, payload := range union.variants {
-		if payload != "" && c.typeContainsOwner(
-			string(payload), map[string]bool{decl.Name: true}) {
+		if payload != "" && ast.OwnerType(c.deinitOwners, string(payload)) {
 			return true
 		}
 	}
@@ -741,8 +687,7 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 	}
 	for _, variant := range decl.Variants {
 		payload := c.unions[decl.Name].variants[variant.Name]
-		if payload == "" || !c.typeContainsOwner(
-			string(payload), map[string]bool{decl.Name: true}) {
+		if payload == "" || !ast.OwnerType(c.deinitOwners, string(payload)) {
 			continue
 		}
 		arm, ok := armByTag[variant.Name]
