@@ -7,6 +7,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/quote"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -1420,7 +1421,7 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 	case *ast.IntExpr:
 		return l.emitConst("i64", e.Value), nil
 	case *ast.StringExpr:
-		return l.emitConst("[]u8", fmt.Sprintf("%q", e.Value)), nil
+		return l.emitConst("[]u8", quote.Bytes(e.Value)), nil
 	case *ast.BoolExpr:
 		return l.emitConst("bool", e.String()), nil
 	case *ast.NullExpr:

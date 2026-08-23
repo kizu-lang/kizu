@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/quote"
 	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -206,7 +207,7 @@ func (l *lowerer) lowerMetaApply(
 		if err != nil {
 			return Value{}, true, err
 		}
-		return l.emitConst("[]u8", fmt.Sprintf("%q", field.name)), true, nil
+		return l.emitConst("[]u8", quote.Bytes(field.name)), true, nil
 	case stdmeta.Field:
 		value, err := l.lowerMetaFieldBorrow(form, typeArg, args)
 		return value, true, err
