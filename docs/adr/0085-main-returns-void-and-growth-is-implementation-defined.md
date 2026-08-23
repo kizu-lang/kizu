@@ -1,4 +1,4 @@
-# ADR-0085: `main` は値を返さず、容量の増加戦略は実装が決める
+# ADR-0085: `main` は exit を `ExitStatus` で返し、容量の増加戦略は実装が決める
 
 Status: 採用
 
@@ -14,25 +14,47 @@ Status: 採用
 | `std_array.kizu` | `capacity()` が 2 | 4 |
 | `error_union_try.kizu` | exit 0 | exit 2 |
 
-## 決定 1: `main` は `void` または `<E>!void` を返す
+## 決定 1: `main` は `void`、`<E>!void`、または `<E>!std::process::ExitStatus` を返す
 
-`fn main() -> !i64` は禁止する。checker が拒否する。
+`fn main() -> !i64` のような整数返しは禁止する。checker が拒否する。
 
 ```text
-type error: `main` returns `!i64`, expected `void` or `!void`
+type error: `main` returns `!i64`, expected `void`, `!void` or `!std::process::ExitStatus`
 ```
 
-理由は移植性である。exit status は platform ごとに形が違い、値 1 つでは表せない。
+理由は移植性である。exit status は platform ごとに形が違い、整数 1 つでは表せない。
 Zig は `u8` / `!u8` を main の戻り値型から**外し**、`std.process.ExitStatus` union
-に置き換えた(plan9 は文字列、UEFI は `std.os.uefi.Status`)。Rust も `i32` を
-返す形は持たず、`Termination` trait と `ExitCode` 型を使う。整数を exit status に
-するのは C の形であり、両言語とも意識的に避けている。
+に置き換えた(ziglang/zig#16135。plan9 は文字列、UEFI は `std.os.uefi.Status`)。
+Rust も `i32` を返す形は持たず、`Termination` trait と `ExitCode` 型を使う。整数を
+exit status にするのは C の形であり、両言語とも意識的に避けている。
 
-error を返した main は、診断を出して非ゼロで終わる。これは Zig / Rust と同じ。
+明示的な exit status は Zig と同じ union で返す。selfhost CLI の `run` / `test` が
+子 process の exit status を転送する必要が出たときに設計した。
 
-明示的な exit status が必要になったら、そのとき `ExitStatus` 相当を設計する。
-Kizu は freestanding build も対象にしており、そこでは exit status の意味自体が
-変わる。整数を今から仕様に埋めるのは早い。
+```kizu
+pub union ExitStatus {
+    Success,
+    Failure,
+    Specific(u8),
+}
+```
+
+hosted native では `Success` は 0、`Failure` は 1、`Specific(code)` はその code に
+写る。plan9 / UEFI のような platform 固有の形は、その target を持つときに
+`Specific` の payload を comptime で切り替える(Zig の switch と同じ)。素の
+`ExitStatus`(error union でない形)は Zig と同じく許さない。wasm backend は
+error union の main を持つ program をまだ表せないので、この写しは native backend
+だけが持つ。
+
+error を返した main は、診断を出して exit 1 で終わる。これは Zig / Rust と同じ。
+
+却下した案:
+
+| 案 | 却下理由 |
+| --- | --- |
+| `main -> !i64` / `u8` の整数返し | platform ごとに形が違う exit status を整数 1 つに固定する C の形。Zig / Rust とも避けている |
+| `std::process::exit(code)` の noreturn 関数 | 隠れた制御フロー(どこからでも process が消える)を入れる。値を `main` まで返す形なら制御フローが見える |
+| conformance の directive に exit code 表記を足す | `-fails` 系は「error: を含む出力 + 非ゼロ」の promise で足りている。具体 code の契約は CLI test が持つ |
 
 ## 決定 2: 容量の増加戦略は実装が決める
 

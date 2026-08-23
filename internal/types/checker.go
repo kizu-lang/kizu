@@ -909,19 +909,23 @@ func (t *typeTable) referencedTypeNames(typeName Type) []string {
 	return names
 }
 
-// checkMainReturnType keeps the entry point returning `void` or an error union
-// over void (ADR-0085). A program does not choose its own exit status: an exit
-// status is platform-shaped, and a value returned from `main` cannot express it
-// portably.
+// checkMainReturnType keeps the entry point returning `void`, an error union
+// over void, or an error union over std::process::ExitStatus (ADR-0085). A
+// program does not choose its own exit status as an integer: an exit status is
+// platform-shaped, and the ExitStatus union is the one value the entry point
+// maps to it.
 func checkMainReturnType(fn *functionType) error {
 	if fn.name != "main" {
 		return nil
 	}
 	returned := strings.TrimSpace(typ.Text(fn.sig.ReturnType))
-	if returned == "" || returned == "void" || strings.HasSuffix(returned, "!void") {
+	if returned == "" || returned == "void" || strings.HasSuffix(returned, "!void") ||
+		strings.HasSuffix(returned, "!std::process::ExitStatus") {
 		return nil
 	}
-	return errorf("type error: `main` returns `%s`, expected `void` or `!void`", returned)
+	return errorf(
+		"type error: `main` returns `%s`, expected `void`, `!void` or `!std::process::ExitStatus`",
+		returned)
 }
 
 // defineScopeParam binds a parameter and derives its root provenance from the
