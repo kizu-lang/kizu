@@ -82,7 +82,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0079: struct literal field initializers name each field once](0079-struct-literal-field-initializers.md)
 - [ADR-0083: `run` は `build` した成果物を実行する](0083-run-executes-the-build.md)
 - [ADR-0084: 境界検査は IR に置き、backend は `cond_fail` を実装するだけにする](0084-bounds-checks-live-in-the-ir.md)
-- [ADR-0085: `main` は値を返さず、容量の増加戦略は実装が決める](0085-main-returns-void-and-growth-is-implementation-defined.md)
+- [ADR-0085: `main` は exit を `ExitStatus` で返し、容量の増加戦略は実装が決める](0085-main-returns-void-and-growth-is-implementation-defined.md)
 - [ADR-0086: error は名前であって message ではない](0086-errors-are-names-not-messages.md) (決定 3 は置換)
 - [ADR-0087: `!T` は error set を宣言しない](0087-error-union-declares-no-set.md)
 - [ADR-0088: map は挿入順で反復し、lookup は O(1)](0088-map-iterates-in-insertion-order.md)

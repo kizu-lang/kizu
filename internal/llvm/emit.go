@@ -2498,6 +2498,9 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	}
 	e.out.WriteString("  ret i32 1\n")
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	if success == exitStatusType {
+		return e.writeMainExitStatusReturn(value)
+	}
 	if success == "i64" {
 		successName := "%" + e.nextSyntheticValue("main.success")
 		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
@@ -2506,6 +2509,64 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 		return nil
 	}
 	e.out.WriteString("  ret i32 0\n")
+	return nil
+}
+
+// exitStatusType is the one std union the entry point maps to a process exit
+// status (ADR-0085).
+const exitStatusType = "std::process::ExitStatus"
+
+// writeMainExitStatusReturn maps main's returned std::process::ExitStatus to
+// the process exit status: Success is 0, Failure is 1, and Specific carries
+// its own code. The variant numbers and the payload type come from the union
+// declaration, so the mapping follows the source rather than a table written
+// here.
+func (e *emitter) writeMainExitStatusReturn(value ir.Value) error {
+	_, failure, ok := e.unionVariant(exitStatusType, "Failure")
+	if !ok {
+		return fmt.Errorf("llvm error: unknown union variant `%s::Failure`", exitStatusType)
+	}
+	_, specific, ok := e.unionVariant(exitStatusType, "Specific")
+	if !ok || specific.Payload == "" {
+		return fmt.Errorf("llvm error: unknown union payload `%s::Specific`", exitStatusType)
+	}
+	_, payloadAlign, ok := e.typeLayout(specific.Payload)
+	if !ok {
+		return fmt.Errorf("llvm error: union payload `%s::Specific` has an unsupported type `%s`",
+			exitStatusType, specific.Payload)
+	}
+	statusName := "%" + e.nextSyntheticValue("main.status")
+	unionType := e.llvmType(exitStatusType)
+	payloadType := e.llvmType(specific.Payload)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",
+		statusName, e.llvmType(value.Type), e.value(value).operand)
+	tagName := statusName + ".tag"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", tagName, unionType, statusName)
+	isSpecific := statusName + ".specific"
+	specificLabel := e.nextSyntheticValue("main.exit.specific")
+	plainLabel := e.nextSyntheticValue("main.exit.plain")
+	fmt.Fprintf(&e.out, "  %s = icmp eq i64 %s, %d\n", isSpecific, tagName, specific.Index)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", isSpecific, specificLabel, plainLabel)
+	fmt.Fprintf(&e.out, "%s:\n", specificLabel)
+	slotName := statusName + ".slot"
+	payloadPtr := statusName + ".payload.ptr"
+	byteName := statusName + ".code8"
+	codeName := statusName + ".code"
+	fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n", slotName, unionType, maxInlinePayloadAlign)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+		unionType, statusName, slotName, maxInlinePayloadAlign)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n",
+		payloadPtr, unionType, slotName)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
+		byteName, payloadType, payloadPtr, payloadAlign)
+	fmt.Fprintf(&e.out, "  %s = zext %s %s to i32\n", codeName, payloadType, byteName)
+	fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
+	fmt.Fprintf(&e.out, "%s:\n", plainLabel)
+	isFailure := statusName + ".failure"
+	plainCode := statusName + ".plain.code"
+	fmt.Fprintf(&e.out, "  %s = icmp eq i64 %s, %d\n", isFailure, tagName, failure.Index)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, i32 1, i32 0\n", plainCode, isFailure)
+	fmt.Fprintf(&e.out, "  ret i32 %s\n", plainCode)
 	return nil
 }
 

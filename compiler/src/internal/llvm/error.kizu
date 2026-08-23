@@ -486,6 +486,9 @@ fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value
     }
     try self.line("  ret i32 1");
     try self.line1("%s:", Arg::Str(ok_label));
+    if mem::equal_bytes(success_bytes, "std::process::ExitStatus") {
+        return self.write_main_exit_status_return(module, value);
+    }
     if mem::equal_bytes(success_bytes, "i64") {
         let success_synthetic = try self.next_synthetic_value("main.success");
         let success_name = try self.percent(success_synthetic);
@@ -496,6 +499,76 @@ fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value
     }
     try self.line("  ret i32 0");
     return null;
+}
+
+/// Maps main's returned std::process::ExitStatus to the process exit
+/// status, the Go `writeMainExitStatusReturn`: Success is 0, Failure is 1,
+/// and Specific carries its own code. The variant numbers and the payload
+/// type come from the union declaration, so the mapping follows the source
+/// rather than a table written here.
+fn (self: &var Emitter) write_main_exit_status_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
+    if module.union_variant_named("std::process::ExitStatus", "Failure") |failure| {
+        if module.union_variant_named("std::process::ExitStatus", "Specific") |specific| {
+            if !ir::is_empty(specific.payload) {
+                return self.write_main_exit_status_value(module, value, failure, specific);
+            }
+        }
+    }
+    return try self.fail0("llvm error: unknown union variant in `std::process::ExitStatus`");
+}
+
+/// Writes the exit mapping once the ExitStatus variants are in hand.
+fn (self: &var Emitter) write_main_exit_status_value(
+    module: &ir::Module,
+    value: ir::Value,
+    failure: ir::UnionVariant,
+    specific: ir::UnionVariant
+) -> !?diagnostic::Diagnostic {
+    let payload_text = ir::name_text(&module.names, specific.payload);
+    let payload_bytes = payload_text.as_bytes();
+    if try self.type_layout(module, payload_bytes) |layout| {
+        let status_synthetic = try self.next_synthetic_value("main.status");
+        let status_name = try self.percent(status_synthetic);
+        let union_type = try self.llvm_type(module, "std::process::ExitStatus");
+        let payload_type = try self.llvm_type(module, payload_bytes);
+        let value_text = ir::name_text(&module.names, value.type_name);
+        let value_type = value_text.as_bytes();
+        let error_type = try self.llvm_type(module, value_type);
+        let info = try self.operand(module, value);
+        try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(status_name), Arg::Str(error_type), Arg::Str(info.operand));
+        let tag_name = try self.suffixed(status_name, ".tag");
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(union_type), Arg::Str(status_name));
+        let is_specific = try self.suffixed(status_name, ".specific");
+        let specific_label = try self.next_synthetic_value("main.exit.specific");
+        let plain_label = try self.next_synthetic_value("main.exit.plain");
+        try self.line3("  %s = icmp eq i64 %s, %d", Arg::Str(is_specific), Arg::Str(tag_name), Arg::Int(specific.index));
+        try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(is_specific), Arg::Str(specific_label), Arg::Str(plain_label));
+        try self.line1("%s:", Arg::Str(specific_label));
+        let slot_name = try self.suffixed(status_name, ".slot");
+        let payload_ptr = try self.suffixed(status_name, ".payload.ptr");
+        let byte_name = try self.suffixed(status_name, ".code8");
+        let code_name = try self.suffixed(status_name, ".code");
+        try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(union_type), Arg::Int(max_inline_payload_align()));
+        try self.line4(
+            "  store %s %s, ptr %s, align %d",
+            Arg::Str(union_type), Arg::Str(status_name), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+        );
+        try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 1", Arg::Str(payload_ptr), Arg::Str(union_type), Arg::Str(slot_name));
+        try self.line4(
+            "  %s = load %s, ptr %s, align %d",
+            Arg::Str(byte_name), Arg::Str(payload_type), Arg::Str(payload_ptr), Arg::Int(layout.align)
+        );
+        try self.line3("  %s = zext %s %s to i32", Arg::Str(code_name), Arg::Str(payload_type), Arg::Str(byte_name));
+        try self.line1("  ret i32 %s", Arg::Str(code_name));
+        try self.line1("%s:", Arg::Str(plain_label));
+        let is_failure = try self.suffixed(status_name, ".failure");
+        let plain_code = try self.suffixed(status_name, ".plain.code");
+        try self.line3("  %s = icmp eq i64 %s, %d", Arg::Str(is_failure), Arg::Str(tag_name), Arg::Int(failure.index));
+        try self.line2("  %s = select i1 %s, i32 1, i32 0", Arg::Str(plain_code), Arg::Str(is_failure));
+        try self.line1("  ret i32 %s", Arg::Str(plain_code));
+        return null;
+    }
+    return try self.fail0("llvm error: unknown union variant in `std::process::ExitStatus`");
 }
 
 /// Names the failure a `main -> !T` process exits with, so it reports why

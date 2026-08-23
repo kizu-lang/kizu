@@ -230,9 +230,12 @@ fn main() -> void {
 }
 ```
 
-`main` は `void` または `<E>!void` を返します。値は返せません。
-exit status は platform ごとに形が違い、返り値 1 つでは表せないためです(ADR-0085)。
-error を返した `main` は診断を出して非ゼロで終了します。
+`main` は `void`、`<E>!void`、または `<E>!std::process::ExitStatus` を返します。
+整数は返せません。exit status は platform ごとに形が違い、整数 1 つでは表せない
+ためです(ADR-0085)。`std::process::ExitStatus` は compiler が知る std 契約で、
+`Success` は 0、`Failure` は 1、`Specific(code)` はその code で終了します。素の
+`ExitStatus`(error union でない形)は書けません。error を返した `main` は診断を
+出して非ゼロで終了します。
 
 ### 6.2 変数
 
@@ -2771,6 +2774,9 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::spawn_wait8(argc, arg0, ..., arg7)` は子プロセスを起動して
   終了を待ち、`!i64` を返す。可変長引数を持たないので引数は 8 個までの固定形
 * `std::process::exit_code(code)` は `i64` を返す
+* `std::process::ExitStatus` は `Success` / `Failure` / `Specific(u8)` の union で、
+  `main` の戻り値 `<E>!std::process::ExitStatus` としてだけ compiler が特別に扱う
+  (checker が main の形を検査し、native backend が exit status へ写す)
 * `std::process` helper は hidden I/O を持たない
 
 ## 16. contract / impl 方針

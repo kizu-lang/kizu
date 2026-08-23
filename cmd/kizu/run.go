@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/kizu-lang/kizu/internal/ir"
 )
@@ -47,9 +48,19 @@ func executeBuilt(exe string, args []string) error {
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			return exitStatus{code: exit.ExitCode()}
+			return exitStatus{code: childExitCode(exit)}
 		}
 		return err
 	}
 	return nil
+}
+
+// childExitCode reports a child's exit the way the wait status spells it: a
+// signal death is 128 plus the signal, the convention the runtime's own
+// process primitives use, rather than the -1 the Go wrapper reports.
+func childExitCode(exit *exec.ExitError) int {
+	if status, ok := exit.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return exit.ExitCode()
 }

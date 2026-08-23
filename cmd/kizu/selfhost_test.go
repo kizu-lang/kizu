@@ -114,7 +114,7 @@ func compareSelfhostArgs(t *testing.T, selfhost string, want cliOutput, args ...
 	runErr := cmd.Run()
 	got := cliOutput{
 		stdout: stdout.String(),
-		stderr: selfhostStderr(stderr.String()),
+		stderr: stderr.String(),
 		failed: runErr != nil,
 	}
 	if got != want {
@@ -123,23 +123,6 @@ func compareSelfhostArgs(t *testing.T, selfhost string, want cliOutput, args ...
 			strings.Join(args, " "), want.failed, want.stdout, want.stderr,
 			got.failed, got.stdout, got.stderr)
 	}
-}
-
-// selfhostStderr drops the line the runtime adds when main returns an error
-// (`runtime error: compiler::Cli::Failed`); the exit status carries that fact.
-func selfhostStderr(text string) string {
-	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-	kept := lines[:0]
-	for _, line := range lines {
-		if strings.HasPrefix(line, "runtime error: compiler::Cli::") {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	if len(kept) == 0 || (len(kept) == 1 && kept[0] == "") {
-		return ""
-	}
-	return strings.Join(kept, "\n") + "\n"
 }
 
 // goParseOutput renders what `kizu parse` prints for a file.
@@ -269,12 +252,11 @@ func globDirs(t *testing.T, pattern string) []string {
 // compares its native backend commands with the Go CLI: `run` and `test`
 // over the examples that check, tests/behavior and the module example
 // packages, and `build --target native` on the same targets, executing
-// both artifacts and comparing their build metadata. Exit status is
-// compared as failed-or-not: the selfhost `main` returns `!void`, so a
-// child's exact exit status collapses to the Cli error (see the gap table
-// in docs/selfhost-porting.md). Targets whose Go build fails in the
-// toolchain are skipped: the Go error carries clang's captured output,
-// which std::process cannot capture.
+// both artifacts and comparing their build metadata. Exit statuses are
+// compared exactly: the selfhost main returns std::process::ExitStatus
+// (ADR-0085), so a child's status crosses both CLIs unchanged. Targets
+// whose Go build fails in the toolchain are skipped: the Go error carries
+// clang's captured output, which std::process cannot capture.
 func TestSelfhostNative(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler and clang")
@@ -349,13 +331,12 @@ var clangNoise = regexp.MustCompile(
 	`^(warning: overriding the module target triple .*|\d+ warnings? generated\.)$`)
 
 // selfhostNativeStderr drops what only the selfhost path prints on stderr:
-// the runtime error line for the Cli error (the exit status carries that
-// fact) and the inherited toolchain noise.
+// the inherited toolchain noise the Go CLI captures and discards.
 func selfhostNativeStderr(text string) string {
 	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	kept := lines[:0]
 	for _, line := range lines {
-		if strings.HasPrefix(line, "runtime error: compiler::Cli::") || clangNoise.MatchString(line) {
+		if clangNoise.MatchString(line) {
 			continue
 		}
 		kept = append(kept, line)
@@ -386,11 +367,11 @@ func compareNativeCommand(t *testing.T, selfhost string, command string, target 
 	}
 	got := runNativeCLI(t, selfhost, command, target)
 	got.output.stderr = selfhostNativeStderr(got.output.stderr)
-	if got.output != want.output {
-		t.Errorf("selfhost %s %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
-			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
-			command, target, want.output.failed, want.output.stdout, want.output.stderr,
-			got.output.failed, got.output.stdout, got.output.stderr)
+	if got.output != want.output || got.code != want.code {
+		t.Errorf("selfhost %s %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			command, target, want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
 	}
 }
 
@@ -419,11 +400,11 @@ func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) 
 	got.output.stderr = selfhostNativeStderr(got.output.stderr)
 	want.output.stdout = strings.ReplaceAll(want.output.stdout, goOut, "OUTPUT")
 	got.output.stdout = strings.ReplaceAll(got.output.stdout, selfOut, "OUTPUT")
-	if got.output != want.output {
-		t.Errorf("selfhost build %s differs\n--- want (failed=%v)\nstdout:\n%sstderr:\n%s"+
-			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
-			target, want.output.failed, want.output.stdout, want.output.stderr,
-			got.output.failed, got.output.stdout, got.output.stderr)
+	if got.output != want.output || got.code != want.code {
+		t.Errorf("selfhost build %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			target, want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
 		return
 	}
 	if want.output.failed {
