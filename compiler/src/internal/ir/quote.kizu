@@ -1,13 +1,415 @@
-import std::fmt;
+import std::mem;
 import std::string;
 
-// STUB: Go `%q` (strconv.Quote) port pending; deterministic ASCII quoting
-// stands in.
+// Ports Go's strconv.Quote, the `%q` verb the Go IR lowering uses to spell
+// string literals (internal/ir/lower.go lowerLiteralExpr), so the Kizu
+// lowering prints identical text. The printable-rune predicate carries the
+// strconv IsPrint tables of Go 1.22 (strconv/isprint.go) as fixed-width hex
+// text generated from the installed toolchain; docs/selfhost-porting.md
+// records the gap (no std quoting / UTF-8 / Unicode table API). The
+// lowercase hex helpers `append_hex_byte` / `hex_digit` live in generic.kizu.
 
-/// Spells bytes the way Go's `%q` does.
+/// A decoded UTF-8 scalar and its byte width, the Go `utf8.DecodeRune` pair:
+/// malformed input is one `65533` of width one.
+struct QuoteRune {
+    value: i64,
+    width: i64
+}
+
+/// Spells bytes the way Go's `%q` (the Go `strconv.Quote`) does.
 pub fn quote_go(allocator: Allocator, bytes: []u8) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
-    try fmt::append_bytes_literal(&var out, bytes);
+    try append_quoted(&var out, bytes);
     return move out;
+}
+
+/// Ports the Go `appendQuotedWith` for the `"` quote with ASCIIonly and
+/// graphicOnly off: an invalid byte is `\x` plus two lowercase hex digits,
+/// every decoded rune goes through `append_escaped_rune`.
+fn append_quoted(out: &var string::String, bytes: []u8) -> !void {
+    try out.append_byte(cast<u8>(34));
+    let length = mem::len(bytes);
+    var position = 0;
+    while position < length {
+        let scalar = quote_decode_rune(bytes, position);
+        if scalar.width == 1 and scalar.value == 65533 {
+            try out.append_bytes("\x");
+            try append_hex_byte(out, bytes[position]);
+        } else {
+            let encoded = bytes[position..position + scalar.width];
+            try append_escaped_rune(out, encoded, scalar.value);
+        }
+        position = position + scalar.width;
+    }
+    try out.append_byte(cast<u8>(34));
+    return;
+}
+
+/// Ports the Go `appendEscapedRune` for the `"` quote. `encoded` holds the
+/// rune's source bytes, which are what `utf8.AppendRune` re-encodes for a
+/// rune that `DecodeRune` accepted. The `!utf8.ValidRune` arm of the Go
+/// switch cannot be reached from decoded input and has no port.
+fn append_escaped_rune(out: &var string::String, encoded: []u8, value: i64) -> !void {
+    if value == 34 or value == 92 {
+        try out.append_byte(cast<u8>(92));
+        return out.append_byte(cast<u8>(value));
+    }
+    if quote_is_print(value) {
+        return out.append_bytes(encoded);
+    }
+    if value == 7 {
+        return out.append_bytes("\a");
+    }
+    if value == 8 {
+        return out.append_bytes("\b");
+    }
+    if value == 12 {
+        return out.append_bytes("\f");
+    }
+    if value == 10 {
+        return out.append_bytes("\n");
+    }
+    if value == 13 {
+        return out.append_bytes("\r");
+    }
+    if value == 9 {
+        return out.append_bytes("\t");
+    }
+    if value == 11 {
+        return out.append_bytes("\v");
+    }
+    if value < 32 or value == 127 {
+        try out.append_bytes("\x");
+        return append_hex_byte(out, cast<u8>(value));
+    }
+    if value < 65536 {
+        try out.append_bytes("\u");
+        return append_quote_hex(out, value, 4);
+    }
+    try out.append_bytes("\U");
+    return append_quote_hex(out, value, 8);
+}
+
+/// Appends `value` as exactly `digits` lowercase hex digits, most significant
+/// first, the Go `lowerhex[r>>uint(s)&0xF]` loop.
+fn append_quote_hex(out: &var string::String, value: i64, digits: i64) -> !void {
+    var divisor = 1;
+    var remaining = digits;
+    while remaining > 1 {
+        divisor = divisor * 16;
+        remaining = remaining - 1;
+    }
+    while divisor > 0 {
+        try out.append_byte(hex_digit((value / divisor) % 16));
+        divisor = divisor / 16;
+    }
+    return;
+}
+
+/// Ports the Go `utf8.DecodeRune` width rules: a truncated, overlong, or
+/// surrogate sequence and a stray continuation byte decode as `65533` of
+/// width one, which the caller tells apart from an encoded U+FFFD by width.
+fn quote_decode_rune(bytes: []u8, position: i64) -> QuoteRune {
+    let length = mem::len(bytes);
+    let first = bytes[position];
+    if first < cast<u8>(128) {
+        return QuoteRune { value: cast<i64>(first), width: 1 };
+    }
+    if first >= cast<u8>(194) and first <= cast<u8>(223) and position + 1 < length {
+        let second = bytes[position + 1];
+        if quote_is_continuation(second) {
+            return QuoteRune {
+                value: cast<i64>(first - cast<u8>(192)) * 64 +
+                    cast<i64>(second - cast<u8>(128)),
+                width: 2
+            };
+        }
+    }
+    if first >= cast<u8>(224) and first <= cast<u8>(239) and position + 2 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let second_valid = quote_is_continuation(second) and
+            !(first == cast<u8>(224) and second < cast<u8>(160)) and
+            !(first == cast<u8>(237) and second > cast<u8>(159));
+        if second_valid and quote_is_continuation(third) {
+            return QuoteRune {
+                value: cast<i64>(first - cast<u8>(224)) * 4096 +
+                    cast<i64>(second - cast<u8>(128)) * 64 +
+                    cast<i64>(third - cast<u8>(128)),
+                width: 3
+            };
+        }
+    }
+    if first >= cast<u8>(240) and first <= cast<u8>(244) and position + 3 < length {
+        let second = bytes[position + 1];
+        let third = bytes[position + 2];
+        let fourth = bytes[position + 3];
+        let second_valid = quote_is_continuation(second) and
+            !(first == cast<u8>(240) and second < cast<u8>(144)) and
+            !(first == cast<u8>(244) and second > cast<u8>(143));
+        if second_valid and quote_is_continuation(third) and quote_is_continuation(fourth) {
+            return QuoteRune {
+                value: cast<i64>(first - cast<u8>(240)) * 262144 +
+                    cast<i64>(second - cast<u8>(128)) * 4096 +
+                    cast<i64>(third - cast<u8>(128)) * 64 +
+                    cast<i64>(fourth - cast<u8>(128)),
+                width: 4
+            };
+        }
+    }
+    return QuoteRune { value: 65533, width: 1 };
+}
+
+/// Reports whether a byte is a UTF-8 continuation byte (10xxxxxx).
+fn quote_is_continuation(byte: u8) -> bool {
+    return byte >= cast<u8>(128) and byte <= cast<u8>(191);
+}
+
+/// Ports the Go `strconv.IsPrint`: the Latin-1 fast path, then the 16-bit
+/// range table minus its exception list, then the 32-bit range table whose
+/// exception list only covers U+10000..U+1FFFF.
+fn quote_is_print(value: i64) -> bool {
+    if value <= 255 {
+        if value >= 32 and value <= 126 {
+            return true;
+        }
+        if value >= 161 and value <= 255 {
+            return value != 173;
+        }
+        return false;
+    }
+    if value < 65536 {
+        let ranges = print16_table();
+        if !print_range_contains(ranges, 4, value) {
+            return false;
+        }
+        let exceptions = not_print16_table();
+        return !print_list_contains(exceptions, 4, value);
+    }
+    let ranges = print32_table();
+    if !print_range_contains(ranges, 6, value) {
+        return false;
+    }
+    if value >= 131072 {
+        return true;
+    }
+    let exceptions = not_print32_table();
+    return !print_list_contains(exceptions, 4, value - 65536);
+}
+
+/// Reports whether a start/end pair table spans `value`: the Go
+/// `i >= len(isPrint) || rr < isPrint[i&^1] || isPrint[i|1] < rr` test.
+fn print_range_contains(table: []u8, width: i64, value: i64) -> bool {
+    let index = print_table_search(table, width, value);
+    if index >= print_table_len(table, width) {
+        return false;
+    }
+    let start = index - index % 2;
+    if value < print_table_entry(table, width, start) {
+        return false;
+    }
+    return print_table_entry(table, width, start + 1) >= value;
+}
+
+/// Reports whether a sorted list table holds `value`: the Go
+/// `j < len(isNotPrint) && isNotPrint[j] == rr` test.
+fn print_list_contains(table: []u8, width: i64, value: i64) -> bool {
+    let index = print_table_search(table, width, value);
+    if index >= print_table_len(table, width) {
+        return false;
+    }
+    return print_table_entry(table, width, index) == value;
+}
+
+/// Ports the Go `bsearch16` / `bsearch32`: the smallest index whose entry is
+/// at least `value`, or the entry count when there is none.
+fn print_table_search(table: []u8, width: i64, value: i64) -> i64 {
+    var low = 0;
+    var high = print_table_len(table, width);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if print_table_entry(table, width, middle) < value {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+/// Counts the entries of a hex table. Rows are 48 hex digits joined by one
+/// newline, so every full 49-byte stretch holds exactly one newline.
+fn print_table_len(table: []u8, width: i64) -> i64 {
+    let length = mem::len(table);
+    return (length - length / 49) / width;
+}
+
+/// Reads entry `index` of a hex table with `width` digits per entry: digit
+/// position `p` of the joined text sits at byte `p + p / 48` once the row
+/// newlines are counted in.
+fn print_table_entry(table: []u8, width: i64, index: i64) -> i64 {
+    let start = index * width + (index * width) / 48;
+    var value = 0;
+    var digit = 0;
+    while digit < width {
+        value = value * 16 + print_table_digit(table[start + digit]);
+        digit = digit + 1;
+    }
+    return value;
+}
+
+/// Returns the value of one lowercase hex digit byte.
+fn print_table_digit(byte: u8) -> i64 {
+    let value = cast<i64>(byte);
+    if value >= 97 {
+        return value - 87;
+    }
+    return value - 48;
+}
+
+/// The Go `isPrint16` table: 424 entries of 4 lowercase hex digits, 12 per row.
+fn print16_table() -> []u8 {
+    return
+        \\0020007e00a10377037a037f038405560559058a058d05c7
+        \\05d005ea05ef05f40606070d0710074a074d07b107c007fa
+        \\07fd082d0830085b085e086a0870088e0898098c098f0990
+        \\099309b209b609b909bc09c409c709c809cb09ce09d709d7
+        \\09dc09e309e609fe0a010a0a0a0f0a100a130a390a3c0a42
+        \\0a470a480a4b0a4d0a510a510a590a5e0a660a760a810ab9
+        \\0abc0acd0ad00ad00ae00ae30ae60af10af90b0c0b0f0b10
+        \\0b130b390b3c0b440b470b480b4b0b4d0b550b570b5c0b63
+        \\0b660b770b820b8a0b8e0b950b990b9f0ba30ba40ba80baa
+        \\0bae0bb90bbe0bc20bc60bcd0bd00bd00bd70bd70be60bfa
+        \\0c000c390c3c0c4d0c550c5a0c5d0c5d0c600c630c660c6f
+        \\0c770cb90cbc0ccd0cd50cd60cdd0ce30ce60cf30d000d4f
+        \\0d540d630d660d960d9a0dbd0dc00dc60dca0dca0dcf0ddf
+        \\0de60def0df20df40e010e3a0e3f0e5b0e810ebd0ec00ed9
+        \\0edc0edf0f000f6c0f710fda100010c710cd10cd10d0124d
+        \\1250125d1260128d129012b512b812c512c813151318135a
+        \\135d137c1380139913a013f513f813fd1400169c16a016f8
+        \\17001715171f17361740175317601773178017dd17e017e9
+        \\17f017f91800181918201878188018aa18b018f51900192b
+        \\1930193b194019401944196d19701974198019ab19b019c9
+        \\19d019da19de1a1b1a1e1a7c1a7f1a891a901a991aa01aad
+        \\1ab01ace1b001b4c1b501bf31bfc1c371c3b1c491c4d1c88
+        \\1c901cba1cbd1cc71cd01cfa1d001f151f181f1d1f201f45
+        \\1f481f4d1f501f7d1f801fd31fd61fef1ff21ffe20102027
+        \\2030205e207020712074209c20a020c020d020f02100218b
+        \\219024262440244a24602b732b762cf32cf92d272d2d2d2d
+        \\2d302d672d6f2d702d7f2d962da02e5d2e802ef32f002fd5
+        \\2ff02ffb30013096309930ff310531e331f0a48ca490a4c6
+        \\a4d0a62ba640a6f7a700a7caa7d0a7d9a7f2a82ca830a839
+        \\a840a877a880a8c5a8cea8d9a8e0a953a95fa97ca980a9d9
+        \\a9deaa36aa40aa4daa50aa59aa5caac2aadbaaf6ab01ab06
+        \\ab09ab0eab11ab16ab20ab6bab70abedabf0abf9ac00d7a3
+        \\d7b0d7c6d7cbd7fbf900fa6dfa70fad9fb00fb06fb13fb17
+        \\fb1dfbc2fbd3fd8ffd92fdc7fdcffdcffdf0fe19fe20fe6b
+        \\fe70fefcff01ffbeffc2ffc7ffcaffcfffd2ffd7ffdaffdc
+        \\ffe0ffeefffcfffd
+    ;
+}
+
+/// The Go `isNotPrint16` table: 133 entries of 4 lowercase hex digits, 12 per row.
+fn not_print16_table() -> []u8 {
+    return
+        \\00ad038b038d03a205300590061c06dd083f085f08e20984
+        \\09a909b109de0a040a290a310a340a370a3d0a5d0a840a8e
+        \\0a920aa90ab10ab40ac60aca0b000b040b290b310b340b5e
+        \\0b840b910b9b0b9d0bc90c0d0c110c290c450c490c570c8d
+        \\0c910ca90cb40cc50cc90cdf0cf00d0d0d110d450d490d80
+        \\0d840db20dbc0dd50dd70e830e850e8b0ea40ea60ec50ec7
+        \\0ecf0f480f980fbd0fcd10c6124912571259128912b112bf
+        \\12c112d713111680176d1771180e191f1a5f1b7f1f581f5a
+        \\1f5c1f5e1fb51fc51fdc1ff5208f2b962d262da72daf2db7
+        \\2dbf2dc72dcf2dd72ddf2e9a30403130318f321fa7d2a7d4
+        \\a9cea9ffab27ab2ffb37fb3dfb3ffb42fb45fe53fe67fe75
+        \\ffe7
+    ;
+}
+
+/// The Go `isPrint32` table: 508 entries of 6 lowercase hex digits, 8 per row.
+fn print32_table() -> []u8 {
+    return
+        \\01000001004d01005001005d0100800100fa010100010102
+        \\01010701013301013701019c0101a00101a00101d00101fd
+        \\01028001029c0102a00102d00102e00102fb010300010323
+        \\01032d01034a01035001037a0103800103c30103c80103d5
+        \\01040001049d0104a00104a90104b00104d30104d80104fb
+        \\01050001052701053001056301056f0105bc010600010736
+        \\0107400107550107600107670107800107ba010800010805
+        \\01080801083801083c01083c01083f01089e0108a70108af
+        \\0108e00108f50108fb01091b01091f01093901093f01093f
+        \\0109800109b70109bc0109cf0109d2010a06010a0c010a35
+        \\010a38010a3a010a3f010a48010a50010a58010a60010a9f
+        \\010ac0010ae6010aeb010af6010b00010b35010b39010b55
+        \\010b58010b72010b78010b91010b99010b9c010ba9010baf
+        \\010c00010c48010c80010cb2010cc0010cf2010cfa010d27
+        \\010d30010d39010e60010ead010eb0010eb1010efd010f27
+        \\010f30010f59010f70010f89010fb0010fcb010fe0010ff6
+        \\01100001104d01105201107501107f0110c20110d00110e8
+        \\0110f00110f90111000111470111500111760111800111f4
+        \\0112000112410112800112a90112b00112ea0112f00112f9
+        \\01130001130c01130f011310011313011344011347011348
+        \\01134b01134d01135001135001135701135701135d011363
+        \\01136601136c0113700113740114000114610114800114c7
+        \\0114d00114d90115800115b50115b80115dd011600011644
+        \\01165001165901166001166c0116800116b90116c00116c9
+        \\01170001171a01171d01172b01173001174601180001183b
+        \\0118a00118f20118ff01190601190901190901190c011938
+        \\01193b0119460119500119590119a00119a70119aa0119d7
+        \\0119da0119e4011a00011a47011a50011aa2011ab0011af8
+        \\011b00011b09011c00011c45011c50011c6c011c70011c8f
+        \\011c92011cb6011d00011d36011d3a011d47011d50011d59
+        \\011d60011d98011da0011da9011ee0011ef8011f00011f3a
+        \\011f3e011f59011fb0011fb0011fc0011ff1011fff012399
+        \\012400012474012480012543012f90012ff201300001342f
+        \\013440013455014400014646016800016a38016a40016a69
+        \\016a6e016ac9016ad0016aed016af0016af5016b00016b45
+        \\016b50016b77016b7d016b8f016e40016e9a016f00016f4a
+        \\016f4f016f87016f8f016f9f016fe0016fe4016ff0016ff1
+        \\0170000187f7018800018cd5018d00018d0801aff001b122
+        \\01b13201b13201b15001b15201b15501b15501b16401b167
+        \\01b17001b2fb01bc0001bc6a01bc7001bc7c01bc8001bc88
+        \\01bc9001bc9901bc9c01bc9f01cf0001cf2d01cf3001cf46
+        \\01cf5001cfc301d00001d0f501d10001d12601d12901d172
+        \\01d17b01d1ea01d20001d24501d2c001d2d301d2e001d2f3
+        \\01d30001d35601d36001d37801d40001d49f01d4a201d4a2
+        \\01d4a501d4a601d4a901d50a01d50d01d54601d54a01d6a5
+        \\01d6a801d7cb01d7ce01da8b01da9b01daaf01df0001df1e
+        \\01df2501df2a01e00001e01801e01b01e02a01e03001e06d
+        \\01e08f01e08f01e10001e12c01e13001e13d01e14001e149
+        \\01e14e01e14f01e29001e2ae01e2c001e2f901e2ff01e2ff
+        \\01e4d001e4f901e7e001e8c401e8c701e8d601e90001e94b
+        \\01e95001e95901e95e01e95f01ec7101ecb401ed0101ed3d
+        \\01ee0001ee2401ee2701ee3b01ee4201ee4201ee4701ee54
+        \\01ee5701ee6401ee6701ee9b01eea101eebb01eef001eef1
+        \\01f00001f02b01f03001f09301f0a001f0ae01f0b101f0f5
+        \\01f10001f1ad01f1e601f20201f21001f23b01f24001f248
+        \\01f25001f25101f26001f26501f30001f6d701f6dc01f6ec
+        \\01f6f001f6fc01f70001f77601f77b01f7d901f7e001f7eb
+        \\01f7f001f7f001f80001f80b01f81001f84701f85001f859
+        \\01f86001f88701f89001f8ad01f8b001f8b101f90001fa53
+        \\01fa6001fa6d01fa7001fa7c01fa8001fa8801fa9001fac5
+        \\01face01fadb01fae001fae801faf001faf801fb0001fbca
+        \\01fbf001fbf902000002a6df02a70002b73902b74002b81d
+        \\02b82002cea102ceb002ebe002f80002fa1d03000003134a
+        \\0313500323af0e01000e01ef
+    ;
+}
+
+/// The Go `isNotPrint32` table: 112 entries of 4 lowercase hex digits, 12 per row.
+fn not_print32_table() -> []u8 {
+    return
+        \\000c0027003b003e018f039e057b058b0593059605a205b2
+        \\05ba078607b108090836085608f30a040a140a180e7f0eaa
+        \\10bd113511e0121212871289128e129e1304132913311334
+        \\133a145c1914191719361c091c371ca81d071d0a1d3b1d3e
+        \\1d661d691d8f1d921f11246f6a5f6abf6b5a6b62aff4affc
+        \\afffd455d49dd4add4bad4bcd4c4d506d515d51dd53ad53f
+        \\d545d551daa0e007e022e025e7e7e7ece7efe7ffee04ee20
+        \\ee23ee28ee33ee38ee3aee48ee4aee4cee50ee53ee58ee5a
+        \\ee5cee5eee60ee63ee6bee73ee78ee7dee7fee8aeea4eeaa
+        \\f0c0f0d0fabefb93
+    ;
 }
