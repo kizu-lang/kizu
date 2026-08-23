@@ -4,12 +4,14 @@ import compiler::internal::ir;
 import compiler::internal::lexer;
 import compiler::internal::llvm;
 import compiler::internal::manifest;
+import compiler::internal::native;
 import compiler::internal::ownership;
 import compiler::internal::parser;
 import compiler::internal::project;
 import compiler::internal::source;
 import compiler::internal::types;
 import std::array;
+import std::fmt;
 import std::fs;
 import std::io;
 import std::mem;
@@ -20,9 +22,12 @@ import std::string;
 // Port of cmd/kizu for the commands the selfhost compiler can run so far:
 // `parse` prints the program a file parses to, `check` loads a file or a
 // package with its std modules, type-checks it, and ownership-checks it,
-// `ir` lowers a checked file or package to typed SSA IR and prints it, and
-// `build --emit-llvm` prints the LLVM IR the lowered module emits to. The
-// native link follows with its module. Not connected to the shipping CLI.
+// `ir` lowers a checked file or package to typed SSA IR and prints it,
+// `build --emit-llvm` prints the LLVM IR the lowered module emits to,
+// `build --target native` links a program into the executable it names,
+// and `run` / `test` build a temporary executable and run it. The child's
+// exit status cannot be forwarded: `main` returns `!void`, so a failing
+// child exits this process with 1. Not connected to the shipping CLI.
 
 /// Names the ways a command line run ends without a result.
 error Cli {
@@ -75,6 +80,30 @@ fn main() -> !void {
         }
         return ir_target(io, allocator, lib_dir_bytes, target, false, Output::Ir);
     }
+    if mem::equal_bytes(command, "run") {
+        return run_command(io, allocator, lib_dir_bytes, target, next, count);
+    }
+    if mem::equal_bytes(command, "test") {
+        return test_command(io, allocator, lib_dir_bytes, target, next, count);
+    }
+    if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--target") {
+        if count - next < 3 {
+            try usage(io);
+            return Cli::Usage;
+        }
+        let target_kind = try process::arg(next + 2);
+        if !mem::equal_bytes(target_kind, "native") {
+            try usage(io);
+            var message = try string::from_bytes(allocator, "error: invalid build target `");
+            defer message.deinit();
+            try message.append_bytes(target_kind);
+            try message.append_bytes("`");
+            let message_bytes = message.as_bytes();
+            try io::write_stderr_line(io, message_bytes);
+            return Cli::Failed;
+        }
+        return build_native_command(io, allocator, lib_dir_bytes, next + 3, count);
+    }
     if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--emit-llvm") {
         if count - next < 3 {
             try usage(io);
@@ -105,9 +134,12 @@ enum Output {
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] parse <file>");
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] run <file|package> [-- args...]");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] test <file|package> [-- args...]");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
-    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --emit-llvm [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --emit-llvm [--opt] <file|package>");
+    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --target native [native-options] <file|package>");
 }
 
 /// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
@@ -176,7 +208,7 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !v
     defer loader.deinit();
     var package_name = string::new(allocator);
     defer package_name.deinit();
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name);
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, false);
     match loaded {
         Error(failed) => {
             defer failed.deinit();
@@ -211,7 +243,7 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
     defer loader.deinit();
     var package_name = string::new(allocator);
     defer package_name.deinit();
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name);
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, false);
     match loaded {
         Error(failed) => {
             defer failed.deinit();
@@ -342,7 +374,8 @@ fn load_target(
     loader: &var project::Loader,
     tree: &var ast::Ast,
     target: []u8,
-    package_name: &var string::String
+    package_name: &var string::String,
+    include_tests: bool
 ) -> !project::LoadResult {
     let package = try is_package_root(io, target);
     if !package {
@@ -375,6 +408,9 @@ fn load_target(
             match resolved {
                 Graph(graph) => {
                     defer graph.deinit();
+                    if include_tests {
+                        return loader.load_test_program(tree, &graph);
+                    }
                     return loader.load_program(tree, &graph);
                 },
                 Error(failed) => return project::LoadResult::Error(move failed),
@@ -392,4 +428,459 @@ fn load_target(
             return project::LoadResult::Error(move failed);
         },
     }
+}
+
+/// Names which native command a lowered module is built for.
+enum NativeCommand {
+    Build,
+    Run,
+    Test,
+}
+
+/// Returns the native link options `run` and `test` build with, the defaults
+/// of the Go `parseNativeBuildArgs` with no output named.
+fn default_native_options(allocator: Allocator) -> !native::Options {
+    var libc = try string::from_bytes(allocator, "on");
+    errdefer libc.deinit();
+    var runtime_mode = try string::from_bytes(allocator, "hosted");
+    errdefer runtime_mode.deinit();
+    var emit = try string::from_bytes(allocator, "exe");
+    errdefer emit.deinit();
+    var linker = try string::from_bytes(allocator, "clang");
+    errdefer linker.deinit();
+    return native::Options {
+        output: string::new(allocator),
+        triple: string::new(allocator),
+        cpu: string::new(allocator),
+        abi: string::new(allocator),
+        libc: move libc,
+        runtime: move runtime_mode,
+        emit: move emit,
+        linker: move linker,
+        opt: false
+    };
+}
+
+/// Runs `run <file|package> [-- args...]`, the Go `dispatchRun`: everything
+/// after `--` goes to the built program.
+fn run_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !void {
+    let child_start = next + 3;
+    var child_count = 0;
+    if count - next >= 3 {
+        let separator = try process::arg(next + 2);
+        if mem::equal_bytes(separator, "--") {
+            child_count = count - child_start;
+        }
+    }
+    var options = try default_native_options(allocator);
+    defer options.deinit();
+    return native_target(io, allocator, lib_dir, target, NativeCommand::Run, &options, child_start, child_count);
+}
+
+/// Runs `test <file|package> [-- args...]`, the Go `dispatchTest`.
+fn test_command(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, next: i64, count: i64) -> !void {
+    let child_start = next + 3;
+    var child_count = 0;
+    if count - next >= 3 {
+        let separator = try process::arg(next + 2);
+        if mem::equal_bytes(separator, "--") {
+            child_count = count - child_start;
+        }
+    }
+    var options = try default_native_options(allocator);
+    defer options.deinit();
+    return native_target(io, allocator, lib_dir, target, NativeCommand::Test, &options, child_start, child_count);
+}
+
+/// Runs `build --target native [native-options] <file|package>`, the Go
+/// `emitNativeFile`.
+fn build_native_command(io: Io, allocator: Allocator, lib_dir: []u8, first: i64, count: i64) -> !void {
+    var options = try default_native_options(allocator);
+    defer options.deinit();
+    var target_path = string::new(allocator);
+    defer target_path.deinit();
+    try parse_native_build_args(io, allocator, first, count, &var options, &var target_path);
+    let target_bytes = target_path.as_bytes();
+    return native_target(io, allocator, lib_dir, target_bytes, NativeCommand::Build, &options, 0, 0);
+}
+
+/// Parses native build flags and derives defaults, the Go
+/// `parseNativeBuildArgs`.
+fn parse_native_build_args(
+    io: Io,
+    allocator: Allocator,
+    first: i64,
+    count: i64,
+    options: &var native::Options,
+    path: &var string::String
+) -> !void {
+    var index = first;
+    while index < count {
+        let arg = try process::arg(index);
+        index = index + 1;
+        if mem::equal_bytes(arg, "--opt") {
+            options.opt = true;
+            continue;
+        }
+        if mem::equal_bytes(arg, "-o") {
+            index = try take_flag_value(io, allocator, index, count, "-o", &var options.output);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--triple") {
+            index = try take_flag_value(io, allocator, index, count, "--triple", &var options.triple);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--cpu") {
+            index = try take_flag_value(io, allocator, index, count, "--cpu", &var options.cpu);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--abi") {
+            index = try take_flag_value(io, allocator, index, count, "--abi", &var options.abi);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--libc") {
+            index = try take_flag_value(io, allocator, index, count, "--libc", &var options.libc);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--runtime") {
+            index = try take_flag_value(io, allocator, index, count, "--runtime", &var options.runtime);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--emit") {
+            index = try take_flag_value(io, allocator, index, count, "--emit", &var options.emit);
+            continue;
+        }
+        if mem::equal_bytes(arg, "--linker") {
+            index = try take_flag_value(io, allocator, index, count, "--linker", &var options.linker);
+            continue;
+        }
+        if path.len() > 0 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: invalid command arguments");
+            return Cli::Failed;
+        }
+        try path.append_bytes(arg);
+    }
+    if path.len() == 0 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: missing source file");
+        return Cli::Failed;
+    }
+    if options.output.len() == 0 {
+        let path_bytes = path.as_bytes();
+        let emit_bytes = options.emit.as_bytes();
+        try default_native_output(path_bytes, emit_bytes, &var options.output);
+    }
+    return;
+}
+
+/// Reads the value following a flag into one option, the Go
+/// `nextNativeArg`.
+fn take_flag_value(
+    io: Io,
+    allocator: Allocator,
+    index: i64,
+    count: i64,
+    flag: []u8,
+    into: &var string::String
+) -> !i64 {
+    if index >= count {
+        try usage(io);
+        var message = try string::from_bytes(allocator, "error: missing value after ");
+        defer message.deinit();
+        try message.append_bytes(flag);
+        let message_bytes = message.as_bytes();
+        try io::write_stderr_line(io, message_bytes);
+        return Cli::Failed;
+    }
+    let value = try process::arg(index);
+    into.clear();
+    try into.append_bytes(value);
+    return index + 1;
+}
+
+/// Maps a source path to the default target/native artifact, the Go
+/// `defaultNativeOutput`.
+fn default_native_output(path: []u8, emit: []u8, out: &var string::String) -> !void {
+    let base = path::basename(path);
+    let ext = path::extension(base);
+    let stem_end = mem::len(base) - mem::len(ext);
+    let name = base[0..stem_end];
+    try out.append_bytes("target/native/");
+    try out.append_bytes(name);
+    if mem::equal_bytes(emit, "obj") {
+        try out.append_bytes(".o");
+    }
+    if mem::equal_bytes(emit, "llvm") {
+        try out.append_bytes(".ll");
+    }
+    return;
+}
+
+/// Lowers a checked file or package and hands it to the native backend: the
+/// Go `emitNativeFile` for Build, `runFile` for Run and `testFile` for
+/// Test. Test loads package test files and replaces `main` with an entry
+/// that runs every test block; Build and Run expose the package main. The
+/// typed-SSA optimizer stays scoped to `build --emit-llvm --opt`, so no
+/// mode runs it; native `--opt` prunes unreachable functions and hands
+/// optimization to the toolchain.
+fn native_target(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    command: NativeCommand,
+    options: &native::Options,
+    child_start: i64,
+    child_count: i64
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit();
+    var package_name = string::new(allocator);
+    defer package_name.deinit();
+    let include_tests = command == NativeCommand::Test;
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, include_tests);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit();
+            try report(io, allocator, &loader.sources, &failed);
+            return Cli::Failed;
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit();
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            let codes = try loader.std_error_codes();
+            match codes {
+                Error(failed) => {
+                    defer failed.deinit();
+                    try report(io, allocator, &loader.sources, &failed);
+                    return Cli::Failed;
+                },
+                Codes(std_errors) => {
+                    defer std_errors.deinit();
+                    var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+                    defer lowerer.deinit();
+                    if try lowerer.lower(&var tree, &program, &std_errors) |failed| {
+                        defer failed.deinit();
+                        try report(io, allocator, &loader.sources, &failed);
+                        return Cli::Failed;
+                    }
+                    if command != NativeCommand::Test and package_name.len() > 0 {
+                        var entry = string::new(allocator);
+                        defer entry.deinit();
+                        try entry.append_string(&package_name);
+                        try entry.append_bytes("::main");
+                        let entry_bytes = entry.as_bytes();
+                        if try add_package_main(allocator, &var lowerer.module, entry_bytes) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                    }
+                    if command == NativeCommand::Test {
+                        if try add_test_main(allocator, &var lowerer.module) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                    }
+                    if command == NativeCommand::Build and options.opt {
+                        var roots = array::new<string::String>(allocator);
+                        defer roots.deinit();
+                        let main_root = try string::from_bytes(allocator, "main");
+                        try roots.append(move main_root);
+                        try ir::keep_reachable_functions(allocator, &var lowerer.module, &roots);
+                    }
+                    var text = string::new(allocator);
+                    defer text.deinit();
+                    if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
+                        defer failed.deinit();
+                        try report(io, allocator, &loader.sources, &failed);
+                        return Cli::Failed;
+                    }
+                    var temps = try native::new_temp_dirs(allocator);
+                    defer temps.deinit();
+                    if command == NativeCommand::Build {
+                        if try native::build(io, allocator, &var temps, options, &text, &std_errors.sets) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return Cli::Failed;
+                        }
+                        let output = options.output.as_bytes();
+                        return io::write_stdout_line(io, output);
+                    }
+                    var run_dir = string::new(allocator);
+                    defer run_dir.deinit();
+                    var exe = string::new(allocator);
+                    defer exe.deinit();
+                    if try native::executable(io, allocator, &var temps, options, &text, &std_errors.sets, &var run_dir, &var exe) |failed| {
+                        defer failed.deinit();
+                        try report(io, allocator, &loader.sources, &failed);
+                        return Cli::Failed;
+                    }
+                    let exe_bytes = exe.as_bytes();
+                    let code = try execute_built(allocator, exe_bytes, child_start, child_count);
+                    let run_dir_bytes = run_dir.as_bytes();
+                    try native::clean_build_dir(io, allocator, run_dir_bytes);
+                    if code != 0 {
+                        return Cli::Failed;
+                    }
+                    if command == NativeCommand::Test {
+                        return io::write_stdout_line(io, "test: ok");
+                    }
+                    return;
+                },
+            }
+        },
+    }
+}
+
+/// Builds an entry that runs every lowered test block in order, the Go
+/// `addTestMain`. It writes IR by hand, so it ends by verifying what it
+/// produced, the same way `internal/ir` verifies what it returns.
+fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic::Diagnostic {
+    var test_names = array::new<ir::Name>(allocator);
+    defer test_names.deinit();
+    try ir::test_function_names(module, &var test_names);
+    if test_names.len() == 0 {
+        let failed = try diagnostic::from_text(
+            allocator,
+            diagnostic::Severity::Error,
+            ast::zero_span(),
+            "test error: no tests found"
+        );
+        return move failed;
+    }
+    // Loose-file lowering may already contain a native main; tests replace it.
+    var reversed = array::new<ir::Function>(allocator);
+    defer reversed.deinit();
+    while module.functions.pop() |function| {
+        try reversed.append(function);
+    }
+    var position = reversed.len();
+    while position > 0 {
+        position = position - 1;
+        let function = reversed.get_or_panic(position);
+        let name = module.function_name(function);
+        if module.names.is(name, "main") {
+            continue;
+        }
+        try module.functions.append(function);
+    }
+    // A test body returns `!void`, so the entry tries each result: the first
+    // failing test returns its message instead of letting the run report ok.
+    let bang_void = try module.names.intern("!void");
+    let void_name = try module.names.intern("void");
+    let main_name = try module.names.intern("main");
+    let entry_name = try module.names.intern("entry");
+    let main_function = ir::Function {
+        node: module.function_nodes.add(ir::FunctionNode {
+            name: main_name,
+            params: array::new<ir::Param>(allocator),
+            return_type: bang_void,
+            blocks: array::new<ir::Block>(allocator)
+        })
+    };
+    try module.functions.append(main_function);
+    let block = try module.add_block(main_function, entry_name);
+    var index = 0;
+    while test_names.get(index) |test_name| {
+        var called_spelling = try string::from_bytes(allocator, "%test.");
+        errdefer called_spelling.deinit();
+        try fmt::append_i64(&var called_spelling, index);
+        let called_name = try module.names.intern_owned(move called_spelling);
+        let called = ir::Value { name: called_name, type_name: bang_void };
+        let call = module.blank_instr(called, ir::Op::Call, test_name, ir::empty_name());
+        let _ = try module.add_instr(block, move call);
+        var tried_spelling = try string::from_bytes(allocator, "%try.");
+        errdefer tried_spelling.deinit();
+        try fmt::append_i64(&var tried_spelling, index);
+        let tried_name = try module.names.intern_owned(move tried_spelling);
+        let tried = ir::Value { name: tried_name, type_name: void_name };
+        var tried_instr = module.blank_instr(tried, ir::Op::ErrorTry, ir::empty_name(), ir::empty_name());
+        errdefer tried_instr.deinit();
+        try tried_instr.args.append(called);
+        let _ = try module.add_instr(block, move tried_instr);
+        index = index + 1;
+    }
+    let ok_name = try module.names.intern("%test.ok");
+    let ok = ir::Value { name: ok_name, type_name: bang_void };
+    let ok_instr = module.blank_instr(ok, ir::Op::ErrorOk, ir::empty_name(), ir::empty_name());
+    let _ = try module.add_instr(block, move ok_instr);
+    module.set_terminator(block, ir::return_terminator(ok));
+    return ir::verify(allocator, module);
+}
+
+/// Runs a linked executable with the arguments after `--` and returns its
+/// exit status, the Go `executeBuilt`. std::process::spawn_wait8 carries at
+/// most eight arguments, so the program and up to seven of its own fit.
+fn execute_built(allocator: Allocator, exe: []u8, arg_start: i64, arg_count: i64) -> !i64 {
+    var a0 = try string::from_bytes(allocator, exe);
+    defer a0.deinit();
+    var a1 = string::new(allocator);
+    defer a1.deinit();
+    var a2 = string::new(allocator);
+    defer a2.deinit();
+    var a3 = string::new(allocator);
+    defer a3.deinit();
+    var a4 = string::new(allocator);
+    defer a4.deinit();
+    var a5 = string::new(allocator);
+    defer a5.deinit();
+    var a6 = string::new(allocator);
+    defer a6.deinit();
+    var a7 = string::new(allocator);
+    defer a7.deinit();
+    if arg_count >= 1 {
+        let value = try process::arg(arg_start);
+        try a1.append_bytes(value);
+    }
+    if arg_count >= 2 {
+        let value = try process::arg(arg_start + 1);
+        try a2.append_bytes(value);
+    }
+    if arg_count >= 3 {
+        let value = try process::arg(arg_start + 2);
+        try a3.append_bytes(value);
+    }
+    if arg_count >= 4 {
+        let value = try process::arg(arg_start + 3);
+        try a4.append_bytes(value);
+    }
+    if arg_count >= 5 {
+        let value = try process::arg(arg_start + 4);
+        try a5.append_bytes(value);
+    }
+    if arg_count >= 6 {
+        let value = try process::arg(arg_start + 5);
+        try a6.append_bytes(value);
+    }
+    if arg_count >= 7 {
+        let value = try process::arg(arg_start + 6);
+        try a7.append_bytes(value);
+    }
+    let b0 = a0.as_bytes();
+    let b1 = a1.as_bytes();
+    let b2 = a2.as_bytes();
+    let b3 = a3.as_bytes();
+    let b4 = a4.as_bytes();
+    let b5 = a5.as_bytes();
+    let b6 = a6.as_bytes();
+    let b7 = a7.as_bytes();
+    let argc = 1 + arg_count;
+    let code = try process::spawn_wait8(argc, b0, b1, b2, b3, b4, b5, b6, b7);
+    return code;
 }
