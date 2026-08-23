@@ -197,6 +197,12 @@ diagnostics、成功なら `// ast:` 以下に rendered program)です。期待 
 `go test ./internal/parser -run TestParserCorpus -update` が生成し、Kizu 側は
 `compiler/src/internal/parser/corpus_test.kizu` の runner が同じ file を読んで比較します。
 Go の挙動を変えたら `-update` で期待 block を作り直し、Kizu 側を同じ commit で追従させます。
+check corpus は `compiler/tests/check/` で、1 file = 入力 + `// check` + `// load:`(loader が
+出す修飾済み宣言か module error)+ `// check:`(`ok` か diagnostics)です。期待 block は
+`go test ./internal/types -run TestCheckCorpus -update` が types → ownership の順に生成し
+(types が通った case だけ ownership まで進む)、`compiler/src/check_corpus_test.kizu` が
+同じ順で読みます。case は types の test 入力(`t_`)、ownership の test 入力(`o_`)、examples
+(`ex_`)、negative examples(`neg_`)から採っています。
 Kizu の unit test に残すのは、入出力で表せない ownership / lifecycle の invariant だけです。
 
 並列 agent は同じ file を編集しません。shared type と ownership 表は一人の
@@ -243,8 +249,9 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | stdprim / stdmeta / stdmethod / unsafecap | 140 / 211 / 80 / 60 | 259 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
-| types | 7768 | 15293 | 1.97 | check corpus 635 case(diagnostics) |
-| compiler(cmd/kizu の parse / check) | 1041(全 command) | 180 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check と tests/behavior・compiler/・examples/modules の check を Go の front end と byte 比較(938 case) |
+| types | 7768 | 15293 | 1.97 | check corpus 765 case(diagnostics) |
+| ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
+| compiler(cmd/kizu の parse / check) | 1041(全 command) | 200 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check と tests/behavior・compiler/・examples/modules の check(types → ownership)を Go の front end と byte 比較(938 case) |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -255,6 +262,19 @@ context 引数 576 行と `var x = empty_type()` 131 行は「Go の `(T, error)
 Go の `if err != nil { return err }` 350 箇所と同数で、増分ではない。残る圧縮余地は
 message builder の共通化(parser の `error_*` と同じ融合)と `tree` 引数の扱いだが、
 2.0 未満に入ったので後続 module を優先する。
+
+ownership の増分(+5,006 行)の分類。API shape が最大で、関数宣言が Go 418 に対して
+Kizu 737(`Name` / binding の accessor、`ast_view` の node reader、`NameTable` の綴り
+helper)、signature を 1 引数 1 行に折り返した 1,589 行、閉じ括弧だけの行が Go 1,845 に対して
+Kizu 2,750(`if try f() |failed| {` の block 310 と 100 桁超の呼び出し折返し 243)。error
+処理は `out` 引数の `var x = empty_name()` 120 行、`handled.* / out.*` 206 行、
+`return move failed` 304 行で、Go の `if err != nil` / `return err` 457 行に対して 734 行。
+ownership の明示は `defer` / `errdefer` 143 行、`as_bytes()` / `name_text` の view 束縛 246 行。
+重複処理は `while` の `index = index + 1` 125 行(Go の `for range`)と diagnostic の
+`Arg::` 262 行(Go は `errorf` の引数に inline)。型名・binding 名・修飾名を 1 つの
+`NameTable` に intern して copy handle `Name` で渡す表現(types の `TypeTable` と同じ判断)が
+`string` の自由な複製を吸収しており、それ以上の圧縮は signature 折返しの 1 行化だけで
+1.5 を切れないため後続 module を優先する。
 
 
 ## 見つかった gap
@@ -283,4 +303,9 @@ message builder の共通化(parser の `error_*` と同じ融合)と `tree` 引
 | closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
 | `main` は exit status を選べず、error を返すと runtime が `runtime error: <名前>` を stderr に足す(ADR-0085) | CLI の失敗終了 | error set `Cli` を返す。差分テストはその 1 行を除いて比較。cutover までに `std::process::exit` 相当の判断が要る |
 | `std::process` は argv[0](実行ファイルの path)を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
+| method の `&T` 戻り値は ownership checker が borrow として追跡しない(`calledFunction` が free function と namespace 修飾名しか解決せず、`let s = self.text(n); s.as_bytes()` が view 初期化子と認識されない) | ownership の `NameTable`: intern した綴りの bytes を読む accessor | free function `name_text(names: &NameTable, name) -> &string::String` にし、call site で `let retained = ...; let bytes = retained.as_bytes();` と束縛する |
+| IR lowering が `&var` 引数の slot 判定を method 名だけで program 全体に union する(`internal/ir/slots.go` `markLentMethodArgs`)ため、別 module に同名で `&var` 位置が違う method があると capture / payload binding の lowering が壊れる(`clone`、`is_plain_data_type` で project / types の関数が clang error になった) | ownership module の `ScopeStore.clone` / `Checker.is_plain_data_type` ほか | 衝突した method だけ名前を変えた(`clone_scope`、`binding_mut`、`check_call`、`check_value_block`、`is_plain_data`、`check_owned_string_method` など)。同名 method の `&var` 位置差を列挙する確認を module 完了時に行う |
+| `test` block の本体は同 module の private field を読めない | ownership の `binding_test.kizu`(`BindingHandle.node` の比較) | 比較を同 module の `fn` に出す |
+| `if try f() \|v\|` の capture から `&var self` method を呼べないため、borrow を返す accessor(`?&T`)は使いにくい | ownership の struct / enum / union 表の読み出し | accessor は copy 値(`?Name`、`?BindingHandle`、`bool`)を返す形にし、`Map.at` は accessor 内部で閉じる |
+| Go の `defer` による状態復帰(`c.loopDepth--`、flag の戻し)を `defer` で書けない(cleanup method 呼び出し以外は `defer` 不可)上、`?Owner` 戻り値を `let` に束縛できない | ownership の `check_block` / `check_while_stmt` / generic instantiation の enter / restore | 失敗 branch と成功 path の両方に復帰を書く(`if try f() \|failed\| { restore; return move failed; } restore;`) |
 
