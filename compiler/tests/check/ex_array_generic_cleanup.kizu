@@ -1,0 +1,49 @@
+import std::array;
+import std::mem;
+import std::string;
+
+// `deinit` releases the value and whatever it holds: a container consumes its
+// elements through their own `deinit` before releasing the buffer, and an
+// element that owns nothing has nothing to consume there.
+//
+// One name is what lets a function write the cleanup without knowing its
+// element type. Two names could not: this function would have to pick between
+// them, and which one is right depends on what the caller passes.
+fn collect<E>(allocator: Allocator, count: i64) -> !array::Array<E> {
+    var items = array::new<E>(allocator);
+    errdefer items.deinit();
+    try items.reserve(count);
+    return move items;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+
+    var numbers = try collect<i64>(allocator, 2);
+    defer numbers.deinit();
+    try numbers.append(7);
+    print(numbers.len());
+
+    var names = try collect<string::String>(allocator, 1);
+    defer names.deinit();
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes("alice");
+    try names.append(move name);
+    print(names.len());
+    return;
+}
+
+// run
+// features: std-array ownership deinit comptime generic
+// output:
+// 1
+// 1
+
+
+// check
+// load:
+// fn collect<E>(allocator: Allocator, count: i64) -> !std::array::Array<E> { var items = std::array::new<E>(allocator); errdefer items.deinit(); try items.reserve(count); return move items; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var numbers = try collect<i64>(allocator, 2); defer numbers.deinit(); try numbers.append(7); print(numbers.len()); var names = try collect<std::string::String>(allocator, 1); defer names.deinit(); var name = std::string::new(allocator); errdefer name.deinit(); try name.append_bytes("alice"); try names.append(move name); print(names.len()); return; }
+// check:
+// ok

@@ -1,0 +1,1119 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::array;
+import std::map;
+import std::mem;
+import std::sort;
+import std::string;
+
+// Identifies the tagged type a match runs over: an enum (or the tag view of
+// an error set) or a union.
+union MatchTarget {
+    Enum(EnumHandle),
+    Union(UnionHandle),
+}
+
+// Validates a branch and tracks whether both arms return.
+fn (self: &var Checker) check_if_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::IfStmt,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    let condition = statement.condition;
+    let consequence_block = statement.consequence;
+    let alternative = statement.alternative;
+    let retained_capture = tree.texts.at(statement.capture.node);
+    let source_capture = retained_capture.as_bytes();
+    let owned_capture = try string::from_bytes(self.allocator, source_capture);
+    defer owned_capture.deinit();
+    let capture = owned_capture.as_bytes();
+    let consequence = self.scopes.new_scope(scope);
+    var handled = false;
+    if try self.bind_container_borrow_capture(
+        tree, scope, capture, condition, consequence, &var handled
+    ) |problem| {
+        return move problem;
+    }
+    if !handled {
+        var cond = empty_type();
+        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+            return move problem;
+        }
+        if try self.bind_condition_capture("if", capture, cond, consequence) |problem| {
+            return move problem;
+        }
+    }
+    var left_returns = false;
+    if try self.check_block(
+        tree,
+        consequence,
+        consequence_block,
+        want_return,
+        &var left_returns
+    ) |problem| {
+        return move problem;
+    }
+    if alternative |alternative_block| {
+        let child = self.scopes.new_scope(scope);
+        var right_returns = false;
+        if try self.check_block(
+            tree,
+            child,
+            alternative_block,
+            want_return,
+            &var right_returns
+        ) |problem| {
+            return move problem;
+        }
+        out.* = left_returns and right_returns;
+        return null;
+    }
+    out.* = false;
+    return null;
+}
+
+// Types an if/while condition: with a capture the condition must be an
+// optional and the payload binds into the branch scope; without one it must
+// be bool.
+fn (self: &var Checker) bind_condition_capture(
+    kind: []u8,
+    capture: []u8,
+    cond: Type,
+    scope: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    if mem::len(capture) == 0 {
+        if !self.types.is_text(cond, "bool") {
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes(kind);
+            try message.append_bytes(" condition must be bool, got ");
+            try self.append_checker_type(&var message, cond);
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
+        }
+        return null;
+    }
+    var elem = empty_type();
+    if try self.types.optional_elem(cond) |present| {
+        elem = present;
+    } else {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes(kind);
+        try message.append_bytes(" capture `|");
+        try message.append_bytes(capture);
+        try message.append_bytes("|` requires an optional condition, got ");
+        try self.append_checker_type(&var message, cond);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    let defined = try self.scopes.define(scope, capture, elem, false);
+    return self.require_scope_definition(capture, defined);
+}
+
+// Handles an array/map at/at_mut capture condition: the capture binds the
+// payload borrow directly, carrying the container's provenance.
+fn (self: &var Checker) bind_container_borrow_capture(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    capture: []u8,
+    condition: ast::Expression,
+    branch: ScopeHandle,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    if mem::len(capture) == 0 {
+        return null;
+    }
+    var elem = empty_type();
+    var mutable = false;
+    if try self.check_container_borrow_condition(
+        tree, scope, condition, &var elem, &var mutable, handled
+    ) |problem| {
+        return move problem;
+    }
+    if !handled.* {
+        return null;
+    }
+    var sources = array::new<string::String>(self.allocator);
+    errdefer sources.deinit();
+    try self.expr_borrow_source_list(tree, scope, condition, &var sources);
+    if sources.len() == 0 {
+        let owned = try string::from_bytes(self.allocator, capture);
+        errdefer owned.deinit();
+        try sources.append(move owned);
+    }
+    let defined = try self.scopes.define_param_with_source(
+        branch, capture, elem, true, mutable, move sources, false
+    );
+    return self.require_scope_definition(capture, defined);
+}
+
+// Types a container borrow capture condition and reports whether the
+// condition was one; a call producing any other type is typed by the generic
+// condition path.
+fn (self: &var Checker) check_container_borrow_condition(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    elem_out: &var Type,
+    mutable_out: &var bool,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    match tree.expressions.at(expression.node) {
+        Call(call) => match tree.expressions.at(call.callee.node) {
+            Field(callee) => {
+                let receiver = callee.receiver;
+                if !(try capture_receiver_shape(self.allocator, tree, receiver)) {
+                    return null;
+                }
+            },
+            Ident(_) => {},
+            _ => return null,
+        },
+        _ => return null,
+    }
+    let saved = self.capture_condition;
+    self.capture_condition = true;
+    var result = empty_type();
+    if try self.check_expr(tree, scope, expression, &var result) |problem| {
+        self.capture_condition = saved;
+        handled.* = true;
+        return move problem;
+    }
+    self.capture_condition = saved;
+    let text = try self.types.copy_text(self.allocator, result);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    if typ::borrow_optional_elem(bytes) |parts| {
+        elem_out.* = try self.types.intern(parts.elem);
+        mutable_out.* = parts.mutable;
+        handled.* = true;
+    }
+    return null;
+}
+
+// Validates loop condition and body types.
+fn (self: &var Checker) check_while_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::WhileStmt,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    let label_text = statement.label;
+    let condition = statement.condition;
+    let body_block = statement.body;
+    let retained_capture = tree.texts.at(statement.capture.node);
+    let source_capture = retained_capture.as_bytes();
+    let owned_capture = try string::from_bytes(self.allocator, source_capture);
+    defer owned_capture.deinit();
+    let capture = owned_capture.as_bytes();
+    let body = self.scopes.new_scope(scope);
+    var handled = false;
+    if try self.bind_container_borrow_capture(
+        tree, scope, capture, condition, body, &var handled
+    ) |problem| {
+        return move problem;
+    }
+    if !handled {
+        var cond = empty_type();
+        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+            return move problem;
+        }
+        if try self.bind_condition_capture("while", capture, cond, body) |problem| {
+            return move problem;
+        }
+    }
+    let retained_label = tree.texts.at(label_text.node);
+    let label = retained_label.as_bytes();
+    if try self.enter_loop(label) |problem| {
+        return move problem;
+    }
+    var returns = false;
+    if try self.check_block(tree, body, body_block, want_return, &var returns) |problem| {
+        self.leave_loop();
+        return move problem;
+    }
+    self.leave_loop();
+    out.* = false;
+    return null;
+}
+
+// Validates a bounded integer range loop.
+fn (self: &var Checker) check_for_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::ForStmt,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    let label_text = statement.label;
+    let name_text = statement.name;
+    let start = statement.start;
+    let end = statement.end;
+    let body_block = statement.body;
+    if try self.check_for_bounds(tree, scope, start, end) |problem| {
+        return move problem;
+    }
+    let retained_label = tree.texts.at(label_text.node);
+    let label = retained_label.as_bytes();
+    if try self.enter_loop(label) |problem| {
+        return move problem;
+    }
+    let child = self.scopes.new_scope(scope);
+    let retained_name = tree.texts.at(name_text.node);
+    let name = retained_name.as_bytes();
+    let index_type = try self.types.i64_type();
+    let defined = try self.scopes.define(child, name, index_type, false);
+    if try self.require_scope_definition(name, defined) |problem| {
+        self.leave_loop();
+        return move problem;
+    }
+    var returns = false;
+    if try self.check_block(tree, child, body_block, want_return, &var returns) |problem| {
+        self.leave_loop();
+        return move problem;
+    }
+    self.leave_loop();
+    out.* = false;
+    return null;
+}
+
+// Validates the start and end expressions for a range loop.
+fn (self: &var Checker) check_for_bounds(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    start: ast::Expression,
+    end: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var start_type = empty_type();
+    if try self.check_expr(tree, scope, start, &var start_type) |problem| {
+        return move problem;
+    }
+    var end_type = empty_type();
+    if try self.check_expr(tree, scope, end, &var end_type) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(start_type, "i64") or
+        !self.types.is_text(end_type, "i64") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("for range expects i64 bounds, got ");
+        try self.append_checker_type(&var message, start_type);
+        try message.append_bytes("..");
+        try self.append_checker_type(&var message, end_type);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return null;
+}
+
+// Returns the named set of tags a match can run over. An enum is one, and so
+// is an error set: matching a failure asks which member of the set it is.
+fn (self: &Checker) tagged_type(name: []u8) -> ?EnumHandle {
+    if self.metadata.enums_by_name.get(name) |handle| {
+        return handle;
+    }
+    if self.metadata.error_sets_by_name.get(name) |handle| {
+        if self.metadata.error_sets.at(handle.index) |set| {
+            return set.tagged;
+        }
+    }
+    return null;
+}
+
+// Resolves the tagged type or union a match value belongs to.
+fn (self: &Checker) match_target(value_type: Type) -> ?MatchTarget {
+    if value_type.node |handle| {
+        let entry = self.types.entries.at(handle);
+        let name = entry.spelling.as_bytes();
+        if self.tagged_type(name) |tagged| {
+            return MatchTarget::Enum(tagged);
+        }
+        if self.metadata.unions_by_name.get(name) |union_handle| {
+            return MatchTarget::Union(union_handle);
+        }
+    }
+    return null;
+}
+
+// Validates exhaustive simple enum tag matches.
+fn (self: &var Checker) check_match_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: ast::Statement,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    match tree.statements.at(statement.node) {
+        Match(value) => {
+            let value_expr = value.value;
+            let meta_capture = value.meta_capture;
+            let meta_owner = value.meta_owner;
+            let arms = try value.arms.clone(self.allocator);
+            defer arms.deinit();
+            var value_type = empty_type();
+            if try self.check_expr(tree, scope, value_expr, &var value_type) |problem| {
+                return move problem;
+            }
+            value_type = try self.types.borrowed_value_type(value_type);
+            if self.match_target(value_type) |target| {
+                return self.check_match_arms(
+                    tree,
+                    scope,
+                    &arms,
+                    target,
+                    meta_capture,
+                    meta_owner,
+                    want_return,
+                    out
+                );
+            }
+            return try self.match_target_error(value_type);
+        },
+        _ => return try self.checker_error_at(
+            "type error", ast::zero_span(), "unsupported statement"
+        ),
+    }
+}
+
+// Validates tag patterns and return flow for match arms.
+fn (self: &var Checker) check_match_arms(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    arms: &array::Array<ast::MatchArm>,
+    target: MatchTarget,
+    meta_capture: ast::Text,
+    meta_owner: ast::Text,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    var arm_variants = map::new<[]u8, MetaFieldHandle>(self.allocator);
+    defer arm_variants.deinit();
+    if try self.match_arm_variants(tree, meta_capture, meta_owner, &var arm_variants) |problem| {
+        return move problem;
+    }
+    let retained_capture = tree.texts.at(meta_capture.node);
+    let source_capture = retained_capture.as_bytes();
+    let owned_capture = try string::from_bytes(self.allocator, source_capture);
+    defer owned_capture.deinit();
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var wildcard = false;
+    var all_return = arms.len() > 0;
+    var index = 0;
+    while arms.at(index) |arm| {
+        var payload = empty_type();
+        let retained_tag = tree.texts.at(arm.tag.node);
+        let tag = retained_tag.as_bytes();
+        if arm.is_wildcard(tree) {
+            if try self.validate_wildcard_match_arm(tree, arm, index, arms.len()) |problem| {
+                return move problem;
+            }
+            if wildcard {
+                return try self.checker_error_at(
+                    "type error", ast::zero_span(),
+                    "duplicate wildcard match arm"
+                );
+            }
+            wildcard = true;
+        } else {
+            if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
+                return move problem;
+            }
+            if seen.contains(tag) {
+                return try self.match_tag_error(tree, "duplicate match tag `", target, tag, "`");
+            }
+            try seen.insert(tag, true);
+        }
+        let arm_scope = self.scopes.new_scope(scope);
+        let retained_binding = tree.texts.at(arm.binding.node);
+        let binding = retained_binding.as_bytes();
+        if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
+            let defined = try self.scopes.define(arm_scope, binding, payload, false);
+            if try self.require_scope_definition(binding, defined) |problem| {
+                return move problem;
+            }
+        }
+        let previous_meta = self.meta_bindings.current;
+        let capture = owned_capture.as_bytes();
+        if mem::len(capture) > 0 {
+            let field = try self.match_arm_meta_field(&arm_variants, tag);
+            try self.bind_meta_field(capture, field);
+        }
+        var returns = false;
+        if try self.check_stmt(tree, arm_scope, arm.body, want_return, &var returns) |problem| {
+            self.meta_bindings.restore(previous_meta);
+            return move problem;
+        }
+        self.meta_bindings.restore(previous_meta);
+        all_return = all_return and returns;
+        index = index + 1;
+    }
+    if !wildcard and seen.len() != self.match_variant_count(target) {
+        return try self.match_not_exhaustive_error(tree, target, &seen);
+    }
+    out.* = all_return;
+    return null;
+}
+
+// Indexes by tag the variants a `comptime match` arm body is written against.
+// A match written by hand carries no capture and binds nothing.
+fn (self: &var Checker) match_arm_variants(
+    tree: &ast::Ast,
+    meta_capture: ast::Text,
+    meta_owner: ast::Text,
+    out: &var map::Map<[]u8, MetaFieldHandle>
+) -> !?diagnostic::Diagnostic {
+    let retained_capture = tree.texts.at(meta_capture.node);
+    let capture = retained_capture.as_bytes();
+    if mem::len(capture) == 0 {
+        return null;
+    }
+    let retained_owner = tree.texts.at(meta_owner.node);
+    let owner = retained_owner.as_bytes();
+    var variants = array::new<MetaFieldHandle>(self.allocator);
+    defer variants.deinit();
+    if try self.meta_variants(tree, owner, &var variants) |problem| {
+        return move problem;
+    }
+    var index = 0;
+    while variants.get(index) |handle| {
+        let field = self.meta_field_entries.at(handle.node);
+        let name = field.name.as_bytes();
+        try out.insert(name, handle);
+        index = index + 1;
+    }
+    return null;
+}
+
+// Selects the variant an expanded arm is written against; an arm without one
+// binds an empty record, the way an absent map entry reads.
+fn (self: &var Checker) match_arm_meta_field(
+    arm_variants: &map::Map<[]u8, MetaFieldHandle>,
+    tag: []u8
+) -> !MetaFieldHandle {
+    if arm_variants.get(tag) |field| {
+        return field;
+    }
+    return self.retain_meta_field(empty_type(), "", empty_type(), false);
+}
+
+// Lists an enum's tags or a union's variants in declaration order.
+fn (self: &var Checker) meta_variants(
+    tree: &ast::Ast,
+    type_arg: []u8,
+    out: &var array::Array<MetaFieldHandle>
+) -> !?diagnostic::Diagnostic {
+    var owner = empty_type();
+    if try typ::split_args_optional(self.allocator, type_arg) |arguments| {
+        defer arguments.deinit();
+        if arguments.len() != 1 {
+            return try self.comptime_form_error(
+                stdmeta::Form::Variants, "` expects 1 static argument"
+            );
+        }
+        if arguments.at(0) |argument| {
+            let bytes = argument.as_bytes();
+            match try self.resolve_type(tree, bytes) {
+                Value(value) => {
+                    owner = value;
+                },
+                Issue(issue) => return try self.type_resolution_diagnostic(issue),
+            }
+        }
+    } else {
+        return try self.comptime_form_error(stdmeta::Form::Variants, "` expects 1 static argument");
+    }
+    let owner_text = try self.types.copy_text(self.allocator, owner);
+    defer owner_text.deinit();
+    let owner_bytes = owner_text.as_bytes();
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var payloads = array::new<Type>(self.allocator);
+    defer payloads.deinit();
+    if self.metadata.enums_by_name.get(owner_bytes) |handle| {
+        try self.enum_variant_names(tree, handle, &var names, &var payloads);
+    } else {
+        if self.metadata.unions_by_name.get(owner_bytes) |handle| {
+            try self.union_variant_names(handle, &var names, &var payloads);
+        } else {
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_byte(cast<u8>(96));
+            try message.append_bytes(stdmeta::spelling(stdmeta::Form::Variants));
+            try message.append_bytes("` expects an enum or union, got ");
+            try self.append_checker_type(&var message, owner);
+            return try self.checker_message_at("comptime error", ast::zero_span(), move message);
+        }
+    }
+    var index = 0;
+    while names.at(index) |name| {
+        let name_bytes = name.as_bytes();
+        let payload = payloads.get_or_panic(index);
+        let field = try self.retain_meta_field(owner, name_bytes, payload, true);
+        try out.append(field);
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &Checker) enum_variant_names(
+    tree: &ast::Ast,
+    handle: EnumHandle,
+    names: &var array::Array<string::String>,
+    payloads: &var array::Array<Type>
+) -> !void {
+    let allocator = self.allocator;
+    if self.metadata.enums.at(handle.index) |enum_type| {
+        var index = 0;
+        while enum_type.order.get(index) |tag| {
+            let retained_tag = tree.texts.at(tag.node);
+            let tag_name = retained_tag.as_bytes();
+            let copied = try string::from_bytes(allocator, tag_name);
+            errdefer copied.deinit();
+            try names.append(move copied);
+            try payloads.append(empty_type());
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+fn (self: &Checker) union_variant_names(
+    handle: UnionHandle,
+    names: &var array::Array<string::String>,
+    payloads: &var array::Array<Type>
+) -> !void {
+    let allocator = self.allocator;
+    if self.metadata.unions.at(handle.index) |union_type| {
+        var index = 0;
+        while union_type.order.at(index) |variant| {
+            let variant_name = variant.as_bytes();
+            let copied = try string::from_bytes(allocator, variant_name);
+            errdefer copied.deinit();
+            try names.append(move copied);
+            let payload = union_type.variants.get(variant_name) orelse
+                empty_type();
+            try payloads.append(payload);
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+// Checks the restricted fallback pattern shape.
+fn (self: &Checker) validate_wildcard_match_arm(
+    tree: &ast::Ast,
+    arm: &ast::MatchArm,
+    index: i64,
+    count: i64
+) -> !?diagnostic::Diagnostic {
+    let retained_binding = tree.texts.at(arm.binding.node);
+    let binding = retained_binding.as_bytes();
+    if mem::len(binding) > 0 {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "wildcard match arm cannot bind payload"
+        );
+    }
+    if index != count - 1 {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(), "wildcard match arm must be last"
+        );
+    }
+    return null;
+}
+
+// Validates a match arm pattern and returns its payload type.
+fn (self: &Checker) match_payload_type(
+    tree: &ast::Ast,
+    target: MatchTarget,
+    arm: &ast::MatchArm,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let retained_tag = tree.texts.at(arm.tag.node);
+    let tag = retained_tag.as_bytes();
+    let retained_binding = tree.texts.at(arm.binding.node);
+    let binding = retained_binding.as_bytes();
+    match target {
+        Enum(handle) => {
+            if !self.enum_has_tag(handle, tag) {
+                return try self.match_tag_error(tree, "unknown match tag `", target, tag, "`");
+            }
+            if mem::len(binding) > 0 {
+                return try self.match_tag_error(
+                    tree, "enum tag `", target, tag, "` has no payload"
+                );
+            }
+            out.* = empty_type();
+            return null;
+        },
+        Union(handle) => {
+            let payload = self.union_variant_payload(handle, tag) orelse
+                return try self.match_tag_error(tree, "unknown match tag `", target, tag, "`");
+            if same_type(payload, empty_type()) and mem::len(binding) > 0 {
+                return try self.match_tag_error(
+                    tree, "union variant `", target, tag, "` has no payload"
+                );
+            }
+            out.* = payload;
+            return null;
+        },
+    }
+}
+
+fn (self: &Checker) enum_has_tag(handle: EnumHandle, tag: []u8) -> bool {
+    if self.metadata.enums.at(handle.index) |enum_type| {
+        return enum_type.tags.contains(tag);
+    }
+    return false;
+}
+
+fn (self: &Checker) union_variant_payload(handle: UnionHandle, tag: []u8) -> ?Type {
+    if self.metadata.unions.at(handle.index) |union_type| {
+        return union_type.variants.get(tag);
+    }
+    return null;
+}
+
+// Appends the matched enum or union type name.
+fn (self: &Checker) append_match_type_name(
+    out: &var string::String,
+    tree: &ast::Ast,
+    target: MatchTarget
+) -> !void {
+    match target {
+        Enum(handle) => {
+            if self.metadata.enums.at(handle.index) |enum_type| {
+                let retained = tree.texts.at(enum_type.name.node);
+                let name = retained.as_bytes();
+                try out.append_bytes(name);
+            }
+        },
+        Union(handle) => {
+            if self.metadata.unions.at(handle.index) |union_type| {
+                let name = union_type.name.as_bytes();
+                try out.append_bytes(name);
+            }
+        },
+    }
+    return;
+}
+
+// Returns the number of variants in a match target.
+fn (self: &Checker) match_variant_count(target: MatchTarget) -> i64 {
+    match target {
+        Enum(handle) => {
+            if self.metadata.enums.at(handle.index) |enum_type| {
+                return enum_type.tags.len();
+            }
+            return 0;
+        },
+        Union(handle) => {
+            if self.metadata.unions.at(handle.index) |union_type| {
+                return union_type.variants.len();
+            }
+            return 0;
+        },
+    }
+}
+
+// Lists the variants a match does not cover, sorted so the message is stable.
+fn (self: &Checker) missing_match_variants(
+    target: MatchTarget,
+    seen: &map::Map<[]u8, bool>,
+    out: &var array::Array<string::String>
+) -> !void {
+    let allocator = self.allocator;
+    match target {
+        Enum(handle) => {
+            if self.metadata.enums.at(handle.index) |enum_type| {
+                var index = 0;
+                while enum_type.tags.key_at(index) |tag| {
+                    if !seen.contains(tag) {
+                        let copied = try string::from_bytes(allocator, tag);
+                        errdefer copied.deinit();
+                        try out.append(move copied);
+                    }
+                    index = index + 1;
+                }
+            }
+        },
+        Union(handle) => {
+            if self.metadata.unions.at(handle.index) |union_type| {
+                var index = 0;
+                while union_type.variants.key_at(index) |variant| {
+                    if !seen.contains(variant) {
+                        let copied = try string::from_bytes(allocator, variant);
+                        errdefer copied.deinit();
+                        try out.append(move copied);
+                    }
+                    index = index + 1;
+                }
+            }
+        },
+    }
+    return sort::strings(out);
+}
+
+fn (self: &Checker) match_target_error(value_type: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("match expects enum or union, got ");
+    try self.append_checker_type(&var message, value_type);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) match_tag_error(
+    tree: &ast::Ast,
+    prefix: []u8,
+    target: MatchTarget,
+    tag: []u8,
+    suffix: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes(prefix);
+    try self.append_match_type_name(&var message, tree, target);
+    try message.append_bytes("::");
+    try message.append_bytes(tag);
+    try message.append_bytes(suffix);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) match_not_exhaustive_error(
+    tree: &ast::Ast,
+    target: MatchTarget,
+    seen: &map::Map<[]u8, bool>
+) -> !diagnostic::Diagnostic {
+    var missing = array::new<string::String>(self.allocator);
+    defer missing.deinit();
+    try self.missing_match_variants(target, seen, &var missing);
+    let joined = try string::join(self.allocator, &missing, ", ");
+    defer joined.deinit();
+    let joined_bytes = joined.as_bytes();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("match on `");
+    try self.append_match_type_name(&var message, tree, target);
+    try message.append_bytes("` is not exhaustive: missing ");
+    try message.append_bytes(joined_bytes);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Types `cond orelse return/break/continue`: on null the guard leaves the
+// enclosing function or loop, so the guard itself always yields the payload.
+fn (self: &var Checker) check_orelse_guard_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::OrelseGuardExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let condition = expression.condition;
+    let exit = expression.exit;
+    var cond = empty_type();
+    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+        return move problem;
+    }
+    var elem = empty_type();
+    if try self.types.optional_elem(cond) |present| {
+        elem = present;
+    } else {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`orelse` expects an optional left operand, got ");
+        try self.append_checker_type(&var message, cond);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    match tree.statements.at(exit.node) {
+        Return(value) => {
+            let copied = ast::ReturnStmt { value: value.value };
+            var returns = false;
+            if try self.check_return_stmt(
+                tree,
+                scope,
+                &copied,
+                self.current_return_type(),
+                &var returns
+            ) |problem| {
+                return move problem;
+            }
+        },
+        Break(value) => {
+            var ignored = false;
+            if try self.check_loop_branch_stmt(tree, "break", value.label, &var ignored) |problem| {
+                return move problem;
+            }
+        },
+        Continue(value) => {
+            var ignored = false;
+            if try self.check_loop_branch_stmt(
+                tree, "continue", value.label, &var ignored
+            ) |problem| {
+                return move problem;
+            }
+        },
+        _ => return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "`orelse` guard must exit with return, break, or continue"
+        ),
+    }
+    out.* = elem;
+    return null;
+}
+
+// Validates an if expression and returns the common branch type.
+fn (self: &var Checker) check_if_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::IfStmt,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let condition = statement.condition;
+    let consequence = statement.consequence;
+    let alternative = statement.alternative;
+    let retained_capture = tree.texts.at(statement.capture.node);
+    let capture = retained_capture.as_bytes();
+    if mem::len(capture) > 0 {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "if capture is a statement form; use `orelse` in expressions"
+        );
+    }
+    var cond = empty_type();
+    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(cond, "bool") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("if condition must be bool, got ");
+        try self.append_checker_type(&var message, cond);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    let alternative_block = alternative orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "if expression requires else branch"
+    );
+    let left_scope = self.scopes.new_scope(scope);
+    var left = empty_type();
+    if try self.check_block_value(tree, left_scope, consequence, &var left) |problem| {
+        return move problem;
+    }
+    let right_scope = self.scopes.new_scope(scope);
+    var right = empty_type();
+    if try self.check_block_value(tree, right_scope, alternative_block, &var right) |problem| {
+        return move problem;
+    }
+    if !same_type(left, right) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("if expression branch types differ: ");
+        try self.append_checker_type(&var message, left);
+        try message.append_bytes(" vs ");
+        try self.append_checker_type(&var message, right);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    out.* = left;
+    return null;
+}
+
+// Validates a block used as an expression branch.
+fn (self: &var Checker) check_block_value(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    block: ast::Block,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let count = block_statement_count(tree, block);
+    var index = 0;
+    while block_statement_at(tree, block, index) |statement| {
+        if index == count - 1 {
+            return self.check_stmt_value(tree, scope, statement, out);
+        }
+        var returns = false;
+        if try self.check_stmt(
+            tree,
+            scope,
+            statement,
+            self.current_return_type(),
+            &var returns
+        ) |problem| {
+            return move problem;
+        }
+        if returns {
+            return try self.checker_error_at(
+                "type error", ast::zero_span(),
+                "expression block cannot contain early return"
+            );
+        }
+        index = index + 1;
+    }
+    return try self.checker_error_at(
+        "type error", ast::zero_span(), "expression block must end with a value"
+    );
+}
+
+fn block_statement_count(tree: &ast::Ast, block: ast::Block) -> i64 {
+    match tree.statements.at(block.node) {
+        Block(value) => return value.statements.len(),
+        _ => return 0,
+    }
+}
+
+// Computes the value type of a statement in expression-tail position.
+fn (self: &var Checker) check_stmt_value(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: ast::Statement,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match tree.statements.at(statement.node) {
+        Expr(value) => {
+            if value.semicolon {
+                return try self.checker_error_at(
+                    "type error", ast::zero_span(),
+                    "expression block must end with a value"
+                );
+            }
+            let expression = value.expr;
+            return self.check_expr(tree, scope, expression, out);
+        },
+        If(value) => {
+            let copied = ast::IfStmt {
+                condition: value.condition,
+                consequence: value.consequence,
+                alternative: value.alternative,
+                capture: value.capture
+            };
+            return self.check_if_expr(tree, scope, &copied, out);
+        },
+        Match(value) => return self.check_match_expr(tree, scope, value, out),
+        Return(_) => return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "expression match arm cannot `return`"
+        ),
+        Block(_) => {
+            let child = self.scopes.new_scope(scope);
+            return self.check_block_value(tree, child, ast::Block { node: statement.node }, out);
+        },
+        _ => return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "expression block must end with a value"
+        ),
+    }
+}
+
+// Validates an exhaustive match expression and its arm result type.
+fn (self: &var Checker) check_match_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::MatchStmt,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let value_expr = statement.value;
+    let arms = try statement.arms.clone(self.allocator);
+    defer arms.deinit();
+    var value_type = empty_type();
+    if try self.check_expr(tree, scope, value_expr, &var value_type) |problem| {
+        return move problem;
+    }
+    value_type = try self.types.borrowed_value_type(value_type);
+    let target = self.match_target(value_type) orelse
+        return try self.match_target_error(value_type);
+    return self.check_match_expr_arms(tree, scope, &arms, target, out);
+}
+
+// Validates match expression arms and returns their common type.
+fn (self: &var Checker) check_match_expr_arms(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    arms: &array::Array<ast::MatchArm>,
+    target: MatchTarget,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var wildcard = false;
+    var result = empty_type();
+    var index = 0;
+    while arms.at(index) |arm| {
+        var got = empty_type();
+        if arm.is_wildcard(tree) {
+            if try self.validate_wildcard_match_arm(tree, arm, index, arms.len()) |problem| {
+                return move problem;
+            }
+            if wildcard {
+                return try self.checker_error_at(
+                    "type error", ast::zero_span(),
+                    "duplicate wildcard match arm"
+                );
+            }
+            wildcard = true;
+            let child = self.scopes.new_scope(scope);
+            if try self.check_stmt_value(tree, child, arm.body, &var got) |problem| {
+                return move problem;
+            }
+        } else {
+            if try self.check_match_expr_arm(tree, scope, arm, target, &var got) |problem| {
+                return move problem;
+            }
+            let retained_tag = tree.texts.at(arm.tag.node);
+            let tag = retained_tag.as_bytes();
+            if seen.contains(tag) {
+                return try self.match_tag_error(tree, "duplicate match tag `", target, tag, "`");
+            }
+            try seen.insert(tag, true);
+        }
+        if index == 0 {
+            result = got;
+        } else {
+            if !same_type(got, result) {
+                var message = string::new(self.allocator);
+                errdefer message.deinit();
+                try message.append_bytes("match arm types differ: ");
+                try self.append_checker_type(&var message, result);
+                try message.append_bytes(" vs ");
+                try self.append_checker_type(&var message, got);
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
+            }
+        }
+        index = index + 1;
+    }
+    if !wildcard and seen.len() != self.match_variant_count(target) {
+        return try self.match_not_exhaustive_error(tree, target, &seen);
+    }
+    out.* = result;
+    return null;
+}
+
+// Validates one match expression arm and returns its value type.
+fn (self: &var Checker) check_match_expr_arm(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    arm: &ast::MatchArm,
+    target: MatchTarget,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if arm.is_wildcard(tree) {
+        let child = self.scopes.new_scope(scope);
+        return self.check_stmt_value(tree, child, arm.body, out);
+    }
+    var payload = empty_type();
+    if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
+        return move problem;
+    }
+    let arm_scope = self.scopes.new_scope(scope);
+    let retained_binding = tree.texts.at(arm.binding.node);
+    let binding = retained_binding.as_bytes();
+    if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
+        let defined = try self.scopes.define(arm_scope, binding, payload, false);
+        if try self.require_scope_definition(binding, defined) |problem| {
+            return move problem;
+        }
+    }
+    return self.check_stmt_value(tree, arm_scope, arm.body, out);
+}

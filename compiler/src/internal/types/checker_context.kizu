@@ -1,0 +1,208 @@
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Owns the maps selected while one generic instantiation is checked. A
+// selected map is a copy handle so entering a nested instance never moves a
+// Checker field that resolver calls may already reference.
+struct TypeValueFrameStore {
+    allocator: Allocator,
+    frames: arena::Arena<map::Map<[]u8, Type>>,
+    current: ?arena::Handle<map::Map<[]u8, Type>>
+}
+
+fn new_type_value_frame_store(allocator: Allocator) -> TypeValueFrameStore {
+    return TypeValueFrameStore {
+        allocator: allocator,
+        frames: arena::new<map::Map<[]u8, Type>>(allocator),
+        current: null
+    };
+}
+
+fn (self: &var TypeValueFrameStore) bind(name: []u8, value: Type) -> !void {
+    if self.current |handle| {
+        if self.frames.at_mut(handle) |values| {
+            return values.insert(name, value);
+        }
+    }
+    var values = map::new<[]u8, Type>(self.allocator);
+    errdefer values.deinit();
+    try values.insert(name, value);
+    self.current = self.frames.add(move values);
+    return;
+}
+
+fn (self: &var TypeValueFrameStore) enter(
+    values: map::Map<[]u8, Type>
+) -> ?arena::Handle<map::Map<[]u8, Type>> {
+    let previous = self.current;
+    if values.len() == 0 {
+        values.deinit();
+        self.current = null;
+        return previous;
+    }
+    self.current = self.frames.add(move values);
+    return previous;
+}
+
+fn (self: &var TypeValueFrameStore) restore(
+    previous: ?arena::Handle<map::Map<[]u8, Type>>
+) -> void {
+    self.current = previous;
+    return;
+}
+
+fn (self: &TypeValueFrameStore) get(name: []u8) -> ?Type {
+    let handle = self.current orelse return null;
+    return self.frames.at(handle).get(name);
+}
+
+fn (self: &TypeValueFrameStore) contains(name: []u8) -> bool {
+    if self.get(name) |_| {
+        return true;
+    }
+    return false;
+}
+
+fn (self: &TypeValueFrameStore) len() -> i64 {
+    let handle = self.current orelse return 0;
+    return self.frames.at(handle).len();
+}
+
+// Applies the selected substitutions, or preserves value when no instance is
+// active.
+fn (self: &TypeValueFrameStore) substitute(table: &var TypeTable, value: Type) -> !Type {
+    let handle = self.current orelse return value;
+    let values = self.frames.at(handle);
+    return table.substitute_type_params(value, values);
+}
+
+// Names one active compile-time field capture. Bindings form a lexical stack:
+// restoring its previous handle removes every name pushed by an expansion
+// without requiring deletion from std::map.
+struct MetaBinding {
+    parent: ?arena::Handle<MetaBinding>,
+    name: string::String,
+    field: MetaFieldHandle
+}
+
+struct MetaBindingStore {
+    allocator: Allocator,
+    bindings: arena::Arena<MetaBinding>,
+    current: ?arena::Handle<MetaBinding>
+}
+
+fn new_meta_binding_store(allocator: Allocator) -> MetaBindingStore {
+    return MetaBindingStore {
+        allocator: allocator,
+        bindings: arena::new<MetaBinding>(allocator),
+        current: null
+    };
+}
+
+fn (self: &var MetaBindingStore) bind(
+    name: []u8,
+    field: MetaFieldHandle
+) -> !?arena::Handle<MetaBinding> {
+    let previous = self.current;
+    let owned_name = try string::from_bytes(self.allocator, name);
+    self.current = self.bindings.add(MetaBinding {
+        parent: previous,
+        name: move owned_name,
+        field: field
+    });
+    return previous;
+}
+
+fn (self: &var MetaBindingStore) restore(previous: ?arena::Handle<MetaBinding>) -> void {
+    self.current = previous;
+    return;
+}
+
+fn (self: &MetaBindingStore) get(name: []u8) -> ?MetaFieldHandle {
+    var current = self.current;
+    while current |handle| {
+        let binding = self.bindings.at(handle);
+        let retained_name = binding.name.as_bytes();
+        if mem::equal_bytes(retained_name, name) {
+            return binding.field;
+        }
+        current = binding.parent;
+    }
+    return null;
+}
+
+// Owns the mutable state local to one function or generic body check. Nested
+// instantiations select another arena record and restore the prior copy handle.
+struct BodyContext {
+    return_type: Type,
+    function: CurrentFunction,
+    std: bool,
+    loop_labels: array::Array<string::String>
+}
+
+union CurrentFunction {
+    None,
+    Value(FunctionHandle),
+}
+
+struct BodyContextRestore {
+    body: ?arena::Handle<BodyContext>,
+    type_params: ?arena::Handle<map::Map<[]u8, bool>>,
+    type_args: ?arena::Handle<map::Map<[]u8, Type>>,
+    static_values: ?arena::Handle<map::Map<[]u8, Type>>
+}
+
+fn (self: &var Checker) enter_body_context(
+    function: CurrentFunction,
+    std: bool,
+    return_type: Type,
+    type_params: map::Map<[]u8, bool>,
+    type_args: map::Map<[]u8, Type>,
+    static_values: map::Map<[]u8, Type>
+) -> !BodyContextRestore {
+    errdefer type_params.deinit();
+    errdefer type_args.deinit();
+    errdefer static_values.deinit();
+    let previous = BodyContextRestore {
+        body: self.current_body,
+        type_params: self.type_params.enter(move type_params),
+        type_args: self.type_args.enter(move type_args),
+        static_values: self.static_values.enter(move static_values)
+    };
+    self.current_body = self.body_contexts.add(BodyContext {
+        return_type: return_type,
+        function: function,
+        std: std,
+        loop_labels: array::new<string::String>(self.allocator)
+    });
+    return previous;
+}
+
+fn (self: &var Checker) restore_body_context(previous: BodyContextRestore) -> void {
+    self.current_body = previous.body;
+    self.type_params.restore(previous.type_params);
+    self.type_args.restore(previous.type_args);
+    self.static_values.restore(previous.static_values);
+    return;
+}
+
+fn (self: &Checker) current_return_type() -> Type {
+    let handle = self.current_body orelse return empty_type();
+    return self.body_contexts.at(handle).return_type;
+}
+
+fn (self: &Checker) current_function_handle() -> ?FunctionHandle {
+    let handle = self.current_body orelse return null;
+    match self.body_contexts.at(handle).function {
+        None => return null,
+        Value(function) => return function,
+    }
+}
+
+fn (self: &Checker) checking_std_body() -> bool {
+    let handle = self.current_body orelse return false;
+    return self.body_contexts.at(handle).std;
+}

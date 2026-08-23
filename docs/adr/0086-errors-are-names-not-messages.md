@@ -127,7 +127,7 @@ Zig の inferred error set と同じ規則である。明示したい場合は `
 - `union` による typed error(`ConfigError!T`)は error set に置き換わる
 - checker に error set の推論が入る
 - conformance で runtime message を検査している 25 case が error 名に変わる
-- `std/src/kizu/parser.kizu` は削除された(ADR-0082 改訂)。2,442 箇所の
+- `std/src/kizu/parser.kizu` は旧 selfhost と一緒に削除された。2,442 箇所の
   `error("...")` を `Diagnostic` に移す段階は不要になった
 
 ## 段階

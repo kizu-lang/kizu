@@ -1,0 +1,529 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Types one recognized std::meta expression form.
+fn (self: &var Checker) check_meta_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let form = stdmeta::identify(name) orelse return null;
+    handled.* = true;
+    if form.shape.type_form {
+        return try self.comptime_named_error(name, " names a type, not a value");
+    }
+    if try typ::split_args_optional(self.allocator, type_arg) |retained_arguments| {
+        defer retained_arguments.deinit();
+        return self.check_meta_apply_arguments(
+            tree,
+            scope,
+            name,
+            form,
+            &retained_arguments,
+            args,
+            out
+        );
+    }
+    return try self.comptime_named_error(name, " has an unreadable static argument list");
+}
+
+fn (self: &var Checker) check_meta_apply_arguments(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    form: stdmeta::IdentifiedForm,
+    retained_arguments: &array::Array<string::String>,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if retained_arguments.len() != form.shape.static_args {
+        return try self.comptime_arity_error(
+            name,
+            "static argument",
+            form.shape.static_args,
+            retained_arguments.len()
+        );
+    }
+    if !form.shape.variadic and args.len(tree) != form.shape.args {
+        return try self.comptime_arity_error(name, "argument", form.shape.args, args.len(tree));
+    }
+    return self.check_meta_form(tree, scope, form.form, retained_arguments, args, out);
+}
+
+fn (self: &var Checker) check_meta_form(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    form: stdmeta::Form,
+    static_args: &array::Array<string::String>,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match form {
+        FieldName => return self.check_meta_capture_name(tree, form, static_args, out),
+        VariantName => return self.check_meta_capture_name(tree, form, static_args, out),
+        Field => return self.check_meta_field_borrow(tree, scope, form, static_args, args, out),
+        Variant => return self.check_meta_variant(tree, scope, form, static_args, args, out),
+        Construct => return self.check_meta_construct(tree, scope, static_args, args, out),
+        IsStruct => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsEnum => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsUnion => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsOptional => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsArray => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsBox => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsMap => return self.check_meta_predicate_form(tree, form, static_args, out),
+        IsOwner => return self.check_meta_predicate_form(tree, form, static_args, out),
+        HasPublicFields => return self.check_meta_predicate_form(tree, form, static_args, out),
+        HasPayload => return self.check_meta_predicate_form(tree, form, static_args, out),
+        Unsupported => return self.check_meta_unsupported(tree, static_args),
+        PublicFields => return try self.comptime_form_list_error(form),
+        Variants => return try self.comptime_form_list_error(form),
+        FieldType => return try self.comptime_type_form_value_error(form),
+        VariantType => return try self.comptime_type_form_value_error(form),
+        Element => return try self.comptime_type_form_value_error(form),
+    }
+}
+
+fn (self: &var Checker) check_meta_capture_name(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    arguments: &array::Array<string::String>,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    match try self.resolve_meta_call_capture(tree, form, arguments) {
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        Value(_) => {
+            out.* = try self.types.byte_string_type();
+            return null;
+        },
+    }
+}
+
+fn (self: &var Checker) resolve_meta_call_capture(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    arguments: &array::Array<string::String>
+) -> !MetaCaptureResolution {
+    var resolved = array::new<Type>(self.allocator);
+    defer resolved.deinit();
+    var index = 0;
+    while arguments.at(index) |argument| {
+        let bytes = argument.as_bytes();
+        let retained = try self.types.intern(bytes);
+        try resolved.append(retained);
+        index = index + 1;
+    }
+    return self.resolve_meta_capture(tree, form, &resolved);
+}
+
+fn (self: &var Checker) check_meta_predicate_form(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    arguments: &array::Array<string::String>,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var value = false;
+    if try self.meta_predicate(tree, form, arguments, &var value) |problem| {
+        return move problem;
+    }
+    out.* = try self.types.bool_type();
+    return null;
+}
+
+fn (self: &var Checker) check_meta_field_borrow(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    form: stdmeta::Form,
+    static_args: &array::Array<string::String>,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var owner = empty_type();
+    var field_type = empty_type();
+    match try self.resolve_meta_call_capture(tree, form, static_args) {
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        Value(handle) => {
+            let field = self.meta_field_entries.at(handle.node);
+            owner = field.owner;
+            field_type = field.type_name;
+        },
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    let borrowed = try self.types.borrowed_value_type(got);
+    if !same_type(borrowed, owner) and !same_type(got, owner) {
+        return try self.meta_field_borrow_error(form, owner, got);
+    }
+    out.* = field_type;
+    return null;
+}
+
+fn (self: &var Checker) check_meta_variant(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    form: stdmeta::Form,
+    static_args: &array::Array<string::String>,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var owner = empty_type();
+    var payload = empty_type();
+    var name = string::new(self.allocator);
+    defer name.deinit();
+    match try self.resolve_meta_call_capture(tree, form, static_args) {
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        Value(handle) => {
+            let field = self.meta_field_entries.at(handle.node);
+            owner = field.owner;
+            payload = field.type_name;
+            let source_name = field.name.as_bytes();
+            try name.append_bytes(source_name);
+        },
+    }
+    let expected = if same_type(payload, empty_type()) {
+        0
+    } else {
+        1
+    };
+    if args.len(tree) != expected {
+        return try self.meta_variant_arity_error(form, owner, &name, expected, args.len(tree));
+    }
+    let owner_name = try self.types.copy_text(self.allocator, owner);
+    defer owner_name.deinit();
+    let owner_bytes = owner_name.as_bytes();
+    let name_bytes = name.as_bytes();
+    let expanded = try ast::variant_expansion(tree, owner_bytes, name_bytes, args);
+    return self.check_expr(tree, scope, expanded, out);
+}
+
+fn (self: &var Checker) check_meta_construct(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    static_args: &array::Array<string::String>,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var owner_argument = string::new(self.allocator);
+    defer owner_argument.deinit();
+    if static_args.at(0) |value| {
+        let bytes = value.as_bytes();
+        try owner_argument.append_bytes(bytes);
+    } else {
+        return try self.comptime_form_list_error(stdmeta::Form::Construct);
+    }
+    var worker_argument = string::new(self.allocator);
+    defer worker_argument.deinit();
+    if static_args.at(1) |value| {
+        let bytes = value.as_bytes();
+        try worker_argument.append_bytes(bytes);
+    } else {
+        return try self.comptime_form_list_error(stdmeta::Form::Construct);
+    }
+    let owner_bytes = owner_argument.as_bytes();
+    var owner = empty_type();
+    match try self.resolve_type(tree, owner_bytes) {
+        Value(value) => {
+            owner = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    var fields = array::new<MetaFieldHandle>(self.allocator);
+    defer fields.deinit();
+    if try self.public_meta_fields(tree, owner, &var fields) |problem| {
+        return move problem;
+    }
+    if fields.len() == 0 {
+        return try self.meta_construct_empty_error(owner);
+    }
+    let worker = worker_argument.as_bytes();
+    let expanded = try self.expand_meta_construct(tree, owner, worker, &fields, args);
+    defer expanded.deinit();
+    let child = self.scopes.new_scope(scope);
+    var index = 0;
+    while expanded.statements.get(index) |statement| {
+        var returns = false;
+        if try self.check_stmt(
+            tree,
+            child,
+            statement,
+            self.current_return_type(),
+            &var returns
+        ) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
+    var built = empty_type();
+    if try self.check_expr(tree, child, expanded.literal, &var built) |problem| {
+        return move problem;
+    }
+    var error_union = string::new(self.allocator);
+    defer error_union.deinit();
+    try error_union.append_byte(cast<u8>(33));
+    try self.append_checker_type(&var error_union, built);
+    let result_bytes = error_union.as_bytes();
+    out.* = try self.types.intern(result_bytes);
+    return null;
+}
+
+fn (self: &var Checker) public_meta_fields(
+    tree: &ast::Ast,
+    owner: Type,
+    out: &var array::Array<MetaFieldHandle>
+) -> !?diagnostic::Diagnostic {
+    let owner_name = try self.types.copy_text(self.allocator, owner);
+    defer owner_name.deinit();
+    let owner_bytes = owner_name.as_bytes();
+    let declaration = self.metadata.structs.get(owner_bytes) orelse
+        return try self.meta_public_fields_type_error(owner);
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => {
+            var index = 0;
+            while value.fields.at(index) |field| {
+                if field.public {
+                    let retained_name = tree.texts.at(field.name.node);
+                    let name = retained_name.as_bytes();
+                    let field_type = try self.types.remember(&tree.types, field.type_name);
+                    let handle = try self.retain_meta_field(owner, name, field_type, false);
+                    try out.append(handle);
+                }
+                index = index + 1;
+            }
+            return null;
+        },
+        _ => return try self.meta_public_fields_type_error(owner),
+    }
+}
+
+fn (self: &Checker) expand_meta_construct(
+    tree: &var ast::Ast,
+    owner: Type,
+    worker: []u8,
+    fields: &array::Array<MetaFieldHandle>,
+    args: ast::ExpressionList
+) -> !ast::ConstructResult {
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var type_names = array::new<string::String>(self.allocator);
+    defer type_names.deinit();
+    var index = 0;
+    while fields.at(index) |handle| {
+        let field = self.meta_field_entries.at(handle.node);
+        let field_name = field.name.as_bytes();
+        let name = try string::from_bytes(self.allocator, field_name);
+        errdefer name.deinit();
+        try names.append(move name);
+        let type_name = try self.types.copy_text(self.allocator, field.type_name);
+        errdefer type_name.deinit();
+        try type_names.append(move type_name);
+        index = index + 1;
+    }
+    let owner_name = try self.types.copy_text(self.allocator, owner);
+    defer owner_name.deinit();
+    let owner_bytes = owner_name.as_bytes();
+    if self.deinit_owners |owners_handle| {
+        let owners = self.deinit_owner_maps.at(owners_handle);
+        return ast::construct_expansion_from_names(
+            self.allocator,
+            tree,
+            owner_bytes,
+            worker,
+            &names,
+            &type_names,
+            args,
+            owners
+        );
+    }
+    var empty_owners = map::new<[]u8, bool>(self.allocator);
+    defer empty_owners.deinit();
+    return ast::construct_expansion_from_names(
+        self.allocator,
+        tree,
+        owner_bytes,
+        worker,
+        &names,
+        &type_names,
+        args,
+        &empty_owners
+    );
+}
+
+fn (self: &var Checker) check_meta_unsupported(
+    tree: &ast::Ast,
+    arguments: &array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    if arguments.len() != 1 {
+        return try self.comptime_arity_error(
+            stdmeta::spelling(stdmeta::Form::Unsupported),
+            "static argument", 1, arguments.len()
+        );
+    }
+    var argument = string::new(self.allocator);
+    defer argument.deinit();
+    if arguments.at(0) |retained| {
+        let source = retained.as_bytes();
+        try argument.append_bytes(source);
+    } else {
+        return try self.comptime_arity_error(
+            stdmeta::spelling(stdmeta::Form::Unsupported),
+            "static argument", 1, arguments.len()
+        );
+    }
+    let bytes = argument.as_bytes();
+    var subject = empty_type();
+    match try self.resolve_type(tree, bytes) {
+        Value(value) => {
+            subject = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if self.current_function_handle() |handle| {
+        if self.metadata.functions.at(handle.index) |function| {
+            let name = function.name.as_bytes();
+            return try self.meta_unsupported_function_error(name, subject);
+        }
+    }
+    return try self.meta_unsupported_here_error(subject);
+}
+
+fn (self: &Checker) comptime_named_error(name: []u8, suffix: []u8) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(suffix);
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) comptime_arity_error(
+    name: []u8,
+    kind: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_byte(cast<u8>(32));
+    try message.append_bytes(kind);
+    if expected != 1 {
+        try message.append_byte(cast<u8>(115));
+    }
+    try message.append_bytes(", got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) comptime_form_list_error(form: stdmeta::Form) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(stdmeta::spelling(form));
+    try message.append_bytes("` is only written as a comptime for list");
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) comptime_type_form_value_error(form: stdmeta::Form) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(stdmeta::spelling(form));
+    try message.append_bytes("` names a type, not a value");
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_field_borrow_error(
+    form: stdmeta::Form,
+    owner: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(stdmeta::spelling(form));
+    try message.append_bytes("` expects &");
+    try self.append_checker_type(&var message, owner);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_variant_arity_error(
+    form: stdmeta::Form,
+    owner: Type,
+    name: &string::String,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(stdmeta::spelling(form));
+    try message.append_bytes("` builds `");
+    try self.append_checker_type(&var message, owner);
+    try message.append_bytes("::");
+    let name_bytes = name.as_bytes();
+    try message.append_bytes(name_bytes);
+    try message.append_bytes("` from ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_bytes(" arguments, got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_public_fields_type_error(owner: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`std::meta::public_fields` expects a struct, got ");
+    try self.append_checker_type(&var message, owner);
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_construct_empty_error(owner: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`std::meta::construct` has no public field to construct `");
+    try self.append_checker_type(&var message, owner);
+    try message.append_bytes("` from");
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_unsupported_function_error(
+    function: []u8,
+    subject: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(function);
+    try message.append_bytes("` does not support type `");
+    try self.append_checker_type(&var message, subject);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) meta_unsupported_here_error(subject: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type `");
+    try self.append_checker_type(&var message, subject);
+    try message.append_bytes("` is not supported here");
+    return self.checker_message_at("comptime error", ast::zero_span(), move message);
+}

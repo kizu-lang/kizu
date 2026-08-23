@@ -1,0 +1,271 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::string;
+
+// Checks one retained block and reports whether execution always returns.
+fn (self: &var Checker) check_block(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    block: ast::Block,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while block_statement_at(tree, block, index) |statement| {
+        var returns = false;
+        if try self.check_stmt(tree, scope, statement, want_return, &var returns) |problem| {
+            return move problem;
+        }
+        if returns {
+            out.* = true;
+            return self.unread_local_error(scope);
+        }
+        index = index + 1;
+    }
+    out.* = false;
+    return self.unread_local_error(scope);
+}
+
+fn block_statement_at(tree: &ast::Ast, block: ast::Block, index: i64) -> ?ast::Statement {
+    match tree.statements.at(block.node) {
+        Block(value) => return value.statements.get(index),
+        _ => return null,
+    }
+}
+
+// Checks one statement without retaining a borrow into the mutable Ast.
+fn (self: &var Checker) check_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: ast::Statement,
+    want_return: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    out.* = false;
+    match tree.statements.at(statement.node) {
+        Let(value) => {
+            let copied = ast::LetStmt {
+                mutable: value.mutable,
+                name: value.name,
+                value: value.value
+            };
+            return self.check_let_stmt(tree, scope, &copied, out);
+        },
+        Assign(value) => {
+            let copied = ast::AssignStmt {
+                target: value.target, value: value.value
+            };
+            return self.check_assign_stmt(tree, scope, &copied, out);
+        },
+        Return(value) => {
+            let copied = ast::ReturnStmt { value: value.value };
+            return self.check_return_stmt(tree, scope, &copied, want_return, out);
+        },
+        Defer(value) => {
+            let copied = ast::DeferStmt { expr: value.expr };
+            return self.check_cleanup_stmt(tree, scope, "defer", copied.expr, out);
+        },
+        ErrDefer(value) => {
+            let copied = ast::ErrDeferStmt { expr: value.expr };
+            return self.check_cleanup_stmt(tree, scope, "errdefer", copied.expr, out);
+        },
+        Expr(value) => {
+            var ignored = empty_type();
+            return self.check_expr(tree, scope, value.expr, &var ignored);
+        },
+        If(value) => {
+            let copied = ast::IfStmt {
+                condition: value.condition,
+                consequence: value.consequence,
+                alternative: value.alternative,
+                capture: value.capture
+            };
+            return self.check_if_stmt(tree, scope, &copied, want_return, out);
+        },
+        While(value) => {
+            let copied = ast::WhileStmt {
+                label: value.label,
+                condition: value.condition,
+                body: value.body,
+                capture: value.capture
+            };
+            return self.check_while_stmt(tree, scope, &copied, want_return, out);
+        },
+        For(value) => {
+            let copied = ast::ForStmt {
+                label: value.label,
+                name: value.name,
+                start: value.start,
+                end: value.end,
+                body: value.body
+            };
+            return self.check_for_stmt(tree, scope, &copied, want_return, out);
+        },
+        Break(value) => return self.check_loop_branch_stmt(tree, "break", value.label, out),
+        Continue(value) => return self.check_loop_branch_stmt(tree, "continue", value.label, out),
+        Match(_) => return self.check_match_stmt(tree, scope, statement, want_return, out),
+        Block(_) => {
+            let child = self.scopes.new_scope(scope);
+            return self.check_block(
+                tree,
+                child,
+                ast::Block { node: statement.node },
+                want_return,
+                out
+            );
+        },
+        ComptimeIf(value) => {
+            let copied = ast::ComptimeIfStmt {
+                condition: value.condition,
+                consequence: value.consequence,
+                alternative: value.alternative
+            };
+            return self.check_comptime_if_stmt(tree, scope, &copied, want_return, out);
+        },
+        ComptimeFor(value) => {
+            let copied = ast::ComptimeForStmt {
+                list: value.list,
+                name: value.name,
+                body: value.body
+            };
+            return self.check_comptime_for_stmt(tree, scope, &copied, want_return, out);
+        },
+        ComptimeMatch(value) => {
+            let copied = ast::ComptimeMatchStmt {
+                value: value.value,
+                name: value.name,
+                binding: value.binding,
+                body: value.body
+            };
+            return self.check_comptime_match_stmt(tree, scope, &copied, want_return, out);
+        },
+        Recovered(_) => return try self.checker_error_at(
+            "type error", ast::zero_span(), "unsupported statement"
+        ),
+    }
+}
+
+fn (self: &var Checker) check_cleanup_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    keyword: []u8,
+    expression: ast::Expression,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if try self.validate_cleanup_call_expr(tree, keyword, expression) |problem| {
+        return move problem;
+    }
+    var got = empty_type();
+    if try self.check_expr(tree, scope, expression, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "void") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes(keyword);
+        try message.append_bytes(" cleanup must return void, got ");
+        try self.append_checker_type(&var message, got);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    out.* = false;
+    return null;
+}
+
+fn (self: &var Checker) check_return_stmt(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statement: &ast::ReturnStmt,
+    want: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if statement.value |expression| {
+        if return_void_identifier(tree, expression) {
+            return try self.checker_error_at(
+                "type error", ast::zero_span(),
+                "void is not a value; use `return;`"
+            );
+        }
+        if return_null_literal(tree, expression) {
+            var success = want;
+            if try self.types.error_union_element(success) |elem| {
+                success = elem;
+            }
+            if try self.types.optional_elem(success) |_| {
+                out.* = true;
+                return null;
+            }
+            return try self.return_null_mismatch(want);
+        }
+        let saved_capture = self.capture_condition;
+        let want_text = try self.types.copy_text(self.allocator, want);
+        let want_bytes = want_text.as_bytes();
+        if typ::borrow_optional_elem(want_bytes) |_| {
+            self.capture_condition = true;
+        }
+        want_text.deinit();
+        var got = empty_type();
+        if try self.check_expr(tree, scope, expression, &var got) |failed| {
+            self.capture_condition = saved_capture;
+            return move failed;
+        }
+        self.capture_condition = saved_capture;
+        return self.check_return_value(tree, scope, expression, want, got, out);
+    }
+    if try self.accepts_bare_return(want) {
+        out.* = true;
+        return null;
+    }
+    return try self.return_void_mismatch(want);
+}
+
+fn return_void_identifier(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            return equal(name, "void");
+        },
+        _ => return false,
+    }
+}
+
+fn return_null_literal(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    return match tree.expressions.at(expression.node) {
+        Null(_) => true,
+        _ => false,
+    };
+}
+
+fn (self: &Checker) return_void_mismatch(want: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("return expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got void");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) return_null_mismatch(want: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("return expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got null");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) check_loop_branch_stmt(
+    tree: &ast::Ast,
+    kind: []u8,
+    label: ast::Text,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(label.node);
+    let bytes = retained.as_bytes();
+    if try self.check_loop_branch(kind, bytes) |problem| {
+        return move problem;
+    }
+    out.* = false;
+    return null;
+}

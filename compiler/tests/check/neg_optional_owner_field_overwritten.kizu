@@ -1,0 +1,45 @@
+import std::mem;
+import std::string;
+
+pub struct Visitor {
+    pub nick: ?string::String,
+}
+
+fn (self: Visitor) deinit() -> void {
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+// Writing over the field releases nothing, so the string it held is lost. A
+// `?Owner` field is live until the owner's deinit opens it, the same as a
+// plain owner field.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var visitor = Visitor { nick: try owned(allocator, "al") };
+    defer visitor.deinit();
+    visitor.nick = null;
+    return;
+}
+
+// check-fails
+// features: optional owner diagnostics
+// error: owner field `visitor.nick` is overwritten before cleanup
+
+
+// check
+// load:
+// pub struct Visitor { pub nick: ?std::string::String }
+// fn (self: Visitor) Visitor.deinit() -> void { if self.nick { held.deinit(); } return; }
+// fn owned(allocator: Allocator, bytes: []u8) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_bytes(bytes); return move text; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var visitor = Visitor { nick: try owned(allocator, "al") }; defer visitor.deinit(); visitor.nick = null; return; }
+// check:
+// - move error: owner field `visitor.nick` is overwritten before cleanup

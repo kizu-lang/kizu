@@ -3,6 +3,7 @@ package ast
 import (
 	"strings"
 
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/typ"
 )
 
@@ -76,7 +77,7 @@ func deriveStructDeinit(owners map[string]bool, decl *StructDecl) *FunctionDecl 
 			Receiver: &IdentExpr{Name: deriveReceiver},
 			Name:     field.Name,
 		}
-		text := typ.Text(field.TypeName)
+		text := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
 		if elem, ok := typ.OptionalElem(text); ok {
 			if !OwnerType(owners, elem) {
 				continue
@@ -109,7 +110,8 @@ func deriveUnionDeinit(owners map[string]bool, decl *UnionDecl) *FunctionDecl {
 	arms := make([]MatchArm, 0, len(decl.Variants))
 	owned := false
 	for _, variant := range decl.Variants {
-		if variant.Payload == nil || !OwnerType(owners, typ.Text(variant.Payload)) {
+		payload := stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload))
+		if variant.Payload == nil || !OwnerType(owners, payload) {
 			arms = append(arms, MatchArm{Tag: variant.Name, Body: &BlockStmt{}})
 			continue
 		}

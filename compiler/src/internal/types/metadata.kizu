@@ -1,0 +1,141 @@
+import compiler::internal::ast;
+import std::array;
+import std::map;
+
+// Mechanical owner mapping for the declaration registries embedded in the Go
+// Checker. Owner records live once in Arrays; name and method Maps retain only
+// copy indexes, while source declaration text remains in the caller Ast.
+
+struct ErrorSetHandle {
+    index: i64
+}
+
+struct UnionHandle {
+    index: i64
+}
+
+struct ContractHandle {
+    index: i64
+}
+
+struct CheckerMetadata {
+    functions: array::Array<FunctionType>,
+    functions_by_name: map::Map<[]u8, FunctionHandle>,
+    structs: map::Map<[]u8, ast::Declaration>,
+    enums: array::Array<EnumType>,
+    enums_by_name: map::Map<[]u8, EnumHandle>,
+    error_sets: array::Array<ErrorSetType>,
+    error_sets_by_name: map::Map<[]u8, ErrorSetHandle>,
+    unions: array::Array<UnionType>,
+    unions_by_name: map::Map<[]u8, UnionHandle>,
+    contracts: array::Array<ContractType>,
+    contracts_by_name: map::Map<[]u8, ContractHandle>,
+    impls: map::Map<[]u8, map::Map<[]u8, FunctionHandle>>,
+    declared_types: map::Map<[]u8, bool>
+}
+
+fn new_checker_metadata(allocator: Allocator) -> CheckerMetadata {
+    return CheckerMetadata {
+        functions: array::new<FunctionType>(allocator),
+        functions_by_name: map::new<[]u8, FunctionHandle>(allocator),
+        structs: map::new<[]u8, ast::Declaration>(allocator),
+        enums: array::new<EnumType>(allocator),
+        enums_by_name: map::new<[]u8, EnumHandle>(allocator),
+        error_sets: array::new<ErrorSetType>(allocator),
+        error_sets_by_name: map::new<[]u8, ErrorSetHandle>(allocator),
+        unions: array::new<UnionType>(allocator),
+        unions_by_name: map::new<[]u8, UnionHandle>(allocator),
+        contracts: array::new<ContractType>(allocator),
+        contracts_by_name: map::new<[]u8, ContractHandle>(allocator),
+        impls: map::new<[]u8, map::Map<[]u8, FunctionHandle>>(allocator),
+        declared_types: map::new<[]u8, bool>(allocator)
+    };
+}
+
+// Registers every source name that introduces a type before declarations are
+// collected, so recursive fields see later declarations too.
+fn (self: &var Checker) predeclare_type_names(tree: &ast::Ast, program: &ast::Program) -> !void {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        let node = tree.declarations.at(declaration.node);
+        if declared_type_name(node) |name| {
+            let retained = tree.texts.at(name.node);
+            let bytes = retained.as_bytes();
+            try self.metadata.declared_types.insert(bytes, true);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &CheckerMetadata) has_declared_type(name: []u8) -> bool {
+    return self.declared_types.contains(name);
+}
+
+fn (self: &CheckerMetadata) has_collected_type(name: []u8) -> bool {
+    return self.error_sets_by_name.contains(name) or
+        self.enums_by_name.contains(name) or
+        self.structs.contains(name) or
+        self.unions_by_name.contains(name);
+}
+
+fn (self: &CheckerMetadata) is_type_name(name: []u8) -> bool {
+    if is_known_type(name) or self.declared_types.contains(name) or
+        is_known_generic_base(name) {
+        return true;
+    }
+    return self.has_collected_type(name);
+}
+
+fn (self: &CheckerMetadata) is_user_declared_type(name: []u8) -> bool {
+    return self.structs.contains(name) or
+        self.enums_by_name.contains(name) or
+        self.error_sets_by_name.contains(name) or
+        self.unions_by_name.contains(name) or
+        self.contracts_by_name.contains(name);
+}
+
+fn (self: &CheckerMetadata) is_public_type(tree: &ast::Ast, name: []u8) -> bool {
+    if self.structs.get(name) |declaration| {
+        return match tree.declarations.at(declaration.node) {
+            Struct(value) => value.public,
+            _ => false,
+        };
+    }
+    if self.enums_by_name.get(name) |handle| {
+        if self.enums.at(handle.index) |value| {
+            return value.public;
+        }
+        return false;
+    }
+    if self.error_sets_by_name.get(name) |handle| {
+        if self.error_sets.at(handle.index) |value| {
+            return value.public;
+        }
+        return false;
+    }
+    if self.unions_by_name.get(name) |handle| {
+        if self.unions.at(handle.index) |value| {
+            return value.public;
+        }
+        return false;
+    }
+    if self.contracts_by_name.get(name) |handle| {
+        if self.contracts.at(handle.index) |value| {
+            return value.public;
+        }
+    }
+    return false;
+}
+
+fn declared_type_name(node: &ast::DeclarationNode) -> ?ast::Text {
+    match node {
+        Struct(declaration) => return declaration.name,
+        Enum(declaration) => return declaration.name,
+        ErrorSet(declaration) => return declaration.name,
+        Union(declaration) => return declaration.name,
+        Contract(declaration) => return declaration.name,
+        _ => {},
+    }
+    return null;
+}

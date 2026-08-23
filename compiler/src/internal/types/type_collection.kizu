@@ -1,0 +1,1061 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// The real declaration-collection work unit predeclares types, then dispatches
+// types, receiver methods, and impl assertions in three source-order passes.
+// This Checker boundary alone constructs source diagnostics from copy issues.
+
+struct CollectionMemberIssue {
+    owner: ast::Text, member: ast::Text
+}
+
+struct CollectionNamedTypeIssue {
+    name: ast::Text, type_name: Type
+}
+
+struct CollectionMemberTypeIssue {
+    member: CollectionMemberIssue, type_name: Type
+}
+
+struct CollectionImplMethodIssue {
+    contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle
+}
+
+struct FunctionParamStorage {
+    params: array::Array<Type>,
+    borrow_params: array::Array<bool>,
+    mut_borrow_params: array::Array<bool>
+}
+
+union TypeCollectionIssue {
+    DuplicateType(ast::Text),
+    DuplicateEnumTag(CollectionMemberIssue),
+    DuplicateError(CollectionMemberIssue),
+    DuplicateUnionVariant(CollectionMemberIssue),
+    DuplicateContract(ast::Text),
+    DuplicateContractMethod(CollectionMemberIssue),
+    DuplicateMethod(ast::Text),
+    DuplicateFunction(ast::Text),
+    FunctionNameIsType(ast::Text),
+    UnknownContract(ast::Text),
+    MissingContractMethod(CollectionImplMethodIssue),
+    ContractMethodMismatch(CollectionImplMethodIssue),
+    Resolution(TypeResolutionIssue),
+    UnionOptional(CollectionMemberIssue),
+    UnionBorrow(CollectionMemberIssue),
+    UnionTypeValue(CollectionMemberIssue),
+    StructObligationDoc(ast::Text),
+    StructBorrow(CollectionMemberIssue),
+    StructRawPointer(CollectionMemberIssue),
+    StructCompileTimeOnly(CollectionMemberTypeIssue),
+    StructTypeValue(CollectionMemberIssue),
+    StructBuffer(CollectionMemberIssue),
+    StructOptionalView(CollectionMemberIssue),
+    FunctionObligationDoc(ast::Text),
+    ReservedFunctionStaticParam(ast::Text),
+    FunctionReturnCompileTimeOnly(CollectionNamedTypeIssue),
+    FunctionReturnBuffer(ast::Text),
+    FunctionReturnTypeValue(ast::Text),
+    FunctionReturnNestedBorrowOptional(ast::Text),
+    ParamBorrowOptional(ast::Text),
+    ParamVoid(ast::Text),
+    ParamTypeValue(ast::Text),
+    ParamBuffer(ast::Text),
+    ParamCompileTimeOnly(CollectionNamedTypeIssue),
+    ParamBorrowOptionalValue(ast::Text),
+}
+
+union DeclaredFunctionResult {
+    Value(FunctionHandle),
+    Issue(TypeCollectionIssue),
+}
+
+// Registers types, receiver methods, then impl assertions in the same three
+// source-order passes as the shipping Checker's collectTypesAndMethods.
+fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
+    let owners = try ast::deinit_owners(self.allocator, tree, program);
+    errdefer owners.deinit();
+    try self.predeclare_type_names(tree, program);
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try self.collect_type_decl(tree, declaration, &owners) |issue| {
+            let value = try self.type_collection_diagnostic(tree, issue);
+            owners.deinit();
+            return move value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try self.collect_method_decl(tree, declaration) |issue| {
+            let value = try self.type_collection_diagnostic(tree, issue);
+            owners.deinit();
+            return move value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Impl(value) => {
+                if try self.collect_impl(tree, value) |issue| {
+                    let diagnostic = try self.type_collection_diagnostic(tree, issue);
+                    owners.deinit();
+                    return move diagnostic;
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    let handle = self.deinit_owner_maps.add(move owners);
+    self.deinit_owners = handle;
+    return null;
+}
+
+fn (self: &var Checker) collect_type_decl(
+    tree: &ast::Ast, declaration: ast::Declaration, owners: &map::Map<[]u8, bool>
+) -> !?TypeCollectionIssue {
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => return self.collect_struct(tree, declaration, value, owners),
+        Enum(value) => return self.collect_enum(tree, value),
+        ErrorSet(value) => return self.collect_error_set(tree, value),
+        Union(value) => return self.collect_union(tree, value),
+        Contract(value) => return self.collect_contract(tree, value),
+        Import(_) => return null,
+        Function(_) => return null,
+        Test(_) => return null,
+        Impl(_) => return null,
+        Recovered(_) => return null,
+    }
+}
+
+fn (self: &var Checker) collect_struct(
+    tree: &ast::Ast, declaration_handle: ast::Declaration,
+    declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>
+) -> !?TypeCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if self.metadata.has_collected_type(name) {
+        return TypeCollectionIssue::DuplicateType(declaration.name);
+    }
+    let retained_doc = tree.texts.at(declaration.doc.node);
+    let doc = retained_doc.as_bytes();
+    if obligation_doc_missing(declaration.requires_unsafe, doc) {
+        return TypeCollectionIssue::StructObligationDoc(declaration.name);
+    }
+    try self.metadata.structs.insert(name, declaration_handle);
+    let previous = try self.type_params.enter_ast(tree, &declaration.type_params);
+    let result = try self.collect_struct_fields(tree, declaration, owners);
+    self.type_params.restore(previous);
+    return result;
+}
+
+fn (self: &var Checker) collect_struct_fields(
+    tree: &ast::Ast, declaration: &ast::StructDecl, owners: &map::Map<[]u8, bool>
+) -> !?TypeCollectionIssue {
+    var index = 0;
+    while declaration.fields.at(index) |field| {
+        match try self.resolve_type_node(tree, field.type_name) {
+            Value(field_type) => {
+                let member = CollectionMemberIssue {
+                    owner: declaration.name, member: field.name
+                };
+                if field.borrow {
+                    return TypeCollectionIssue::StructBorrow(member);
+                }
+                if raw_pointer_field_requires_unsafe(
+                    &self.types, declaration.requires_unsafe, field_type
+                ) {
+                    return TypeCollectionIssue::StructRawPointer(member);
+                }
+                if compile_time_only_type(&self.types, field_type) {
+                    let issue = CollectionMemberTypeIssue {
+                        member: member, type_name: field_type
+                    };
+                    return TypeCollectionIssue::StructCompileTimeOnly(issue);
+                }
+                if self.types.contains_type_value(field_type) {
+                    return TypeCollectionIssue::StructTypeValue(member);
+                }
+                if self.types.contains_buffer_type(field_type) {
+                    return TypeCollectionIssue::StructBuffer(member);
+                }
+                if try self.types.optional_elem(field_type) |element| {
+                    if !try self.optional_field_element_allowed(tree, owners, element) {
+                        return TypeCollectionIssue::StructOptionalView(member);
+                    }
+                }
+            },
+            Issue(issue) => return TypeCollectionIssue::Resolution(issue),
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &var Checker) optional_field_element_allowed(tree: &ast::Ast, owners: &map::Map<[]u8, bool>, element: Type) -> !bool {
+    var seen = array::new<Type>(self.allocator);
+    defer seen.deinit();
+    if try self.is_plain_data_type(tree, element, &var seen) {
+        return true;
+    }
+    let text = try self.types.copy_text(self.allocator, element);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    return ast::owner_type(owners, bytes);
+}
+
+fn (self: &var Checker) is_plain_data_type(tree: &ast::Ast, value: Type, seen: &var array::Array<Type>) -> !bool {
+    if try self.types.optional_elem(value) |element| {
+        return self.is_plain_data_type(tree, element, seen);
+    }
+    let text = try self.types.copy_text(self.allocator, value);
+    defer text.deinit();
+    let name = text.as_bytes();
+    if self.types.is_text(value, "bool") or
+        self.types.is_text(value, "void") or is_numeric_type(name) {
+        return true;
+    }
+    if self.metadata.enums_by_name.contains(name) or
+        self.metadata.error_sets_by_name.contains(name) or
+        mem::starts_with(name, "std::arena::Handle<") {
+        return true;
+    }
+    var seen_index = 0;
+    while seen.get(seen_index) |active| {
+        if same_type(active, value) {
+            return false;
+        }
+        seen_index = seen_index + 1;
+    }
+    if self.metadata.impls.at(name) |methods| {
+        if methods.contains(typ::cleanup_method()) {
+            return false;
+        }
+    }
+    let struct_declaration = self.metadata.structs.get(name);
+    let union_handle = self.metadata.unions_by_name.get(name);
+    try seen.append(value);
+    var plain = true;
+    if struct_declaration |handle| {
+        match tree.declarations.at(handle.node) {
+            Struct(declaration) => {
+                var index = 0;
+                while declaration.fields.at(index) |field| {
+                    let resolved = try stdmeta::resolve_element_type_forms(
+                        self.allocator, &tree.types, field.type_name
+                    );
+                    let field_type = try self.intern_collection_text(move resolved);
+                    if field.borrow or
+                        !try self.is_plain_data_type(tree, field_type, seen) {
+                        plain = false;
+                        break;
+                    }
+                    index = index + 1;
+                }
+            },
+            _ => {
+                plain = false;
+            },
+        }
+    } else {
+        if union_handle |handle| {
+            var payloads = array::new<Type>(self.allocator);
+            defer payloads.deinit();
+            if self.metadata.unions.at(handle.index) |union_type| {
+                var index = 0;
+                while union_type.variants.key_at(index) |variant| {
+                    if union_type.variants.get(variant) |payload| {
+                        if !same_type(payload, empty_type()) {
+                            try payloads.append(payload);
+                        }
+                    }
+                    index = index + 1;
+                }
+            } else {
+                plain = false;
+            }
+            var payload_index = 0;
+            while payloads.get(payload_index) |payload| {
+                if !try self.is_plain_data_type(tree, payload, seen) {
+                    plain = false;
+                    break;
+                }
+                payload_index = payload_index + 1;
+            }
+        } else {
+            plain = false;
+        }
+    }
+    let _ = seen.pop_or_panic();
+    return plain;
+}
+
+fn (self: &var Checker) collect_union(tree: &ast::Ast, declaration: &ast::UnionDecl) -> !?TypeCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if self.metadata.has_collected_type(name) {
+        return TypeCollectionIssue::DuplicateType(declaration.name);
+    }
+    let previous = try self.type_params.enter_ast(tree, &declaration.type_params);
+    let result = try self.collect_union_in_scope(tree, declaration, name);
+    self.type_params.restore(previous);
+    return result;
+}
+
+fn (self: &var Checker) collect_union_in_scope(tree: &ast::Ast, declaration: &ast::UnionDecl, name: []u8) -> !?TypeCollectionIssue {
+    var value = UnionType {
+        name: try string::from_bytes(self.allocator, name),
+        type_params: array::new<string::String>(self.allocator),
+        variants: map::new<[]u8, Type>(self.allocator),
+        order: array::new<string::String>(self.allocator),
+        public: declaration.public
+    };
+    errdefer value.deinit();
+    var index = 0;
+    while declaration.type_params.at(index) |parameter| {
+        let retained = tree.texts.at(parameter.node);
+        let bytes = retained.as_bytes();
+        let copied = try string::from_bytes(self.allocator, bytes);
+        errdefer copied.deinit();
+        try value.type_params.append(move copied);
+        index = index + 1;
+    }
+    index = 0;
+    while declaration.variants.at(index) |variant| {
+        let retained_variant = tree.texts.at(variant.name.node);
+        let variant_name = retained_variant.as_bytes();
+        let member = CollectionMemberIssue {
+            owner: declaration.name, member: variant.name
+        };
+        if value.variants.contains(variant_name) {
+            let issue = TypeCollectionIssue::DuplicateUnionVariant(member);
+            return discard_union(move value, issue);
+        }
+        var payload_type = empty_type();
+        if variant.payload |payload| {
+            match try self.resolve_type_node(tree, payload) {
+                Value(value) => {
+                    payload_type = value;
+                },
+                Issue(issue) => return discard_union(move value, TypeCollectionIssue::Resolution(issue)),
+            }
+            let normalized = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, payload);
+            defer normalized.deinit();
+            let written = try typ::render(self.allocator, &tree.types, payload);
+            defer written.deinit();
+            let normalized_bytes = normalized.as_bytes();
+            let written_bytes = written.as_bytes();
+            if !mem::equal_bytes(normalized_bytes, written_bytes) {
+                match try self.resolve_type(tree, normalized_bytes) {
+                    Value(value) => {
+                        payload_type = value;
+                    },
+                    Issue(issue) => return discard_union(move value, TypeCollectionIssue::Resolution(issue)),
+                }
+            }
+            if try self.types.optional_elem(payload_type) |_| {
+                return discard_union(move value, TypeCollectionIssue::UnionOptional(member));
+            }
+            if is_borrow_payload(&tree.types, payload) {
+                return discard_union(move value, TypeCollectionIssue::UnionBorrow(member));
+            }
+            if self.types.contains_type_value(payload_type) {
+                return discard_union(move value, TypeCollectionIssue::UnionTypeValue(member));
+            }
+        }
+        try value.variants.insert(variant_name, payload_type);
+        let copied = try string::from_bytes(self.allocator, variant_name);
+        errdefer copied.deinit();
+        try value.order.append(move copied);
+        index = index + 1;
+    }
+    let handle = UnionHandle { index: self.metadata.unions.len() };
+    try self.metadata.unions.append(move value);
+    try self.metadata.unions_by_name.insert(name, handle);
+    return null;
+}
+
+fn discard_union(value: UnionType, issue: TypeCollectionIssue) -> ?TypeCollectionIssue {
+    value.deinit();
+    return issue;
+}
+
+fn (self: &var Checker) intern_collection_text(text: string::String) -> !Type {
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &var Checker) collect_contract(tree: &ast::Ast, declaration: &ast::ContractDecl) -> !?TypeCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if self.metadata.contracts_by_name.contains(name) {
+        return TypeCollectionIssue::DuplicateContract(declaration.name);
+    }
+    var value = ContractType {
+        name: try string::from_bytes(self.allocator, name),
+        methods: map::new<[]u8, FunctionHandle>(self.allocator),
+        public: declaration.public
+    };
+    errdefer value.deinit();
+    var index = 0;
+    while declaration.methods.at(index) |method| {
+        let retained_method = tree.texts.at(method.signature.name.node);
+        let method_name = retained_method.as_bytes();
+        if value.methods.contains(method_name) {
+            value.deinit();
+            let issue = CollectionMemberIssue {
+                owner: declaration.name, member: method.signature.name
+            };
+            return TypeCollectionIssue::DuplicateContractMethod(issue);
+        }
+        match try self.new_declared_function_type(tree, method) {
+            Value(handle) => {
+                try value.methods.insert(method_name, handle);
+            },
+            Issue(issue) => {
+                value.deinit();
+                return issue;
+            },
+        }
+        index = index + 1;
+    }
+    let handle = ContractHandle { index: self.metadata.contracts.len() };
+    try self.metadata.contracts.append(move value);
+    try self.metadata.contracts_by_name.insert(name, handle);
+    return null;
+}
+
+fn (self: &var Checker) new_declared_function_type(tree: &ast::Ast, declaration: &ast::FunctionDecl) -> !DeclaredFunctionResult {
+    let signature = &declaration.signature;
+    let retained_doc = tree.texts.at(declaration.doc.node);
+    let doc = retained_doc.as_bytes();
+    if obligation_doc_missing(signature.requires_unsafe, doc) {
+        let issue = TypeCollectionIssue::FunctionObligationDoc(signature.name);
+        return DeclaredFunctionResult::Issue(issue);
+    }
+    let previous = try self.type_params.enter_ast_signature(tree, signature);
+    let result = try self.new_declared_function_type_in_scope(tree, declaration);
+    self.type_params.restore(previous);
+    return result;
+}
+
+fn (self: &var Checker) new_declared_function_type_in_scope(tree: &ast::Ast, declaration: &ast::FunctionDecl) -> !DeclaredFunctionResult {
+    let signature = &declaration.signature;
+    if try self.reserved_static_parameter(tree, signature) |parameter| {
+        let issue = TypeCollectionIssue::ReservedFunctionStaticParam(parameter);
+        return DeclaredFunctionResult::Issue(issue);
+    }
+    var storage = FunctionParamStorage {
+        params: array::new<Type>(self.allocator),
+        borrow_params: array::new<bool>(self.allocator),
+        mut_borrow_params: array::new<bool>(self.allocator)
+    };
+    errdefer storage.deinit();
+    var index = 0;
+    while signature.params.at(index) |parameter| {
+        match try self.resolve_type_node(tree, parameter.type_name) {
+            Value(parameter_type) => {
+                if try self.collect_function_parameter(
+                    signature.std, parameter, parameter_type, &var storage
+                ) |issue| {
+                    return function_storage_issue(move storage, issue);
+                }
+            },
+            Issue(issue) => {
+                let resolution = TypeCollectionIssue::Resolution(issue);
+                return function_storage_issue(move storage, resolution);
+            },
+        }
+        index = index + 1;
+    }
+    var return_type = try self.types.void_type();
+    if signature.return_type |written_return| {
+        match try self.resolve_type_node(tree, written_return) {
+            Value(value) => {
+                return_type = value;
+            },
+            Issue(issue) => {
+                let resolution = TypeCollectionIssue::Resolution(issue);
+                return function_storage_issue(move storage, resolution);
+            },
+        }
+    }
+    if compile_time_only_type(&self.types, return_type) {
+        let named = CollectionNamedTypeIssue {
+            name: signature.name, type_name: return_type
+        };
+        let issue = TypeCollectionIssue::FunctionReturnCompileTimeOnly(named);
+        return function_storage_issue(move storage, issue);
+    }
+    if self.types.contains_buffer_type(return_type) {
+        let issue = TypeCollectionIssue::FunctionReturnBuffer(signature.name);
+        return function_storage_issue(move storage, issue);
+    }
+    if self.types.contains_type_value(return_type) {
+        let issue = TypeCollectionIssue::FunctionReturnTypeValue(signature.name);
+        return function_storage_issue(move storage, issue);
+    }
+    if !signature.std and self.types.contains_borrow_optional(return_type) {
+        let text = try self.types.copy_text(self.allocator, return_type);
+        let bytes = text.as_bytes();
+        var bare = false;
+        if typ::borrow_optional_elem(bytes) |_| {
+            bare = true;
+        }
+        text.deinit();
+        if !bare {
+            let issue = TypeCollectionIssue::FunctionReturnNestedBorrowOptional(signature.name);
+            return function_storage_issue(move storage, issue);
+        }
+    }
+    let cached = try self.cache_function_signature(tree, signature);
+    errdefer cached.deinit();
+    let retained_name = tree.texts.at(signature.name.node);
+    let name = retained_name.as_bytes();
+    let function_type = FunctionType {
+        name: try string::from_bytes(self.allocator, name),
+        signature: move cached,
+        params: move storage.params,
+        borrow_params: move storage.borrow_params,
+        mut_borrow_params: move storage.mut_borrow_params,
+        return_type: return_type,
+        body: declaration.body,
+        implicit_return: false
+    };
+    let handle = FunctionHandle { index: self.metadata.functions.len() };
+    try self.metadata.functions.append(move function_type);
+    return DeclaredFunctionResult::Value(handle);
+}
+
+fn function_storage_issue(storage: FunctionParamStorage, issue: TypeCollectionIssue) -> DeclaredFunctionResult {
+    storage.deinit();
+    return DeclaredFunctionResult::Issue(issue);
+}
+
+fn (self: &var Checker) collect_function_parameter(
+    std_function: bool, parameter: &ast::Param, parameter_type: Type,
+    storage: &var FunctionParamStorage
+) -> !?TypeCollectionIssue {
+    if !std_function and self.types.contains_borrow_optional(parameter_type) {
+        return TypeCollectionIssue::ParamBorrowOptional(parameter.name);
+    }
+    if self.types.is_text(parameter_type, "void") {
+        return TypeCollectionIssue::ParamVoid(parameter.name);
+    }
+    if self.types.contains_type_value(parameter_type) {
+        return TypeCollectionIssue::ParamTypeValue(parameter.name);
+    }
+    if self.types.contains_buffer_type(parameter_type) {
+        return TypeCollectionIssue::ParamBuffer(parameter.name);
+    }
+    if compile_time_only_type(&self.types, parameter_type) {
+        let named = CollectionNamedTypeIssue {
+            name: parameter.name, type_name: parameter_type
+        };
+        return TypeCollectionIssue::ParamCompileTimeOnly(named);
+    }
+    if try self.types.optional_elem(parameter_type) |_| {
+        if parameter.borrow {
+            return TypeCollectionIssue::ParamBorrowOptionalValue(parameter.name);
+        }
+    }
+    try storage.params.append(parameter_type);
+    try storage.borrow_params.append(parameter.borrow);
+    try storage.mut_borrow_params.append(parameter.mut_borrow);
+    return null;
+}
+
+fn (self: &var Checker) reserved_static_parameter(tree: &ast::Ast, signature: &ast::FunctionSignature) -> !?ast::Text {
+    if signature.std {
+        return null;
+    }
+    var index = 0;
+    while signature.static_params.at(index) |parameter| {
+        if parameter.type_name |type_name| {
+            let retained = try self.types.remember(&tree.types, type_name);
+            if self.types.is_text(retained, "Function") {
+                return parameter.name;
+            }
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &var Checker) cache_function_signature(tree: &ast::Ast, source: &ast::FunctionSignature) -> !FunctionSignatureType {
+    let retained_abi = tree.texts.at(source.extern_abi.node);
+    let abi = retained_abi.as_bytes();
+    var signature = FunctionSignatureType {
+        extern_abi: try string::from_bytes(self.allocator, abi),
+        static_params: array::new<StaticParamType>(self.allocator),
+        params: array::new<SignatureParamType>(self.allocator),
+        return_type: empty_type(),
+        requires_unsafe: source.requires_unsafe,
+        std: source.std
+    };
+    errdefer signature.deinit();
+    var index = 0;
+    while source.static_params.at(index) |parameter| {
+        let retained_name = tree.texts.at(parameter.name.node);
+        let name = retained_name.as_bytes();
+        var type_name = empty_type();
+        var is_type = true;
+        if parameter.type_name |written_type| {
+            type_name = try self.types.remember(&tree.types, written_type);
+            is_type = false;
+        }
+        let copied = try string::from_bytes(self.allocator, name);
+        errdefer copied.deinit();
+        try signature.static_params.append(StaticParamType {
+            name: move copied, type_name: type_name, is_type: is_type
+        });
+        index = index + 1;
+    }
+    index = 0;
+    while source.params.at(index) |parameter| {
+        let retained_name = tree.texts.at(parameter.name.node);
+        let name = retained_name.as_bytes();
+        let copied = try string::from_bytes(self.allocator, name);
+        errdefer copied.deinit();
+        try signature.params.append(SignatureParamType {
+            name: move copied, borrow: parameter.borrow,
+            mut_borrow: parameter.mut_borrow
+        });
+        index = index + 1;
+    }
+    if source.return_type |written_return| {
+        signature.return_type = try self.types.remember(&tree.types, written_return);
+    }
+    return move signature;
+}
+
+fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeCollectionIssue) -> !diagnostic::Diagnostic {
+    match issue {
+        Resolution(resolution_issue) => return self.type_resolution_diagnostic(resolution_issue),
+        _ => {},
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    var category = "type error";
+    match issue {
+        DuplicateType(name) => {
+            try message.append_bytes("duplicate type `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateEnumTag(member) => {
+            try message.append_bytes("duplicate enum tag `");
+            try append_collection_member(&var message, tree, member, "::");
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateError(member) => {
+            try message.append_bytes("duplicate error `");
+            try append_collection_member(&var message, tree, member, "::");
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateUnionVariant(member) => {
+            try message.append_bytes("duplicate union variant `");
+            try append_collection_member(&var message, tree, member, "::");
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateContract(name) => {
+            try message.append_bytes("duplicate contract `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateContractMethod(member) => {
+            try message.append_bytes("duplicate contract method `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateMethod(name) => {
+            try message.append_bytes("duplicate method `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateFunction(name) => {
+            try message.append_bytes("duplicate function `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        FunctionNameIsType(name) => {
+            try message.append_byte(cast<u8>(96));
+            try append_collection_text(&var message, tree, name);
+            try message.append_bytes("` is a type and cannot name a function");
+        },
+        UnknownContract(name) => {
+            try message.append_bytes("unknown contract `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        MissingContractMethod(impl_method) => {
+            try message.append_byte(cast<u8>(96));
+            try append_collection_text(&var message, tree, impl_method.type_name);
+            try message.append_bytes("` does not satisfy `");
+            try append_collection_text(&var message, tree, impl_method.contract_name);
+            try message.append_byte(cast<u8>(96));
+            try message.append_bytes(": missing method `");
+            if self.metadata.functions.at(impl_method.method.index) |function| {
+                let name = function.name.as_bytes();
+                try message.append_bytes(name);
+            }
+            try message.append_byte(cast<u8>(96));
+        },
+        ContractMethodMismatch(impl_method) => {
+            try message.append_byte(cast<u8>(96));
+            try append_collection_text(&var message, tree, impl_method.type_name);
+            try message.append_byte(cast<u8>(46));
+            if self.metadata.functions.at(impl_method.method.index) |function| {
+                let name = function.name.as_bytes();
+                try message.append_bytes(name);
+            }
+            try message.append_bytes("` does not match contract `");
+            try append_collection_text(&var message, tree, impl_method.contract_name);
+            try message.append_byte(cast<u8>(96));
+        },
+        Resolution(_) => {
+            // Handled before message storage is created.
+},
+        UnionOptional(member) => {
+            try message.append_bytes("union payload `");
+            try append_collection_member(&var message, tree, member, "::");
+            try message.append_bytes("` cannot store an optional yet");
+        },
+        UnionBorrow(member) => {
+            try message.append_bytes("borrow payload `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_bytes("` cannot store borrow");
+        },
+        UnionTypeValue(member) => {
+            try message.append_bytes("union variant `");
+            try append_collection_member(&var message, tree, member, "::");
+            try message.append_bytes("` cannot store type value");
+        },
+        StructObligationDoc(name) => {
+            category = "unsafe error";
+            try message.append_bytes("`unsafe struct ");
+            try append_collection_text(&var message, tree, name);
+            try message.append_bytes("` needs a `///` comment stating the invariant its fields carry");
+        },
+        StructBorrow(member) => {
+            try message.append_bytes("borrow field `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_bytes("` cannot store borrow");
+        },
+        StructRawPointer(member) => {
+            category = "unsafe error";
+            try message.append_bytes("struct `");
+            try append_collection_text(&var message, tree, member.owner);
+            try message.append_bytes("` holds a raw pointer in field `");
+            try append_collection_text(&var message, tree, member.member);
+            try message.append_bytes("`, so it must be declared `unsafe struct`");
+        },
+        StructCompileTimeOnly(named) => {
+            try message.append_bytes("struct field `");
+            try append_collection_member(&var message, tree, named.member, ".");
+            try message.append_bytes("` cannot store ");
+            try self.append_checker_type(&var message, named.type_name);
+        },
+        StructTypeValue(member) => {
+            try message.append_bytes("struct field `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_bytes("` cannot store type value");
+        },
+        StructBuffer(member) => {
+            try message.append_bytes("struct field `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_bytes("` cannot store stack buffer");
+        },
+        StructOptionalView(member) => {
+            try message.append_bytes("struct field `");
+            try append_collection_member(&var message, tree, member, ".");
+            try message.append_bytes("` cannot store an optional view; a capture would be hidden ");
+            try message.append_bytes("from the rules that read field types");
+        },
+        FunctionObligationDoc(name) => {
+            category = "unsafe error";
+            try message.append_bytes("`unsafe fn ");
+            try append_collection_text(&var message, tree, name);
+            try message.append_bytes("` needs a `///` comment stating what the caller must uphold");
+        },
+        ReservedFunctionStaticParam(name) => {
+            try message.append_bytes("Function static parameter `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_bytes("` is reserved for std");
+        },
+        FunctionReturnCompileTimeOnly(named) => {
+            try append_function_name(&var message, tree, named.name);
+            try message.append_bytes(" cannot return ");
+            try self.append_checker_type(&var message, named.type_name);
+        },
+        FunctionReturnBuffer(name) => {
+            try append_function_name(&var message, tree, name);
+            try message.append_bytes(" cannot return a stack buffer; return an owned buffer or ");
+            try message.append_bytes("write through a view");
+        },
+        FunctionReturnTypeValue(name) => {
+            try append_function_name(&var message, tree, name);
+            try message.append_bytes(" cannot return type");
+        },
+        FunctionReturnNestedBorrowOptional(name) => {
+            try append_function_name(&var message, tree, name);
+            try message.append_bytes(" cannot nest a borrow optional in its return; declare a bare ");
+            try message.append_bytes("`?&T` / `?&var T`");
+        },
+        ParamBorrowOptional(name) => {
+            try append_parameter_name(&var message, tree, name);
+            try message.append_bytes(" cannot hold a borrow optional; `?&T` exists only as a ");
+            try message.append_bytes("capture condition");
+        },
+        ParamVoid(name) => {
+            try append_parameter_name(&var message, tree, name);
+            try message.append_bytes(" cannot have type void");
+        },
+        ParamTypeValue(name) => {
+            try append_parameter_name(&var message, tree, name);
+            try message.append_bytes(" cannot have type");
+        },
+        ParamBuffer(name) => {
+            try message.append_bytes("stack buffer parameter `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_bytes("` is not supported; pass a view (`[]u8` or `&var []u8`)");
+        },
+        ParamCompileTimeOnly(named) => {
+            try self.append_checker_type(&var message, named.type_name);
+            try message.append_bytes(" parameter `");
+            try append_collection_text(&var message, tree, named.name);
+            try message.append_bytes("` belongs in `<...>`, not `(...)`");
+        },
+        ParamBorrowOptionalValue(name) => {
+            try append_parameter_name(&var message, tree, name);
+            try message.append_bytes(" cannot borrow an optional yet");
+        },
+    }
+    var value = try new_checker_diagnostic(self.allocator, category, move message);
+    errdefer value.deinit();
+    match issue {
+        StructObligationDoc(_) => try value.with_help(
+            "write `/// <the invariant its fields carry>` above the declaration"
+        ),
+        FunctionObligationDoc(_) => try value.with_help(
+            "write `/// <what the caller must uphold>` above the declaration"
+        ),
+        StructRawPointer(member) => {
+            var help = string::new(self.allocator);
+            defer help.deinit();
+            try help.append_bytes("write `unsafe struct ");
+            try append_collection_text(&var help, tree, member.owner);
+            try help.append_bytes("` and document the invariant its fields carry");
+            let help_text = help.as_bytes();
+            try value.with_help(help_text);
+        },
+        _ => {},
+    }
+    return move value;
+}
+
+fn new_checker_diagnostic(allocator: Allocator, category: []u8, message: string::String) -> !diagnostic::Diagnostic {
+    defer message.deinit();
+    let message_text = message.as_bytes();
+    return diagnostic::new(
+        allocator, diagnostic::Severity::Error, category,
+        ast::zero_span(), message_text
+    );
+}
+
+fn (self: &Checker) type_resolution_diagnostic(
+    issue: TypeResolutionIssue
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    let category = try self.append_type_resolution_diagnostic(&var message, issue);
+    return new_checker_diagnostic(self.allocator, category, move message);
+}
+
+fn append_collection_text(out: &var string::String, tree: &ast::Ast, text: ast::Text) -> !void {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return out.append_bytes(bytes);
+}
+
+fn append_collection_member(out: &var string::String, tree: &ast::Ast, issue: CollectionMemberIssue, separator: []u8) -> !void {
+    try append_collection_text(out, tree, issue.owner);
+    try out.append_bytes(separator);
+    return append_collection_text(out, tree, issue.member);
+}
+
+fn append_function_name(out: &var string::String, tree: &ast::Ast, name: ast::Text) -> !void {
+    try out.append_bytes("function `");
+    try append_collection_text(out, tree, name);
+    return out.append_byte(cast<u8>(96));
+}
+
+fn append_parameter_name(out: &var string::String, tree: &ast::Ast, name: ast::Text) -> !void {
+    try out.append_bytes("parameter `");
+    try append_collection_text(out, tree, name);
+    return out.append_byte(cast<u8>(96));
+}
+
+fn (self: &Checker) append_checker_type(out: &var string::String, value: Type) -> !void {
+    let text = try self.types.copy_text(self.allocator, value);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    return out.append_bytes(bytes);
+}
+
+fn (self: &Checker) append_type_resolution_diagnostic(out: &var string::String, issue: TypeResolutionIssue) -> ![]u8 {
+    match issue {
+        Missing => {
+            try out.append_bytes("missing type");
+            return "type error";
+        },
+        Unknown(subject) => {
+            try out.append_bytes("unknown type `");
+            try self.append_checker_type(out, subject);
+            try out.append_byte(cast<u8>(96));
+            return "type error";
+        },
+        WrapsOptional(subject) => {
+            try out.append_byte(cast<u8>(96));
+            try self.append_checker_type(out, subject);
+            try out.append_bytes("` cannot wrap an optional yet");
+            return "type error";
+        },
+        ErrorSetRequired(subject) => {
+            try out.append_bytes("the error of `E!T` must be an `error` set, got `");
+            try self.append_checker_type(out, subject);
+            try out.append_byte(cast<u8>(96));
+            return "type error";
+        },
+        OptionalStaticArg(subject) => {
+            try out.append_bytes("optional `");
+            try self.append_checker_type(out, subject);
+            try out.append_bytes("` cannot be a static argument yet");
+            return "type error";
+        },
+        SingleGenericArity(subject) => {
+            try out.append_byte(cast<u8>(96));
+            try self.append_checker_type(out, subject);
+            try out.append_bytes("` expects 1 static argument");
+            return "type error";
+        },
+        MapArity => {
+            try out.append_bytes("std::map::Map expects 2 static arguments");
+            return "type error";
+        },
+        MapKey => {
+            try out.append_bytes("std::map::Map key type must be []u8");
+            return "type error";
+        },
+        UnknownGeneric(subject) => {
+            try out.append_bytes("unknown generic type `");
+            try self.append_checker_type(out, subject);
+            try out.append_byte(cast<u8>(96));
+            return "type error";
+        },
+        UserGenericArity(arity) => {
+            try out.append_byte(cast<u8>(96));
+            try self.append_checker_type(out, arity.subject);
+            try out.append_bytes("` expects ");
+            try fmt::append_i64(out, arity.expected);
+            try out.append_bytes(" static arguments");
+            return "type error";
+        },
+        OptionalOptional(subject) => {
+            try out.append_bytes("optional cannot wrap an optional `");
+            try self.append_checker_type(out, subject);
+            try out.append_byte(cast<u8>(96));
+            return "type error";
+        },
+        OptionalErrorUnion(subject) => {
+            try out.append_bytes("optional cannot wrap an error union `");
+            try self.append_checker_type(out, subject);
+            try out.append_bytes("`; spell it `E!?T`");
+            return "type error";
+        },
+        MetaNotType(form) => {
+            try append_meta_form(out, form);
+            try out.append_bytes(" does not name a type");
+            return "comptime error";
+        },
+        MetaArity(arity) => {
+            try append_meta_form(out, arity.form);
+            try out.append_bytes(" expects ");
+            try fmt::append_i64(out, arity.expected);
+            try out.append_bytes(" static arguments, got ");
+            try fmt::append_i64(out, arity.actual);
+            return "comptime error";
+        },
+        MetaCaptureUnbound(capture) => {
+            try out.append_byte(cast<u8>(96));
+            try self.append_checker_type(out, capture);
+            try out.append_bytes("` is not a comptime capture");
+            return "comptime error";
+        },
+        MetaCaptureKind(kind) => {
+            try append_meta_form(out, kind.form);
+            try out.append_bytes(" expects a ");
+            if stdmeta::variant_form(kind.form) {
+                try out.append_bytes("variant");
+            } else {
+                try out.append_bytes("field");
+            }
+            try out.append_bytes(" capture, got `");
+            try self.append_checker_type(out, kind.capture);
+            try out.append_byte(cast<u8>(96));
+            return "comptime error";
+        },
+        MetaCaptureOwner(owner_issue) => {
+            try out.append_bytes("capture `");
+            try self.append_checker_type(out, owner_issue.capture_type());
+            try out.append_bytes("` belongs to ");
+            let field = self.meta_field_entries.at(owner_issue.field_handle().node);
+            try self.append_checker_type(out, field.owner);
+            try out.append_bytes(", not ");
+            try self.append_checker_type(out, owner_issue.owner_type());
+            return "comptime error";
+        },
+        MetaVariantNoPayload(handle) => {
+            let field = self.meta_field_entries.at(handle.node);
+            try out.append_bytes("variant `");
+            try self.append_checker_type(out, field.owner);
+            try out.append_bytes("::");
+            let name = field.name.as_bytes();
+            try out.append_bytes(name);
+            try out.append_bytes("` carries no payload, so `");
+            try out.append_bytes(stdmeta::spelling(stdmeta::Form::VariantType));
+            try out.append_bytes("` names nothing; ask `");
+            try out.append_bytes(stdmeta::spelling(stdmeta::Form::HasPayload));
+            try out.append_byte(cast<u8>(96));
+            try out.append_bytes(" first");
+            return "comptime error";
+        },
+        MetaElementArity => {
+            try append_meta_form(out, stdmeta::Form::Element);
+            try out.append_bytes(" expects 1 static argument");
+            return "comptime error";
+        },
+        MetaElementUnsupported(subject) => {
+            try append_meta_form(out, stdmeta::Form::Element);
+            try out.append_bytes(" expects ?T, Array<T>, Box<T>, or Map<K, V>, got ");
+            try self.append_checker_type(out, subject);
+            return "comptime error";
+        },
+    }
+}
+
+fn append_meta_form(out: &var string::String, form: stdmeta::Form) -> !void {
+    try out.append_byte(cast<u8>(96));
+    try out.append_bytes(stdmeta::spelling(form));
+    return out.append_byte(cast<u8>(96));
+}

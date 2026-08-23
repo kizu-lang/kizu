@@ -1,0 +1,589 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Port of internal/project/resolve.go: how a namespace chain or a type name
+// written in one module is read as a package-qualified name.
+
+/// Is one resolved namespace chain: the qualified function it stands for,
+/// nothing when the chain names no function, or the module error that
+/// refuses it.
+union NamespaceResolution {
+    Name(string::String),
+    Missing,
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one resolved name spelling, or the module error that refuses it.
+union NameResolution {
+    Name(string::String),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one rewritten type, or the module error that stopped the rewrite.
+union TypeNodeResolution {
+    Type(typ::Type),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Renames type paths from the table resolve_type_node built: the path
+/// callback map_names takes cannot reach the loader, so every name is
+/// resolved before the walk and looked up during it.
+struct NameRenames {
+    resolved: map::Map<[]u8, string::String>
+}
+
+/// Appends parts[start..end] joined by `::`.
+fn append_path(out: &var string::String, parts: &array::Array<string::String>, start: i64, end: i64) -> !void {
+    var index = start;
+    while index < end {
+        if parts.at(index) |part| {
+            if index > start {
+                try out.append_bytes("::");
+            }
+            try out.append_string(part);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+/// Joins parts[start..end] with `::`.
+fn join_path(allocator: Allocator, parts: &array::Array<string::String>, start: i64, end: i64) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_path(&var out, parts, start, end);
+    return move out;
+}
+
+/// Joins a namespace target and the parts after the alias: the module-qualified
+/// name a chain through an import spells.
+fn join_under(allocator: Allocator, target: &string::String, parts: &array::Array<string::String>) -> !string::String {
+    var out = try copy_string(allocator, target);
+    errdefer out.deinit();
+    try out.append_bytes("::");
+    try append_path(&var out, parts, 1, parts.len());
+    return move out;
+}
+
+/// Splits a `::` separated name into its segments.
+fn split_path(allocator: Allocator, name: []u8) -> !array::Array<string::String> {
+    var parts = array::new<string::String>(allocator);
+    errdefer parts.deinit();
+    var start = 0;
+    var index = 0;
+    let length = mem::len(name);
+    while index <= length {
+        if index == length or (index + 1 < length and
+            name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58)) {
+            try parts.append(try string::from_bytes(allocator, name[start..index]));
+            index = index + 2;
+            start = index;
+            continue;
+        }
+        index = index + 1;
+    }
+    return move parts;
+}
+
+/// Reports whether name spells a path through a namespace.
+fn has_path_separator(name: []u8) -> bool {
+    var index = 0;
+    while index + 1 < mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Reports whether the first part of a chain is exactly bytes.
+fn first_part_is(parts: &array::Array<string::String>, bytes: []u8) -> bool {
+    if parts.at(0) |first| {
+        return text_is(first, bytes);
+    }
+    return false;
+}
+
+/// Copies the bytes of one retained text.
+fn text_copy(allocator: Allocator, tree: &ast::Ast, text: ast::Text) -> !string::String {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return string::from_bytes(allocator, bytes);
+}
+
+/// Copies what the first part of a chain is bound to in a file's namespaces.
+fn (self: &Loader) namespace_target(
+    file: arena::Handle<ModuleFile>,
+    parts: &array::Array<string::String>
+) -> !?string::String {
+    let entry = self.files.at(file);
+    if parts.at(0) |first| {
+        let first_bytes = first.as_bytes();
+        if entry.namespaces.at(first_bytes) |target| {
+            return try copy_string(self.allocator, target);
+        }
+    }
+    return null;
+}
+
+/// Records that a chain was reached through the namespace its first part names.
+fn (self: &var Loader) use_first(file: arena::Handle<ModuleFile>, parts: &array::Array<string::String>) -> !void {
+    if parts.at(0) |first| {
+        let first_bytes = first.as_bytes();
+        return self.use_namespace(file, first_bytes);
+    }
+    return;
+}
+
+/// Returns what a name declared in file's module is filed under.
+fn (self: &Loader) qualify_in(file: arena::Handle<ModuleFile>, name: []u8) -> !string::String {
+    let group = self.files.at(file).group;
+    return self.qualify_name(group, name);
+}
+
+/// Reports whether an export index holds name.
+fn index_holds(index: &map::Map<[]u8, Export>, name: &string::String) -> bool {
+    let bytes = name.as_bytes();
+    return index.contains(bytes);
+}
+
+/// Reports whether an export index holds name as something file may not
+/// reach: declared by another module and not public.
+fn (self: &Loader) index_hides(
+    index: &map::Map<[]u8, Export>,
+    file: arena::Handle<ModuleFile>,
+    name: &string::String
+) -> bool {
+    let bytes = name.as_bytes();
+    if index.at(bytes) |exported| {
+        let group = self.files.at(file).group;
+        return exported.group != group and !exported.public;
+    }
+    return false;
+}
+
+/// Reports whether a module at file may name module_path.
+fn (self: &Loader) reachable(file: arena::Handle<ModuleFile>, module_path: []u8) -> !bool {
+    let from = try self.module_path_copy(file);
+    defer from.deinit();
+    let from_bytes = from.as_bytes();
+    return reachable_from(module_path, from_bytes);
+}
+
+/// Reports a name the file spells that resolution refuses: the text around
+/// the quoted chain says why.
+fn (self: &Loader) name_error(
+    before: []u8,
+    parts: &array::Array<string::String>,
+    after: []u8
+) -> !diagnostic::Diagnostic {
+    var text = try module_error_text(self.allocator);
+    errdefer text.deinit();
+    try text.append_bytes(before);
+    try text.append_bytes("`");
+    try append_path(&var text, parts, 0, parts.len());
+    try text.append_bytes("`");
+    try text.append_bytes(after);
+    return module_error(self.allocator, move text);
+}
+
+/// Resolves the receiver of Type::Tag namespace lookups.
+fn (self: &var Loader) resolve_type_namespace_receiver(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    receiver: ast::Expression
+) -> !?string::String {
+    if try namespace_parts(self.allocator, tree, receiver) |parts| {
+        defer parts.deinit();
+        return self.resolve_type_namespace_parts(file, &parts);
+    }
+    return null;
+}
+
+/// Resolves a complete module-qualified namespace chain.
+fn (self: &var Loader) resolve_namespace_path(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression
+) -> !NamespaceResolution {
+    if try namespace_parts(self.allocator, tree, expr) |parts| {
+        defer parts.deinit();
+        return self.resolve_namespace_parts(file, &parts);
+    }
+    return NamespaceResolution::Missing;
+}
+
+/// Resolves local or imported function namespace parts.
+fn (self: &var Loader) resolve_namespace_parts(
+    file: arena::Handle<ModuleFile>,
+    parts: &array::Array<string::String>
+) -> !NamespaceResolution {
+    if parts.len() == 0 {
+        return NamespaceResolution::Missing;
+    }
+    if try self.namespace_target(file, parts) |target| {
+        defer target.deinit();
+        if parts.len() == 1 {
+            return NamespaceResolution::Missing;
+        }
+        try self.use_first(file, parts);
+        let name = try join_under(self.allocator, &target, parts);
+        defer name.deinit();
+        let name_bytes = name.as_bytes();
+        let reachable = try self.reachable(file, name_bytes);
+        if !reachable {
+            return NamespaceResolution::Failed(try self.internal_module_error(name_bytes, file));
+        }
+        let target_bytes = target.as_bytes();
+        if is_std_path(target_bytes) {
+            return self.resolve_std_function(file, &name, parts);
+        }
+        return self.resolve_imported_function(file, &target, parts);
+    }
+    if try self.reject_unbound_std(file, parts) |failed| {
+        return NamespaceResolution::Failed(move failed);
+    }
+    let joined = try join_path(self.allocator, parts, 0, parts.len());
+    defer joined.deinit();
+    let joined_bytes = joined.as_bytes();
+    let name = try self.qualify_in(file, joined_bytes);
+    errdefer name.deinit();
+    if index_holds(&self.functions, &name) {
+        return NamespaceResolution::Name(move name);
+    }
+    name.deinit();
+    return NamespaceResolution::Missing;
+}
+
+/// Refuses a std path the file never brought into scope. It speaks only for
+/// paths that name a std module: a chain that names nothing there is somebody
+/// else's error, and saying `import it` would name a fix that does not exist.
+fn (self: &Loader) reject_unbound_std(
+    file: arena::Handle<ModuleFile>,
+    parts: &array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    if parts.len() < 2 or !first_part_is(parts, std_root()) {
+        return null;
+    }
+    if try self.namespace_target(file, parts) |bound| {
+        bound.deinit();
+        return null;
+    }
+    let size = try self.std_module_prefix(parts);
+    if size == 0 {
+        return null;
+    }
+    let path = try join_path(self.allocator, parts, 0, size);
+    defer path.deinit();
+    let path_bytes = path.as_bytes();
+    let reachable = try self.reachable(file, path_bytes);
+    if !reachable {
+        return try self.internal_module_error(path_bytes, file);
+    }
+    var text = try module_error_text(self.allocator);
+    errdefer text.deinit();
+    try text.append_bytes("`");
+    try append_path(&var text, parts, 0, parts.len());
+    try text.append_bytes("` is used without an import in `");
+    try self.append_module_name(&var text, file);
+    try text.append_bytes("`");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("help: `import ");
+    try text.append_bytes(std_root());
+    try text.append_bytes(";` reaches it by this path, or `import ");
+    try text.append_string(&path);
+    try text.append_bytes(";` and write `");
+    try append_path(&var text, parts, size - 1, parts.len());
+    try text.append_bytes("`");
+    return try module_error(self.allocator, move text);
+}
+
+/// Returns how many leading segments of parts spell the longest std module
+/// path that prefixes them, or 0 when none does. A path names the deepest
+/// module it can, so `std::path::internal::bits::is_slash` is an item of
+/// `std::path::internal::bits` rather than of `std::path`.
+fn (self: &Loader) std_module_prefix(parts: &array::Array<string::String>) -> !i64 {
+    var size = parts.len();
+    while size >= 2 {
+        let path = try join_path(self.allocator, parts, 0, size);
+        defer path.deinit();
+        let path_bytes = path.as_bytes();
+        if self.std_module(path_bytes) {
+            return size;
+        }
+        size = size - 1;
+    }
+    return 0;
+}
+
+/// Validates visibility for a call into std. A name std does not declare is
+/// one the compiler provides itself -- `std::arena::Arena` has no Kizu source
+/// -- so it passes through to the checker that knows about it.
+fn (self: &Loader) resolve_std_function(
+    file: arena::Handle<ModuleFile>,
+    name: &string::String,
+    parts: &array::Array<string::String>
+) -> !NamespaceResolution {
+    if self.index_hides(&self.functions, file, name) {
+        return NamespaceResolution::Failed(try self.name_error("function ", parts, " is private"));
+    }
+    return NamespaceResolution::Name(try copy_string(self.allocator, name));
+}
+
+/// Validates visibility for a call through an import alias.
+fn (self: &Loader) resolve_imported_function(
+    file: arena::Handle<ModuleFile>,
+    target: &string::String,
+    parts: &array::Array<string::String>
+) -> !NamespaceResolution {
+    let name = try join_under(self.allocator, target, parts);
+    defer name.deinit();
+    if !index_holds(&self.functions, &name) {
+        return NamespaceResolution::Failed(try self.name_error("unknown function ", parts, ""));
+    }
+    if self.index_hides(&self.functions, file, &name) {
+        return NamespaceResolution::Failed(try self.name_error("function ", parts, " is private"));
+    }
+    return NamespaceResolution::Name(try copy_string(self.allocator, &name));
+}
+
+/// Resolves namespace parts only when they name a type.
+fn (self: &var Loader) resolve_type_namespace_parts(
+    file: arena::Handle<ModuleFile>,
+    parts: &array::Array<string::String>
+) -> !?string::String {
+    if parts.len() == 0 {
+        return null;
+    }
+    if try self.namespace_target(file, parts) |target| {
+        defer target.deinit();
+        if parts.len() > 1 {
+            try self.use_first(file, parts);
+            let name = try join_under(self.allocator, &target, parts);
+            defer name.deinit();
+            let name_bytes = name.as_bytes();
+            let reachable = try self.reachable(file, name_bytes);
+            if !reachable {
+                // resolve_namespace_parts says why; this one has no way to
+                // report it.
+                return null;
+            }
+            let target_bytes = target.as_bytes();
+            if is_std_path(target_bytes) or index_holds(&self.types, &name) {
+                return try copy_string(self.allocator, &name);
+            }
+        }
+    }
+    let joined = try join_path(self.allocator, parts, 0, parts.len());
+    defer joined.deinit();
+    let joined_bytes = joined.as_bytes();
+    let name = try self.qualify_in(file, joined_bytes);
+    errdefer name.deinit();
+    if index_holds(&self.types, &name) {
+        return move name;
+    }
+    name.deinit();
+    return null;
+}
+
+/// Returns identifier segments from a namespace expression.
+fn namespace_parts(allocator: Allocator, tree: &ast::Ast, expr: ast::Expression) -> !?array::Array<string::String> {
+    match tree.expressions.at(expr.node) {
+        Ident(value) => {
+            var parts = array::new<string::String>(allocator);
+            errdefer parts.deinit();
+            try parts.append(try text_copy(allocator, tree, value.name));
+            return move parts;
+        },
+        Field(value) => {
+            if !value.namespace {
+                return null;
+            }
+            if try namespace_parts(allocator, tree, value.receiver) |parts| {
+                errdefer parts.deinit();
+                try parts.append(try text_copy(allocator, tree, value.name));
+                return move parts;
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
+/// Rewrites a source type name into its package-qualified form.
+fn (self: &var Loader) resolve_type(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
+    // Go answers a spelling the table cannot parse with `unknown type`; the
+    // table here has no optional parse, and every spelling that reaches this
+    // point was produced by the parser, so a parse failure is propagated.
+    let parsed = try tree.types.parse(name);
+    let outcome = try self.resolve_type_node(tree, file, parsed);
+    match outcome {
+        Type(resolved) => return NameResolution::Name(try typ::render(self.allocator, &tree.types, resolved)),
+        Failed(failed) => return NameResolution::Failed(move failed),
+    }
+}
+
+/// Rewrites every name a type mentions to its package-qualified form, keeping
+/// the structure around it.
+fn (self: &var Loader) resolve_type_node(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    value: typ::Type
+) -> !TypeNodeResolution {
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    try collect_type_names(self.allocator, &tree.types, value, &var names);
+    var renames = NameRenames { resolved: map::new<[]u8, string::String>(self.allocator) };
+    defer renames.deinit();
+    var index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        if renames.resolved.contains(name_bytes) {
+            continue;
+        }
+        let outcome = try self.resolve_base(file, name_bytes);
+        match outcome {
+            Name(resolved) => try renames.resolved.insert(name_bytes, move resolved),
+            Failed(failed) => return TypeNodeResolution::Failed(move failed),
+        }
+    }
+    return TypeNodeResolution::Type(try typ::map_names<NameRenames>(&var tree.types, value, &var renames));
+}
+
+/// Lists the name paths a type mentions, in the order map_names visits them.
+fn collect_type_names(
+    allocator: Allocator,
+    table: &typ::Table,
+    value: typ::Type,
+    out: &var array::Array<string::String>
+) -> !void {
+    match typ::root_node(table, value) {
+        Name(node) => {
+            try out.append(try join_path(allocator, &node.path, 0, node.path.len()));
+            var index = 0;
+            while node.args.get(index) |arg| {
+                try collect_type_names(allocator, table, typ::child_type(value, arg), out);
+                index = index + 1;
+            }
+        },
+        Slice(node) => try collect_type_names(allocator, table, typ::child_type(value, node.elem), out),
+        Buffer(node) => try collect_type_names(allocator, table, typ::child_type(value, node.elem), out),
+        Borrow(node) => try collect_type_names(allocator, table, typ::child_type(value, node.elem), out),
+        Optional(node) => try collect_type_names(allocator, table, typ::child_type(value, node.elem), out),
+        Const(node) => try collect_type_names(allocator, table, typ::child_type(value, node.elem), out),
+        ErrorUnion(node) => {
+            try collect_type_names(allocator, table, typ::child_type(value, node.ok), out);
+            if node.err |err| {
+                try collect_type_names(allocator, table, typ::child_type(value, err), out);
+            }
+        },
+    }
+    return;
+}
+
+/// Rewrites one path to the spelling resolve_type_node resolved it to. Every
+/// path of the type was resolved before the walk, so the fallback copy is the
+/// shape the lookup forces rather than a case that occurs.
+fn (self: &var NameRenames) rename_path(
+    allocator: Allocator,
+    path: &array::Array<string::String>
+) -> !array::Array<string::String> {
+    let joined = try join_path(allocator, path, 0, path.len());
+    defer joined.deinit();
+    let joined_bytes = joined.as_bytes();
+    if self.resolved.at(joined_bytes) |resolved| {
+        let resolved_bytes = resolved.as_bytes();
+        return split_path(allocator, resolved_bytes);
+    }
+    return split_path(allocator, joined_bytes);
+}
+
+/// Resolves one non-generic type base.
+fn (self: &var Loader) resolve_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
+    if mem::starts_with(name, "std::") {
+        try self.use_namespace(file, std_root());
+        let reachable = try self.reachable(file, name);
+        if !reachable {
+            return NameResolution::Failed(try self.internal_module_error(name, file));
+        }
+        let parts = try split_path(self.allocator, name);
+        defer parts.deinit();
+        if try self.reject_unbound_std(file, &parts) |failed| {
+            return NameResolution::Failed(move failed);
+        }
+        return NameResolution::Name(try string::from_bytes(self.allocator, name));
+    }
+    if has_path_separator(name) {
+        return self.resolve_qualified_base(file, name);
+    }
+    let local = try self.qualify_in(file, name);
+    errdefer local.deinit();
+    if index_holds(&self.types, &local) {
+        return NameResolution::Name(move local);
+    }
+    local.deinit();
+    if is_primitive_type(name) {
+        return NameResolution::Name(try string::from_bytes(self.allocator, name));
+    }
+    return NameResolution::Name(try string::from_bytes(self.allocator, name));
+}
+
+/// Resolves an imported module type by last-segment alias.
+fn (self: &var Loader) resolve_qualified_base(file: arena::Handle<ModuleFile>, name: []u8) -> !NameResolution {
+    let parts = try split_path(self.allocator, name);
+    defer parts.deinit();
+    if try self.namespace_target(file, &parts) |target| {
+        defer target.deinit();
+        try self.use_first(file, &parts);
+        let qualified = try join_under(self.allocator, &target, &parts);
+        defer qualified.deinit();
+        let qualified_bytes = qualified.as_bytes();
+        let reachable = try self.reachable(file, qualified_bytes);
+        if !reachable {
+            return NameResolution::Failed(try self.internal_module_error(qualified_bytes, file));
+        }
+        let target_bytes = target.as_bytes();
+        if is_std_path(target_bytes) {
+            return NameResolution::Name(try copy_string(self.allocator, &qualified));
+        }
+        if !index_holds(&self.types, &qualified) {
+            return NameResolution::Failed(try self.name_error("unknown type ", &parts, ""));
+        }
+        if self.index_hides(&self.types, file, &qualified) {
+            return NameResolution::Failed(try self.name_error("type ", &parts, " is private"));
+        }
+        return NameResolution::Name(try copy_string(self.allocator, &qualified));
+    }
+    var text = try module_error_text(self.allocator);
+    errdefer text.deinit();
+    try text.append_bytes("`");
+    try append_path(&var text, &parts, 0, 1);
+    try text.append_bytes("` is not imported in `");
+    let module_path = try self.module_path_copy(file);
+    defer module_path.deinit();
+    try text.append_string(&module_path);
+    try text.append_bytes("`");
+    return NameResolution::Failed(try module_error(self.allocator, move text));
+}
+
+/// Reports source-level types that do not need module lookup.
+fn is_primitive_type(name: []u8) -> bool {
+    return mem::equal_bytes(name, "bool") or mem::equal_bytes(name, "i8") or
+        mem::equal_bytes(name, "i16") or mem::equal_bytes(name, "i32") or
+        mem::equal_bytes(name, "i64") or mem::equal_bytes(name, "u8") or
+        mem::equal_bytes(name, "u16") or mem::equal_bytes(name, "u32") or
+        mem::equal_bytes(name, "u64") or mem::equal_bytes(name, "usize") or
+        mem::equal_bytes(name, "isize") or mem::equal_bytes(name, "f32") or
+        mem::equal_bytes(name, "f64") or mem::equal_bytes(name, "void") or
+        mem::equal_bytes(name, "Io") or mem::equal_bytes(name, "Allocator") or
+        mem::equal_bytes(name, "Function") or mem::equal_bytes(name, "Field") or
+        mem::equal_bytes(name, "type");
+}

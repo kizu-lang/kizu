@@ -35,7 +35,7 @@ gate をすべて通過したまま残っていた。
   `rejectThreadBoundary*` 7 関数と `rejectConcurrencyBoundary*` 7 関数として
   2 つの checker に手書きで二重実装していた。ユーザーは書けず、拡張もできない。
 - SPEC.md は `TaskGroup` を「interpreter 上の structured task model」「`threaded()`
-  は goroutine で実行」と説明していた。その interpreter は ADR-0082 / ADR-0083 で
+  は goroutine で実行」と説明していた。その interpreter は ADR-0083 で
   削除済み。仕様書が存在しない実装を説明していた。
 
 ## 決定

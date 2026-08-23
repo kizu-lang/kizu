@@ -30,7 +30,7 @@ conformance の 366 ケースはすべて interpreter 経路でしか走らな�
 **診断を一切出さずに落ちて**いた。interpreter は `index out of bounds` と言って
 止まる。同じ失敗が経路によって別の見え方をしていた。
 
-これは ADR-0082 が selfhost で踏んだ失敗と同型である。違いは、
+これは旧 selfhost(Kizu で書いた第二実装)が踏んだ失敗と同型である。違いは、
 第二実装が Kizu で書かれていたか Go で書かれていたかだけで、構造は同じ。
 
 ## 決定

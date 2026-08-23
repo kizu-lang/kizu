@@ -163,7 +163,7 @@ type errorSetType struct {
 type unionType struct {
 	name       string
 	typeParams []string
-	variants   map[string]string
+	variants   map[string]Type
 	// order lists the variants as they were declared, for the same reason an
 	// enum keeps one.
 	order  []string
@@ -204,30 +204,38 @@ func sortedMethodNames(methods map[string]*functionType) []string {
 	return names
 }
 
-// isBufferType reports whether t is a fixed-length stack buffer (`[N]u8`).
-func isBufferType(t Type) bool {
-	s := string(t)
-	return len(s) > 1 && s[0] == '[' && s[1] >= '0' && s[1] <= '9'
+// isBufferType reports whether value is a fixed-length stack buffer (`[N]T`).
+func (t *typeTable) isBufferType(value Type) bool {
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return false
+	}
+	_, ok = parsed.(*typ.Buffer)
+	return ok
 }
 
-// containsBufferType reports whether a spelling mentions a stack buffer.
+// containsBufferType reports whether a type contains a stack buffer.
 // A stack buffer is local-only in v1 (ADR-0097): it cannot appear in
 // signatures, fields, payloads, or container elements.
-func containsBufferType(t Type) bool {
-	s := string(t)
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] == '[' && s[i+1] >= '0' && s[i+1] <= '9' {
-			return true
-		}
-	}
-	return false
+func (t *typeTable) containsBufferType(value Type) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		_, ok := node.(*typ.Buffer)
+		return ok
+	})
 }
 
-// containsBorrowOptional reports whether a spelling mentions `?&T`. A borrow
+// containsBorrowOptional reports whether a type contains `?&T`. A borrow
 // optional is positional-only: it appears as an at/at_mut capture condition
 // and never crosses a user signature.
-func containsBorrowOptional(t Type) bool {
-	return strings.Contains(string(t), "?&")
+func (t *typeTable) containsBorrowOptional(value Type) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		optional, ok := node.(*typ.Optional)
+		if !ok {
+			return false
+		}
+		_, ok = optional.Elem.(*typ.Borrow)
+		return ok
+	})
 }
 
 // isBorrowedViewReturnType reports whether typ returns a non-owned view.
@@ -264,18 +272,6 @@ func borrowWrappedType(borrow bool, mutable bool, typ string) string {
 	return "&" + typ
 }
 
-// typeParamSet returns a lookup for function-level type parameters.
-func typeParamSet(params []string) map[string]bool {
-	if len(params) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(params))
-	for _, param := range params {
-		out[param] = true
-	}
-	return out
-}
-
 // sameType reports exact type equality.
 func sameType(left Type, right Type) bool {
 	return left == right
@@ -309,17 +305,8 @@ func (t *typeTable) parsedSubst(subst map[string]Type) map[string]typ.Type {
 	return out
 }
 
-// argTexts returns the spelling of each static argument.
-func argTexts(args []typ.Type) []string {
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		out = append(out, arg.String())
-	}
-	return out
-}
-
 // isKnownGenericBase reports whether base names a generic type the compiler
-// provides. parseGenericType gives each one its own argument rules; this answers
+// provides. resolveGenericType gives each one its own argument rules; this answers
 // the prior question of whether the spelling is a type at all, which is also
 // what stops a function from taking it.
 func isKnownGenericBase(base string) bool {
@@ -461,59 +448,52 @@ func isPointerType(typ Type) bool {
 	return ok
 }
 
-// containsRawPointer reports whether a type spelling mentions ptr<T> anywhere,
-// including behind `?`, `[]`, and static type arguments.
-func containsRawPointer(typ Type) bool {
-	return containsWrappedType(typ, isPointerType)
+// containsRawPointer reports whether a retained type graph contains ptr<T>.
+func (t *typeTable) containsRawPointer(value Type) bool {
+	return t.containsNamedType(value, "ptr")
 }
 
-// containsTypeValue reports whether a type spelling contains comptime-only type.
-func containsTypeValue(typ Type) bool {
-	return containsWrappedType(typ, func(typ Type) bool {
-		return typ == typeType
+// containsTypeValue reports whether a retained type graph contains comptime-only type.
+func (t *typeTable) containsTypeValue(value Type) bool {
+	return t.containsNamedType(value, string(typeType))
+}
+
+// containsCompileTimeOnly reports whether a retained type graph contains a
+// Function or Field token. Both are names with no runtime representation.
+func (t *typeTable) containsCompileTimeOnly(value Type) bool {
+	return t.containsNamedType(value, string(typeFunction), string(typeField))
+}
+
+// containsTypeNode walks the retained graph until matches accepts one node.
+func (t *typeTable) containsTypeNode(value Type, matches func(typ.Type) bool) bool {
+	parsed, ok := t.lookup(value)
+	if !ok {
+		return false
+	}
+	found := false
+	typ.Walk(parsed, func(node typ.Type) {
+		if !found {
+			found = matches(node)
+		}
 	})
+	return found
 }
 
-// containsWrappedType recursively checks prefixes and static type arguments.
-func containsWrappedType(typ Type, match func(Type) bool) bool {
-	text := string(typ)
-	for {
-		switch {
-		case strings.HasPrefix(text, "!"):
-			text = strings.TrimPrefix(text, "!")
-		case strings.HasPrefix(text, "&var "):
-			text = strings.TrimPrefix(text, "&var ")
-		case strings.HasPrefix(text, "&"):
-			text = strings.TrimPrefix(text, "&")
-		case strings.HasPrefix(text, "?"):
-			text = strings.TrimPrefix(text, "?")
-		case strings.HasPrefix(text, "[]"):
-			text = strings.TrimPrefix(text, "[]")
-		case strings.HasPrefix(text, "const "):
-			text = strings.TrimPrefix(text, "const ")
-		default:
-			if match(Type(text)) {
-				return true
-			}
-			base, arg, ok := splitGenericType(text)
-			if !ok {
-				return false
-			}
-			if match(Type(base)) {
-				return true
-			}
-			args, ok := splitGenericArgs(arg)
-			if !ok {
-				return false
-			}
-			for _, item := range args {
-				if containsWrappedType(Type(item), match) {
-					return true
-				}
-			}
+// containsNamedType walks the parsed graph retained by this checker phase.
+// Structural queries do not split or allocate a second copy of type text.
+func (t *typeTable) containsNamedType(value Type, names ...string) bool {
+	return t.containsTypeNode(value, func(node typ.Type) bool {
+		name, ok := node.(*typ.Name)
+		if !ok || len(name.Path) != 1 {
 			return false
 		}
-	}
+		for _, expected := range names {
+			if name.Path[0] == expected {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // methodMatches checks a method against the contract method it stands for. The
@@ -567,12 +547,4 @@ func splitGenericArgs(arg string) ([]string, bool) {
 		return nil, false
 	}
 	return args, true
-}
-
-// singleGenericArg returns the only argument for one-parameter generic types.
-func singleGenericArg(base string, args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("type error: `%s` expects 1 static argument", base)
-	}
-	return args[0], nil
 }

@@ -1,0 +1,136 @@
+import compiler::internal::ast;
+import std::array;
+import std::mem;
+import std::string;
+import std::testing;
+
+fn test_span(line: i64, column: i64) -> ast::Span {
+    return ast::Span {
+        source: null,
+        start: ast::Position { line: line, column: column },
+        end: ast::Position { line: line, column: column + 1 }
+    };
+}
+
+fn one_source(allocator: Allocator, name: []u8) -> !array::Array<string::String> {
+    var sources = array::new<string::String>(allocator);
+    errdefer sources.deinit();
+    let source = try string::from_bytes(allocator, name);
+    errdefer source.deinit();
+    try sources.append(move source);
+    return move sources;
+}
+
+fn expect_borrow_source(
+    scopes: &ScopeStore,
+    scope: ScopeHandle,
+    binding_name: []u8,
+    expected: []u8
+) -> void {
+    let retained = scopes.scopes.at(scope.node);
+    if retained.bindings.at(binding_name) |binding| {
+        if binding.borrow_sources.at(0) |source| {
+            let bytes = source.as_bytes();
+            testing::expect(equal(bytes, expected));
+            return;
+        }
+    }
+    testing::fail("scope binding lost its borrow source");
+}
+
+fn expect_unread(
+    scopes: &ScopeStore,
+    scope: ScopeHandle,
+    name: []u8,
+    expected: bool
+) -> void {
+    let retained = scopes.scopes.at(scope.node);
+    if retained.bindings.at(name) |binding| {
+        if binding.unread |_| {
+            testing::expect(expected);
+        } else {
+            testing::expect(!expected);
+        }
+        return;
+    }
+    testing::fail("scope lost its local binding");
+}
+
+test "scope keeps one binding record per name" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    var scopes = new_scope_store(allocator);
+    defer scopes.deinit();
+    let root = scopes.new_scope(null);
+    let bool_type = try table.bool_type();
+    let i64_type = try table.i64_type();
+    testing::expect(try scopes.define(root, "zeta", bool_type, false));
+    testing::expect(try scopes.define(root, "alpha", i64_type, true));
+    let zeta_span = test_span(4, 5);
+    let alpha_span = test_span(2, 3);
+    scopes.declare_local(root, "zeta", zeta_span);
+    scopes.declare_local(root, "alpha", alpha_span);
+    testing::expect(scopes.is_mutable(root, "alpha"));
+    expect_unread(&scopes, root, "alpha", true);
+    testing::expect(!(try scopes.define(root, "alpha", bool_type, false)));
+    testing::expect(try scopes.define(root, "_", i64_type, false));
+    testing::expect(try scopes.define(root, "_", bool_type, true));
+    let child = scopes.new_scope(root);
+    if scopes.lookup(child, "alpha") |found| {
+        testing::expect(same_type(found, i64_type));
+    } else {
+        testing::fail("child did not resolve its parent binding");
+    }
+    expect_unread(&scopes, root, "alpha", false);
+    expect_unread(&scopes, root, "zeta", true);
+}
+
+test "scope resolves borrow facts at the nearest binding" {
+    let allocator = mem::page_allocator();
+    var table = new_type_table(allocator);
+    defer table.deinit();
+    var scopes = new_scope_store(allocator);
+    defer scopes.deinit();
+    let root = scopes.new_scope(null);
+    let view_type = try table.byte_string_type();
+    let view_sources = try one_source(allocator, "view");
+    testing::expect(try scopes.define_param_with_source(
+        root,
+        "view",
+        view_type,
+        false,
+        false,
+        move view_sources,
+        false
+    ));
+    expect_borrow_source(&scopes, root, "view", "view");
+    let i64_type = try table.i64_type();
+    let out_sources = try one_source(allocator, "out");
+    testing::expect(try scopes.define_param_with_source(
+        root,
+        "out",
+        i64_type,
+        true,
+        true,
+        move out_sources,
+        true
+    ));
+    testing::expect(scopes.is_borrowed(root, "out"));
+    testing::expect(scopes.is_mut_borrowed(root, "out"));
+    testing::expect(scopes.is_mut_borrowed_param(root, "out"));
+    let child = scopes.new_scope(root);
+    let bool_type = try table.bool_type();
+    let sources = try one_source(allocator, "owner");
+    testing::expect(try scopes.define_param_with_source(
+        child,
+        "out",
+        bool_type,
+        true,
+        true,
+        move sources,
+        false
+    ));
+    testing::expect(!scopes.is_mut_borrowed_param(child, "out"));
+    expect_borrow_source(&scopes, child, "out", "owner");
+}

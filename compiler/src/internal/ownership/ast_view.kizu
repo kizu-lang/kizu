@@ -1,0 +1,386 @@
+import compiler::internal::ast;
+import std::array;
+import std::mem;
+
+// One-line readers for the Ast node shapes the checker dispatches on, the Go
+// `expr.(*ast.CallExpr)` type assertions. A copy-only node comes back by
+// value so the Ast borrow ends with the call; nodes that own arrays (match
+// arms, struct literal fields) are read through their handle by the caller.
+
+pub fn call_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::CallExpr {
+    match tree.expressions.at(expression.node) {
+        Call(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn field_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::FieldExpr {
+    match tree.expressions.at(expression.node) {
+        Field(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn ident_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IdentExpr {
+    match tree.expressions.at(expression.node) {
+        Ident(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn type_apply_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::TypeApplyExpr {
+    match tree.expressions.at(expression.node) {
+        TypeApply(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn try_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::TryExpr {
+    match tree.expressions.at(expression.node) {
+        Try(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn deref_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::DerefExpr {
+    match tree.expressions.at(expression.node) {
+        Deref(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn prefix_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::PrefixExpr {
+    match tree.expressions.at(expression.node) {
+        Prefix(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn move_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::MoveExpr {
+    match tree.expressions.at(expression.node) {
+        Move(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn unsafe_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::UnsafeExpr {
+    match tree.expressions.at(expression.node) {
+        Unsafe(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn int_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IntExpr {
+    match tree.expressions.at(expression.node) {
+        Int(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn binary_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::BinaryExpr {
+    match tree.expressions.at(expression.node) {
+        Binary(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn cast_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::CastExpr {
+    match tree.expressions.at(expression.node) {
+        Cast(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn index_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IndexExpr {
+    match tree.expressions.at(expression.node) {
+        Index(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn comptime_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::ComptimeExpr {
+    match tree.expressions.at(expression.node) {
+        Comptime(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn orelse_guard_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::OrelseGuardExpr {
+    match tree.expressions.at(expression.node) {
+        OrelseGuard(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn type_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::TypeExpr {
+    match tree.expressions.at(expression.node) {
+        Type(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn bool_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::BoolExpr {
+    match tree.expressions.at(expression.node) {
+        Bool(value) => return value,
+        _ => return null,
+    }
+}
+
+/// Reads an `if` used as an expression.
+pub fn if_expr(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IfStmt {
+    match tree.expressions.at(expression.node) {
+        If(value) => return value,
+        _ => return null,
+    }
+}
+
+/// Reports whether an expression is a `match` used as an expression.
+pub fn is_match_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        Match(_) => return true,
+        _ => return false,
+    }
+}
+
+pub fn is_struct_literal_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        StructLiteral(_) => return true,
+        _ => return false,
+    }
+}
+
+pub fn is_call_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    if call_expr(tree, expression) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Reads the type name and span of a struct literal; its fields are read
+/// through struct_literal_field_at.
+pub struct StructLiteralHead {
+    pub type_name: ast::Text,
+    pub span: ast::Span,
+    pub field_count: i64
+}
+
+pub fn struct_literal_head(tree: &ast::Ast, expression: ast::Expression) -> ?StructLiteralHead {
+    match tree.expressions.at(expression.node) {
+        StructLiteral(value) => return StructLiteralHead {
+            type_name: value.type_name,
+            span: value.span,
+            field_count: value.fields.len()
+        },
+        _ => return null,
+    }
+}
+
+pub fn struct_literal_field_at(tree: &ast::Ast, expression: ast::Expression, index: i64) -> ?ast::FieldValue {
+    match tree.expressions.at(expression.node) {
+        StructLiteral(value) => return value.fields.get(index),
+        _ => return null,
+    }
+}
+
+/// Reads the copy half of a match: its scrutinee and meta texts; arms come
+/// back through match_arms.
+pub struct MatchHead {
+    pub value: ast::Expression,
+    pub meta_capture: ast::Text,
+    pub meta_owner: ast::Text,
+    pub arm_count: i64
+}
+
+pub fn match_stmt_head(tree: &ast::Ast, statement: ast::Statement) -> ?MatchHead {
+    match tree.statements.at(statement.node) {
+        Match(value) => return MatchHead {
+            value: value.value,
+            meta_capture: value.meta_capture,
+            meta_owner: value.meta_owner,
+            arm_count: value.arms.len()
+        },
+        _ => return null,
+    }
+}
+
+pub fn match_expr_head(tree: &ast::Ast, expression: ast::Expression) -> ?MatchHead {
+    match tree.expressions.at(expression.node) {
+        Match(value) => return MatchHead {
+            value: value.value,
+            meta_capture: value.meta_capture,
+            meta_owner: value.meta_owner,
+            arm_count: value.arms.len()
+        },
+        _ => return null,
+    }
+}
+
+/// Copies the arms of a match statement so the Ast borrow ends.
+pub fn match_stmt_arms(allocator: Allocator, tree: &ast::Ast, statement: ast::Statement) -> !array::Array<ast::MatchArm> {
+    match tree.statements.at(statement.node) {
+        Match(value) => return value.arms.clone(allocator),
+        _ => return array::new<ast::MatchArm>(allocator),
+    }
+}
+
+/// Copies the arms of a match expression so the Ast borrow ends.
+pub fn match_expr_arms(allocator: Allocator, tree: &ast::Ast, expression: ast::Expression) -> !array::Array<ast::MatchArm> {
+    match tree.expressions.at(expression.node) {
+        Match(value) => return value.arms.clone(allocator),
+        _ => return array::new<ast::MatchArm>(allocator),
+    }
+}
+
+pub fn let_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::LetStmt {
+    match tree.statements.at(statement.node) {
+        Let(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn assign_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::AssignStmt {
+    match tree.statements.at(statement.node) {
+        Assign(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn return_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ReturnStmt {
+    match tree.statements.at(statement.node) {
+        Return(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn defer_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::DeferStmt {
+    match tree.statements.at(statement.node) {
+        Defer(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn errdefer_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ErrDeferStmt {
+    match tree.statements.at(statement.node) {
+        ErrDefer(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn expr_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ExprStmt {
+    match tree.statements.at(statement.node) {
+        Expr(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn if_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::IfStmt {
+    match tree.statements.at(statement.node) {
+        If(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn while_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::WhileStmt {
+    match tree.statements.at(statement.node) {
+        While(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn for_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ForStmt {
+    match tree.statements.at(statement.node) {
+        For(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn break_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::BreakStmt {
+    match tree.statements.at(statement.node) {
+        Break(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn continue_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ContinueStmt {
+    match tree.statements.at(statement.node) {
+        Continue(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn comptime_if_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ComptimeIfStmt {
+    match tree.statements.at(statement.node) {
+        ComptimeIf(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn comptime_for_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ComptimeForStmt {
+    match tree.statements.at(statement.node) {
+        ComptimeFor(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn comptime_match_stmt(tree: &ast::Ast, statement: ast::Statement) -> ?ast::ComptimeMatchStmt {
+    match tree.statements.at(statement.node) {
+        ComptimeMatch(value) => return value,
+        _ => return null,
+    }
+}
+
+pub fn is_block_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    match tree.statements.at(statement.node) {
+        Block(_) => return true,
+        _ => return false,
+    }
+}
+
+pub fn is_match_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    match tree.statements.at(statement.node) {
+        Match(_) => return true,
+        _ => return false,
+    }
+}
+
+pub fn is_return_stmt(tree: &ast::Ast, statement: ast::Statement) -> bool {
+    match tree.statements.at(statement.node) {
+        Return(_) => return true,
+        _ => return false,
+    }
+}
+
+/// Returns the statement a block holds at index, the Go
+/// `block.Statements[index]`.
+pub fn block_statement_at(tree: &ast::Ast, block: ast::Block, index: i64) -> ?ast::Statement {
+    match tree.statements.at(block.node) {
+        Block(value) => return value.statements.get(index),
+        _ => return null,
+    }
+}
+
+/// Returns the number of statements a block holds.
+pub fn block_len(tree: &ast::Ast, block: ast::Block) -> i64 {
+    match tree.statements.at(block.node) {
+        Block(value) => return value.statements.len(),
+        _ => return 0,
+    }
+}
+
+/// Returns the argument a call holds at index.
+pub fn arg_at(tree: &ast::Ast, args: ast::ExpressionList, index: i64) -> ?ast::Expression {
+    let values = tree.expression_lists.at(args.node);
+    return values.get(index);
+}
+
+/// Returns the number of arguments a call holds, the Go `len(call.Args)`.
+pub fn arg_count(tree: &ast::Ast, args: ast::ExpressionList) -> i64 {
+    return args.len(tree);
+}
+
+/// Reports whether an Ast text spells the bytes, the Go `name == "..."`.
+pub fn text_equals(tree: &ast::Ast, text: ast::Text, want: []u8) -> bool {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, want);
+}

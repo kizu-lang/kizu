@@ -1,0 +1,308 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::map;
+import std::mem;
+import std::string;
+
+struct OwnerUnionCleanupProblem {
+    variant: ast::Text, binding: ast::Text
+}
+
+union OwnerUnionProblem {
+    Generic,
+    ReturnVoid,
+    OnlySelf,
+    ByValue,
+    ReceiverType,
+    MissingSelf,
+    Dispatch(FunctionHandle),
+    Wildcard,
+    Missing(ast::Text),
+    Binding(ast::Text),
+    Cleanup(OwnerUnionCleanupProblem),
+}
+
+// Enforces the owner-payload cleanup contract in source order. Helpers and
+// failures stay inside this private Checker work unit.
+fn (self: &var Checker) check_owner_union_contracts(
+    tree: &ast::Ast, program: &ast::Program
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Union(value) => {
+                if try self.validate_owner_union_cleanup(tree, value) |problem| {
+                    let result = try self.owner_union_diagnostic(
+                        tree, value.name, problem);
+                    return move result;
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &Checker) validate_owner_union_cleanup(
+    tree: &ast::Ast, declaration: &ast::UnionDecl
+) -> !?OwnerUnionProblem {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    let union_handle = self.metadata.unions_by_name.get(name) orelse return null;
+    if self.metadata.unions.at(union_handle.index) |union_type| {
+        if !self.union_has_owner_payload(union_type) {
+            return null;
+        }
+        if declaration.type_params.len() > 0 {
+            return OwnerUnionProblem::Generic;
+        }
+        if self.impl_method(name, typ::cleanup_method()) |method| {
+            if self.metadata.functions.at(method.index) |function| {
+                if !self.types.is_text(function.return_type, "void") {
+                    return OwnerUnionProblem::ReturnVoid;
+                }
+                if function.params.len() != 1 {
+                    return OwnerUnionProblem::OnlySelf;
+                }
+                if function.borrow_params.get_or_panic(0) or
+                    function.mut_borrow_params.get_or_panic(0) {
+                    return OwnerUnionProblem::ByValue;
+                }
+                if !self.types.is_text(function.params.get_or_panic(0), name) {
+                    return OwnerUnionProblem::ReceiverType;
+                }
+                if function.signature.params.len() == 0 {
+                    return OwnerUnionProblem::MissingSelf;
+                }
+                if function.signature.params.at(0) |parameter| {
+                    let self_name = parameter.name.as_bytes();
+                    if function.body |body| {
+                        match tree.statements.at(body.node) {
+                            Block(block) => {
+                                if block.statements.get(0) |first| {
+                                    match tree.statements.at(first.node) {
+                                        Match(matched) => {
+                                            if owner_union_ident_is(
+                                                tree, matched.value, self_name
+                                            ) {
+                                                return self.check_owner_union_arms(
+                                                    tree, declaration,
+                                                    union_type, matched);
+                                            }
+                                        },
+                                        Expr(statement) => {
+                                            match tree.expressions.at(statement.expr.node) {
+                                                Match(matched) => {
+                                                    if owner_union_ident_is(
+                                                        tree, matched.value, self_name
+                                                    ) {
+                                                        return self.check_owner_union_arms(
+                                                            tree, declaration,
+                                                            union_type, matched);
+                                                    }
+                                                },
+                                                _ => {},
+                                            }
+                                        },
+                                        _ => {},
+                                    }
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                }
+            }
+            return OwnerUnionProblem::Dispatch(method);
+        }
+    }
+    return null;
+}
+
+fn (self: &Checker) check_owner_union_arms(
+    tree: &ast::Ast, declaration: &ast::UnionDecl,
+    union_type: &UnionType, matched: &ast::MatchStmt
+) -> !?OwnerUnionProblem {
+    let owners_handle = self.deinit_owners orelse return null;
+    let owners = self.deinit_owner_maps.at(owners_handle);
+    var arms = map::new<[]u8, i64>(self.allocator);
+    defer arms.deinit();
+    var index = 0;
+    while matched.arms.at(index) |arm| {
+        let retained = tree.texts.at(arm.tag.node);
+        let tag = retained.as_bytes();
+        if mem::equal_bytes(tag, "_") {
+            return OwnerUnionProblem::Wildcard;
+        }
+        try arms.insert(tag, index);
+        index = index + 1;
+    }
+    index = 0;
+    while declaration.variants.at(index) |variant| {
+        let retained = tree.texts.at(variant.name.node);
+        let name = retained.as_bytes();
+        let payload = union_type.variants.get(name) orelse empty_type();
+        if !self.type_is_owner(owners, payload) {
+            index = index + 1;
+            continue;
+        }
+        if arms.get(name) |arm_index| {
+            let arm = matched.arms.get_or_panic(arm_index);
+            let retained_binding = tree.texts.at(arm.binding.node);
+            let binding = retained_binding.as_bytes();
+            if mem::len(binding) == 0 {
+                return OwnerUnionProblem::Binding(variant.name);
+            }
+            if !match_arm_cleans_payload(tree, arm.body, binding) {
+                return OwnerUnionProblem::Cleanup(OwnerUnionCleanupProblem {
+                    variant: variant.name, binding: arm.binding
+                });
+            }
+        } else {
+            return OwnerUnionProblem::Missing(variant.name);
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn (self: &Checker) union_has_owner_payload(union_type: &UnionType) -> bool {
+    let owners_handle = self.deinit_owners orelse return false;
+    let owners = self.deinit_owner_maps.at(owners_handle);
+    var index = 0;
+    while union_type.order.at(index) |retained_variant| {
+        let variant_name = retained_variant.as_bytes();
+        let payload = union_type.variants.get(variant_name) orelse empty_type();
+        if self.type_is_owner(owners, payload) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn (self: &Checker) type_is_owner(owners: &map::Map<[]u8, bool>, value: Type) -> bool {
+    let type_handle = value.node orelse return false;
+    let entry = self.types.entries.at(type_handle);
+    let text = entry.spelling.as_bytes();
+    return ast::owner_type(owners, text);
+}
+
+// Reports whether an arm body is exactly `<binding>.deinit()`.
+fn match_arm_cleans_payload(tree: &ast::Ast, body: ast::Statement, binding: []u8) -> bool {
+    match tree.statements.at(body.node) {
+        Expr(statement) => match tree.expressions.at(statement.expr.node) {
+            Call(call) => match tree.expressions.at(call.callee.node) {
+                Field(field) => {
+                    let retained = tree.texts.at(field.name.node);
+                    let name = retained.as_bytes();
+                    return !field.namespace and
+                        mem::equal_bytes(name, typ::cleanup_method()) and
+                        owner_union_ident_is(tree, field.receiver, binding);
+                },
+                _ => return false,
+            },
+            _ => return false,
+        },
+        _ => return false,
+    }
+}
+
+fn owner_union_ident_is(tree: &ast::Ast, expression: ast::Expression, expected: []u8) -> bool {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            return mem::equal_bytes(name, expected);
+        },
+        _ => return false,
+    }
+}
+
+fn (self: &Checker) owner_union_diagnostic(
+    tree: &ast::Ast, owner: ast::Text, problem: OwnerUnionProblem
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    match problem {
+        Generic => {
+            try message.append_bytes("generic ");
+            try append_owner_union_subject(&var message, tree, owner);
+        },
+        Binding(variant) => {
+            try append_owner_union_variant(
+                &var message, tree, owner, variant);
+        },
+        Cleanup(value) => {
+            try append_owner_union_variant(
+                &var message, tree, owner, value.variant);
+        },
+        _ => try append_owner_union_subject(&var message, tree, owner),
+    }
+    match problem {
+        Generic => try message.append_bytes(
+            " is unsupported; use a concrete owner union with explicit `deinit`"),
+        ReturnVoid => try message.append_bytes(" deinit must return void"),
+        OnlySelf => {
+            try message.append_bytes(" deinit must take only `self: ");
+            try append_collection_text(&var message, tree, owner);
+            try message.append_byte(cast<u8>(96));
+        },
+        ByValue => try message.append_bytes(" deinit must take `self` by value"),
+        ReceiverType => {
+            try message.append_bytes(" deinit receiver must be `");
+            try append_collection_text(&var message, tree, owner);
+            try message.append_byte(cast<u8>(96));
+        },
+        MissingSelf => try message.append_bytes(" deinit must take `self`"),
+        Dispatch(method) => {
+            try message.append_bytes(" deinit must dispatch on `");
+            try self.append_owner_union_self_name(&var message, method);
+            try message.append_bytes("` with an exhaustive `match`");
+        },
+        Wildcard => try message.append_bytes(
+            " deinit `match` cannot use `_`; clean each variant explicitly"),
+        Missing(variant) => {
+            try message.append_bytes(" deinit must handle variant `");
+            try append_collection_text(&var message, tree, variant);
+            try message.append_byte(cast<u8>(96));
+        },
+        Binding(_) => try message.append_bytes(
+            "` must bind its payload to clean it in deinit"),
+        Cleanup(value) => {
+            try message.append_bytes("` must clean its payload via `");
+            try append_collection_text(&var message, tree, value.binding);
+            try message.append_bytes(".deinit()`");
+        },
+    }
+    return new_checker_diagnostic(self.allocator, "type error", move message);
+}
+
+fn append_owner_union_subject(out: &var string::String, tree: &ast::Ast, name: ast::Text) -> !void {
+    try out.append_bytes("owner-payload union `");
+    try append_collection_text(out, tree, name);
+    return out.append_byte(cast<u8>(96));
+}
+
+fn append_owner_union_variant(
+    out: &var string::String, tree: &ast::Ast, owner: ast::Text, variant: ast::Text
+) -> !void {
+    try out.append_bytes("owner-payload union variant `");
+    return append_collection_member(out, tree,
+        CollectionMemberIssue { owner: owner, member: variant }, "::");
+}
+
+fn (self: &Checker) append_owner_union_self_name(
+    out: &var string::String, method: FunctionHandle
+) -> !void {
+    if self.metadata.functions.at(method.index) |function| {
+        if function.signature.params.at(0) |parameter| {
+            let name = parameter.name.as_bytes();
+            return out.append_bytes(name);
+        }
+        return;
+    }
+    return;
+}

@@ -1,0 +1,36 @@
+import std::map;
+import std::mem;
+import std::string;
+
+fn owned(allocator: Allocator, bytes: []u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes(bytes);
+    return move text;
+}
+
+// A map that holds owner values cannot overwrite one: the value already stored
+// under that key would be dropped, and the map is the only thing that still
+// knows about it. So a second insert under the same key traps rather than
+// leaking it. Replacing one in place is `at_mut`.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var names = map::new<[]u8, string::String>(allocator);
+    defer names.deinit();
+
+    try names.insert("first", try owned(allocator, "alice"));
+    try names.insert("first", try owned(allocator, "bob"));
+    return;
+}
+
+// run-fails
+// features: std-map owner diagnostics
+// error: runtime error: std::map::Map: insert would drop the owner value already stored for this key
+
+
+// check
+// load:
+// fn owned(allocator: Allocator, bytes: []u8) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_bytes(bytes); return move text; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var names = std::map::new<[]u8, std::string::String>(allocator); defer names.deinit(); try names.insert("first", try owned(allocator, "alice")); try names.insert("first", try owned(allocator, "bob")); return; }
+// check:
+// ok

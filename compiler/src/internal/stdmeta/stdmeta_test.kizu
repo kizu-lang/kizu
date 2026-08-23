@@ -1,3 +1,4 @@
+import compiler::internal::typ;
 import std::array;
 import std::mem;
 import std::string;
@@ -63,6 +64,57 @@ fn expect_spelling(form: Form, expected: []u8) -> void {
     testing::expect_equal<[]u8>(expected, spelling(form));
 }
 
+fn expect_element_type(
+    allocator: Allocator,
+    container: []u8,
+    expected: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(container);
+    if element_type(&table, parsed) |element| {
+        let rendered = try typ::render(allocator, &table, element);
+        defer rendered.deinit();
+        let bytes = rendered.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+    } else {
+        testing::fail("stdmeta element type was not found");
+    }
+    return;
+}
+
+fn expect_no_element_type(
+    allocator: Allocator,
+    container: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(container);
+    if element_type(&table, parsed) |_| {
+        testing::fail("invalid stdmeta element container was accepted");
+    }
+    return;
+}
+
+fn expect_resolved_element_type_forms(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var table = typ::new(allocator);
+    defer table.deinit();
+    let parsed = try table.parse(input);
+    let resolved = try resolve_element_type_forms(
+        allocator,
+        &table,
+        parsed
+    );
+    defer resolved.deinit();
+    let bytes = resolved.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
 fn expect_no_apply(allocator: Allocator, text: []u8) -> !void {
     if try split_apply(allocator, text) |parts| {
         parts.deinit();
@@ -91,6 +143,11 @@ test "stdmeta registry exposes every form and shape" {
         if lookup(name) |_| {
         } else {
             testing::fail("enumerated stdmeta form has no shape");
+        }
+        if identify(name) |identified| {
+            testing::expect(identified.form == form);
+        } else {
+            testing::fail("enumerated stdmeta form has no identity");
         }
         index = index + 1;
     }
@@ -165,6 +222,9 @@ test "stdmeta registry exposes every form and shape" {
     expect_shape("std::meta::unsupported", 1, false, 0, false, false, 0);
     if lookup("std::meta::missing") |_| {
         testing::fail("unknown stdmeta form has a shape");
+    }
+    if identify("std::meta::missing") |_| {
+        testing::fail("unknown stdmeta form has an identity");
     }
 }
 
@@ -245,4 +305,59 @@ test "stdmeta rejects ordinary and malformed applications" {
     try expect_no_apply(allocator, "std::meta::field_type<T, f");
     try expect_no_apply(allocator, "std::meta::field_type<T>, f>");
     try expect_no_apply(allocator, "std::meta::field_type<T<f>");
+}
+
+test "stdmeta reads element types from valid closed containers" {
+    let allocator = mem::page_allocator();
+    try expect_element_type(allocator, "?i64", "i64");
+    try expect_element_type(
+        allocator,
+        "std::array::Array<i64>",
+        "i64"
+    );
+    try expect_element_type(
+        allocator,
+        "std::mem::Box<bool>",
+        "bool"
+    );
+    try expect_element_type(
+        allocator,
+        "std::map::Map<[]u8, bool>",
+        "bool"
+    );
+    try expect_element_type(
+        allocator,
+        "std::map::Map<K, V>",
+        "V"
+    );
+    try expect_no_element_type(allocator, "i64");
+}
+
+test "element forms resolve recursively without hiding invalid maps" {
+    let allocator = mem::page_allocator();
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::array::Array<i64>>",
+        "i64"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "?std::array::Array<std::meta::element<std::mem::Box<i64>>>",
+        "?std::array::Array<i64>"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<[]u8, std::string::String>>",
+        "std::string::String"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<i64, bool>>",
+        "std::meta::element<std::map::Map<i64, bool>>"
+    );
+    try expect_resolved_element_type_forms(
+        allocator,
+        "std::meta::element<std::map::Map<K, bool>>",
+        "std::meta::element<std::map::Map<K, bool>>"
+    );
 }

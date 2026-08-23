@@ -80,6 +80,25 @@ func TestDeriveDeinitMatchesTheActiveVariant(t *testing.T) {
 	}
 }
 
+// TestDeriveDeinitResolvesElementPayload checks owner discovery reads the type
+// a closed meta form names, rather than treating the form's source spelling as
+// a separate non-owner type.
+func TestDeriveDeinitResolvesElementPayload(t *testing.T) {
+	decl := &UnionDecl{Name: "Slot", Variants: []UnionVariant{{
+		Name:    "Kept",
+		Payload: name("std::meta::element<std::array::Array<std::string::String>>"),
+	}}}
+	owners := map[string]bool{"std::string::String": true}
+	fn := DeriveDeinit(owners, decl)
+	if fn == nil {
+		t.Fatal("a union carrying element<Array<String>> should derive a deinit")
+	}
+	match := fn.Body.Statements[0].(*MatchStmt)
+	if match.Arms[0].Binding == "" {
+		t.Fatal("the resolved owner payload should be consumed")
+	}
+}
+
 // TestDeinitOwnersTransitivelyIncludesHolders checks holding an owner makes a
 // type one, through as many steps as the declarations take.
 func TestDeinitOwnersTransitivelyIncludesHolders(t *testing.T) {

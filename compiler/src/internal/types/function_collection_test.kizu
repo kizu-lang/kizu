@@ -1,0 +1,116 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::array;
+import std::mem;
+import std::testing;
+
+fn append_qualified_function(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    name: []u8
+) -> !void {
+    var signature = ast::FunctionSignature {
+        receiver: false,
+        name: try tree.add_text_from_bytes(name),
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: array::new<ast::Param>(allocator),
+        return_type: null,
+        requires_unsafe: false,
+        extern_abi: try tree.add_text_from_bytes(""),
+        public: false,
+        std: false
+    };
+    errdefer signature.deinit();
+    let doc = try tree.add_text_from_bytes("");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: false,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+test "checker collects top-level functions after declarations" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\fn first(value: i64) -> i64 { return value; }
+        \\struct Later {}
+        \\fn second() -> Later { return Later {}; }
+    ;
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        let message = value.message.as_bytes();
+        testing::fail(message);
+    }
+}
+
+test "top-level function diagnostics match the shipping checker" {
+    let allocator = mem::page_allocator();
+    try expect_collection_diagnostic(
+        allocator,
+        "fn same() {} fn same() {}",
+        "type error",
+        "duplicate function `same`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "fn Point() {} struct Point {}",
+        "type error",
+        "`Point` is a type and cannot name a function",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "enum Color { Red } fn Color() {}",
+        "type error",
+        "`Color` is a type and cannot name a function",
+        ""
+    );
+}
+
+test "declaration failures precede top-level function failures" {
+    let allocator = mem::page_allocator();
+    try expect_collection_diagnostic(
+        allocator,
+        "fn same() {} fn same() {} enum Color { Red, Red }",
+        "type error",
+        "duplicate enum tag `Color::Red`",
+        ""
+    );
+}
+
+test "receiver declarations also enter the top-level function index" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, "struct File {}");
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    try append_writer_method(allocator, &var tree, &var program, "[]u8");
+    try append_qualified_function(
+        allocator, &var tree, &var program, "File.write"
+    );
+    try expect_method_program_diagnostic(
+        allocator,
+        &tree,
+        &program,
+        "duplicate function `File.write`"
+    );
+}

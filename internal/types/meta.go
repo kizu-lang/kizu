@@ -1,7 +1,6 @@
 package types
 
 import (
-	"errors"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -116,7 +115,7 @@ func (c *Checker) variants(typeArg string) ([]metaField, error) {
 		out = append(out, metaField{
 			owner:   owner,
 			name:    name,
-			typ:     Type(union.variants[name]),
+			typ:     union.variants[name],
 			variant: true,
 		})
 	}
@@ -157,48 +156,15 @@ func (c *Checker) publicFields(typeArg string) ([]metaField, error) {
 
 // metaCapture resolves the capture named in a form's static arguments.
 func (c *Checker) metaCapture(form stdmeta.Form, args []string) (metaField, error) {
-	if len(args) != 2 {
-		return metaField{}, errorf("comptime error: `%s` expects 2 static arguments", form)
+	typeArgs := make([]Type, len(args))
+	for idx, arg := range args {
+		typeArgs[idx] = Type(arg)
 	}
-	field, ok := c.metaFields[args[1]]
-	if !ok {
-		return metaField{}, errorf(
-			"comptime error: `%s` is not a comptime capture", args[1])
-	}
-	if field.variant != stdmeta.VariantForm(form) {
-		return metaField{}, errorf("comptime error: `%s` expects a %s capture, got `%s`",
-			form, metaCaptureKind(stdmeta.VariantForm(form)), args[1])
-	}
-	owner, err := c.parseType(args[0])
-	if err != nil {
-		return metaField{}, err
-	}
-	if owner != field.owner {
-		return metaField{}, errorf("comptime error: capture `%s` belongs to %s, not %s",
-			args[1], field.owner, owner)
+	field, issue := c.resolveMetaCapture(form, typeArgs)
+	if issue.present() {
+		return metaField{}, typeResolutionError(issue)
 	}
 	return field, nil
-}
-
-// metaFormError is the failure of a form that resolved its capture and still
-// names no type. It is separated from every other failure because the two mean
-// opposite things: a capture that is simply not bound here is what a
-// declaration looks like before instantiation and keeps its spelling, while
-// this is the program's mistake and has to be reported where it is written.
-type metaFormError struct {
-	err error
-}
-
-// Error returns the wrapped diagnostic.
-func (e metaFormError) Error() string {
-	return e.err.Error()
-}
-
-// isMetaFormError reports whether a failure is the program's mistake rather
-// than a capture that is not bound yet.
-func isMetaFormError(err error) bool {
-	var formErr metaFormError
-	return errors.As(err, &formErr)
 }
 
 // metaCaptureKind names a capture kind for a diagnostic.
@@ -264,74 +230,11 @@ func metaVariantList(variants []metaField) []ast.MetaVariant {
 // type they name. Text with no form in it comes back unchanged, so every
 // caller can run it over any spelling.
 func (c *Checker) resolveMetaTypeText(text string) (string, error) {
-	form, args, ok := stdmeta.SplitApply(text)
-	if !ok {
-		return text, nil
+	resolved, issue := c.resolveMetaType(Type(text))
+	if issue.present() {
+		return "", typeResolutionError(issue)
 	}
-	for idx, arg := range args {
-		// A form's own arguments carry the type parameters of the body being
-		// instantiated, so they are bound before the form is resolved.
-		resolved, err := c.resolveMetaTypeText(string(c.types.substituteTypeParams(
-			Type(arg), c.typeArgValues)))
-		if err != nil {
-			return "", err
-		}
-		args[idx] = resolved
-	}
-	switch form {
-	case stdmeta.FieldType:
-		field, err := c.metaCapture(form, args)
-		if err != nil {
-			return "", err
-		}
-		return string(field.typ), nil
-	case stdmeta.VariantType:
-		variant, err := c.metaCapture(form, args)
-		if err != nil {
-			return "", err
-		}
-		if variant.typ == "" {
-			return "", metaFormError{errorf(
-				"comptime error: variant `%s::%s` carries no payload, so "+
-					"`%s` names nothing; ask `%s` first",
-				variant.owner, variant.name, stdmeta.VariantType, stdmeta.HasPayload)}
-		}
-		return string(variant.typ), nil
-	case stdmeta.Element:
-		return c.metaElement(args)
-	default:
-		return "", errorf("comptime error: `%s` does not name a type", form)
-	}
-}
-
-// metaElement names what a container holds.
-func (c *Checker) metaElement(args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errorf("comptime error: `%s` expects 1 static argument", stdmeta.Element)
-	}
-	container, err := c.parseType(args[0])
-	if err != nil {
-		return "", err
-	}
-	if elem, ok := optionalElem(container); ok {
-		return string(elem), nil
-	}
-	base, elem, ok := splitGenericType(string(container))
-	if ok && (base == "std::array::Array" || base == "std::mem::Box") {
-		return elem, nil
-	}
-	// A map holds two types. What it *contains* is the value: the key is how
-	// an entry is found, and every map key is `[]u8` today.
-	if ok && base == "std::map::Map" {
-		args, err := typ.SplitArgs(elem)
-		if err != nil || len(args) != 2 {
-			return "", errorf("comptime error: `%s` cannot read %s", stdmeta.Element, container)
-		}
-		return args[1], nil
-	}
-	return "", errorf(
-		"comptime error: `%s` expects ?T, Array<T>, Box<T>, or Map<K, V>, got %s",
-		stdmeta.Element, container)
+	return string(resolved), nil
 }
 
 // checkMetaApply types the forms written where an expression goes. ok reports
@@ -496,10 +399,10 @@ func (c *Checker) constructFields(typeArg string) (Type, []ast.ConstructField, e
 // the form resolved to.
 func (c *Checker) resolveMetaTypeDeep(text string) (string, error) {
 	resolved, err := c.resolveMetaTypeText(text)
-	if isMetaFormError(err) {
+	if err != nil {
 		return "", err
 	}
-	if err == nil && resolved != text {
+	if resolved != text {
 		return resolved, nil
 	}
 	parsed, ok := c.types.lookup(Type(text))

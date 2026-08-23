@@ -86,7 +86,7 @@ func (l *lowerer) variants(typeArg string) ([]metaField, error) {
 		out = append(out, metaField{
 			owner:   typeArg,
 			name:    variant.Name,
-			typ:     typ.Text(variant.Payload),
+			typ:     stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload)),
 			variant: true,
 		})
 	}
@@ -108,7 +108,7 @@ func (l *lowerer) publicFields(typeArg string) ([]metaField, error) {
 		fields = append(fields, metaField{
 			owner: typeArg,
 			name:  field.Name,
-			typ:   typ.Text(field.TypeName),
+			typ:   stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName)),
 		})
 	}
 	return fields, nil
@@ -425,25 +425,14 @@ func (l *lowerer) resolveMetaTypeText(text string) string {
 		if len(args) != 1 {
 			return text
 		}
-		return metaElementType(l.resolveType(args[0]))
+		container, err := l.types.Parse(l.resolveType(args[0]))
+		if err == nil {
+			if element, ok := stdmeta.ElementType(container); ok {
+				return element.String()
+			}
+		}
+		return text
 	default:
 		return text
 	}
-}
-
-// metaElementType names what a container holds.
-func metaElementType(container string) string {
-	if elem, ok := typ.OptionalElem(container); ok {
-		return elem
-	}
-	if elem, ok := arrayElementType(container); ok {
-		return elem
-	}
-	if elem, ok := boxElementType(container); ok {
-		return elem
-	}
-	if elem, ok := mapValueType(container); ok {
-		return elem
-	}
-	return container
 }

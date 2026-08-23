@@ -1714,7 +1714,7 @@ static int64_t kizu_map_slot(
 }
 
 static int64_t kizu_map_find(KizuMap *map, const unsigned char *key, int64_t key_len) {
-    if (!map || !key || key_len < 0 || map->index_cap == 0) {
+    if (!map || (!key && key_len > 0) || key_len < 0 || map->index_cap == 0) {
         return -1;
     }
     return map->index[kizu_map_slot(map, key, key_len, kizu_map_hash(key, key_len))];
@@ -1782,7 +1782,8 @@ static _Bool kizu_map_reserve(KizuMap *map, int64_t needed) {
 
 _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, const void *value) {
     KizuMap *map = (KizuMap *)handle;
-    if (!map || !key || key_len < 0 || !value) {
+    /* An empty key may arrive with a null pointer; only a non-empty key needs one. */
+    if (!map || (!key && key_len > 0) || key_len < 0 || !value) {
         return 0;
     }
     /* Before the slot is taken, because growing the index moves every slot. */

@@ -1,0 +1,651 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::sort;
+import std::string;
+
+// Port of the graph-wide passes of internal/project/load.go: export
+// collection, import binding, dependency ordering, and the merge that hands
+// one qualified program on.
+
+/// Returns what a name declared in a module is filed under. A module with no
+/// path is a program that is not part of a package: its declarations keep the
+/// names they are written with.
+fn (self: &Loader) qualify_name(
+    group: arena::Handle<ModuleGroup>,
+    name: []u8
+) -> !string::String {
+    let entry = self.groups.at(group);
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    if entry.path.len() > 0 {
+        try out.append_string(&entry.path);
+        try out.append_bytes("::");
+    }
+    try out.append_bytes(name);
+    return move out;
+}
+
+/// Appends what a diagnostic calls a module: its path, or the file it was read
+/// from when it is not part of a package.
+fn (self: &Loader) append_module_name(
+    out: &var string::String,
+    file: arena::Handle<ModuleFile>
+) -> !void {
+    let entry = self.files.at(file);
+    let group = self.groups.at(entry.group);
+    if group.path.len() > 0 {
+        return out.append_string(&group.path);
+    }
+    return out.append_string(&entry.file);
+}
+
+/// Copies the module path a file belongs to.
+fn (self: &Loader) module_path_copy(file: arena::Handle<ModuleFile>) -> !string::String {
+    let entry = self.files.at(file);
+    let group = self.groups.at(entry.group);
+    return copy_string(self.allocator, &group.path);
+}
+
+/// Copies the package a file belongs to.
+fn (self: &Loader) module_pkg_copy(file: arena::Handle<ModuleFile>) -> !string::String {
+    let entry = self.files.at(file);
+    let group = self.groups.at(entry.group);
+    return copy_string(self.allocator, &group.pkg);
+}
+
+/// Records that a name was reached through one of a module's namespaces.
+fn (self: &var Loader) use_namespace(
+    file: arena::Handle<ModuleFile>,
+    alias: []u8
+) -> !void {
+    if self.files.at_mut(file) |entry| {
+        return entry.used.insert(alias, true);
+    }
+    return;
+}
+
+/// Returns every module group, by path, so that a walk is in a stable order.
+fn (self: &Loader) sorted_module_groups() -> !array::Array<arena::Handle<ModuleGroup>> {
+    var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while self.std_order.at(index) |group| {
+        try out.append(group.*);
+        index = index + 1;
+    }
+    index = 0;
+    while self.order.at(index) |group| {
+        try out.append(group.*);
+        index = index + 1;
+    }
+    // Insertion sort by path; the group count is small.
+    var outer = 1;
+    while outer < out.len() {
+        var inner = outer;
+        while inner > 0 {
+            let before_group = self.groups.at(out.get_or_panic(inner - 1));
+            let here_group = self.groups.at(out.get_or_panic(inner));
+            let before = before_group.path.as_bytes();
+            let here = here_group.path.as_bytes();
+            if !bytes_less(here, before) {
+                break;
+            }
+            try out.swap(inner - 1, inner);
+            inner = inner - 1;
+        }
+        outer = outer + 1;
+    }
+    return move out;
+}
+
+/// Returns modules in the order they were loaded: std before the package that
+/// imports it, and inside each package a module after the ones it is built on.
+fn (self: &Loader) modules_in_load_order() -> !array::Array<arena::Handle<ModuleGroup>> {
+    var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while self.std_order.at(index) |group| {
+        try out.append(group.*);
+        index = index + 1;
+    }
+    index = 0;
+    while self.order.at(index) |group| {
+        try out.append(group.*);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Lists every file handle of every group, groups in the given order.
+fn (self: &Loader) files_of(
+    groups: &array::Array<arena::Handle<ModuleGroup>>
+) -> !array::Array<arena::Handle<ModuleFile>> {
+    var out = array::new<arena::Handle<ModuleFile>>(self.allocator);
+    errdefer out.deinit();
+    var group_index = 0;
+    while groups.at(group_index) |group_handle| {
+        group_index = group_index + 1;
+        let group = self.groups.at(group_handle.*);
+        var file_index = 0;
+        while group.files.at(file_index) |file| {
+            try out.append(file.*);
+            file_index = file_index + 1;
+        }
+    }
+    return move out;
+}
+
+/// Copies the declaration handles of one file, so that a walk over them can
+/// borrow and mutate the loader freely.
+fn (self: &Loader) declarations_of(
+    file: arena::Handle<ModuleFile>
+) -> !array::Array<ast::Declaration> {
+    let entry = self.files.at(file);
+    return entry.program.declarations.clone(self.allocator);
+}
+
+/// Is the top-level type name and visibility a declaration carries, when it
+/// declares a type.
+struct DeclaredType {
+    name: ast::Text,
+    public: bool
+}
+
+/// Returns the top-level type name declared by a declaration.
+fn declared_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?DeclaredType {
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => return DeclaredType { name: value.name, public: value.public },
+        Enum(value) => return DeclaredType { name: value.name, public: value.public },
+        ErrorSet(value) => return DeclaredType { name: value.name, public: value.public },
+        Union(value) => return DeclaredType { name: value.name, public: value.public },
+        Contract(value) => return DeclaredType { name: value.name, public: value.public },
+        _ => return null,
+    }
+}
+
+/// Indexes user-declared module types before resolving references.
+fn (self: &var Loader) collect_types(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
+    let groups = try self.sorted_module_groups();
+    defer groups.deinit();
+    let files = try self.files_of(&groups);
+    defer files.deinit();
+    var file_index = 0;
+    while files.at(file_index) |file_handle| {
+        file_index = file_index + 1;
+        let file = file_handle.*;
+        let declarations = try self.declarations_of(file);
+        defer declarations.deinit();
+        var index = 0;
+        while declarations.at(index) |declaration_handle| {
+            let declaration = declaration_handle.*;
+            index = index + 1;
+            if declared_type(tree, declaration) |declared| {
+                let name = tree.texts.at(declared.name.node);
+                let name_bytes = name.as_bytes();
+                let group = self.files.at(file).group;
+                let qualified = try self.qualify_name(group, name_bytes);
+                defer qualified.deinit();
+                let qualified_bytes = qualified.as_bytes();
+                if self.types.contains(qualified_bytes) {
+                    var text = try module_error_text(self.allocator);
+                    errdefer text.deinit();
+                    try text.append_bytes("duplicate type `");
+                    try text.append_string(&qualified);
+                    try text.append_bytes("`");
+                    return try module_error(self.allocator, move text);
+                }
+                try self.types.insert(
+                    qualified_bytes,
+                    Export { group: group, public: declared.public }
+                );
+            }
+        }
+    }
+    return null;
+}
+
+/// Indexes user-declared module functions before resolving calls. A method is
+/// filed under its receiver's type, not in its module, so it is not a name a
+/// path can reach.
+fn (self: &var Loader) collect_functions(tree: &ast::Ast) -> !?diagnostic::Diagnostic {
+    let groups = try self.sorted_module_groups();
+    defer groups.deinit();
+    let files = try self.files_of(&groups);
+    defer files.deinit();
+    var file_index = 0;
+    while files.at(file_index) |file_handle| {
+        file_index = file_index + 1;
+        let file = file_handle.*;
+        let declarations = try self.declarations_of(file);
+        defer declarations.deinit();
+        var index = 0;
+        while declarations.at(index) |declaration_handle| {
+            let declaration = declaration_handle.*;
+            index = index + 1;
+            match tree.declarations.at(declaration.node) {
+                Function(value) => {
+                    if value.signature.receiver {
+                        continue;
+                    }
+                    let name = tree.texts.at(value.signature.name.node);
+                    let name_bytes = name.as_bytes();
+                    let group = self.files.at(file).group;
+                    let qualified = try self.qualify_name(group, name_bytes);
+                    defer qualified.deinit();
+                    let qualified_bytes = qualified.as_bytes();
+                    if self.functions.contains(qualified_bytes) {
+                        var text = try module_error_text(self.allocator);
+                        errdefer text.deinit();
+                        try text.append_bytes("duplicate function `");
+                        try text.append_string(&qualified);
+                        try text.append_bytes("`");
+                        return try module_error(self.allocator, move text);
+                    }
+                    try self.functions.insert(
+                        qualified_bytes,
+                        Export { group: group, public: value.signature.public }
+                    );
+                },
+                _ => {},
+            }
+        }
+    }
+    return null;
+}
+
+/// Validates imports and returns package-qualified declarations: the merged
+/// program in dependency order, with derived cleanups filled in once the
+/// modules are merged and before any phase reads the program.
+fn (self: &var Loader) program(tree: &var ast::Ast) -> !LoadResult {
+    let groups = try self.sorted_module_groups();
+    defer groups.deinit();
+    let files = try self.files_of(&groups);
+    defer files.deinit();
+    var file_index = 0;
+    while files.at(file_index) |file_handle| {
+        file_index = file_index + 1;
+        if try self.resolve_imports(tree, file_handle.*) |failed| {
+            return LoadResult::Error(move failed);
+        }
+    }
+    let outcome_1 = try self.ordered_modules();
+    match outcome_1 {
+        Ordered(ordered) => {
+            defer ordered.deinit();
+            var merged = ast::new_program(self.allocator);
+            errdefer merged.deinit();
+            let ordered_files = try self.files_of(&ordered);
+            defer ordered_files.deinit();
+            var index = 0;
+            while ordered_files.at(index) |file_handle| {
+                index = index + 1;
+                let file = file_handle.*;
+                if try self.qualify_module(tree, file, &var merged) |failed| {
+                    merged.deinit();
+                    return LoadResult::Error(move failed);
+                }
+                if try self.reject_unused_imports(file) |failed| {
+                    merged.deinit();
+                    return LoadResult::Error(move failed);
+                }
+            }
+            try ast::add_derived_deinits(self.allocator, tree, &var merged);
+            return LoadResult::Program(move merged);
+        },
+        Failed(failed) => return LoadResult::Error(move failed),
+    }
+}
+
+/// Is the dependency order of the module groups, or the cycle that prevents one.
+union OrderResult {
+    Ordered(array::Array<arena::Handle<ModuleGroup>>),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Returns dependency modules before modules that import them.
+fn (self: &Loader) ordered_modules() -> !OrderResult {
+    var out = array::new<arena::Handle<ModuleGroup>>(self.allocator);
+    errdefer out.deinit();
+    var visiting = map::new<[]u8, bool>(self.allocator);
+    defer visiting.deinit();
+    var visited = map::new<[]u8, bool>(self.allocator);
+    defer visited.deinit();
+    let loaded = try self.modules_in_load_order();
+    defer loaded.deinit();
+    var index = 0;
+    while loaded.at(index) |group| {
+        index = index + 1;
+        if try self.visit_module(group.*, &var visiting, &var visited, &var out) |failed| {
+            out.deinit();
+            return OrderResult::Failed(move failed);
+        }
+    }
+    return OrderResult::Ordered(move out);
+}
+
+/// Performs a deterministic DFS over explicit module imports.
+fn (self: &Loader) visit_module(
+    group: arena::Handle<ModuleGroup>,
+    visiting: &var map::Map<[]u8, bool>,
+    visited: &var map::Map<[]u8, bool>,
+    out: &var array::Array<arena::Handle<ModuleGroup>>
+) -> !?diagnostic::Diagnostic {
+    let entry = self.groups.at(group);
+    let path = entry.path.as_bytes();
+    if visited.contains(path) {
+        return null;
+    }
+    if visiting.get(path) |active| {
+        if active {
+            var text = try module_error_text(self.allocator);
+            errdefer text.deinit();
+            try text.append_bytes("import cycle at `");
+            try text.append_bytes(path);
+            try text.append_bytes("`");
+            return try module_error(self.allocator, move text);
+        }
+    }
+    try visiting.insert(path, true);
+    let imports = try sorted_import_paths(self.allocator, &entry.imports);
+    defer imports.deinit();
+    var index = 0;
+    while imports.at(index) |import_path| {
+        index = index + 1;
+        let import_bytes = import_path.as_bytes();
+        // A package root binds a namespace without naming one module, so there
+        // is no single dependency to order this one after.
+        if self.group_by_path.get(import_bytes) |imported| {
+            if try self.visit_module(imported, visiting, visited, out) |failed| {
+                return move failed;
+            }
+        }
+    }
+    try visiting.insert(path, false);
+    try visited.insert(path, true);
+    try out.append(group);
+    return null;
+}
+
+/// Lists the import paths a group's files declare, in a stable order.
+fn sorted_import_paths(
+    allocator: Allocator,
+    imports: &map::Map<[]u8, string::String>
+) -> !array::Array<string::String> {
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while imports.key_at(index) |key| {
+        index = index + 1;
+        if imports.at(key) |value| {
+            try out.append(try copy_string(allocator, value));
+        }
+    }
+    try sort::strings(&var out);
+    return move out;
+}
+
+/// Lists the aliases a module's imports bind, in a stable order so that a file
+/// with two unused imports always reports the same one first.
+fn sorted_aliases(
+    allocator: Allocator,
+    imports: &map::Map<[]u8, string::String>
+) -> !array::Array<string::String> {
+    var out = array::new<string::String>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while imports.key_at(index) |key| {
+        index = index + 1;
+        try out.append(try string::from_bytes(allocator, key));
+    }
+    try sort::strings(&var out);
+    return move out;
+}
+
+/// Is one validated import: the alias it binds and the path it names.
+struct BoundImport {
+    alias: string::String,
+    path: string::String
+}
+
+/// Validates imports and records last-segment aliases and the namespaces the
+/// file can name.
+fn (self: &var Loader) resolve_imports(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>
+) -> !?diagnostic::Diagnostic {
+    let allocator = self.allocator;
+    var bound = array::new<BoundImport>(allocator);
+    defer bound.deinit();
+    let declarations = try self.declarations_of(file);
+    defer declarations.deinit();
+    var index = 0;
+    while declarations.at(index) |declaration_handle| {
+        let declaration = declaration_handle.*;
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Import(value) => {
+                let import_path = try join_import_path(allocator, tree, value);
+                errdefer import_path.deinit();
+                let last = value.path.get_or_panic(value.path.len() - 1);
+                let alias = tree.texts.at(last.node);
+                let alias_bytes = alias.as_bytes();
+                if bound_alias_taken(&bound, alias_bytes) {
+                    import_path.deinit();
+                    return try self.duplicate_import(alias_bytes, file);
+                }
+                if try self.bind_import(file, &import_path) |failed| {
+                    import_path.deinit();
+                    return move failed;
+                }
+                try bound.append(BoundImport {
+                    alias: try string::from_bytes(allocator, alias_bytes),
+                    path: move import_path
+                });
+            },
+            _ => {},
+        }
+    }
+    if try self.reject_import_shadowing(tree, file, &bound) |failed| {
+        return move failed;
+    }
+    let pkg_text = try self.module_pkg_copy(file);
+    defer pkg_text.deinit();
+    let group = self.files.at(file).group;
+    // The group's import union drives dependency ordering.
+    if self.groups.at_mut(group) |entry| {
+        var bound_index = 0;
+        while bound.at(bound_index) |import_entry| {
+            bound_index = bound_index + 1;
+            let target_bytes = import_entry.path.as_bytes();
+            if !entry.imports.contains(target_bytes) {
+                try entry.imports.insert(
+                    target_bytes,
+                    try copy_string(allocator, &import_entry.path)
+                );
+            }
+        }
+    }
+    // The namespaces are the imports plus the package root namespace, which is
+    // reachable without an import and is not an edge.
+    if self.files.at_mut(file) |entry| {
+        var bound_index = 0;
+        while bound.at(bound_index) |import_entry| {
+            bound_index = bound_index + 1;
+            let alias_bytes = import_entry.alias.as_bytes();
+            try entry.imports.insert(alias_bytes, try copy_string(allocator, &import_entry.path));
+            try entry.namespaces.insert(alias_bytes, try copy_string(allocator, &import_entry.path));
+        }
+        let pkg = pkg_text.as_bytes();
+        if mem::len(pkg) > 0 and !entry.namespaces.contains(pkg) {
+            try entry.namespaces.insert(pkg, try copy_string(allocator, &pkg_text));
+        }
+    }
+    return null;
+}
+
+/// Reports whether an alias is already bound in this file's import list.
+fn bound_alias_taken(bound: &array::Array<BoundImport>, alias: []u8) -> bool {
+    var index = 0;
+    while bound.at(index) |entry| {
+        if text_is(&entry.alias, alias) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Refuses a declaration whose local name is also bound by an import of the
+/// same module, so that a name always stands for one thing.
+fn (self: &Loader) reject_import_shadowing(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    bound: &array::Array<BoundImport>
+) -> !?diagnostic::Diagnostic {
+    let group_handle = self.files.at(file).group;
+    let group = self.groups.at(group_handle);
+    var file_index = 0;
+    while group.files.at(file_index) |sibling| {
+        file_index = file_index + 1;
+        let declarations = try self.declarations_of(sibling.*);
+        defer declarations.deinit();
+        var index = 0;
+        while declarations.at(index) |declaration| {
+            index = index + 1;
+            if declared_top_level_name(tree, declaration.*) |name| {
+                let text = tree.texts.at(name.node);
+                let name_bytes = text.as_bytes();
+                if bound_alias_taken(bound, name_bytes) {
+                    var message = try module_error_text(self.allocator);
+                    errdefer message.deinit();
+                    try message.append_bytes("declaration `");
+                    try message.append_bytes(name_bytes);
+                    try message.append_bytes("` shadows import in `");
+                    let module_path = try self.module_path_copy(file);
+                    defer module_path.deinit();
+                    try message.append_string(&module_path);
+                    try message.append_bytes("`");
+                    return try module_error(self.allocator, move message);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// Returns the local namespace name introduced by a declaration. A method's
+/// name lives under its receiver's type, so it is not a name in this module
+/// and shadows nothing.
+fn declared_top_level_name(tree: &ast::Ast, declaration: ast::Declaration) -> ?ast::Text {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => {
+            if value.signature.receiver {
+                return null;
+            }
+            return value.signature.name;
+        },
+        Struct(value) => return value.name,
+        Enum(value) => return value.name,
+        ErrorSet(value) => return value.name,
+        Union(value) => return value.name,
+        Contract(value) => return value.name,
+        _ => return null,
+    }
+}
+
+/// Rejects an import that names nothing or names something the module may not
+/// reach.
+fn (self: &Loader) bind_import(
+    file: arena::Handle<ModuleFile>,
+    path: &string::String
+) -> !?diagnostic::Diagnostic {
+    let import_path = path.as_bytes();
+    if !self.group_by_path.contains(import_path) and !self.packages.contains(import_path) {
+        var text = try module_error_text(self.allocator);
+        errdefer text.deinit();
+        try text.append_bytes("missing import `");
+        try text.append_bytes(import_path);
+        try text.append_bytes("` in `");
+        try self.append_module_name(&var text, file);
+        try text.append_bytes("`");
+        return try module_error(self.allocator, move text);
+    }
+    let module_path = try self.module_path_copy(file);
+    defer module_path.deinit();
+    let module_path_bytes = module_path.as_bytes();
+    if !reachable_from(import_path, module_path_bytes) {
+        return try self.internal_module_error(import_path, file);
+    }
+    return null;
+}
+
+/// Refuses a module the reading file may not reach. What keeps it in is where
+/// it sits, so the message says where that is rather than naming a list it is
+/// missing from.
+fn (self: &Loader) internal_module_error(
+    module_path: []u8,
+    file: arena::Handle<ModuleFile>
+) -> !diagnostic::Diagnostic {
+    let found = internal_module(module_path);
+    var text = try module_error_text(self.allocator);
+    errdefer text.deinit();
+    try text.append_bytes("`");
+    try text.append_bytes(module_path[0..found.module_end]);
+    try text.append_bytes("` is internal to `");
+    try text.append_bytes(module_path[0..found.scope_end]);
+    try text.append_bytes("` and is not reachable from `");
+    try self.append_module_name(&var text, file);
+    try text.append_bytes("`");
+    return module_error(self.allocator, move text);
+}
+
+/// Reports two imports competing for one name.
+fn (self: &Loader) duplicate_import(
+    alias: []u8,
+    file: arena::Handle<ModuleFile>
+) -> !diagnostic::Diagnostic {
+    var text = try module_error_text(self.allocator);
+    errdefer text.deinit();
+    try text.append_bytes("duplicate import alias `");
+    try text.append_bytes(alias);
+    try text.append_bytes("` in `");
+    let module_path = try self.module_path_copy(file);
+    defer module_path.deinit();
+    try text.append_string(&module_path);
+    try text.append_bytes("`");
+    return module_error(self.allocator, move text);
+}
+
+/// Refuses an import nothing was reached through. It runs after resolution, so
+/// what counts as used is what resolution actually went through rather than a
+/// second reading of the source.
+fn (self: &Loader) reject_unused_imports(
+    file: arena::Handle<ModuleFile>
+) -> !?diagnostic::Diagnostic {
+    let entry = self.files.at(file);
+    let aliases = try sorted_aliases(self.allocator, &entry.imports);
+    defer aliases.deinit();
+    var index = 0;
+    while aliases.at(index) |alias| {
+        index = index + 1;
+        let alias_bytes = alias.as_bytes();
+        if entry.used.contains(alias_bytes) {
+            continue;
+        }
+        var text = try module_error_text(self.allocator);
+        errdefer text.deinit();
+        try text.append_bytes("unused import `");
+        if entry.namespaces.at(alias_bytes) |target| {
+            try text.append_string(target);
+        }
+        try text.append_bytes("` in `");
+        try self.append_module_name(&var text, file);
+        try text.append_bytes("`");
+        return try module_error(self.allocator, move text);
+    }
+    return null;
+}

@@ -1,3 +1,5 @@
+import compiler::internal::typ;
+import std::arena;
 import std::array;
 import std::mem;
 import std::string;
@@ -40,6 +42,12 @@ pub struct Shape {
     pub worker: i64
 }
 
+/// Is the identity and shape found by one registry lookup.
+pub struct IdentifiedForm {
+    pub form: Form,
+    pub shape: Shape
+}
+
 struct Entry {
     form: Form,
     shape: Shape
@@ -80,6 +88,14 @@ pub fn lookup(name: []u8) -> ?Shape {
     return null;
 }
 
+/// Returns the identity and shape of name in one registry lookup.
+pub fn identify(name: []u8) -> ?IdentifiedForm {
+    if lookup_entry(name) |value| {
+        return IdentifiedForm { form: value.form, shape: value.shape };
+    }
+    return null;
+}
+
 /// Reports whether name is a compile-time predicate form.
 pub fn predicate(name: []u8) -> bool {
     if lookup_entry(name) |value| {
@@ -109,6 +125,113 @@ pub fn variant_form(form: Form) -> bool {
         Variant => true,
         _ => false,
     };
+}
+
+/// Returns the child type held by one valid, closed container type.
+/// The returned handle remains owned by table.
+pub fn element_type(
+    table: &typ::Table,
+    container: typ::Type
+) -> ?typ::Type {
+    match typ::root_node(table, container) {
+        Optional(node) => return typ::child_type(container, node.elem),
+        Name(node) => {
+            if (path_is(&node.path, "array", "Array") or
+                path_is(&node.path, "mem", "Box")) and
+                node.args.len() == 1 {
+                return typ::child_type(
+                    container,
+                    node.args.get_or_panic(0)
+                );
+            }
+            if path_is(&node.path, "map", "Map") and
+                node.args.len() == 2 {
+                return typ::child_type(
+                    container,
+                    node.args.get_or_panic(1)
+                );
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+/// Rewrites every valid, closed element<T> form in one retained type graph.
+/// Invalid and type-parameter-dependent containers remain written forms so
+/// the checker that owns their context can reject or instantiate them later.
+pub fn resolve_element_type_forms(allocator: Allocator, table: &typ::Table, value: typ::Type) -> !string::String {
+    var resolved = typ::new(allocator);
+    defer resolved.deinit();
+    var mapper = ElementTypeMapper {};
+    let transformed = try typ::fold_names_into<ElementTypeMapper>(table, value, &var resolved, &var mapper);
+    return typ::render(allocator, &resolved, transformed);
+}
+
+struct ElementTypeMapper {}
+
+fn (self: &var ElementTypeMapper) fold_name(builder: &var typ::Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<typ::Node>>) -> !arena::Handle<typ::Node> {
+    if path_is(&path, "meta", "element") and args.len() == 1 {
+        let container = args.get_or_panic(0);
+        if projected_element_handle(builder, container) |element| {
+            path.deinit();
+            args.deinit();
+            return element;
+        }
+    }
+    return builder.add(typ::Node::Name(typ::Name { path: move path, args: move args }));
+}
+
+fn projected_element_handle(builder: &typ::Builder, container: arena::Handle<typ::Node>) -> ?arena::Handle<typ::Node> {
+    match builder.at(container) {
+        Optional(node) => return node.elem,
+        Name(node) => {
+            if (path_is(&node.path, "array", "Array") or
+                path_is(&node.path, "mem", "Box")) and
+                node.args.len() == 1 {
+                return node.args.get_or_panic(0);
+            }
+            if path_is(&node.path, "map", "Map") and
+                node.args.len() == 2 and
+                builder_handle_is_byte_slice(builder, node.args.get_or_panic(0)) {
+                return node.args.get_or_panic(1);
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+fn builder_handle_is_byte_slice(builder: &typ::Builder, value: arena::Handle<typ::Node>) -> bool {
+    match builder.at(value) {
+        Slice(node) => {
+            match builder.at(node.elem) {
+                Name(name) => return name.path.len() == 1 and
+                    name.args.len() == 0 and
+                    path_part_is(&name.path, 0, "u8"),
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return false;
+}
+
+fn path_is(path: &array::Array<string::String>, module: []u8, name: []u8) -> bool {
+    if path.len() != 3 {
+        return false;
+    }
+    return path_part_is(path, 0, "std") and
+        path_part_is(path, 1, module) and
+        path_part_is(path, 2, name);
+}
+
+fn path_part_is(path: &array::Array<string::String>, index: i64, expected: []u8) -> bool {
+    if path.at(index) |part| {
+        let bytes = part.as_bytes();
+        return mem::equal_bytes(bytes, expected);
+    }
+    return false;
 }
 
 /// Returns every form.

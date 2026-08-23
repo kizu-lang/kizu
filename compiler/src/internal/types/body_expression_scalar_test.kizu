@@ -1,0 +1,386 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::mem;
+import std::testing;
+
+fn first_let_value(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> ?ast::Expression {
+    var declaration_index = 0;
+    while program.declarations.get(declaration_index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                if function.body |body| {
+                    match tree.statements.at(body.node) {
+                        Block(block) => {
+                            var statement_index = 0;
+                            while block.statements.get(statement_index) |statement| {
+                                match tree.statements.at(statement.node) {
+                                    Let(binding) => return binding.value,
+                                    _ => {},
+                                }
+                                statement_index = statement_index + 1;
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+        declaration_index = declaration_index + 1;
+    }
+    return null;
+}
+
+fn fail_expression_diagnostic(problem: &diagnostic::Diagnostic) -> void {
+    let message = problem.message.as_bytes();
+    testing::fail(message);
+    return;
+}
+
+fn resolved_expression_test_type(
+    state: &var Checker,
+    tree: &ast::Ast,
+    text: []u8
+) -> !Type {
+    match try state.resolve_type(tree, text) {
+        Value(value) => return value,
+        Issue(issue) => {
+            let problem = try state.type_resolution_diagnostic(issue);
+            defer problem.deinit();
+            fail_expression_diagnostic(&problem);
+            return empty_type();
+        },
+    }
+}
+
+fn expect_scalar_type(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |problem| {
+        defer problem.deinit();
+        fail_expression_diagnostic(&problem);
+    }
+    if first_let_value(&tree, &program) |expression| {
+        var resolved = empty_type();
+        if try state.check_scalar_expr(
+            &tree, expression, &var resolved
+        ) |problem| {
+            defer problem.deinit();
+            fail_expression_diagnostic(&problem);
+        }
+        let value = try state.copy_resolution_text(allocator, resolved);
+        defer value.deinit();
+        let bytes = value.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+        return;
+    }
+    testing::fail("test source has no let expression");
+    return;
+}
+
+fn expect_scalar_diagnostic(
+    allocator: Allocator,
+    input: []u8,
+    expected: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |problem| {
+        defer problem.deinit();
+        fail_expression_diagnostic(&problem);
+    }
+    if first_let_value(&tree, &program) |expression| {
+        var resolved = empty_type();
+        if try state.check_scalar_expr(
+            &tree, expression, &var resolved
+        ) |problem| {
+            defer problem.deinit();
+            let message = problem.message.as_bytes();
+            testing::expect_equal<[]u8>(expected, message);
+            return;
+        }
+        testing::fail("scalar expression unexpectedly succeeded");
+        return;
+    }
+    testing::fail("test source has no let expression");
+    return;
+}
+
+test "checker scalar expressions preserve shipping types and diagnostics" {
+    let allocator = mem::page_allocator();
+    try expect_scalar_type(
+        allocator, "fn main() { let value = 1; }", "i64"
+    );
+    let string_source =
+        \\fn main() { let value = "x"; }
+    ;
+    try expect_scalar_type(
+        allocator, string_source, "[]u8"
+    );
+    try expect_scalar_type(
+        allocator, "fn main() { let value = true; }", "bool"
+    );
+    try expect_scalar_type(
+        allocator, "fn main() { let value = type<i64>; }", "type"
+    );
+    try expect_scalar_diagnostic(
+        allocator,
+        "fn main() { let value = null; }",
+        "`null` needs an optional context (a `?T` return or argument)"
+    );
+}
+
+fn expect_identifier(
+    allocator: Allocator,
+    input: []u8,
+    define_name: []u8,
+    expected_type: []u8,
+    expected_message: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    let scope = state.scopes.new_scope(null);
+    if mem::len(define_name) > 0 {
+        let defined_type = try resolved_expression_test_type(
+            &var state, &tree, expected_type
+        );
+        testing::expect(try state.scopes.define(
+            scope, define_name, defined_type, false
+        ));
+    }
+    if first_let_value(&tree, &program) |expression| {
+        match tree.expressions.at(expression.node) {
+            Ident(identifier) => {
+                var resolved = empty_type();
+                if try state.check_ident_expr(
+                    &tree, scope, identifier, &var resolved
+                ) |problem| {
+                    defer problem.deinit();
+                    let message = problem.message.as_bytes();
+                    testing::expect_equal<[]u8>(expected_message, message);
+                    return;
+                }
+                let text = try state.copy_resolution_text(
+                    allocator, resolved
+                );
+                defer text.deinit();
+                let bytes = text.as_bytes();
+                testing::expect_equal<[]u8>(expected_type, bytes);
+            },
+            _ => testing::fail("test expression is not an identifier"),
+        }
+        return;
+    }
+    testing::fail("test source has no identifier expression");
+    return;
+}
+
+test "checker identifier lookup preserves locals, type values, and spans" {
+    let allocator = mem::page_allocator();
+    try expect_identifier(
+        allocator,
+        "fn main() { let value = local; }",
+        "local",
+        "i32",
+        ""
+    );
+    try expect_identifier(
+        allocator,
+        "fn main() { let value = missing; }",
+        "",
+        "",
+        "undefined variable `missing`"
+    );
+    try expect_identifier(
+        allocator,
+        "fn main() { let value = void; }",
+        "",
+        "",
+        "void is not a value"
+    );
+}
+
+fn expect_contextual_integer(
+    allocator: Allocator,
+    input: []u8,
+    want_text: []u8,
+    expected_text: []u8,
+    expected_message: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if first_let_value(&tree, &program) |expression| {
+        let want = try resolved_expression_test_type(
+            &var state, &tree, want_text
+        );
+        let got = try resolved_expression_test_type(
+            &var state, &tree, "i64"
+        );
+        var resolved = empty_type();
+        if try state.coerce_contextual_integer_literal(
+            &tree, expression, want, got, &var resolved
+        ) |problem| {
+            defer problem.deinit();
+            let message = problem.message.as_bytes();
+            testing::expect_equal<[]u8>(expected_message, message);
+            return;
+        }
+        let text = try state.copy_resolution_text(allocator, resolved);
+        defer text.deinit();
+        let bytes = text.as_bytes();
+        testing::expect_equal<[]u8>(expected_text, bytes);
+        return;
+    }
+    testing::fail("contextual source has no expression");
+    return;
+}
+
+test "contextual integer leaves narrow only literal syntax within bounds" {
+    let allocator = mem::page_allocator();
+    try expect_contextual_integer(
+        allocator,
+        "fn main() { let value = 255; }",
+        "u8",
+        "u8",
+        ""
+    );
+    try expect_contextual_integer(
+        allocator,
+        "fn main() { let value = -1; }",
+        "i32",
+        "i32",
+        ""
+    );
+    try expect_contextual_integer(
+        allocator,
+        "fn main() { let value = 256; }",
+        "u8",
+        "",
+        "integer literal `256` does not fit u8"
+    );
+    try expect_contextual_integer(
+        allocator,
+        "fn main() { let value = already_typed; }",
+        "u8",
+        "i64",
+        ""
+    );
+}
+
+fn expect_note(
+    problem: &diagnostic::Diagnostic,
+    index: i64,
+    expected: []u8
+) -> void {
+    if problem.notes.at(index) |note| {
+        let bytes = note.as_bytes();
+        testing::expect_equal<[]u8>(expected, bytes);
+        return;
+    }
+    testing::fail("operator diagnostic lost a note");
+    return;
+}
+
+test "operator leaves preserve result types, codes, spans, and notes" {
+    let allocator = mem::page_allocator();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let bool_type = try resolved_expression_test_type(
+        &var state, &tree, "bool"
+    );
+    let i64_type = try resolved_expression_test_type(
+        &var state, &tree, "i64"
+    );
+    let span = ast::Span {
+        source: null,
+        start: ast::Position { line: 3, column: 7 },
+        end: ast::Position { line: 3, column: 9 }
+    };
+    var result = empty_type();
+    if try state.check_logical(
+        "and", bool_type, bool_type, span, &var result
+    ) |problem| {
+        defer problem.deinit();
+        fail_expression_diagnostic(&problem);
+    }
+    testing::expect(same_type(result, bool_type));
+    if try state.check_logical(
+        "and", bool_type, i64_type, span, &var result
+    ) |problem| {
+        defer problem.deinit();
+        let message = problem.message.as_bytes();
+        testing::expect_equal<[]u8>(
+            "operator `and` expects bool operands", message
+        );
+        expect_note(&problem, 0, "left operand has type bool");
+        expect_note(&problem, 1, "right operand has type i64");
+    } else {
+        testing::fail("logical mismatch unexpectedly succeeded");
+    }
+    if try state.check_equality(
+        "==", bool_type, i64_type, span, &var result
+    ) |problem| {
+        defer problem.deinit();
+        let code = problem.code.as_bytes();
+        testing::expect_equal<[]u8>(
+            "type.operator_type_mismatch", code
+        );
+        testing::expect(problem.span.start.line == 3);
+        testing::expect(problem.span.start.column == 7);
+        expect_note(&problem, 0, "left operand has type bool");
+        expect_note(&problem, 1, "right operand has type i64");
+    } else {
+        testing::fail("equality mismatch unexpectedly succeeded");
+    }
+    let problem = try state.operator_operand_kind_error(
+        "+", "numeric", bool_type, bool_type, span
+    );
+    defer problem.deinit();
+    let message = problem.message.as_bytes();
+    testing::expect_equal<[]u8>(
+        "operator `+` expects numeric operands", message
+    );
+    expect_note(&problem, 0, "left operand has type bool");
+    expect_note(&problem, 1, "right operand has type bool");
+    testing::expect(is_comparison("<="));
+    testing::expect(!is_comparison("+"));
+}

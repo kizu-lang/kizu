@@ -1,0 +1,120 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Restricts defer and errdefer to the explicit cleanup call shape.
+fn (self: &Checker) validate_cleanup_call_expr(
+    tree: &ast::Ast,
+    keyword: []u8,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        Call(call) => match tree.expressions.at(call.callee.node) {
+            Field(field) => {
+                let retained = tree.texts.at(field.name.node);
+                let name = retained.as_bytes();
+                if mem::equal_bytes(name, typ::cleanup_method()) {
+                    return null;
+                }
+                var message = string::new(self.allocator);
+                errdefer message.deinit();
+                try message.append_bytes(keyword);
+                try message.append_bytes(" cleanup must be `");
+                try message.append_bytes(typ::cleanup_method());
+                try message.append_bytes("`, got `");
+                try message.append_bytes(name);
+                try message.append_byte(cast<u8>(96));
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
+            },
+            _ => {},
+        },
+        _ => {},
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes(keyword);
+    try message.append_bytes(" expects cleanup method call");
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Records an active loop label after rejecting a duplicate named loop.
+fn (self: &var Checker) enter_loop(label: []u8) -> !?diagnostic::Diagnostic {
+    if mem::len(label) > 0 and self.has_loop_label(label) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("duplicate loop label `");
+        try message.append_bytes(label);
+        try message.append_byte(cast<u8>(96));
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    if self.current_body |handle| {
+        let owned = try string::from_bytes(self.allocator, label);
+        errdefer owned.deinit();
+        if self.body_contexts.at_mut(handle) |context| {
+            try context.loop_labels.append(move owned);
+            return null;
+        }
+        owned.deinit();
+    }
+    return try self.checker_error_at(
+        "type error", ast::zero_span(),
+        "internal checker has no active body"
+    );
+}
+
+fn (self: &var Checker) leave_loop() -> void {
+    if self.current_body |handle| {
+        if self.body_contexts.at_mut(handle) |context| {
+            let label = context.loop_labels.pop_or_panic();
+            label.deinit();
+        }
+    }
+    return;
+}
+
+// Validates break and continue placement against the active loop stack.
+fn (self: &Checker) check_loop_branch(kind: []u8, label: []u8) -> !?diagnostic::Diagnostic {
+    if self.loop_depth() == 0 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(kind);
+        try message.append_bytes("` used outside loop");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    if mem::len(label) > 0 and !self.has_loop_label(label) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("unknown loop label `");
+        try message.append_bytes(label);
+        try message.append_byte(cast<u8>(96));
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return null;
+}
+
+fn (self: &Checker) loop_depth() -> i64 {
+    let handle = self.current_body orelse return 0;
+    let context = self.body_contexts.at(handle);
+    return context.loop_labels.len();
+}
+
+// Reports whether label names an active loop, searching innermost first.
+fn (self: &Checker) has_loop_label(label: []u8) -> bool {
+    let handle = self.current_body orelse return false;
+    let context = self.body_contexts.at(handle);
+    let labels = &context.loop_labels;
+    var index = labels.len() - 1;
+    while index >= 0 {
+        if labels.at(index) |retained| {
+            let current = retained.as_bytes();
+            if mem::equal_bytes(current, label) {
+                return true;
+            }
+        }
+        index = index - 1;
+    }
+    return false;
+}

@@ -1,0 +1,49 @@
+import std::string;
+
+pub struct Inner {
+    pub nick: ?string::String,
+}
+
+fn (self: Inner) deinit() -> void {
+    if self.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+pub struct Outer {
+    pub inner: Inner,
+}
+
+// The path depth changes nothing: this still reads a field out of storage the
+// outer value owns. Cleanup through a nested path is refused for the same
+// reason `self.inner.nick.deinit()` is — it would bypass `Inner`'s own deinit.
+fn drop_nick(outer: &Outer) -> void {
+    if outer.inner.nick |held| {
+        held.deinit();
+    }
+    return;
+}
+
+fn main() -> !void {
+    var outer = Outer { inner: Inner { nick: null } };
+    defer outer.deinit();
+    drop_nick(&outer);
+    return;
+}
+
+// check-fails
+// features: optional owner diagnostics
+// error: `String.deinit` requires owned String receiver
+
+
+// check
+// load:
+// pub struct Inner { pub nick: ?std::string::String }
+// fn (self: Inner) Inner.deinit() -> void { if self.nick { held.deinit(); } return; }
+// pub struct Outer { pub inner: Inner }
+// fn drop_nick(outer: &Outer) -> void { if outer.inner.nick { held.deinit(); } return; }
+// fn main() -> !void { var outer = Outer { inner: Inner { nick: null } }; defer outer.deinit(); drop_nick((&outer)); return; }
+// fn (self: Outer) Outer.deinit() -> void { self.inner.deinit(); return; }
+// check:
+// - string error: `String.deinit` requires owned String receiver

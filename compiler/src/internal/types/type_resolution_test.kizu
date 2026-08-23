@@ -1,0 +1,362 @@
+import compiler::internal::ast;
+import std::mem;
+import std::testing;
+
+enum ExpectedResolutionIssue {
+    Unknown,
+    WrapsOptional,
+    ErrorSetRequired,
+    OptionalStaticArg,
+    SingleGenericArity,
+    MapArity,
+    MapKey,
+    UnknownGeneric,
+    OptionalOptional,
+    OptionalErrorUnion,
+    MetaElementUnsupported,
+}
+
+fn expect_resolution_text(
+    allocator: Allocator,
+    state: &Checker,
+    value: Type,
+    expected: []u8
+) -> !void {
+    let text = try state.copy_resolution_text(allocator, value);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    testing::expect_equal<[]u8>(expected, bytes);
+    return;
+}
+
+fn expect_resolution_value(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    text: []u8,
+    expected: []u8
+) -> !void {
+    match try state.resolve_type(tree, text) {
+        Value(value) => try expect_resolution_text(
+            allocator,
+            state,
+            value,
+            expected
+        ),
+        Issue(_) => testing::fail("type resolution returned an issue"),
+    }
+    return;
+}
+
+fn expect_resolution_issue(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    text: []u8,
+    expected: ExpectedResolutionIssue,
+    subject: []u8
+) -> !void {
+    match try state.resolve_type(tree, text) {
+        Value(_) => testing::fail("invalid type resolution succeeded"),
+        Issue(issue) => match issue {
+            Unknown(value) => {
+                testing::expect(expected == ExpectedResolutionIssue::Unknown);
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            WrapsOptional(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::WrapsOptional
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            ErrorSetRequired(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::ErrorSetRequired
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            OptionalStaticArg(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::OptionalStaticArg
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            SingleGenericArity(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::SingleGenericArity
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            MapArity => testing::expect(
+                expected == ExpectedResolutionIssue::MapArity
+            ),
+            MapKey => testing::expect(
+                expected == ExpectedResolutionIssue::MapKey
+            ),
+            UnknownGeneric(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::UnknownGeneric
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            OptionalOptional(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::OptionalOptional
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            OptionalErrorUnion(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::OptionalErrorUnion
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            MetaElementUnsupported(value) => {
+                testing::expect(
+                    expected == ExpectedResolutionIssue::MetaElementUnsupported
+                );
+                try expect_resolution_text(allocator, state, value, subject);
+            },
+            _ => testing::fail("type resolution returned the wrong issue"),
+        },
+    }
+    return;
+}
+
+test "type resolution returns copy issues below diagnostics" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "Missing",
+        ExpectedResolutionIssue::Unknown, "Missing"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "Missing!bool",
+        ExpectedResolutionIssue::Unknown, "Missing"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "[]?i64",
+        ExpectedResolutionIssue::WrapsOptional, "[]?i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "i64!bool",
+        ExpectedResolutionIssue::ErrorSetRequired, "i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "std::array::Array<?i64>",
+        ExpectedResolutionIssue::OptionalStaticArg, "?i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "?ptr<?i64>",
+        ExpectedResolutionIssue::OptionalStaticArg, "?i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "std::array::Array<i64, bool>",
+        ExpectedResolutionIssue::SingleGenericArity, "std::array::Array"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "std::map::Map<[]u8>",
+        ExpectedResolutionIssue::MapArity, ""
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "std::map::Map<i64, bool>",
+        ExpectedResolutionIssue::MapKey, ""
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "Mystery<i64>",
+        ExpectedResolutionIssue::UnknownGeneric, "Mystery"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "??i64",
+        ExpectedResolutionIssue::OptionalOptional, "?i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "?!i64",
+        ExpectedResolutionIssue::OptionalErrorUnion, "!i64"
+    );
+    try expect_resolution_issue(
+        allocator, &var state, &tree, "std::meta::element<i64>",
+        ExpectedResolutionIssue::MetaElementUnsupported, "i64"
+    );
+    return;
+}
+
+test "type resolution retains values and defers only unbound captures" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    try expect_resolution_value(allocator, &var state, &tree, "i64", "i64");
+    try expect_resolution_value(allocator, &var state, &tree, "[]i64", "[]i64");
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::map::Map<[]u8, i64>",
+        "std::map::Map<[]u8, i64>"
+    );
+    try expect_resolution_value(
+        allocator, &var state, &tree,
+        "?ptr<const i64>", "?ptr<const i64>"
+    );
+    try expect_resolution_value(
+        allocator, &var state, &tree, "!?i64", "!?i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::element<?i64>",
+        "i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::element<std::array::Array<i64>>",
+        "i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::element<std::mem::Box<i64>>",
+        "i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::element<std::map::Map<[]u8, i64>>",
+        "i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::element<std::array::Array<std::meta::element<std::array::Array<i64>>>>",
+        "i64"
+    );
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::field_type<i64, f>",
+        "std::meta::field_type<i64, f>"
+    );
+    var i64_type = empty_type();
+    match try state.resolve_type(&tree, "i64") {
+        Value(value) => {
+            i64_type = value;
+        },
+        Issue(_) => testing::fail("i64 did not resolve"),
+    }
+    let field = try state.retain_meta_field(
+        i64_type,
+        "value",
+        i64_type,
+        false
+    );
+    try state.bind_meta_field("f", field);
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::field_type<i64, f>",
+        "i64"
+    );
+    var nested_type = empty_type();
+    match try state.resolve_type(
+        &tree,
+        "std::meta::field_type<i64, g>"
+    ) {
+        Value(value) => {
+            nested_type = value;
+        },
+        Issue(_) => testing::fail("nested field type did not defer"),
+    }
+    let nested = try state.retain_meta_field(
+        i64_type,
+        "nested",
+        i64_type,
+        false
+    );
+    try state.bind_meta_field("g", nested);
+    let outer = try state.retain_meta_field(
+        i64_type,
+        "outer",
+        nested_type,
+        false
+    );
+    try state.bind_meta_field("f", outer);
+    try expect_resolution_value(
+        allocator,
+        &var state,
+        &tree,
+        "std::meta::field_type<i64, f>",
+        "i64"
+    );
+    match try state.resolve_type(
+        &tree,
+        "std::meta::field_type<bool, f>"
+    ) {
+        Value(_) => testing::fail("capture owner mismatch was accepted"),
+        Issue(issue) => match issue {
+            MetaCaptureOwner(value) => {
+                try expect_resolution_text(
+                    allocator,
+                    &state,
+                    value.capture_type(),
+                    "f"
+                );
+                try expect_resolution_text(
+                    allocator,
+                    &state,
+                    value.owner_type(),
+                    "bool"
+                );
+                let retained_owner = state.meta_field_owner(
+                    value.field_handle()
+                );
+                try expect_resolution_text(
+                    allocator,
+                    &state,
+                    retained_owner,
+                    "i64"
+                );
+            },
+            _ => testing::fail("wrong capture owner issue"),
+        },
+    }
+    return;
+}
+
+test "type resolution retains only nodes owned by its ast" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    let parsed = try tree.types.parse("i64");
+    match try state.resolve_type_node(&tree, parsed) {
+        Value(value) => try expect_resolution_text(
+            allocator,
+            &state,
+            value,
+            "i64"
+        ),
+        Issue(_) => testing::fail("parser-owned type did not resolve"),
+    }
+    match try state.resolve_type_node(&tree, null) {
+        Value(_) => testing::fail("missing parser type resolved"),
+        Issue(issue) => match issue {
+            Missing => {},
+            _ => testing::fail("missing parser type returned the wrong issue"),
+        },
+    }
+    return;
+}

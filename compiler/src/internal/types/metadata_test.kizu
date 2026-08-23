@@ -1,0 +1,68 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::mem;
+import std::testing;
+
+fn expect_type_name(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    name: []u8,
+    expected: bool
+) -> !void {
+    match try state.resolve_type(tree, name) {
+        Value(value) => {
+            if !expected {
+                testing::fail("non-type name resolved as a type");
+            }
+            let text = try state.copy_resolution_text(allocator, value);
+            defer text.deinit();
+            let bytes = text.as_bytes();
+            testing::expect_equal<[]u8>(name, bytes);
+        },
+        Issue(_) => {
+            if expected {
+                testing::fail("predeclared type name did not resolve");
+            }
+        },
+    }
+    return;
+}
+
+test "checker predeclares every type name" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\struct Later { value: i64 }
+        \\pub enum Choice { First }
+        \\error Problem { Failed }
+        \\union Maybe { None, Some(i64) }
+        \\contract Readable { fn read(self: i64); }
+        \\fn run() {}
+    ;
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    try state.predeclare_type_names(&tree, &program);
+    try expect_type_name(allocator, &var state, &tree, "Later", true);
+    try expect_type_name(allocator, &var state, &tree, "Choice", true);
+    try expect_type_name(allocator, &var state, &tree, "Problem", true);
+    try expect_type_name(allocator, &var state, &tree, "Maybe", true);
+    try expect_type_name(allocator, &var state, &tree, "Readable", true);
+    try expect_type_name(allocator, &var state, &tree, "run", false);
+    try expect_type_name(allocator, &var state, &tree, "i64", true);
+    try expect_type_name(
+        allocator,
+        &var state,
+        &tree,
+        "std::array::Array",
+        true
+    );
+    try expect_type_name(allocator, &var state, &tree, "Missing", false);
+}

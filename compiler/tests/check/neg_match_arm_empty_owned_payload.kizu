@@ -1,0 +1,49 @@
+import std::mem;
+import std::string;
+
+union Slot {
+    Kept(string::String),
+    Vacant
+}
+
+fn (self: Slot) deinit() -> void {
+    match self {
+        Kept(payload) => payload.deinit(),
+        Vacant => {},
+    }
+    return;
+}
+
+// An empty arm is a no-op, so binding an owned payload into it drops the
+// payload without cleanup.
+fn discard(slot: Slot) -> void {
+    match slot {
+        Kept(payload) => {},
+        Vacant => {},
+    }
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes("kept");
+    discard(Slot::Kept(name));
+    return;
+}
+
+// check-fails
+// features: match arm-empty union ownership
+// error: owned value `payload` is never deinitialized
+
+
+// check
+// load:
+// union Slot { Kept(std::string::String), Vacant }
+// fn (self: Slot) Slot.deinit() -> void { match self { Kept(payload) => payload.deinit(), Vacant => {  } } return; }
+// fn discard(slot: Slot) -> void { match slot { Kept(payload) => {  }, Vacant => {  } } return; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var name = std::string::new(allocator); errdefer name.deinit(); try name.append_bytes("kept"); discard(Slot::Kept(name)); return; }
+// check:
+// 20:11-20:15 move error: owned value `payload` is never deinitialized
+// 32:24-32:28 move error: `name` is handed off here; write `move name`

@@ -1,0 +1,168 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::lexer;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The parser corpus in compiler/tests/parser is shared with the Go parser,
+// which generates each case's expectation block. This runner parses every
+// case with this parser and requires the same diagnostics or the same
+// rendered program, so the two parsers are checked against one corpus
+// instead of two test suites.
+
+/// The blank line plus `// parse` line that ends a case input.
+fn corpus_marker() -> []u8 {
+    return
+        \\
+        \\
+        \\// parse
+        \\
+    ;
+}
+
+/// Separates one case into its input and its expectation block.
+fn split_corpus_case(data: []u8) -> ?i64 {
+    let marker = corpus_marker();
+    let marker_len = mem::len(marker);
+    var index = mem::len(data) - marker_len;
+    while index >= 0 {
+        if mem::slice(data, index, index + marker_len) |candidate| {
+            if mem::equal_bytes(candidate, marker) {
+                return index;
+            }
+        }
+        index = index - 1;
+    }
+    return null;
+}
+
+/// Appends `L:C-L:C message` for one diagnostic.
+fn append_corpus_diagnostic(
+    out: &var string::String,
+    entry: &diagnostic::Diagnostic
+) -> !void {
+    try out.append_bytes("// ");
+    try fmt::append_i64(out, entry.span.start.line);
+    try out.append_byte(cast<u8>(58));
+    try fmt::append_i64(out, entry.span.start.column);
+    try out.append_byte(cast<u8>(45));
+    try fmt::append_i64(out, entry.span.end.line);
+    try out.append_byte(cast<u8>(58));
+    try fmt::append_i64(out, entry.span.end.column);
+    try out.append_byte(cast<u8>(32));
+    let message = entry.message.as_bytes();
+    try out.append_bytes(message);
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Appends the rendered program, one `// ` prefixed line per rendered line.
+fn append_corpus_program(
+    out: &var string::String,
+    rendered: []u8
+) -> !void {
+    try out.append_bytes("// ");
+    var index = 0;
+    while mem::byte_at(rendered, index) |byte| {
+        try out.append_byte(byte);
+        if byte == cast<u8>(10) {
+            try out.append_bytes("// ");
+        }
+        index = index + 1;
+    }
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Renders the diagnostics block of a failed parse.
+fn render_corpus_diagnostics(
+    allocator: Allocator,
+    value: &Parser
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("// diagnostics:");
+    try out.append_byte(cast<u8>(10));
+    var index = 0;
+    while value.diagnostic(index) |entry| {
+        try append_corpus_diagnostic(&var out, entry);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Parses one case input and renders its expectation block the way the Go
+/// corpus test does: diagnostics only on a failed parse, the rendered program
+/// on a clean one. The parser is released before rendering, so every clean
+/// case also checks that the retained program outlives the token stream.
+fn render_corpus_case(allocator: Allocator, input: []u8) -> !string::String {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var value = try new(allocator, move scanner);
+    errdefer value.deinit();
+    var program = try value.parse_program(&var tree);
+    defer program.deinit();
+    if value.diagnostics_len() > 0 {
+        let out = try render_corpus_diagnostics(allocator, &value);
+        value.deinit();
+        return move out;
+    }
+    value.deinit();
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes("// ast:");
+    try out.append_byte(cast<u8>(10));
+    let rendered = try ast::render_program(allocator, &tree, &program);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    try append_corpus_program(&var out, bytes);
+    return move out;
+}
+
+test "parser corpus matches the shipping parser" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var entries = try fs::read_dir(io, "compiler/tests/parser");
+    defer entries.deinit();
+    var cases = 0;
+    var failures = 0;
+    var index = 0;
+    while entries.at(index) |entry| {
+        index = index + 1;
+        if !entry.is_dir {
+            cases = cases + 1;
+            let data = try fs::read_file(
+                io,
+                allocator,
+                entry.path,
+                mem::Limit::Unlimited
+            );
+            defer data.deinit();
+            let bytes = data.as_bytes();
+            if split_corpus_case(bytes) |cut| {
+                let input = bytes[0..cut];
+                let want = bytes[cut + mem::len(corpus_marker())..mem::len(bytes)];
+                let got = try render_corpus_case(allocator, input);
+                defer got.deinit();
+                let got_bytes = got.as_bytes();
+                if !mem::equal_bytes(want, got_bytes) {
+                    failures = failures + 1;
+                    try io::write_stderr_line(io, entry.path);
+                    try io::write_stderr_line(io, "--- want");
+                    try io::write_stderr(io, want);
+                    try io::write_stderr_line(io, "--- got");
+                    try io::write_stderr(io, got_bytes);
+                }
+            } else {
+                failures = failures + 1;
+                try io::write_stderr(io, "no `// parse` marker: ");
+                try io::write_stderr_line(io, entry.path);
+            }
+        }
+    }
+    testing::expect(cases > 0);
+    testing::expect_equal<i64>(0, failures);
+}

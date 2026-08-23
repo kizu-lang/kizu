@@ -1,0 +1,2303 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::typ;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+struct CheckedStaticArgs {
+    names: array::Array<string::String>,
+    type_args: array::Array<Type>,
+    substitutions: map::Map<[]u8, Type>,
+    field_args: map::Map<[]u8, MetaFieldHandle>
+}
+
+struct StaticParamCheck {
+    name: string::String,
+    type_name: Type,
+    is_type: bool
+}
+
+struct CheckedMapArgs {
+    key: Type,
+    value: Type
+}
+
+struct InstanceFunctionFacts {
+    name: string::String,
+    body: ?ast::Block,
+    return_type: Type,
+    std: bool
+}
+
+struct InstanceParamCheck {
+    name: string::String,
+    type_name: Type,
+    borrow: bool,
+    mutable: bool
+}
+
+struct ArrayUnionStorageItem {
+    name: string::String,
+    payload: Type
+}
+
+union ArrayStorageCheck {
+    Safe,
+    Unsafe(string::String),
+    Problem(diagnostic::Diagnostic),
+}
+
+union CheckedStaticArgsResult {
+    Value(CheckedStaticArgs),
+    Problem(diagnostic::Diagnostic),
+}
+
+union CheckedFieldStaticArgResult {
+    Value(MetaFieldHandle),
+    Unbound,
+    Problem(diagnostic::Diagnostic),
+}
+
+// Validates a call target with explicit static arguments.
+fn (self: &var Checker) check_type_apply_call_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::TypeApplyExpr,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let name = try qualified_name(self.allocator, tree, expression.callee) orelse
+        return try self.unsupported_type_application_error(tree, expression);
+    defer name.deinit();
+    let name_bytes = name.as_bytes();
+    if try self.reject_unknown_builtin(name_bytes) |problem| {
+        return move problem;
+    }
+    let instantiated = try self.instantiate_type_arg_text(tree, expression.type_arg);
+    defer instantiated.deinit();
+    let type_arg = instantiated.as_bytes();
+    if try self.reject_optional_static_args(type_arg) |problem| {
+        return move problem;
+    }
+    var handled = false;
+    if try self.check_meta_apply(
+        tree,
+        scope,
+        name_bytes,
+        type_arg,
+        args,
+        &var handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    if mem::equal_bytes(name_bytes, "ptr_from_int") {
+        let span = expression_span(tree, expression.callee);
+        return self.check_ptr_from_int(tree, scope, type_arg, span, args, out);
+    }
+    if mem::equal_bytes(name_bytes, "int_from_ptr") {
+        let span = expression_span(tree, expression.callee);
+        return self.check_int_from_ptr(tree, scope, type_arg, span, args, out);
+    }
+    if try self.check_generic_user_type_apply(
+        tree,
+        scope,
+        name_bytes,
+        type_arg,
+        args,
+        &var handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_builtin_map_type_apply(
+        tree,
+        scope,
+        name_bytes,
+        type_arg,
+        args,
+        &var handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    if try self.check_builtin_type_apply(
+        tree,
+        scope,
+        name_bytes,
+        type_arg,
+        args,
+        &var handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name_bytes);
+    try message.append_bytes("` does not take static arguments");
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) unsupported_type_application_error(
+    tree: &ast::Ast,
+    expression: &ast::TypeApplyExpr
+) -> !diagnostic::Diagnostic {
+    let rendered = try ast::render_expression(self.allocator, tree, expression.callee);
+    defer rendered.deinit();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("unsupported type application `");
+    let callee = rendered.as_bytes();
+    try message.append_bytes(callee);
+    try message.append_byte(cast<u8>(60));
+    let retained = tree.texts.at(expression.type_arg.node);
+    let type_arg = retained.as_bytes();
+    try message.append_bytes(type_arg);
+    try message.append_bytes(">`");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &var Checker) reject_optional_static_args(text: []u8) -> !?diagnostic::Diagnostic {
+    if try typ::split_args_optional(self.allocator, text) |arguments| {
+        defer arguments.deinit();
+        var index = 0;
+        while arguments.at(index) |argument| {
+            let bytes = argument.as_bytes();
+            if typ::optional_elem(bytes) |_| {
+                let subject = try self.types.intern(bytes);
+                return try self.type_resolution_diagnostic(
+                    TypeResolutionIssue::OptionalStaticArg(subject)
+                );
+            }
+            index = index + 1;
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_ptr_from_int(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if try self.require_unsafe_capability_at(
+        UnsafeCapability::PtrIntCast,
+        "`ptr_from_int`",
+        span
+    ) |problem| {
+        return move problem;
+    }
+    var target = empty_type();
+    match try self.resolve_type(tree, type_arg) {
+        Value(value) => {
+            target = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if !self.types.is_pointer_type(target) or
+        mem::starts_with(type_arg, "?") {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "`ptr_from_int` target must be non-null raw pointer"
+        );
+    }
+    if args.len(tree) != 1 {
+        return try self.named_arity_error("ptr_from_int", 1, args.len(tree));
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.checker_integer_type(got) {
+        return try self.pointer_cast_arg_error("ptr_from_int", "integer", got);
+    }
+    out.* = target;
+    return null;
+}
+
+fn (self: &var Checker) check_int_from_ptr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    span: ast::Span,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if try self.require_unsafe_capability_at(
+        UnsafeCapability::PtrIntCast,
+        "`int_from_ptr`",
+        span
+    ) |problem| {
+        return move problem;
+    }
+    var target = empty_type();
+    match try self.resolve_type(tree, type_arg) {
+        Value(value) => {
+            target = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if !self.checker_integer_type(target) {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "`int_from_ptr` target must be integer"
+        );
+    }
+    if args.len(tree) != 1 {
+        return try self.named_arity_error("int_from_ptr", 1, args.len(tree));
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_pointer_type(got) {
+        return try self.pointer_cast_arg_error("int_from_ptr", "raw pointer", got);
+    }
+    out.* = target;
+    return null;
+}
+
+fn (self: &Checker) pointer_cast_arg_error(
+    name: []u8,
+    want: []u8,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try message.append_bytes(want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Validates a source generic call with explicit static arguments.
+fn (self: &var Checker) check_generic_user_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if self.metadata.functions_by_name.get(name) |handle| {
+        return self.check_generic_user_type_apply_function(
+            tree,
+            scope,
+            handle,
+            name,
+            type_arg,
+            args,
+            handled,
+            out
+        );
+    }
+    handled.* = false;
+    return null;
+}
+
+fn (self: &var Checker) check_generic_user_type_apply_function(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    handle: FunctionHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let static_count = self.function_static_param_count(handle);
+    if static_count == 0 {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    let static_args = try split_generic_args(self.allocator, type_arg) orelse
+        return try self.static_arity_error(name, static_count);
+    defer static_args.deinit();
+    if static_args.len() != static_count {
+        return try self.static_arity_error(name, static_count);
+    }
+    let result = try self.check_static_args(tree, handle, name, &static_args);
+    match result {
+        Problem(problem) => return move problem,
+        Value(checked) => return self.check_generic_user_type_apply_checked(
+            tree,
+            scope,
+            handle,
+            name,
+            args,
+            move checked,
+            out
+        ),
+    }
+}
+
+fn (self: &var Checker) check_generic_user_type_apply_checked(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    handle: FunctionHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    checked: CheckedStaticArgs,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    defer checked.deinit();
+    if try self.check_generic_wrapper_type_args(tree, name, &checked.type_args) |problem| {
+        return move problem;
+    }
+    let facts = self.callable_facts(handle) orelse
+        return try self.undefined_function_error(name);
+    if args.len(tree) != facts.parameter_count {
+        return try self.user_call_arity_error(handle, name, args.len(tree));
+    }
+    var index = 0;
+    while index < facts.parameter_count {
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_generic_user_arg(
+            tree,
+            scope,
+            handle,
+            name,
+            &checked.substitutions,
+            index,
+            argument
+        ) |problem| {
+            return move problem;
+        }
+        index = index + 1;
+    }
+    if try self.check_generic_instantiation(
+        tree,
+        handle,
+        &checked.substitutions,
+        &checked.field_args
+    ) |problem| {
+        return move problem;
+    }
+    let previous_meta = self.meta_bindings.current;
+    try self.bind_static_meta_fields(&checked.field_args);
+    let declared_return = self.function_return_type(handle);
+    let substituted = try self.types.substitute_type_params(
+        declared_return, &checked.substitutions
+    );
+    if try self.resolve_instance_type(tree, substituted, out) |problem| {
+        self.meta_bindings.restore(previous_meta);
+        return move problem;
+    }
+    self.meta_bindings.restore(previous_meta);
+    return null;
+}
+
+fn (self: &Checker) function_static_param_count(function: FunctionHandle) -> i64 {
+    if self.metadata.functions.at(function.index) |value| {
+        return value.signature.static_params.len();
+    }
+    return 0;
+}
+
+fn (self: &Checker) function_return_type(function: FunctionHandle) -> Type {
+    if self.metadata.functions.at(function.index) |value| {
+        return value.return_type;
+    }
+    return empty_type();
+}
+
+fn (self: &var Checker) check_static_args(
+    tree: &ast::Ast,
+    function: FunctionHandle,
+    function_name: []u8,
+    arguments: &array::Array<string::String>
+) -> !CheckedStaticArgsResult {
+    var checked = CheckedStaticArgs {
+        names: array::new<string::String>(self.allocator),
+        type_args: array::new<Type>(self.allocator),
+        substitutions: map::new<[]u8, Type>(self.allocator),
+        field_args: map::new<[]u8, MetaFieldHandle>(self.allocator)
+    };
+    errdefer checked.deinit();
+    var index = 0;
+    while index < arguments.len() {
+        if try self.check_static_arg(
+            tree,
+            function,
+            function_name,
+            arguments,
+            index,
+            &var checked
+        ) |problem| {
+            checked.deinit();
+            return CheckedStaticArgsResult::Problem(move problem);
+        }
+        index = index + 1;
+    }
+    return CheckedStaticArgsResult::Value(move checked);
+}
+
+// Checks one static argument against its declared parameter and records the
+// accepted value in checked.
+fn (self: &var Checker) check_static_arg(
+    tree: &ast::Ast,
+    function: FunctionHandle,
+    function_name: []u8,
+    arguments: &array::Array<string::String>,
+    index: i64,
+    checked: &var CheckedStaticArgs
+) -> !?diagnostic::Diagnostic {
+    let parameter = try self.copy_static_param(function, index) orelse
+        return try self.checker_error_at(
+        "type error",
+        ast::zero_span(),
+        "missing static parameter metadata"
+    );
+    let parameter_type = parameter.type_name;
+    let parameter_is_type = parameter.is_type;
+    try checked.names.append(move parameter.name);
+    var argument = string::new(self.allocator);
+    defer argument.deinit();
+    if arguments.at(index) |retained_argument| {
+        let source = retained_argument.as_bytes();
+        try argument.append_bytes(source);
+    }
+    let argument_bytes = argument.as_bytes();
+    if checked.names.at(index) |retained_name| {
+        let parameter_name = retained_name.as_bytes();
+        if parameter_is_type {
+            var resolved = empty_type();
+            match try self.resolve_type(tree, argument_bytes) {
+                Value(value) => {
+                    resolved = value;
+                },
+                Issue(issue) => return try self.type_resolution_diagnostic(issue),
+            }
+            try checked.type_args.append(resolved);
+            try checked.substitutions.insert(parameter_name, resolved);
+        } else {
+            if self.types.is_text(parameter_type, "Field") {
+                let result = try self.field_static_arg(
+                    tree,
+                    function,
+                    function_name,
+                    parameter_name,
+                    argument_bytes,
+                    index,
+                    arguments
+                );
+                match result {
+                    Value(field) => {
+                        try checked.field_args.insert(parameter_name, field);
+                    },
+                    Unbound => {},
+                    Problem(problem) => return move problem,
+                }
+            } else {
+                if try self.check_static_value_arg(
+                    function_name,
+                    parameter_name,
+                    parameter_type,
+                    argument_bytes
+                ) |problem| {
+                    return move problem;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn (self: &Checker) copy_static_param(function: FunctionHandle, index: i64) -> !?StaticParamCheck {
+    if self.metadata.functions.at(function.index) |value| {
+        if value.signature.static_params.at(index) |parameter| {
+            let bytes = parameter.name.as_bytes();
+            return StaticParamCheck {
+                name: try string::from_bytes(self.allocator, bytes),
+                type_name: parameter.type_name,
+                is_type: parameter.is_type
+            };
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_generic_user_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    function: FunctionHandle,
+    name: []u8,
+    substitutions: &map::Map<[]u8, Type>,
+    index: i64,
+    argument: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let declared = self.callable_param_facts(function, index) orelse
+        return try self.undefined_function_error(name);
+    let want = try self.types.substitute_type_params(declared.typ, substitutions);
+    var checked_argument = argument;
+    if try self.prepare_borrow_argument(
+        tree,
+        scope,
+        argument,
+        declared.borrow,
+        declared.mutable,
+        &var checked_argument
+    ) |problem| {
+        return move problem;
+    }
+    if declared.mutable {
+        if try self.require_mutable_borrow_arg(tree, scope, checked_argument, want) |problem| {
+            return move problem;
+        }
+    }
+    var got = empty_type();
+    if try self.check_contextual_expr(tree, scope, checked_argument, want, &var got) |problem| {
+        return move problem;
+    }
+    match try self.types.coerce_returned_borrow_argument(
+        got, want, declared.borrow, declared.mutable
+    ) {
+        Value(value) => {
+            got = value;
+        },
+        Error(reason) => return try self.borrow_argument_error(reason),
+    }
+    if !same_type(got, want) {
+        return try self.user_call_arg_error(function, name, index, want, got);
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_generic_wrapper_type_args(
+    tree: &ast::Ast,
+    name: []u8,
+    arguments: &array::Array<Type>
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "std::array::Array") {
+        if arguments.get(0) |element| {
+            return self.reject_array_element_type(tree, element);
+        }
+    }
+    if mem::equal_bytes(name, "std::map::Map") {
+        return self.check_map_type_arg_contract(arguments);
+    }
+    return null;
+}
+
+fn (self: &var Checker) bind_static_meta_fields(fields: &map::Map<[]u8, MetaFieldHandle>) -> !void {
+    var index = 0;
+    while fields.key_at(index) |name| {
+        if fields.get(name) |field| {
+            try self.bind_meta_field(name, field);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn (self: &var Checker) field_static_arg(
+    tree: &ast::Ast,
+    function: FunctionHandle,
+    function_name: []u8,
+    parameter_name: []u8,
+    argument: []u8,
+    index: i64,
+    arguments: &array::Array<string::String>
+) -> !CheckedFieldStaticArgResult {
+    if self.meta_bindings.get(argument) |field| {
+        return CheckedFieldStaticArgResult::Value(field);
+    }
+    if !is_identifier_text(argument) {
+        let problem = try self.static_value_kind_error(
+            function_name, parameter_name, "field name", argument
+        );
+        return CheckedFieldStaticArgResult::Problem(move problem);
+    }
+    var owner = string::new(self.allocator);
+    defer owner.deinit();
+    var owner_present = false;
+    try self.preceding_type_arg(function, index, arguments, &var owner, &var owner_present);
+    if !owner_present {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(function_name);
+        try message.append_bytes("` static argument `");
+        try message.append_bytes(parameter_name);
+        try message.append_bytes("` has no type parameter before it");
+        let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+        return CheckedFieldStaticArgResult::Problem(move problem);
+    }
+    let owner_bytes = owner.as_bytes();
+    if self.type_params.contains(owner_bytes) {
+        return CheckedFieldStaticArgResult::Unbound;
+    }
+    var owner_type = empty_type();
+    match try self.resolve_type(tree, owner_bytes) {
+        Value(value) => {
+            owner_type = value;
+        },
+        Issue(issue) => {
+            let problem = try self.type_resolution_diagnostic(issue);
+            return CheckedFieldStaticArgResult::Problem(move problem);
+        },
+    }
+    var fields = array::new<MetaFieldHandle>(self.allocator);
+    defer fields.deinit();
+    if try self.public_meta_fields(tree, owner_type, &var fields) |problem| {
+        return CheckedFieldStaticArgResult::Problem(move problem);
+    }
+    var field_index = 0;
+    while fields.get(field_index) |handle| {
+        let retained = self.meta_field_entries.at(handle.node);
+        let name = retained.name.as_bytes();
+        if mem::equal_bytes(name, argument) {
+            return CheckedFieldStaticArgResult::Value(handle);
+        }
+        field_index = field_index + 1;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(owner_bytes);
+    try message.append_bytes("` has no public field `");
+    try message.append_bytes(argument);
+    try message.append_byte(cast<u8>(96));
+    let problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+    return CheckedFieldStaticArgResult::Problem(move problem);
+}
+
+fn (self: &Checker) preceding_type_arg(
+    function: FunctionHandle,
+    index: i64,
+    arguments: &array::Array<string::String>,
+    out: &var string::String,
+    present: &var bool
+) -> !void {
+    var back = index - 1;
+    while back >= 0 {
+        var is_type = false;
+        if self.metadata.functions.at(function.index) |value| {
+            if value.signature.static_params.at(back) |parameter| {
+                is_type = parameter.is_type;
+            }
+        }
+        if is_type {
+            if arguments.at(back) |argument| {
+                let bytes = argument.as_bytes();
+                try out.append_bytes(bytes);
+                present.* = true;
+                return;
+            }
+        }
+        back = back - 1;
+    }
+    present.* = false;
+    return;
+}
+
+fn (self: &Checker) check_static_value_arg(
+    function_name: []u8,
+    parameter_name: []u8,
+    parameter_type: Type,
+    argument: []u8
+) -> !?diagnostic::Diagnostic {
+    if self.static_values.get(argument) |forwarded| {
+        if same_type(forwarded, parameter_type) {
+            return null;
+        }
+    }
+    if self.types.is_text(parameter_type, "Function") {
+        if is_identifier_text(argument) {
+            return null;
+        }
+        return try self.static_value_kind_error(
+            function_name, parameter_name, "function name", argument
+        );
+    }
+    if self.types.is_text(parameter_type, "bool") {
+        if mem::equal_bytes(argument, "true") or
+            mem::equal_bytes(argument, "false") {
+            return null;
+        }
+        return try self.static_value_kind_error(function_name, parameter_name, "bool", argument);
+    }
+    if decimal_i64(argument) |_| {
+        return null;
+    }
+    let expected = try self.types.copy_text(self.allocator, parameter_type);
+    defer expected.deinit();
+    let expected_bytes = expected.as_bytes();
+    return try self.static_value_kind_error(
+        function_name, parameter_name, expected_bytes, argument
+    );
+}
+
+fn is_identifier_text(text: []u8) -> bool {
+    if mem::len(text) == 0 {
+        return false;
+    }
+    var index = 0;
+    while index < mem::len(text) {
+        let byte = text[index];
+        let letter = byte == cast<u8>(95) or
+            (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+            (byte >= cast<u8>(65) and byte <= cast<u8>(90));
+        let digit = index > 0 and
+            byte >= cast<u8>(48) and byte <= cast<u8>(57);
+        if !letter and !digit {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn (self: &Checker) static_arity_error(name: []u8, expected: i64) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_bytes(" static arguments");
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) static_value_kind_error(
+    function_name: []u8,
+    parameter_name: []u8,
+    expected: []u8,
+    got: []u8
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(function_name);
+    try message.append_bytes("` static argument `");
+    try message.append_bytes(parameter_name);
+    try message.append_bytes("` expects ");
+    try message.append_bytes(expected);
+    try message.append_bytes(", got `");
+    try message.append_bytes(got);
+    try message.append_byte(cast<u8>(96));
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Validates the std-only Map constructor and method primitives.
+fn (self: &var Checker) check_builtin_map_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::starts_with(name, "std::internal::builtin::map_") {
+        handled.* = true;
+        return self.check_builtin_map_method(tree, scope, name, type_arg, args, out);
+    }
+    if !mem::equal_bytes(name, "std::internal::builtin::map") {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    var map_args = CheckedMapArgs {
+        key: empty_type(),
+        value: empty_type()
+    };
+    if try self.checked_map_args(tree, type_arg, &var map_args) |problem| {
+        return move problem;
+    }
+    return self.check_map_constructor_for_args(
+        tree,
+        scope,
+        map_args.key,
+        map_args.value,
+        args,
+        out
+    );
+}
+
+fn (self: &var Checker) check_builtin_map_method(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var map_args = CheckedMapArgs {
+        key: empty_type(),
+        value: empty_type()
+    };
+    if try self.checked_map_args(tree, type_arg, &var map_args) |problem| {
+        return move problem;
+    }
+    let receiver = try self.intern_map_type(map_args.key, map_args.value);
+    if try self.check_builtin_receiver(tree, scope, name, receiver, args) |problem| {
+        return move problem;
+    }
+    let prefix = "std::internal::builtin::map_";
+    let method = mem::slice(
+        name, mem::len(prefix), mem::len(name)
+    ) orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "invalid Map primitive name"
+    );
+    return self.check_map_primitive_method(
+        tree,
+        scope,
+        map_args.key,
+        map_args.value,
+        method,
+        args,
+        1,
+        out
+    );
+}
+
+fn (self: &var Checker) checked_map_args(
+    tree: &ast::Ast,
+    text: []u8,
+    out: &var CheckedMapArgs
+) -> !?diagnostic::Diagnostic {
+    let values = try split_generic_args(self.allocator, text) orelse
+        return try self.checker_error_at(
+        "type error",
+        ast::zero_span(),
+        "std::map::Map expects 2 static arguments"
+    );
+    defer values.deinit();
+    if values.len() != 2 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "std::map::Map expects 2 static arguments"
+        );
+    }
+    if values.at(0) |key_text| {
+        let key_bytes = key_text.as_bytes();
+        match try self.resolve_type(tree, key_bytes) {
+            Value(value) => {
+                out.key = value;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+    } else {
+        return try self.checker_error_at("type error", ast::zero_span(), "missing Map key type");
+    }
+    if values.at(1) |value_text| {
+        let value_bytes = value_text.as_bytes();
+        match try self.resolve_type(tree, value_bytes) {
+            Value(value) => {
+                out.value = value;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+    } else {
+        return try self.checker_error_at("type error", ast::zero_span(), "missing Map value type");
+    }
+    if try self.check_map_type_arg_contract_values(out.key, out.value) |problem| {
+        return move problem;
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_map_type_arg_contract(
+    arguments: &array::Array<Type>
+) -> !?diagnostic::Diagnostic {
+    if arguments.len() != 2 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "std::map::Map expects 2 static arguments"
+        );
+    }
+    let key = arguments.get(0) orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "missing Map key type"
+    );
+    let value = arguments.get(1) orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "missing Map value type"
+    );
+    return self.check_map_type_arg_contract_values(key, value);
+}
+
+fn (self: &var Checker) check_map_type_arg_contract_values(
+    key: Type,
+    value: Type
+) -> !?diagnostic::Diagnostic {
+    if !self.types.is_text(key, "[]u8") and
+        !self.type_is_generic_param(key) {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "std::map::Map key type must be []u8"
+        );
+    }
+    if same_type(value, empty_type()) {
+        return try self.checker_error_at("type error", ast::zero_span(), "missing Map value type");
+    }
+    return null;
+}
+
+fn (self: &Checker) type_is_generic_param(value: Type) -> bool {
+    let handle = value.node orelse return false;
+    let entry = self.types.entries.at(handle);
+    let text = entry.spelling.as_bytes();
+    if mem::len(text) == 0 {
+        return false;
+    }
+    let first = text[0];
+    return first >= cast<u8>(65) and first <= cast<u8>(90);
+}
+
+fn (self: &var Checker) intern_map_type(key: Type, value: Type) -> !Type {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    try text.append_bytes("std::map::Map<");
+    try self.append_checker_type(&var text, key);
+    try text.append_bytes(", ");
+    try self.append_checker_type(&var text, value);
+    try text.append_byte(cast<u8>(62));
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &var Checker) check_map_constructor_for_args(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    key: Type,
+    value: Type,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 1 {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "`std::map::Map` expects allocator"
+        );
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Allocator") {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::map::Map` expects Allocator, got ");
+        try self.append_checker_type(&var message, got);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    out.* = try self.intern_map_type(key, value);
+    return null;
+}
+
+fn (self: &var Checker) check_map_primitive_method(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    key: Type,
+    value: Type,
+    name: []u8,
+    args: ast::ExpressionList,
+    offset: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "at") {
+        if try self.check_map_primitive_key_arg(tree, scope, name, key, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = try self.intern_optional_borrow_type(value, false);
+        return null;
+    }
+    if mem::equal_bytes(name, "at_mut") {
+        if try self.check_map_primitive_key_arg(tree, scope, name, key, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = try self.intern_optional_borrow_type(value, true);
+        return null;
+    }
+    if mem::equal_bytes(name, "take_value_at") {
+        if try self.check_map_index_arg(tree, scope, name, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = value;
+        return null;
+    }
+    if !self.type_is_generic_param(key) and
+        !self.type_is_generic_param(value) {
+        return self.check_map_method(tree, scope, value, name, args, offset, out);
+    }
+    return self.check_generic_map_primitive_method(
+        tree,
+        scope,
+        key,
+        value,
+        name,
+        args,
+        offset,
+        out
+    );
+}
+
+fn (self: &var Checker) check_generic_map_primitive_method(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    key: Type,
+    value: Type,
+    name: []u8,
+    args: ast::ExpressionList,
+    offset: i64,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let count = args.len(tree) - offset;
+    if mem::equal_bytes(name, "insert") {
+        if count != 2 {
+            return try self.receiver_arity_error("Map", name, 2, count);
+        }
+        var got_key = empty_type();
+        let argument = args.get_or_panic(tree, offset);
+        if try self.check_expr(tree, scope, argument, &var got_key) |problem| {
+            return move problem;
+        }
+        if !same_type(got_key, key) {
+            return try self.map_expected_arg_error(name, "key", key, got_key);
+        }
+        var got_value = empty_type();
+        let second_argument = args.get_or_panic(tree, offset + 1);
+        if try self.check_contextual_expr(
+            tree,
+            scope,
+            second_argument,
+            value,
+            &var got_value
+        ) |problem| {
+            return move problem;
+        }
+        if !same_type(got_value, value) {
+            return try self.map_expected_arg_error(name, "value", value, got_value);
+        }
+        let void_type = try self.types.void_type();
+        out.* = try self.intern_error_type(void_type);
+        return null;
+    }
+    if mem::equal_bytes(name, "get") {
+        if try self.check_map_primitive_key_arg(tree, scope, name, key, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = try self.intern_optional_type(value);
+        return null;
+    }
+    if mem::equal_bytes(name, "take_value_at") {
+        if try self.check_map_index_arg(tree, scope, name, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = value;
+        return null;
+    }
+    if mem::equal_bytes(name, "contains") {
+        if try self.check_map_primitive_key_arg(tree, scope, name, key, args, offset) |problem| {
+            return move problem;
+        }
+        out.* = try self.types.bool_type();
+        return null;
+    }
+    return self.check_map_method(tree, scope, value, name, args, offset, out);
+}
+
+fn (self: &var Checker) check_map_primitive_key_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    key: Type,
+    args: ast::ExpressionList,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    let count = args.len(tree) - offset;
+    if count != 1 {
+        return try self.receiver_arity_error("Map", name, 1, count);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, offset);
+    if try self.check_contextual_expr(tree, scope, argument, key, &var got) |problem| {
+        return move problem;
+    }
+    if !same_type(got, key) {
+        return try self.map_expected_arg_error(name, "key", key, got);
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_map_index_arg(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    args: ast::ExpressionList,
+    offset: i64
+) -> !?diagnostic::Diagnostic {
+    let count = args.len(tree) - offset;
+    if count != 1 {
+        return try self.receiver_arity_error("Map", name, 1, count);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, offset);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "i64") {
+        return try self.map_expected_arg_error(name, "index", try self.types.i64_type(), got);
+    }
+    return null;
+}
+
+fn (self: &var Checker) intern_optional_type(value: Type) -> !Type {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    try text.append_byte(cast<u8>(63));
+    try self.append_checker_type(&var text, value);
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &var Checker) intern_optional_borrow_type(value: Type, mutable: bool) -> !Type {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    if mutable {
+        try text.append_bytes("?&var ");
+    } else {
+        try text.append_bytes("?&");
+    }
+    try self.append_checker_type(&var text, value);
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &Checker) map_expected_arg_error(
+    name: []u8,
+    role: []u8,
+    expected: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`Map.");
+    try message.append_bytes(name);
+    try message.append_bytes("` expects ");
+    try self.append_checker_type(&var message, expected);
+    try message.append_byte(cast<u8>(32));
+    try message.append_bytes(role);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Routes std-only generic runtime primitives.
+fn (self: &var Checker) check_builtin_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::starts_with(name, "std::internal::builtin::arena") {
+        handled.* = true;
+        return self.check_builtin_arena_type_apply(tree, scope, name, type_arg, args, out);
+    }
+    if try self.check_builtin_box_type_apply(
+        tree,
+        scope,
+        name,
+        type_arg,
+        args,
+        handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled.* {
+        return null;
+    }
+    if try self.check_builtin_testing_type_apply(
+        tree,
+        scope,
+        name,
+        type_arg,
+        args,
+        handled,
+        out
+    ) |problem| {
+        return move problem;
+    }
+    if handled.* {
+        return null;
+    }
+    return self.check_builtin_array_method_type_apply(
+        tree,
+        scope,
+        name,
+        type_arg,
+        args,
+        handled,
+        out
+    );
+}
+
+fn (self: &var Checker) check_builtin_arena_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if mem::equal_bytes(name, "std::internal::builtin::arena") {
+        return self.check_arena_type_apply(tree, scope, type_arg, args, out);
+    }
+    var element = empty_type();
+    match try self.resolve_type(tree, type_arg) {
+        Value(value) => {
+            element = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    let receiver = try self.intern_arena_type(element);
+    if try self.check_builtin_receiver(tree, scope, name, receiver, args) |problem| {
+        return move problem;
+    }
+    let prefix = "std::internal::builtin::arena_";
+    let method = mem::slice(
+        name, mem::len(prefix), mem::len(name)
+    ) orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "invalid Arena primitive name"
+    );
+    let rest = args.len(tree) - 1;
+    if rest != 0 {
+        return try self.receiver_arity_error("Arena", method, 0, rest);
+    }
+    if mem::equal_bytes(method, "len") {
+        out.* = try self.types.i64_type();
+        return null;
+    }
+    if mem::equal_bytes(method, "pop_or_panic") {
+        out.* = element;
+        return null;
+    }
+    if mem::equal_bytes(method, "deinit") {
+        out.* = try self.types.void_type();
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("Arena has no storage primitive `");
+    try message.append_bytes(method);
+    try message.append_byte(cast<u8>(96));
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &var Checker) check_arena_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let parts = try split_generic_args(self.allocator, type_arg) orelse
+        return try self.checker_error_at(
+        "type error", ast::zero_span(),
+        "std::arena::new expects 1 type argument"
+    );
+    defer parts.deinit();
+    if parts.len() != 1 {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(),
+            "std::arena::new expects 1 type argument"
+        );
+    }
+    var element = empty_type();
+    if parts.at(0) |retained| {
+        let retained_bytes = retained.as_bytes();
+        match try self.resolve_type(tree, retained_bytes) {
+            Value(value) => {
+                element = value;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+    } else {
+        return try self.checker_error_at(
+            "type error", ast::zero_span(), "missing Arena element type"
+        );
+    }
+    if args.len(tree) != 1 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::arena::new<");
+        try self.append_checker_type(&var message, element);
+        try message.append_bytes(">` expects exactly one allocator argument");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Allocator") {
+        return try self.typed_constructor_arg_error("std::arena::new", element, "Allocator", got);
+    }
+    out.* = try self.intern_arena_type(element);
+    return null;
+}
+
+fn (self: &var Checker) check_builtin_testing_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if !mem::equal_bytes(name, "std::internal::builtin::test_fail_equal") {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    var expected = empty_type();
+    match try self.resolve_type(tree, type_arg) {
+        Value(value) => {
+            expected = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if args.len(tree) != 2 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::testing::expect_equal<");
+        try self.append_checker_type(&var message, expected);
+        try message.append_bytes(">` expects 2 args");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var index = 0;
+    while index < 2 {
+        var got = empty_type();
+        let argument = args.get_or_panic(tree, index);
+        if try self.check_contextual_expr(tree, scope, argument, expected, &var got) |problem| {
+            return move problem;
+        }
+        if !same_type(got, expected) {
+            return try self.testing_equal_arg_error(index, expected, got);
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.void_type();
+    return null;
+}
+
+fn (self: &var Checker) check_builtin_box_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if box_primitive_method(name) |selected| {
+        handled.* = true;
+        var element = empty_type();
+        match try self.resolve_type(tree, type_arg) {
+            Value(value) => {
+                element = value;
+            },
+            Issue(issue) => return try self.type_resolution_diagnostic(issue),
+        }
+        if mem::len(selected) == 0 {
+            return self.check_box_constructor(tree, scope, element, args, out);
+        }
+        let receiver = try self.intern_box_type(element);
+        if try self.check_builtin_receiver(tree, scope, name, receiver, args) |problem| {
+            return move problem;
+        }
+        let rest = args.len(tree) - 1;
+        if rest != 0 {
+            return try self.receiver_arity_error("Box", selected, 0, rest);
+        }
+        if mem::equal_bytes(selected, "borrow") {
+            out.* = try self.types.borrow_wrapped_type(true, false, element);
+            return null;
+        }
+        if mem::equal_bytes(selected, "borrow_mut") {
+            out.* = try self.types.borrow_wrapped_type(true, true, element);
+            return null;
+        }
+        if mem::equal_bytes(selected, "take") {
+            out.* = element;
+            return null;
+        }
+        out.* = try self.types.void_type();
+        return null;
+    }
+    handled.* = false;
+    return null;
+}
+
+fn box_primitive_method(name: []u8) -> ?[]u8 {
+    if mem::equal_bytes(name, "std::internal::builtin::box") {
+        return "";
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_borrow") {
+        return "borrow";
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_borrow_mut") {
+        return "borrow_mut";
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_deinit") {
+        return "deinit";
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_take") {
+        return "take";
+    }
+    return null;
+}
+
+fn (self: &var Checker) check_box_constructor(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    element: Type,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 2 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::mem::Box<");
+        try self.append_checker_type(&var message, element);
+        try message.append_bytes(">` expects allocator and value");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var allocator_type = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var allocator_type) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(allocator_type, "Allocator") {
+        return try self.typed_constructor_arg_error(
+            "std::mem::Box", element, "Allocator", allocator_type
+        );
+    }
+    let value_expression = args.get_or_panic(tree, 1);
+    var value_type = empty_type();
+    if try self.check_expr(tree, scope, value_expression, &var value_type) |problem| {
+        return move problem;
+    }
+    var coerced = empty_type();
+    if try self.coerce_contextual_integer_literal(
+        tree,
+        value_expression,
+        element,
+        value_type,
+        &var coerced
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(coerced, element) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::mem::Box<");
+        try self.append_checker_type(&var message, element);
+        try message.append_bytes(">` expects ");
+        try self.append_checker_type(&var message, element);
+        try message.append_bytes(" value, got ");
+        try self.append_checker_type(&var message, coerced);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    let box_type = try self.intern_box_type(element);
+    out.* = try self.intern_error_type(box_type);
+    return null;
+}
+
+fn (self: &var Checker) check_builtin_array_method_type_apply(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    let constructor = mem::equal_bytes(name, "std::internal::builtin::array");
+    let prefix = "std::internal::builtin::array_";
+    if !constructor and !mem::starts_with(name, prefix) {
+        handled.* = false;
+        return null;
+    }
+    handled.* = true;
+    var element = empty_type();
+    match try self.resolve_type(tree, type_arg) {
+        Value(value) => {
+            element = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if constructor {
+        return self.check_array_constructor(tree, scope, element, args, out);
+    }
+    let receiver = try self.intern_array_type(element);
+    if try self.check_builtin_receiver(tree, scope, name, receiver, args) |problem| {
+        return move problem;
+    }
+    let method = mem::slice(
+        name, mem::len(prefix), mem::len(name)
+    ) orelse return try self.checker_error_at(
+        "type error", ast::zero_span(), "invalid Array primitive name"
+    );
+    return self.check_array_primitive_method(tree, scope, element, method, args, 1, out);
+}
+
+fn (self: &var Checker) check_array_constructor(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    element: Type,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if !self.is_type_parameter(element) {
+        if try self.reject_array_element_type(tree, element) |problem| {
+            return move problem;
+        }
+    }
+    if args.len(tree) != 1 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`std::array::Array<");
+        try self.append_checker_type(&var message, element);
+        try message.append_bytes(">` expects allocator");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !self.types.is_text(got, "Allocator") {
+        return try self.typed_constructor_arg_error("std::array::Array", element, "Allocator", got);
+    }
+    out.* = try self.intern_array_type(element);
+    return null;
+}
+
+fn (self: &var Checker) check_builtin_receiver(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    receiver: Type,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) == 0 {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` expects receiver");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    var got = empty_type();
+    let argument = args.get_or_panic(tree, 0);
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+        return move problem;
+    }
+    if !same_type(got, receiver) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` expects ");
+        try self.append_checker_type(&var message, receiver);
+        try message.append_bytes(" receiver, got ");
+        try self.append_checker_type(&var message, got);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return null;
+}
+
+fn (self: &var Checker) intern_array_type(element: Type) -> !Type {
+    return self.intern_single_argument_type("std::array::Array", element);
+}
+
+fn (self: &var Checker) intern_arena_type(element: Type) -> !Type {
+    return self.intern_single_argument_type("std::arena::Arena", element);
+}
+
+fn (self: &var Checker) intern_box_type(element: Type) -> !Type {
+    return self.intern_single_argument_type("std::mem::Box", element);
+}
+
+fn (self: &var Checker) intern_single_argument_type(base: []u8, argument: Type) -> !Type {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    try text.append_bytes(base);
+    try text.append_byte(cast<u8>(60));
+    try self.append_checker_type(&var text, argument);
+    try text.append_byte(cast<u8>(62));
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &var Checker) intern_error_type(value: Type) -> !Type {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    try text.append_byte(cast<u8>(33));
+    try self.append_checker_type(&var text, value);
+    let bytes = text.as_bytes();
+    return self.types.intern(bytes);
+}
+
+fn (self: &Checker) receiver_arity_error(
+    receiver: []u8,
+    method: []u8,
+    expected: i64,
+    got: i64
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(receiver);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(method);
+    try message.append_bytes("` expects ");
+    try fmt::append_i64(&var message, expected);
+    try message.append_bytes(" args, got ");
+    try fmt::append_i64(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) typed_constructor_arg_error(
+    name: []u8,
+    type_arg: Type,
+    expected: []u8,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_byte(cast<u8>(60));
+    try self.append_checker_type(&var message, type_arg);
+    try message.append_bytes(">` expects ");
+    try message.append_bytes(expected);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &Checker) testing_equal_arg_error(
+    index: i64,
+    expected: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("arg ");
+    try fmt::append_i64(&var message, index + 1);
+    try message.append_bytes(" of `std::testing::expect_equal<");
+    try self.append_checker_type(&var message, expected);
+    try message.append_bytes(">` expects ");
+    try self.append_checker_type(&var message, expected);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+// Checks one concrete generic body and memoizes its static argument set.
+fn (self: &var Checker) check_generic_instantiation(
+    tree: &var ast::Ast,
+    function: FunctionHandle,
+    substitutions: &map::Map<[]u8, Type>,
+    fields: &map::Map<[]u8, MetaFieldHandle>
+) -> !?diagnostic::Diagnostic {
+    var done = false;
+    if try self.enter_instantiation(function, substitutions, fields, &var done) |problem| {
+        return move problem;
+    }
+    if done {
+        return null;
+    }
+    let previous_meta = self.meta_bindings.current;
+    try self.bind_static_meta_fields(fields);
+    if try self.check_generic_instantiation_bound(tree, function, substitutions) |problem| {
+        self.meta_bindings.restore(previous_meta);
+        self.leave_instantiation();
+        return move problem;
+    }
+    self.meta_bindings.restore(previous_meta);
+    self.leave_instantiation();
+    return null;
+}
+
+fn (self: &var Checker) check_generic_instantiation_bound(
+    tree: &var ast::Ast,
+    function: FunctionHandle,
+    substitutions: &map::Map<[]u8, Type>
+) -> !?diagnostic::Diagnostic {
+    let facts = try self.copy_instance_function_facts(function) orelse
+        return try self.checker_error_at(
+        "type error", ast::zero_span(), "missing generic function metadata"
+    );
+    defer facts.deinit();
+    let body = facts.body orelse return null;
+    var static_params = array::new<StaticParamCheck>(self.allocator);
+    defer static_params.deinit();
+    let static_count = self.function_static_param_count(function);
+    var index = 0;
+    while index < static_count {
+        if try self.copy_static_param(function, index) |parameter| {
+            try static_params.append(move parameter);
+        } else {
+            return try self.checker_error_at(
+                "type error",
+                ast::zero_span(),
+                "missing static parameter metadata"
+            );
+        }
+        index = index + 1;
+    }
+    var runtime_params = array::new<InstanceParamCheck>(self.allocator);
+    defer runtime_params.deinit();
+    let runtime_count = self.function_runtime_param_count(function);
+    index = 0;
+    while index < runtime_count {
+        if try self.copy_instance_param(function, index) |parameter| {
+            try runtime_params.append(move parameter);
+        } else {
+            return try self.checker_error_at(
+                "type error",
+                ast::zero_span(),
+                "missing runtime parameter metadata"
+            );
+        }
+        index = index + 1;
+    }
+    let root = self.scopes.new_scope(null);
+    var static_values = map::new<[]u8, Type>(self.allocator);
+    errdefer static_values.deinit();
+    var type_params = map::new<[]u8, bool>(self.allocator);
+    errdefer type_params.deinit();
+    index = 0;
+    while static_params.at(index) |parameter| {
+        let parameter_name = parameter.name.as_bytes();
+        if parameter.is_type {
+            try type_params.insert(parameter_name, true);
+        } else {
+            let defined = try self.define_scope_param(
+                root,
+                parameter_name,
+                parameter.type_name,
+                false,
+                false,
+                false
+            );
+            if try self.require_scope_definition(parameter_name, defined) |problem| {
+                type_params.deinit();
+                static_values.deinit();
+                return move problem;
+            }
+            try static_values.insert(parameter_name, parameter.type_name);
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while runtime_params.at(index) |parameter| {
+        let parameter_type = try self.types.substitute_type_params(
+            parameter.type_name, substitutions
+        );
+        if try self.revalidate_substituted(tree, parameter_type) |problem| {
+            type_params.deinit();
+            static_values.deinit();
+            return move problem;
+        }
+        let parameter_name = parameter.name.as_bytes();
+        let defined = try self.define_scope_param(
+            root,
+            parameter_name,
+            parameter_type,
+            parameter.borrow,
+            parameter.mutable,
+            true
+        );
+        if try self.require_scope_definition(parameter_name, defined) |problem| {
+            type_params.deinit();
+            static_values.deinit();
+            return move problem;
+        }
+        index = index + 1;
+    }
+    let declared_return = facts.return_type;
+    let substituted_return = try self.types.substitute_type_params(declared_return, substitutions);
+    var return_type = empty_type();
+    if try self.resolve_instance_type(tree, substituted_return, &var return_type) |problem| {
+        type_params.deinit();
+        static_values.deinit();
+        return move problem;
+    }
+    if try self.revalidate_substituted(tree, return_type) |problem| {
+        type_params.deinit();
+        static_values.deinit();
+        return move problem;
+    }
+    let type_args = try copy_type_value_map(self.allocator, substitutions);
+    let previous_context = try self.enter_body_context(
+        CurrentFunction::Value(function),
+        facts.std,
+        return_type,
+        move type_params,
+        move type_args,
+        move static_values
+    );
+    if try self.check_instantiated_body(tree, root, body, return_type, &facts.name) |problem| {
+        self.restore_body_context(previous_context);
+        return move problem;
+    }
+    self.restore_body_context(previous_context);
+    return null;
+}
+
+fn (self: &var Checker) check_instantiated_body(
+    tree: &var ast::Ast,
+    root: ScopeHandle,
+    body: ast::Block,
+    return_type: Type,
+    name: &string::String
+) -> !?diagnostic::Diagnostic {
+    let saved_mark = self.mark;
+    self.mark = UnsafeMark { used: null };
+    var returns = false;
+    if try self.check_block(tree, root, body, return_type, &var returns) |problem| {
+        self.mark = saved_mark;
+        return move problem;
+    }
+    self.mark = saved_mark;
+    if !self.types.is_text(return_type, "void") and !returns {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("function `");
+        try message.append_string(name);
+        try message.append_bytes("` must return ");
+        try self.append_checker_type(&var message, return_type);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return null;
+}
+
+// resolve_instance_type rewrites the `std::meta` forms a declaration wrote into
+// the types they name, now that this instantiation has bound what they read.
+// A declaration writes `std::meta::field_type<T, f>` because neither name is
+// bound where it is written; the instance is where both are.
+fn (self: &var Checker) resolve_instance_type(
+    tree: &ast::Ast,
+    declared: Type,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var resolved = declared;
+    match try self.resolve_meta_type_deep(tree, declared) {
+        Value(value) => {
+            resolved = value;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+    if same_type(resolved, declared) {
+        out.* = declared;
+        return null;
+    }
+    match try self.resolve_retained_type(tree, resolved) {
+        Value(value) => {
+            out.* = value;
+            return null;
+        },
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+}
+
+fn (self: &var Checker) revalidate_substituted(
+    tree: &ast::Ast,
+    value: Type
+) -> !?diagnostic::Diagnostic {
+    match try self.resolve_retained_type(tree, value) {
+        Value(_) => return null,
+        Issue(issue) => return try self.type_resolution_diagnostic(issue),
+    }
+}
+
+fn (self: &var Checker) enter_instantiation(
+    function: FunctionHandle,
+    substitutions: &map::Map<[]u8, Type>,
+    fields: &map::Map<[]u8, MetaFieldHandle>,
+    done: &var bool
+) -> !?diagnostic::Diagnostic {
+    let key = try self.instance_key(function, substitutions, fields) orelse
+        return try self.checker_error_at(
+        "type error", ast::zero_span(), "missing generic function metadata"
+    );
+    let key_bytes = key.as_bytes();
+    let already_checked = self.checked_instances.contains(key_bytes);
+    if already_checked {
+        key.deinit();
+        done.* = true;
+        return null;
+    }
+    if self.instantiation_depth >= 64 {
+        done.* = true;
+        return try self.instantiation_depth_error(move key);
+    }
+    let retained_key = self.checked_instance_keys.add(move key);
+    let retained = self.checked_instance_keys.at(retained_key);
+    let retained_bytes = retained.as_bytes();
+    try self.checked_instances.insert(retained_bytes, true);
+    self.instantiation_depth = self.instantiation_depth + 1;
+    done.* = false;
+    return null;
+}
+
+fn (self: &var Checker) leave_instantiation() -> void {
+    self.instantiation_depth = self.instantiation_depth - 1;
+    return;
+}
+
+fn (self: &Checker) instance_key(
+    function: FunctionHandle,
+    substitutions: &map::Map<[]u8, Type>,
+    fields: &map::Map<[]u8, MetaFieldHandle>
+) -> !?string::String {
+    var key = string::new(self.allocator);
+    errdefer key.deinit();
+    if self.metadata.functions.at(function.index) |value| {
+        try key.append_string(&value.name);
+        try key.append_byte(cast<u8>(60));
+        var first = true;
+        var index = 0;
+        while value.signature.static_params.at(index) |parameter| {
+            let parameter_name = parameter.name.as_bytes();
+            if parameter.is_type {
+                if !first {
+                    try key.append_bytes(", ");
+                }
+                let bound = substitutions.get(parameter_name) orelse
+                    empty_type();
+                try self.append_checker_type(&var key, bound);
+                first = false;
+            }
+            index = index + 1;
+        }
+        try key.append_byte(cast<u8>(62));
+        index = 0;
+        while value.signature.static_params.at(index) |parameter| {
+            let parameter_name = parameter.name.as_bytes();
+            if fields.get(parameter_name) |field| {
+                let entry = self.meta_field_entries.at(field.node);
+                try key.append_byte(cast<u8>(46));
+                try self.append_checker_type(&var key, entry.owner);
+                try key.append_byte(cast<u8>(46));
+                try key.append_string(&entry.name);
+            }
+            index = index + 1;
+        }
+        return move key;
+    }
+    key.deinit();
+    return null;
+}
+
+fn (self: &Checker) instantiation_depth_error(key: string::String) -> !diagnostic::Diagnostic {
+    defer key.deinit();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("generic instantiation nested deeper than 64 at `");
+    let text = key.as_bytes();
+    let length = mem::len(text);
+    if length <= 120 {
+        try message.append_bytes(text);
+    } else {
+        try message.append_bytes(text[0..60]);
+        try message.append_bytes(" ... ");
+        try message.append_bytes(text[length - 60..length]);
+    }
+    try message.append_byte(cast<u8>(96));
+    var problem = try self.checker_message_at("type error", ast::zero_span(), move message);
+    errdefer problem.deinit();
+    try problem.with_help("each call grew its static argument, so no instance repeats");
+    return move problem;
+}
+
+fn (self: &Checker) copy_instance_function_facts(
+    function: FunctionHandle
+) -> !?InstanceFunctionFacts {
+    if self.metadata.functions.at(function.index) |value| {
+        let name = value.name.as_bytes();
+        return InstanceFunctionFacts {
+            name: try string::from_bytes(self.allocator, name),
+            body: value.body,
+            return_type: value.return_type,
+            std: value.signature.std
+        };
+    }
+    return null;
+}
+
+fn (self: &Checker) function_runtime_param_count(function: FunctionHandle) -> i64 {
+    if self.metadata.functions.at(function.index) |value| {
+        return value.params.len();
+    }
+    return 0;
+}
+
+fn (self: &Checker) copy_instance_param(
+    function: FunctionHandle,
+    index: i64
+) -> !?InstanceParamCheck {
+    if self.metadata.functions.at(function.index) |value| {
+        if value.signature.params.at(index) |parameter| {
+            if value.params.get(index) |type_name| {
+                let name = parameter.name.as_bytes();
+                return InstanceParamCheck {
+                    name: try string::from_bytes(self.allocator, name),
+                    type_name: type_name,
+                    borrow: value.borrow_params.get_or_panic(index),
+                    mutable: value.mut_borrow_params.get_or_panic(index)
+                };
+            }
+        }
+    }
+    return null;
+}
+
+fn copy_type_value_map(
+    allocator: Allocator,
+    source: &map::Map<[]u8, Type>
+) -> !map::Map<[]u8, Type> {
+    var copied = map::new<[]u8, Type>(allocator);
+    errdefer copied.deinit();
+    var index = 0;
+    while source.key_at(index) |name| {
+        if source.get(name) |value| {
+            try copied.insert(name, value);
+        }
+        index = index + 1;
+    }
+    return move copied;
+}
+
+// Rejects element graphs whose storage rules are not yet Array-safe.
+fn (self: &var Checker) reject_array_element_type(
+    tree: &ast::Ast,
+    element: Type
+) -> !?diagnostic::Diagnostic {
+    var seen = array::new<Type>(self.allocator);
+    defer seen.deinit();
+    let result = try self.check_array_storage_type(tree, element, &var seen);
+    match result {
+        Safe => return null,
+        Problem(problem) => return move problem,
+        Unsafe(reason) => {
+            defer reason.deinit();
+            var message = string::new(self.allocator);
+            errdefer message.deinit();
+            try message.append_bytes("Array element is not safe: ");
+            try message.append_string(&reason);
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
+        },
+    }
+}
+
+fn (self: &var Checker) check_array_storage_type(
+    tree: &ast::Ast,
+    value: Type,
+    seen: &var array::Array<Type>
+) -> !ArrayStorageCheck {
+    var index = 0;
+    while seen.get(index) |known| {
+        if same_type(known, value) {
+            return ArrayStorageCheck::Safe;
+        }
+        index = index + 1;
+    }
+    try seen.append(value);
+    if self.types.is_pointer_type(value) {
+        return ArrayStorageCheck::Unsafe(
+            try string::from_bytes(
+                self.allocator,
+                "type error: Array element cannot be raw pointer"
+            )
+        );
+    }
+    if self.types.contains_buffer_type(value) {
+        return ArrayStorageCheck::Unsafe(
+            try string::from_bytes(
+                self.allocator,
+                "type error: Array element cannot be stack buffer"
+            )
+        );
+    }
+    let retained = try self.types.copy_text(self.allocator, value);
+    defer retained.deinit();
+    let text = retained.as_bytes();
+    if split_generic_type(text) |parts| {
+        if mem::equal_bytes(parts.base, "option") {
+            match try self.resolve_type(tree, parts.args) {
+                Value(inner) => {
+                    return self.check_array_storage_type(tree, inner, seen);
+                },
+                Issue(issue) => {
+                    let problem = try self.type_resolution_diagnostic(issue);
+                    return ArrayStorageCheck::Problem(move problem);
+                },
+            }
+        }
+    }
+    if self.metadata.structs.get(text) |declaration| {
+        return self.check_array_storage_struct(tree, value, declaration, seen);
+    }
+    if self.metadata.unions_by_name.get(text) |handle| {
+        return self.check_array_storage_union(tree, value, handle, seen);
+    }
+    return ArrayStorageCheck::Safe;
+}
+
+fn (self: &var Checker) check_array_storage_struct(
+    tree: &ast::Ast,
+    owner: Type,
+    declaration: ast::Declaration,
+    seen: &var array::Array<Type>
+) -> !ArrayStorageCheck {
+    match tree.declarations.at(declaration.node) {
+        Struct(value) => {
+            var index = 0;
+            while value.fields.at(index) |field| {
+                var field_type = empty_type();
+                match try self.resolve_type_node(tree, field.type_name) {
+                    Value(resolved) => {
+                        field_type = resolved;
+                    },
+                    Issue(issue) => {
+                        let problem = try self.type_resolution_diagnostic(issue);
+                        return ArrayStorageCheck::Problem(move problem);
+                    },
+                }
+                let result = try self.check_array_storage_type(tree, field_type, seen);
+                match result {
+                    Safe => {},
+                    Problem(problem) => {
+                        return ArrayStorageCheck::Problem(move problem);
+                    },
+                    Unsafe(reason) => {
+                        let field_name = tree.texts.at(field.name.node);
+                        let name = field_name.as_bytes();
+                        return ArrayStorageCheck::Unsafe(
+                            try self.array_struct_storage_reason(owner, name, move reason)
+                        );
+                    },
+                }
+                index = index + 1;
+            }
+            return ArrayStorageCheck::Safe;
+        },
+        _ => return ArrayStorageCheck::Safe,
+    }
+}
+
+fn (self: &var Checker) check_array_storage_union(
+    tree: &ast::Ast,
+    owner: Type,
+    handle: UnionHandle,
+    seen: &var array::Array<Type>
+) -> !ArrayStorageCheck {
+    var variants = array::new<ArrayUnionStorageItem>(self.allocator);
+    defer variants.deinit();
+    if self.metadata.unions.at(handle.index) |union_type| {
+        var index = 0;
+        while union_type.variants.key_at(index) |name| {
+            if union_type.variants.get(name) |payload| {
+                if !same_type(payload, empty_type()) {
+                    try variants.append(ArrayUnionStorageItem {
+                        name: try string::from_bytes(self.allocator, name),
+                        payload: payload
+                    });
+                }
+            }
+            index = index + 1;
+        }
+    }
+    var index = 0;
+    while variants.at(index) |variant| {
+        let result = try self.check_array_storage_type(tree, variant.payload, seen);
+        match result {
+            Safe => {},
+            Problem(problem) => {
+                return ArrayStorageCheck::Problem(move problem);
+            },
+            Unsafe(reason) => {
+                return ArrayStorageCheck::Unsafe(
+                    try self.array_union_storage_reason(owner, &variant.name, move reason)
+                );
+            },
+        }
+        index = index + 1;
+    }
+    return ArrayStorageCheck::Safe;
+}
+
+fn (self: &Checker) array_struct_storage_reason(
+    owner: Type,
+    field: []u8,
+    reason: string::String
+) -> !string::String {
+    defer reason.deinit();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type error: struct `");
+    try self.append_checker_type(&var message, owner);
+    try message.append_byte(cast<u8>(46));
+    try message.append_bytes(field);
+    try message.append_bytes("` cannot be Array element: ");
+    try message.append_string(&reason);
+    return move message;
+}
+
+fn (self: &Checker) array_union_storage_reason(
+    owner: Type,
+    variant: &string::String,
+    reason: string::String
+) -> !string::String {
+    defer reason.deinit();
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("type error: union `");
+    try self.append_checker_type(&var message, owner);
+    try message.append_bytes("::");
+    try message.append_string(variant);
+    try message.append_bytes("` cannot be Array element: ");
+    try message.append_string(&reason);
+    return move message;
+}

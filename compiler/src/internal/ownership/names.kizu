@@ -1,0 +1,692 @@
+import compiler::internal::ast;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Holds the Go `string` values internal/ownership passes around: type
+// spellings, binding names, qualified names, field paths. Go shares immutable
+// strings freely; here every distinct text is retained once in a NameTable and
+// handed on as the copy handle Name, so checker records hold no owner Strings
+// and equal spellings compare by handle. The text helpers of checker.go that
+// only read spellings live here as well.
+
+/// Identifies one retained text; a null node is the empty text.
+pub struct Name {
+    node: ?arena::Handle<string::String>
+}
+
+/// Returns the empty text, the Go `""`.
+pub fn empty_name() -> Name {
+    return Name { node: null };
+}
+
+/// Reports whether two names spell the same text.
+pub fn same_name(left: Name, right: Name) -> bool {
+    if left.node |left_node| {
+        if right.node |right_node| {
+            return left_node == right_node;
+        }
+        return false;
+    }
+    if right.node |_| {
+        return false;
+    }
+    return true;
+}
+
+/// Is the payload and mutability of one `&T` / `&var T` / `?&T` spelling.
+pub struct BorrowParts {
+    pub mutable: bool,
+    pub inner: Name
+}
+
+/// Is `Base` and `Args` of one `Base<Args>` spelling.
+pub struct GenericParts {
+    pub base: Name,
+    pub args: Name
+}
+
+/// Is the error and success side of one `E!T` / `!T` spelling.
+pub struct ErrorUnionParts {
+    pub err: Name,
+    pub success: Name
+}
+
+/// Retains every text one checker run names.
+pub struct NameTable {
+    allocator: Allocator,
+    texts: arena::Arena<string::String>,
+    by_text: map::Map<[]u8, Name>,
+    empty: arena::Handle<string::String>,
+    parsed: typ::Table
+}
+
+pub fn new_name_table(allocator: Allocator) -> NameTable {
+    var texts = arena::new<string::String>(allocator);
+    let empty = texts.add(string::new(allocator));
+    return NameTable {
+        allocator: allocator,
+        texts: move texts,
+        by_text: map::new<[]u8, Name>(allocator),
+        empty: empty,
+        parsed: typ::new(allocator)
+    };
+}
+
+fn (self: NameTable) deinit() -> void {
+    self.texts.deinit();
+    self.by_text.deinit();
+    self.parsed.deinit();
+    return;
+}
+
+/// Returns the retained text of a name; callers bind `as_bytes()` locally.
+pub fn name_text(names: &NameTable, name: Name) -> &string::String {
+    let node = name.node orelse names.empty;
+    return names.texts.at(node);
+}
+
+/// Returns the one name that spells text, retaining it on first use.
+fn (self: &var NameTable) intern(text: []u8) -> !Name {
+    if mem::len(text) == 0 {
+        return empty_name();
+    }
+    if self.by_text.get(text) |known| {
+        return known;
+    }
+    let owned = try string::from_bytes(self.allocator, text);
+    return self.intern_owned(move owned);
+}
+
+/// Names bytes `start..end` of an already retained name. The lookup runs
+/// while the source text is borrowed; only a miss copies, after the borrow
+/// has ended, so the table can then retain the copy.
+fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> !Name {
+    if start >= end {
+        return empty_name();
+    }
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if self.by_text.get(bytes[start..end]) |known| {
+        return known;
+    }
+    let copied = try string::from_bytes(self.allocator, bytes[start..end]);
+    return self.intern_owned(move copied);
+}
+
+/// Returns the one name that spells an owned text, consuming the text.
+fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
+    if text.len() == 0 {
+        text.deinit();
+        return empty_name();
+    }
+    if self.find_name(&text) |known| {
+        text.deinit();
+        return known;
+    }
+    let handle = self.texts.add(move text);
+    let name = Name { node: handle };
+    let retained = self.texts.at(handle);
+    let retained_bytes = retained.as_bytes();
+    try self.by_text.insert(retained_bytes, name);
+    return name;
+}
+
+fn (self: &NameTable) find_name(text: &string::String) -> ?Name {
+    let bytes = text.as_bytes();
+    return self.by_text.get(bytes);
+}
+
+/// Names one Ast text.
+fn (self: &var NameTable) intern_text(tree: &ast::Ast, text: ast::Text) -> !Name {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.intern(bytes);
+}
+
+/// Names the canonical spelling of one parsed type, as `typ.Text` does.
+fn (self: &var NameTable) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name {
+    let rendered = try typ::render(self.allocator, &tree.types, value);
+    return self.intern_owned(move rendered);
+}
+
+/// Names a parsed type that may be absent, as `typ.Text(nil)` is `""`.
+fn (self: &var NameTable) intern_optional_type(tree: &ast::Ast, value: ?typ::Type) -> !Name {
+    let present = value orelse return empty_name();
+    return self.intern_type(tree, present);
+}
+
+/// Names the rendering of one expression, the Go `expr.String()`.
+fn (self: &var NameTable) intern_expression(tree: &ast::Ast, value: ast::Expression) -> !Name {
+    let rendered = try ast::render_expression(self.allocator, tree, value);
+    return self.intern_owned(move rendered);
+}
+
+/// Reports whether name spells text.
+fn (self: &NameTable) is(name: Name, text: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, text);
+}
+
+/// Reports whether an Ast text is empty, the Go `name == ""`.
+pub fn text_empty(tree: &ast::Ast, text: ast::Text) -> bool {
+    return tree.texts.at(text.node).len() == 0;
+}
+
+/// Reports whether a name and an Ast text spell the same bytes.
+fn (self: &NameTable) is_text(name: Name, tree: &ast::Ast, text: ast::Text) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    let other = tree.texts.at(text.node);
+    let other_bytes = other.as_bytes();
+    return mem::equal_bytes(bytes, other_bytes);
+}
+
+fn is_empty(name: Name) -> bool {
+    if name.node |_| {
+        return false;
+    }
+    return true;
+}
+
+fn (self: &NameTable) len(name: Name) -> i64 {
+    let retained = name_text(self, name);
+    return retained.len();
+}
+
+fn (self: &NameTable) starts_with(name: Name, prefix: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::starts_with(bytes, prefix);
+}
+
+fn (self: &NameTable) ends_with(name: Name, suffix: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return ends_with_bytes(bytes, suffix);
+}
+
+fn ends_with_bytes(bytes: []u8, suffix: []u8) -> bool {
+    let length = mem::len(bytes);
+    let suffix_length = mem::len(suffix);
+    if suffix_length > length {
+        return false;
+    }
+    return mem::equal_bytes(bytes[length - suffix_length..length], suffix);
+}
+
+/// Reports whether name contains byte, the Go `strings.Contains` on one byte.
+fn (self: &NameTable) contains_byte(name: Name, byte: u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return index_of_byte(bytes, byte) >= 0;
+}
+
+/// Returns the first index of byte in bytes, or -1.
+pub fn index_of_byte(bytes: []u8, byte: u8) -> i64 {
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+/// Returns the last index of byte in bytes, or -1.
+pub fn last_index_of_byte(bytes: []u8, byte: u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 0 {
+        index = index - 1;
+        if bytes[index] == byte {
+            return index;
+        }
+    }
+    return -1;
+}
+
+/// Appends the text of a name to a message under construction.
+fn (self: &NameTable) append_to(out: &var string::String, name: Name) -> !void {
+    let retained = name_text(self, name);
+    return out.append_string(retained);
+}
+
+/// Names the text of `format` with each `%s` replaced in order by a, b, c.
+/// Unused arguments are ignored, so one shape serves every arity up to three.
+fn (self: &var NameTable) format(format: []u8, a: Name, b: Name, c: Name) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var used = 0;
+    var index = 0;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) and
+            format[index + 1] == cast<u8>(115) {
+            if used == 0 {
+                try self.append_to(&var out, a);
+            }
+            if used == 1 {
+                try self.append_to(&var out, b);
+            }
+            if used == 2 {
+                try self.append_to(&var out, c);
+            }
+            used = used + 1;
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
+        }
+    }
+    return self.intern_owned(move out);
+}
+
+/// Names `prefix` + name.
+fn (self: &var NameTable) prefixed(prefix: []u8, name: Name) -> !Name {
+    var out = try string::from_bytes(self.allocator, prefix);
+    errdefer out.deinit();
+    try self.append_to(&var out, name);
+    return self.intern_owned(move out);
+}
+
+/// Names name with a leading prefix removed, the Go `strings.TrimPrefix`.
+fn (self: &var NameTable) trim_prefix(name: Name, prefix: []u8) -> !Name {
+    if !self.starts_with(name, prefix) {
+        return name;
+    }
+    return self.intern_slice(name, mem::len(prefix), self.len(name));
+}
+
+/// Names the text after the first `!`, or name itself without one: the
+/// payload a `!T` return carries.
+fn (self: &var NameTable) after_bang(name: Name) -> !Name {
+    let index = self.index_of(name, cast<u8>(33));
+    if index < 0 {
+        return name;
+    }
+    return self.intern_slice(name, index + 1, self.len(name));
+}
+
+/// Returns the first index of byte in the text of name, or -1.
+fn (self: &NameTable) index_of(name: Name, byte: u8) -> i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return index_of_byte(bytes, byte);
+}
+
+/// Returns the last index of byte in the text of name, or -1.
+fn (self: &NameTable) last_index_of(name: Name, byte: u8) -> i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return last_index_of_byte(bytes, byte);
+}
+
+/// Names T for a `?T` spelling, the Go `typ.OptionalElem`.
+fn (self: &var NameTable) optional_elem(name: Name) -> !?Name {
+    let end = self.len(name);
+    let start = self.optional_elem_start(name) orelse return null;
+    return try self.intern_slice(name, start, end);
+}
+
+/// Returns where the payload of a `?T` spelling starts, or null when name is
+/// not one; `typ::optional_elem` holds the rule.
+fn (self: &NameTable) optional_elem_start(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if !mem::starts_with(bytes, "?") or mem::starts_with(bytes, "?ptr<") {
+        return null;
+    }
+    return 1;
+}
+
+/// Reports whether name is a `?T` spelling without naming T.
+fn (self: &NameTable) is_optional(name: Name) -> bool {
+    if self.optional_elem_start(name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Names T for `?T`, or name itself otherwise.
+fn (self: &var NameTable) optional_payload_name(name: Name) -> !Name {
+    if try self.optional_elem(name) |elem| {
+        return elem;
+    }
+    return name;
+}
+
+/// Splits `?&T` / `?&var T`, the Go `typ.BorrowOptionalElem`.
+fn (self: &var NameTable) borrow_optional_elem(name: Name) -> !?BorrowParts {
+    let end = self.len(name);
+    let start = self.borrow_optional_start(name) orelse return null;
+    let inner = try self.intern_slice(name, start, end);
+    return BorrowParts { mutable: start == 6, inner: inner };
+}
+
+/// Returns where the payload of `?&T` (2) / `?&var T` (6) starts, or null.
+fn (self: &NameTable) borrow_optional_start(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if mem::starts_with(bytes, "?&var ") {
+        return 6;
+    }
+    if mem::starts_with(bytes, "?&") {
+        return 2;
+    }
+    return null;
+}
+
+/// Reports whether name is a borrow optional without naming its payload.
+fn (self: &NameTable) is_borrow_optional(name: Name) -> bool {
+    if self.borrow_optional_start(name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Splits `&T` / `&var T`, the Go `explicitOwnershipBorrowType`.
+fn (self: &var NameTable) explicit_borrow(name: Name) -> !?BorrowParts {
+    let end = self.len(name);
+    let start = self.explicit_borrow_start(name) orelse return null;
+    let inner = try self.intern_slice(name, start, end);
+    return BorrowParts { mutable: start == 5, inner: inner };
+}
+
+/// Returns where the payload of `&T` (1) / `&var T` (5) starts, or null.
+fn (self: &NameTable) explicit_borrow_start(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if !mem::starts_with(bytes, "&") {
+        return null;
+    }
+    var start = 1;
+    if mem::starts_with(bytes, "&var ") {
+        start = 5;
+    }
+    if start == mem::len(bytes) {
+        return null;
+    }
+    return start;
+}
+
+/// Reports whether name is an explicit borrow spelling.
+fn (self: &NameTable) is_explicit_borrow(name: Name) -> bool {
+    if self.explicit_borrow_start(name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Names the value visible through an explicit borrow, the Go
+/// `borrowedOwnershipValueType`.
+fn (self: &var NameTable) borrowed_value(name: Name) -> !Name {
+    if try self.explicit_borrow(name) |parts| {
+        return parts.inner;
+    }
+    return name;
+}
+
+/// Splits `Base<Args>`, the Go `splitGenericType`.
+fn (self: &var NameTable) split_generic(name: Name) -> !?GenericParts {
+    let end = self.len(name);
+    let open = self.generic_open(name) orelse return null;
+    let base = try self.intern_slice(name, 0, open);
+    let args = try self.intern_slice(name, open + 1, end - 1);
+    return GenericParts { base: base, args: args };
+}
+
+/// Returns the index of the `<` that opens the static arguments of a
+/// `Base<Args>` spelling, or null; `typ::split_apply` holds the rule.
+fn (self: &NameTable) generic_open(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return generic_open_index(bytes);
+}
+
+/// Returns the index of the `<` of a `Base<Args>` spelling, or null when the
+/// bytes are not one; the rule is `typ::split_apply`'s.
+pub fn generic_open_index(bytes: []u8) -> ?i64 {
+    let end = mem::len(bytes);
+    let open = index_of_byte(bytes, cast<u8>(60));
+    if open < 1 or end == 0 or bytes[end - 1] != cast<u8>(62) or open + 1 == end - 1 {
+        return null;
+    }
+    return open;
+}
+
+/// Reports whether name applies base to static arguments.
+fn (self: &NameTable) generic_base_is(name: Name, base: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    let open = generic_open_index(bytes) orelse return false;
+    return mem::equal_bytes(bytes[0..open], base);
+}
+
+/// Names the comma-separated static arguments of one list, or null when the
+/// list is malformed, the Go `splitGenericArgs`.
+fn (self: &var NameTable) split_generic_args(args: Name) -> !?array::Array<Name> {
+    let retained = name_text(self, args);
+    let bytes = retained.as_bytes();
+    let parts = try typ::split_args_optional(self.allocator, bytes) orelse return null;
+    defer parts.deinit();
+    return try self.intern_all(&parts);
+}
+
+/// Names every retained String of a list in order.
+fn (self: &var NameTable) intern_all(parts: &array::Array<string::String>) -> !array::Array<Name> {
+    var out = array::new<Name>(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while parts.at(index) |part| {
+        let bytes = part.as_bytes();
+        try out.append(try self.intern(bytes));
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Splits `E!T` / `!T` at the top-level `!`, the Go `errorUnionParts`. A
+/// spelling without a top-level `!` is not an error union; the parser
+/// confirms the shape of one that has it.
+fn (self: &var NameTable) error_union_parts(name: Name) -> !?ErrorUnionParts {
+    let bang = self.top_level_bang(name) orelse return null;
+    let err = try self.intern_slice(name, 0, bang);
+    let success = try self.intern_slice(name, bang + 1, self.len(name));
+    return ErrorUnionParts { err: err, success: success };
+}
+
+/// Returns the index of the `!` that splits an error union spelling, or null
+/// when the spelling is not one.
+fn (self: &NameTable) top_level_bang(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    var depth = 0;
+    var index = 0;
+    while index < mem::len(bytes) {
+        let byte = bytes[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        }
+        if byte == cast<u8>(62) {
+            depth = depth - 1;
+        }
+        if byte == cast<u8>(33) and depth == 0 {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Names the element of `ptr<T>` / `?ptr<T>`, the Go `rawPointerElement`.
+fn (self: &var NameTable) raw_pointer_element(name: Name) -> !?Name {
+    let end = self.len(name);
+    let start = self.raw_pointer_element_start(name) orelse return null;
+    return try self.intern_slice(name, start, end - 1);
+}
+
+/// Returns where the element of `ptr<T>` / `?ptr<T>` starts, or null.
+fn (self: &NameTable) raw_pointer_element_start(name: Name) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return raw_pointer_element_index(bytes);
+}
+
+/// Reports whether name is a raw pointer spelling, the Go `isRawPointerType`.
+fn (self: &NameTable) is_raw_pointer(name: Name) -> bool {
+    if self.raw_pointer_element_start(name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Returns where T starts in `ptr<T>` / `?ptr<T>`, or null for other bytes.
+fn raw_pointer_element_index(bytes: []u8) -> ?i64 {
+    var start = 0;
+    if mem::starts_with(bytes, "?") {
+        start = 1;
+    }
+    let open = generic_open_index(bytes[start..mem::len(bytes)]) orelse return null;
+    if !mem::equal_bytes(bytes[start..start + open], "ptr") {
+        return null;
+    }
+    return start + open + 1;
+}
+
+/// Reports whether a spelling is a fixed-length stack buffer (`[N]u8`).
+fn (self: &NameTable) is_buffer_type(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::len(bytes) > 1 and bytes[0] == cast<u8>(91) and
+        bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
+}
+
+/// Reports whether a type is a fixed-width integer, the Go
+/// `isIntegerOwnershipType`.
+fn (self: &NameTable) is_integer_type(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return integer_type_bytes(bytes);
+}
+
+fn integer_type_bytes(bytes: []u8) -> bool {
+    return mem::equal_bytes(bytes, "i8") or mem::equal_bytes(bytes, "i16") or
+        mem::equal_bytes(bytes, "i32") or mem::equal_bytes(bytes, "i64") or
+        mem::equal_bytes(bytes, "u8") or mem::equal_bytes(bytes, "u16") or
+        mem::equal_bytes(bytes, "u32") or mem::equal_bytes(bytes, "u64") or
+        mem::equal_bytes(bytes, "usize") or mem::equal_bytes(bytes, "isize");
+}
+
+/// Reports whether a type is a plain scalar, the Go `isPlainDataType` base
+/// case.
+fn (self: &NameTable) is_scalar_type(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, "bool") or mem::equal_bytes(bytes, "void") or
+        mem::equal_bytes(bytes, "f32") or mem::equal_bytes(bytes, "f64") or
+        integer_type_bytes(bytes);
+}
+
+/// Reports whether a type spelling is a std wrapper parameter, the Go
+/// `isGenericParamName`.
+fn (self: &NameTable) is_generic_param_name(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::len(bytes) > 0 and bytes[0] >= cast<u8>(65) and bytes[0] <= cast<u8>(90);
+}
+
+/// Shortens a spelling for a diagnostic, the Go `elideTypeText`.
+fn (self: &var NameTable) elide(name: Name) -> !Name {
+    let length = self.len(name);
+    if length <= 120 {
+        return name;
+    }
+    let out = try self.elided_copy(name);
+    return self.intern_owned(move out);
+}
+
+fn (self: &NameTable) elided_copy(name: Name) -> !string::String {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    let length = mem::len(bytes);
+    var out = try string::from_bytes(self.allocator, bytes[0..60]);
+    errdefer out.deinit();
+    try out.append_bytes(" ... ");
+    try out.append_bytes(bytes[length - 60..length]);
+    return move out;
+}
+
+/// Replaces type parameters in one spelling through the type parser, the Go
+/// `typ.SubstituteText`. Every spelling that reaches this checker passed the
+/// type checker, so a parse failure is propagated instead of tolerated.
+fn (self: &var NameTable) substitute_text(
+    name: Name,
+    names: &array::Array<string::String>,
+    replacements: &array::Array<string::String>
+) -> !Name {
+    let out = try self.substituted_copy(name, names, replacements);
+    return self.intern_owned(move out);
+}
+
+fn (self: &NameTable) substituted_copy(
+    name: Name,
+    names: &array::Array<string::String>,
+    replacements: &array::Array<string::String>
+) -> !string::String {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return typ::substitute_owned_text(self.allocator, bytes, names, replacements);
+}
+
+/// Reports whether a type owns storage a returned view could alias, the Go
+/// `isContainerTypeName`.
+fn (self: &NameTable) is_container_type(name: Name) -> bool {
+    if self.is(name, "std::string::String") or self.is_buffer_type(name) {
+        return true;
+    }
+    return self.generic_base_is(name, "std::array::Array") or self.generic_base_is(name, "std::map::Map") or
+        self.generic_base_is(name, "std::mem::Box") or self.generic_base_is(name, "std::arena::Arena");
+}
+
+/// Reports whether a spelling parses to a plain type name (a path with or
+/// without static arguments) rather than a view or wrapper form, the Go
+/// `parsed.(*typ.Name)` test.
+fn (self: &NameTable) is_plain_name(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if mem::len(bytes) == 0 {
+        return false;
+    }
+    let first = bytes[0];
+    let word = (first >= cast<u8>(65) and first <= cast<u8>(90)) or
+        (first >= cast<u8>(97) and first <= cast<u8>(122)) or first == cast<u8>(95);
+    if !word or mem::starts_with(bytes, "const ") {
+        return false;
+    }
+    if self.top_level_bang(name) |_| {
+        return false;
+    }
+    return true;
+}
+
+/// Names the base of a generic application, or the name itself when it
+/// applies nothing, the Go `strings.Join(name.Path, "::")`.
+fn (self: &var NameTable) generic_base_or_self(name: Name) -> !Name {
+    if try self.split_generic(name) |parts| {
+        return parts.base;
+    }
+    return name;
+}
+
+/// Copies the text of a name into an owned String, for the few places that
+/// need its bytes while the table is mutated or `&var self` methods run.
+fn (self: &NameTable) copy(name: Name) -> !string::String {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return string::from_bytes(self.allocator, bytes);
+}

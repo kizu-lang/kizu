@@ -1,0 +1,1318 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import std::arena;
+import std::array;
+
+// Port of the assignment, expression statement, if / while / for / match
+// statement, and branch agreement checks of internal/ownership/checker.go,
+// together with the capture recognizers those statements share.
+
+/// Moves the assigned value into an existing binding, the Go
+/// `checkAssignStmt`.
+fn (self: &var Checker) check_assign_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::AssignStmt
+) -> !?diagnostic::Diagnostic {
+    if self.direct_assignment_root(tree, env, statement.target) |target| {
+        var type_name = empty_name();
+        let target_type = self.binding(target).type_name;
+        if try self.move_contextual_expr(tree, env, statement.value, target_type, &var type_name) |failed| {
+            return move failed;
+        }
+        if self.store.has_any_borrow(target) {
+            return try self.error1(
+                tree, ast::zero_span(), "borrow error: value `%s` cannot be assigned while borrowed",
+                Arg::Str(self.binding(target).name)
+            );
+        }
+        // Overwriting a live owner silently drops it (ADR-0091). A `&var`
+        // parameter always points at a live value the caller still owns, so
+        // the same rule stops overwriting an owned type through it.
+        if try self.binding_needs_consume(target) or
+            (self.is_mut_borrow_param(target) and try self.value_type_needs_consume(target_type)) {
+            return try self.error1(
+                tree, expression_span(tree, statement.value),
+                "move error: owned value `%s` is overwritten before cleanup",
+                Arg::Str(self.binding(target).name)
+            );
+        }
+        if try self.check_cleanup_receiver_overwrite(tree, target, statement) |failed| {
+            return move failed;
+        }
+        if self.store.binding_mut(target) |record| {
+            record.type_name = type_name;
+            record.moved = false;
+            record.deinitialized = false;
+            record.arena_id = 0;
+            record.handle_arena_id = 0;
+        }
+        try self.set_arena_provenance(tree, env, target, statement.value);
+        return null;
+    }
+    var ignored = empty_name();
+    if try self.move_expr(tree, env, statement.value, &var ignored) |failed| {
+        return move failed;
+    }
+    if try self.check_assignment_borrow_conflict(tree, env, statement.target) |failed| {
+        return move failed;
+    }
+    if try self.direct_field_root(tree, env, statement.target) |root| {
+        if !is_empty(root.path) {
+            if try self.check_owner_field_overwrite(tree, root.root, root.path, statement) |failed| {
+                return move failed;
+            }
+            try self.clear_field_deinit(root.root, root.path);
+        }
+    }
+    if self.assignment_root(tree, env, statement.target) |_| {
+        return null;
+    }
+    return self.read_expr(tree, env, statement.target, &var ignored);
+}
+
+/// Rejects assigning over a live owner field, the Go
+/// `checkOwnerFieldOverwrite`. The assignment releases nothing, so the value
+/// the field held leaks. A field the owner's own deinit has consumed is not
+/// live, so re-filling it stays allowed.
+fn (self: &var Checker) check_owner_field_overwrite(
+    tree: &ast::Ast,
+    root: BindingHandle,
+    field: Name,
+    statement: ast::AssignStmt
+) -> !?diagnostic::Diagnostic {
+    if self.field_deinit_name(root, field) {
+        return null;
+    }
+    let field_type = self.field_path_type(self.binding(root).type_name, field) orelse return null;
+    if !try self.field_type_needs_consume(field_type) {
+        return null;
+    }
+    return try self.error2(
+        tree, expression_span(tree, statement.value),
+        "move error: owner field `%s.%s` is overwritten before cleanup",
+        Arg::Str(self.binding(root).name), Arg::Str(field)
+    );
+}
+
+/// Reads standalone expressions, the Go `checkExprStmt`; normal calls handle
+/// argument moves.
+fn (self: &var Checker) check_expr_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    var produced = empty_name();
+    if try self.read_expr(tree, env, expression, &var produced) |failed| {
+        return move failed;
+    }
+    return self.check_discarded_owner(tree, expression, produced);
+}
+
+/// Rejects an expression statement that produces an owner, the Go
+/// `checkDiscardedOwner`. Cleanup obligations are tracked per binding, so a
+/// value that is never bound is never tracked; binding the value is what
+/// makes the obligation visible.
+fn (self: &var Checker) check_discarded_owner(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    produced: Name
+) -> !?diagnostic::Diagnostic {
+    if !try self.result_type_needs_consume(produced) {
+        return null;
+    }
+    return try self.error1(
+        tree, expression_span(tree, expression),
+        "move error: this expression produces owned `%s` and discards it; bind the value and consume it",
+        Arg::Str(produced)
+    );
+}
+
+/// Is the recognized capture condition of an if / while, or its plain read.
+struct CaptureCondition {
+    is_borrow_cond: bool,
+    borrow_cond: ContainerBorrowCondition,
+    cond_type: Name
+}
+
+fn (self: CaptureCondition) deinit() -> void {
+    self.borrow_cond.deinit();
+    return;
+}
+
+/// Reads the condition of a capturing if / while: the borrow-optional
+/// recognizer first, the sanctioned plain read otherwise.
+fn (self: &var Checker) read_capture_head(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    condition: ast::Expression,
+    capture: ast::Text,
+    out: &var CaptureCondition
+) -> !?diagnostic::Diagnostic {
+    out.is_borrow_cond = false;
+    if !text_empty(tree, capture) {
+        if try self.match_container_borrow_condition(tree, env, condition, &var out.borrow_cond, &var out.is_borrow_cond) |failed| {
+            return move failed;
+        }
+    }
+    if !out.is_borrow_cond {
+        return self.read_capture_condition(tree, env, condition, capture, &var out.cond_type);
+    }
+    return null;
+}
+
+/// Merges possible moves from either branch into the outer scope, the Go
+/// `checkIfStmt`.
+fn (self: &var Checker) check_if_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::IfStmt
+) -> !?diagnostic::Diagnostic {
+    var head = try self.new_capture_condition();
+    defer head.deinit();
+    if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
+        return move failed;
+    }
+    let left = try self.store.clone_scope(env);
+    let left_scope = self.store.child(left);
+    // Both clones come first, so what the capture records about a field
+    // lands on the binding the branches were cloned from rather than on one
+    // of them. Opening a `?Owner` field discharges its cleanup on both paths
+    // — the value is released where it is there and there is nothing to
+    // release where it is not — so it is not a branch that consumed it.
+    let right = try self.store.clone_scope(env);
+    // The tie borrows the branch's clone of each container: the branch body
+    // is checked against that clone, so only its bindings make its mutations
+    // wait.
+    var consumes_field = false;
+    if try self.define_capture(
+        tree, statement.capture, statement.condition, &head, false, env, left_scope, &var consumes_field
+    ) |failed| {
+        return move failed;
+    }
+    if try self.check_block(tree, left_scope, statement.consequence) |failed| {
+        return move failed;
+    }
+    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, left_scope) |failed| {
+        return move failed;
+    }
+    var right_live = true;
+    if statement.alternative |alternative| {
+        let right_scope = self.store.child(right);
+        if try self.check_block(tree, right_scope, alternative) |failed| {
+            return move failed;
+        }
+        right_live = !self.block_terminates(tree, alternative);
+    }
+    // A branch that always returns cannot affect the code after the if.
+    let left_live = !self.block_terminates(tree, statement.consequence);
+    if try self.check_branch_consume_agreement(tree, env, left, right, left_live, right_live) |failed| {
+        return move failed;
+    }
+    if left_live {
+        try self.store.merge_moved_from(env, left);
+    }
+    if right_live {
+        try self.store.merge_moved_from(env, right);
+    }
+    return null;
+}
+
+fn (self: &Checker) new_capture_condition() -> !CaptureCondition {
+    return CaptureCondition {
+        is_borrow_cond: false,
+        borrow_cond: ContainerBorrowCondition {
+            targets: array::new<BorrowCaptureTarget>(self.allocator),
+            elem: empty_name(),
+            mutable: false
+        },
+        cond_type: empty_name()
+    };
+}
+
+/// Sanctions the one direct user call whose optional payload can carry an
+/// input view, the Go `readCaptureCondition`. The capture records that
+/// provenance after the call is read; nested calls remain ordinary calls and
+/// cannot borrow a local view past their statement.
+fn (self: &var Checker) read_capture_condition(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    capture: ast::Text,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let unwrapped = unwrap_expression_markers(tree, expression);
+    if text_empty(tree, capture) {
+        return self.read_expr(tree, env, expression, out);
+    }
+    let call = call_expr(tree, unwrapped) orelse return self.read_expr(tree, env, expression, out);
+    let called = try self.called_user_function(tree, call.callee) orelse return self.read_expr(tree, env, expression, out);
+    var result_type = self.return_type_name(called.function);
+    if try self.names.error_union_parts(result_type) |parts| {
+        result_type = parts.success;
+    }
+    let payload = try self.names.optional_elem(result_type) orelse return self.read_expr(tree, env, expression, out);
+    if !try self.view_carrying_type(payload) {
+        return self.read_expr(tree, env, expression, out);
+    }
+    let saved = self.view_capture_call;
+    self.view_capture_call = unwrapped;
+    if try self.read_expr(tree, env, expression, out) |failed| {
+        self.view_capture_call = saved;
+        return move failed;
+    }
+    self.view_capture_call = saved;
+    return null;
+}
+
+/// Rejects an owner only one surviving branch consumes, the Go
+/// `checkBranchConsumeAgreement`. After the merge the value is unusable, so
+/// the branch that did not consume it can neither release it nor hand it on,
+/// and cleaning up after the if would double-free the branch that already
+/// did. Both paths must agree.
+fn (self: &var Checker) check_branch_consume_agreement(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    left: ScopeHandle,
+    right: ScopeHandle,
+    left_live: bool,
+    right_live: bool
+) -> !?diagnostic::Diagnostic {
+    // A branch that always returns had its own obligations checked at that
+    // return, so it puts nothing on the path that continues past the if.
+    if !left_live or !right_live {
+        return null;
+    }
+    var split = none_binding();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        if !try self.binding_needs_consume(value) {
+            continue;
+        }
+        let id = self.binding(value).id;
+        let in_left = self.store.find_by_id(left, id) orelse continue;
+        let in_right = self.store.find_by_id(right, id) orelse continue;
+        if self.binding_consumed(in_left) == self.binding_consumed(in_right) {
+            continue;
+        }
+        split = self.later_binding(split, value);
+    }
+    let found = split orelse return self.check_branch_field_consume_agreement(tree, env, left, right);
+    return try self.error1(
+        tree, self.binding(found).decl_span,
+        "move error: owned value `%s` is consumed on one branch only; consume it on both branches or on neither",
+        Arg::Str(self.binding(found).name)
+    );
+}
+
+/// Keeps the binding declared later of a candidate and the one found so far,
+/// the Go `if split == nil || value.id > split.id` selection.
+fn (self: &Checker) later_binding(current: ?BindingHandle, candidate: BindingHandle) -> ?BindingHandle {
+    let seen = current orelse return candidate;
+    if self.binding(candidate).id > self.binding(seen).id {
+        return candidate;
+    }
+    return seen;
+}
+
+/// Rejects an owner field only one surviving branch cleaned, the Go
+/// `checkBranchFieldConsumeAgreement`: past the merge the branch that left
+/// it alone can no longer release it, and releasing it after the if would
+/// release twice what the other branch already did.
+fn (self: &var Checker) check_branch_field_consume_agreement(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    left: ScopeHandle,
+    right: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    var split_value = none_binding();
+    var split_field = empty_name();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        let type_name = self.binding(value).type_name;
+        if !self.is_struct(type_name) {
+            continue;
+        }
+        let id = self.binding(value).id;
+        let in_left = self.store.find_by_id(left, id) orelse continue;
+        let in_right = self.store.find_by_id(right, id) orelse continue;
+        var index = 0;
+        while self.struct_field_at(type_name, index) |field| {
+            index = index + 1;
+            let field_type = self.struct_field_type(type_name, field) orelse continue;
+            if !try self.field_type_needs_consume(field_type) {
+                continue;
+            }
+            if self.field_deinit_name(in_left, field) == self.field_deinit_name(in_right, field) {
+                continue;
+            }
+            let later = self.later_binding(split_value, value) orelse continue;
+            if split_value |seen| {
+                if seen.node == later.node {
+                    continue;
+                }
+            }
+            split_value = later;
+            split_field = field;
+        }
+    }
+    let found = split_value orelse return null;
+    return try self.error2(
+        tree, self.binding(found).decl_span,
+        "move error: owner field `%s.%s` is consumed on one branch only; consume it on both branches or on neither",
+        Arg::Str(self.binding(found).name), Arg::Str(split_field)
+    );
+}
+
+/// Treats moves in the body as possible after the loop, the Go
+/// `checkWhileStmt`.
+fn (self: &var Checker) check_while_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::WhileStmt
+) -> !?diagnostic::Diagnostic {
+    var head = try self.new_capture_condition();
+    defer head.deinit();
+    if try self.read_capture_head(tree, env, statement.condition, statement.capture, &var head) |failed| {
+        return move failed;
+    }
+    let body = try self.store.clone_scope(env);
+    let child = self.store.child(body);
+    // Borrow the loop's clone of each container, as in check_if_stmt.
+    var consumes_field = false;
+    if try self.define_capture(
+        tree, statement.capture, statement.condition, &head, true, env, child, &var consumes_field
+    ) |failed| {
+        return move failed;
+    }
+    self.loop_depth = self.loop_depth + 1;
+    if try self.check_while_body(tree, env, statement, body, child, consumes_field) |failed| {
+        self.loop_depth = self.loop_depth - 1;
+        return move failed;
+    }
+    self.loop_depth = self.loop_depth - 1;
+    return null;
+}
+
+fn (self: &var Checker) check_while_body(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::WhileStmt,
+    body: ScopeHandle,
+    child: ScopeHandle,
+    consumes_field: bool
+) -> !?diagnostic::Diagnostic {
+    if try self.check_block(tree, child, statement.body) |failed| {
+        return move failed;
+    }
+    if try self.check_capture_payload_consumed(tree, statement.capture, consumes_field, child) |failed| {
+        return move failed;
+    }
+    if try self.check_loop_consumes_nothing_outside(tree, env, body) |failed| {
+        return move failed;
+    }
+    try self.store.merge_moved_from(env, body);
+    return null;
+}
+
+/// Rejects a loop body that consumes a binding declared outside it, the Go
+/// `checkLoopConsumesNothingOutside`. The body runs an unknown number of
+/// times: zero leaves the value unreleased, two release it twice.
+fn (self: &var Checker) check_loop_consumes_nothing_outside(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    body: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    var consumed = none_binding();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        if !try self.binding_needs_consume(value) {
+            continue;
+        }
+        let inside = self.store.find_by_id(body, self.binding(value).id) orelse continue;
+        if !self.binding_consumed(inside) {
+            continue;
+        }
+        consumed = self.later_binding(consumed, value);
+    }
+    let found = consumed orelse return self.check_loop_cleans_no_outer_field(tree, env, body);
+    return try self.error1(
+        tree, self.binding(found).decl_span,
+        "move error: owned value `%s` is consumed inside a loop; the body runs an unknown number of times",
+        Arg::Str(self.binding(found).name)
+    );
+}
+
+/// Rejects a loop body that releases a field of a value declared outside
+/// it, the Go `checkLoopCleansNoOuterField`.
+fn (self: &var Checker) check_loop_cleans_no_outer_field(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    body: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    var cleaned_value = none_binding();
+    var cleaned_field = empty_name();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        let type_name = self.binding(value).type_name;
+        if !self.is_struct(type_name) {
+            continue;
+        }
+        let inside = self.store.find_by_id(body, self.binding(value).id) orelse continue;
+        var index = 0;
+        while self.struct_field_at(type_name, index) |field| {
+            index = index + 1;
+            let field_type = self.struct_field_type(type_name, field) orelse continue;
+            if !try self.field_type_needs_consume(field_type) {
+                continue;
+            }
+            if self.field_deinit_name(value, field) or !self.field_deinit_name(inside, field) {
+                continue;
+            }
+            let later = self.later_binding(cleaned_value, value) orelse continue;
+            if cleaned_value |seen| {
+                if seen.node == later.node {
+                    continue;
+                }
+            }
+            cleaned_value = later;
+            cleaned_field = field;
+        }
+    }
+    let found = cleaned_value orelse return null;
+    return try self.error2(
+        tree, self.binding(found).decl_span,
+        "move error: owner field `%s.%s` is released inside a loop; the body runs an unknown number of times",
+        Arg::Str(self.binding(found).name), Arg::Str(cleaned_field)
+    );
+}
+
+/// Builds the `|name|` payload binding for an optional condition, the Go
+/// `newCaptureBinding`. The payload's class rides on its type: an owner
+/// payload owes a consume before the branch ends, a view payload is a free
+/// view like a parameter's, and a copy payload is a plain copy.
+fn (self: &var Checker) new_capture_binding(
+    tree: &ast::Ast,
+    name: ast::Text,
+    cond_type: Name,
+    condition: ast::Expression
+) -> !Binding {
+    let capture_name = try self.names.intern_text(tree, name);
+    let payload = try self.names.optional_payload_name(cond_type);
+    var value = self.store.new_binding(capture_name, payload);
+    errdefer value.deinit();
+    value.decl_span = expression_span(tree, condition);
+    return move value;
+}
+
+/// Is the classification of a capture condition whose payload owns memory,
+/// the Go `optionalOwnerFieldCapture` result: the field's root binding, the
+/// field name, and whether the payload may be consumed there.
+struct OptionalOwnerFieldCapture {
+    root: ?BindingHandle,
+    field: Name,
+    consumable: bool
+}
+
+/// Classifies a capture condition whose payload owns memory, the Go
+/// `optionalOwnerFieldCapture`; null when the condition is not such a
+/// capture or hands the payload over (which the caller leaves alone).
+///
+/// A read of storage does not hand the payload over, so the capture borrows
+/// — the way a container accessor's `?&V` does (ADR-0104). The one place a
+/// field is owned is its type's own deinit, where the receiver arrived by
+/// value and direct field cleanup is already allowed. Reading storage is the
+/// default answer, not the recognized one: an owner payload becomes owned
+/// only where something positively hands it over (原理 8).
+fn (self: &var Checker) optional_owner_field_capture(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    condition: ast::Expression,
+    cond_type: Name
+) -> !?OptionalOwnerFieldCapture {
+    let elem = try self.names.optional_elem(cond_type) orelse return null;
+    if !try self.value_type_needs_consume(elem) {
+        return null;
+    }
+    if try self.hands_over_optional_payload(tree, condition) {
+        return null;
+    }
+    let direct = try self.direct_field_root(tree, env, condition) orelse
+        return OptionalOwnerFieldCapture { root: null, field: empty_name(), consumable: false };
+    if self.names.contains_byte(direct.path, cast<u8>(46)) {
+        // A nested path reads storage the same way a direct one does, and
+        // cleanup through one is refused anyway (ADR-0067), so it borrows
+        // with no field to attribute the obligation to.
+        return OptionalOwnerFieldCapture { root: null, field: empty_name(), consumable: false };
+    }
+    return OptionalOwnerFieldCapture {
+        root: direct.root,
+        field: direct.path,
+        consumable: self.allows_owner_field_cleanup(direct.root)
+    };
+}
+
+/// Reports whether the condition produces the payload rather than reading it
+/// out of storage, the Go `handsOverOptionalPayload`. A call produces one —
+/// `Array.pop` moves the element out, a function returning `?T` hands back
+/// what it built. The comptime field form is the exception: it is spelled as
+/// a call but reads one field of a borrowed struct (ADR-0113).
+fn (self: &var Checker) hands_over_optional_payload(tree: &ast::Ast, condition: ast::Expression) -> !bool {
+    let call = call_expr(tree, unwrap_expression_markers(tree, condition)) orelse return false;
+    let apply = type_apply_expr(tree, call.callee) orelse return true;
+    var target = empty_type_apply_target();
+    if try self.type_apply_target(tree, apply, &var target) |failed| {
+        failed.deinit();
+        return true;
+    }
+    if self.meta_form(target.name) |form| {
+        return form != stdmeta::Form::Field;
+    }
+    return true;
+}
+
+/// Strips the markers that wrap an expression without changing where its
+/// value came from, the Go `unwrapExpressionMarkers`: `try` forwards a
+/// call's success value, and `unsafe` only records who owns the obligation.
+pub fn unwrap_expression_markers(tree: &ast::Ast, expression: ast::Expression) -> ast::Expression {
+    var current = expression;
+    while true {
+        if try_expr(tree, current) |tried| {
+            current = tried.value;
+            continue;
+        }
+        if unsafe_expr(tree, current) |marked| {
+            current = marked.value;
+            continue;
+        }
+        return current;
+    }
+    return current;
+}
+
+/// Applies the owner-field split to one capture binding, the Go
+/// `tieOptionalOwnerFieldCapture`: a borrow everywhere but the owner's
+/// deinit, and there a consumable payload whose cleanup counts toward the
+/// field's obligation. is_field_capture reports whether the condition was
+/// one; consumes whether the body has to consume the payload.
+fn (self: &var Checker) tie_optional_owner_field_capture(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    capture: &var Binding,
+    condition: ast::Expression,
+    cond_type: Name,
+    in_loop: bool,
+    is_field_capture: &var bool,
+    consumes: &var bool
+) -> !?diagnostic::Diagnostic {
+    is_field_capture.* = false;
+    consumes.* = false;
+    let classified = try self.optional_owner_field_capture(tree, env, condition, cond_type) orelse return null;
+    is_field_capture.* = true;
+    if !classified.consumable {
+        capture.borrowed_param = true;
+        return null;
+    }
+    let root = classified.root orelse return null;
+    if in_loop {
+        // The condition reads the same storage every turn, so the payload the
+        // first turn released would be released again by the second.
+        return try self.error2(
+            tree, ast::zero_span(),
+            "move error: `while` cannot consume owner field `%s.%s`; the condition reads the same storage every turn, so use `if`",
+            Arg::Str(self.binding(root).name), Arg::Str(classified.field)
+        );
+    }
+    try self.mark_field_deinit(root, classified.field);
+    consumes.* = true;
+    return null;
+}
+
+/// Builds the binding a `|name|` capture introduces, ties it to what it
+/// borrows, and defines it in the body's scope, the Go `defineCapture`. It
+/// reports whether the payload is one the body has to consume — true only
+/// for an owner field opened inside that field's own type deinit.
+fn (self: &var Checker) define_capture(
+    tree: &var ast::Ast,
+    name: ast::Text,
+    condition: ast::Expression,
+    head: &CaptureCondition,
+    in_loop: bool,
+    env: ScopeHandle,
+    body: ScopeHandle,
+    consumes: &var bool
+) -> !?diagnostic::Diagnostic {
+    consumes.* = false;
+    if text_empty(tree, name) {
+        return null;
+    }
+    if head.is_borrow_cond {
+        var capture = try self.new_capture_binding(tree, name, head.borrow_cond.elem, condition);
+        errdefer capture.deinit();
+        if try self.tie_container_borrow_capture(tree, &var capture, &head.borrow_cond, body) |failed| {
+            capture.deinit();
+            return move failed;
+        }
+        let _ = try self.define(body, move capture);
+        return null;
+    }
+    var capture = try self.new_capture_binding(tree, name, head.cond_type, condition);
+    errdefer capture.deinit();
+    var is_field_capture = false;
+    if try self.tie_optional_owner_field_capture(
+        tree, env, &var capture, condition, head.cond_type, in_loop, &var is_field_capture, consumes
+    ) |failed| {
+        capture.deinit();
+        return move failed;
+    }
+    if !is_field_capture {
+        if try self.tie_view_capture(tree, body, &var capture, head.cond_type, condition) |failed| {
+            capture.deinit();
+            return move failed;
+        }
+    }
+    let _ = try self.define(body, move capture);
+    return null;
+}
+
+/// Rejects a capture body that opened an owner field and dropped what it
+/// found, the Go `checkCapturePayloadConsumed`. The field's obligation was
+/// recorded when the capture bound, so leaving the payload here would
+/// discharge the field's cleanup without releasing anything (ADR-0091).
+fn (self: &var Checker) check_capture_payload_consumed(
+    tree: &ast::Ast,
+    name: ast::Text,
+    consumable: bool,
+    scope: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    if !consumable or text_empty(tree, name) {
+        return null;
+    }
+    let value = self.lookup_local_text(tree, scope, name) orelse return null;
+    if !try self.binding_needs_consume(value) {
+        return null;
+    }
+    return try self.leak_error(tree, value, plain_exit());
+}
+
+/// Ties a view-carrying capture to the containers its condition call read,
+/// the Go `tieViewCapture`: the captured view may alias their storage, so
+/// each stays share-borrowed until the capture's last use, and mutation or
+/// deinit waits — the same exclusion `let view = string.as_bytes()` gets.
+fn (self: &var Checker) tie_view_capture(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    capture: &var Binding,
+    cond_type: Name,
+    condition: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let payload = try self.names.optional_elem(cond_type) orelse return null;
+    if !try self.view_carrying_type(payload) {
+        return null;
+    }
+    var sources = array::new<BorrowSource>(self.allocator);
+    defer sources.deinit();
+    if try self.cond_view_sources(tree, env, condition, &var sources) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while sources.get(index) |source| {
+        if try self.check_borrow_conflict_for_field(tree, source.target, source.field, false) |failed| {
+            return move failed;
+        }
+        try self.activate_borrow(source.target, source.field, false);
+        capture.borrowed_param = true;
+        capture.local_borrow = true;
+        try capture.borrow_targets.append(source);
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Lists the storage and borrow-class view sources a capture-condition call
+/// reads, the Go `condViewSources`. Declared functions derive sources from
+/// their signatures; the syntactic container walk covers builtin accessors.
+fn (self: &var Checker) cond_view_sources(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    condition: ast::Expression,
+    sources: &var array::Array<BorrowSource>
+) -> !?diagnostic::Diagnostic {
+    let unwrapped = unwrap_expression_markers(tree, condition);
+    let call = call_expr(tree, unwrapped) orelse return null;
+    if try self.called_user_function(tree, call.callee) |called| {
+        var derived = array::new<BorrowSource>(self.allocator);
+        defer derived.deinit();
+        if try self.call_borrow_return_sources(
+            tree, env, called.name, called.function, call, false, false, true, &var derived
+        ) |failed| {
+            return move failed;
+        }
+        var index = 0;
+        while derived.get(index) |source| {
+            try add_source(sources, source);
+            index = index + 1;
+        }
+    }
+    if field_expr(tree, call.callee) |field| {
+        try self.add_cond_view_source(tree, env, field.receiver, sources);
+    }
+    var index = 0;
+    while arg_at(tree, call.args, index) |arg| {
+        try self.add_cond_view_source(tree, env, arg, sources);
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Adds one unseen source, the Go `addSource` closure of `condViewSources`.
+fn add_source(sources: &var array::Array<BorrowSource>, source: BorrowSource) -> !void {
+    var index = 0;
+    while sources.get(index) |seen| {
+        if seen.target.node == source.target.node and same_name(seen.field, source.field) {
+            return;
+        }
+        index = index + 1;
+    }
+    return sources.append(source);
+}
+
+/// Adds the source one receiver or argument expression reads, the Go `add`
+/// closure of `condViewSources`.
+fn (self: &var Checker) add_cond_view_source(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    sources: &var array::Array<BorrowSource>
+) -> !void {
+    if try self.borrow_class_view_root(tree, env, expression) |view| {
+        return add_source(sources, BorrowSource { target: view, field: empty_name() });
+    }
+    let value = self.lookup_ident(tree, env, expression) orelse return;
+    if self.binding(value).moved or !self.names.is_container_type(self.binding(value).type_name) {
+        return;
+    }
+    return add_source(sources, BorrowSource { target: value, field: empty_name() });
+}
+
+/// Rejects `orelse` over a view optional produced from an owned container,
+/// the Go `refuseContainerViewOrelse`: the result is a bare view no binding
+/// ties back to the container, so it could outlive a mutation. A capture
+/// ties the view for exactly its scope instead.
+fn (self: &var Checker) refuse_container_view_orelse(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    cond_type: Name,
+    condition: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let payload = try self.names.optional_elem(cond_type) orelse return null;
+    if !try self.view_carrying_type(payload) {
+        return null;
+    }
+    var sources = array::new<BorrowSource>(self.allocator);
+    defer sources.deinit();
+    if try self.cond_view_sources(tree, env, condition, &var sources) |failed| {
+        return move failed;
+    }
+    if sources.len() == 0 {
+        return null;
+    }
+    return try self.error1(
+        tree, ast::zero_span(),
+        "move error: view optional `%s` from a container must be consumed by a capture (`if cond |name|` or `while cond |name|`)",
+        Arg::Str(cond_type)
+    );
+}
+
+/// Treats moves in the body as possible after the loop, the Go
+/// `checkForStmt`.
+fn (self: &var Checker) check_for_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ForStmt
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, statement.start, &var ignored) |failed| {
+        return move failed;
+    }
+    if try self.read_expr(tree, env, statement.end, &var ignored) |failed| {
+        return move failed;
+    }
+    let body = try self.store.clone_scope(env);
+    let child = self.store.child(body);
+    let name = try self.names.intern_text(tree, statement.name);
+    let counter = self.store.new_binding(name, self.common.i64_name);
+    let _ = try self.define(child, move counter);
+    self.loop_depth = self.loop_depth + 1;
+    if try self.check_block(tree, child, statement.body) |failed| {
+        self.loop_depth = self.loop_depth - 1;
+        return move failed;
+    }
+    self.loop_depth = self.loop_depth - 1;
+    try self.store.merge_moved_from(env, body);
+    return null;
+}
+
+/// Rejects branch statements outside loops, the Go `checkLoopBranch`.
+fn (self: &var Checker) check_loop_branch_label(tree: &ast::Ast, label: ast::Text) -> !?diagnostic::Diagnostic {
+    if self.loop_depth == 0 {
+        return try self.error1(tree, ast::zero_span(), "move error: loop branch `%s` used outside loop", Arg::Text(label));
+    }
+    return null;
+}
+
+/// Merges possible moves from enum or union match arms into the outer
+/// scope, the Go `checkMatchStmt`.
+fn (self: &var Checker) check_match_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::Statement
+) -> !?diagnostic::Diagnostic {
+    let head = match_stmt_head(tree, statement) orelse return null;
+    var value_type = empty_name();
+    if try self.read_expr(tree, env, head.value, &var value_type) |failed| {
+        return move failed;
+    }
+    value_type = try self.names.borrowed_value(value_type);
+    let tags = try self.match_tags(value_type) orelse
+        return try self.error1(tree, ast::zero_span(), "move error: match expects enum or union, got %s", Arg::Str(value_type));
+    var arm_variants = array::new<MetaField>(self.allocator);
+    defer arm_variants.deinit();
+    var has_arm_variants = false;
+    if try self.comptime_arm_variants(tree, head, &var arm_variants, &var has_arm_variants) |failed| {
+        return move failed;
+    }
+    let owner_deinit_dispatch = self.matches_owner_union_deinit(tree, head.value, value_type);
+    if owner_deinit_dispatch {
+        try self.consume_owner_union_receiver(tree, env, head.value);
+    }
+    let owned_match = try self.match_scrutinee_owned(tree, env, head.value);
+    let arms = try match_stmt_arms(self.allocator, tree, statement);
+    defer arms.deinit();
+    if !owner_deinit_dispatch {
+        if try self.consume_moved_from_scrutinee(tree, env, head.value, &arms, tags) |failed| {
+            return move failed;
+        }
+    }
+    // Every arm starts from the state the match was reached in. Cloning
+    // inside the loop would start each arm from what the arms before it
+    // merged back, so an arm would inherit a cleanup only one other arm ran.
+    var live = array::new<ScopeHandle>(self.allocator);
+    defer live.deinit();
+    let context = MatchArmContext {
+        value_type: value_type,
+        tags: tags,
+        has_arm_variants: has_arm_variants,
+        owner_deinit_dispatch: owner_deinit_dispatch,
+        owned_match: owned_match,
+        value_span: expression_span(tree, head.value),
+        meta_capture: head.meta_capture
+    };
+    if try self.check_match_stmt_arms(tree, env, &arms, &arm_variants, context, &var live) |failed| {
+        return move failed;
+    }
+    if try self.check_arm_field_consume_agreement(tree, env, &live) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while live.get(index) |arm_env| {
+        try self.store.merge_moved_from(env, arm_env);
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Carries what every arm of one match is checked against, the Go
+/// `matchArmContext`.
+struct MatchArmContext {
+    value_type: Name,
+    tags: MatchTags,
+    has_arm_variants: bool,
+    owner_deinit_dispatch: bool,
+    owned_match: bool,
+    value_span: ast::Span,
+    meta_capture: ast::Text
+}
+
+/// Checks each arm against the state the match was reached in and collects
+/// the scopes of the arms that continue past it, the Go `checkMatchArms`.
+fn (self: &var Checker) check_match_stmt_arms(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arms: &array::Array<ast::MatchArm>,
+    arm_variants: &array::Array<MetaField>,
+    context: MatchArmContext,
+    live: &var array::Array<ScopeHandle>
+) -> !?diagnostic::Diagnostic {
+    let base = try self.store.clone_scope(env);
+    var index = 0;
+    while arms.get(index) |arm| {
+        index = index + 1;
+        if arm.is_wildcard(tree) {
+            if !text_empty(tree, arm.binding) {
+                return try self.error0(ast::zero_span(), "move error: wildcard match arm cannot bind payload");
+            }
+        } else {
+            if !self.match_tag_known(tree, context.tags, arm.tag) {
+                return try self.error2(
+                    tree, ast::zero_span(), "move error: unknown match tag `%s::%s`",
+                    Arg::Str(context.value_type), Arg::Text(arm.tag)
+                );
+            }
+        }
+        let arm_env = try self.store.clone_scope(base);
+        let child = self.store.child(arm_env);
+        try self.define_match_arm_payload(
+            tree, arm, context.tags, context.owner_deinit_dispatch, context.owned_match, child, context.value_span
+        );
+        let restore = try self.bind_arm_meta_field(tree, context.meta_capture, arm, arm_variants, context.has_arm_variants);
+        if try self.check_stmt(tree, child, arm.body) |failed| {
+            self.meta_fields.restore(restore);
+            return move failed;
+        }
+        self.meta_fields.restore(restore);
+        if try self.check_arm_payload_consumed(tree, arm, child) |failed| {
+            return move failed;
+        }
+        if !self.stmt_terminates(tree, arm.body) {
+            try live.append(arm_env);
+        }
+    }
+    return null;
+}
+
+/// Binds the `comptime match` capture to the arm's own variant while its
+/// body is checked, the Go `c.bindMetaField(stmt.MetaCapture,
+/// ctx.armVariants[arm.Tag])`; a match written by hand binds nothing.
+fn (self: &var Checker) bind_arm_meta_field(
+    tree: &ast::Ast,
+    meta_capture: ast::Text,
+    arm: ast::MatchArm,
+    arm_variants: &array::Array<MetaField>,
+    has_arm_variants: bool
+) -> !?arena::Handle<MetaBinding> {
+    let previous = self.meta_fields.current;
+    if text_empty(tree, meta_capture) {
+        return previous;
+    }
+    var field = MetaField { owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false };
+    if has_arm_variants {
+        var index = 0;
+        while arm_variants.get(index) |variant| {
+            if self.names.is_text(variant.name, tree, arm.tag) {
+                field = variant;
+            }
+            index = index + 1;
+        }
+    }
+    let retained = tree.texts.at(meta_capture.node);
+    let bytes = retained.as_bytes();
+    return self.meta_fields.bind(bytes, field);
+}
+
+/// Rejects an owner field only some of the arms that continue past the
+/// match cleaned, the Go `checkArmFieldConsumeAgreement`. It is the branch
+/// rule an if already follows, read across every surviving arm.
+fn (self: &var Checker) check_arm_field_consume_agreement(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    live: &array::Array<ScopeHandle>
+) -> !?diagnostic::Diagnostic {
+    if live.len() < 2 {
+        return null;
+    }
+    var split_value = none_binding();
+    var split_field = empty_name();
+    var walker = self.store.walk(env);
+    while walker.next(&self.store) |value| {
+        let type_name = self.binding(value).type_name;
+        if !self.is_struct(type_name) {
+            continue;
+        }
+        var index = 0;
+        while self.struct_field_at(type_name, index) |field| {
+            index = index + 1;
+            let field_type = self.struct_field_type(type_name, field) orelse continue;
+            if !try self.field_type_needs_consume(field_type) {
+                continue;
+            }
+            if self.field_cleanup_agrees(live, self.binding(value).id, field) {
+                continue;
+            }
+            let later = self.later_binding(split_value, value) orelse continue;
+            if split_value |seen| {
+                if seen.node == later.node {
+                    continue;
+                }
+            }
+            split_value = later;
+            split_field = field;
+        }
+    }
+    let found = split_value orelse return null;
+    return try self.error2(
+        tree, self.binding(found).decl_span,
+        "move error: owner field `%s.%s` is consumed on some match arms only; consume it on every arm that continues past the match or on none",
+        Arg::Str(self.binding(found).name), Arg::Str(split_field)
+    );
+}
+
+/// Reports whether every arm that carries this binding made the same
+/// decision about one of its fields, the Go `fieldCleanupAgrees`.
+fn (self: &Checker) field_cleanup_agrees(live: &array::Array<ScopeHandle>, id: i64, field: Name) -> bool {
+    var seen = false;
+    var cleaned = false;
+    var index = 0;
+    while live.get(index) |arm_env| {
+        index = index + 1;
+        let value = self.store.find_by_id(arm_env, id) orelse continue;
+        let flag = self.field_deinit_name(value, field);
+        if !seen {
+            seen = true;
+            cleaned = flag;
+            continue;
+        }
+        if flag != cleaned {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Rejects a match arm that drops an owned payload it moved out of the
+/// scrutinee (ADR-0091), the Go `checkArmPayloadConsumed`.
+fn (self: &var Checker) check_arm_payload_consumed(
+    tree: &ast::Ast,
+    arm: ast::MatchArm,
+    child: ScopeHandle
+) -> !?diagnostic::Diagnostic {
+    if text_empty(tree, arm.binding) {
+        return null;
+    }
+    let value = self.lookup_local_text(tree, child, arm.binding) orelse return null;
+    if !try self.binding_needs_consume(value) {
+        return null;
+    }
+    return try self.leak_error(tree, value, plain_exit());
+}
+
+/// Returns the binding of a matched value that is an owned named local, the
+/// one thing a moving match must mark consumed, the Go `matchScrutineeOwner`.
+fn (self: &Checker) match_scrutinee_owner(tree: &ast::Ast, env: ScopeHandle, value: ast::Expression) -> ?BindingHandle {
+    let owner = self.lookup_ident(tree, env, value) orelse return null;
+    let record = self.binding(owner);
+    if record.borrowed_param or record.local_borrow or record.handle_arena_id != 0 {
+        return null;
+    }
+    return owner;
+}
+
+/// Reports whether the matched value owns its payloads, the Go
+/// `matchScrutineeOwned`: an owned named local, or a call temporary the match
+/// consumes for free. Borrows, projections, and calls that may return
+/// borrows match in borrow mode and their aggregate payloads cannot move out.
+fn (self: &var Checker) match_scrutinee_owned(tree: &var ast::Ast, env: ScopeHandle, value: ast::Expression) -> !bool {
+    if self.match_scrutinee_owner(tree, env, value) |_| {
+        return true;
+    }
+    let call = call_expr(tree, value) orelse return false;
+    if try self.is_arena_at_expr(tree, env, value) {
+        return false;
+    }
+    if field_expr(tree, call.callee) |field| {
+        if !field.namespace {
+            return false;
+        }
+    }
+    if try self.called_user_function(tree, call.callee) |called| {
+        // A borrow-typed return is a view of caller state, not a fresh
+        // temporary (ADR-0098: provenance is structural).
+        return !self.names.starts_with(self.return_type_name(called.function), "&");
+    }
+    // An unresolved namespace call is a variant constructor: a fresh
+    // temporary.
+    return true;
+}
+
+/// Marks an owned matched value moved when any arm binds a payload that
+/// moves out, the Go `consumeMovedFromScrutinee`. One arm moving is enough:
+/// which arm runs is not known statically, so the value is unavailable in
+/// the arm bodies and after the match either way.
+fn (self: &var Checker) consume_moved_from_scrutinee(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    value: ast::Expression,
+    arms: &array::Array<ast::MatchArm>,
+    tags: MatchTags
+) -> !?diagnostic::Diagnostic {
+    let owner = self.match_scrutinee_owner(tree, env, value) orelse return null;
+    if !try self.match_moves_payload(tree, arms, tags) {
+        return null;
+    }
+    if self.store.has_any_borrow(owner) {
+        return try self.error1(
+            tree, expression_span(tree, value), "borrow error: value `%s` cannot be moved while borrowed",
+            Arg::Str(self.binding(owner).name)
+        );
+    }
+    try self.store.set_moved(owner, true);
+    return null;
+}
+
+/// Reports whether any arm binds a payload an owned match moves out rather
+/// than copies, the Go `matchMovesPayload`.
+fn (self: &var Checker) match_moves_payload(
+    tree: &ast::Ast,
+    arms: &array::Array<ast::MatchArm>,
+    tags: MatchTags
+) -> !bool {
+    var index = 0;
+    while arms.get(index) |arm| {
+        index = index + 1;
+        if arm.is_wildcard(tree) or text_empty(tree, arm.binding) {
+            continue;
+        }
+        let payload = self.union_payload_for_tag(tree, tags, arm.tag);
+        if try self.classify_match_payload(payload) == MatchPayloadClass::Moves {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Marks an owner union's deinit receiver moved, the Go
+/// `consumeOwnerUnionReceiver`. The dispatch moves the active payload out
+/// for cleanup, so `self` is unavailable inside the arm bodies and after the
+/// match; a second read or re-match of the deinitialized union is then a
+/// use-after-move.
+fn (self: &var Checker) consume_owner_union_receiver(tree: &ast::Ast, env: ScopeHandle, value: ast::Expression) -> !void {
+    let owner = self.lookup_ident(tree, env, value) orelse return;
+    return self.store.set_moved(owner, true);
+}
+
+/// Binds one union variant payload for a match arm, the Go
+/// `defineMatchArmPayload`. Scalar payloads bind as copies from any match;
+/// declared aggregates move out of an owned scrutinee (ADR-0090); view
+/// payloads and aggregate payloads of a borrowed scrutinee stay borrowed so
+/// they cannot escape. Inside an owner union's own `deinit` the active owner
+/// payload is bound as an owned local so it can be cleaned through its
+/// explicit `deinit`. Inactive variants are never bound.
+fn (self: &var Checker) define_match_arm_payload(
+    tree: &ast::Ast,
+    arm: ast::MatchArm,
+    tags: MatchTags,
+    owner_deinit_dispatch: bool,
+    owned_match: bool,
+    child: ScopeHandle,
+    span: ast::Span
+) -> !void {
+    let payload = self.union_payload_for_tag(tree, tags, arm.tag);
+    if arm.is_wildcard(tree) or is_empty(payload) or text_empty(tree, arm.binding) {
+        return;
+    }
+    let name = try self.names.intern_text(tree, arm.binding);
+    var value = self.store.new_binding(name, payload);
+    errdefer value.deinit();
+    value.decl_span = span;
+    let class = try self.classify_match_payload(payload);
+    let owned = class == MatchPayloadClass::Copies or
+        (class == MatchPayloadClass::Moves and owned_match) or
+        (owner_deinit_dispatch and !try self.is_copy_type(payload));
+    if !owned {
+        value.borrowed_param = true;
+    }
+    let _ = try self.define(child, move value);
+    return;
+}
+
+/// Says what a match on an owned value may do with one bound payload, the Go
+/// `matchPayloadClass`: copy it out, move it out, or keep it borrowed.
+pub enum MatchPayloadClass {
+    Borrows,
+    Copies,
+    Moves,
+}
+
+/// Sorts a payload type for a match on an owned value, the Go
+/// `classifyMatchPayload`. Only types positively known to be provenance-free
+/// copies or declared aggregates escape the arm; views and anything
+/// unclassified stay borrowed, so an unhandled type errs toward rejection,
+/// never toward escape (ADR-0090).
+fn (self: &var Checker) classify_match_payload(type_name: Name) -> !MatchPayloadClass {
+    if !self.names.is_plain_name(type_name) {
+        // []T, &T, ?T, E!T: views and wrappers keep borrow handling.
+        return MatchPayloadClass::Borrows;
+    }
+    if self.names.is_raw_pointer(type_name) {
+        return MatchPayloadClass::Borrows;
+    }
+    if try self.is_copy_type(type_name) {
+        return MatchPayloadClass::Copies;
+    }
+    let base = try self.names.generic_base_or_self(type_name);
+    if self.is_struct(base) or self.is_union(base) {
+        return MatchPayloadClass::Moves;
+    }
+    return MatchPayloadClass::Borrows;
+}
+
+/// Is the declaration a match dispatches on, the Go `matchTags` result: the
+/// enum tags, error set members, or union variants of the scrutinee type.
+pub enum MatchTagKind {
+    Enum,
+    ErrorSet,
+    Union,
+}
+
+pub struct MatchTags {
+    pub kind: MatchTagKind,
+    pub type_name: Name
+}
+
+/// Returns known tags for enum and union match ownership checks, the Go
+/// `matchTags`; null when the type is neither.
+fn (self: &Checker) match_tags(type_name: Name) -> !?MatchTags {
+    if self.is_enum(type_name) {
+        return MatchTags { kind: MatchTagKind::Enum, type_name: type_name };
+    }
+    // An error carries nothing, so matching one moves nothing, which is what
+    // a tag enum arm already means here.
+    if self.is_error_set(type_name) {
+        return MatchTags { kind: MatchTagKind::ErrorSet, type_name: type_name };
+    }
+    if self.is_union(type_name) {
+        return MatchTags { kind: MatchTagKind::Union, type_name: type_name };
+    }
+    return null;
+}
+
+/// Reports whether the matched declaration has a tag, the Go `tags[arm.Tag]`.
+fn (self: &Checker) match_tag_known(tree: &ast::Ast, tags: MatchTags, tag: ast::Text) -> bool {
+    let retained = tree.texts.at(tag.node);
+    let bytes = retained.as_bytes();
+    return match tags.kind {
+        Enum => self.enum_has_tag(tags.type_name, bytes),
+        ErrorSet => self.error_set_has(tags.type_name, bytes),
+        Union => self.union_has_variant(tags.type_name, bytes),
+    };
+}
+
+fn (self: &Checker) union_has_variant(union_name: Name, variant: []u8) -> bool {
+    if self.union_variant_payload(union_name, variant) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Returns the payload type of the union variant an arm names, the Go
+/// `unionPayloads[arm.Tag]`: empty for enums, error sets, and payload-free
+/// variants.
+fn (self: &Checker) union_payload_for_tag(tree: &ast::Ast, tags: MatchTags, tag: ast::Text) -> Name {
+    if tags.kind != MatchTagKind::Union {
+        return empty_name();
+    }
+    let retained = tree.texts.at(tag.node);
+    let bytes = retained.as_bytes();
+    return self.union_variant_payload(tags.type_name, bytes) orelse empty_name();
+}

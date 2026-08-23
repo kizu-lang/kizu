@@ -101,7 +101,7 @@ deliberately excluded, so the two are not confused.
 | full generics | **not planned as such.** Explicit static arguments only, no inference, no bounds, no HKT (ADR-0066) |
 | `async fn` / `await` syntax | **not adopted.** Function coloring is the cost this language does not pay (ADR-0025) |
 | Rust `Send` / `Sync` traits | **not adopted.** Whatever replaces them must be one rule users can read, not a hand-written whitelist (ADR-0025) |
-| self-hosting compiler | **porting.** Go remains the only shipping implementation until atomic cutover (ADR-0082) |
+| self-hosting compiler | **porting.** Go remains the only shipping implementation until atomic cutover |
 
 A feature is "implemented" here only when a conformance case runs it and checks
 its output. Rules that only a checker enforces are not counted as features --

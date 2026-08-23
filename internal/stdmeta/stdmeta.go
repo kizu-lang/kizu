@@ -1,5 +1,5 @@
-// Package stdmeta names the `std::meta` forms and the shape each one is
-// spelled with.
+// Package stdmeta names the `std::meta` forms, the shape each one is spelled
+// with, and the closed container rule shared by every compiler phase.
 //
 // These are not functions. Like `type<T>`, each form is resolved by the
 // compiler where it is written, so no runtime primitive stands behind them
@@ -11,6 +11,8 @@ package stdmeta
 import (
 	"errors"
 	"strings"
+
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // Form is one `std::meta` spelling.
@@ -182,6 +184,95 @@ func SplitApply(text string) (Form, []string, bool) {
 		return "", nil, false
 	}
 	return name, args, true
+}
+
+// ResolveElementTypeForms rewrites every valid, closed element<T> form to the
+// type held by T. An invalid container or one that still depends on a type
+// parameter is left in place for the validator or later instantiation.
+func ResolveElementTypeForms(text string) string {
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return text
+	}
+	return resolveElementTypeForms(parsed).String()
+}
+
+// resolveElementTypeForms resolves closed element forms recursively through
+// wrappers and generic arguments.
+func resolveElementTypeForms(node typ.Type) typ.Type {
+	switch value := node.(type) {
+	case *typ.Name:
+		for index, arg := range value.Args {
+			value.Args[index] = resolveElementTypeForms(arg)
+		}
+		if strings.Join(value.Path, "::") != string(Element) || len(value.Args) != 1 {
+			return value
+		}
+		if element, ok := projectedElementType(value.Args[0]); ok {
+			return resolveElementTypeForms(element)
+		}
+		return value
+	case *typ.Slice:
+		value.Elem = resolveElementTypeForms(value.Elem)
+	case *typ.Buffer:
+		value.Elem = resolveElementTypeForms(value.Elem)
+	case *typ.Borrow:
+		value.Elem = resolveElementTypeForms(value.Elem)
+	case *typ.Optional:
+		value.Elem = resolveElementTypeForms(value.Elem)
+	case *typ.Const:
+		value.Elem = resolveElementTypeForms(value.Elem)
+	case *typ.ErrorUnion:
+		if value.Err != nil {
+			value.Err = resolveElementTypeForms(value.Err)
+		}
+		value.Ok = resolveElementTypeForms(value.Ok)
+	}
+	return node
+}
+
+// ElementType returns the child graph held by one valid, closed container.
+// The returned node remains owned by the graph that owns container.
+func ElementType(container typ.Type) (typ.Type, bool) {
+	if optional, ok := container.(*typ.Optional); ok {
+		return optional.Elem, true
+	}
+	name, ok := container.(*typ.Name)
+	if !ok {
+		return nil, false
+	}
+	switch strings.Join(name.Path, "::") {
+	case "std::array::Array", "std::mem::Box":
+		if len(name.Args) == 1 {
+			return name.Args[0], true
+		}
+	case "std::map::Map":
+		if len(name.Args) == 2 {
+			return name.Args[1], true
+		}
+	}
+	return nil, false
+}
+
+// projectedElementType keeps raw declaration projection from erasing a Map
+// key error before the Checker validates the original type.
+func projectedElementType(container typ.Type) (typ.Type, bool) {
+	name, ok := container.(*typ.Name)
+	if ok && strings.Join(name.Path, "::") == "std::map::Map" &&
+		(len(name.Args) != 2 || !isByteSlice(name.Args[0])) {
+		return nil, false
+	}
+	return ElementType(container)
+}
+
+// isByteSlice reports the one key type Map accepts.
+func isByteSlice(value typ.Type) bool {
+	slice, ok := value.(*typ.Slice)
+	if !ok {
+		return false
+	}
+	element, ok := slice.Elem.(*typ.Name)
+	return ok && len(element.Path) == 1 && element.Path[0] == "u8" && len(element.Args) == 0
 }
 
 // splitArgs splits a static argument list on the commas that sit outside any

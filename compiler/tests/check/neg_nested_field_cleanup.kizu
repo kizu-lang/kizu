@@ -1,0 +1,39 @@
+import std;
+import std::array;
+
+struct Log {
+    lines: array::Array<i64>,
+}
+
+struct Order {
+    log: Log,
+}
+
+// Cleanup descends one field at a time: reaching through `log` into `lines`
+// would bypass Log's own deinit.
+fn (self: Order) deinit() -> void {
+    self.log.lines.deinit();
+}
+
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    var o = Order { log: Log { lines: array::new<i64>(allocator) } };
+    defer o.deinit();
+    try o.log.lines.append(7);
+    return;
+}
+
+// check-fails
+// features: method receiver field-access deinit ownership
+// error: field cleanup `self.log.lines.deinit` is only allowed on one direct field
+
+
+// check
+// load:
+// struct Log { lines: std::array::Array<i64> }
+// struct Order { log: Log }
+// fn (self: Order) Order.deinit() -> void { self.log.lines.deinit(); }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var o = Order { log: Log { lines: std::array::new<i64>(allocator) } }; defer o.deinit(); try o.log.lines.append(7); return; }
+// fn (self: Log) Log.deinit() -> void { self.lines.deinit(); return; }
+// check:
+// - type error: field cleanup `self.log.lines.deinit` is only allowed on one direct field

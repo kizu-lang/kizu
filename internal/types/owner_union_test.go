@@ -79,6 +79,37 @@ fn (self: Outer) deinit() -> void {
 	}
 }
 
+// TestCheckRejectsBoxOwnerUnionMissingCleanup keeps Box payload ownership on
+// the same DeinitOwners definition used by the rest of the checker.
+func TestCheckRejectsBoxOwnerUnionMissingCleanup(t *testing.T) {
+	source := `struct Node { child: std::mem::Box<i64> }
+union Slot { Held(Node), Empty }
+fn (self: Slot) deinit() -> void {
+    match self {
+        Held(node) => print(0),
+        Empty => print(0),
+    }
+}`
+	assertCheckError(t, source,
+		"owner-payload union variant `Slot::Held` must clean its payload via `node.deinit()`")
+}
+
+// TestCheckRejectsDeclaredOwnerUnionMissingCleanup treats a source-visible
+// deinit declaration as the payload type's own cleanup contract.
+func TestCheckRejectsDeclaredOwnerUnionMissingCleanup(t *testing.T) {
+	source := `struct Resource {}
+fn (self: Resource) deinit() -> void {}
+union Slot { Held(Resource), Empty }
+fn (self: Slot) deinit() -> void {
+    match self {
+        Held(resource) => print(0),
+        Empty => print(0),
+    }
+}`
+	assertCheckError(t, source,
+		"owner-payload union variant `Slot::Held` must clean its payload via `resource.deinit()`")
+}
+
 // TestCheckAcceptsOwnerUnionWithoutDeclaredDeinit checks a union that declares
 // no cleanup is accepted: its body is the derived one, and there is no author's
 // body to validate.

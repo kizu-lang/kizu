@@ -12,8 +12,21 @@ compiler source、移植 workflow、`docs/selfhost-ownership.tsv` と一緒に�
 - cutover の前後とも user-facing compiler path を一つに保つ
 
 移植と同時に language feature、compiler architecture、optimization、public API を
-再設計しません。必要性が見つかった場合は移植を止め、Go の shipping path と
-SPEC / ADR / behavior test のどこが変わるかを別の判断として先に確定します。
+再設計しません。ただし AST / token の内部表現(node の保持方法、error 回復時の
+placeholder、handle の形)は、render・diagnostic・処理順が Go と同じなら Kizu-native
+に変えてよく、pass 構成と diagnostic 文面は変えません。それ以外の必要性が見つかった
+場合は移植を止め、Go の shipping path と SPEC / behavior test のどこが変わるかを別の
+判断として先に確定します。
+
+機械移植を選んだ理由と却下した案:
+
+| 案 | 却下理由 |
+| --- | --- |
+| compiler を Kizu で一から再設計する | 移植と architecture 変更の差が見えず、Go 版との挙動差を説明できない |
+| 汎用 Go-to-Kizu transpiler を維持する | Go の interface、GC、slice、pointer semantics を再実装する恒久的な第二 toolchain になる |
+| Go と Kizu を長期間ともに shipping する | 言語機能を二度実装し、fallback が片方の欠陥を隠した以前の失敗を繰り返す |
+| file ごとに規則なしで AI へ一括変換させる | ownership、module 境界、diagnostic の判断が file ごとに分岐する |
+| 生成 IR や内部 AST の文字列一致を gate にする | 実装の形を固定し、挙動が正しくても変更できない。examples と behavior test が契約を持つ |
 
 ## Source of truth
 
@@ -106,6 +119,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | `map[string]V` | `std::map::Map<[]u8, V>` | iteration order と overwrite behavior を先に確認する |
 | immutable map literal | pure lookup function または明示 owner の `Map` | hidden global allocator を作らず、hot path は計測する |
 | `*T` | `&T` / `&var T` / `Box<T>` / arena handle | nullable、mutation、owner、lifetime を ownership 表で固定する |
+| parse error 後の nil 埋め partial node | `ast::RecoveredNode` variant | diagnostic を出した後は node を作らず `add_recovered_*` を返す。partial AST は CLI も LSP も捨てるので契約ではない |
 | `(T, error)` | named error または `!T` | caller が error を列挙する契約なら named set を保つ |
 | nullable value | `?T` | absence と failure を混ぜない |
 | interface | static contract / closed union / generic | runtime dispatch を仮定せず、対応が閉じなければ止める |
@@ -172,8 +186,40 @@ cycle が出たら Go 側の実際の ownership を調べ、共有型の owner �
 4. check: target module を Kizu compiler で check する
 5. behavior: 対象の公開挙動を Kizu test で実行する
 
+`kizu check compiler` と `kizu test compiler` は pre-commit hook `selfhost` が回します。
+
+### Behavior corpus
+
+module の公開挙動は、Go test の white-box 構造を Kizu に写すのではなく、両 compiler が
+同じ入力 corpus を読む形で検査します。parser の corpus は `compiler/tests/parser/` で、
+1 file = 入力 + 空行 + `// parse` + 期待 block(失敗なら `// L:C-L:C message` の
+diagnostics、成功なら `// ast:` 以下に rendered program)です。期待 block は Go の
+`go test ./internal/parser -run TestParserCorpus -update` が生成し、Kizu 側は
+`compiler/src/internal/parser/corpus_test.kizu` の runner が同じ file を読んで比較します。
+Go の挙動を変えたら `-update` で期待 block を作り直し、Kizu 側を同じ commit で追従させます。
+check corpus は `compiler/tests/check/` で、1 file = 入力 + `// check` + `// load:`(loader が
+出す修飾済み宣言か module error)+ `// check:`(`ok` か diagnostics)です。期待 block は
+`go test ./internal/types -run TestCheckCorpus -update` が types → ownership の順に生成し
+(types が通った case だけ ownership まで進む)、`compiler/src/check_corpus_test.kizu` が
+同じ順で読みます。case は types の test 入力(`t_`)、ownership の test 入力(`o_`)、examples
+(`ex_`)、negative examples(`neg_`)から採っています。
+Kizu の unit test に残すのは、入出力で表せない ownership / lifecycle の invariant だけです。
+
 並列 agent は同じ file を編集しません。shared type と ownership 表は一人の
 integrator だけが変更し、他の agent は変更要求を返します。
+
+## Unattended work
+
+module 単位の機械移植は、次の契約で人の判断を待たずに進めます。
+
+- 範囲は 1 module ずつ。module の完了条件(下)を満たすまで次へ進まない
+- work unit ごとに topic branch へ commit し、review は module 単位の PR で受ける
+- 止まる条件: SPEC / std の変更が要る、分類と修正の後も累計 ratio が 2 倍以上、
+  Go 側の shipping 挙動を変える修正が要る、ir / llvm の内部表現を決める時
+- 見つけた language / std gap は止めずにこの文書末尾の「見つかった gap」へ
+  証拠付きで記録し、仕様を足さない局所解で進める。module 完了時にまとめて判断する
+- 検証は corpus、`kizu check compiler`、`kizu test compiler`、fmt、pre-commit で
+  機械的に行い、人の目は PR で入る
 
 ## Completion
 
@@ -185,3 +231,81 @@ compiler と同じ契約で通した状態です。
 
 binary byte identity や LLVM text identity は要求しません。契約は実行結果、
 diagnostic、artifact の意味が持ちます。
+
+## Module status
+
+code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。検証欄は挙動一致を
+何で確認しているか。ratio が 2.0 以上の module は gate 未達で、圧縮 pass が残っている。
+
+| module | Go | Kizu | ratio | 検証 |
+| --- | --- | --- | --- | --- |
+| source | 44 | 39 | 0.89 | unit |
+| token | 123 | 254 | 2.07 | unit(parser corpus 経由) |
+| diagnostic | 126 | 291 | 2.31 | unit(corpus の render 経由) |
+| lexer | 325 | 593 | 1.82 | unit + parser corpus |
+| ast | 1042 | 2330 | 2.24 | parser corpus(render) |
+| parser | 1796 | 2990 | 1.66 | parser corpus 308 case(diagnostics + render) |
+| typ | 524 | 1047 | 2.00 | unit |
+| stdprim / stdmeta / stdmethod / unsafecap | 140 / 211 / 80 / 60 | 259 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
+| manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
+| project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
+| types | 7768 | 15293 | 1.97 | check corpus 765 case(diagnostics) |
+| ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
+| compiler(cmd/kizu の parse / check) | 1041(全 command) | 200 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check と tests/behavior・compiler/・examples/modules の check(types → ownership)を Go の front end と byte 比較(938 case) |
+
+types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
+差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
+builder 165 関数)は `fmt.Sprintf` 相当が無い std gap。`tree` / `scope` / `out` の
+context 引数 576 行と `var x = empty_type()` 131 行は「Go の `(T, error)` 返しを out
+引数 + `!?Diagnostic` で写した」API shape。`defer` / `errdefer` 402 行と `as_bytes`
+束縛 325 行、owned copy 53 行が ownership の明示。error 伝播 `return move x;` 298 行は
+Go の `if err != nil { return err }` 350 箇所と同数で、増分ではない。残る圧縮余地は
+message builder の共通化(parser の `error_*` と同じ融合)と `tree` 引数の扱いだが、
+2.0 未満に入ったので後続 module を優先する。
+
+ownership の増分(+5,006 行)の分類。API shape が最大で、関数宣言が Go 418 に対して
+Kizu 737(`Name` / binding の accessor、`ast_view` の node reader、`NameTable` の綴り
+helper)、signature を 1 引数 1 行に折り返した 1,589 行、閉じ括弧だけの行が Go 1,845 に対して
+Kizu 2,750(`if try f() |failed| {` の block 310 と 100 桁超の呼び出し折返し 243)。error
+処理は `out` 引数の `var x = empty_name()` 120 行、`handled.* / out.*` 206 行、
+`return move failed` 304 行で、Go の `if err != nil` / `return err` 457 行に対して 734 行。
+ownership の明示は `defer` / `errdefer` 143 行、`as_bytes()` / `name_text` の view 束縛 246 行。
+重複処理は `while` の `index = index + 1` 125 行(Go の `for range`)と diagnostic の
+`Arg::` 262 行(Go は `errorf` の引数に inline)。型名・binding 名・修飾名を 1 つの
+`NameTable` に intern して copy handle `Name` で渡す表現(types の `TypeTable` と同じ判断)が
+`string` の自由な複製を吸収しており、それ以上の圧縮は signature 折返しの 1 行化だけで
+1.5 を切れないため後続 module を優先する。
+
+
+## 見つかった gap
+
+移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
+
+| gap | 証拠 | 局所解 |
+| --- | --- | --- |
+| sequence literal(`[N]T{a, b}` / table / table-driven test)が無い | parser の precedence table(if 連鎖 23 行)、Go の table test 7 本が展開されている | 展開のまま |
+| 文字列組立の std API が `append_*` だけ | parser の message helper 155 行、checker の `errorf` 315 箇所 | parser は `error_*` method に融合(parser.kizu) |
+| struct field からの take / replace が無い | parser が cur/peek を持てず全 token を arena に保持 | `Arena<Token>` + handle stream |
+| `orelse` の右辺に block を書けない | parser の early return | `if opt \|v\| {} else {}` に展開 |
+| owner の `?T` は産出した場所で capture / orelse が必須 | parser test | 同上 |
+| `[]u8` view は関数から返せず、`as_bytes()` は local binding に束縛必須 | loader の `module_name() -> []u8` 系 helper が書けない | `&string::String` を返す / 渡し、callee 側で bind する。append 系 helper に変える |
+| `match try f()` では owner payload を move out できない | loader の `match try self.read_std_graph()` | `let r = try f(); match r { ... }` |
+| `else if` が無い | loader | `else { if ... }` に展開 |
+| owner field への代入不可のため「field を入れ替える」書き方が無い | loader の `self.order` の差し替え、ModuleFile.imports の設定 | 空で作って in place に insert する。入れ替えが要る場合は 2 つの field を持つ |
+| Array.at の結果は capture 限定で `orelse` も不可 | checker body port | `if arr.at(i) \|v\| {} else {}` |
+| `typ::map_names` の rename callback は error set しか返せず diagnostic を運べない | loader の resolve_type_node | mapper struct に失敗を記録して呼び出し後に読む |
+| view field を持つ struct(`ast::ConstructField { []u8, []u8 }`)を view binding から作れない | checker body の construct_expansion 呼び出し | builder(`begin_construct` / `add_field` / `finish_construct`)に変えた |
+| `while` 本体で作った view が同 block の `defer owner.deinit()` と衝突する | checker body | view を iteration ごとに bind し直す |
+| `mem::slice` を view に使えない / `?[]u8` を返す helper に view binding を渡せない | checker body | `x[a..b]` で切る / index を返す helper にする |
+| union payload に `?T` を置けない | loader の qualify(optional child を持つ結果) | optional 子は inline で分岐 |
+| `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
+| expression の match arm で `return` できない | loader / checker body | statement の match に包む |
+| closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
+| `main` は exit status を選べず、error を返すと runtime が `runtime error: <名前>` を stderr に足す(ADR-0085) | CLI の失敗終了 | error set `Cli` を返す。差分テストはその 1 行を除いて比較。cutover までに `std::process::exit` 相当の判断が要る |
+| `std::process` は argv[0](実行ファイルの path)を出さない | CLI の lib dir 探索(Go は binary 隣の `lib/kizu`) | `--lib-dir` / `KIZU_LIB_DIR` のみ。既定は `lib/kizu` |
+| method の `&T` 戻り値は ownership checker が borrow として追跡しない(`calledFunction` が free function と namespace 修飾名しか解決せず、`let s = self.text(n); s.as_bytes()` が view 初期化子と認識されない) | ownership の `NameTable`: intern した綴りの bytes を読む accessor | free function `name_text(names: &NameTable, name) -> &string::String` にし、call site で `let retained = ...; let bytes = retained.as_bytes();` と束縛する |
+| IR lowering が `&var` 引数の slot 判定を method 名だけで program 全体に union する(`internal/ir/slots.go` `markLentMethodArgs`)ため、別 module に同名で `&var` 位置が違う method があると capture / payload binding の lowering が壊れる(`clone`、`is_plain_data_type` で project / types の関数が clang error になった) | ownership module の `ScopeStore.clone` / `Checker.is_plain_data_type` ほか | 衝突した method だけ名前を変えた(`clone_scope`、`binding_mut`、`check_call`、`check_value_block`、`is_plain_data`、`check_owned_string_method` など)。同名 method の `&var` 位置差を列挙する確認を module 完了時に行う |
+| `test` block の本体は同 module の private field を読めない | ownership の `binding_test.kizu`(`BindingHandle.node` の比較) | 比較を同 module の `fn` に出す |
+| `if try f() \|v\|` の capture から `&var self` method を呼べないため、borrow を返す accessor(`?&T`)は使いにくい | ownership の struct / enum / union 表の読み出し | accessor は copy 値(`?Name`、`?BindingHandle`、`bool`)を返す形にし、`Map.at` は accessor 内部で閉じる |
+| Go の `defer` による状態復帰(`c.loopDepth--`、flag の戻し)を `defer` で書けない(cleanup method 呼び出し以外は `defer` 不可)上、`?Owner` 戻り値を `let` に束縛できない | ownership の `check_block` / `check_while_stmt` / generic instantiation の enter / restore | 失敗 branch と成功 path の両方に復帰を書く(`if try f() \|failed\| { restore; return move failed; } restore;`) |
+

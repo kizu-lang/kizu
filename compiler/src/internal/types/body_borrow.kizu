@@ -1,0 +1,150 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::mem;
+import std::string;
+
+union BorrowPrefixResult {
+    None,
+    Value(ast::PrefixExpr),
+}
+
+// Validates an explicit borrow and returns the value type it borrows.
+fn (self: &var Checker) check_borrow_prefix(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::PrefixExpr,
+    out: &var Type,
+    mutable_out: &var bool
+) -> !?diagnostic::Diagnostic {
+    let retained = tree.texts.at(expression.operator.node);
+    let operator = retained.as_bytes();
+    let mutable = mem::equal_bytes(operator, "&var");
+    if try self.check_borrow_target_shape(tree, expression.right) |problem| {
+        return move problem;
+    }
+    var value_type = empty_type();
+    if try self.check_expr(tree, scope, expression.right, &var value_type) |problem| {
+        return move problem;
+    }
+    if self.types.is_buffer_type(value_type) {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "cannot borrow a stack buffer; use `as_bytes()` / `as_mut_bytes()`"
+        );
+    }
+    if mutable {
+        if try self.require_mutable_borrow_arg(
+            tree,
+            scope,
+            expression.right,
+            value_type
+        ) |problem| {
+            return move problem;
+        }
+    }
+    out.* = value_type;
+    mutable_out.* = mutable;
+    return null;
+}
+
+fn borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> BorrowPrefixResult {
+    match tree.expressions.at(expression.node) {
+        Prefix(prefix) => {
+            let retained = tree.texts.at(prefix.operator.node);
+            let operator = retained.as_bytes();
+            if mem::equal_bytes(operator, "&") or
+                mem::equal_bytes(operator, "&var") {
+                return BorrowPrefixResult::Value(ast::PrefixExpr {
+                    operator: prefix.operator,
+                    right: prefix.right
+                });
+            }
+        },
+        _ => {},
+    }
+    return BorrowPrefixResult::None;
+}
+
+fn (self: &Checker) check_borrow_target_shape(
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    match tree.expressions.at(expression.node) {
+        Ident(_) => return null,
+        _ => {},
+    }
+    if try ast::field_path_root(self.allocator, tree, expression) |path| {
+        path.deinit();
+        return null;
+    }
+    return try self.checker_error_at(
+        "type error",
+        expression_span(tree, expression),
+        "borrow target must be a local binding or field path"
+    );
+}
+
+fn mutable_place_base(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    expression: ast::Expression
+) -> !?ast::IdentExpr {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => return ast::IdentExpr {
+            name: identifier.name,
+            span: identifier.span
+        },
+        _ => {},
+    }
+    if try ast::field_path_root(allocator, tree, expression) |path| {
+        let root = path.root;
+        path.deinit();
+        return root;
+    }
+    return null;
+}
+
+fn (self: &Checker) require_mutable_borrow_arg(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    want: Type
+) -> !?diagnostic::Diagnostic {
+    if self.types.is_text(want, "[]u8") {
+        match tree.expressions.at(expression.node) {
+            Ident(identifier) => {
+                let retained = tree.texts.at(identifier.name.node);
+                let name = retained.as_bytes();
+                if self.scopes.is_mut_borrowed(scope, name) {
+                    return null;
+                }
+            },
+            _ => {},
+        }
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`&var []u8` argument must be a writable view binding"
+        );
+    }
+    if try mutable_place_base(self.allocator, tree, expression) |base| {
+        let retained = tree.texts.at(base.name.node);
+        let name = retained.as_bytes();
+        if self.scopes.is_mutable(scope, name) or
+            self.scopes.is_mut_borrowed(scope, name) {
+            return null;
+        }
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("&var argument `");
+        try message.append_bytes(name);
+        try message.append_bytes("` must be mutable");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    return try self.checker_error_at(
+        "type error",
+        ast::zero_span(),
+        "&var argument must be a mutable local binding"
+    );
+}

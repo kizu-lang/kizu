@@ -1,0 +1,323 @@
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/manifest/manifest.go. Go's helpers return
+// `(value, error)`; a Kizu error value carries no text, so each helper returns
+// the manifest error text as `?string::String` (null is success) and writes its
+// value through a `&var` parameter, the way Go's assignManifestValue already
+// fills `*Manifest`. Go's pre-split line slice is a LineCursor over source.
+
+/// Manifest is the minimal kizu.toml shape accepted by the compiler.
+///
+/// There is no export list. What a package keeps to itself is decided by where
+/// the source sits: a module under an `internal` directory is reachable from the
+/// subtree that directory belongs to and nowhere else.
+pub struct Manifest {
+    pub package_name: string::String,
+    pub version: string::String,
+    pub paths: array::Array<string::String>
+}
+
+/// Is either the parsed manifest or the manifest error text.
+pub union ParseResult {
+    Manifest(Manifest),
+    Error(string::String),
+}
+
+// Names the TOML section the current assignment belongs to; None is Go's "".
+enum Section {
+    None,
+    Package,
+    Modules,
+}
+
+// Holds the two sides of one `key = value` line.
+struct Assignment {
+    key: []u8,
+    value: []u8
+}
+
+// Walks source one line at a time: [start, end) is the current line and
+// number its 1-based line number. end starts at -1, the newline before the
+// first line, so that the visited lines are exactly strings.Split(source, "\n").
+struct LineCursor {
+    start: i64,
+    end: i64,
+    number: i64
+}
+
+/// Parses the declarative subset of kizu.toml used by Kizu.
+pub fn parse_manifest(allocator: Allocator, source: []u8) -> !ParseResult {
+    return parse(allocator, source, false);
+}
+
+/// Parses the std package manifest with its reserved name.
+pub fn parse_std_manifest(allocator: Allocator, source: []u8) -> !ParseResult {
+    return parse(allocator, source, true);
+}
+
+// parse owns the manifest under construction so that one cleanup covers every
+// failure of parse_into.
+fn parse(allocator: Allocator, source: []u8, allow_reserved_name: bool) -> !ParseResult {
+    var manifest = Manifest {
+        package_name: string::new(allocator),
+        version: string::new(allocator),
+        paths: array::new<string::String>(allocator)
+    };
+    errdefer manifest.deinit();
+    if try parse_into(allocator, source, allow_reserved_name, &var manifest) |failure| {
+        manifest.deinit();
+        return ParseResult::Error(move failure);
+    }
+    return ParseResult::Manifest(move manifest);
+}
+
+// parse_into parses the declarative subset shared by user and std manifests.
+fn parse_into(
+    allocator: Allocator, source: []u8, allow_reserved_name: bool, manifest: &var Manifest
+) -> !?string::String {
+    var section = Section::None;
+    var cursor = LineCursor { start: 0, end: -1, number: 0 };
+    while cursor.next(source) {
+        let line = mem::trim_ascii(strip_comment(source[cursor.start..cursor.end]));
+        if mem::len(line) == 0 {
+            continue;
+        }
+        if mem::starts_with(line, "[") {
+            if try parse_section(allocator, line, cursor.number, &var section) |failure| {
+                return move failure;
+            }
+            continue;
+        }
+        var assignment = Assignment { key: "", value: "" };
+        if try parse_assignment(allocator, line, cursor.number, &var assignment) |failure| {
+            return move failure;
+        }
+        var joined = try string::from_bytes(allocator, assignment.value);
+        defer joined.deinit();
+        if starts_multiline_array(assignment.value) {
+            if try collect_multiline_array(allocator, &var joined, source, &var cursor) |failure| {
+                return move failure;
+            }
+        }
+        let value = joined.as_bytes();
+        if try assign_manifest_value(
+            allocator, manifest, section, assignment.key, value, cursor.number
+        ) |failure| {
+            return move failure;
+        }
+    }
+    return validate_manifest(allocator, manifest, allow_reserved_name);
+}
+
+// next moves to the following line and reports false after the last one.
+fn (self: &var LineCursor) next(source: []u8) -> bool {
+    if self.end >= mem::len(source) {
+        return false;
+    }
+    self.start = self.end + 1;
+    self.end = find_byte(source, self.start, cast<u8>(10));
+    self.number = self.number + 1;
+    return true;
+}
+
+// starts_multiline_array reports arrays that continue on later lines.
+fn starts_multiline_array(value: []u8) -> bool {
+    return mem::starts_with(value, "[") and !ends_with(value, "]");
+}
+
+// collect_multiline_array joins the supported TOML string array subset onto
+// out, which already holds the opening line, and leaves cursor on the closing
+// line.
+fn collect_multiline_array(
+    allocator: Allocator, out: &var string::String, source: []u8, cursor: &var LineCursor
+) -> !?string::String {
+    let line_no = cursor.number;
+    while cursor.next(source) {
+        let line = mem::trim_ascii(strip_comment(source[cursor.start..cursor.end]));
+        if mem::len(line) == 0 {
+            continue;
+        }
+        try out.append_bytes(line);
+        if ends_with(line, "]") {
+            return null;
+        }
+    }
+    return try line_error(allocator, line_no, "unterminated string array");
+}
+
+// strip_comment removes a full-line or suffix TOML comment in the supported subset.
+fn strip_comment(line: []u8) -> []u8 {
+    return line[0..find_byte(line, 0, cast<u8>(35))];
+}
+
+// parse_section parses a TOML section header into section.
+fn parse_section(
+    allocator: Allocator, line: []u8, line_no: i64, section: &var Section
+) -> !?string::String {
+    if !ends_with(line, "]") {
+        return try line_error(allocator, line_no, "invalid section header");
+    }
+    let name = mem::trim_ascii(line[1..mem::len(line) - 1]);
+    if mem::equal_bytes(name, "package") {
+        section.* = Section::Package;
+        return null;
+    }
+    if mem::equal_bytes(name, "modules") {
+        section.* = Section::Modules;
+        return null;
+    }
+    var failure = try line_error(allocator, line_no, "unsupported section `");
+    errdefer failure.deinit();
+    try failure.append_bytes(name);
+    try failure.append_bytes("`");
+    return move failure;
+}
+
+// parse_assignment parses one key/value assignment into out.
+fn parse_assignment(
+    allocator: Allocator, line: []u8, line_no: i64, out: &var Assignment
+) -> !?string::String {
+    let at = find_byte(line, 0, cast<u8>(61));
+    if at == mem::len(line) {
+        return try line_error(allocator, line_no, "expected key = value");
+    }
+    let key = mem::trim_ascii(line[0..at]);
+    let value = mem::trim_ascii(line[at + 1..mem::len(line)]);
+    if mem::len(key) == 0 or mem::len(value) == 0 {
+        return try line_error(allocator, line_no, "expected key = value");
+    }
+    out.* = Assignment { key: key, value: value };
+    return null;
+}
+
+// assign_manifest_value stores one parsed manifest value.
+fn assign_manifest_value(
+    allocator: Allocator, manifest: &var Manifest, section: Section, key: []u8, value: []u8,
+    line_no: i64
+) -> !?string::String {
+    if section == Section::Package and mem::equal_bytes(key, "name") {
+        manifest.package_name.clear();
+        return parse_string_value(allocator, value, line_no, &var manifest.package_name);
+    }
+    if section == Section::Package and mem::equal_bytes(key, "version") {
+        manifest.version.clear();
+        return parse_string_value(allocator, value, line_no, &var manifest.version);
+    }
+    if section == Section::Modules and mem::equal_bytes(key, "paths") {
+        while manifest.paths.pop() |old| {
+            old.deinit();
+        }
+        return parse_string_list(allocator, value, line_no, &var manifest.paths);
+    }
+    var failure = try line_error(allocator, line_no, "unsupported key `");
+    errdefer failure.deinit();
+    try failure.append_bytes(section_spelling(section));
+    try failure.append_bytes(".");
+    try failure.append_bytes(key);
+    try failure.append_bytes("`");
+    return move failure;
+}
+
+// section_spelling returns the section name Go keeps as the section string.
+fn section_spelling(section: Section) -> []u8 {
+    return match section {
+        None => "",
+        Package => "package",
+        Modules => "modules",
+    };
+}
+
+// parse_string_value parses a quoted string value onto out.
+fn parse_string_value(
+    allocator: Allocator, value: []u8, line_no: i64, out: &var string::String
+) -> !?string::String {
+    let length = mem::len(value);
+    let quote = cast<u8>(34);
+    if length >= 2 and value[0] == quote and value[length - 1] == quote {
+        try out.append_bytes(value[1..length - 1]);
+        return null;
+    }
+    return try line_error(allocator, line_no, "expected quoted string");
+}
+
+// parse_string_list parses a simple TOML string array onto values.
+fn parse_string_list(
+    allocator: Allocator, value: []u8, line_no: i64, values: &var array::Array<string::String>
+) -> !?string::String {
+    if !mem::starts_with(value, "[") or !ends_with(value, "]") {
+        return try line_error(allocator, line_no, "expected string array");
+    }
+    let body = mem::trim_ascii(value[1..mem::len(value) - 1]);
+    if mem::len(body) == 0 {
+        return null;
+    }
+    var start = 0;
+    while start <= mem::len(body) {
+        let end = find_byte(body, start, cast<u8>(44));
+        let part = mem::trim_ascii(body[start..end]);
+        if mem::len(part) > 0 or end < mem::len(body) {
+            var parsed = string::new(allocator);
+            errdefer parsed.deinit();
+            if try parse_string_value(allocator, part, line_no, &var parsed) |failure| {
+                parsed.deinit();
+                return move failure;
+            }
+            try values.append(move parsed);
+        }
+        start = end + 1;
+    }
+    return null;
+}
+
+// validate_manifest checks required fields and reserved package names.
+fn validate_manifest(
+    allocator: Allocator, manifest: &var Manifest, allow_reserved_name: bool
+) -> !?string::String {
+    let name = manifest.package_name.as_bytes();
+    if mem::len(name) == 0 {
+        return try string::from_bytes(allocator, "manifest error: missing [package].name");
+    }
+    if mem::equal_bytes(name, "std") and !allow_reserved_name {
+        return try string::from_bytes(allocator, "manifest error: package name `std` is reserved");
+    }
+    if manifest.paths.len() == 0 {
+        try manifest.paths.append(try string::from_bytes(allocator, "src"));
+    }
+    return null;
+}
+
+// line_error builds Go's `manifest error:<line_no>: <text>` message.
+fn line_error(allocator: Allocator, line_no: i64, text: []u8) -> !string::String {
+    var out = try string::from_bytes(allocator, "manifest error:");
+    errdefer out.deinit();
+    try fmt::append_i64(&var out, line_no);
+    try out.append_bytes(": ");
+    try out.append_bytes(text);
+    return move out;
+}
+
+// find_byte returns the index of the first needle at or after start, or the
+// length of bytes when there is none.
+fn find_byte(bytes: []u8, start: i64, needle: u8) -> i64 {
+    var index = start;
+    while index < mem::len(bytes) {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+// ends_with reports whether bytes ends with suffix.
+fn ends_with(bytes: []u8, suffix: []u8) -> bool {
+    let suffix_len = mem::len(suffix);
+    let length = mem::len(bytes);
+    if suffix_len > length {
+        return false;
+    }
+    return mem::equal_bytes(bytes[length - suffix_len..length], suffix);
+}

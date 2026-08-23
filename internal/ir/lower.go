@@ -7,6 +7,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/stdmeta"
 	"github.com/kizu-lang/kizu/internal/stdmethod"
 	"github.com/kizu-lang/kizu/internal/stdprim"
 	"github.com/kizu-lang/kizu/internal/typ"
@@ -559,7 +560,8 @@ func lowerUnion(decl *ast.UnionDecl) Union {
 	variants := map[string]UnionVariant{}
 	for index, variant := range decl.Variants {
 		variants[variant.Name] = UnionVariant{
-			Name: variant.Name, Index: index, Payload: typ.Text(variant.Payload),
+			Name: variant.Name, Index: index,
+			Payload: stdmeta.ResolveElementTypeForms(typ.Text(variant.Payload)),
 		}
 	}
 	return Union{Name: decl.Name, Variants: variants}
@@ -606,7 +608,10 @@ func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
 func lowerStruct(decl *ast.StructDecl) Struct {
 	fields := make([]Field, 0, len(decl.Fields))
 	for _, field := range decl.Fields {
-		fields = append(fields, Field{Name: field.Name, Type: typ.Text(field.TypeName)})
+		fields = append(fields, Field{
+			Name: field.Name,
+			Type: stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName)),
+		})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
 }

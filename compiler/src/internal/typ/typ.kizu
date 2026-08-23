@@ -121,6 +121,13 @@ pub contract NameMapper {
     ) -> !array::Array<string::String>;
 }
 
+/// Describes a post-order whole-name fold into a distinct type graph.
+pub contract NameFolder {
+    fn fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node>>) -> !arena::Handle<Node>;
+}
+
+struct PlainNameTransform {}
+
 // NoReplacements selects the plain static renderer instantiation.
 struct NoReplacements {}
 
@@ -170,12 +177,27 @@ fn (self: &var Builder) add(node: Node) -> arena::Handle<Node> {
     return self.nodes.add(move node);
 }
 
+fn copy_path(allocator: Allocator, source: &array::Array<string::String>) -> !array::Array<string::String> {
+    var path = array::new<string::String>(allocator);
+    errdefer path.deinit();
+    var index = 0;
+    while source.at(index) |part| {
+        let bytes = part.as_bytes();
+        let copied = try owned_text(allocator, bytes);
+        errdefer copied.deinit();
+        try path.append(move copied);
+        index = index + 1;
+    }
+    return move path;
+}
+
+// Borrows a node already retained in this in-progress graph.
+fn (self: &Builder) at(handle: arena::Handle<Node>) -> &Node {
+    return self.nodes.at(handle);
+}
+
 /// Transfers the completed graph into its phase table.
-pub fn finish_builder(
-    builder: Builder,
-    table: &var Table,
-    root: arena::Handle<Node>
-) -> Type {
+pub fn finish_builder(builder: Builder, table: &var Table, root: arena::Handle<Node>) -> Type {
     let tree = TypeTree { nodes: move builder.nodes, root: root };
     let tree_handle = table.trees.add(move tree);
     return Type { tree: tree_handle, root: root };
@@ -792,88 +814,81 @@ fn equal_error_union(
 }
 
 /// Rewrites every name path while preserving the type structure around it.
-pub fn map_names<M>(
-    table: &var Table,
-    value: Type,
-    mapper: &var M
-) -> !Type {
-    var builder = new_builder(table.allocator);
-    errdefer builder.deinit();
-    let root = try map_names_node<M>(
-        &var builder,
-        table.trees.at(value.tree),
-        value.root,
-        mapper
-    );
-    return finish_builder(move builder, table, root);
+pub fn map_names<M>(table: &var Table, value: Type, mapper: &var M) -> !Type {
+    var folder = PlainNameTransform {};
+    return transform_names<M, PlainNameTransform>(table, value, table, mapper, &var folder);
 }
 
-fn map_names_node<M>(
-    builder: &var Builder,
-    value: &TypeTree,
-    handle: arena::Handle<Node>,
-    mapper: &var M
-) -> !arena::Handle<Node> {
+/// Folds whole names post-order from a borrowed graph into a distinct table.
+pub fn fold_names_into<F>(source: &Table, value: Type, destination: &var Table, folder: &var F) -> !Type {
+    var mapper = PlainNameTransform {};
+    return transform_names<PlainNameTransform, F>(source, value, destination, &var mapper, folder);
+}
+
+fn (self: &var PlainNameTransform) rename_path(allocator: Allocator, path: &array::Array<string::String>) -> !array::Array<string::String> {
+    return copy_path(allocator, path);
+}
+
+fn (self: &var PlainNameTransform) fold_name(builder: &var Builder, path: array::Array<string::String>, args: array::Array<arena::Handle<Node>>) -> !arena::Handle<Node> {
+    return builder.add(Node::Name(Name { path: move path, args: move args }));
+}
+
+fn transform_names<M, F>(source: &Table, value: Type, destination: &var Table, mapper: &var M, folder: &var F) -> !Type {
+    var builder = new_builder(destination.allocator);
+    errdefer builder.deinit();
+    let root = try map_names_node<M, F>(&var builder, source.trees.at(value.tree), value.root, mapper, folder);
+    return finish_builder(move builder, destination, root);
+}
+
+fn map_names_node<M, F>(builder: &var Builder, value: &TypeTree, handle: arena::Handle<Node>, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     return match value.nodes.at(handle) {
-        Name(node) => try map_name_node<M>(builder, value, node, mapper),
+        Name(node) => try map_name_node<M, F>(builder, value, node, mapper, folder),
         Slice(node) => {
-            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Slice(Slice { elem: elem }))
         },
         Buffer(node) => {
-            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Buffer(Buffer { size: node.size, elem: elem }))
         },
         Borrow(node) => {
-            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Borrow(Borrow {
                 elem: elem,
                 mutable: node.mutable
             }))
         },
         Optional(node) => {
-            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Optional(Optional { elem: elem }))
         },
         Const(node) => {
-            let elem = try map_names_node<M>(builder, value, node.elem, mapper);
+            let elem = try map_names_node<M, F>(builder, value, node.elem, mapper, folder);
             builder.nodes.add(Node::Const(Const { elem: elem }))
         },
-        ErrorUnion(node) => try map_error_union_names<M>(builder, value, node, mapper),
+        ErrorUnion(node) => try map_error_union_names<M, F>(builder, value, node, mapper, folder),
     };
 }
 
-fn map_name_node<M>(
-    builder: &var Builder,
-    value: &TypeTree,
-    node: &Name,
-    mapper: &var M
-) -> !arena::Handle<Node> {
+fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
     var path = try mapper.rename_path(builder.allocator, &node.path);
     errdefer path.deinit();
-    var args = array::new<arena::Handle<Node>>(builder.allocator);
+    let allocator = builder.allocator;
+    var args = array::new<arena::Handle<Node>>(allocator);
     errdefer args.deinit();
     var index = 0;
     while node.args.get(index) |arg| {
-        try args.append(try map_names_node<M>(builder, value, arg, mapper));
+        try args.append(try map_names_node<M, F>(builder, value, arg, mapper, folder));
         index = index + 1;
     }
-    return builder.nodes.add(Node::Name(Name {
-        path: move path,
-        args: move args
-    }));
+    return folder.fold_name(builder, move path, move args);
 }
 
 // map_error_union_names keeps Go's callback order: success before error.
-fn map_error_union_names<M>(
-    builder: &var Builder,
-    value: &TypeTree,
-    node: &ErrorUnion,
-    mapper: &var M
-) -> !arena::Handle<Node> {
-    let ok = try map_names_node<M>(builder, value, node.ok, mapper);
+fn map_error_union_names<M, F>(builder: &var Builder, value: &TypeTree, node: &ErrorUnion, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
+    let ok = try map_names_node<M, F>(builder, value, node.ok, mapper, folder);
     if node.err |source_err| {
-        let err = try map_names_node<M>(builder, value, source_err, mapper);
+        let err = try map_names_node<M, F>(builder, value, source_err, mapper, folder);
         return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: err, ok: ok }));
     }
     return builder.nodes.add(Node::ErrorUnion(ErrorUnion { err: null, ok: ok }));
@@ -1010,19 +1025,9 @@ fn substitute_name(
             }
         }
     }
-    var path = array::new<string::String>(builder.allocator);
-    errdefer path.deinit();
-    var index = 0;
-    while node.path.at(index) |part| {
-        let bytes = part.as_bytes();
-        let copied = try owned_text(builder.allocator, bytes);
-        errdefer copied.deinit();
-        try path.append(move copied);
-        index = index + 1;
-    }
     var args = array::new<arena::Handle<Node>>(builder.allocator);
     errdefer args.deinit();
-    index = 0;
+    var index = 0;
     while node.args.get(index) |arg| {
         try args.append(try substitute_node(
             builder,
@@ -1034,10 +1039,8 @@ fn substitute_name(
         ));
         index = index + 1;
     }
-    return builder.nodes.add(Node::Name(Name {
-        path: move path,
-        args: move args
-    }));
+    let path = try copy_path(builder.allocator, &node.path);
+    return builder.add(Node::Name(Name { path: move path, args: move args }));
 }
 
 // substitute_error_union keeps Go's traversal order: success before error.
@@ -1080,9 +1083,7 @@ pub fn substitute_text(
     var index = 0;
     while substitutions.key_at(index) |name| {
         if substitutions.get(name) |replacement| {
-            let replacement_type = try table.parse(replacement);
-            let replacement_text = try render(allocator, &table, replacement_type);
-            try rendered_substitutions.values.insert(name, move replacement_text);
+            try put_rendered_substitution(allocator, &var table, &var rendered_substitutions.values, name, replacement);
         }
         index = index + 1;
     }
@@ -1116,21 +1117,7 @@ pub fn substitute_owned_text(
         if replacements.at(index) |replacement| {
             let name_bytes = name.as_bytes();
             let replacement_bytes = replacement.as_bytes();
-            let replacement_type = try table.parse(replacement_bytes);
-            if rendered_substitutions.values.at_mut(name_bytes) |existing| {
-                existing.clear();
-                try append_render(existing, &table, replacement_type);
-            } else {
-                let replacement_text = try render(
-                    allocator,
-                    &table,
-                    replacement_type
-                );
-                try rendered_substitutions.values.insert(
-                    name_bytes,
-                    move replacement_text
-                );
-            }
+            try put_rendered_substitution(allocator, &var table, &var rendered_substitutions.values, name_bytes, replacement_bytes);
         }
         index = index + 1;
     }
@@ -1140,6 +1127,16 @@ pub fn substitute_owned_text(
         parsed,
         &rendered_substitutions
     );
+}
+
+fn put_rendered_substitution(allocator: Allocator, table: &var Table, values: &var map::Map<[]u8, string::String>, name: []u8, replacement: []u8) -> !void {
+    let replacement_type = try table.parse(replacement);
+    if values.at_mut(name) |existing| {
+        existing.clear();
+        return append_render(existing, table, replacement_type);
+    }
+    let replacement_text = try render(allocator, table, replacement_type);
+    return values.insert(name, move replacement_text);
 }
 
 fn render_substituted(

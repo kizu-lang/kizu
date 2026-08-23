@@ -1,0 +1,1334 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::map;
+
+// Port of the owned container methods of internal/ownership/checker.go:
+// Array<T> and Map<[]u8, V> method checks, the concrete impl method call
+// with its two-phase receiver borrow, the arena accessors, and the arena /
+// handle provenance contracts derived from signatures (ADR-0098).
+
+/// Validates ownership effects for owned Array<T> methods, the Go
+/// `checkArrayMethod`.
+fn (self: &var Checker) check_array_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    array: BindingHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.is_std_array_storage_method(method) and !self.current_std {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: Array has no method `%s`", Arg::Str(method)
+        );
+    }
+    let base_name = try self.names.intern("std::array::Array");
+    if try self.check_container_method_access(tree, base_name, array, method) |failed| {
+        return move failed;
+    }
+    if self.is_std_array_storage_method(method) {
+        return self.check_array_storage_method(tree, env, elem, method, args, out);
+    }
+    if self.names.is(method, "append") {
+        return self.check_array_append(tree, env, elem, args, out);
+    }
+    if self.names.is(method, "reserve") {
+        return self.check_array_count_mutation(tree, env, method, args, out);
+    }
+    if self.names.is(method, "pop") {
+        return self.check_array_pop(tree, elem, method, args, true, out);
+    }
+    if self.names.is(method, "pop_or_panic") {
+        return self.check_array_pop(tree, elem, method, args, false, out);
+    }
+    if self.names.is(method, "len") or self.names.is(method, "capacity") {
+        return self.check_array_read_no_args(tree, method, args, out);
+    }
+    if self.names.is(method, "get") or self.names.is(method, "get_or_panic") or
+        self.names.is(method, "clone") {
+        return self.check_array_copy_method(tree, env, elem, method, args, out);
+    }
+    if self.names.is(method, "at") or self.names.is(method, "at_mut") {
+        return self.check_array_at_condition(tree, env, array, elem, method, args, out);
+    }
+    if self.names.is(method, "set") or self.names.is(method, "swap") {
+        return self.check_array_indexed_mutation(tree, env, array, elem, method, args, out);
+    }
+    if self.names.is(method, "deinit") {
+        let count = arg_count(tree, args);
+        if count != 0 {
+            return try self.error2(
+                tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
+                Arg::Str(method), Arg::Int(count)
+            );
+        }
+        try self.store.set_moved(array, true);
+        out.* = self.common.void_name;
+        return null;
+    }
+    // Unreachable while this chain and the shared access table agree; the
+    // table refusal above is the user-facing one.
+    return try self.error1(
+        tree, ast::zero_span(), "array error: method `%s` is classified but unhandled",
+        Arg::Str(method)
+    );
+}
+
+/// Validates set and owner-safe slot exchange, the Go
+/// `checkArrayIndexedMutation`.
+fn (self: &var Checker) check_array_indexed_mutation(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    value: BindingHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(method, "set") {
+        return self.check_array_set(tree, env, elem, args, out);
+    }
+    let borrowed_param = self.binding(value).borrowed_param;
+    let mut_borrow = self.binding(value).mut_borrow;
+    if borrowed_param and !mut_borrow {
+        return try self.error0(
+            ast::zero_span(), "array error: `Array.swap` requires mutable Array receiver"
+        );
+    }
+    return self.check_array_swap(tree, env, args, out);
+}
+
+/// Validates two checked indexes without moving either element, the Go
+/// `checkArraySwap`.
+fn (self: &var Checker) check_array_swap(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.swap` expects 2 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        var got = empty_name();
+        if try self.read_expr(tree, env, arg, &var got) |failed| {
+            return move failed;
+        }
+        if !self.names.is(got, "i64") {
+            return try self.error1(
+                tree, ast::zero_span(), "array error: `Array.swap` expects i64 index, got %s",
+                Arg::Str(got)
+            );
+        }
+    }
+    out.* = self.common.error_void_name;
+    return null;
+}
+
+/// Dispatches operations whose result duplicates copy elements without
+/// consuming the source Array, the Go `checkArrayCopyMethod`.
+fn (self: &var Checker) check_array_copy_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(method, "clone") {
+        return self.check_array_clone(tree, env, elem, args, out);
+    }
+    return self.check_array_get(tree, env, elem, method, args, out);
+}
+
+/// Validates the explicit allocator and limits clone to copy elements, the
+/// Go `checkArrayClone`. Owner elements need per-type deep-copy logic
+/// (ADR-0124).
+fn (self: &var Checker) check_array_clone(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.clone` expects 1 arg, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "Allocator") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.clone` expects Allocator, got %s",
+            Arg::Str(got)
+        );
+    }
+    if !try self.is_copy_type(elem) {
+        return try self.error0(
+            ast::zero_span(), "array error: `Array.clone` requires copy element"
+        );
+    }
+    out.* = try self.names.format("!std::array::Array<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Validates Array helpers reserved to std source, the Go
+/// `checkStdArrayStorageMethod`.
+fn (self: &var Checker) check_array_storage_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if self.names.is(method, "truncate") {
+        return self.check_array_count_mutation(tree, env, method, args, out);
+    }
+    if self.names.is(method, "clear") {
+        let count = arg_count(tree, args);
+        if count != 0 {
+            return try self.error1(
+                tree, ast::zero_span(), "array error: `Array.clear` expects 0 args, got %d",
+                Arg::Int(count)
+            );
+        }
+        out.* = self.common.void_name;
+        return null;
+    }
+    if !self.names.is(elem, "u8") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.%s` requires Array<u8>", Arg::Str(method)
+        );
+    }
+    return self.check_array_read_no_args(tree, method, args, out);
+}
+
+/// Reports methods reserved for std-owned storage wrappers, the Go
+/// `isStdArrayStorageMethod`.
+fn (self: &Checker) is_std_array_storage_method(method: Name) -> bool {
+    return self.names.is(method, "truncate") or self.names.is(method, "clear") or
+        self.names.is(method, "as_bytes") or self.names.is(method, "as_mut_bytes");
+}
+
+/// Validates one-count Array mutations, the Go `checkArrayCountMutation`.
+fn (self: &var Checker) check_array_count_mutation(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects i64, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    out.* = self.common.error_void_name;
+    return null;
+}
+
+/// Validates append mutation and element move, the Go `checkArrayAppend`.
+fn (self: &var Checker) check_array_append(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.append` expects 1 arg, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.move_contextual_expr(tree, env, first, elem, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, elem) {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.append` expects %s, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = self.common.error_void_name;
+    return null;
+}
+
+/// Validates moving one initialized element out of an Array, the Go
+/// `checkArrayPop`.
+fn (self: &var Checker) check_array_pop(
+    tree: &ast::Ast,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    returns_optional: bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    if !returns_optional {
+        out.* = elem;
+        return null;
+    }
+    out.* = try self.names.prefixed("?", elem);
+    return null;
+}
+
+/// Checks at/at_mut inside a capture condition -- a mutable binding for
+/// at_mut and one i64 index -- and refuses them everywhere else, the Go
+/// `checkArrayAtCondition`: the borrow optional they produce exists only
+/// there.
+fn (self: &var Checker) check_array_at_condition(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    array: BindingHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if !self.capture_condition and !self.borrow_return {
+        return try self.error3(
+            tree, ast::zero_span(),
+            "array error: `Array.%s` must be consumed by a capture (`if array.%s(...) |name|` or `while array.%s(...) |name|`)",
+            Arg::Str(method), Arg::Str(method), Arg::Str(method)
+        );
+    }
+    if self.names.is(method, "at_mut") and !self.mutable_place(array) {
+        return try self.error0(
+            ast::zero_span(), "array error: `Array.at_mut` requires mutable array binding"
+        );
+    }
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    // The context covers exactly this call: both flags off while the
+    // argument is read -- a nested at/at_mut in argument position refuses as
+    // usual -- and back for the result the call gate reads.
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_outside_borrow_context(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects i64 index, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    if self.names.is(method, "at_mut") {
+        out.* = try self.names.prefixed("?&var ", elem);
+        return null;
+    }
+    out.* = try self.names.prefixed("?&", elem);
+    return null;
+}
+
+/// Reads one expression with the borrow-optional contexts off, so producers
+/// nested inside it refuse as usual, the Go `readOutsideBorrowContext`.
+fn (self: &var Checker) read_outside_borrow_context(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let saved_capture = self.capture_condition;
+    let saved_return = self.borrow_return;
+    self.capture_condition = false;
+    self.borrow_return = false;
+    if try self.read_expr(tree, env, expression, out) |failed| {
+        self.capture_condition = saved_capture;
+        self.borrow_return = saved_return;
+        return move failed;
+    }
+    self.capture_condition = saved_capture;
+    self.borrow_return = saved_return;
+    return null;
+}
+
+/// Validates len/capacity reads, the Go `checkArrayReadNoArgs`.
+fn (self: &var Checker) check_array_read_no_args(
+    tree: &ast::Ast,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 0 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    out.* = self.common.i64_name;
+    return null;
+}
+
+/// Validates checked element replacement, the Go `checkArraySet`.
+fn (self: &var Checker) check_array_set(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.set` expects 2 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var index_type = empty_name();
+    if try self.read_expr(tree, env, first, &var index_type) |failed| {
+        return move failed;
+    }
+    if !self.names.is(index_type, "i64") {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.set` expects i64 index, got %s",
+            Arg::Str(index_type)
+        );
+    }
+    let second = args.get_or_panic(tree, 1);
+    var got = empty_name();
+    if try self.move_contextual_expr(tree, env, second, elem, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, elem) {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.set` expects %s value, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = self.common.error_void_name;
+    return null;
+}
+
+/// Validates copy-only Array<T> reads in the prototype, the Go
+/// `checkArrayGet`.
+fn (self: &var Checker) check_array_get(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    elem: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error2(
+            tree, ast::zero_span(), "array error: `Array.%s` expects i64 index, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    if !try self.is_copy_type(elem) {
+        return try self.error1(
+            tree, ast::zero_span(), "array error: `Array.%s` requires copy element",
+            Arg::Str(method)
+        );
+    }
+    if self.names.is(method, "get") {
+        out.* = try self.names.prefixed("?", elem);
+        return null;
+    }
+    out.* = elem;
+    return null;
+}
+
+/// Validates ownership effects for owned Map<[]u8, V> methods, the Go
+/// `checkMapMethod`.
+fn (self: &var Checker) check_map_method(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    map_value: BindingHandle,
+    args_text: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var map_args = array::new<Name>(self.allocator);
+    defer map_args.deinit();
+    if try self.checked_map_args(tree, args_text, &var map_args) |failed| {
+        return move failed;
+    }
+    let value_type = map_args.get_or_panic(1);
+    let base_name = try self.names.intern("std::map::Map");
+    if try self.check_container_method_access(tree, base_name, map_value, method) |failed| {
+        return move failed;
+    }
+    if self.names.is(method, "insert") {
+        return self.check_owned_map_insert(tree, env, value_type, args, out);
+    }
+    if self.names.is(method, "get") {
+        if try self.check_map_key_arg(tree, env, method, args) |failed| {
+            return move failed;
+        }
+        if !try self.is_copy_type(value_type) {
+            return try self.error0(ast::zero_span(), "map error: `Map.get` requires copy value");
+        }
+        out.* = try self.names.prefixed("?", value_type);
+        return null;
+    }
+    if self.names.is(method, "at") or self.names.is(method, "at_mut") {
+        return self.check_map_at_condition(tree, env, map_value, value_type, method, args, out);
+    }
+    if self.names.is(method, "key_at") {
+        if try self.check_map_index_arg(tree, env, method, args) |failed| {
+            return move failed;
+        }
+        out.* = try self.names.intern("?[]u8");
+        return null;
+    }
+    if self.names.is(method, "contains") {
+        if try self.check_map_key_arg(tree, env, method, args) |failed| {
+            return move failed;
+        }
+        out.* = self.common.bool_name;
+        return null;
+    }
+    if self.names.is(method, "len") {
+        return self.check_map_read_no_args(tree, method, args, out);
+    }
+    if self.names.is(method, "deinit") {
+        return self.check_map_deinit(tree, map_value, args, out);
+    }
+    // Unreachable while this chain and the shared access table agree; the
+    // table refusal above is the user-facing one.
+    return try self.error1(
+        tree, ast::zero_span(), "map error: method `%s` is classified but unhandled",
+        Arg::Str(method)
+    );
+}
+
+/// Checks at/at_mut inside a capture condition -- a mutable binding for
+/// at_mut and one []u8 key -- and refuses them everywhere else, the Go
+/// `checkMapAtCondition`: the borrow optional they produce exists only there.
+fn (self: &var Checker) check_map_at_condition(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    map_value: BindingHandle,
+    value_type: Name,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if !self.capture_condition and !self.borrow_return {
+        return try self.error3(
+            tree, ast::zero_span(),
+            "map error: `Map.%s` must be consumed by a capture (`if m.%s(key) |name|` or `while m.%s(key) |name|`)",
+            Arg::Str(method), Arg::Str(method), Arg::Str(method)
+        );
+    }
+    if self.names.is(method, "at_mut") and !self.mutable_place(map_value) {
+        return try self.error0(
+            ast::zero_span(), "map error: `Map.at_mut` requires mutable map binding"
+        );
+    }
+    // The context covers exactly this call: both flags off while the
+    // argument is read -- a nested at/at_mut in argument position refuses as
+    // usual -- and back for the result the call gate reads.
+    let saved_capture = self.capture_condition;
+    let saved_return = self.borrow_return;
+    self.capture_condition = false;
+    self.borrow_return = false;
+    if try self.check_map_key_arg(tree, env, method, args) |failed| {
+        self.capture_condition = saved_capture;
+        self.borrow_return = saved_return;
+        return move failed;
+    }
+    self.capture_condition = saved_capture;
+    self.borrow_return = saved_return;
+    if self.names.is(method, "at_mut") {
+        out.* = try self.names.prefixed("?&var ", value_type);
+        return null;
+    }
+    out.* = try self.names.prefixed("?&", value_type);
+    return null;
+}
+
+/// Validates read-only key and copy value insertion, the Go
+/// `checkMapInsert`.
+fn (self: &var Checker) check_owned_map_insert(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    value_type: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 2 {
+        return try self.error1(
+            tree, ast::zero_span(), "map error: `Map.insert` expects 2 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var key_type = empty_name();
+    if try self.read_expr(tree, env, first, &var key_type) |failed| {
+        return move failed;
+    }
+    if !self.names.is(key_type, "[]u8") {
+        return try self.error1(
+            tree, ast::zero_span(), "map error: `Map.insert` expects []u8 key, got %s",
+            Arg::Str(key_type)
+        );
+    }
+    let second = args.get_or_panic(tree, 1);
+    var got = empty_name();
+    if try self.move_contextual_expr(tree, env, second, value_type, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, value_type) {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.insert` expects %s value, got %s",
+            Arg::Str(value_type), Arg::Str(got)
+        );
+    }
+    out.* = self.common.error_void_name;
+    return null;
+}
+
+/// Validates one i64 insertion-position argument, the Go `checkMapIndexArg`.
+fn (self: &var Checker) check_map_index_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "i64") {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects i64 index, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Validates one []u8 lookup key, the Go `checkMapKeyArg`.
+fn (self: &var Checker) check_map_key_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: Name,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects 1 arg, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.read_expr(tree, env, first, &var got) |failed| {
+        return move failed;
+    }
+    if !self.names.is(got, "[]u8") {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects []u8 key, got %s",
+            Arg::Str(method), Arg::Str(got)
+        );
+    }
+    return null;
+}
+
+/// Validates no-argument Map reads, the Go `checkMapReadNoArgs`.
+fn (self: &var Checker) check_map_read_no_args(
+    tree: &ast::Ast,
+    method: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.%s` expects 0 args, got %d",
+            Arg::Str(method), Arg::Int(count)
+        );
+    }
+    out.* = self.common.i64_name;
+    return null;
+}
+
+/// Validates owned Map cleanup and marks it moved, the Go `checkMapDeinit`.
+fn (self: &var Checker) check_map_deinit(
+    tree: &ast::Ast,
+    map_value: BindingHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "map error: `Map.deinit` expects 0 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    try self.store.set_moved(map_value, true);
+    out.* = self.common.void_name;
+    return null;
+}
+
+/// Reads one i64 argument, the Go `checkOneI64Arg`.
+fn (self: &var Checker) check_one_i64_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    label: []u8,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        let label_name = try self.names.intern(label);
+        return try self.error2(
+            tree, ast::zero_span(), "parallel error: `%s` expects 1 arg, got %d",
+            Arg::Str(label_name), Arg::Int(count)
+        );
+    }
+    let first = args.get_or_panic(tree, 0);
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, first, &var ignored) |failed| {
+        return move failed;
+    }
+    out.* = self.common.i64_name;
+    return null;
+}
+
+/// Reads non-arena method arguments after type checking, the Go
+/// `checkPlainMethodArgs`.
+fn (self: &var Checker) check_plain_method_args(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var ignored = empty_name();
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        index = index + 1;
+        if try self.read_expr(tree, env, arg, &var ignored) |failed| {
+            return move failed;
+        }
+    }
+    out.* = self.common.unknown_name;
+    return null;
+}
+
+/// Applies a concrete impl method signature to a receiver call, the Go
+/// `checkImplMethodCall`; handled is false when the type declares no such
+/// method.
+fn (self: &var Checker) check_impl_method_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    value: BindingHandle,
+    method: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let type_name = self.binding(value).type_name;
+    let method_fn = self.impl_method(type_name, method) orelse return null;
+    handled.* = true;
+    let info = self.functions.at(method_fn.index);
+    let method_name = info.name;
+    let param_count = info.params.len();
+    if param_count == 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "move error: method `%s` must have self parameter",
+            Arg::Str(method_name)
+        );
+    }
+    let receiver = info.params.get_or_panic(0);
+    if receiver.mut_borrow and self.store.has_any_borrow(value) {
+        return try self.error1(
+            tree, ast::zero_span(),
+            "borrow error: method `%s` mutates its receiver while it is borrowed",
+            Arg::Str(method_name)
+        );
+    }
+    let count = arg_count(tree, args);
+    if count != param_count - 1 {
+        return try self.error3(
+            tree, ast::zero_span(), "move error: `%s` expects %d args, got %d",
+            Arg::Str(method_name), Arg::Int(param_count - 1), Arg::Int(count)
+        );
+    }
+    if try self.check_impl_method_args(tree, env, method_fn, value, args) |failed| {
+        return move failed;
+    }
+    if receiver.mut_borrow {
+        // The exclusive receiver borrow is active from here through the call,
+        // so the deinit path below sees the receiver as borrowed.
+        self.adjust_active_mut_borrows(value, 1);
+    }
+    if self.names.is(method, "deinit") and self.names.is(self.return_type_name(method_fn), "void") {
+        if self.store.has_any_borrow(value) {
+            if receiver.mut_borrow {
+                self.adjust_active_mut_borrows(value, -1);
+            }
+            return try self.error1(
+                tree, ast::zero_span(), "borrow error: value `%s` cannot be moved while borrowed",
+                Arg::Str(self.binding(value).name)
+            );
+        }
+        // Inside the type's own deinit the fields are what the body consumes,
+        // and consuming them is how it finishes; anywhere else a value missing
+        // a field cannot run a cleanup that reaches for it.
+        if try self.partially_consumed_field(value) |field| {
+            if !self.inside_deinit_of(value) {
+                if receiver.mut_borrow {
+                    self.adjust_active_mut_borrows(value, -1);
+                }
+                let name = self.binding(value).name;
+                return try self.error3(
+                    tree, ast::zero_span(),
+                    "move error: field `%s.%s` is already consumed, so `%s.deinit()` would release it twice",
+                    Arg::Str(name), Arg::Str(field), Arg::Str(name)
+                );
+            }
+        }
+        try self.store.set_moved(value, true);
+    }
+    if receiver.mut_borrow {
+        self.adjust_active_mut_borrows(value, -1);
+    }
+    out.* = self.return_type_name(method_fn);
+    return null;
+}
+
+/// Moves the receiver's exclusive call-duration borrow count by delta: the
+/// `value.activeMutBorrows++` and deferred `--` of the Go
+/// `checkImplMethodCall`, which Kizu spells on every exit.
+fn (self: &var Checker) adjust_active_mut_borrows(value: BindingHandle, delta: i64) -> void {
+    if self.store.binding_mut(value) |record| {
+        record.active_mut_borrows = record.active_mut_borrows + delta;
+    }
+    return;
+}
+
+/// Is the binding and field the receiver's call-duration borrow lands on,
+/// the Go `receiverPlace` result.
+pub struct ReceiverPlace {
+    pub target: BindingHandle,
+    pub field: Name
+}
+
+/// Returns the binding and field the receiver's call-duration borrow lands
+/// on, the Go `receiverPlace`: the owner and its field for a direct-field
+/// projection, the receiver binding itself otherwise. Routing through the
+/// owner is what makes an argument borrow of the same field collide with
+/// the receiver.
+fn (self: &Checker) receiver_place(receiver: BindingHandle) -> ReceiverPlace {
+    let record = self.binding(receiver);
+    if record.field_owner |owner| {
+        return ReceiverPlace { target: owner, field: record.field_owner_name };
+    }
+    return ReceiverPlace { target: receiver, field: empty_name() };
+}
+
+/// Applies ownership effects for explicit method arguments, the Go
+/// `checkImplMethodArgs`.
+///
+/// A `&var` receiver is two-phase: while the arguments are evaluated it is
+/// only reserved -- a shared borrow, so arguments can read the receiver --
+/// and the exclusive borrow activates once every argument has settled.
+fn (self: &var Checker) check_impl_method_args(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: FunctionHandle,
+    receiver: BindingHandle,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    let none = self.empty_subst();
+    defer none.deinit();
+    if try self.check_call_handle_pairing(tree, env, method, 1, &none, args) |failed| {
+        return move failed;
+    }
+    let info = self.functions.at(method.index);
+    let first = info.params.get_or_panic(0);
+    let receiver_mut = first.mut_borrow;
+    let place = self.receiver_place(receiver);
+    if receiver_mut {
+        try self.activate_borrow(place.target, place.field, false);
+    }
+    var borrowed = array::new<TemporaryBorrow>(self.allocator);
+    defer borrowed.deinit();
+    if try self.activate_borrow_args(tree, env, method, 1, args, &var borrowed) |failed| {
+        errdefer failed.deinit();
+        if receiver_mut {
+            try self.release_temporary_borrow(
+                TemporaryBorrow { value: place.target, field: place.field, mutable: false }
+            );
+        }
+        return move failed;
+    }
+    var index = 0;
+    while arg_at(tree, args, index) |arg| {
+        let position = index;
+        index = index + 1;
+        if try self.check_impl_method_arg(tree, env, method, position + 1, arg) |failed| {
+            errdefer failed.deinit();
+            if receiver_mut {
+                try self.release_temporary_borrow(
+                    TemporaryBorrow { value: place.target, field: place.field, mutable: false }
+                );
+            }
+            try self.release_temporary_borrows(&borrowed);
+            return move failed;
+        }
+    }
+    if receiver_mut {
+        try self.release_temporary_borrow(
+            TemporaryBorrow { value: place.target, field: place.field, mutable: false }
+        );
+        // Activation: argument borrows still live at the call must not
+        // overlap the receiver's exclusive borrow.
+        if try self.check_borrow_conflict_for_field(
+            tree, place.target, place.field, true
+        ) |failed| {
+            errdefer failed.deinit();
+            try self.release_temporary_borrows(&borrowed);
+            return move failed;
+        }
+    }
+    try self.release_temporary_borrows(&borrowed);
+    return null;
+}
+
+/// Mirrors user-call argument ownership for one method parameter, the Go
+/// `checkImplMethodArg`. A view lends to a method under the same condition
+/// as to a plain function, with the receiver counted among the parameters
+/// that could retain it: a `&var self` whose type carries a view could store
+/// the lend in a field.
+fn (self: &var Checker) check_impl_method_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    method: FunctionHandle,
+    param_index: i64,
+    arg: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let info = self.functions.at(method.index);
+    let param = info.params.get_or_panic(param_index);
+    var ignored = empty_name();
+    if param.borrow {
+        if param.mut_borrow {
+            return null;
+        }
+        return self.read_expr(tree, env, arg, &var ignored);
+    }
+    if try self.view_arg_lend(tree, env, method, param_index, arg) {
+        return self.read_expr(tree, env, arg, &var ignored);
+    }
+    return self.move_expr(tree, env, arg, &var ignored);
+}
+
+/// Names T of an `std::arena::Arena<T>` binding, the
+/// `splitGenericType(arena.typeName)` with base check the Go arena methods
+/// share; null when the binding is not an arena.
+fn (self: &var Checker) arena_element_type(arena: BindingHandle) -> !?Name {
+    let type_name = self.binding(arena).type_name;
+    let parts = try self.names.split_generic(type_name) orelse return null;
+    if !self.names.is(parts.base, "std::arena::Arena") {
+        return null;
+    }
+    return parts.args;
+}
+
+/// Builds the refusal of an arena method on a binding that is not one, the
+/// `arena error: ... is not an arena` of the Go `checkArenaAdd` and
+/// `checkArenaHandleArg`.
+fn (self: &Checker) not_an_arena_error(
+    tree: &ast::Ast,
+    arena: BindingHandle
+) -> !diagnostic::Diagnostic {
+    return self.error1(
+        tree, ast::zero_span(), "arena error: `%s` is not an arena",
+        Arg::Str(self.binding(arena).name)
+    );
+}
+
+/// Moves one value into an arena and returns a handle, the Go
+/// `checkArenaAdd`.
+fn (self: &var Checker) check_arena_add(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arena: BindingHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: `arena.add` expects 1 arg, got %d",
+            Arg::Int(count)
+        );
+    }
+    let elem = try self.arena_element_type(arena) orelse
+        return try self.not_an_arena_error(tree, arena);
+    let first = args.get_or_panic(tree, 0);
+    var got = empty_name();
+    if try self.move_contextual_expr(tree, env, first, elem, &var got) |failed| {
+        return move failed;
+    }
+    if !same_name(got, elem) {
+        return try self.error2(
+            tree, ast::zero_span(), "arena error: `arena.add` expects %s, got %s",
+            Arg::Str(elem), Arg::Str(got)
+        );
+    }
+    out.* = try self.names.format("std::arena::Handle<%s>", elem, empty_name(), empty_name());
+    return null;
+}
+
+/// Reads a handle and returns a shared borrow tied to the arena, the Go
+/// `checkArenaAt`.
+fn (self: &var Checker) check_arena_at(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arena: BindingHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var elem = empty_name();
+    if try self.check_arena_handle_arg(tree, env, arena, args, "arena.at", &var elem) |failed| {
+        return move failed;
+    }
+    out.* = try self.names.prefixed("&", elem);
+    return null;
+}
+
+/// Validates the one handle argument an arena accessor takes -- count,
+/// provenance, and the read itself -- and returns the element type behind
+/// the handle, the Go `checkArenaHandleArg`. label names the accessor in the
+/// count error.
+fn (self: &var Checker) check_arena_handle_arg(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arena: BindingHandle,
+    args: ast::ExpressionList,
+    label: []u8,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 1 {
+        let label_name = try self.names.intern(label);
+        return try self.error2(
+            tree, ast::zero_span(), "arena error: `%s` expects 1 arg, got %d",
+            Arg::Str(label_name), Arg::Int(count)
+        );
+    }
+    let elem = try self.arena_element_type(arena) orelse
+        return try self.not_an_arena_error(tree, arena);
+    let first = args.get_or_panic(tree, 0);
+    if try self.check_known_handle_provenance(tree, env, arena, first) |failed| {
+        return move failed;
+    }
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, first, &var ignored) |failed| {
+        return move failed;
+    }
+    out.* = elem;
+    return null;
+}
+
+/// Validates explicit arena cleanup and invalidates the binding, the Go
+/// `checkArenaDeinit`.
+fn (self: &var Checker) check_owned_arena_deinit(
+    tree: &ast::Ast,
+    arena: BindingHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    let count = arg_count(tree, args);
+    if count != 0 {
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: `arena.deinit` expects 0 args, got %d",
+            Arg::Int(count)
+        );
+    }
+    try self.store.set_deinitialized(arena, true);
+    try self.store.set_moved(arena, true);
+    out.* = self.common.void_name;
+    return null;
+}
+
+/// Rejects handle uses whose provenance is known to mismatch, the Go
+/// `checkKnownHandleProvenance`: both sides carry an arena identity and they
+/// differ. An unknown side -- an arena that arrived as a borrow, a handle
+/// read out of a field -- passes, because the reader cannot see where it was
+/// made and the signature is what carries the contract (ADR-0098). This is
+/// the one provenance rule; local arenas always carry an identity, so known
+/// confusions still stop.
+fn (self: &var Checker) check_known_handle_provenance(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    arena: BindingHandle,
+    expression: ast::Expression
+) -> !?diagnostic::Diagnostic {
+    let arena_id = self.binding(arena).arena_id;
+    if arena_id == 0 {
+        return null;
+    }
+    if try self.arena_add_receiver(tree, env, expression) |add_arena| {
+        let add_arena_id = self.binding(add_arena).arena_id;
+        if add_arena_id != 0 {
+            if add_arena_id != arena_id {
+                return try self.error2(
+                    tree, ast::zero_span(),
+                    "arena error: handle from `%s` does not belong to arena `%s`",
+                    Arg::Str(self.binding(add_arena).name), Arg::Str(self.binding(arena).name)
+                );
+            }
+            return null;
+        }
+    }
+    let provenance = self.known_handle_provenance(tree, env, expression);
+    if provenance != 0 and provenance != arena_id {
+        if ident_text(tree, expression) |name| {
+            return try self.error2(
+                tree, ast::zero_span(), "arena error: handle `%s` does not belong to arena `%s`",
+                Arg::Text(name), Arg::Str(self.binding(arena).name)
+            );
+        }
+        return try self.error1(
+            tree, ast::zero_span(), "arena error: handle expression does not belong to arena `%s`",
+            Arg::Str(self.binding(arena).name)
+        );
+    }
+    return null;
+}
+
+/// Returns tracked arena identity for handle-like expressions, the Go
+/// `knownHandleProvenance`.
+fn (self: &Checker) known_handle_provenance(
+    tree: &ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> i64 {
+    if ident_text(tree, expression) |name| {
+        if self.lookup_text(tree, env, name) |value| {
+            return self.binding(value).handle_arena_id;
+        }
+    }
+    return 0;
+}
+
+/// Names the parameter indices of one derived contract, the Go
+/// `arenaHandlePair`: the handle argument must come from the arena argument.
+pub struct ArenaHandlePair {
+    pub arena: i64,
+    pub handle: i64
+}
+
+/// Derives handle-pairing contracts from a signature, the Go
+/// `arenaHandlePairs`, the same division of labor borrow provenance uses
+/// (ADR-0098: the callee trusts the signature, the caller re-derives the
+/// contract from it). A pair exists when a borrowed `Arena<T>` parameter
+/// and a by-value `Handle<T>` parameter appear for the same T exactly once
+/// each; any other shape -- repeated T, a by-value arena, a borrowed handle
+/// -- is ambiguous and derives nothing. first_param skips a method receiver,
+/// so pair indices count from the first explicit argument.
+fn (self: &var Checker) arena_handle_pairs(
+    function: FunctionHandle,
+    first_param: i64,
+    subst: &Subst,
+    pairs: &var array::Array<ArenaHandlePair>
+) -> !void {
+    var resolved = array::new<Name>(self.allocator);
+    defer resolved.deinit();
+    var arenas = map::new<[]u8, i64>(self.allocator);
+    defer arenas.deinit();
+    var handles = map::new<[]u8, i64>(self.allocator);
+    defer handles.deinit();
+    var index = 0;
+    while self.param_at(function, first_param + index) |param| {
+        let position = index;
+        index = index + 1;
+        let type_name = try self.substitute_with(param.type_name, subst);
+        try resolved.append(type_name);
+        let parts = try self.names.split_generic(type_name) orelse continue;
+        if self.names.is(parts.base, "std::arena::Arena") {
+            try self.note_pair_index(&var arenas, parts.args, position, param.borrow);
+        }
+        if self.names.is(parts.base, "std::arena::Handle") {
+            try self.note_pair_index(&var handles, parts.args, position, !param.borrow);
+        }
+    }
+    var position = 0;
+    while resolved.get(position) |type_name| {
+        let idx = position;
+        position = position + 1;
+        let parts = try self.names.split_generic(type_name) orelse continue;
+        let handle_index = self.pair_index(&handles, parts.args) orelse continue;
+        if handle_index != idx {
+            continue;
+        }
+        let arena_index = self.pair_index(&arenas, parts.args) orelse continue;
+        if arena_index == ambiguous_pair_index() {
+            continue;
+        }
+        try pairs.append(ArenaHandlePair { arena: arena_index, handle: idx });
+    }
+    return;
+}
+
+/// Is the marker an element spelling takes once it can no longer name one
+/// parameter, the `ambiguous` constant of the Go `arenaHandlePairs`.
+fn ambiguous_pair_index() -> i64 {
+    return -1;
+}
+
+/// Records the parameter index one element spelling names, the `note`
+/// closure of the Go `arenaHandlePairs`: a spelling seen before, or one in
+/// an ineligible shape, becomes ambiguous.
+fn (self: &Checker) note_pair_index(
+    indices: &var map::Map<[]u8, i64>,
+    elem: Name,
+    index: i64,
+    eligible: bool
+) -> !void {
+    let retained = name_text(&self.names, elem);
+    let bytes = retained.as_bytes();
+    if indices.at_mut(bytes) |slot| {
+        slot.* = ambiguous_pair_index();
+        return;
+    }
+    if !eligible {
+        return indices.insert(bytes, ambiguous_pair_index());
+    }
+    return indices.insert(bytes, index);
+}
+
+/// Reads the parameter index recorded for one element spelling, the Go
+/// `handles[elem]` / `arenas[elem]` lookups.
+fn (self: &Checker) pair_index(indices: &map::Map<[]u8, i64>, elem: Name) -> ?i64 {
+    let retained = name_text(&self.names, elem);
+    let bytes = retained.as_bytes();
+    return indices.get(bytes);
+}
+
+/// Enforces derived arena/handle contracts at a call site where both
+/// origins are visible, the Go `checkCallHandlePairing`. An unknown side --
+/// the caller itself received the arena or handle -- passes, and the
+/// contract chains to the next signature (ADR-0098).
+fn (self: &var Checker) check_call_handle_pairing(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    function: FunctionHandle,
+    first_param: i64,
+    subst: &Subst,
+    args: ast::ExpressionList
+) -> !?diagnostic::Diagnostic {
+    var pairs = array::new<ArenaHandlePair>(self.allocator);
+    defer pairs.deinit();
+    try self.arena_handle_pairs(function, first_param, subst, &var pairs);
+    var index = 0;
+    while pairs.get(index) |pair| {
+        index = index + 1;
+        let arena_arg = args.get_or_panic(tree, pair.arena);
+        let arena = try self.arena_arg_binding(tree, env, arena_arg) orelse continue;
+        if self.binding(arena).arena_id == 0 {
+            continue;
+        }
+        let handle_arg = args.get_or_panic(tree, pair.handle);
+        if try self.check_known_handle_provenance(tree, env, arena, handle_arg) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Resolves the arena identity an argument lends, if visible, the Go
+/// `arenaArgBinding`: a bare or &-prefixed local, or one direct owner field.
+/// Anything else has no visible identity and resolves to null.
+fn (self: &var Checker) arena_arg_binding(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    expression: ast::Expression
+) -> !?BindingHandle {
+    var place = expression;
+    if borrow_prefix(tree, expression) |prefix| {
+        place = prefix.right;
+    }
+    if ident_text(tree, place) |name| {
+        return self.lookup_text(tree, env, name);
+    }
+    let field = field_expr(tree, place) orelse return null;
+    if field.namespace {
+        return null;
+    }
+    var direct = self.empty_direct_field_receiver();
+    if try self.direct_field_receiver(tree, env, field, &var direct) |failed| {
+        failed.deinit();
+        return null;
+    }
+    if !self.names.generic_base_is(direct.type_name, "std::arena::Arena") {
+        return null;
+    }
+    return try self.binding_for_direct_field_receiver(direct);
+}

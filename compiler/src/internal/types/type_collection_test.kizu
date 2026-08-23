@@ -1,0 +1,385 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::mem;
+import std::testing;
+
+fn expect_collection_diagnostic(
+    allocator: Allocator,
+    input: []u8,
+    category: []u8,
+    message: []u8,
+    help: []u8
+) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        let got_category = value.category.as_bytes();
+        let got_message = value.message.as_bytes();
+        let got_help = value.help.as_bytes();
+        testing::expect_equal<[]u8>(category, got_category);
+        testing::expect_equal<[]u8>(message, got_message);
+        testing::expect_equal<[]u8>(help, got_help);
+    } else {
+        testing::fail("type declaration collection returned no diagnostic");
+    }
+    return;
+}
+
+fn expect_collection_type(
+    allocator: Allocator,
+    state: &var Checker,
+    tree: &ast::Ast,
+    name: []u8
+) -> !void {
+    match try state.resolve_type(tree, name) {
+        Value(value) => {
+            let text = try state.copy_resolution_text(allocator, value);
+            defer text.deinit();
+            let bytes = text.as_bytes();
+            testing::expect_equal<[]u8>(name, bytes);
+        },
+        Issue(_) => testing::fail("collected declaration did not resolve"),
+    }
+    return;
+}
+
+fn expect_collection_success(allocator: Allocator, input: []u8) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        let message = value.message.as_bytes();
+        testing::fail(message);
+    }
+    return;
+}
+
+test "checker collects every type declaration through one dispatch" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\struct Later<T> { value: T }
+        \\enum Choice { First, Second }
+        \\error Problem { Failed, Missing }
+        \\union Maybe<T> {
+        \\    None,
+        \\    Some(std::meta::element<std::array::Array<T>>),
+        \\}
+        \\contract Readable { fn read(value: Later<i64>) -> bool; }
+        \\fn ignored() {}
+        \\test "ignored" {}
+    ;
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_types_and_methods(&tree, &program) |value| {
+        defer value.deinit();
+        testing::fail("valid type declarations were rejected");
+    }
+    try expect_collection_type(
+        allocator,
+        &var state,
+        &tree,
+        "Later<i64>"
+    );
+    try expect_collection_type(
+        allocator,
+        &var state,
+        &tree,
+        "Problem!i64"
+    );
+    try expect_collection_type(
+        allocator,
+        &var state,
+        &tree,
+        "Maybe<i64>"
+    );
+}
+
+test "type declaration diagnostics match the shipping checker" {
+    let allocator = mem::page_allocator();
+    try expect_collection_diagnostic(
+        allocator,
+        "enum Choice { First, First }",
+        "type error",
+        "duplicate enum tag `Choice::First`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "error Problem { Failed, Failed }",
+        "type error",
+        "duplicate error `Problem::Failed`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Choice {} union Choice { Empty }",
+        "type error",
+        "duplicate type `Choice`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "union Choice { First, First }",
+        "type error",
+        "duplicate union variant `Choice::First`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> i64; fn get() -> i64; }",
+        "type error",
+        "duplicate contract method `Read.get`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: Missing }",
+        "type error",
+        "unknown type `Missing`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "union Maybe { Some(?i64) }",
+        "type error",
+        "union payload `Maybe::Some` cannot store an optional yet",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "union Maybe { Some(&i64) }",
+        "type error",
+        "borrow payload `Maybe.Some` cannot store borrow",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: [4]u8 }",
+        "type error",
+        "struct field `Holder.value` cannot store stack buffer",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: ?[]u8 }",
+        "type error",
+        "struct field `Holder.value` cannot store an optional view; a capture would be hidden from the rules that read field types",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "unsafe struct Buf { data: ptr<u8> }",
+        "unsafe error",
+        "`unsafe struct Buf` needs a `///` comment stating the invariant its fields carry",
+        "write `/// <the invariant its fields carry>` above the declaration"
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Buf { data: ptr<u8> }",
+        "unsafe error",
+        "struct `Buf` holds a raw pointer in field `data`, so it must be declared `unsafe struct`",
+        "write `unsafe struct Buf` and document the invariant its fields carry"
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: [4]u8) -> i64; }",
+        "type error",
+        "stack buffer parameter `value` is not supported; pass a view (`[]u8` or `&var []u8`)",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> Missing; }",
+        "type error",
+        "unknown type `Missing`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> i64; } contract Read { fn next() -> i64; }",
+        "type error",
+        "duplicate contract `Read`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "union Holder { Value(type) }",
+        "type error",
+        "union variant `Holder::Value` cannot store type value",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct View { value: &i64 }",
+        "type error",
+        "borrow field `View.value` cannot store borrow",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: Field }",
+        "type error",
+        "struct field `Holder.value` cannot store Field",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: type }",
+        "type error",
+        "struct field `Holder.value` cannot store type value",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Apply { fn call<w: Function>() -> i64; }",
+        "type error",
+        "Function static parameter `w` is reserved for std",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> Field; }",
+        "type error",
+        "function `get` cannot return Field",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> [4]u8; }",
+        "type error",
+        "function `get` cannot return a stack buffer; return an owned buffer or write through a view",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get() -> type; }",
+        "type error",
+        "function `get` cannot return type",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "error Problem { Failed } contract Read { fn get() -> Problem!?&i64; }",
+        "type error",
+        "function `get` cannot nest a borrow optional in its return; declare a bare `?&T` / `?&var T`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: ?&i64) -> i64; }",
+        "type error",
+        "parameter `value` cannot hold a borrow optional; `?&T` exists only as a capture condition",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: void) -> i64; }",
+        "type error",
+        "parameter `value` cannot have type void",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: type) -> i64; }",
+        "type error",
+        "parameter `value` cannot have type",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: Field) -> i64; }",
+        "type error",
+        "Field parameter `value` belongs in `<...>`, not `(...)`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Read { fn get(value: &?u8) -> i64; }",
+        "type error",
+        "parameter `value` cannot borrow an optional yet",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct Holder { value: std::meta::element<i64> }",
+        "comptime error",
+        "`std::meta::element` expects ?T, Array<T>, Box<T>, or Map<K, V>, got i64",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "union Holder { Value(std::meta::element<std::map::Map<i64, bool>>) }",
+        "type error",
+        "std::map::Map key type must be []u8",
+        ""
+    );
+}
+
+test "type collection adapter preserves the variant payload diagnostic" {
+    let allocator = mem::page_allocator();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var state = new_checker(allocator);
+    defer state.deinit();
+    var owner = empty_type();
+    match try state.resolve_type(&tree, "i64") {
+        Value(value) => {
+            owner = value;
+        },
+        Issue(_) => testing::fail("i64 did not resolve"),
+    }
+    let field = try state.retain_meta_field(
+        owner, "Empty", empty_type(), true
+    );
+    let issue = TypeCollectionIssue::Resolution(
+        TypeResolutionIssue::MetaVariantNoPayload(field)
+    );
+    let value = try state.type_collection_diagnostic(&tree, issue);
+    defer value.deinit();
+    let category = value.category.as_bytes();
+    let message = value.message.as_bytes();
+    testing::expect_equal<[]u8>("comptime error", category);
+    testing::expect_equal<[]u8>(
+        "variant `i64::Empty` carries no payload, so `std::meta::variant_type` names nothing; ask `std::meta::has_payload` first",
+        message
+    );
+}
+
+test "type declaration collection accepts closed and deferred storage forms" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\struct Plain { value: i64 }
+        \\struct PlainHolder { value: ?Plain }
+        \\struct OwnerHolder { value: ?std::arena::Arena<i64> }
+        \\/// data points into storage managed outside Raw
+        \\unsafe struct Raw { data: ptr<u8> }
+        \\union Deferred<K, V> {
+        \\    Value(std::meta::element<std::map::Map<K, V>>),
+        \\}
+        \\contract Reader { fn get() -> ?&i64; }
+    ;
+    try expect_collection_success(allocator, input);
+}

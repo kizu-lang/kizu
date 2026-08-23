@@ -1,0 +1,53 @@
+import std::mem;
+import std::string;
+
+pub struct Pair {
+    pub eager: bool,
+    pub first: string::String,
+    pub second: string::String,
+}
+
+// `second` is released on one path only. Past the merge the path that left it
+// alone can no longer release it, and releasing it after the if would release
+// twice what the other path already did. Both paths must agree — the rule a
+// whole owned value already follows.
+fn (self: Pair) deinit() -> void {
+    self.first.deinit();
+    if self.eager {
+        self.second.deinit();
+    }
+    return;
+}
+
+fn owned(allocator: Allocator) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("x");
+    return text;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var pair = Pair {
+        eager: false,
+        first: try owned(allocator),
+        second: try owned(allocator),
+    };
+    defer pair.deinit();
+    return;
+}
+
+// check-fails
+// features: owner cleanup diagnostics
+// error: owner field `self.second` is consumed on one branch only
+
+
+// check
+// load:
+// pub struct Pair { pub eager: bool, pub first: std::string::String, pub second: std::string::String }
+// fn (self: Pair) Pair.deinit() -> void { self.first.deinit(); if self.eager { self.second.deinit(); } return; }
+// fn owned(allocator: Allocator) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_bytes("x"); return text; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var pair = Pair { eager: false, first: try owned(allocator), second: try owned(allocator) }; defer pair.deinit(); return; }
+// check:
+// - move error: owner field `self.second` is consumed on one branch only; consume it on both branches or on neither
+// 26:12-26:16 move error: `text` is handed off here; write `move text`

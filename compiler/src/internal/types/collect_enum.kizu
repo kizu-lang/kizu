@@ -1,0 +1,78 @@
+import compiler::internal::ast;
+import std::array;
+import std::map;
+
+// Collects the enum-shaped branches of the Checker's type-declaration pass.
+fn (self: &var Checker) collect_enum(tree: &ast::Ast, declaration: &ast::EnumDecl) -> !?TypeCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if self.metadata.has_collected_type(name) {
+        return TypeCollectionIssue::DuplicateType(declaration.name);
+    }
+    var value = EnumType {
+        name: declaration.name,
+        tags: map::new<[]u8, bool>(self.allocator),
+        order: array::new<ast::Text>(self.allocator),
+        public: declaration.public
+    };
+    errdefer value.deinit();
+    var index = 0;
+    while declaration.tags.at(index) |tag| {
+        let retained_tag = tree.texts.at(tag.node);
+        let tag_name = retained_tag.as_bytes();
+        if value.tags.contains(tag_name) {
+            value.deinit();
+            let issue = CollectionMemberIssue {
+                owner: declaration.name, member: ast::Text { node: tag.node }
+            };
+            return TypeCollectionIssue::DuplicateEnumTag(issue);
+        }
+        try value.order.append(ast::Text { node: tag.node });
+        try value.tags.insert(tag_name, true);
+        index = index + 1;
+    }
+    let handle = EnumHandle { index: self.metadata.enums.len() };
+    try self.metadata.enums.append(move value);
+    try self.metadata.enums_by_name.insert(name, handle);
+    return null;
+}
+
+fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !?TypeCollectionIssue {
+    let retained_name = tree.texts.at(declaration.name.node);
+    let name = retained_name.as_bytes();
+    if self.metadata.has_collected_type(name) {
+        return TypeCollectionIssue::DuplicateType(declaration.name);
+    }
+    var tagged = EnumType {
+        name: declaration.name,
+        tags: map::new<[]u8, bool>(self.allocator),
+        order: array::new<ast::Text>(self.allocator),
+        public: declaration.public
+    };
+    errdefer tagged.deinit();
+    var index = 0;
+    while declaration.members.at(index) |member| {
+        let retained_member = tree.texts.at(member.node);
+        let member_name = retained_member.as_bytes();
+        if tagged.tags.contains(member_name) {
+            tagged.deinit();
+            let issue = CollectionMemberIssue {
+                owner: declaration.name, member: ast::Text { node: member.node }
+            };
+            return TypeCollectionIssue::DuplicateError(issue);
+        }
+        try tagged.tags.insert(member_name, true);
+        index = index + 1;
+    }
+    let tagged_handle = EnumHandle { index: self.metadata.enums.len() };
+    try self.metadata.enums.append(move tagged);
+    let set = ErrorSetType {
+        name: declaration.name,
+        public: declaration.public,
+        tagged: tagged_handle
+    };
+    let set_handle = ErrorSetHandle { index: self.metadata.error_sets.len() };
+    try self.metadata.error_sets.append(set);
+    try self.metadata.error_sets_by_name.insert(name, set_handle);
+    return null;
+}

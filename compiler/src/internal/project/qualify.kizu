@@ -1,0 +1,1364 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::stdmethod;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::map;
+import std::string;
+
+// Port of internal/project/qualify.go. Go copies a node and rewrites the
+// names in the copy; here the copy is added to the syntax graph as a new node
+// and the source node stays where it was, so every function hands back the
+// handle of the node it built.
+
+/// Is one qualified declaration, an import that is consumed here, or the
+/// module error that stopped the rewrite.
+union DeclarationResult {
+    Declaration(ast::Declaration),
+    Skipped,
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified function declaration or the module error.
+union FunctionResult {
+    Function(ast::FunctionDecl),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified block or the module error.
+union BlockResult {
+    Block(ast::Block),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified statement or the module error.
+union StatementResult {
+    Statement(ast::Statement),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified conditional, used as a statement or an expression.
+union IfResult {
+    If(ast::IfStmt),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified match, used as a statement or an expression.
+union MatchResult {
+    Match(ast::MatchStmt),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Is one qualified expression or the module error.
+union ExpressionResult {
+    Expression(ast::Expression),
+    Failed(diagnostic::Diagnostic),
+}
+
+/// Rewrites one parsed module into package-qualified names and appends the
+/// qualified declarations to merged. Imports are consumed here and not handed
+/// on.
+fn (self: &var Loader) qualify_module(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    merged: &var ast::Program
+) -> !?diagnostic::Diagnostic {
+    let declarations = try self.declarations_of(file);
+    defer declarations.deinit();
+    var index = 0;
+    while declarations.at(index) |declaration_handle| {
+        let declaration = declaration_handle.*;
+        index = index + 1;
+        let outcome = try self.qualify_decl(tree, file, declaration);
+        match outcome {
+            Declaration(qualified) => try merged.add_declaration(qualified),
+            Skipped => {},
+            Failed(failed) => return move failed,
+        }
+    }
+    return null;
+}
+
+/// Rewrites declaration type references for a package check.
+fn (self: &var Loader) qualify_decl(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    declaration: ast::Declaration
+) -> !DeclarationResult {
+    match tree.declarations.at(declaration.node) {
+        Import(_) => return DeclarationResult::Skipped,
+        Struct(value) => return self.qualify_struct(tree, file, value),
+        Enum(value) => {
+            let name = try self.qualify_text(tree, file, value.name);
+            let tags = try value.tags.clone(self.allocator);
+            errdefer tags.deinit();
+            if value.tag_docs |docs| {
+                let tag_docs = try copy_docs(self.allocator, docs);
+                errdefer tag_docs.deinit();
+                return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Enum(
+                    ast::EnumDecl { name: name, doc: value.doc, tags: move tags, tag_docs: move tag_docs, public: value.public }
+                )));
+            }
+            return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Enum(
+                ast::EnumDecl { name: name, doc: value.doc, tags: move tags, tag_docs: null, public: value.public }
+            )));
+        },
+        ErrorSet(value) => {
+            let name = try self.qualify_text(tree, file, value.name);
+            let members = try value.members.clone(self.allocator);
+            errdefer members.deinit();
+            if value.member_docs |docs| {
+                let member_docs = try copy_docs(self.allocator, docs);
+                errdefer member_docs.deinit();
+                return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
+                    ast::ErrorSetDecl { name: name, doc: value.doc, members: move members, member_docs: move member_docs, public: value.public }
+                )));
+            }
+            return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
+                ast::ErrorSetDecl { name: name, doc: value.doc, members: move members, member_docs: null, public: value.public }
+            )));
+        },
+        Union(value) => return self.qualify_union(tree, file, value),
+        Contract(value) => return self.qualify_contract(tree, file, value),
+        Impl(value) => return self.qualify_impl(tree, file, value),
+        Function(value) => {
+            let outcome = try self.declared_function_name(tree, file, value);
+            match outcome {
+                Name(name) => {
+                    let text = tree.add_text(move name);
+                    let qualified = try self.qualify_function(tree, file, value, text);
+                    return match qualified {
+                        Function(function) => DeclarationResult::Declaration(
+                            tree.add_declaration(ast::DeclarationNode::Function(move function))
+                        ),
+                        Failed(failed) => DeclarationResult::Failed(move failed),
+                    };
+                },
+                Failed(failed) => return DeclarationResult::Failed(move failed),
+            }
+        },
+        Test(value) => return self.qualify_test_decl(tree, file, value),
+        Recovered(_) => return DeclarationResult::Declaration(declaration),
+    }
+}
+
+/// Copies the documentation a declaration keeps per tag or member.
+fn copy_docs(allocator: Allocator, docs: &map::Map<[]u8, ast::Text>) -> !map::Map<[]u8, ast::Text> {
+    var out = map::new<[]u8, ast::Text>(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while docs.key_at(index) |key| {
+        index = index + 1;
+        if docs.get(key) |text| {
+            try out.insert(key, text);
+        }
+    }
+    return move out;
+}
+
+/// Retains what a name declared in file's module is filed under.
+fn (self: &Loader) qualify_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !ast::Text {
+    let source = try text_copy(self.allocator, tree, name);
+    defer source.deinit();
+    let bytes = source.as_bytes();
+    let qualified = try self.qualify_in(file, bytes);
+    return tree.add_text(move qualified);
+}
+
+/// Reports whether a file belongs to the standard library package.
+fn (self: &Loader) module_is_std(file: arena::Handle<ModuleFile>) -> bool {
+    let entry = self.files.at(file);
+    let group = self.groups.at(entry.group);
+    return text_is(&group.pkg, std_root());
+}
+
+/// Returns what a function is filed under. A method is filed under the type
+/// it is a method on, so two types in one module may each declare a `len`;
+/// anything else is filed under its module.
+fn (self: &var Loader) declared_function_name(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::FunctionDecl
+) -> !NameResolution {
+    if !decl.signature.receiver or decl.signature.params.len() == 0 {
+        let name = try text_copy(self.allocator, tree, decl.signature.name);
+        defer name.deinit();
+        let name_bytes = name.as_bytes();
+        return NameResolution::Name(try self.qualify_in(file, name_bytes));
+    }
+    let receiver_type = decl.signature.params.get_or_panic(0).type_name;
+    let outcome = try self.resolve_type_node(tree, file, receiver_type);
+    match outcome {
+        Type(resolved) => {
+            if try receiver_base(self.allocator, &tree.types, resolved) |base| {
+                defer base.deinit();
+                let base_bytes = base.as_bytes();
+                let name = try text_copy(self.allocator, tree, decl.signature.name);
+                defer name.deinit();
+                let name_bytes = name.as_bytes();
+                return NameResolution::Name(try stdmethod::method_name(self.allocator, base_bytes, name_bytes));
+            }
+            var text = try module_error_text(self.allocator);
+            errdefer text.deinit();
+            try text.append_bytes("`");
+            try typ::append_render(&var text, &tree.types, receiver_type);
+            try text.append_bytes("` is not a type a method can be declared on in `");
+            try self.append_module_name(&var text, file);
+            try text.append_bytes("`");
+            return NameResolution::Failed(try module_error(self.allocator, move text));
+        },
+        Failed(failed) => return NameResolution::Failed(move failed),
+    }
+}
+
+/// Names the type a receiver stands for, with borrows and static arguments
+/// dropped: `&std::array::Array<T>` is a method on `std::array::Array`.
+fn receiver_base(allocator: Allocator, table: &typ::Table, value: typ::Type) -> !?string::String {
+    match typ::root_node(table, value) {
+        Borrow(node) => return receiver_base(allocator, table, typ::child_type(value, node.elem)),
+        Const(node) => return receiver_base(allocator, table, typ::child_type(value, node.elem)),
+        Name(node) => return try join_path(allocator, &node.path, 0, node.path.len()),
+        _ => return null,
+    }
+}
+
+/// Rewrites a struct declaration and its field types.
+fn (self: &var Loader) qualify_struct(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::StructDecl
+) -> !DeclarationResult {
+    var node = ast::StructDecl {
+        name: try self.qualify_text(tree, file, decl.name),
+        doc: decl.doc,
+        type_params: try decl.type_params.clone(self.allocator),
+        fields: array::new<ast::Field>(self.allocator),
+        public: decl.public,
+        span: decl.span,
+        requires_unsafe: decl.requires_unsafe
+    };
+    errdefer node.deinit();
+    var index = 0;
+    while decl.fields.at(index) |field| {
+        index = index + 1;
+        var copied = field.*;
+        let outcome = try self.resolve_type_node(tree, file, field.type_name);
+        match outcome {
+            Type(resolved) => {
+                copied.type_name = resolved;
+                try node.fields.append(copied);
+            },
+            Failed(failed) => {
+                node.deinit();
+                return DeclarationResult::Failed(move failed);
+            },
+        }
+    }
+    return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Struct(move node)));
+}
+
+/// Rewrites a union declaration and its payload types.
+fn (self: &var Loader) qualify_union(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::UnionDecl
+) -> !DeclarationResult {
+    var node = ast::UnionDecl {
+        name: try self.qualify_text(tree, file, decl.name),
+        doc: decl.doc,
+        type_params: try decl.type_params.clone(self.allocator),
+        variants: array::new<ast::UnionVariant>(self.allocator),
+        public: decl.public
+    };
+    errdefer node.deinit();
+    var index = 0;
+    while decl.variants.at(index) |variant| {
+        index = index + 1;
+        var copied = variant.*;
+        if variant.payload |payload| {
+            let outcome = try self.resolve_type_node(tree, file, payload);
+            match outcome {
+                Type(resolved) => {
+                    copied.payload = resolved;
+                },
+                Failed(failed) => {
+                    node.deinit();
+                    return DeclarationResult::Failed(move failed);
+                },
+            }
+        }
+        try node.variants.append(copied);
+    }
+    return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Union(move node)));
+}
+
+/// Rewrites contract method signature type references.
+fn (self: &var Loader) qualify_contract(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::ContractDecl
+) -> !DeclarationResult {
+    let name = try self.qualify_text(tree, file, decl.name);
+    var methods = array::new<ast::FunctionDecl>(self.allocator);
+    errdefer methods.deinit();
+    var index = 0;
+    while decl.methods.at(index) |method| {
+        index = index + 1;
+        let outcome = try self.qualify_function(tree, file, method, method.signature.name);
+        match outcome {
+            Function(qualified) => try methods.append(move qualified),
+            Failed(failed) => {
+                methods.deinit();
+                return DeclarationResult::Failed(move failed);
+            },
+        }
+    }
+    return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Contract(
+        ast::ContractDecl { name: name, methods: move methods, public: decl.public }
+    )));
+}
+
+/// Rewrites the type and contract an assertion names.
+fn (self: &var Loader) qualify_impl(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: ast::ImplDecl
+) -> !DeclarationResult {
+    var node = decl;
+    let type_outcome = try self.resolve_text(tree, file, decl.type_name);
+    match type_outcome {
+        Name(type_name) => {
+            node.type_name = tree.add_text(move type_name);
+            let contract_outcome = try self.resolve_text(tree, file, decl.contract_name);
+            return match contract_outcome {
+                Name(contract_name) => {
+                    node.contract_name = tree.add_text(move contract_name);
+                    DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Impl(node)))
+                },
+                Failed(failed) => DeclarationResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return DeclarationResult::Failed(move failed),
+    }
+}
+
+/// Rewrites one retained type spelling into its package-qualified form.
+fn (self: &var Loader) resolve_text(tree: &var ast::Ast, file: arena::Handle<ModuleFile>, name: ast::Text) -> !NameResolution {
+    let source = try text_copy(self.allocator, tree, name);
+    defer source.deinit();
+    let bytes = source.as_bytes();
+    return self.resolve_type(tree, file, bytes);
+}
+
+/// Rewrites a function signature and body type references.
+///
+/// A function std declared is marked as such, because being std source is what
+/// lets it name the trusted primitives and what makes its `self` parameter a
+/// method receiver.
+fn (self: &var Loader) qualify_function(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::FunctionDecl,
+    name: ast::Text
+) -> !FunctionResult {
+    var signature = ast::FunctionSignature {
+        receiver: decl.signature.receiver,
+        name: name,
+        static_params: try decl.signature.static_params.clone(self.allocator),
+        params: array::new<ast::Param>(self.allocator),
+        return_type: decl.signature.return_type,
+        requires_unsafe: decl.signature.requires_unsafe,
+        extern_abi: decl.signature.extern_abi,
+        public: decl.signature.public,
+        std: self.module_is_std(file)
+    };
+    errdefer signature.deinit();
+    var index = 0;
+    while decl.signature.params.at(index) |param| {
+        index = index + 1;
+        var copied = param.*;
+        let outcome = try self.resolve_type_node(tree, file, param.type_name);
+        match outcome {
+            Type(resolved) => {
+                copied.type_name = resolved;
+                try signature.params.append(copied);
+            },
+            Failed(failed) => {
+                signature.deinit();
+                return FunctionResult::Failed(move failed);
+            },
+        }
+    }
+    if decl.signature.return_type |declared| {
+        let outcome = try self.resolve_type_node(tree, file, declared);
+        match outcome {
+            Type(resolved) => {
+                signature.return_type = resolved;
+            },
+            Failed(failed) => {
+                signature.deinit();
+                return FunctionResult::Failed(move failed);
+            },
+        }
+    }
+    var body = decl.body;
+    if decl.body |declared| {
+        let outcome = try self.qualify_block(tree, file, declared);
+        match outcome {
+            Block(qualified) => {
+                body = qualified;
+            },
+            Failed(failed) => {
+                signature.deinit();
+                return FunctionResult::Failed(move failed);
+            },
+        }
+    }
+    return FunctionResult::Function(ast::FunctionDecl {
+        signature: move signature,
+        doc: decl.doc,
+        derived: decl.derived,
+        body: body
+    });
+}
+
+/// Rewrites type-bearing expressions inside a test block.
+fn (self: &var Loader) qualify_test_decl(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: ast::TestDecl
+) -> !DeclarationResult {
+    var node = decl;
+    if decl.body |declared| {
+        let outcome = try self.qualify_block(tree, file, declared);
+        match outcome {
+            Block(qualified) => {
+                node.body = qualified;
+            },
+            Failed(failed) => return DeclarationResult::Failed(move failed),
+        }
+    }
+    return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Test(node)));
+}
+
+/// Rewrites type-bearing expressions inside a block.
+fn (self: &var Loader) qualify_block(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    block: ast::Block
+) -> !BlockResult {
+    match tree.statements.at(block.node) {
+        Block(value) => {
+            let source = try value.statements.clone(self.allocator);
+            defer source.deinit();
+            var statements = array::new<ast::Statement>(self.allocator);
+            errdefer statements.deinit();
+            var index = 0;
+            while source.at(index) |statement| {
+                index = index + 1;
+                let outcome = try self.qualify_stmt(tree, file, statement.*);
+                match outcome {
+                    Statement(qualified) => try statements.append(qualified),
+                    Failed(failed) => {
+                        statements.deinit();
+                        return BlockResult::Failed(move failed);
+                    },
+                }
+            }
+            return BlockResult::Block(tree.add_block(ast::BlockStmt { statements: move statements }));
+        },
+        // A block handle always names a block node.
+        _ => return BlockResult::Block(block),
+    }
+}
+
+/// Rewrites type-bearing expressions inside one statement.
+fn (self: &var Loader) qualify_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::Statement
+) -> !StatementResult {
+    match tree.statements.at(stmt.node) {
+        Let(value) => {
+            var node = value;
+            let outcome = try self.qualify_expr(tree, file, value.value);
+            return match outcome {
+                Expression(qualified) => {
+                    node.value = qualified;
+                    StatementResult::Statement(tree.add_statement(ast::StatementNode::Let(node)))
+                },
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        Assign(value) => return self.qualify_assign_stmt(tree, file, value),
+        Return(value) => {
+            var node = value;
+            if value.value |present| {
+                let outcome = try self.qualify_expr(tree, file, present);
+                match outcome {
+                    Expression(qualified) => {
+                        node.value = qualified;
+                    },
+                    Failed(failed) => return StatementResult::Failed(move failed),
+                }
+            }
+            return StatementResult::Statement(tree.add_statement(ast::StatementNode::Return(node)));
+        },
+        Defer(value) => return self.qualify_defer_stmt(tree, file, value),
+        ErrDefer(value) => return self.qualify_err_defer_stmt(tree, file, value),
+        Expr(value) => {
+            var node = value;
+            let outcome = try self.qualify_expr(tree, file, value.expr);
+            return match outcome {
+                Expression(qualified) => {
+                    node.expr = qualified;
+                    StatementResult::Statement(tree.add_statement(ast::StatementNode::Expr(node)))
+                },
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        If(value) => {
+            let outcome = try self.qualify_if_stmt(tree, file, value);
+            return match outcome {
+                If(qualified) => StatementResult::Statement(tree.add_statement(ast::StatementNode::If(qualified))),
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        While(value) => {
+            var node = value;
+            let outcome = try self.qualify_expr(tree, file, value.condition);
+            match outcome {
+                Expression(condition) => {
+                    node.condition = condition;
+                    let body_outcome = try self.qualify_block(tree, file, value.body);
+                    return match body_outcome {
+                        Block(body) => {
+                            node.body = body;
+                            StatementResult::Statement(tree.add_statement(ast::StatementNode::While(node)))
+                        },
+                        Failed(failed) => StatementResult::Failed(move failed),
+                    };
+                },
+                Failed(failed) => return StatementResult::Failed(move failed),
+            }
+        },
+        For(value) => return self.qualify_for_stmt(tree, file, value),
+        Match(value) => {
+            let outcome = try self.qualify_match_stmt(tree, file, value);
+            return match outcome {
+                Match(qualified) => StatementResult::Statement(
+                    tree.add_statement(ast::StatementNode::Match(move qualified))
+                ),
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        Block(_) => {
+            // Only a match arm body is a bare block statement (SPEC §6.12).
+            let outcome = try self.qualify_block(tree, file, ast::Block { node: stmt.node });
+            return match outcome {
+                Block(qualified) => StatementResult::Statement(qualified.as_statement()),
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        _ => return self.qualify_comptime_stmt(tree, file, stmt),
+    }
+}
+
+/// Rewrites the statements that are resolved at compile time. A statement that
+/// is none of them carries nothing to qualify.
+fn (self: &var Loader) qualify_comptime_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::Statement
+) -> !StatementResult {
+    match tree.statements.at(stmt.node) {
+        ComptimeIf(value) => return self.qualify_comptime_if_stmt(tree, file, value),
+        ComptimeFor(value) => return self.qualify_comptime_for_stmt(tree, file, value),
+        ComptimeMatch(value) => return self.qualify_comptime_match_stmt(tree, file, value),
+        _ => return StatementResult::Statement(stmt),
+    }
+}
+
+/// Rewrites the dispatched value and the body every variant expands.
+fn (self: &var Loader) qualify_comptime_match_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::ComptimeMatchStmt
+) -> !StatementResult {
+    var node = stmt;
+    let outcome = try self.qualify_expr(tree, file, stmt.value);
+    match outcome {
+        Expression(value) => {
+            node.value = value;
+            let body_outcome = try self.qualify_block(tree, file, stmt.body);
+            return match body_outcome {
+                Block(body) => {
+                    node.body = body;
+                    StatementResult::Statement(tree.add_statement(ast::StatementNode::ComptimeMatch(node)))
+                },
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return StatementResult::Failed(move failed),
+    }
+}
+
+/// Rewrites the compile-time list and the loop body.
+fn (self: &var Loader) qualify_comptime_for_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::ComptimeForStmt
+) -> !StatementResult {
+    var node = stmt;
+    let outcome = try self.qualify_expr(tree, file, stmt.list);
+    match outcome {
+        Expression(list) => {
+            node.list = list;
+            let body_outcome = try self.qualify_block(tree, file, stmt.body);
+            return match body_outcome {
+                Block(body) => {
+                    node.body = body;
+                    StatementResult::Statement(tree.add_statement(ast::StatementNode::ComptimeFor(node)))
+                },
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return StatementResult::Failed(move failed),
+    }
+}
+
+/// Rewrites type-bearing expressions in a deferred cleanup.
+fn (self: &var Loader) qualify_defer_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::DeferStmt
+) -> !StatementResult {
+    let outcome = try self.qualify_expr(tree, file, stmt.expr);
+    return match outcome {
+        Expression(expr) => StatementResult::Statement(
+            tree.add_statement(ast::StatementNode::Defer(ast::DeferStmt { expr: expr }))
+        ),
+        Failed(failed) => StatementResult::Failed(move failed),
+    };
+}
+
+/// Rewrites type-bearing expressions in an errdefer cleanup.
+fn (self: &var Loader) qualify_err_defer_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::ErrDeferStmt
+) -> !StatementResult {
+    let outcome = try self.qualify_expr(tree, file, stmt.expr);
+    return match outcome {
+        Expression(expr) => StatementResult::Statement(
+            tree.add_statement(ast::StatementNode::ErrDefer(ast::ErrDeferStmt { expr: expr }))
+        ),
+        Failed(failed) => StatementResult::Failed(move failed),
+    };
+}
+
+/// Rewrites both sides of an assignment statement.
+fn (self: &var Loader) qualify_assign_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::AssignStmt
+) -> !StatementResult {
+    var node = stmt;
+    let target_outcome = try self.qualify_expr(tree, file, stmt.target);
+    match target_outcome {
+        Expression(target) => {
+            node.target = target;
+            let value_outcome = try self.qualify_expr(tree, file, stmt.value);
+            return match value_outcome {
+                Expression(value) => {
+                    node.value = value;
+                    StatementResult::Statement(tree.add_statement(ast::StatementNode::Assign(node)))
+                },
+                Failed(failed) => StatementResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return StatementResult::Failed(move failed),
+    }
+}
+
+/// Rewrites all expressions reachable from an if node.
+fn (self: &var Loader) qualify_if_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::IfStmt
+) -> !IfResult {
+    var node = stmt;
+    let condition_outcome = try self.qualify_expr(tree, file, stmt.condition);
+    match condition_outcome {
+        Expression(condition) => {
+            node.condition = condition;
+            let consequence_outcome = try self.qualify_block(tree, file, stmt.consequence);
+            match consequence_outcome {
+                Block(consequence) => {
+                    node.consequence = consequence;
+                    if stmt.alternative |present| {
+                        let outcome = try self.qualify_block(tree, file, present);
+                        match outcome {
+                            Block(alternative) => {
+                                node.alternative = alternative;
+                            },
+                            Failed(failed) => return IfResult::Failed(move failed),
+                        }
+                    }
+                    return IfResult::If(node);
+                },
+                Failed(failed) => return IfResult::Failed(move failed),
+            }
+        },
+        Failed(failed) => return IfResult::Failed(move failed),
+    }
+}
+
+/// Rewrites range bounds and loop body expressions.
+fn (self: &var Loader) qualify_for_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::ForStmt
+) -> !StatementResult {
+    var node = stmt;
+    let start_outcome = try self.qualify_expr(tree, file, stmt.start);
+    match start_outcome {
+        Expression(start) => {
+            node.start = start;
+            let end_outcome = try self.qualify_expr(tree, file, stmt.end);
+            match end_outcome {
+                Expression(end) => {
+                    node.end = end;
+                    let body_outcome = try self.qualify_block(tree, file, stmt.body);
+                    return match body_outcome {
+                        Block(body) => {
+                            node.body = body;
+                            StatementResult::Statement(tree.add_statement(ast::StatementNode::For(node)))
+                        },
+                        Failed(failed) => StatementResult::Failed(move failed),
+                    };
+                },
+                Failed(failed) => return StatementResult::Failed(move failed),
+            }
+        },
+        Failed(failed) => return StatementResult::Failed(move failed),
+    }
+}
+
+/// Rewrites both branches of a compile-time conditional.
+fn (self: &var Loader) qualify_comptime_if_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: ast::ComptimeIfStmt
+) -> !StatementResult {
+    var node = stmt;
+    let condition_outcome = try self.qualify_expr(tree, file, stmt.condition);
+    match condition_outcome {
+        Expression(condition) => {
+            node.condition = condition;
+            let consequence_outcome = try self.qualify_block(tree, file, stmt.consequence);
+            match consequence_outcome {
+                Block(consequence) => {
+                    node.consequence = consequence;
+                    if stmt.alternative |present| {
+                        let outcome = try self.qualify_block(tree, file, present);
+                        match outcome {
+                            Block(alternative) => {
+                                node.alternative = alternative;
+                            },
+                            Failed(failed) => return StatementResult::Failed(move failed),
+                        }
+                    }
+                    return StatementResult::Statement(tree.add_statement(ast::StatementNode::ComptimeIf(node)));
+                },
+                Failed(failed) => return StatementResult::Failed(move failed),
+            }
+        },
+        Failed(failed) => return StatementResult::Failed(move failed),
+    }
+}
+
+/// Rewrites the matched value and all arm bodies.
+fn (self: &var Loader) qualify_match_stmt(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    stmt: &ast::MatchStmt
+) -> !MatchResult {
+    var node = ast::MatchStmt {
+        value: stmt.value,
+        arms: array::new<ast::MatchArm>(self.allocator),
+        meta_capture: stmt.meta_capture,
+        meta_owner: stmt.meta_owner
+    };
+    errdefer node.deinit();
+    let source = try stmt.arms.clone(self.allocator);
+    defer source.deinit();
+    let value_outcome = try self.qualify_expr(tree, file, stmt.value);
+    match value_outcome {
+        Expression(value) => {
+            node.value = value;
+            var index = 0;
+            while source.at(index) |arm| {
+                index = index + 1;
+                var copied = arm.*;
+                let outcome = try self.qualify_stmt(tree, file, arm.body);
+                match outcome {
+                    Statement(body) => {
+                        copied.body = body;
+                        try node.arms.append(copied);
+                    },
+                    Failed(failed) => {
+                        node.deinit();
+                        return MatchResult::Failed(move failed);
+                    },
+                }
+            }
+            return MatchResult::Match(move node);
+        },
+        Failed(failed) => {
+            node.deinit();
+            return MatchResult::Failed(move failed);
+        },
+    }
+}
+
+/// Rewrites type names carried by expressions.
+fn (self: &var Loader) qualify_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression
+) -> !ExpressionResult {
+    match tree.expressions.at(expr.node) {
+        Comptime(value) => return self.qualify_comptime_expr(tree, file, value),
+        Prefix(value) => return self.qualify_prefix_expr(tree, file, value),
+        Binary(value) => return self.qualify_binary_expr(tree, file, value),
+        Call(value) => return self.qualify_call_expr(tree, file, value),
+        Cast(value) => return self.qualify_cast_expr(tree, file, value),
+        Try(value) => return self.qualify_try_expr(tree, file, value),
+        Unsafe(value) => return self.qualify_unsafe_expr(tree, file, value),
+        Move(value) => return self.qualify_move_expr(tree, file, value),
+        OrelseGuard(value) => return self.qualify_orelse_guard_expr(tree, file, value),
+        _ => return self.qualify_type_or_control_expr(tree, file, expr),
+    }
+}
+
+/// Rewrites the condition and any returned value of an orelse guard.
+fn (self: &var Loader) qualify_orelse_guard_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::OrelseGuardExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let condition_outcome = try self.qualify_expr(tree, file, expr.condition);
+    match condition_outcome {
+        Expression(condition) => {
+            node.condition = condition;
+            match tree.statements.at(expr.exit.node) {
+                Return(value) => {
+                    var exit = value;
+                    if value.value |present| {
+                        let outcome = try self.qualify_expr(tree, file, present);
+                        match outcome {
+                            Expression(qualified) => {
+                                exit.value = qualified;
+                            },
+                            Failed(failed) => return ExpressionResult::Failed(move failed),
+                        }
+                    }
+                    node.exit = tree.add_statement(ast::StatementNode::Return(exit));
+                },
+                _ => {},
+            }
+            return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::OrelseGuard(node)));
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Rewrites type-bearing and control expressions.
+fn (self: &var Loader) qualify_type_or_control_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression
+) -> !ExpressionResult {
+    match tree.expressions.at(expr.node) {
+        TypeApply(value) => return self.qualify_type_apply_expr(tree, file, value),
+        Type(value) => {
+            let outcome = try self.resolve_text(tree, file, value.type_name);
+            return match outcome {
+                Name(resolved) => {
+                    let type_name = tree.add_text(move resolved);
+                    ExpressionResult::Expression(tree.add_expression(
+                        ast::ExpressionNode::Type(ast::TypeExpr { type_name: type_name })
+                    ))
+                },
+                Failed(failed) => ExpressionResult::Failed(move failed),
+            };
+        },
+        StructLiteral(value) => return self.qualify_struct_literal(tree, file, value),
+        Field(value) => return self.qualify_field_expr(tree, file, value),
+        Index(value) => return self.qualify_index_expr(tree, file, value),
+        Deref(value) => return self.qualify_deref_expr(tree, file, value),
+        If(value) => {
+            let outcome = try self.qualify_if_stmt(tree, file, value);
+            return match outcome {
+                If(qualified) => ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::If(qualified))),
+                Failed(failed) => ExpressionResult::Failed(move failed),
+            };
+        },
+        Match(value) => {
+            let outcome = try self.qualify_match_stmt(tree, file, value);
+            return match outcome {
+                Match(qualified) => ExpressionResult::Expression(
+                    tree.add_expression(ast::ExpressionNode::Match(move qualified))
+                ),
+                Failed(failed) => ExpressionResult::Failed(move failed),
+            };
+        },
+        _ => return ExpressionResult::Expression(expr),
+    }
+}
+
+/// Rewrites the expression evaluated at compile time.
+fn (self: &var Loader) qualify_comptime_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::ComptimeExpr
+) -> !ExpressionResult {
+    let outcome = try self.qualify_expr(tree, file, expr.expr);
+    return match outcome {
+        Expression(value) => ExpressionResult::Expression(
+            tree.add_expression(ast::ExpressionNode::Comptime(ast::ComptimeExpr { expr: value }))
+        ),
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites the operand of a unary expression.
+fn (self: &var Loader) qualify_prefix_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::PrefixExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let outcome = try self.qualify_expr(tree, file, expr.right);
+    return match outcome {
+        Expression(right) => {
+            node.right = right;
+            ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Prefix(node)))
+        },
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites both sides of a binary expression.
+fn (self: &var Loader) qualify_binary_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::BinaryExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let left_outcome = try self.qualify_expr(tree, file, expr.left);
+    match left_outcome {
+        Expression(left) => {
+            node.left = left;
+            let right_outcome = try self.qualify_expr(tree, file, expr.right);
+            return match right_outcome {
+                Expression(right) => {
+                    node.right = right;
+                    ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Binary(node)))
+                },
+                Failed(failed) => ExpressionResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Rewrites the target type and value of a cast expression.
+fn (self: &var Loader) qualify_cast_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::CastExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let type_outcome = try self.resolve_type_node(tree, file, expr.target_type);
+    match type_outcome {
+        Type(target_type) => {
+            node.target_type = target_type;
+            let value_outcome = try self.qualify_expr(tree, file, expr.value);
+            return match value_outcome {
+                Expression(value) => {
+                    node.value = value;
+                    ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Cast(node)))
+                },
+                Failed(failed) => ExpressionResult::Failed(move failed),
+            };
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Rewrites the fallible expression wrapped by try.
+fn (self: &var Loader) qualify_try_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::TryExpr
+) -> !ExpressionResult {
+    let outcome = try self.qualify_expr(tree, file, expr.value);
+    return match outcome {
+        Expression(value) => ExpressionResult::Expression(
+            tree.add_expression(ast::ExpressionNode::Try(ast::TryExpr { value: value }))
+        ),
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites the expression an unsafe marker covers.
+fn (self: &var Loader) qualify_unsafe_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::UnsafeExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let outcome = try self.qualify_expr(tree, file, expr.value);
+    return match outcome {
+        Expression(value) => {
+            node.value = value;
+            ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Unsafe(node)))
+        },
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites the place a move marker covers.
+fn (self: &var Loader) qualify_move_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::MoveExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let outcome = try self.qualify_expr(tree, file, expr.value);
+    return match outcome {
+        Expression(value) => {
+            node.value = value;
+            ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Move(node)))
+        },
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites callees and arguments inside a call expression.
+fn (self: &var Loader) qualify_call_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::CallExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let callee_outcome = try self.qualify_callee(tree, file, expr.callee);
+    match callee_outcome {
+        Expression(callee) => {
+            node.callee = callee;
+            let list = tree.expression_lists.at(expr.args.node);
+            let source = try list.clone(self.allocator);
+            defer source.deinit();
+            var args = array::new<ast::Expression>(self.allocator);
+            errdefer args.deinit();
+            var index = 0;
+            while source.at(index) |arg| {
+                index = index + 1;
+                let outcome = try self.qualify_expr(tree, file, arg.*);
+                match outcome {
+                    Expression(qualified) => try args.append(qualified),
+                    Failed(failed) => {
+                        args.deinit();
+                        return ExpressionResult::Failed(move failed);
+                    },
+                }
+            }
+            node.args = tree.add_expression_list(move args);
+            return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Call(node)));
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Rewrites explicit static type arguments in constructor calls.
+///
+/// The callee goes through qualify_callee, not qualify_expr: `f<T>(x)` names a
+/// function of this module exactly as `f(x)` does, and reading it as a plain
+/// expression left the name unqualified while the declaration was registered
+/// under the module path, so the call found nothing that takes static arguments.
+fn (self: &var Loader) qualify_type_apply_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::TypeApplyExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let callee_outcome = try self.qualify_callee(tree, file, expr.callee);
+    match callee_outcome {
+        Expression(callee) => {
+            node.callee = callee;
+            let type_arg = try text_copy(self.allocator, tree, expr.type_arg);
+            defer type_arg.deinit();
+            let type_arg_bytes = type_arg.as_bytes();
+            if try typ::split_args_optional(self.allocator, type_arg_bytes) |args| {
+                defer args.deinit();
+                let worker = try worker_arg_index(self.allocator, tree, expr.callee);
+                var out = string::new(self.allocator);
+                errdefer out.deinit();
+                var index = 0;
+                while args.at(index) |arg| {
+                    if index > 0 {
+                        try out.append_bytes(", ");
+                    }
+                    if index == worker {
+                        // This argument names a function the form calls, not a
+                        // type, so it is qualified the way a callee is. Resolving
+                        // it as a type would leave the name unqualified and the
+                        // call would find nothing.
+                        let qualified = try self.qualify_function_name(file, arg);
+                        defer qualified.deinit();
+                        try out.append_string(&qualified);
+                    } else {
+                        let arg_bytes = arg.as_bytes();
+                        let outcome = try self.resolve_type(tree, file, arg_bytes);
+                        match outcome {
+                            Name(resolved) => {
+                                defer resolved.deinit();
+                                try out.append_string(&resolved);
+                            },
+                            Failed(failed) => {
+                                out.deinit();
+                                return ExpressionResult::Failed(move failed);
+                            },
+                        }
+                    }
+                    index = index + 1;
+                }
+                node.type_arg = tree.add_text(move out);
+                return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::TypeApply(node)));
+            }
+            var text = try module_error_text(self.allocator);
+            errdefer text.deinit();
+            try text.append_bytes("invalid static arguments `");
+            try text.append_string(&type_arg);
+            try text.append_bytes("`");
+            return ExpressionResult::Failed(try module_error(self.allocator, move text));
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Returns the index of the static argument that names a function the callee
+/// will call, or -1 when the callee calls none.
+fn worker_arg_index(allocator: Allocator, tree: &ast::Ast, callee: ast::Expression) -> !i64 {
+    let rendered = try ast::render_expression(allocator, tree, callee);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    if stdmeta::lookup(bytes) |shape| {
+        if shape.worker == 0 {
+            return -1;
+        }
+        return shape.worker - 1;
+    }
+    return -1;
+}
+
+/// Resolves a bare function name against this module, the way a callee written
+/// as a bare name is resolved. A name that is not this module's stays as
+/// written, which is what an already-qualified spelling and a forwarded static
+/// parameter both need.
+fn (self: &Loader) qualify_function_name(file: arena::Handle<ModuleFile>, name: &string::String) -> !string::String {
+    let bytes = name.as_bytes();
+    if try self.declares_function(file, bytes) {
+        return self.qualify_in(file, bytes);
+    }
+    return copy_string(self.allocator, name);
+}
+
+/// Rewrites imported function calls to their package function name.
+fn (self: &var Loader) qualify_callee(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::Expression
+) -> !ExpressionResult {
+    // Qualifying rewrites the callee node, so the span has to be carried over:
+    // it is what anchors every later diagnostic that points at a call.
+    match tree.expressions.at(expr.node) {
+        Ident(value) => {
+            var node = value;
+            let name = try text_copy(self.allocator, tree, value.name);
+            defer name.deinit();
+            let name_bytes = name.as_bytes();
+            if try self.declares_function(file, name_bytes) {
+                node.name = try self.qualify_text(tree, file, value.name);
+                return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Ident(node)));
+            }
+        },
+        Field(value) => {
+            let node = value;
+            if node.namespace {
+                if try self.resolve_type_namespace_receiver(tree, file, node.receiver) |receiver| {
+                    receiver.deinit();
+                    return self.qualify_field_expr(tree, file, node);
+                }
+                let outcome = try self.resolve_namespace_path(tree, file, expr);
+                match outcome {
+                    Name(name) => {
+                        let retained = tree.add_text(move name);
+                        return ExpressionResult::Expression(tree.add_expression(
+                            ast::ExpressionNode::Ident(ast::IdentExpr { name: retained, span: node.span })
+                        ));
+                    },
+                    Missing => {},
+                    Failed(failed) => return ExpressionResult::Failed(move failed),
+                }
+            }
+        },
+        _ => {},
+    }
+    return self.qualify_expr(tree, file, expr);
+}
+
+/// Reports whether file's module has a local top-level function. It reads the
+/// index collect_functions built, which holds exactly the functions a module
+/// names -- methods are filed under their receiver and are not among them.
+fn (self: &Loader) declares_function(file: arena::Handle<ModuleFile>, name: []u8) -> !bool {
+    let qualified = try self.qualify_in(file, name);
+    defer qualified.deinit();
+    return index_holds(&self.functions, &qualified);
+}
+
+/// Rewrites namespace receivers while preserving field names.
+fn (self: &var Loader) qualify_field_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::FieldExpr
+) -> !ExpressionResult {
+    var node = expr;
+    if expr.namespace {
+        if try self.resolve_type_namespace_receiver(tree, file, expr.receiver) |resolved| {
+            let name = tree.add_text(move resolved);
+            node.receiver = tree.add_expression(ast::ExpressionNode::Ident(ast::IdentExpr {
+                name: name,
+                span: ast::zero_span()
+            }));
+            return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Field(node)));
+        }
+    }
+    let outcome = try self.qualify_expr(tree, file, expr.receiver);
+    return match outcome {
+        Expression(receiver) => {
+            node.receiver = receiver;
+            ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Field(node)))
+        },
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites target and index expressions.
+fn (self: &var Loader) qualify_index_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::IndexExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let target_outcome = try self.qualify_expr(tree, file, expr.target);
+    match target_outcome {
+        Expression(target) => {
+            node.target = target;
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+    if expr.index |present| {
+        let outcome = try self.qualify_expr(tree, file, present);
+        match outcome {
+            Expression(index) => {
+                node.index = index;
+            },
+            Failed(failed) => return ExpressionResult::Failed(move failed),
+        }
+    }
+    if expr.start |present| {
+        let outcome = try self.qualify_expr(tree, file, present);
+        match outcome {
+            Expression(start) => {
+                node.start = start;
+            },
+            Failed(failed) => return ExpressionResult::Failed(move failed),
+        }
+    }
+    if expr.end |present| {
+        let outcome = try self.qualify_expr(tree, file, present);
+        match outcome {
+            Expression(end) => {
+                node.end = end;
+            },
+            Failed(failed) => return ExpressionResult::Failed(move failed),
+        }
+    }
+    return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Index(node)));
+}
+
+/// Rewrites the receiver before explicit pointer dereference.
+fn (self: &var Loader) qualify_deref_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::DerefExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let outcome = try self.qualify_expr(tree, file, expr.receiver);
+    return match outcome {
+        Expression(receiver) => {
+            node.receiver = receiver;
+            ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::Deref(node)))
+        },
+        Failed(failed) => ExpressionResult::Failed(move failed),
+    };
+}
+
+/// Rewrites struct literal type and field value expressions.
+fn (self: &var Loader) qualify_struct_literal(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: &ast::StructLiteralExpr
+) -> !ExpressionResult {
+    var node = ast::StructLiteralExpr {
+        type_name: expr.type_name,
+        fields: array::new<ast::FieldValue>(self.allocator),
+        span: expr.span
+    };
+    errdefer node.deinit();
+    let source = try expr.fields.clone(self.allocator);
+    defer source.deinit();
+    let type_outcome = try self.resolve_text(tree, file, expr.type_name);
+    match type_outcome {
+        Name(resolved) => {
+            node.type_name = tree.add_text(move resolved);
+            var index = 0;
+            while source.at(index) |field| {
+                index = index + 1;
+                var copied = field.*;
+                let outcome = try self.qualify_expr(tree, file, field.value);
+                match outcome {
+                    Expression(value) => {
+                        copied.value = value;
+                        try node.fields.append(copied);
+                    },
+                    Failed(failed) => {
+                        node.deinit();
+                        return ExpressionResult::Failed(move failed);
+                    },
+                }
+            }
+            return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::StructLiteral(move node)));
+        },
+        Failed(failed) => {
+            node.deinit();
+            return ExpressionResult::Failed(move failed);
+        },
+    }
+}

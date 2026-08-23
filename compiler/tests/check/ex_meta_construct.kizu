@@ -1,0 +1,44 @@
+import std;
+import std::mem;
+import std::string;
+
+struct Names {
+    pub first: string::String,
+    pub second: string::String,
+}
+
+// One call per public field, then the struct literal that takes all of them.
+// Nothing holds a half-built `Names`: the values are separate bindings until
+// the literal consumes them at once. If the second call fails, the `errdefer`
+// the expansion carries releases the first string.
+fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_bytes(std::meta::field_name<T, f>());
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var names = try std::meta::construct<Names, field_from_name>(allocator);
+    defer names.deinit();
+    print(names.first.len());
+    print(names.second.len());
+    return;
+}
+
+// run
+// features: comptime construct field-static-param reflection errdefer deinit std-string
+// output:
+// 5
+// 6
+
+
+// check
+// load:
+// struct Names { pub first: std::string::String, pub second: std::string::String }
+// fn field_from_name<T, f: Field>(allocator: Allocator) -> !std::meta::field_type<T, f> { var out = std::string::new(allocator); errdefer out.deinit(); try out.append_bytes(std::meta::field_name<T, f>()); return move out; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var names = try std::meta::construct<Names, field_from_name>(allocator); defer names.deinit(); print(names.first.len()); print(names.second.len()); return; }
+// fn (self: Names) Names.deinit() -> void { self.first.deinit(); self.second.deinit(); return; }
+// check:
+// ok

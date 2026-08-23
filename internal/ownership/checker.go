@@ -336,7 +336,8 @@ func (c *Checker) collectUnions(program *ast.Program) {
 		variants := map[string]string{}
 		order := make([]string, 0, len(unionDecl.Variants))
 		for _, variant := range unionDecl.Variants {
-			variants[variant.Name] = typ.Text(variant.Payload)
+			variants[variant.Name] = stdmeta.ResolveElementTypeForms(
+				typ.Text(variant.Payload))
 			order = append(order, variant.Name)
 		}
 		c.unions[unionDecl.Name] = variants
@@ -359,7 +360,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
-			fields[field.Name] = fieldOwnershipType(field)
+			fields[field.Name] = stdmeta.ResolveElementTypeForms(fieldOwnershipType(field))
 			order = append(order, field.Name)
 			if field.Public {
 				public = append(public, field.Name)

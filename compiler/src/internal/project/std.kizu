@@ -1,0 +1,432 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::lexer;
+import compiler::internal::manifest;
+import compiler::internal::token;
+import std::array;
+import std::fs;
+import std::map;
+import std::mem;
+import std::path;
+import std::sort;
+import std::string;
+
+// Port of internal/project/std.go: std is a package with a manifest and a
+// source tree, resolved by the same loader as a program's own package. A
+// program pays for the part of std it imports rather than for all of it.
+
+/// Is the manifest file every package root carries.
+fn manifest_file_name() -> []u8 {
+    return "kizu.toml";
+}
+
+/// Names the std package root inside the library tree.
+fn std_dir_name() -> []u8 {
+    return "std";
+}
+
+/// Reads the std manifest and source tree from the library tree.
+fn (self: &Loader) read_std_graph() -> !GraphResult {
+    let lib_dir = self.lib_dir.as_bytes();
+    let dir = try path::join(self.allocator, lib_dir, std_dir_name());
+    defer dir.deinit();
+    let dir_bytes = dir.as_bytes();
+    let manifest_path = try path::join(self.allocator, dir_bytes, manifest_file_name());
+    defer manifest_path.deinit();
+    let manifest_path_bytes = manifest_path.as_bytes();
+    let exists = try fs::exists(self.io, manifest_path_bytes);
+    if !exists {
+        return GraphResult::Error(try self.missing_lib_file(manifest_path_bytes));
+    }
+    let text = try fs::read_file(
+        self.io,
+        self.allocator,
+        manifest_path_bytes,
+        mem::Limit::Unlimited
+    );
+    defer text.deinit();
+    let text_bytes = text.as_bytes();
+    let outcome_1 = try manifest::parse_std_manifest(self.allocator, text_bytes);
+    match outcome_1 {
+        Manifest(parsed) => {
+            defer parsed.deinit();
+            return resolve_modules(self.io, self.allocator, dir_bytes, &parsed);
+        },
+        Error(message) => {
+            return GraphResult::Error(try module_error(self.allocator, move message));
+        },
+    }
+}
+
+/// Reports a file the library tree does not have, naming the tree so the
+/// reader can point the compiler somewhere else.
+fn (self: &Loader) missing_lib_file(file: []u8) -> !diagnostic::Diagnostic {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    try text.append_bytes("open ");
+    try text.append_bytes(file);
+    try text.append_bytes(": no such file or directory");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("help: the library tree is `");
+    try text.append_string(&self.lib_dir);
+    try text.append_bytes("`; set KIZU_LIB_DIR or pass --lib-dir to point somewhere else");
+    let bytes = text.as_bytes();
+    let built = try diagnostic::from_text(
+        self.allocator,
+        diagnostic::Severity::Error,
+        ast::zero_span(),
+        bytes
+    );
+    return move built;
+}
+
+/// Records which paths name a module of the standard library with sources.
+fn (self: &var Loader) remember_std_modules(graph: &Graph) -> !void {
+    var index = 0;
+    while graph.modules.at(index) |module| {
+        index = index + 1;
+        if module.files.len() > 0 {
+            try set_insert(&var self.std_modules, &module.path);
+        }
+    }
+    return;
+}
+
+/// Reports whether path names a module of the standard library.
+fn (self: &Loader) std_module(module_path: []u8) -> bool {
+    return self.std_modules.contains(module_path);
+}
+
+/// Walks std modules, pulling in what each one names.
+struct StdLoader {
+    allocator: Allocator,
+    io: Io,
+    // paths lists every std module path with sources, in sorted order.
+    paths: array::Array<string::String>,
+    visited: map::Map<[]u8, bool>,
+    out: array::Array<string::String>
+}
+
+/// Returns the std modules a set of import paths reaches as a graph, each
+/// module after the modules it is built on. The file texts the walk read are
+/// added to sources, so the parse that follows does not open the same files
+/// again.
+fn (self: &Loader) std_modules_for(
+    graph: &Graph,
+    imports: &array::Array<string::String>,
+    sources: &var map::Map<[]u8, string::String>
+) -> !Graph {
+    var loader = StdLoader {
+        allocator: self.allocator,
+        io: self.io,
+        paths: array::new<string::String>(self.allocator),
+        visited: map::new<[]u8, bool>(self.allocator),
+        out: array::new<string::String>(self.allocator)
+    };
+    defer loader.deinit();
+    var index = 0;
+    while graph.modules.at(index) |module| {
+        index = index + 1;
+        if module.files.len() == 0 {
+            continue;
+        }
+        try loader.paths.append(try copy_string(self.allocator, &module.path));
+    }
+    try sort::strings(&var loader.paths);
+    index = 0;
+    while imports.at(index) |import_path| {
+        index = index + 1;
+        let import_bytes = import_path.as_bytes();
+        let wanted = try loader.named(import_bytes);
+        defer wanted.deinit();
+        var wanted_index = 0;
+        while wanted.at(wanted_index) |module_path| {
+            wanted_index = wanted_index + 1;
+            let module_bytes = module_path.as_bytes();
+            try loader.visit(graph, module_bytes, sources);
+        }
+    }
+    var modules = array::new<Module>(self.allocator);
+    errdefer modules.deinit();
+    index = 0;
+    while loader.out.at(index) |module_path| {
+        index = index + 1;
+        var graph_index = 0;
+        while graph.modules.at(graph_index) |module| {
+            graph_index = graph_index + 1;
+            if same_text(&module.path, module_path) {
+                try modules.append(try clone_module(self.allocator, module));
+            }
+        }
+    }
+    return Graph {
+        package_name: try copy_string(self.allocator, &graph.package_name),
+        modules: move modules
+    };
+}
+
+/// Copies one module record with allocator.
+fn clone_module(allocator: Allocator, module: &Module) -> !Module {
+    var files = array::new<string::String>(allocator);
+    errdefer files.deinit();
+    var index = 0;
+    while module.files.at(index) |file| {
+        try files.append(try copy_string(allocator, file));
+        index = index + 1;
+    }
+    var test_files = array::new<string::String>(allocator);
+    errdefer test_files.deinit();
+    index = 0;
+    while module.test_files.at(index) |file| {
+        try test_files.append(try copy_string(allocator, file));
+        index = index + 1;
+    }
+    return Module {
+        path: try copy_string(allocator, &module.path),
+        files: move files,
+        test_files: move test_files
+    };
+}
+
+/// Returns the std modules one import path names. Importing the package root
+/// names every module a program outside std may reach, because that is what a
+/// path through the root can spell.
+fn (self: &StdLoader) named(import_path: []u8) -> !array::Array<string::String> {
+    var wanted = array::new<string::String>(self.allocator);
+    errdefer wanted.deinit();
+    if mem::equal_bytes(import_path, std_root()) {
+        var index = 0;
+        while self.paths.at(index) |module_path| {
+            index = index + 1;
+            let bytes = module_path.as_bytes();
+            if !internal_module(bytes).internal {
+                try wanted.append(try copy_string(self.allocator, module_path));
+            }
+        }
+        return move wanted;
+    }
+    var index = 0;
+    while self.paths.at(index) |module_path| {
+        index = index + 1;
+        if text_is(module_path, import_path) {
+            try wanted.append(try copy_string(self.allocator, module_path));
+            return move wanted;
+        }
+    }
+    return move wanted;
+}
+
+/// Adds one std module after adding the modules its source names.
+fn (self: &var StdLoader) visit(
+    graph: &Graph,
+    module_path: []u8,
+    sources: &var map::Map<[]u8, string::String>
+) -> !void {
+    // Marked on the way in: a module already being visited is one this walk
+    // reached through itself, and adding it again would not end.
+    if self.visited.contains(module_path) {
+        return;
+    }
+    try self.visited.insert(module_path, true);
+    var graph_index = 0;
+    while graph.modules.at(graph_index) |module| {
+        graph_index = graph_index + 1;
+        if !text_is(&module.path, module_path) {
+            continue;
+        }
+        var file_index = 0;
+        while module.files.at(file_index) |file| {
+            file_index = file_index + 1;
+            let file_bytes = file.as_bytes();
+            let text = try fs::read_file(self.io, self.allocator, file_bytes, mem::Limit::Unlimited);
+            errdefer text.deinit();
+            let dependencies = try self.references(&text);
+            defer dependencies.deinit();
+            try sources.insert(file_bytes, move text);
+            var dependency_index = 0;
+            while dependencies.at(dependency_index) |dependency| {
+                dependency_index = dependency_index + 1;
+                let dependency_bytes = dependency.as_bytes();
+                try self.visit(graph, dependency_bytes, sources);
+            }
+        }
+    }
+    return self.out.append(try string::from_bytes(self.allocator, module_path));
+}
+
+/// Returns the std modules a source names. std modules reach their siblings
+/// through the package root namespace rather than through imports, so what one
+/// is built on is read off the names it writes.
+fn (self: &StdLoader) references(text: &string::String) -> !array::Array<string::String> {
+    let text_bytes = text.as_bytes();
+    var seen = try scan_std_paths(self.allocator, text_bytes);
+    defer seen.deinit();
+    var modules = array::new<string::String>(self.allocator);
+    errdefer modules.deinit();
+    var index = 0;
+    while self.paths.at(index) |module_path| {
+        index = index + 1;
+        let bytes = module_path.as_bytes();
+        if seen.contains(bytes) {
+            try modules.append(try copy_string(self.allocator, module_path));
+        }
+    }
+    return move modules;
+}
+
+/// Records the std module paths a source names, skipping the ones inside string
+/// literals and comments by reading tokens rather than text.
+fn scan_std_paths(allocator: Allocator, text: []u8) -> !map::Map<[]u8, bool> {
+    var seen = map::new<[]u8, bool>(allocator);
+    errdefer seen.deinit();
+    var scanner = lexer::new(allocator, text);
+    defer scanner.deinit();
+    while true {
+        let current = try scanner.next_token();
+        defer current.deinit();
+        if current.kind == token::Kind::Eof {
+            return move seen;
+        }
+        if current.kind != token::Kind::Ident or !text_is(&current.literal, std_root()) {
+            continue;
+        }
+        // Read the namespace chain: every prefix shorter than the whole chain
+        // is a module this source could be built on, and the last segment names
+        // an item.
+        var prefix = try string::from_bytes(allocator, std_root());
+        defer prefix.deinit();
+        var segments = 1;
+        while true {
+            let separator = try scanner.next_token();
+            defer separator.deinit();
+            if separator.kind != token::Kind::DoubleColon {
+                break;
+            }
+            let part = try scanner.next_token();
+            defer part.deinit();
+            if part.kind != token::Kind::Ident {
+                break;
+            }
+            segments = segments + 1;
+            if segments > 2 {
+                let prefix_bytes = prefix.as_bytes();
+                try seen.insert(prefix_bytes, true);
+            }
+            try prefix.append_bytes("::");
+            try prefix.append_string(&part.literal);
+        }
+    }
+    return move seen;
+}
+
+/// Parses the std modules this program imports, and puts them before it.
+fn (self: &var Loader) load_std(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
+    let outcome_2 = try self.read_std_graph();
+    match outcome_2 {
+        Graph(graph) => {
+            defer graph.deinit();
+            try self.remember_std_modules(&graph);
+            let imports = try self.std_import_paths(tree);
+            defer imports.deinit();
+            var std_sources = map::new<[]u8, string::String>(self.allocator);
+            defer std_sources.deinit();
+            let std_graph = try self.std_modules_for(&graph, &imports, &var std_sources);
+            defer std_graph.deinit();
+            // The walk that decided which modules to load already read them,
+            // so the parse takes that text rather than opening the same files
+            // again.
+            try self.add_source_overrides(&var std_sources);
+            return self.load_package(tree, &std_graph, false, true);
+        },
+        Error(failed) => return move failed,
+    }
+}
+
+/// Returns the std paths this program's modules declare they import, in a
+/// stable order.
+fn (self: &Loader) std_import_paths(tree: &ast::Ast) -> !array::Array<string::String> {
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var paths = array::new<string::String>(self.allocator);
+    errdefer paths.deinit();
+    let groups = try self.sorted_module_groups();
+    defer groups.deinit();
+    var group_index = 0;
+    while groups.at(group_index) |group_handle| {
+        group_index = group_index + 1;
+        let group = self.groups.at(group_handle.*);
+        var file_index = 0;
+        while group.files.at(file_index) |file_handle| {
+            file_index = file_index + 1;
+            let file = self.files.at(file_handle.*);
+            var declaration_index = 0;
+            while file.program.declarations.at(declaration_index) |declaration| {
+                declaration_index = declaration_index + 1;
+                match tree.declarations.at(declaration.node) {
+                    Import(value) => {
+                        if !import_starts_with_std(tree, value) {
+                            continue;
+                        }
+                        let joined = try join_import_path(self.allocator, tree, value);
+                        errdefer joined.deinit();
+                        if set_contains(&seen, &joined) {
+                            joined.deinit();
+                        } else {
+                            try set_insert(&var seen, &joined);
+                            try paths.append(move joined);
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return move paths;
+}
+
+/// Reports whether an import's first segment is the std root.
+fn import_starts_with_std(tree: &ast::Ast, value: &ast::ImportDecl) -> bool {
+    if value.path.at(0) |first| {
+        let text = tree.texts.at(first.node);
+        return text_is(text, std_root());
+    }
+    return false;
+}
+
+/// Joins an import's segments with `::`.
+pub fn join_import_path(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    value: &ast::ImportDecl
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while value.path.at(index) |segment| {
+        if index > 0 {
+            try out.append_bytes("::");
+        }
+        let text = tree.texts.at(segment.node);
+        try out.append_string(text);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Records source text a caller already read, keyed the way parse_module looks
+/// it up.
+fn (self: &var Loader) add_source_overrides(
+    sources: &var map::Map<[]u8, string::String>
+) -> !void {
+    var index = 0;
+    while sources.key_at(index) |key| {
+        index = index + 1;
+        let cleaned = try path::clean(self.allocator, key);
+        defer cleaned.deinit();
+        let cleaned_bytes = cleaned.as_bytes();
+        if sources.at(key) |text| {
+            try self.source_overrides.insert(cleaned_bytes, try copy_string(self.allocator, text));
+        }
+    }
+    return;
+}

@@ -27,7 +27,7 @@ safe Kizu の詳細な安全契約と regression coverage は
 将来入るかもしれない機能を範囲表で予告することはしません。
 
 `kizu run` / `kizu check` / `kizu test` は生成した実行ファイルを走らせます。経路は
-1 本で、interpreter はありません(ADR-0083)。実装は Go 一本です(ADR-0082)。
+1 本で、interpreter はありません(ADR-0083)。実装は Go 一本です。
 `check: ok` は「checker を通った」ではなく「`run` / `build` が使う lowering が
 この program を受理する」の約束です: check は同じ `ir.Lower` を通し、module を
 捨てます。
@@ -81,7 +81,7 @@ OS thread / event loop / networking runtime
 Rust 同等以上の runtime performance guarantee
 ```
 
-self-host は言語が固まってから、Go の構造に沿って作り直します(ADR-0082)。
+self-host は Go の構造に沿って `compiler/` へ移植中で、shipping 実装は Go 一本です。
 thread は入れます。撤回したのは API の形だけで、実行系を先に作り、安全規則は
 動く thread の上でだけ書きます(ADR-0025)。
 
@@ -213,7 +213,7 @@ std::arena::Handle<T>
 ## 5. 実装方針
 
 実装は Go 一本です。言語とツールチェインの正は `internal/` と `cmd/kizu` にあり、
-第二実装は持ちません(ADR-0082)。
+第二実装は持ちません。
 
 `run` と `test` は生成した実行ファイルを走らせます。経路は 1 本で、interpreter は
 ありません(ADR-0083)。native code は LLVM IR backend が生成します。
@@ -2332,9 +2332,10 @@ checker が使うものと同じです。
 storage を指し、確保は起きません。
 
 `element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
-返します。`field_type<T, f>` はその field の型を返します。どちらも型の位置に
-書くので、型値として比べるときは `type<std::meta::element<T>>` と綴ります。
-static 引数にも書けるので、そのまま再帰できます。
+返します。`std::map::Map<[]u8, V>` では、key は entry の見つけ方なので、保持する
+値の型 `V` を返します。`field_type<T, f>` はその field の型を返します。どちらも
+型の位置に書くので、型値として比べるときは `type<std::meta::element<T>>` と
+綴ります。static 引数にも書けるので、そのまま再帰できます。
 
 ```kizu
 fn encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void {

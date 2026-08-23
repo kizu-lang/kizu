@@ -50,22 +50,15 @@ func (c *Checker) underMark(
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
-	types         typeTable
-	functions     map[string]*functionType
-	structs       map[string]*ast.StructDecl
-	enums         map[string]*enumType
-	errorSets     map[string]*errorSetType
-	unions        map[string]*unionType
-	contracts     map[string]*contractType
-	impls         map[string]map[string]*functionType
-	declaredTypes map[string]bool
+	checkerMetadata
+	types typeTable
 	// declaredDeinits names the types whose cleanup an author wrote. They hold
 	// an obligation of their own, so their fields are not taken one at a time.
 	declaredDeinits map[string]bool
 	currentReturn   Type
 	currentFunction *functionType
 	currentStd      bool
-	typeParams      map[string]bool
+	typeParams      typeParamStore
 	typeArgValues   map[string]Type
 	// staticParams holds the compile-time value parameters of the generic being
 	// checked, by declared type. A runtime local of the same name is not one of
@@ -77,9 +70,6 @@ type Checker struct {
 	// than in a scope: the only thing that may read it is a `std::meta` form.
 	metaFields map[string]metaField
 	loopLabels []string
-	// stdMethods indexes the signatures std declares for its container methods,
-	// so this checker reads them instead of restating them.
-	stdMethods stdmethod.MethodIndex
 	// checkedStdBodies records the std wrapper instantiations already checked,
 	// keyed by name and static arguments.
 	checkedStdBodies map[string]bool
@@ -100,36 +90,11 @@ type Checker struct {
 	captureCondition bool
 }
 
-type scope struct {
-	types     *typeTable
-	parent    *scope
-	values    map[string]Type
-	mutable   map[string]bool
-	borrowed  map[string]bool
-	mutBorrow map[string]bool
-	// param marks the names bound by the function signature. A `&var` among
-	// them is the caller's storage, which a local mut borrow binding is not.
-	param        map[string]bool
-	borrowSource map[string][]string
-	// unread holds the locals this scope declared that nothing has read yet. A
-	// read removes one; whatever is left when the scope closes was never needed.
-	// Parameters are not in here: they are part of a signature, and a caller can
-	// require one the body has no use for.
-	unread map[string]ast.Span
-}
-
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
+		checkerMetadata:  newCheckerMetadata(),
 		types:            newTypeTable(),
-		functions:        map[string]*functionType{},
-		structs:          map[string]*ast.StructDecl{},
-		enums:            map[string]*enumType{},
-		errorSets:        map[string]*errorSetType{},
-		unions:           map[string]*unionType{},
-		contracts:        map[string]*contractType{},
-		impls:            map[string]map[string]*functionType{},
-		declaredTypes:    map[string]bool{},
 		checkedStdBodies: map[string]bool{},
 		checkedInstances: map[string]bool{},
 		metaFields:       map[string]metaField{},
@@ -138,7 +103,6 @@ func New() *Checker {
 
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
-	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
@@ -173,7 +137,6 @@ func (c *Checker) Check(program *ast.Program) error {
 // every independent type error at once. Setup phases that the body checks
 // depend on still fail fast, since later errors would be noise without them.
 func (c *Checker) CheckAll(program *ast.Program) []error {
-	c.stdMethods = stdmethod.IndexMethods(program.Decls)
 	c.deinitOwners = ast.DeinitOwners(program)
 	c.declaredDeinits = ast.DeclaredDeinits(program)
 	if err := c.collectFunctions(program); err != nil {
@@ -302,36 +265,6 @@ func (c *Checker) collectReceiverMethod(decl *ast.FunctionDecl) error {
 	return nil
 }
 
-// predeclareTypeNames lets recursive fields refer to later declarations through Box.
-func (c *Checker) predeclareTypeNames(program *ast.Program) error {
-	for _, decl := range program.Decls {
-		name, ok := declaredTypeName(decl)
-		if !ok {
-			continue
-		}
-		c.declaredTypes[name] = true
-	}
-	return nil
-}
-
-// declaredTypeName returns the user type introduced by a declaration.
-func declaredTypeName(decl ast.Decl) (string, bool) {
-	switch d := decl.(type) {
-	case *ast.StructDecl:
-		return d.Name, true
-	case *ast.EnumDecl:
-		return d.Name, true
-	case *ast.ErrorSetDecl:
-		return d.Name, true
-	case *ast.UnionDecl:
-		return d.Name, true
-	case *ast.ContractDecl:
-		return d.Name, true
-	default:
-		return "", false
-	}
-}
-
 // checkPublicAPI rejects private types exposed through public declarations.
 func (c *Checker) checkPublicAPI(program *ast.Program) error {
 	for _, decl := range program.Decls {
@@ -448,6 +381,16 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 			return errorf("type error: `%s` is a type and cannot name a function",
 				fn.Name)
 		}
+		if fn.Receiver {
+			receiver, name, ok := stdmethod.SplitMethodName(fn.Name)
+			if ok {
+				method := c.implMethod(receiver, name)
+				if method != nil {
+					c.functions[fn.Name] = method
+					continue
+				}
+			}
+		}
 		fnType, err := c.newDeclaredFunctionType(fn)
 		if err != nil {
 			return err
@@ -507,58 +450,30 @@ func (c *Checker) checkSatisfies(contractName string, typeName Type) error {
 	return nil
 }
 
-// collectEnum registers and validates a tag enum declaration.
-func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
-	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
-		return err
-	}
-	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
-	for _, tag := range decl.Tags {
-		if enum.tags[tag] {
-			return errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
-		}
-		enum.tags[tag] = true
-		enum.order = append(enum.order, tag)
-	}
-	c.enums[decl.Name] = enum
-	return nil
-}
-
-// collectErrorSet registers and validates an error set declaration.
-func (c *Checker) collectErrorSet(decl *ast.ErrorSetDecl) error {
-	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
-		return err
-	}
-	set := &errorSetType{name: decl.Name, members: map[string]bool{}, public: decl.Public}
-	for _, member := range decl.Members {
-		if set.members[member] {
-			return errorf("type error: duplicate error `%s::%s`", decl.Name, member)
-		}
-		set.members[member] = true
-	}
-	set.tagged = &enumType{name: set.name, tags: set.members, public: set.public}
-	c.errorSets[decl.Name] = set
-	return nil
-}
-
 // rejectDuplicateTypeName reports a name already taken by another declaration.
 // Every declaration asks here, so a name is taken whichever kind claimed it
 // first: checking only the kinds that came before leaves the answer depending
 // on the order two declarations were written in.
 func (c *Checker) rejectDuplicateTypeName(name string) error {
-	if _, exists := c.errorSets[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.enums[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.structs[name]; exists {
-		return errorf("type error: duplicate type `%s`", name)
-	}
-	if _, exists := c.unions[name]; exists {
+	if c.hasDuplicateTypeName(name) {
 		return errorf("type error: duplicate type `%s`", name)
 	}
 	return nil
+}
+
+// hasDuplicateTypeName reports a name already retained by a concrete type.
+func (c *Checker) hasDuplicateTypeName(name string) bool {
+	if _, exists := c.errorSets[name]; exists {
+		return true
+	}
+	if _, exists := c.enums[name]; exists {
+		return true
+	}
+	if _, exists := c.structs[name]; exists {
+		return true
+	}
+	_, exists := c.unions[name]
+	return exists
 }
 
 // collectUnion registers and validates a tagged union declaration.
@@ -566,39 +481,45 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	if err := c.rejectDuplicateTypeName(decl.Name); err != nil {
 		return err
 	}
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(decl.TypeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enter(decl.TypeParams)
+	defer c.typeParams.restore(previousTypeParams)
 	union := &unionType{
 		name: decl.Name, typeParams: decl.TypeParams,
-		variants: map[string]string{}, public: decl.Public,
+		variants: map[string]Type{}, public: decl.Public,
 	}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
 			return errorf("type error: duplicate union variant `%s::%s`",
 				decl.Name, variant.Name)
 		}
+		payloadType := Type("")
 		if variant.Payload != nil {
-			payload := typ.Text(variant.Payload)
-			parsed, err := c.parseType(payload)
+			parsed, err := c.parseTypeNode(variant.Payload)
 			if err != nil {
 				return err
+			}
+			written := typ.Text(variant.Payload)
+			if payload := stdmeta.ResolveElementTypeForms(written); payload != written {
+				parsed, err = c.parseType(payload)
+				if err != nil {
+					return err
+				}
 			}
 			if _, ok := optionalElem(parsed); ok {
 				return errorf("type error: union payload `%s::%s` cannot store an optional yet",
 					decl.Name, variant.Name)
 			}
-			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, payload); err != nil {
-				return err
+			if isBorrowPayload(variant.Payload) {
+				return errorf("type error: borrow payload `%s.%s` cannot store borrow",
+					decl.Name, variant.Name)
 			}
-			if containsTypeValue(parsed) {
+			if c.types.containsTypeValue(parsed) {
 				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
+			payloadType = parsed
 		}
-		union.variants[variant.Name] = typ.Text(variant.Payload)
+		union.variants[variant.Name] = payloadType
 		union.order = append(union.order, variant.Name)
 	}
 	c.unions[decl.Name] = union
@@ -615,31 +536,32 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		return err
 	}
 	c.structs[decl.Name] = decl
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(decl.TypeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enter(decl.TypeParams)
+	defer c.typeParams.restore(previousTypeParams)
 	for _, field := range decl.Fields {
 		typ, err := c.parseTypeNode(field.TypeName)
 		if err != nil {
 			return err
 		}
-		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
-			return err
+		if field.Borrow {
+			return errorf("type error: borrow field `%s.%s` cannot store borrow",
+				decl.Name, field.Name)
 		}
-		if err := checkRawPointerFieldPolicy(decl, field, typ); err != nil {
-			return err
+		if rawPointerFieldRequiresUnsafe(&c.types, decl.RequiresUnsafe, typ) {
+			return errorf("unsafe error: struct `%s` holds a raw pointer in field `%s`, "+
+				"so it must be declared `unsafe struct`"+
+				"\nhelp: write `unsafe struct %s` and document the invariant its fields carry",
+				decl.Name, field.Name, decl.Name)
 		}
-		if compileTimeOnlyType(typ) {
+		if compileTimeOnlyType(&c.types, typ) {
 			return errorf("type error: struct field `%s.%s` cannot store %s",
 				decl.Name, field.Name, typ)
 		}
-		if containsTypeValue(typ) {
+		if c.types.containsTypeValue(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store type value",
 				decl.Name, field.Name)
 		}
-		if containsBufferType(typ) {
+		if c.types.containsBufferType(typ) {
 			return errorf("type error: struct field `%s.%s` cannot store stack buffer",
 				decl.Name, field.Name)
 		}
@@ -667,65 +589,14 @@ func (c *Checker) optionalFieldElemAllowed(elem Type) bool {
 	return c.isPlainDataType(string(elem), nil) || c.ownerType(elem)
 }
 
-// ownedContainerBases lists the inline-stored std containers that own heap
-// storage and must be released through their explicit `deinit`. A payload
-// built from one of these (directly or nested) is an owner payload of the
-// inline tagged-union payload ABI.
-//
-// std::mem::Box is intentionally excluded: a boxed (heap-indirected) or
-// recursive union payload is deferred to #495, so it is outside this contract
-// and is left to ordinary move/borrow checking.
-var ownedContainerBases = map[string]bool{
-	"std::array::Array":   true,
-	"std::string::String": true,
-	"std::map::Map":       true,
-	"std::arena::Arena":   true,
-}
-
-// typeContainsOwner reports whether typeName transitively holds an owned
-// container. Scalars, enums, copy AST nodes, and arena handles are not owners;
-// structs and unions are owners only when a field or variant payload is one.
-func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bool {
-	name := strings.TrimSpace(typeName)
-	name = strings.TrimPrefix(name, "!")
-	base := name
-	if b, _, ok := splitGenericType(name); ok {
-		base = b
-	}
-	if ownedContainerBases[base] {
-		return true
-	}
-	if visited[base] {
-		return false
-	}
-	if st, ok := c.structs[base]; ok {
-		visited[base] = true
-		for _, field := range st.Fields {
-			if c.typeContainsOwner(typ.Text(field.TypeName), visited) {
-				return true
-			}
-		}
-		return false
-	}
-	if union, ok := c.unions[base]; ok {
-		visited[base] = true
-		for _, payload := range union.variants {
-			if payload != "" && c.typeContainsOwner(payload, visited) {
-				return true
-			}
-		}
-		return false
-	}
-	return false
-}
-
 // unionHasOwnerPayload reports whether any variant payload is an owner payload.
 func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
-	for _, variant := range decl.Variants {
-		if variant.Payload == nil {
-			continue
-		}
-		if c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
+	union := c.unions[decl.Name]
+	if union == nil {
+		return false
+	}
+	for _, payload := range union.variants {
+		if payload != "" && ast.OwnerType(c.deinitOwners, string(payload)) {
 			return true
 		}
 	}
@@ -820,8 +691,8 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *functionTyp
 		armByTag[arm.Tag] = arm
 	}
 	for _, variant := range decl.Variants {
-		if variant.Payload == nil ||
-			!c.typeContainsOwner(typ.Text(variant.Payload), map[string]bool{decl.Name: true}) {
+		payload := c.unions[decl.Name].variants[variant.Name]
+		if payload == "" || !ast.OwnerType(c.deinitOwners, string(payload)) {
 			continue
 		}
 		arm, ok := armByTag[variant.Name]
@@ -873,15 +744,13 @@ func (c *Checker) newDeclaredFunctionType(fn *ast.FunctionDecl) (*functionType, 
 // out of the body: a signature that came from a body is one no other package
 // can be told without being shipped the body too.
 func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, error) {
-	typeParams := fn.TypeParamNames()
-	previousTypeParams := c.typeParams
-	c.typeParams = typeParamSet(typeParams)
-	defer func() {
-		c.typeParams = previousTypeParams
-	}()
+	previousTypeParams := c.typeParams.enterSignature(fn)
+	defer c.typeParams.restore(previousTypeParams)
 
-	if err := checkStaticParamPolicy(fn); err != nil {
-		return nil, err
+	if index, reserved := reservedFunctionStaticParamIndex(fn); reserved {
+		param := fn.StaticParams[index]
+		return nil, errorf(
+			"type error: Function static parameter `%s` is reserved for std", param.Name)
 	}
 	paramInfo, err := c.collectFunctionParams(fn)
 	if err != nil {
@@ -895,18 +764,18 @@ func (c *Checker) newFunctionType(fn ast.FunctionSignature) (*functionType, erro
 			return nil, err
 		}
 	}
-	if compileTimeOnlyType(ret) {
+	if compileTimeOnlyType(&c.types, ret) {
 		return nil, errorf("type error: function `%s` cannot return %s", fn.Name, ret)
 	}
-	if containsBufferType(ret) {
+	if c.types.containsBufferType(ret) {
 		return nil, errorf(
 			"type error: function `%s` cannot return a stack buffer; "+
 				"return an owned buffer or write through a view", fn.Name)
 	}
-	if containsTypeValue(ret) {
+	if c.types.containsTypeValue(ret) {
 		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
-	if !fn.Std && containsBorrowOptional(ret) {
+	if !fn.Std && c.types.containsBorrowOptional(ret) {
 		if _, _, bare := typ.BorrowOptionalElem(string(ret)); !bare {
 			return nil, errorf(
 				"type error: function `%s` cannot nest a borrow optional in its"+
@@ -933,7 +802,7 @@ func (c *Checker) collectFunctionParams(fn ast.FunctionSignature) (functionParam
 		if err != nil {
 			return functionParamInfo{}, err
 		}
-		if !fn.Std && containsBorrowOptional(paramType) {
+		if !fn.Std && c.types.containsBorrowOptional(paramType) {
 			return functionParamInfo{}, errorf(
 				"type error: parameter `%s` cannot hold a borrow optional;"+
 					" `?&T` exists only as a capture condition", param.Name)
@@ -956,16 +825,20 @@ func (c *Checker) checkFunctionParam(
 	if paramType == typeVoid {
 		return errorf("type error: parameter `%s` cannot have type void", param.Name)
 	}
-	if containsTypeValue(paramType) {
+	if c.types.containsTypeValue(paramType) {
 		return errorf("type error: parameter `%s` cannot have type", param.Name)
 	}
-	if containsBufferType(paramType) {
+	if c.types.containsBufferType(paramType) {
 		return errorf(
 			"type error: stack buffer parameter `%s` is not supported; pass a view (`[]u8` or `&var []u8`)",
 			param.Name)
 	}
-	if err := checkFunctionParamPolicy(param, paramType); err != nil {
-		return err
+	// A function name and a field token are known only at compile time, so they
+	// belong in the static argument list rather than the runtime parameter list.
+	if compileTimeOnlyType(&c.types, paramType) {
+		return errorf(
+			"type error: %s parameter `%s` belongs in `<...>`, not `(...)`",
+			paramType, param.Name)
 	}
 	if _, ok := optionalElem(paramType); ok && param.Borrow {
 		return errorf(
@@ -994,259 +867,14 @@ func (c *Checker) instantiateTypeArgText(typeArg string) string {
 // happens to sit: the `!` in `Array<!i64>` belongs to the argument, not to this
 // type.
 func (c *Checker) parseType(name string) (Type, error) {
-	// A `std::meta` form written where a type goes names a type rather than
-	// being one, so it resolves before the spelling is read (ADR-0113). A form
-	// whose capture is not bound here keeps its spelling: that is a declaration,
-	// and parseMetaTypeForm is the one place that decides what to do with it.
-	resolved := name
-	rewritten, err := c.resolveMetaTypeText(name)
-	if isMetaFormError(err) {
-		return "", err
-	}
-	if err == nil {
-		resolved = rewritten
-	}
-	parsed, ok := c.types.lookup(Type(resolved))
-	if !ok {
-		return "", errorf("type error: unknown type `%s`", resolved)
-	}
-	return c.parseTypeNode(parsed)
+	return resolvedType(c.resolveType(name))
 }
 
 // parseTypeNode validates a type the parser already read, which is every type a
 // declaration writes. Only a type the compiler itself spells still arrives as
 // text, and parseType is the entry for those.
 func (c *Checker) parseTypeNode(parsed typ.Type) (Type, error) {
-	if parsed == nil {
-		return "", errorf("type error: missing type")
-	}
-	c.types.remember(parsed)
-	name := parsed.String()
-	switch node := parsed.(type) {
-	case *typ.ErrorUnion:
-		return c.parseErrorUnionType(name, node)
-	case *typ.Borrow:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Slice:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Buffer:
-		return c.parseWrappingType(name, node.Elem)
-	case *typ.Optional:
-		return c.parseNullableType(name, node.Elem)
-	case *typ.Name:
-		if len(node.Args) == 0 {
-			return c.parseNamedType(name)
-		}
-		return c.parseGenericType(name, strings.Join(node.Path, "::"), argTexts(node.Args))
-	default:
-		return "", errorf("type error: unknown type `%s`", name)
-	}
-}
-
-// parseWrappingType validates the element of a type that wraps one.
-func (c *Checker) parseWrappingType(name string, elem typ.Type) (Type, error) {
-	if _, ok := elem.(*typ.Optional); ok {
-		return "", errorf("type error: `%s` cannot wrap an optional yet", name)
-	}
-	if _, err := c.parseTypeNode(elem); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseNamedType validates primitive, declared, and type-parameter names.
-func (c *Checker) parseNamedType(name string) (Type, error) {
-	typ := Type(name)
-	if c.typeParams[name] {
-		return typ, nil
-	}
-	if !c.isTypeName(name) {
-		return "", errorf("type error: unknown type `%s`", name)
-	}
-	return typ, nil
-}
-
-// isTypeName reports whether a name is a type in this program: one the compiler
-// provides or one the program declared. Type parameters are not asked about
-// here, since they are scoped to a single declaration rather than to the
-// program. Every caller asks the same question, so a name that is a type for
-// one of them is a type for all of them.
-func (c *Checker) isTypeName(name string) bool {
-	if knownTypes[Type(name)] || c.declaredTypes[name] || isKnownGenericBase(name) {
-		return true
-	}
-	return c.structs[name] != nil || c.enums[name] != nil ||
-		c.unions[name] != nil || c.errorSets[name] != nil
-}
-
-// parseErrorUnionType validates `!T` and the typed `Error!T` spelling.
-func (c *Checker) parseErrorUnionType(name string, node *typ.ErrorUnion) (Type, error) {
-	if node.Err != nil {
-		errName, err := c.parseTypeNode(node.Err)
-		if err != nil {
-			return "", err
-		}
-		if c.errorSets[string(errName)] == nil {
-			return "", errorf(
-				"type error: the error of `E!T` must be an `error` set, got `%s`",
-				errName)
-		}
-	}
-	// An optional success (`E!?T`) is the one composition optionals allow:
-	// the call can fail, and succeeding can still find nothing.
-	if _, ok := node.Ok.(*typ.Optional); ok {
-		if _, err := c.parseTypeNode(node.Ok); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	}
-	return c.parseWrappingType(name, node.Ok)
-}
-
-// parseGenericType validates supported generic-like type spellings.
-func (c *Checker) parseGenericType(name string, base string, args []string) (Type, error) {
-	if err := rejectOptionalArgs(args); err != nil {
-		return "", err
-	}
-	if shape, ok := stdmeta.Lookup(base); ok {
-		return c.parseMetaTypeForm(name, stdmeta.Form(base), shape, args)
-	}
-	switch base {
-	case "std::mem::Box":
-		arg, err := singleGenericArg(base, args)
-		if err != nil {
-			return "", err
-		}
-		if _, err := c.parseType(arg); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	case "std::map::Map":
-		return c.parseMapType(name, args)
-	case "ptr":
-		arg, err := singleGenericArg(base, args)
-		if err != nil {
-			return "", err
-		}
-		return c.parsePointerType(name, arg)
-	}
-
-	if c.structs[base] != nil {
-		return c.parseUserGenericType(name, base, args, c.structs[base].TypeParams)
-	}
-	if union := c.unions[base]; union != nil {
-		return c.parseUserGenericType(name, base, args, union.typeParams)
-	}
-
-	if !isKnownGenericBase(base) {
-		return "", errorf("type error: unknown generic type `%s`", base)
-	}
-	arg, err := singleGenericArg(base, args)
-	if err != nil {
-		return "", err
-	}
-	if _, err := c.parseType(arg); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseMetaTypeForm validates a `std::meta` form written where a type goes but
-// not yet resolvable: a declaration writes `std::meta::field_type<T, f>` before
-// either name is bound, exactly as it writes `T`. The spelling stands for
-// itself here and resolves at each instantiation, where the capture is bound.
-func (c *Checker) parseMetaTypeForm(
-	name string,
-	form stdmeta.Form,
-	shape stdmeta.Shape,
-	args []string,
-) (Type, error) {
-	if !shape.Type {
-		return "", errorf("comptime error: `%s` does not name a type", form)
-	}
-	if len(args) != shape.StaticArgs {
-		return "", errorf("comptime error: `%s` expects %d static arguments, got %d",
-			form, shape.StaticArgs, len(args))
-	}
-	resolved, err := c.resolveMetaTypeText(name)
-	if isMetaFormError(err) {
-		return "", err
-	}
-	if err != nil || resolved == name {
-		// An unbound capture is what a declaration looks like.
-		return Type(name), nil
-	}
-	return c.parseType(resolved)
-}
-
-// parseUserGenericType validates static type arguments for user declarations.
-func (c *Checker) parseUserGenericType(
-	name string,
-	base string,
-	args []string,
-	types []string,
-) (Type, error) {
-	want := len(types)
-	if len(args) != want {
-		return "", errorf("type error: `%s` expects %d static arguments", base, want)
-	}
-	for _, arg := range args {
-		if _, err := c.parseType(arg); err != nil {
-			return "", err
-		}
-	}
-	return Type(name), nil
-}
-
-// parseMapType validates the symbol-table map spelling.
-func (c *Checker) parseMapType(name string, args []string) (Type, error) {
-	if len(args) != 2 {
-		return "", errorf("type error: std::map::Map expects 2 static arguments")
-	}
-	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
-		return "", errorf("type error: std::map::Map key type must be []u8")
-	}
-	if _, err := c.parseType(args[1]); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parseNullableType validates nullable pointer types.
-func (c *Checker) parseNullableType(name string, elem typ.Type) (Type, error) {
-	if inner, ok := elem.(*typ.Name); ok &&
-		len(inner.Path) == 1 && inner.Path[0] == "ptr" && len(inner.Args) == 1 {
-		if _, err := c.parsePointerType(elem.String(), inner.Args[0].String()); err != nil {
-			return "", err
-		}
-		return Type(name), nil
-	}
-	// The element follows the same rule as an error union's success type:
-	// anything parseable. The one wrapping optionals allow is being wrapped
-	// by an error union (`E!?T`), so an optional or error-union element is
-	// rejected here rather than by an allow-list.
-	switch elem.(type) {
-	case *typ.Optional:
-		return "", errorf("type error: optional cannot wrap an optional `%s`", elem)
-	case *typ.ErrorUnion:
-		return "", errorf(
-			"type error: optional cannot wrap an error union `%s`; spell it `E!?T`", elem)
-	}
-	if _, err := c.parseTypeNode(elem); err != nil {
-		return "", err
-	}
-	return Type(name), nil
-}
-
-// parsePointerType validates raw pointer element types.
-func (c *Checker) parsePointerType(name string, arg string) (Type, error) {
-	if strings.HasPrefix(arg, "const ") {
-		arg = strings.TrimPrefix(arg, "const ")
-	}
-	if _, err := c.parseType(arg); err != nil {
-		return "", err
-	}
-	return Type(name), nil
+	return resolvedType(c.resolveTypeNode(parsed))
 }
 
 // rejectPrivateType reports an error when typeName exposes a private declaration.
@@ -1281,46 +909,6 @@ func (t *typeTable) referencedTypeNames(typeName Type) []string {
 	return names
 }
 
-// isUserDeclaredType reports whether name is declared by the current program.
-func (c *Checker) isUserDeclaredType(name string) bool {
-	if c.structs[name] != nil {
-		return true
-	}
-	if c.enums[name] != nil {
-		return true
-	}
-	if c.errorSets[name] != nil {
-		return true
-	}
-	if c.unions[name] != nil {
-		return true
-	}
-	if c.contracts[name] != nil {
-		return true
-	}
-	return false
-}
-
-// isPublicType reports whether name is externally visible.
-func (c *Checker) isPublicType(name string) bool {
-	if decl := c.structs[name]; decl != nil {
-		return decl.Public
-	}
-	if enum := c.enums[name]; enum != nil {
-		return enum.public
-	}
-	if set := c.errorSets[name]; set != nil {
-		return set.public
-	}
-	if union := c.unions[name]; union != nil {
-		return union.public
-	}
-	if contract := c.contracts[name]; contract != nil {
-		return contract.public
-	}
-	return false
-}
-
 // checkMainReturnType keeps the entry point returning `void` or an error union
 // over void (ADR-0085). A program does not choose its own exit status: an exit
 // status is platform-shaped, and a value returned from `main` cannot express it
@@ -1336,17 +924,56 @@ func checkMainReturnType(fn *functionType) error {
 	return errorf("type error: `main` returns `%s`, expected `void` or `!void`", returned)
 }
 
+// defineScopeParam binds a parameter and derives its root provenance from the
+// type policy owned by the checker type table.
+func defineScopeParam(
+	types *typeTable,
+	s *scope,
+	name string,
+	typ Type,
+	borrowed bool,
+	mutBorrow bool,
+) bool {
+	var sources []string
+	if borrowed || types.isBorrowedViewReturnType(typ) {
+		sources = []string{name}
+	}
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources, false)
+}
+
+// defineSignatureParam binds one function parameter. Only these bindings are
+// the caller's storage, which lets assignment through a `&var` one store there.
+func defineSignatureParam(
+	types *typeTable,
+	s *scope,
+	name string,
+	typ Type,
+	borrowed bool,
+	mutBorrow bool,
+) bool {
+	var sources []string
+	if borrowed || types.isBorrowedViewReturnType(typ) {
+		sources = []string{name}
+	}
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources, true)
+}
+
 // defineStaticValueParams puts the compile-time values a `<...>` list declares
 // into scope, and returns them by declared type. A body reads them like any
 // other name, and a static argument list needs to tell them apart from a
 // runtime local, so both callers set up a generic body through here.
-func defineStaticValueParams(env *scope, sig ast.FunctionSignature) (map[string]Type, error) {
+func defineStaticValueParams(
+	types *typeTable,
+	env *scope,
+	sig ast.FunctionSignature,
+) (map[string]Type, error) {
 	staticParams := map[string]Type{}
 	for _, param := range sig.StaticParams {
 		if param.IsType() {
 			continue
 		}
-		if err := env.defineParam(param.Name, Type(typ.Text(param.Type)), false, false); err != nil {
+		defined := defineScopeParam(types, env, param.Name, Type(typ.Text(param.Type)), false, false)
+		if err := requireScopeDefinition(param.Name, defined); err != nil {
 			return nil, err
 		}
 		staticParams[param.Name] = Type(typ.Text(param.Type))
@@ -1362,13 +989,15 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if err := checkMainReturnType(fn); err != nil {
 		return err
 	}
-	env := newScope(nil, &c.types)
-	staticParams, err := defineStaticValueParams(env, fn.sig)
+	env := newScope(nil)
+	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
-		err := env.defineSignatureParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+		defined := defineSignatureParam(
+			&c.types, env, param.Name, fn.params[idx], param.Borrow, param.MutBorrow)
+		err := requireScopeDefinition(param.Name, defined)
 		if err != nil {
 			return err
 		}
@@ -1376,20 +1005,19 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
-	previousTypeParams := c.typeParams
+	previousTypeParams := c.typeParams.enterSignature(fn.sig)
 	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
-	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.staticParams = staticParams
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
-		c.typeParams = previousTypeParams
+		c.typeParams.restore(previousTypeParams)
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
 	}()
@@ -1433,10 +1061,37 @@ func (c *Checker) checkBlock(
 		if returns {
 			// A block that returns still has to account for what it bound: an
 			// early return does not make the bindings before it needed.
-			return true, env.checkAllRead()
+			return true, unreadLocalError(env)
 		}
 	}
-	return false, env.checkAllRead()
+	return false, unreadLocalError(env)
+}
+
+// requireScopeDefinition turns the scope's copy-only duplicate decision into
+// the source-facing checker diagnostic.
+func requireScopeDefinition(name string, defined bool) error {
+	if defined {
+		return nil
+	}
+	return errorf("type error: duplicate variable `%s`", name)
+}
+
+// unreadLocalError turns the stable first unread binding into its diagnostic.
+func unreadLocalError(env *scope) error {
+	names := make([]string, 0, len(env.bindings))
+	for name, binding := range env.bindings {
+		if binding.unread {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	name := names[0]
+	return errorAtCode(env.bindings[name].declaration, "type.unused_local",
+		"type error: local `%s` is never read"+
+			"\nhelp: remove it, or write `let _ = ...` to drop the value on purpose", name)
 }
 
 // checkStmt validates a statement and reports explicit return flow.
@@ -1583,20 +1238,22 @@ func (c *Checker) checkLetBinding(stmt *ast.LetStmt, env *scope, unsafe unsafeMa
 	if err != nil {
 		return false, err
 	}
-	if containsTypeValue(typ) {
+	if c.types.containsTypeValue(typ) {
 		return false, errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
-		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources)
+		return false, requireScopeDefinition(
+			stmt.Name, env.defineParamWithSource(stmt.Name, inner, true, mutable, sources, false))
 	}
 	if c.types.isBorrowedViewReturnType(typ) {
 		sources := c.exprBorrowSourceList(stmt.Value, env, unsafe)
 		if len(sources) > 0 {
-			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources)
+			return false, requireScopeDefinition(
+				stmt.Name, env.defineWithSource(stmt.Name, typ, stmt.Mutable, sources))
 		}
 	}
-	return false, env.define(stmt.Name, typ, stmt.Mutable)
+	return false, requireScopeDefinition(stmt.Name, env.define(stmt.Name, typ, stmt.Mutable))
 }
 
 // defineSpecialLetInitializer records local borrow/view initializers with source data.
@@ -1611,21 +1268,24 @@ func (c *Checker) defineSpecialLetInitializer(
 			return true, err
 		}
 		sources := c.exprBorrowSourceList(borrow.Right, env, unsafe)
-		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources)
+		return true, requireScopeDefinition(
+			stmt.Name, env.defineParamWithSource(stmt.Name, typ, true, mutable, sources, false))
 	}
 	typ, mutable, ok, err := c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParam(stmt.Name, typ, true, mutable)
+		return true, requireScopeDefinition(
+			stmt.Name, defineScopeParam(&c.types, env, stmt.Name, typ, true, mutable))
 	}
 	sources, mutable, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources)
+		return true, requireScopeDefinition(stmt.Name,
+			env.defineParamWithSource(stmt.Name, typeByteString, true, mutable, sources, false))
 	}
 	return false, nil
 }
@@ -1694,12 +1354,12 @@ func (c *Checker) checkStringViewInitializer(
 	if err != nil {
 		return nil, mutable, true, err
 	}
-	if receiver != "std::string::String" && !isBufferType(receiver) {
+	if receiver != "std::string::String" && !c.types.isBufferType(receiver) {
 		return nil, mutable, true, errorf(
 			"type error: `%s` expects String or stack buffer receiver", field.Name)
 	}
 	kind := "String"
-	if isBufferType(receiver) {
+	if c.types.isBufferType(receiver) {
 		kind = "buffer"
 	}
 	if len(call.Args) != 0 {
@@ -2078,12 +1738,12 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 			continue
 		}
 		seen[source] = true
-		next, ok := env.lookupBorrowSource(source)
-		if !ok {
+		binding, ok := env.binding(source)
+		if !ok || len(binding.borrowSources) == 0 {
 			roots[source] = true
 			continue
 		}
-		for _, n := range next {
+		for _, n := range binding.borrowSources {
 			if n == source {
 				// A name whose recorded provenance includes itself is a root.
 				roots[source] = true
@@ -2330,6 +1990,11 @@ func (c *Checker) structLiteralFieldValue(
 	if want == "" {
 		return "", errorf("type error: unknown field `%s.%s`", typeName, field.Name)
 	}
+	var err error
+	want, err = c.resolveInstanceType(want)
+	if err != nil {
+		return "", err
+	}
 	if _, isOptional := optionalElem(want); !isOptional {
 		return "", errorf("type error: field `%s.%s` expects %s, got null",
 			typeName, field.Name, want)
@@ -2401,7 +2066,7 @@ func (c *Checker) bindConditionCapture(
 			"type error: %s capture `|%s|` requires an optional condition, got %s",
 			kind, capture, cond)
 	}
-	return scope.define(capture, elem, false)
+	return requireScopeDefinition(capture, scope.define(capture, elem, false))
 }
 
 // bindContainerBorrowCapture handles an array/map at/at_mut capture condition:
@@ -2425,7 +2090,8 @@ func (c *Checker) bindContainerBorrowCapture(
 	if len(sources) == 0 {
 		sources = []string{capture}
 	}
-	return true, branch.defineParamWithSource(capture, elem, true, mutable, sources)
+	return true, requireScopeDefinition(
+		capture, branch.defineParamWithSource(capture, elem, true, mutable, sources, false))
 }
 
 // checkWhileStmt validates loop condition and body types.
@@ -2474,7 +2140,7 @@ func (c *Checker) checkForStmt(
 	}
 	defer leave()
 	child := env.child()
-	if err := child.define(stmt.Name, typeI64, false); err != nil {
+	if err := requireScopeDefinition(stmt.Name, child.define(stmt.Name, typeI64, false)); err != nil {
 		return false, err
 	}
 	_, err = c.checkBlock(stmt.Body, child, wantReturn, unsafe)
@@ -2605,7 +2271,8 @@ func (c *Checker) checkMatchArms(
 		}
 		armEnv := env.child()
 		if payload != "" && arm.Binding != "" {
-			if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+			if err := requireScopeDefinition(
+				arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
 				return false, err
 			}
 		}
@@ -2692,7 +2359,7 @@ func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm
 		return "", errorf("type error: union variant `%s::%s` has no payload",
 			unionType.name, arm.Tag)
 	}
-	return payload, nil
+	return string(payload), nil
 }
 
 // matchTypeName returns the matched enum or union type name.
@@ -3013,7 +2680,8 @@ func (c *Checker) checkMatchExprArm(
 	}
 	armEnv := env.child()
 	if payload != "" && arm.Binding != "" {
-		if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+		if err := requireScopeDefinition(
+			arm.Binding, armEnv.define(arm.Binding, Type(payload), false)); err != nil {
 			return "", err
 		}
 	}
@@ -3268,7 +2936,7 @@ func (c *Checker) checkBorrowPrefix(
 	if err != nil {
 		return "", false, err
 	}
-	if isBufferType(typ) {
+	if c.types.isBufferType(typ) {
 		return "", false, errorf(
 			"type error: cannot borrow a stack buffer; use `as_bytes()` / `as_mut_bytes()`")
 	}
@@ -3856,7 +3524,7 @@ func (c *Checker) checkArrayConstructor(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, bool, error) {
-	if !c.typeParams[string(elem)] {
+	if !c.typeParams.contains(string(elem)) {
 		if err := c.rejectArrayElementType(elem); err != nil {
 			return "", true, err
 		}
@@ -3892,7 +3560,7 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return errorf("type error: Array element cannot be raw pointer")
 	}
-	if containsBufferType(typ) {
+	if c.types.containsBufferType(typ) {
 		return errorf("type error: Array element cannot be stack buffer")
 	}
 	if base, arg, ok := splitGenericType(string(typ)); ok && base == "option" {
@@ -3939,11 +3607,7 @@ func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
 		if payload == "" {
 			continue
 		}
-		payloadType, err := c.parseType(payload)
-		if err != nil {
-			return err
-		}
-		if err := c.rejectArrayStorageType(payloadType, seen); err != nil {
+		if err := c.rejectArrayStorageType(payload, seen); err != nil {
 			return errorf("type error: union `%s::%s` cannot be Array element: %w",
 				typ, variant, err)
 		}
@@ -3995,7 +3659,9 @@ func rejectOptionalStaticArgs(typeArg string) error {
 func rejectOptionalArgs(args []string) error {
 	for _, arg := range args {
 		if _, ok := optionalElem(Type(arg)); ok {
-			return errorf("type error: optional `%s` cannot be a static argument yet", arg)
+			return typeResolutionError(typeResolutionIssue{
+				kind: typeResolutionOptionalStaticArg, subject: Type(arg),
+			})
 		}
 	}
 	return nil
@@ -4761,7 +4427,7 @@ func (c *Checker) fieldStaticArg(
 			"type error: `%s` static argument `%s` has no type parameter before it",
 			name, param.Name)
 	}
-	if c.typeParams[owner] {
+	if c.typeParams.contains(owner) {
 		// The owner is the enclosing generic's own parameter, so which fields
 		// exist is not known here. The instantiation of that generic checks
 		// this call again with the type bound.
@@ -4823,14 +4489,16 @@ func (c *Checker) checkGenericInstantiation(
 	}
 	defer func() { c.instantiationDepth-- }()
 	defer c.bindMetaFields(fieldArgs)()
-	env := newScope(nil, &c.types)
-	staticParams, err := defineStaticValueParams(env, fn.sig)
+	env := newScope(nil)
+	staticParams, err := defineStaticValueParams(&c.types, env, fn.sig)
 	if err != nil {
 		return err
 	}
 	for idx, param := range fn.sig.Params {
 		typ := c.types.substituteTypeParams(fn.params[idx], subst)
-		if err := env.defineSignatureParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
+		defined := defineSignatureParam(
+			&c.types, env, param.Name, typ, param.Borrow, param.MutBorrow)
+		if err := requireScopeDefinition(param.Name, defined); err != nil {
 			return err
 		}
 	}
@@ -4884,14 +4552,13 @@ func (c *Checker) enterInstanceContext(
 	previousReturn := c.currentReturn
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
-	previousTypeParams := c.typeParams
+	previousTypeParams := c.typeParams.enterSignature(fn.sig)
 	previousTypeArgValues := c.typeArgValues
 	previousStaticParams := c.staticParams
 	previousLoops := c.loopLabels
 	c.currentReturn = returnType
 	c.currentFunction = fn
 	c.currentStd = fn.sig.Std
-	c.typeParams = typeParamSet(fn.sig.TypeParamNames())
 	c.typeArgValues = subst
 	c.staticParams = staticParams
 	c.loopLabels = nil
@@ -4899,7 +4566,7 @@ func (c *Checker) enterInstanceContext(
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
-		c.typeParams = previousTypeParams
+		c.typeParams.restore(previousTypeParams)
 		c.typeArgValues = previousTypeArgValues
 		c.staticParams = previousStaticParams
 		c.loopLabels = previousLoops
@@ -5188,12 +4855,12 @@ func (c *Checker) checkUnionConstructorCall(
 	if err != nil {
 		return "", true, err
 	}
-	got, err = c.coerceContextualIntegerLiteral(args[0], Type(payload), got)
+	got, err = c.coerceContextualIntegerLiteral(args[0], payload, got)
 	if err != nil {
 		return "", true, err
 	}
-	if !sameType(got, Type(payload)) &&
-		!c.returnValueMatchesBorrowParam(args[0], env, Type(payload), got) {
+	if !sameType(got, payload) &&
+		!c.returnValueMatchesBorrowParam(args[0], env, payload, got) {
 		return "", true, errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
@@ -5240,8 +4907,11 @@ func (c *Checker) checkStructLiteralExpr(
 		if err := c.checkPrivateFieldAccess(expr.TypeName, field); err != nil {
 			return "", err
 		}
-		want := fieldDeclaredType(field)
-		got, err := c.coerceContextualIntegerLiteral(exprs[field.Name], want, got)
+		want, err := c.resolveInstanceType(fieldDeclaredType(field))
+		if err != nil {
+			return "", err
+		}
+		got, err = c.coerceContextualIntegerLiteral(exprs[field.Name], want, got)
 		if err != nil {
 			return "", err
 		}
@@ -5313,7 +4983,8 @@ func (c *Checker) resolveFieldExpr(
 			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
 				return "", nil, err
 			}
-			return Type(typ.Text(field.TypeName)), decl, nil
+			fieldType, err := c.resolveInstanceType(Type(typ.Text(field.TypeName)))
+			return fieldType, decl, err
 		}
 	}
 	return "", nil, errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
@@ -6068,29 +5739,33 @@ func (c *Checker) checkStdMethod(
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
-	method, ok := c.stdMethods[receiver][name]
-	if !ok {
+	method := c.implMethod(receiver, name)
+	if method == nil || len(method.params) == 0 {
 		return "", errorf("type error: %s has no method `%s`", label, name)
 	}
 	if err := c.checkStdMethodBody(method, typeArgs); err != nil {
 		return "", err
 	}
-	if len(args) != len(method.Params) {
+	if len(args) != len(method.params)-1 {
 		return "", errorf("type error: `%s.%s` expects %d args, got %d",
-			label, name, len(method.Params), len(args))
+			label, name, len(method.params)-1, len(args))
 	}
-	subst := make([]string, 0, len(typeArgs))
-	for _, arg := range typeArgs {
-		subst = append(subst, string(arg))
+	typeParams := method.sig.TypeParamNames()
+	subst := make(map[string]Type, len(typeArgs))
+	if len(typeParams) == len(typeArgs) {
+		for idx, param := range typeParams {
+			subst[param] = typeArgs[idx]
+		}
 	}
 	for idx, arg := range args {
-		want := Type(method.Substitute(method.Params[idx].TypeName, subst))
+		paramIndex := idx + 1
+		want := c.types.substituteTypeParams(method.params[paramIndex], subst)
 		got, err := c.checkContextualExpr(arg, want, env, unsafe)
 		if err != nil {
 			return "", err
 		}
 		got, err = coerceReturnedBorrowArgument(
-			got, want, method.Params[idx].Borrow, method.Params[idx].MutBorrow,
+			got, want, method.borrowParams[paramIndex], method.mutBorrowParams[paramIndex],
 		)
 		if err != nil {
 			return "", err
@@ -6099,7 +5774,7 @@ func (c *Checker) checkStdMethod(
 			return "", errorf("type error: `%s.%s` expects %s, got %s", label, name, want, got)
 		}
 	}
-	result := Type(method.Substitute(method.Return, subst))
+	result := c.types.substituteTypeParams(method.returnType, subst)
 	if err := c.revalidateSubstituted(result); err != nil {
 		return "", err
 	}
@@ -6127,12 +5802,12 @@ func (c *Checker) revalidateSubstituted(t Type) error {
 // declares and lowered from the method name. That left the body unchecked, so
 // `return std::internal::builtin::array_apend<T>(self, value)` -- or anything else -- sat
 // in std reading like the implementation while meaning nothing.
-func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) error {
-	fn := c.functions[method.Sig.Name]
-	if fn == nil || fn.body == nil || len(method.TypeParams) != len(typeArgs) {
+func (c *Checker) checkStdMethodBody(fn *functionType, typeArgs []Type) error {
+	typeParams := fn.sig.TypeParamNames()
+	if fn.body == nil || len(typeParams) != len(typeArgs) {
 		return nil
 	}
-	key := method.Sig.Name + "<" + joinTypes(typeArgs) + ">"
+	key := fn.sig.Name + "<" + joinTypes(typeArgs) + ">"
 	if c.checkedStdBodies[key] {
 		return nil
 	}
@@ -6140,7 +5815,7 @@ func (c *Checker) checkStdMethodBody(method stdmethod.Method, typeArgs []Type) e
 	// another wrapper stops here instead of recurring.
 	c.checkedStdBodies[key] = true
 	subst := make(map[string]Type, len(typeArgs))
-	for idx, param := range method.TypeParams {
+	for idx, param := range typeParams {
 		subst[param] = typeArgs[idx]
 	}
 	return c.checkGenericInstantiation(fn, subst, nil)
@@ -6371,7 +6046,7 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	if !ok || len(args) != 2 {
 		return nil, errorf("type error: std::map::Map expects 2 static arguments")
 	}
-	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
+	if _, err := c.parseType(fmt.Sprintf("std::map::Map<%s>", arg)); err != nil {
 		return nil, err
 	}
 	return args, nil
@@ -6919,14 +6594,15 @@ func (c *Checker) isPlainDataAggregate(name string, seen map[string]bool) bool {
 	defer delete(seen, name)
 	if isStruct {
 		for _, field := range st.Fields {
-			if field.Borrow || !c.isPlainDataType(typ.Text(field.TypeName), seen) {
+			fieldType := stdmeta.ResolveElementTypeForms(typ.Text(field.TypeName))
+			if field.Borrow || !c.isPlainDataType(fieldType, seen) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, payload := range union.variants {
-		if payload != "" && !c.isPlainDataType(payload, seen) {
+		if payload != "" && !c.isPlainDataType(string(payload), seen) {
 			return false
 		}
 	}
@@ -6982,175 +6658,4 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeMa
 		return "", errorf("type error: `print` cannot print void")
 	}
 	return typeVoid, nil
-}
-
-// newScope creates a lexical type scope.
-func newScope(parent *scope, types *typeTable) *scope {
-	return &scope{
-		types: types, parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
-		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
-		param:        map[string]bool{},
-		borrowSource: map[string][]string{}, unread: map[string]ast.Span{},
-	}
-}
-
-// child creates a nested lexical type scope.
-func (s *scope) child() *scope {
-	return newScope(s, s.types)
-}
-
-// declareLocal records a binding this scope will be asked about. `_` is the
-// name for a value that is deliberately dropped, so it is never asked about.
-func (s *scope) declareLocal(name string, span ast.Span) {
-	if name == discardName {
-		return
-	}
-	s.unread[name] = span
-}
-
-// discardName is written where a value is produced on purpose and not kept.
-const discardName = "_"
-
-// checkAllRead reports a local this scope declared and nothing read.
-func (s *scope) checkAllRead() error {
-	names := make([]string, 0, len(s.unread))
-	for name := range s.unread {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		return errorAtCode(s.unread[name], "type.unused_local",
-			"type error: local `%s` is never read"+
-				"\nhelp: remove it, or write `let _ = ...` to drop the value on purpose", name)
-	}
-	return nil
-}
-
-// define binds a local name to a type in the current scope.
-func (s *scope) define(name string, typ Type, mutable bool) error {
-	if name == discardName {
-		// `_` is where a value is dropped, not a name anything can read. Binding
-		// it twice in one scope is two drops, not a redeclaration.
-		return nil
-	}
-	if _, exists := s.values[name]; exists {
-		return errorf("type error: duplicate variable `%s`", name)
-	}
-	s.values[name] = typ
-	s.mutable[name] = mutable
-	return nil
-}
-
-// defineWithSource binds a non-borrow local while preserving view provenance.
-func (s *scope) defineWithSource(name string, typ Type, mutable bool, sources []string) error {
-	if err := s.define(name, typ, mutable); err != nil {
-		return err
-	}
-	if len(sources) > 0 {
-		s.borrowSource[name] = sources
-	}
-	return nil
-}
-
-// defineParam binds a function parameter and records borrow capabilities.
-func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
-	var sources []string
-	if borrowed || s.types.isBorrowedViewReturnType(typ) {
-		sources = []string{name}
-	}
-	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, sources)
-}
-
-// defineSignatureParam binds one function parameter. Only these bindings are
-// the caller's storage, which is what lets assignment through a `&var` one
-// reach the caller.
-func (s *scope) defineSignatureParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
-	if err := s.defineParam(name, typ, borrowed, mutBorrow); err != nil {
-		return err
-	}
-	s.param[name] = true
-	return nil
-}
-
-// defineParamWithSource binds a borrowed local and records its source owners.
-func (s *scope) defineParamWithSource(
-	name string,
-	typ Type,
-	borrowed bool,
-	mutBorrow bool,
-	sources []string,
-) error {
-	if err := s.define(name, typ, false); err != nil {
-		return err
-	}
-	s.borrowed[name] = borrowed
-	s.mutBorrow[name] = mutBorrow
-	if len(sources) > 0 {
-		s.borrowSource[name] = sources
-	}
-	return nil
-}
-
-// lookup resolves a local name by walking parent scopes.
-func (s *scope) lookup(name string) (Type, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		if typ, ok := cur.values[name]; ok {
-			delete(cur.unread, name)
-			return typ, true
-		}
-	}
-	return "", false
-}
-
-// isMutable reports whether a resolved local name may be assigned.
-func (s *scope) isMutable(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutable[name]
-		}
-	}
-	return false
-}
-
-// isMutBorrowedParam reports whether a resolved local name is a `&var`
-// parameter: the one mut-borrow binding that is the caller's storage, so
-// assigning it stores there. A local mut borrow binding or capture is not.
-func (s *scope) isMutBorrowedParam(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutBorrow[name] && cur.param[name]
-		}
-	}
-	return false
-}
-
-// isBorrowed reports whether a local name is an &T or &var T parameter.
-func (s *scope) isBorrowed(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.borrowed[name]
-		}
-	}
-	return false
-}
-
-// isMutBorrowed reports whether a local name is an &var T parameter.
-func (s *scope) isMutBorrowed(name string) bool {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			return cur.mutBorrow[name]
-		}
-	}
-	return false
-}
-
-// lookupBorrowSource resolves the provenance sources for a borrowed local.
-func (s *scope) lookupBorrowSource(name string) ([]string, bool) {
-	for cur := s; cur != nil; cur = cur.parent {
-		if _, ok := cur.values[name]; ok {
-			sources := cur.borrowSource[name]
-			return sources, len(sources) > 0
-		}
-	}
-	return nil, false
 }

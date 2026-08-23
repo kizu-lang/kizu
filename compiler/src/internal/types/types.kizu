@@ -72,6 +72,53 @@ enum WrappedKind {
     RawPointer,
     TypeValue,
     CompileTimeOnly,
+    Buffer,
+    BorrowOptional,
+}
+
+// Records whether a structural walk found the requested closed name kind.
+struct WrappedTypeVisitor {
+    kind: WrappedKind,
+    found: bool,
+    optional_child: bool
+}
+
+fn (self: &var WrappedTypeVisitor) visit(value: &typ::Node) -> void {
+    if self.found {
+        return;
+    }
+    let directly_optional = self.optional_child;
+    self.optional_child = false;
+    match value {
+        Name(node) => {
+            if node.path.len() != 1 {
+                return;
+            }
+            if node.path.at(0) |part| {
+                let name = part.as_bytes();
+                self.found = match self.kind {
+                    RawPointer => node.args.len() > 0 and equal(name, "ptr"),
+                    TypeValue => equal(name, "type"),
+                    CompileTimeOnly => equal(name, "Field") or
+                        equal(name, "Function"),
+                    Buffer => false,
+                    BorrowOptional => false,
+                };
+            }
+        },
+        Buffer(_) => {
+            self.found = self.kind == WrappedKind::Buffer;
+        },
+        Borrow(_) => {
+            self.found = directly_optional and
+                self.kind == WrappedKind::BorrowOptional;
+        },
+        Optional(_) => {
+            self.optional_child = true;
+        },
+        _ => {},
+    }
+    return;
 }
 
 /// Identifies one EnumType owned by checker metadata storage.
@@ -84,18 +131,17 @@ pub struct FunctionHandle {
     pub index: i64
 }
 
-/// Caches one enum declaration independently of its source Ast.
+/// Caches one enum declaration with copy handles into its source Ast.
 pub struct EnumType {
-    pub name: string::String,
+    pub name: ast::Text,
     pub tags: map::Map<[]u8, bool>,
-    pub order: array::Array<string::String>,
+    pub order: array::Array<ast::Text>,
     pub public: bool
 }
 
 /// Caches one declared error set and its enum-shaped match view.
 pub struct ErrorSetType {
-    pub name: string::String,
-    pub members: map::Map<[]u8, bool>,
+    pub name: ast::Text,
     pub public: bool,
     pub tagged: EnumHandle
 }
@@ -131,25 +177,6 @@ pub struct FunctionSignatureType {
     pub return_type: Type,
     pub requires_unsafe: bool,
     pub std: bool
-}
-
-/// Copies the names of entries that declare types, in declaration order.
-pub fn (self: &FunctionSignatureType) type_param_names(
-    allocator: Allocator
-) -> !array::Array<string::String> {
-    var names = array::new<string::String>(allocator);
-    errdefer names.deinit();
-    var index = 0;
-    while self.static_params.at(index) |param| {
-        if param.is_type {
-            let bytes = param.name.as_bytes();
-            let copied = try string::from_bytes(allocator, bytes);
-            errdefer copied.deinit();
-            try names.append(move copied);
-        }
-        index = index + 1;
-    }
-    return move names;
 }
 
 /// Is one callable signature plus the retained Ast body it checks.
@@ -249,10 +276,7 @@ pub fn (self: &var TypeTable) intern(text: []u8) -> !Type {
 }
 
 /// Copies a source type graph into this checker phase's canonical table.
-pub fn (self: &var TypeTable) remember(
-    source: &typ::Table,
-    parsed: typ::Type
-) -> !Type {
+pub fn (self: &var TypeTable) remember(source: &typ::Table, parsed: typ::Type) -> !Type {
     let spelling = try typ::render(self.allocator, source, parsed);
     defer spelling.deinit();
     let bytes = spelling.as_bytes();
@@ -260,10 +284,7 @@ pub fn (self: &var TypeTable) remember(
 }
 
 /// Copies the canonical spelling, including empty text for no type.
-pub fn (self: &TypeTable) copy_text(
-    allocator: Allocator,
-    value: Type
-) -> !string::String {
+pub fn (self: &TypeTable) copy_text(allocator: Allocator, value: Type) -> !string::String {
     if value.node |handle| {
         let entry = self.entries.at(handle);
         let bytes = entry.spelling.as_bytes();
@@ -328,54 +349,27 @@ pub fn (self: &TypeTable) is_text(value: Type, expected: []u8) -> bool {
 
 /// Reports whether value is a fixed-length stack buffer.
 pub fn (self: &TypeTable) is_buffer_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return mem::len(bytes) > 1 and bytes[0] == cast<u8>(91) and
-            bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
+    if self.lookup(value) |parsed| {
+        return match typ::root_node(&self.parsed, parsed) {
+            Buffer(_) => true,
+            _ => false,
+        };
     }
     return false;
 }
 
-/// Reports whether a spelling mentions a stack buffer.
+/// Reports whether a retained type graph contains a stack buffer.
 pub fn (self: &TypeTable) contains_buffer_type(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        var index = 0;
-        while index + 1 < mem::len(bytes) {
-            if bytes[index] == cast<u8>(91) and
-                bytes[index + 1] >= cast<u8>(48) and
-                bytes[index + 1] <= cast<u8>(57) {
-                return true;
-            }
-            index = index + 1;
-        }
-    }
-    return false;
+    return self.contains_wrapped_type(value, WrappedKind::Buffer);
 }
 
-/// Reports whether a spelling mentions the positional-only `?&T` form.
+/// Reports whether a retained graph contains the positional-only `?&T` form.
 pub fn (self: &TypeTable) contains_borrow_optional(value: Type) -> bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        var index = 0;
-        while index + 1 < mem::len(bytes) {
-            if bytes[index] == cast<u8>(63) and
-                bytes[index + 1] == cast<u8>(38) {
-                return true;
-            }
-            index = index + 1;
-        }
-    }
-    return false;
+    return self.contains_wrapped_type(value, WrappedKind::BorrowOptional);
 }
 
 /// Returns the success payload of an error union, or value unchanged.
-pub fn (self: &var TypeTable) unwrap_return_success_type(
-    value: Type
-) -> !Type {
+pub fn (self: &var TypeTable) unwrap_return_success_type(value: Type) -> !Type {
     if try self.error_union_parts(value) |parts| {
         return parts.success;
     }
@@ -383,9 +377,7 @@ pub fn (self: &var TypeTable) unwrap_return_success_type(
 }
 
 /// Reports whether a return type exposes a borrowed view.
-pub fn (self: &var TypeTable) is_borrowed_view_return_type(
-    value: Type
-) -> !bool {
+pub fn (self: &var TypeTable) is_borrowed_view_return_type(value: Type) -> !bool {
     let success = try self.unwrap_return_success_type(value);
     if self.lookup(success) |parsed| {
         return match typ::root_node(&self.parsed, parsed) {
@@ -407,30 +399,10 @@ pub fn (self: &var TypeTable) borrow_wrapped_type(
         return value;
     }
     if self.lookup(value) |parsed| {
-        let wrapped = try typ::wrap_borrow(
-            &var self.parsed,
-            parsed,
-            mutable
-        );
+        let wrapped = try typ::wrap_borrow(&var self.parsed, parsed, mutable);
         return self.retain_parsed(wrapped);
     }
     return value;
-}
-
-/// Returns a lookup containing each declared type parameter name.
-pub fn type_param_set(
-    allocator: Allocator,
-    params: &array::Array<string::String>
-) -> !map::Map<[]u8, bool> {
-    var out = map::new<[]u8, bool>(allocator);
-    errdefer out.deinit();
-    var index = 0;
-    while params.at(index) |param| {
-        let bytes = param.as_bytes();
-        try out.insert(bytes, true);
-        index = index + 1;
-    }
-    return move out;
 }
 
 /// Instantiates one type from a name-to-Type substitution map.
@@ -459,11 +431,7 @@ pub fn (self: &var TypeTable) substitute_type_params(
             }
             index = index + 1;
         }
-        let replaced = try typ::substitute(
-            &var self.parsed,
-            parsed,
-            &parsed_substitutions
-        );
+        let replaced = try typ::substitute(&var self.parsed, parsed, &parsed_substitutions);
         return self.retain_parsed(replaced);
     }
     return declared;
@@ -487,8 +455,8 @@ pub fn arg_texts(
     return move out;
 }
 
-/// Lists contract method names in stable lexical order.
-pub fn sorted_method_names(
+// Lists contract method names in stable lexical order.
+fn sorted_method_names(
     allocator: Allocator,
     methods: &map::Map<[]u8, FunctionHandle>
 ) -> !array::Array<string::String> {
@@ -505,8 +473,8 @@ pub fn sorted_method_names(
     return move names;
 }
 
-/// Checks an implementation method against its receiver-less contract method.
-pub fn method_matches(want: &FunctionType, got: &FunctionType) -> bool {
+// Checks an implementation method against its receiver-less contract method.
+fn method_matches(want: &FunctionType, got: &FunctionType) -> bool {
     if got.params.len() == 0 or
         want.params.len() != got.params.len() - 1 or
         !same_type(want.return_type, got.return_type) {
@@ -545,10 +513,7 @@ pub fn (self: &var TypeTable) optional_elem(value: Type) -> !?Type {
 }
 
 /// Reports the inferred-error-set absorption accepted by `try`.
-pub fn (self: &var TypeTable) absorbs_error_union(
-    want: Type,
-    got: Type
-) -> !bool {
+pub fn (self: &var TypeTable) absorbs_error_union(want: Type, got: Type) -> !bool {
     if try self.error_union_parts(want) |want_parts| {
         if !same_type(want_parts.err, empty_type()) {
             return false;
@@ -562,9 +527,7 @@ pub fn (self: &var TypeTable) absorbs_error_union(
 }
 
 /// Extracts the payload and mutability of `&T` and `&var T`.
-pub fn (self: &var TypeTable) explicit_borrow_type(
-    value: Type
-) -> !?BorrowParts {
+pub fn (self: &var TypeTable) explicit_borrow_type(value: Type) -> !?BorrowParts {
     if self.lookup(value) |parsed| {
         match typ::root_node(&self.parsed, parsed) {
             Borrow(node) => {
@@ -597,19 +560,13 @@ pub fn (self: &var TypeTable) coerce_returned_borrow_argument(
 ) -> !BorrowCoercionResult {
     if try self.explicit_borrow_type(got) |parts| {
         if !want_borrow {
-            return BorrowCoercionResult::Error(
-                BorrowCoercionError::OwningParameter
-            );
+            return BorrowCoercionResult::Error(BorrowCoercionError::OwningParameter);
         }
         if parts.mutable and !want_mutable {
-            return BorrowCoercionResult::Error(
-                BorrowCoercionError::WantsShared
-            );
+            return BorrowCoercionResult::Error(BorrowCoercionError::WantsShared);
         }
         if !parts.mutable and want_mutable {
-            return BorrowCoercionResult::Error(
-                BorrowCoercionError::WantsMutable
-            );
+            return BorrowCoercionResult::Error(BorrowCoercionError::WantsMutable);
         }
         if same_type(parts.inner, want) {
             return BorrowCoercionResult::Value(parts.inner);
@@ -660,10 +617,7 @@ pub fn (self: &TypeTable) is_pointer_type(value: Type) -> bool {
     return false;
 }
 
-fn parsed_pointer_element(
-    table: &typ::Table,
-    value: typ::Type
-) -> ?typ::Type {
+fn parsed_pointer_element(table: &typ::Table, value: typ::Type) -> ?typ::Type {
     var candidate = value;
     match typ::root_node(table, candidate) {
         Optional(node) => {
@@ -677,10 +631,7 @@ fn parsed_pointer_element(
     }
 }
 
-fn pointer_name_element(
-    parent: typ::Type,
-    node: &typ::Name
-) -> ?typ::Type {
+fn pointer_name_element(parent: typ::Type, node: &typ::Name) -> ?typ::Type {
     if node.path.len() != 1 or node.args.len() != 1 {
         return null;
     }
@@ -699,9 +650,7 @@ fn pointer_name_element(
 }
 
 /// Classifies the value read by raw pointer dereference.
-pub fn (self: &var TypeTable) raw_pointer_deref_type(
-    value: Type
-) -> !PointerDerefResult {
+pub fn (self: &var TypeTable) raw_pointer_deref_type(value: Type) -> !PointerDerefResult {
     let nullable = is_optional_root(&self.parsed, self.lookup(value));
     if try self.pointer_element(value) |element| {
         if nullable {
@@ -761,129 +710,44 @@ fn is_const_root(table: &typ::Table, value: ?typ::Type) -> bool {
     return false;
 }
 
-/// Reports whether a type spelling contains a raw pointer.
-pub fn (self: &TypeTable) contains_raw_pointer(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
-    return self.contains_wrapped_type(allocator, value, WrappedKind::RawPointer);
+/// Reports whether a retained type graph contains a raw pointer.
+pub fn (self: &TypeTable) contains_raw_pointer(value: Type) -> bool {
+    return self.contains_wrapped_type(value, WrappedKind::RawPointer);
 }
 
-/// Reports whether a type spelling contains the compile-time `type` value.
-pub fn (self: &TypeTable) contains_type_value(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
-    return self.contains_wrapped_type(allocator, value, WrappedKind::TypeValue);
+/// Reports whether a retained type graph contains the compile-time `type` value.
+pub fn (self: &TypeTable) contains_type_value(value: Type) -> bool {
+    return self.contains_wrapped_type(value, WrappedKind::TypeValue);
 }
 
-/// Reports whether a type spelling contains `Field` or `Function`.
-pub fn (self: &TypeTable) contains_compile_time_only(
-    allocator: Allocator,
-    value: Type
-) -> !bool {
-    return self.contains_wrapped_type(
-        allocator,
-        value,
-        WrappedKind::CompileTimeOnly
-    );
+/// Reports whether a retained type graph contains `Field` or `Function`.
+pub fn (self: &TypeTable) contains_compile_time_only(value: Type) -> bool {
+    return self.contains_wrapped_type(value, WrappedKind::CompileTimeOnly);
 }
 
-fn (self: &TypeTable) contains_wrapped_type(
-    allocator: Allocator,
-    value: Type,
-    kind: WrappedKind
-) -> !bool {
-    if value.node |handle| {
-        let entry = self.entries.at(handle);
-        let bytes = entry.spelling.as_bytes();
-        return contains_wrapped_text(allocator, bytes, kind);
+fn (self: &TypeTable) contains_wrapped_type(value: Type, kind: WrappedKind) -> bool {
+    if self.lookup(value) |parsed| {
+        var visitor = WrappedTypeVisitor {
+            kind: kind,
+            found: false,
+            optional_child: false
+        };
+        typ::walk<WrappedTypeVisitor>(&self.parsed, parsed, &var visitor);
+        return visitor.found;
     }
     return false;
-}
-
-fn contains_wrapped_text(
-    allocator: Allocator,
-    value: []u8,
-    kind: WrappedKind
-) -> !bool {
-    var text = value;
-    while true {
-        if mem::starts_with(text, "!") {
-            text = text[1..mem::len(text)];
-        } else {
-            if mem::starts_with(text, "&var ") {
-                text = text[5..mem::len(text)];
-            } else {
-                if mem::starts_with(text, "&") or
-                    mem::starts_with(text, "?") {
-                    text = text[1..mem::len(text)];
-                } else {
-                    if mem::starts_with(text, "[]") {
-                        text = text[2..mem::len(text)];
-                    } else {
-                        if mem::starts_with(text, "const ") {
-                            text = text[6..mem::len(text)];
-                        } else {
-                            if matches_wrapped_kind(text, kind) {
-                                return true;
-                            }
-                            if typ::split_apply(text) |parts| {
-                                if matches_wrapped_kind(parts.base, kind) {
-                                    return true;
-                                }
-                                let args = try typ::split_args(
-                                    allocator,
-                                    parts.args
-                                );
-                                defer args.deinit();
-                                var index = 0;
-                                while args.at(index) |argument| {
-                                    let bytes = argument.as_bytes();
-                                    if try contains_wrapped_text(
-                                        allocator,
-                                        bytes,
-                                        kind
-                                    ) {
-                                        return true;
-                                    }
-                                    index = index + 1;
-                                }
-                            }
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-fn matches_wrapped_kind(value: []u8, kind: WrappedKind) -> bool {
-    return match kind {
-        RawPointer => equal(value, "ptr"),
-        TypeValue => equal(value, "type"),
-        CompileTimeOnly => equal(value, "Field") or equal(value, "Function"),
-    };
 }
 
 /// Extracts the error and success side of `!T` or `E!T`.
-pub fn (self: &var TypeTable) error_union_parts(
-    value: Type
-) -> !?ErrorUnionTypeParts {
+pub fn (self: &var TypeTable) error_union_parts(value: Type) -> !?ErrorUnionTypeParts {
     if self.lookup(value) |parsed| {
         match typ::root_node(&self.parsed, parsed) {
             ErrorUnion(node) => {
                 var err = empty_type();
                 if node.err |error_node| {
-                    err = try self.retain_parsed(
-                        typ::child_type(parsed, error_node)
-                    );
+                    err = try self.retain_parsed(typ::child_type(parsed, error_node));
                 }
-                let success = try self.retain_parsed(
-                    typ::child_type(parsed, node.ok)
-                );
+                let success = try self.retain_parsed(typ::child_type(parsed, node.ok));
                 return ErrorUnionTypeParts {
                     err: err,
                     success: success
@@ -896,9 +760,7 @@ pub fn (self: &var TypeTable) error_union_parts(
 }
 
 /// Returns the success side of an error union.
-pub fn (self: &var TypeTable) error_union_element(
-    value: Type
-) -> !?Type {
+pub fn (self: &var TypeTable) error_union_element(value: Type) -> !?Type {
     if try self.error_union_parts(value) |parts| {
         return parts.success;
     }
@@ -911,17 +773,12 @@ pub fn split_generic_type(name: []u8) -> ?typ::ApplyParts {
 }
 
 /// Splits top-level generic arguments into independently owned text.
-pub fn split_generic_args(
-    allocator: Allocator,
-    args: []u8
-) -> !?array::Array<string::String> {
+pub fn split_generic_args(allocator: Allocator, args: []u8) -> !?array::Array<string::String> {
     return typ::split_args_optional(allocator, args);
 }
 
 /// Borrows the only generic argument, or returns null for any other arity.
-pub fn single_generic_arg(
-    args: &array::Array<string::String>
-) -> ?&string::String {
+pub fn single_generic_arg(args: &array::Array<string::String>) -> ?&string::String {
     if args.len() != 1 {
         return null;
     }
@@ -981,107 +838,6 @@ pub fn is_known_generic_base(base: []u8) -> bool {
 
 fn equal(left: []u8, right: []u8) -> bool {
     return mem::equal_bytes(left, right);
-}
-
-/// Identifies where Ast retains the leading owner-union cleanup match.
-pub union OwnerUnionMatch {
-    Statement(ast::Statement),
-    Expression(ast::Expression),
-}
-
-// Returns the leading `match self` from one owner-union cleanup body. The
-// result is a copy handle; Ast continues to own the match payload and arms.
-pub fn owner_union_self_match(
-    tree: &ast::Ast,
-    body: ?ast::Block,
-    self_name: []u8
-) -> ?OwnerUnionMatch {
-    let retained_body = body orelse return null;
-    match tree.statements.at(retained_body.node) {
-        Block(block) => {
-            let first = block.statements.get(0) orelse return null;
-            match tree.statements.at(first.node) {
-                Match(value) => {
-                    if owner_union_ident_is(tree, value.value, self_name) {
-                        return OwnerUnionMatch::Statement(first);
-                    }
-                },
-                Expr(statement) => {
-                    match tree.expressions.at(statement.expr.node) {
-                        Match(value) => {
-                            if owner_union_ident_is(
-                                tree,
-                                value.value,
-                                self_name
-                            ) {
-                                return OwnerUnionMatch::Expression(
-                                    statement.expr
-                                );
-                            }
-                        },
-                        _ => {},
-                    }
-                },
-                _ => {},
-            }
-        },
-        _ => {},
-    }
-    return null;
-}
-
-// Reports whether an arm body is exactly `<binding>.deinit()`.
-pub fn match_arm_cleans_payload(
-    tree: &ast::Ast,
-    body: ast::Statement,
-    binding: []u8
-) -> bool {
-    match tree.statements.at(body.node) {
-        Expr(statement) => {
-            return owner_union_deinit_call(tree, statement.expr, binding);
-        },
-        _ => return false,
-    }
-}
-
-// Reports whether an expression calls `deinit` directly on one binding. The
-// later expression checker validates the call arguments and payload type.
-fn owner_union_deinit_call(
-    tree: &ast::Ast,
-    expression: ast::Expression,
-    binding: []u8
-) -> bool {
-    match tree.expressions.at(expression.node) {
-        Call(call) => {
-            match tree.expressions.at(call.callee.node) {
-                Field(field) => {
-                    let retained = tree.texts.at(field.name.node);
-                    let name = retained.as_bytes();
-                    return !field.namespace and
-                        mem::equal_bytes(name, typ::cleanup_method()) and
-                        owner_union_ident_is(tree, field.receiver, binding);
-                },
-                _ => return false,
-            }
-        },
-        _ => return false,
-    }
-}
-
-// Reports whether an expression is the requested identifier.
-fn owner_union_ident_is(
-    tree: &ast::Ast,
-    expression: ast::Expression,
-    expected: []u8
-) -> bool {
-    match tree.expressions.at(expression.node) {
-        Ident(identifier) => {
-            let retained = tree.texts.at(identifier.name.node);
-            let name = retained.as_bytes();
-            return mem::equal_bytes(name, expected);
-        },
-        _ => return false,
-    }
 }
 
 /// Identifies one kind of operation that an unsafe marker may cover.

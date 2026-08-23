@@ -1,0 +1,59 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmethod;
+
+// Registers every declaration and top-level function signature before body
+// checks, matching the shipping Checker's collectFunctions phase.
+fn (self: &var Checker) collect_functions(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> !?diagnostic::Diagnostic {
+    if try self.collect_types_and_methods(tree, program) |value| {
+        return move value;
+    }
+    if try self.collect_top_level_functions(tree, program) |issue| {
+        let value = try self.type_collection_diagnostic(tree, issue);
+        return move value;
+    }
+    return null;
+}
+
+// Registers top-level function signatures after all type and method metadata.
+fn (self: &var Checker) collect_top_level_functions(
+    tree: &ast::Ast,
+    program: &ast::Program
+) -> !?TypeCollectionIssue {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                let retained_name = tree.texts.at(function.signature.name.node);
+                let name = retained_name.as_bytes();
+                if self.metadata.functions_by_name.contains(name) {
+                    return TypeCollectionIssue::DuplicateFunction(function.signature.name);
+                }
+                if self.metadata.is_type_name(name) {
+                    return TypeCollectionIssue::FunctionNameIsType(function.signature.name);
+                }
+                if function.signature.receiver {
+                    if stdmethod::split_method_name(name) |parts| {
+                        if self.impl_method(parts.receiver, parts.method) |handle| {
+                            try self.metadata.functions_by_name.insert(name, handle);
+                            index = index + 1;
+                            continue;
+                        }
+                    }
+                }
+                match try self.new_declared_function_type(tree, function) {
+                    Value(handle) => {
+                        try self.metadata.functions_by_name.insert(name, handle);
+                    },
+                    Issue(issue) => return issue,
+                }
+            },
+            _ => {},
+        }
+        index = index + 1;
+    }
+    return null;
+}

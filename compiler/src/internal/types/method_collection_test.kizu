@@ -1,0 +1,172 @@
+import compiler::internal::ast;
+import compiler::internal::lexer;
+import compiler::internal::parser;
+import std::array;
+import std::mem;
+import std::testing;
+
+fn append_writer_method(
+    allocator: Allocator,
+    tree: &var ast::Ast,
+    program: &var ast::Program,
+    parameter_type: []u8
+) -> !void {
+    var params = array::new<ast::Param>(allocator);
+    errdefer params.deinit();
+    try params.append(ast::Param {
+        name: try tree.add_text_from_bytes("self"),
+        type_name: try tree.types.parse("File"),
+        borrow: true,
+        mut_borrow: false
+    });
+    try params.append(ast::Param {
+        name: try tree.add_text_from_bytes("text"),
+        type_name: try tree.types.parse(parameter_type),
+        borrow: false,
+        mut_borrow: false
+    });
+    var signature = ast::FunctionSignature {
+        receiver: true,
+        name: try tree.add_text_from_bytes("File.write"),
+        static_params: array::new<ast::StaticParam>(allocator),
+        params: move params,
+        return_type: try tree.types.parse("!i64"),
+        requires_unsafe: false,
+        extern_abi: try tree.add_text_from_bytes(""),
+        public: false,
+        std: false
+    };
+    errdefer signature.deinit();
+    let doc = try tree.add_text_from_bytes("");
+    let declaration = tree.add_declaration(ast::DeclarationNode::Function(
+        ast::FunctionDecl {
+        signature: move signature,
+        doc: doc,
+        derived: false,
+        body: null
+    }
+    ));
+    return program.add_declaration(declaration);
+}
+
+fn expect_method_program_diagnostic(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    program: &ast::Program,
+    expected: []u8
+) -> !void {
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(tree, program) |value| {
+        defer value.deinit();
+        let category = value.category.as_bytes();
+        let message = value.message.as_bytes();
+        testing::expect_equal<[]u8>("type error", category);
+        testing::expect_equal<[]u8>(expected, message);
+    } else {
+        testing::fail("method collection returned no diagnostic");
+    }
+    return;
+}
+
+test "checker registers all receiver methods before impl assertions" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\struct File { name: []u8 }
+        \\contract Writer { fn write(text: []u8) -> !i64; }
+        \\impl Writer for File;
+    ;
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    let scanner = lexer::new(allocator, input);
+    var source_parser = try parser::new(allocator, move scanner);
+    defer source_parser.deinit();
+    var program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    try append_writer_method(allocator, &var tree, &var program, "[]u8");
+    var state = new_checker(allocator);
+    defer state.deinit();
+    if try state.collect_functions(&tree, &program) |value| {
+        defer value.deinit();
+        let message = value.message.as_bytes();
+        testing::fail(message);
+    }
+    if state.impl_method("File", "write") |_| {} else {
+        testing::fail("qualified receiver method was not retained");
+    }
+}
+
+test "method and impl diagnostics match the shipping checker" {
+    let allocator = mem::page_allocator();
+    try expect_collection_diagnostic(
+        allocator,
+        "struct File {} contract Writer { fn z() -> i64; fn a() -> i64; } impl Writer for File;",
+        "type error",
+        "`File` does not satisfy `Writer`: missing method `a`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "struct File {} impl Missing for File;",
+        "type error",
+        "unknown contract `Missing`",
+        ""
+    );
+    try expect_collection_diagnostic(
+        allocator,
+        "contract Missing {} impl Missing for Unknown;",
+        "type error",
+        "unknown type `Unknown`",
+        ""
+    );
+}
+
+test "checker rejects duplicate and mismatched receiver methods" {
+    let allocator = mem::page_allocator();
+    let input =
+        \\struct File {}
+        \\contract Writer { fn write(text: []u8) -> !i64; }
+        \\impl Writer for File;
+    ;
+    var duplicate_tree = ast::new(allocator);
+    defer duplicate_tree.deinit();
+    let duplicate_scanner = lexer::new(allocator, input);
+    var duplicate_parser = try parser::new(
+        allocator, move duplicate_scanner
+    );
+    defer duplicate_parser.deinit();
+    var duplicate_program = try duplicate_parser.parse_program(
+        &var duplicate_tree
+    );
+    defer duplicate_program.deinit();
+    try append_writer_method(
+        allocator, &var duplicate_tree, &var duplicate_program, "[]u8"
+    );
+    try append_writer_method(
+        allocator, &var duplicate_tree, &var duplicate_program, "[]u8"
+    );
+    try expect_method_program_diagnostic(
+        allocator,
+        &duplicate_tree,
+        &duplicate_program,
+        "duplicate method `File.write`"
+    );
+    var mismatch_tree = ast::new(allocator);
+    defer mismatch_tree.deinit();
+    let mismatch_scanner = lexer::new(allocator, input);
+    var mismatch_parser = try parser::new(allocator, move mismatch_scanner);
+    defer mismatch_parser.deinit();
+    var mismatch_program = try mismatch_parser.parse_program(
+        &var mismatch_tree
+    );
+    defer mismatch_program.deinit();
+    try append_writer_method(
+        allocator, &var mismatch_tree, &var mismatch_program, "bool"
+    );
+    try expect_method_program_diagnostic(
+        allocator,
+        &mismatch_tree,
+        &mismatch_program,
+        "`File.write` does not match contract `Writer`"
+    );
+}

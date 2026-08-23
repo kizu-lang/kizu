@@ -1,0 +1,640 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::mem;
+import std::string;
+
+// Port of internal/ownership/meta.go: the ownership effects of the
+// `std::meta` forms and of the `comptime for` / `comptime match` expansions
+// that bind their captures. The Go `metaField` is MetaField in ownership.kizu
+// and the `c.metaFields` map is the MetaBindingStore there.
+
+/// Returns a capture record to fill in, the Go zero `metaField`.
+pub fn empty_meta_field() -> MetaField {
+    return MetaField { owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false };
+}
+
+/// Checks ownership effects once per expansion, the Go `checkComptimeForStmt`.
+/// Each expansion is the same body checked against a different field, so a
+/// move in the body is a move in every expansion -- which is what makes
+/// moving an owner inside a multi-field loop the error it should be.
+fn (self: &var Checker) check_comptime_for_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ComptimeForStmt
+) -> !?diagnostic::Diagnostic {
+    var fields = array::new<MetaField>(self.allocator);
+    defer fields.deinit();
+    if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
+        return move failed;
+    }
+    let retained = tree.texts.at(statement.name.node);
+    let name_bytes = retained.as_bytes();
+    let name = try string::from_bytes(self.allocator, name_bytes);
+    defer name.deinit();
+    let previous = self.meta_fields.current;
+    var index = 0;
+    while fields.get(index) |field| {
+        index = index + 1;
+        let bytes = name.as_bytes();
+        let _ = try self.meta_fields.bind(bytes, field);
+        let child = self.store.child(env);
+        if try self.check_block(tree, child, statement.body) |failed| {
+            self.meta_fields.restore(previous);
+            return move failed;
+        }
+    }
+    self.meta_fields.restore(previous);
+    return null;
+}
+
+/// Reads the list a `comptime for` walks, the Go `comptimeForFields`.
+fn (self: &var Checker) comptime_for_fields(
+    tree: &ast::Ast,
+    list: ast::Expression,
+    out: &var array::Array<MetaField>
+) -> !?diagnostic::Diagnostic {
+    let call = call_expr(tree, list) orelse return try self.comptime_for_list_error();
+    let apply = type_apply_expr(tree, call.callee) orelse return try self.comptime_for_list_error();
+    let name = try self.qualified_name(tree, apply.callee) orelse
+        return try self.comptime_for_list_error();
+    let form = self.meta_form(name) orelse return try self.comptime_for_list_error();
+    let apply_arg = try self.names.intern_text(tree, apply.type_arg);
+    match form {
+        PublicFields => {
+            let type_arg = try self.instantiate_type_arg_text(apply_arg);
+            return self.public_fields(tree, type_arg, out);
+        },
+        Variants => {
+            let type_arg = try self.instantiate_type_arg_text(apply_arg);
+            return self.variants(tree, type_arg, out);
+        },
+        _ => return try self.comptime_for_list_error(),
+    }
+}
+
+/// Names the lists a `comptime for` accepts, the Go `errComptimeForList`.
+fn (self: &Checker) comptime_for_list_error() -> !diagnostic::Diagnostic {
+    return self.error0(
+        ast::zero_span(),
+        "move error: comptime for expects `std::meta::public_fields<T>()` or `std::meta::variants<T>()`"
+    );
+}
+
+/// Lists an enum's tags or a union's variants in declaration order, the Go
+/// `variants`.
+fn (self: &var Checker) variants(
+    tree: &ast::Ast,
+    type_arg: Name,
+    out: &var array::Array<MetaField>
+) -> !?diagnostic::Diagnostic {
+    let args = try self.names.split_generic_args(type_arg) orelse
+        return try self.one_static_argument_error(tree, stdmeta::Form::Variants);
+    defer args.deinit();
+    if args.len() != 1 {
+        return try self.one_static_argument_error(tree, stdmeta::Form::Variants);
+    }
+    let owner = args.get_or_panic(0);
+    if self.is_enum(owner) {
+        var index = 0;
+        while self.enum_tag_at(owner, index) |tag| {
+            index = index + 1;
+            try out.append(MetaField { owner: owner, name: tag, typ: empty_name(), variant: true });
+        }
+        return null;
+    }
+    if !self.is_union(owner) {
+        let form_name = try self.form_name(stdmeta::Form::Variants);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects an enum or union, got %s",
+            Arg::Str(form_name), Arg::Str(owner)
+        );
+    }
+    var index = 0;
+    while self.union_variant_at(owner, index) |name| {
+        index = index + 1;
+        let payload = self.union_variant_payload_name(owner, name) orelse empty_name();
+        try out.append(MetaField { owner: owner, name: name, typ: payload, variant: true });
+    }
+    return null;
+}
+
+/// Lists a struct's public fields in declaration order, the Go `publicFields`.
+fn (self: &var Checker) public_fields(
+    tree: &ast::Ast,
+    type_arg: Name,
+    out: &var array::Array<MetaField>
+) -> !?diagnostic::Diagnostic {
+    let args = try self.names.split_generic_args(type_arg) orelse
+        return try self.one_static_argument_error(tree, stdmeta::Form::PublicFields);
+    defer args.deinit();
+    if args.len() != 1 {
+        return try self.one_static_argument_error(tree, stdmeta::Form::PublicFields);
+    }
+    let owner = args.get_or_panic(0);
+    if !self.is_struct(owner) {
+        let form_name = try self.form_name(stdmeta::Form::PublicFields);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects a struct, got %s",
+            Arg::Str(form_name), Arg::Str(owner)
+        );
+    }
+    var index = 0;
+    while self.struct_public_field_at(owner, index) |name| {
+        index = index + 1;
+        let field_type = self.struct_field_type(owner, name) orelse empty_name();
+        try out.append(MetaField { owner: owner, name: name, typ: field_type, variant: false });
+    }
+    return null;
+}
+
+/// Rejects a list form applied to other than one static argument, the Go
+/// errorf("move error: `%s` expects 1 static argument", form).
+fn (self: &var Checker) one_static_argument_error(
+    tree: &ast::Ast,
+    form: stdmeta::Form
+) -> !diagnostic::Diagnostic {
+    let form_name = try self.form_name(form);
+    return self.error1(
+        tree, ast::zero_span(), "move error: `%s` expects 1 static argument", Arg::Str(form_name)
+    );
+}
+
+/// Names the source spelling of a form for a diagnostic, the Go `%s` of a
+/// `stdmeta.Form`.
+fn (self: &var Checker) form_name(form: stdmeta::Form) -> !Name {
+    return self.names.intern(stdmeta::spelling(form));
+}
+
+/// Returns the capture bound under a name, the Go `c.metaFields[name]`.
+fn (self: &Checker) meta_field_named(name: Name) -> ?MetaField {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    return self.meta_fields.get(bytes);
+}
+
+/// Rewrites the forms written where a type goes into the type they name, the
+/// Go `resolveMetaTypeText`. Text with no form in it comes back unchanged.
+fn (self: &var Checker) resolve_meta_type_text(text: Name) -> !Name {
+    let copied = try self.names.copy(text);
+    defer copied.deinit();
+    let bytes = copied.as_bytes();
+    let parts = try stdmeta::split_apply(self.allocator, bytes) orelse return text;
+    defer parts.deinit();
+    var args = array::new<Name>(self.allocator);
+    defer args.deinit();
+    var index = 0;
+    while parts.args.at(index) |arg| {
+        let arg_bytes = arg.as_bytes();
+        let arg_name = try self.names.intern(arg_bytes);
+        let resolved = try self.resolve_meta_type_text(arg_name);
+        try args.append(resolved);
+        index = index + 1;
+    }
+    match parts.form {
+        FieldType => return self.capture_type_text(text, &args),
+        VariantType => return self.capture_type_text(text, &args),
+        Element => return self.element_type_text(text, &args),
+        _ => return text,
+    }
+}
+
+/// Resolves `field_type<T, f>` / `variant_type<T, v>` to the bound capture's
+/// type, or returns text unchanged when the capture is unbound or carries no
+/// type (the `FieldType` / `VariantType` case of the Go `resolveMetaTypeText`).
+fn (self: &Checker) capture_type_text(text: Name, args: &array::Array<Name>) -> !Name {
+    if args.len() != 2 {
+        return text;
+    }
+    let field = self.meta_field_named(args.get_or_panic(1)) orelse return text;
+    if is_empty(field.typ) {
+        return text;
+    }
+    return field.typ;
+}
+
+/// Resolves `element<C>` to the element type of the container C, or returns
+/// text unchanged when C holds no element (the `Element` case of the Go
+/// `resolveMetaTypeText`).
+fn (self: &var Checker) element_type_text(text: Name, args: &array::Array<Name>) -> !Name {
+    if args.len() != 1 {
+        return text;
+    }
+    let copied = try self.names.copy(args.get_or_panic(0));
+    defer copied.deinit();
+    let bytes = copied.as_bytes();
+    let container = try self.names.parsed.parse(bytes);
+    let element = stdmeta::element_type(&self.names.parsed, container) orelse return text;
+    let rendered = try typ::render(self.allocator, &self.names.parsed, element);
+    return self.names.intern_owned(move rendered);
+}
+
+/// Names the container a spelling applies, or the empty name for a type that
+/// applies none, the Go `metaGenericBase`.
+fn (self: &var Checker) meta_generic_base(type_name: Name) -> !Name {
+    let open = self.names.index_of(type_name, cast<u8>(60));
+    if open < 0 or !self.names.ends_with(type_name, ">") {
+        return empty_name();
+    }
+    return self.names.intern_slice(type_name, 0, open);
+}
+
+/// Resolves the capture named in a form's static arguments, the Go
+/// `metaCapture`.
+fn (self: &var Checker) meta_capture(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    args: &array::Array<Name>,
+    out: &var MetaField
+) -> !?diagnostic::Diagnostic {
+    if args.len() != 2 {
+        let form_name = try self.form_name(form);
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` expects 2 static arguments",
+            Arg::Str(form_name)
+        );
+    }
+    let capture = args.get_or_panic(1);
+    var field = empty_meta_field();
+    if self.meta_field_named(capture) |bound| {
+        field = bound;
+    } else {
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` is not a comptime capture",
+            Arg::Str(capture)
+        );
+    }
+    if field.variant != stdmeta::variant_form(form) {
+        let form_name = try self.form_name(form);
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` is written against the wrong capture kind",
+            Arg::Str(form_name)
+        );
+    }
+    out.* = field;
+    return null;
+}
+
+/// Applies the ownership effect of one `std::meta` form, the Go
+/// `checkMetaApply`. handled reports whether name was a form at all.
+fn (self: &var Checker) check_meta_apply(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    handled: &var bool,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let form = self.meta_form(name) orelse return null;
+    handled.* = true;
+    let static_args = try self.names.split_generic_args(type_arg) orelse
+        return try self.unreadable_static_arguments_error(tree, name);
+    defer static_args.deinit();
+    match form {
+        FieldName => return self.check_meta_capture_name(tree, form, &static_args, out),
+        VariantName => return self.check_meta_capture_name(tree, form, &static_args, out),
+        IsStruct => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        IsEnum => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        IsUnion => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        IsOptional => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        IsOwner => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        HasPayload => {
+            out.* = self.common.bool_name;
+            return null;
+        },
+        Field => return self.check_meta_field_borrow(tree, env, form, &static_args, args, out),
+        Variant => return self.check_meta_variant(tree, env, form, &static_args, args, out),
+        Construct => return self.check_meta_construct(tree, env, &static_args, args, out),
+        _ => return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` cannot be called", Arg::Str(name)
+        ),
+    }
+}
+
+/// Rejects a form whose static argument list does not split, the Go
+/// errorf("move error: `%s` has an unreadable static argument list", name).
+fn (self: &Checker) unreadable_static_arguments_error(
+    tree: &ast::Ast,
+    name: Name
+) -> !diagnostic::Diagnostic {
+    return self.error1(
+        tree, ast::zero_span(), "move error: `%s` has an unreadable static argument list",
+        Arg::Str(name)
+    );
+}
+
+/// Checks `field_name<T, f>` / `variant_name<T, v>`: the capture must
+/// resolve, and the value is the name's bytes (the `FieldName` /
+/// `VariantName` case of the Go `checkMetaApply`).
+fn (self: &var Checker) check_meta_capture_name(
+    tree: &ast::Ast,
+    form: stdmeta::Form,
+    static_args: &array::Array<Name>,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var field = empty_meta_field();
+    if try self.meta_capture(tree, form, static_args, &var field) |failed| {
+        return move failed;
+    }
+    out.* = self.common.bytes_name;
+    return null;
+}
+
+/// Applies the ownership effect of `std::meta::construct<T, worker>(args...)`,
+/// the Go `checkMetaConstruct`: the code it stands for. Each worker result is
+/// an owner until the struct literal takes it, and the `errdefer` the
+/// expansion carries is what releases the fields already built when a later
+/// worker fails. The expansion is built in one place
+/// (ast::construct_expansion_from_names), so this reads the same statements
+/// the type checker and lowering do.
+fn (self: &var Checker) check_meta_construct(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    static_args: &array::Array<Name>,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if static_args.len() != 2 {
+        let form_name = try self.form_name(stdmeta::Form::Construct);
+        return try self.error1(
+            tree, ast::zero_span(), "move error: `%s` expects 2 static arguments",
+            Arg::Str(form_name)
+        );
+    }
+    let owner = try self.resolve_meta_type_text(static_args.get_or_panic(0));
+    var fields = array::new<MetaField>(self.allocator);
+    defer fields.deinit();
+    if try self.public_fields(tree, owner, &var fields) |failed| {
+        return move failed;
+    }
+    let worker = static_args.get_or_panic(1);
+    let expanded = try self.expand_meta_construct(tree, owner, worker, &fields, args);
+    defer expanded.deinit();
+    let scope = self.store.child(env);
+    let mark = self.live_err_defers.len();
+    if try self.check_construct_statements(tree, scope, &expanded.statements) |failed| {
+        self.restore_err_defers(mark);
+        return move failed;
+    }
+    // The literal consumes the bindings the statements produced, so it is
+    // checked as the move it is. Reading it left the expansion trusted: a
+    // binding taken twice was not a double move, because reading moved nothing.
+    var built = empty_name();
+    if try self.move_expr(tree, scope, expanded.literal, &var built) |failed| {
+        self.restore_err_defers(mark);
+        return move failed;
+    }
+    self.restore_err_defers(mark);
+    out.* = try self.names.prefixed("!", built);
+    return null;
+}
+
+/// Builds the statements and literal `std::meta::construct<T, worker>(...)`
+/// stands for, the `ast.ConstructExpansion` call of the Go
+/// `checkMetaConstruct`.
+fn (self: &Checker) expand_meta_construct(
+    tree: &var ast::Ast,
+    owner: Name,
+    worker: Name,
+    fields: &array::Array<MetaField>,
+    args: ast::ExpressionList
+) -> !ast::ConstructResult {
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var type_names = array::new<string::String>(self.allocator);
+    defer type_names.deinit();
+    var index = 0;
+    while fields.get(index) |field| {
+        let name = try self.names.copy(field.name);
+        errdefer name.deinit();
+        try names.append(move name);
+        let type_name = try self.names.copy(field.typ);
+        errdefer type_name.deinit();
+        try type_names.append(move type_name);
+        index = index + 1;
+    }
+    let owner_name = try self.names.copy(owner);
+    defer owner_name.deinit();
+    let worker_name = try self.names.copy(worker);
+    defer worker_name.deinit();
+    let owner_bytes = owner_name.as_bytes();
+    let worker_bytes = worker_name.as_bytes();
+    return ast::construct_expansion_from_names(
+        self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args,
+        &self.deinit_owners
+    );
+}
+
+/// Checks the statements of one construct expansion in order. The expansion
+/// registers cleanups the way a block does, which is the one place `errdefer`
+/// is accepted; the statements are a block in everything but the braces.
+fn (self: &var Checker) check_construct_statements(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    statements: &array::Array<ast::Statement>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while statements.get(index) |statement| {
+        index = index + 1;
+        if errdefer_stmt(tree, statement) |deferred| {
+            if try self.check_err_defer_stmt(tree, scope, deferred) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        if try self.check_stmt(tree, scope, statement) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Applies the ownership effect of `std::meta::variant<T, v>(payload)`, the
+/// Go `checkMetaVariant`: the `T::v(payload)` it stands for
+/// (ast::variant_expansion). The payload moves into the value the same way it
+/// does when a program writes the constructor itself.
+fn (self: &var Checker) check_meta_variant(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    form: stdmeta::Form,
+    static_args: &array::Array<Name>,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var variant = empty_meta_field();
+    if try self.meta_capture(tree, form, static_args, &var variant) |failed| {
+        return move failed;
+    }
+    let owner_name = try self.names.copy(variant.owner);
+    defer owner_name.deinit();
+    let variant_name = try self.names.copy(variant.name);
+    defer variant_name.deinit();
+    let owner_bytes = owner_name.as_bytes();
+    let name_bytes = variant_name.as_bytes();
+    let expanded = try ast::variant_expansion(tree, owner_bytes, name_bytes, args);
+    return self.read_expr(tree, env, expanded, out);
+}
+
+/// Applies the ownership effect of the match a `comptime match` stands for,
+/// with the capture bound to the arm's own variant while its body is checked,
+/// the Go `checkComptimeMatchStmt`.
+fn (self: &var Checker) check_comptime_match_stmt(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    statement: ast::ComptimeMatchStmt
+) -> !?diagnostic::Diagnostic {
+    var value_type = empty_name();
+    if try self.read_expr(tree, env, statement.value, &var value_type) |failed| {
+        return move failed;
+    }
+    let trimmed = try self.names.trim_prefix(value_type, "&var ");
+    let owner = try self.names.trim_prefix(trimmed, "&");
+    var variants = array::new<MetaField>(self.allocator);
+    defer variants.deinit();
+    if try self.variants(tree, owner, &var variants) |failed| {
+        failed.deinit();
+        return try self.error1(
+            tree, ast::zero_span(), "move error: comptime match expects an enum or union, got %s",
+            Arg::Str(value_type)
+        );
+    }
+    let expanded = try self.expand_comptime_match(tree, statement, owner, &variants);
+    return self.check_stmt(tree, env, expanded);
+}
+
+/// Builds the ordinary match a `comptime match` stands for, the
+/// `ast.ComptimeMatchExpansion` call of the Go `checkComptimeMatchStmt`.
+fn (self: &Checker) expand_comptime_match(
+    tree: &var ast::Ast,
+    statement: ast::ComptimeMatchStmt,
+    owner: Name,
+    variants: &array::Array<MetaField>
+) -> !ast::Statement {
+    var list = array::new<ast::MetaVariant>(self.allocator);
+    defer list.deinit();
+    var index = 0;
+    while variants.get(index) |variant| {
+        let name_copy = try self.names.copy(variant.name);
+        defer name_copy.deinit();
+        let name_bytes = name_copy.as_bytes();
+        let name = try tree.add_text_from_bytes(name_bytes);
+        try list.append(ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+        index = index + 1;
+    }
+    let owner_copy = try self.names.copy(owner);
+    defer owner_copy.deinit();
+    let owner_bytes = owner_copy.as_bytes();
+    let owner_text = try tree.add_text_from_bytes(owner_bytes);
+    let empty = tree.add_empty_text();
+    let expanded = try ast::comptime_match_expansion(
+        self.allocator, &statement, owner_text, empty, &list
+    );
+    return tree.add_statement(ast::StatementNode::Match(move expanded));
+}
+
+/// Binds one capture for the length of one expansion and returns the handle
+/// that unbinds it through `self.meta_fields.restore`, the Go
+/// `bindMetaField`. An empty name binds nothing, so a caller with no capture
+/// in hand needs no branch of its own.
+fn (self: &var Checker) bind_meta_field(
+    name: []u8,
+    field: MetaField
+) -> !?arena::Handle<MetaBinding> {
+    if mem::len(name) == 0 {
+        return self.meta_fields.current;
+    }
+    return self.meta_fields.bind(name, field);
+}
+
+/// Lists the variants a `comptime match` arm body is written against, the Go
+/// `matchArmVariants`; has reports whether the match carried a capture. A
+/// match written by hand carries no capture and gets none.
+fn (self: &var Checker) comptime_arm_variants(
+    tree: &ast::Ast,
+    head: MatchHead,
+    out: &var array::Array<MetaField>,
+    has: &var bool
+) -> !?diagnostic::Diagnostic {
+    if text_empty(tree, head.meta_capture) {
+        has.* = false;
+        return null;
+    }
+    let owner = try self.names.intern_text(tree, head.meta_owner);
+    if try self.variants(tree, owner, out) |failed| {
+        return move failed;
+    }
+    has.* = true;
+    return null;
+}
+
+/// Borrows one field out of a borrowed struct, the Go `checkMetaFieldBorrow`.
+/// The borrow is the field path borrow of §9: the same target, the same
+/// tracking, the same conflicts (ADR-0113), so this synthesizes that path
+/// rather than inventing a second borrow rule.
+fn (self: &var Checker) check_meta_field_borrow(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    form: stdmeta::Form,
+    static_args: &array::Array<Name>,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var field = empty_meta_field();
+    if try self.meta_capture(tree, form, static_args, &var field) |failed| {
+        return move failed;
+    }
+    let count = arg_count(tree, args);
+    if count != 1 {
+        let form_name = try self.form_name(form);
+        return try self.error2(
+            tree, ast::zero_span(), "move error: `%s` expects 1 argument, got %d",
+            Arg::Str(form_name), Arg::Int(count)
+        );
+    }
+    let receiver = args.get_or_panic(tree, 0);
+    let name_copy = try self.names.copy(field.name);
+    defer name_copy.deinit();
+    let name_bytes = name_copy.as_bytes();
+    let name = try tree.add_text_from_bytes(name_bytes);
+    let path = tree.add_expression(ast::ExpressionNode::Field(ast::FieldExpr {
+        receiver: receiver,
+        name: name,
+        namespace: false,
+        span: ast::zero_span()
+    }));
+    var ignored = empty_name();
+    if try self.read_expr(tree, env, path, &var ignored) |failed| {
+        return move failed;
+    }
+    out.* = field.typ;
+    return null;
+}
+
+/// Identifies the `std::meta` form a name spells, or null for any other
+/// name, the Go `stdmeta.Lookup(name)` / `stdmeta.Form(name)` pair.
+fn (self: &Checker) meta_form(name: Name) -> ?stdmeta::Form {
+    let retained = name_text(&self.names, name);
+    let bytes = retained.as_bytes();
+    let identified = stdmeta::identify(bytes) orelse return null;
+    return identified.form;
+}

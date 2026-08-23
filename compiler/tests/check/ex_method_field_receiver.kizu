@@ -1,0 +1,65 @@
+import std::array;
+import std::mem;
+
+struct Counter {
+    count: i64,
+}
+
+fn (self: &var Counter) bump() -> void {
+    self.count = self.count + 1;
+    return;
+}
+
+fn reset(counter: &var Counter) -> void {
+    counter.count = 0;
+    return;
+}
+
+struct Tracker {
+    visits: Counter,
+    log: array::Array<i64>,
+}
+
+// A `&var self` method reaches one direct field of a mutable owner: the
+// exclusive borrow derives from the owner's storage, the same derivation a
+// `&var` argument uses. A type split into small fields keeps each field's
+// methods callable through the owner.
+fn (self: &var Tracker) record(id: i64) -> !void {
+    try self.log.append(id);
+    self.visits.bump();
+    return;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var tracker = Tracker { visits: Counter { count: 0 }, log: array::new<i64>(allocator) };
+    defer tracker.deinit();
+    try tracker.record(7);
+    try tracker.record(9);
+    tracker.visits.bump();
+    print(tracker.visits.count);
+    reset(tracker.visits);
+    print(tracker.visits.count);
+    print(tracker.log.len());
+    return;
+}
+
+// run
+// features: method receiver mutable-borrow field-access struct
+// output:
+// 3
+// 0
+// 2
+
+
+// check
+// load:
+// struct Counter { count: i64 }
+// fn (self: &var Counter) Counter.bump() -> void { self.count = (self.count + 1); return; }
+// fn reset(counter: &var Counter) -> void { counter.count = 0; return; }
+// struct Tracker { visits: Counter, log: std::array::Array<i64> }
+// fn (self: &var Tracker) Tracker.record(id: i64) -> !void { try self.log.append(id); self.visits.bump(); return; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var tracker = Tracker { visits: Counter { count: 0 }, log: std::array::new<i64>(allocator) }; defer tracker.deinit(); try tracker.record(7); try tracker.record(9); tracker.visits.bump(); print(tracker.visits.count); reset(tracker.visits); print(tracker.visits.count); print(tracker.log.len()); return; }
+// fn (self: Tracker) Tracker.deinit() -> void { self.log.deinit(); return; }
+// check:
+// ok

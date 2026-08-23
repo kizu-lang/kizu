@@ -6,7 +6,7 @@
 
 ## 1. 全体像: shipping 実装は 1 つ
 
-Kizu の shipping 実装は `internal/` + `cmd/kizu` の Go 実装だけです(ADR-0082)。
+Kizu の shipping 実装は `internal/` + `cmd/kizu` の Go 実装だけです。
 `compiler/` では、その構造と挙動を保った Kizu への機械移植を進めますが、cutover
 までは CLI、fallback、user-facing command から呼びません。以前の selfhost は
 独立した第二実装として育ち、片方がもう片方を偽装して緑を保ったため削除しました。
@@ -56,7 +56,7 @@ source.kizu
 その関数の中で定義されていること、`alloca` が entry block にあることの 2 つで、
 どちらも壊れると診断の無い実行時の失敗になります —— 前者は clang が SSA 名だけを
 言って落ち、後者はループがスタックを 1 回転ごとに食って guard page で死にます。
-命令の形は固定しません(ADR-0082)。
+命令の形は固定しません。
 
 その実行ファイルは build cache に残ります。鍵は LLVM IR・runtime object・
 toolchain、つまり実行ファイルが**何でできているか**だけで、ファイル名も時刻も
@@ -125,5 +125,4 @@ CI は push/PR ごとに 1 job(`go test ./...` + gofmt)。定時実行は置き�
 | stdlib の移行計画と builtin registry | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
 | self-host の移植規則 | docs/selfhost-porting.md |
-| self-host の移植判断と shipping 境界 | docs/adr/0082-selfhost-mechanical-port.md |
 | 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0049 モジュール解決)|

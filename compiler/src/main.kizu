@@ -1,0 +1,229 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::lexer;
+import compiler::internal::manifest;
+import compiler::internal::ownership;
+import compiler::internal::parser;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::types;
+import std::fs;
+import std::io;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+
+// Port of cmd/kizu for the commands the selfhost compiler can run so far:
+// `parse` prints the program a file parses to, `check` loads a file or a
+// package with its std modules, type-checks it, and ownership-checks it. The
+// later gates `check` runs in the Go compiler (IR, LLVM emit) follow with
+// their modules. Not connected to the shipping CLI.
+
+/// Names the ways a command line run ends without a result.
+error Cli {
+    Usage,
+    Failed,
+}
+
+/// Dispatches the command line: `[--lib-dir PATH] <parse|check> <target>`.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    // std::process counts the user arguments only; arg(0) is the first one.
+    let count = process::arg_count();
+    var next = 0;
+    var lib_dir = string::new(allocator);
+    defer lib_dir.deinit();
+    if count >= 2 {
+        let first = try process::arg(0);
+        if mem::equal_bytes(first, "--lib-dir") {
+            let given = try process::arg(1);
+            try lib_dir.append_bytes(given);
+            next = 2;
+        }
+    }
+    if lib_dir.len() == 0 {
+        try resolve_lib_dir(&var lib_dir);
+    }
+    if count - next < 2 {
+        try usage(io);
+        return Cli::Usage;
+    }
+    let command = try process::arg(next);
+    let target = try process::arg(next + 1);
+    let lib_dir_bytes = lib_dir.as_bytes();
+    if mem::equal_bytes(command, "parse") {
+        return parse_file(io, allocator, target);
+    }
+    if mem::equal_bytes(command, "check") {
+        return check_target(io, allocator, lib_dir_bytes, target);
+    }
+    try usage(io);
+    return Cli::Usage;
+}
+
+/// Writes the usage lines for the commands this binary has.
+fn usage(io: Io) -> !void {
+    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] parse <file>");
+    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
+}
+
+/// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
+/// The Go CLI also looks next to its own binary, but std::process does not
+/// expose the executable path, so the tree has to be named explicitly here.
+fn resolve_lib_dir(out: &var string::String) -> !void {
+    if process::env("KIZU_LIB_DIR") |from_env| {
+        return out.append_bytes(from_env);
+    }
+    return out.append_bytes("lib/kizu");
+}
+
+/// Writes one diagnostic the way the CLI reports errors.
+fn report(
+    io: Io,
+    allocator: Allocator,
+    sources: &source::SourceMap,
+    failed: &diagnostic::Diagnostic
+) -> !void {
+    let rendered = try failed.cli_error(allocator, sources);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    return io::write_stderr_line(io, bytes);
+}
+
+/// Parses a source file and prints its AST summary.
+fn parse_file(io: Io, allocator: Allocator, file: []u8) -> !void {
+    let text = try fs::read_file(io, allocator, file, mem::Limit::Unlimited);
+    errdefer text.deinit();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path_copy = try string::from_bytes(allocator, file);
+    let id = try sources.add(move path_copy, move text);
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    if sources.at(id) |input| {
+        let bytes = input.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, bytes);
+        var source_parser = try parser::new(allocator, move scanner);
+        defer source_parser.deinit();
+        let program = try source_parser.parse_program(&var tree);
+        defer program.deinit();
+        if source_parser.diagnostics_len() > 0 {
+            var index = 0;
+            while source_parser.diagnostic(index) |failed| {
+                try report(io, allocator, &sources, failed);
+                index = index + 1;
+            }
+            try io::write_stderr_line(io, "error: parse failed");
+            return Cli::Failed;
+        }
+        let rendered = try ast::render_program(allocator, &tree, &program);
+        defer rendered.deinit();
+        let rendered_bytes = rendered.as_bytes();
+        return io::write_stdout_line(io, rendered_bytes);
+    }
+    return;
+}
+
+/// Loads a file or a package with the std modules it imports, type-checks
+/// the merged program, and then checks its ownership rules.
+fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !void {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit();
+    let loaded = try load_target(io, allocator, &var loader, &var tree, target);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit();
+            try report(io, allocator, &loader.sources, &failed);
+            return Cli::Failed;
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            if try ownership::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try report(io, allocator, &loader.sources, &failed);
+                return Cli::Failed;
+            }
+            return io::write_stdout_line(io, "check: ok");
+        },
+    }
+}
+
+/// Reports whether path names a package root: a directory or a manifest.
+fn is_package_root(io: Io, target: []u8) -> !bool {
+    let exists = try fs::exists(io, target);
+    if !exists {
+        return false;
+    }
+    let info = try fs::metadata(io, target);
+    if info.is_dir {
+        return true;
+    }
+    return mem::equal_bytes(path::basename(target), "kizu.toml");
+}
+
+/// Loads the target as a package when it is a package root, else as one file
+/// resolved together with the std it imports.
+fn load_target(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    target: []u8
+) -> !project::LoadResult {
+    let package = try is_package_root(io, target);
+    if !package {
+        let text = try fs::read_file(io, allocator, target, mem::Limit::Unlimited);
+        defer text.deinit();
+        let text_bytes = text.as_bytes();
+        return loader.load_source(tree, target, text_bytes);
+    }
+    var root = try string::from_bytes(allocator, target);
+    defer root.deinit();
+    var manifest_path = try path::join(allocator, target, "kizu.toml");
+    defer manifest_path.deinit();
+    if mem::equal_bytes(path::basename(target), "kizu.toml") {
+        root.clear();
+        try root.append_bytes(path::dirname(target));
+        manifest_path.clear();
+        try manifest_path.append_bytes(target);
+    }
+    let manifest_bytes = manifest_path.as_bytes();
+    let text = try fs::read_file(io, allocator, manifest_bytes, mem::Limit::Unlimited);
+    defer text.deinit();
+    let text_bytes = text.as_bytes();
+    let parsed = try manifest::parse_manifest(allocator, text_bytes);
+    match parsed {
+        Manifest(found) => {
+            defer found.deinit();
+            let root_bytes = root.as_bytes();
+            let resolved = try project::resolve_modules(io, allocator, root_bytes, &found);
+            match resolved {
+                Graph(graph) => {
+                    defer graph.deinit();
+                    return loader.load_program(tree, &graph);
+                },
+                Error(failed) => return project::LoadResult::Error(move failed),
+            }
+        },
+        Error(message) => {
+            defer message.deinit();
+            let message_bytes = message.as_bytes();
+            let failed = try diagnostic::from_text(
+                allocator,
+                diagnostic::Severity::Error,
+                ast::zero_span(),
+                message_bytes
+            );
+            return project::LoadResult::Error(move failed);
+        },
+    }
+}

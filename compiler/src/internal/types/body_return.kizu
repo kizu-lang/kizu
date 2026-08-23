@@ -1,0 +1,200 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::string;
+
+// Validates a typed non-void return expression against the declared result.
+fn (self: &var Checker) check_return_value(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    var matched = false;
+    if try self.check_error_union_return(tree, expression, want, got, &var matched) |problem| {
+        return move problem;
+    }
+    if matched {
+        out.* = true;
+        return null;
+    }
+    if try self.types.optional_elem(want) |_| {
+        if try self.wraps_into_optional(tree, expression, want, got, &var matched) |problem| {
+            return move problem;
+        }
+        if matched {
+            out.* = true;
+            return null;
+        }
+        return try self.return_type_mismatch(want, got);
+    }
+    if try self.return_value_matches_borrow_param(tree, scope, expression, want, got) {
+        out.* = true;
+        return null;
+    }
+    var coerced = empty_type();
+    if try self.coerce_contextual_integer_literal(
+        tree, expression, want, got, &var coerced
+    ) |problem| {
+        return move problem;
+    }
+    if !same_type(coerced, want) {
+        return try self.return_type_mismatch(want, coerced);
+    }
+    out.* = true;
+    return null;
+}
+
+// Reports whether got fills an optional slot, including literal narrowing of
+// a value that wraps as the optional element.
+fn (self: &var Checker) wraps_into_optional(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    var elem = empty_type();
+    if try self.types.optional_elem(want) |present| {
+        elem = present;
+    } else {
+        out.* = false;
+        return null;
+    }
+    if same_type(got, want) {
+        out.* = true;
+        return null;
+    }
+    var coerced = empty_type();
+    if try self.coerce_contextual_integer_literal(
+        tree, expression, elem, got, &var coerced
+    ) |problem| {
+        return move problem;
+    }
+    out.* = same_type(coerced, elem);
+    return null;
+}
+
+// Accepts success values, compatible error unions, and declared error members
+// for an error-union return.
+fn (self: &var Checker) check_error_union_return(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    want: Type,
+    got: Type,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if try self.types.error_union_element(want) |success| {
+        var coerced = empty_type();
+        if try self.coerce_contextual_integer_literal(
+            tree, expression, success, got, &var coerced
+        ) |problem| {
+            return move problem;
+        }
+        if same_type(coerced, success) {
+            out.* = true;
+            return null;
+        }
+        if try self.wraps_into_optional(tree, expression, success, got, out) |problem| {
+            return move problem;
+        }
+        if out.* {
+            return null;
+        }
+    }
+    if try self.types.absorbs_error_union(want, got) {
+        out.* = true;
+        return null;
+    }
+    if try self.types.error_union_parts(want) |parts| {
+        if same_type(parts.err, empty_type()) and
+            self.is_declared_error_set(got) {
+            out.* = true;
+            return null;
+        }
+        var coerced = empty_type();
+        if try self.coerce_contextual_integer_literal(
+            tree, expression, parts.success, got, &var coerced
+        ) |problem| {
+            return move problem;
+        }
+        if same_type(coerced, parts.success) or
+            same_type(got, parts.err) {
+            out.* = true;
+            return null;
+        }
+        if try self.wraps_into_optional(tree, expression, parts.success, got, out) |problem| {
+            return move problem;
+        }
+        if out.* {
+            return null;
+        }
+    }
+    out.* = false;
+    return null;
+}
+
+fn (self: &Checker) is_declared_error_set(value: Type) -> bool {
+    if value.node |handle| {
+        let entry = self.types.entries.at(handle);
+        let name = entry.spelling.as_bytes();
+        return self.metadata.error_sets_by_name.contains(name);
+    }
+    return false;
+}
+
+// Reports whether a bare return satisfies void or an error union over void.
+fn (self: &var Checker) accepts_bare_return(want: Type) -> !bool {
+    if self.types.is_text(want, "void") {
+        return true;
+    }
+    if try self.types.error_union_parts(want) |parts| {
+        return self.types.is_text(parts.success, "void");
+    }
+    return false;
+}
+
+// Permits returning a named borrowed parameter through a compatible borrow
+// return type.
+fn (self: &var Checker) return_value_matches_borrow_param(
+    tree: &ast::Ast,
+    scope: ScopeHandle,
+    expression: ast::Expression,
+    want: Type,
+    got: Type
+) -> !bool {
+    match tree.expressions.at(expression.node) {
+        Ident(identifier) => {
+            let retained = tree.texts.at(identifier.name.node);
+            let name = retained.as_bytes();
+            if !self.scopes.is_borrowed(scope, name) {
+                return false;
+            }
+            if try self.types.explicit_borrow_type(want) |parts| {
+                if parts.mutable and
+                    !self.scopes.is_mut_borrowed(scope, name) {
+                    return false;
+                }
+                if !same_type(got, parts.inner) {
+                    return false;
+                }
+                if self.current_function_handle() |_| {
+                    return true;
+                }
+            }
+        },
+        _ => {},
+    }
+    return false;
+}
+
+fn (self: &Checker) return_type_mismatch(want: Type, got: Type) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("return expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}

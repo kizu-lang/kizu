@@ -1,0 +1,266 @@
+import compiler::internal::ast;
+import std::array;
+import std::map;
+
+// Port of the last-use analysis of internal/ownership/checker.go: which
+// statement index each identifier is last read at, so a block can release
+// local borrows once their binding is no longer used.
+
+/// Returns the last statement index where each identifier appears, the Go
+/// `blockLastUses`. Identifiers used inside loop bodies are kept past the
+/// block's end, since the loop reads them again.
+pub fn block_last_uses(allocator: Allocator, tree: &ast::Ast, block: ast::Block) -> !map::Map<[]u8, i64> {
+    var last_uses = map::new<[]u8, i64>(allocator);
+    errdefer last_uses.deinit();
+    let count = block_len(tree, block);
+    var index = 0;
+    while block_statement_at(tree, block, index) |statement| {
+        try loop_ident_uses(tree, statement, count + 1, &var last_uses, true);
+        try stmt_ident_uses(tree, statement, index, &var last_uses, false, count);
+        index = index + 1;
+    }
+    return move last_uses;
+}
+
+/// Records the identifiers used inside loop bodies, the Go `loopIdentUses`.
+fn loop_ident_uses(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    at: i64,
+    out: &var map::Map<[]u8, i64>,
+    force: bool
+) -> !void {
+    if while_stmt(tree, statement) |value| {
+        return block_ident_uses(tree, value.body, at, out, force, 0);
+    }
+    if for_stmt(tree, statement) |value| {
+        return block_ident_uses(tree, value.body, at, out, force, 0);
+    }
+    return;
+}
+
+/// Records the index at which a name was used: when force is set every
+/// recorded name takes the index; otherwise a name already kept past the
+/// block (above count) keeps that position.
+fn record_use(out: &var map::Map<[]u8, i64>, name: []u8, at: i64, force: bool, count: i64) -> !void {
+    if out.at_mut(name) |slot| {
+        if !force and slot.* > count {
+            return;
+        }
+        slot.* = at;
+        return;
+    }
+    return out.insert(name, at);
+}
+
+/// Collects identifier reads from one statement, the Go `stmtIdentUses`.
+fn stmt_ident_uses(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    at: i64,
+    out: &var map::Map<[]u8, i64>,
+    force: bool,
+    count: i64
+) -> !void {
+    match tree.statements.at(statement.node) {
+        Let(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
+        Assign(value) => {
+            try expr_ident_uses(tree, value.value, at, out, force, count);
+            return expr_ident_uses(tree, value.target, at, out, force, count);
+        },
+        Return(value) => {
+            if value.value |returned| {
+                return expr_ident_uses(tree, returned, at, out, force, count);
+            }
+            return;
+        },
+        Defer(value) => return expr_ident_uses(tree, value.expr, at, out, force, count),
+        ErrDefer(value) => return expr_ident_uses(tree, value.expr, at, out, force, count),
+        Expr(value) => return expr_ident_uses(tree, value.expr, at, out, force, count),
+        If(value) => {
+            try expr_ident_uses(tree, value.condition, at, out, force, count);
+            try block_ident_uses(tree, value.consequence, at, out, force, count);
+            if value.alternative |alternative| {
+                return block_ident_uses(tree, alternative, at, out, force, count);
+            }
+            return;
+        },
+        While(value) => {
+            try expr_ident_uses(tree, value.condition, at, out, force, count);
+            return block_ident_uses(tree, value.body, at, out, force, count);
+        },
+        For(value) => {
+            try expr_ident_uses(tree, value.start, at, out, force, count);
+            try expr_ident_uses(tree, value.end, at, out, force, count);
+            return block_ident_uses(tree, value.body, at, out, force, count);
+        },
+        Match(value) => {
+            try expr_ident_uses(tree, value.value, at, out, force, count);
+            var index = 0;
+            while value.arms.get(index) |arm| {
+                try stmt_ident_uses(tree, arm.body, at, out, force, count);
+                index = index + 1;
+            }
+            return;
+        },
+        ComptimeIf(value) => {
+            try expr_ident_uses(tree, value.condition, at, out, force, count);
+            try block_ident_uses(tree, value.consequence, at, out, force, count);
+            if value.alternative |alternative| {
+                return block_ident_uses(tree, alternative, at, out, force, count);
+            }
+            return;
+        },
+        _ => return,
+    }
+}
+
+/// Collects identifier reads inside a nested block, the Go `blockIdentUses`.
+fn block_ident_uses(
+    tree: &ast::Ast,
+    block: ast::Block,
+    at: i64,
+    out: &var map::Map<[]u8, i64>,
+    force: bool,
+    count: i64
+) -> !void {
+    var index = 0;
+    while block_statement_at(tree, block, index) |statement| {
+        try stmt_ident_uses(tree, statement, at, out, force, count);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Collects identifier reads from an expression, the Go `exprIdentUses`.
+fn expr_ident_uses(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    at: i64,
+    out: &var map::Map<[]u8, i64>,
+    force: bool,
+    count: i64
+) -> !void {
+    if transparent_expr_value(tree, expression) |inner| {
+        return expr_ident_uses(tree, inner, at, out, force, count);
+    }
+    match tree.expressions.at(expression.node) {
+        Ident(value) => {
+            let retained = tree.texts.at(value.name.node);
+            let bytes = retained.as_bytes();
+            return record_use(out, bytes, at, force, count);
+        },
+        Binary(value) => {
+            try expr_ident_uses(tree, value.left, at, out, force, count);
+            return expr_ident_uses(tree, value.right, at, out, force, count);
+        },
+        Call(value) => {
+            try expr_ident_uses(tree, value.callee, at, out, force, count);
+            let args = tree.expression_lists.at(value.args.node);
+            var index = 0;
+            while args.get(index) |arg| {
+                try expr_ident_uses(tree, arg, at, out, force, count);
+                index = index + 1;
+            }
+            return;
+        },
+        Cast(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
+        Try(value) => return expr_ident_uses(tree, value.value, at, out, force, count),
+        StructLiteral(value) => {
+            var index = 0;
+            while value.fields.get(index) |field| {
+                try expr_ident_uses(tree, field.value, at, out, force, count);
+                index = index + 1;
+            }
+            return;
+        },
+        Field(value) => return expr_ident_uses(tree, value.receiver, at, out, force, count),
+        Deref(value) => return expr_ident_uses(tree, value.receiver, at, out, force, count),
+        Index(value) => {
+            try expr_ident_uses(tree, value.target, at, out, force, count);
+            if value.index |present| {
+                try expr_ident_uses(tree, present, at, out, force, count);
+            }
+            if value.start |present| {
+                try expr_ident_uses(tree, present, at, out, force, count);
+            }
+            if value.end |present| {
+                return expr_ident_uses(tree, present, at, out, force, count);
+            }
+            return;
+        },
+        Comptime(value) => return expr_ident_uses(tree, value.expr, at, out, force, count),
+        _ => return,
+    }
+}
+
+/// Ends local borrows whose binding is no longer used, the Go
+/// `releaseLastUseBorrows`. A binding that is itself still borrowed keeps its
+/// own sources active: the chain buffer <- view <- allocator <- owner releases
+/// from the leaf inward, each release re-examining only the bindings it just
+/// unblocked.
+fn (self: &var Checker) release_last_use_borrows(
+    env: ScopeHandle,
+    statement_index: i64,
+    last_uses: &map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while self.store.scope_value_at(env, index) |value| {
+        try self.release_if_unused(env, value, statement_index, last_uses);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Releases one binding's borrow targets once it is past its last use and
+/// nothing borrows it, then retries the targets that release may have
+/// unblocked, the Go `releaseIfUnused`.
+fn (self: &var Checker) release_if_unused(
+    env: ScopeHandle,
+    value: BindingHandle,
+    statement_index: i64,
+    last_uses: &map::Map<[]u8, i64>
+) -> !void {
+    if !self.has_borrow_targets(value) {
+        return;
+    }
+    if self.last_use_of(value, last_uses) |last| {
+        if last > statement_index {
+            return;
+        }
+    }
+    if self.store.has_any_borrow(value) {
+        return;
+    }
+    try self.release_borrow(value);
+    var targets = array::new<BorrowSource>(self.allocator);
+    defer targets.deinit();
+    try self.take_borrow_targets(value, &var targets);
+    var index = 0;
+    while targets.get(index) |source| {
+        index = index + 1;
+        let held = self.lookup_local_name(env, self.binding(source.target).name) orelse continue;
+        if held.node == source.target.node {
+            try self.release_if_unused(env, held, statement_index, last_uses);
+        }
+    }
+    return;
+}
+
+/// Reads the last-use statement index recorded for a binding's name.
+fn (self: &Checker) last_use_of(value: BindingHandle, last_uses: &map::Map<[]u8, i64>) -> ?i64 {
+    let retained = name_text(&self.names, self.binding(value).name);
+    let bytes = retained.as_bytes();
+    return last_uses.get(bytes);
+}
+
+/// Moves a binding's borrow targets out, leaving it with none, the Go
+/// `targets := value.borrowTargets; value.borrowTargets = nil`.
+fn (self: &var Checker) take_borrow_targets(value: BindingHandle, out: &var array::Array<BorrowSource>) -> !void {
+    if self.store.binding_mut(value) |record| {
+        while record.borrow_targets.pop() |source| {
+            try out.append(source);
+        }
+    }
+    return;
+}
