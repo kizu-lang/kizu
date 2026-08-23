@@ -1,35 +1,1242 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::stdprim;
+import compiler::internal::typ;
+import std::array;
+import std::mem;
 
-// STUB: port of the call half of internal/ir/lower.go pending.
+// Mechanical port of the call half of internal/ir/lower.go: call dispatch,
+// the raw pointer builtins, named and generic calls, the std storage
+// constructors, `try`, method calls and their receivers, and the runtime
+// primitives the std container wrappers forward to. The Go primitive tables
+// (`arrayPrimitives` .. `arenaPrimitives`) are pure lookup functions here
+// that map a `std::internal::builtin` name straight to the Op it lowers as,
+// so the method spelling Go switches on is the Op itself.
 
-fn (self: &var Lowerer) lower_call_expr(tree: &var ast::Ast, call: ast::CallExpr, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_call_expr");
+/// Lowers builtin, user, and method calls, the Go `lowerCallExpr`.
+fn (self: &var Lowerer) lower_call_expr(
+    tree: &var ast::Ast,
+    call: ast::CallExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::field_expr(tree, call.callee) |field| {
+        if field.namespace {
+            var handled = false;
+            if try self.lower_union_constructor(tree, field, call.args, out, &var handled) |failed| {
+                return move failed;
+            }
+            if handled {
+                return null;
+            }
+        }
+    }
+    if ownership::type_apply_expr(tree, call.callee) |type_apply| {
+        return self.lower_type_apply_call(tree, call.callee, type_apply, call.args, out);
+    }
+    var ptr_handled = false;
+    if try self.lower_ptr_builtin_call(tree, call, out, &var ptr_handled) |failed| {
+        return move failed;
+    }
+    if ptr_handled {
+        return null;
+    }
+    if try self.function_callee_name(tree, call.callee) |name| {
+        return self.lower_named_call_expr(tree, name, call.args, out);
+    }
+    if ownership::field_expr(tree, call.callee) |field| {
+        if !field.namespace {
+            return self.lower_method_call_expr(tree, field, call.args, out);
+        }
+    }
+    let rendered = try self.expression_name(tree, call.callee);
+    return try self.fail1(tree, "ir error: unsupported callee `%s`", Arg::Str(rendered));
 }
 
+/// Resolves direct and namespace-qualified function names, the Go
+/// `functionCalleeName`; null for a callee that is neither.
 fn (self: &var Lowerer) function_callee_name(tree: &var ast::Ast, callee: ast::Expression) -> !?Name {
+    if ownership::ident_expr(tree, callee) |ident| {
+        return try self.text_name(tree, ident.name);
+    }
+    let field = ownership::field_expr(tree, callee) orelse return null;
+    if !field.namespace {
+        return null;
+    }
+    let qualified = try self.expression_name(tree, callee);
+    if self.has_signature(qualified) {
+        return qualified;
+    }
+    let retained = name_text(&self.module.names, qualified);
+    let bytes = retained.as_bytes();
+    if stdprim::simple_core_signature(bytes) |_| {
+        return qualified;
+    }
+    if runtime_builtin_return_type(bytes) |_| {
+        return qualified;
+    }
+    if array_primitive(bytes) |_| {
+        return qualified;
+    }
+    if map_primitive(bytes) |_| {
+        return qualified;
+    }
+    if box_primitive(bytes) |_| {
+        return qualified;
+    }
+    if arena_primitive(bytes) |_| {
+        return qualified;
+    }
     return null;
 }
 
-fn (self: &var Lowerer) lower_try_expr(tree: &var ast::Ast, expression: ast::Expression, attempt: ast::TryExpr, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_try_expr");
+/// Lowers calls whose callee carries a static argument list, the Go
+/// `lowerTypeApplyCall`. The std storage constructors lower to one
+/// instruction each, so their std bodies are never walked. Every other
+/// generic call resolves by name. callee is the type-apply expression
+/// itself, rendered for the failure.
+fn (self: &var Lowerer) lower_type_apply_call(
+    tree: &var ast::Ast,
+    callee: ast::Expression,
+    type_apply: ast::TypeApplyExpr,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let callee_name = try self.expression_name(tree, type_apply.callee);
+    let type_arg = try self.text_name(tree, type_apply.type_arg);
+    // The element type is resolved before it is handed over: it becomes the
+    // instruction's immediate, which is what every backend measures the
+    // element by, and a spelling that still names a type parameter or a
+    // `std::meta` form measures the wrong thing.
+    if self.name_is(callee_name, "std::arena::new") {
+        let elem = try self.resolve_bound_type(type_arg);
+        return self.lower_arena_constructor(tree, elem, args, out);
+    }
+    if self.name_is(callee_name, "std::array::new") {
+        let elem = try self.resolve_bound_type(type_arg);
+        return self.lower_array_constructor(tree, elem, args, out);
+    }
+    if self.name_is(callee_name, "std::map::new") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_map_constructor(tree, resolved, args, out);
+    }
+    if self.name_is(callee_name, "ptr_from_int") or self.name_is(callee_name, "int_from_ptr") {
+        return self.lower_ptr_int_cast(tree, type_arg, args, out);
+    }
+    var handled = false;
+    if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    if try self.function_callee_name(tree, type_apply.callee) |name| {
+        return self.lower_typed_named_call_expr(tree, name, type_arg, args, out);
+    }
+    let rendered = try self.expression_name(tree, callee);
+    return try self.fail1(tree, "ir error: unsupported callee `%s`", Arg::Str(rendered));
+}
+
+/// Lowers the raw pointer builtins ptr_read, ptr_write, volatile_read, and
+/// volatile_write, the Go `lowerPtrBuiltinCall`; handled reports whether the
+/// callee was one of them. The plain pair are call spellings of the deref
+/// the checker already proved, so they lower to the same load and store the
+/// explicit `p.*` forms use. The volatile pair carries its own ops: a
+/// volatile access is an effect, not a value read, so no pass may drop or
+/// merge one.
+fn (self: &var Lowerer) lower_ptr_builtin_call(
+    tree: &var ast::Ast,
+    call: ast::CallExpr,
+    out: &var Value,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let ident = ownership::ident_expr(tree, call.callee) orelse return null;
+    if text_is(tree, ident.name, "ptr_read") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        return self.lower_ptr_load(tree, name, Op::RefLoad, call.args, out);
+    }
+    if text_is(tree, ident.name, "ptr_write") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        return self.lower_ptr_store(tree, name, Op::RefStore, call.args, out);
+    }
+    if text_is(tree, ident.name, "volatile_read") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        return self.lower_ptr_load(tree, name, Op::VolatileLoad, call.args, out);
+    }
+    if text_is(tree, ident.name, "volatile_write") {
+        handled.* = true;
+        let name = try self.text_name(tree, ident.name);
+        return self.lower_ptr_store(tree, name, Op::VolatileStore, call.args, out);
+    }
+    return null;
+}
+
+/// Lowers a raw pointer read builtin to op, the Go `lowerPtrLoad`.
+fn (self: &var Lowerer) lower_ptr_load(
+    tree: &var ast::Ast,
+    name: Name,
+    op: Op,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail1(tree, "ir error: %s expects 1 arg", Arg::Str(name));
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var pointer = empty_value();
+    if try self.lower_expr(tree, first, &var pointer) |failed| {
+        return move failed;
+    }
+    let elem = try self.raw_pointer_elem(pointer.type_name) orelse return try self.fail2(
+        tree, "ir error: %s expects raw pointer, got %s", Arg::Str(name), Arg::Str(pointer.type_name)
+    );
+    out.* = try self.emit1(op, elem, pointer);
+    return null;
+}
+
+/// Lowers a raw pointer write builtin to op, the Go `lowerPtrStore`.
+fn (self: &var Lowerer) lower_ptr_store(
+    tree: &var ast::Ast,
+    name: Name,
+    op: Op,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 2 {
+        return try self.fail1(tree, "ir error: %s expects 2 args", Arg::Str(name));
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var pointer = empty_value();
+    if try self.lower_expr(tree, first, &var pointer) |failed| {
+        return move failed;
+    }
+    let elem = try self.raw_pointer_elem(pointer.type_name) orelse return try self.fail2(
+        tree, "ir error: %s expects raw pointer, got %s", Arg::Str(name), Arg::Str(pointer.type_name)
+    );
+    let second = ownership::arg_at(tree, args, 1) orelse return null;
+    var value = empty_value();
+    if try self.lower_contextual_expr(tree, second, elem, &var value) |failed| {
+        return move failed;
+    }
+    out.* = try self.emit2(op, self.common.void_type, pointer, value);
+    return null;
+}
+
+/// Lowers ptr_from_int<ptr<T>>(v) and int_from_ptr<usize>(p), the Go
+/// `lowerPtrIntCast`. Both are casts the checker proved; the backend reads
+/// the operand and result types to pick the conversion.
+fn (self: &var Lowerer) lower_ptr_int_cast(
+    tree: &var ast::Ast,
+    target: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail0("ir error: pointer-integer cast expects 1 arg");
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var value = empty_value();
+    if try self.lower_expr(tree, first, &var value) |failed| {
+        return move failed;
+    }
+    out.* = try self.emit_imm1(Op::Cast, target, target, value);
+    return null;
+}
+
+/// Lowers builtins and resolved function calls, the Go `lowerNamedCallExpr`.
+fn (self: &var Lowerer) lower_named_call_expr(
+    tree: &var ast::Ast,
+    name: Name,
+    raw_args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit();
+    if try self.lower_call_args(tree, name, raw_args, &var args) |failed| {
+        return move failed;
+    }
+    if self.name_is(name, "std::internal::builtin::mem_len") {
+        if args.len() != 1 {
+            return try self.fail0("ir error: std::internal::builtin::mem_len expects 1 arg");
+        }
+        out.* = try self.emit_with(Op::SliceLen, empty_name(), self.common.i64_type, empty_name(), &args);
+        return null;
+    }
+    if self.name_is(name, "std::internal::builtin::test_fail") {
+        out.* = try self.emit_with(Op::TestFail, empty_name(), self.common.void_type, empty_name(), &args);
+        return null;
+    }
+    if self.name_is(name, "std::internal::builtin::panic") {
+        out.* = try self.emit_with(Op::PanicFail, empty_name(), self.common.void_type, empty_name(), &args);
+        return null;
+    }
+    var ret = self.common.void_type;
+    if self.signature_named(name) |signature| {
+        ret = self.signature_return(signature);
+    } else {
+        let name_copy = try self.module.names.copy(name);
+        defer name_copy.deinit();
+        let bytes = name_copy.as_bytes();
+        if stdprim::simple_core_signature(bytes) |core| {
+            ret = try self.name(core.return_type);
+        } else {
+            if runtime_builtin_return_type(bytes) |builtin_return| {
+                ret = try self.name(builtin_return);
+            }
+        }
+    }
+    var symbol = name;
+    if self.extern_symbol(name) |linked| {
+        symbol = linked;
+    }
+    out.* = try self.emit_with(Op::Call, symbol, ret, empty_name(), &args);
+    return null;
+}
+
+/// Returns the C symbol an extern "c" callee links to, the Go
+/// `l.externSymbols[name]`, or null for a Kizu callee.
+fn (self: &Lowerer) extern_symbol(name: Name) -> ?Name {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return self.extern_symbols.get(bytes);
+}
+
+/// Lowers the small typed-call subset with backend support, the Go
+/// `lowerTypedNamedCallExpr`.
+fn (self: &var Lowerer) lower_typed_named_call_expr(
+    tree: &var ast::Ast,
+    name: Name,
+    type_arg: Name,
+    raw_args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var handled = false;
+    if try self.lower_typed_container_primitive(tree, name, type_arg, raw_args, out, &var handled) |failed| {
+        return move failed;
+    }
+    if handled {
+        return null;
+    }
+    // expect_equal lowers to its own instruction, so its std wrapper body is
+    // never called. Its arguments still arrive at the types that wrapper
+    // declares, which is what makes `expect_equal<u8>(65, byte)` compare
+    // bytes.
+    if self.name_is(name, "std::testing::expect_equal") {
+        var params = no_params();
+        if try self.declared_instance_params(tree, name, type_arg, &var params) |failed| {
+            return move failed;
+        }
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit();
+        if try self.lower_call_args_as(tree, params, raw_args, &var args) |failed| {
+            return move failed;
+        }
+        if args.len() != 2 {
+            return try self.fail0("ir error: std::testing::expect_equal expects 2 args");
+        }
+        let first = args.get_or_panic(0);
+        let second = args.get_or_panic(1);
+        if !same_name(first.type_name, second.type_name) {
+            return try self.fail2(
+                tree,
+                "ir error: std::testing::expect_equal expects matching arg types, got %s and %s",
+                Arg::Str(first.type_name),
+                Arg::Str(second.type_name)
+            );
+        }
+        out.* = try self.emit_with(Op::TestExpectEqual, empty_name(), self.common.void_type, type_arg, &args);
+        return null;
+    }
+    var instance = self.blank_instance();
+    if try self.request_generic_instance(tree, name, type_arg, &var instance) |failed| {
+        return move failed;
+    }
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit();
+    if try self.lower_call_args_as(tree, params_of(instance.signature), raw_args, &var args) |failed| {
+        return move failed;
+    }
+    let return_type = self.signature_return(instance.signature);
+    out.* = try self.emit_with(Op::Call, instance.symbol, return_type, empty_name(), &args);
+    return null;
+}
+
+/// Returns a signature handle for a result slot to hold until a resolver
+/// writes it: the lowerer keeps no scratch signature, so one empty record
+/// is retained per slot.
+fn (self: &var Lowerer) scratch_signature() -> SignatureHandle {
+    let node = self.signature_nodes.add(Signature {
+        params: array::new<Param>(self.allocator),
+        return_type: empty_name()
+    });
+    return SignatureHandle { node: node };
+}
+
+/// Returns the record `request_generic_instance` fills.
+fn (self: &var Lowerer) blank_instance() -> ResolvedInstance {
+    return ResolvedInstance { symbol: empty_name(), signature: self.scratch_signature() };
+}
+
+/// Lowers private storage operations whose static element type is carried
+/// as an instruction immediate, the Go `lowerTypedContainerPrimitive`;
+/// handled reports whether name was one.
+fn (self: &var Lowerer) lower_typed_container_primitive(
+    tree: &var ast::Ast,
+    name: Name,
+    type_arg: Name,
+    raw_args: ast::ExpressionList,
+    out: &var Value,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    let array_op = array_primitive(bytes);
+    let map_op = map_primitive(bytes);
+    let box_op = box_primitive(bytes);
+    let arena_op = arena_primitive(bytes);
+    // A container primitive carries its element type as an immediate the
+    // backend reads, so the call itself declares no parameter types to hand
+    // over.
+    if array_op |op| {
+        handled.* = true;
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit();
+        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+            return move failed;
+        }
+        let elem = try self.resolve_bound_type(type_arg);
+        return self.lower_array_method(tree, op, elem, &args, out);
+    }
+    if map_op |op| {
+        handled.* = true;
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit();
+        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+            return move failed;
+        }
+        let resolved = try self.resolve_type_args(type_arg);
+        let value_type = try self.map_primitive_value_type(resolved);
+        return self.lower_map_method(tree, op, value_type, &args, out);
+    }
+    if box_op |op| {
+        handled.* = true;
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit();
+        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+            return move failed;
+        }
+        let elem = try self.resolve_bound_type(type_arg);
+        return self.lower_box_method(tree, op, elem, &args, out);
+    }
+    if arena_op |op| {
+        handled.* = true;
+        var args = array::new<Value>(self.allocator);
+        defer args.deinit();
+        if try self.lower_call_args_as(tree, no_params(), raw_args, &var args) |failed| {
+            return move failed;
+        }
+        let elem = try self.resolve_bound_type(type_arg);
+        return self.lower_arena_primitive(tree, op, elem, &args, out);
+    }
+    return null;
+}
+
+/// Lowers std::arena::new<T>(allocator), the Go `lowerArenaConstructor`.
+fn (self: &var Lowerer) lower_arena_constructor(
+    tree: &var ast::Ast,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail1(
+            tree, "ir error: std::arena::new<%s> expects exactly one allocator argument", Arg::Str(type_arg)
+        );
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var allocator = empty_value();
+    if try self.lower_expr(tree, first, &var allocator) |failed| {
+        return move failed;
+    }
+    let arena_type = try self.module.names.wrapped("std::arena::Arena<", type_arg, ">");
+    out.* = try self.emit_imm1(Op::ArenaNew, arena_type, type_arg, allocator);
+    return null;
+}
+
+/// Lowers std::array::new<T>(allocator), the Go `lowerArrayConstructor`.
+fn (self: &var Lowerer) lower_array_constructor(
+    tree: &var ast::Ast,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail1(
+            tree, "ir error: std::array::Array<%s> expects exactly one allocator argument", Arg::Str(type_arg)
+        );
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var allocator = empty_value();
+    if try self.lower_expr(tree, first, &var allocator) |failed| {
+        return move failed;
+    }
+    let array_type = try self.module.names.wrapped("std::array::Array<", type_arg, ">");
+    out.* = try self.emit_imm1(Op::ArrayNew, array_type, type_arg, allocator);
+    return null;
+}
+
+/// Lowers std::map::new<[]u8, V>(allocator), the Go `lowerMapConstructor`.
+fn (self: &var Lowerer) lower_map_constructor(
+    tree: &var ast::Ast,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var value_type = empty_name();
+    let map_type = try self.map_instance_type(type_arg, &var value_type) orelse return try self.fail0(
+        "ir error: std::map::Map only supports []u8 keys"
+    );
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail1(tree, "ir error: %s expects exactly one allocator argument", Arg::Str(map_type));
+    }
+    let first = ownership::arg_at(tree, args, 0) orelse return null;
+    var allocator = empty_value();
+    if try self.lower_expr(tree, first, &var allocator) |failed| {
+        return move failed;
+    }
+    out.* = try self.emit_imm1(Op::MapNew, map_type, value_type, allocator);
+    return null;
+}
+
+/// Lowers error-union propagation as an explicit IR instruction, the Go
+/// `lowerTryExpr`; expression is the `try` node itself, which the ownership
+/// checker keyed its retired errdefers by.
+fn (self: &var Lowerer) lower_try_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    attempt: ast::TryExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var value = empty_value();
+    if try self.lower_expr(tree, attempt.value, &var value) |failed| {
+        return move failed;
+    }
+    // The attached cleanups run at this same program point, so a slot-backed
+    // receiver is loaded here: Cleanup args are always values, never `&var`
+    // slots, and no backend has to re-derive that rule.
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit();
+    try self.error_cleanups(&var cleanups);
+    try self.retire_cleanups_for_try(expression, &var cleanups);
+    var index = 0;
+    while index < cleanups.len() {
+        if cleanups.at_mut(index) |slot| {
+            slot.arg = try self.load_cleanup_arg(slot.arg);
+        }
+        index = index + 1;
+    }
+    let success = try self.error_union_element_type(value.type_name);
+    let result = try self.emit1(Op::ErrorTry, success, value);
+    if self.last_instr() |instr| {
+        index = 0;
+        while cleanups.get(index) |cleanup| {
+            index = index + 1;
+            try self.module.add_cleanup(instr, cleanup);
+        }
+    }
+    out.* = result;
+    return null;
+}
+
+/// Lowers a method call's receiver, the Go `lowerMethodReceiver`. A `&var
+/// self` method on a one-level field path receives the field's own storage,
+/// projected out of the owner's; every other receiver keeps the
+/// slot-or-value shape lower_receiver_address picks. The method is resolved
+/// from the receiver's declared type before anything is emitted, so choosing
+/// the projection never leaves a dead read behind.
+fn (self: &var Lowerer) lower_method_receiver(
+    tree: &var ast::Ast,
+    field: ast::FieldExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let receiver_type = try self.assign_target_type(tree, field.receiver);
+    if !is_empty(receiver_type) {
+        let method = try self.text_name(tree, field.name);
+        if try self.method_takes_self_storage(receiver_type, method) {
+            if try self.lower_field_storage(tree, field.receiver) |storage| {
+                out.* = storage;
+                return null;
+            }
+        }
+    }
+    return self.lower_receiver_address(tree, field.receiver, out);
+}
+
+/// Lowers receiver method calls, the Go `lowerMethodCallExpr`.
+fn (self: &var Lowerer) lower_method_call_expr(
+    tree: &var ast::Ast,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var receiver = empty_value();
+    if try self.lower_method_receiver(tree, field, &var receiver) |failed| {
+        return move failed;
+    }
+    let method = try self.text_name(tree, field.name);
+    // A method that declares `&var self` receives the receiver's storage;
+    // every other method receives the value, so a receiver arriving as a
+    // borrow is loaded for it. `&T` reaches here from a borrow optional's
+    // capture (`array.at(i) |elem|`), which holds a real address; a `&T`
+    // parameter is already erased to its value by the time it is a receiver.
+    let wants_storage = try self.method_takes_self_storage(receiver.type_name, method);
+    if self.is_reference_type(receiver.type_name) and !wants_storage {
+        let elem = try self.deref_type(receiver.type_name);
+        receiver = try self.emit1(Op::RefLoad, elem, receiver);
+    }
+    if wants_storage and !self.is_mutable_reference_type(receiver.type_name) {
+        let rendered = try self.expression_name(tree, field.receiver);
+        return try self.fail2(
+            tree,
+            "ir error: method `%s` takes `&var self`, receiver `%s` has no storage",
+            Arg::Str(method),
+            Arg::Str(rendered)
+        );
+    }
+    if self.is_buffer_ir_type(receiver.type_name) {
+        return self.lower_buffer_method(tree, method, receiver, args, out);
+    }
+    var params = no_params();
+    if try self.method_callee_params(tree, receiver.type_name, method, &var params) |failed| {
+        return move failed;
+    }
+    var lowered = array::new<Value>(self.allocator);
+    defer lowered.deinit();
+    if try self.lower_call_args_as(tree, params, args, &var lowered) |failed| {
+        return move failed;
+    }
+    var all_args = array::new<Value>(self.allocator);
+    defer all_args.deinit();
+    try all_args.append(receiver);
+    var index = 0;
+    while lowered.get(index) |arg| {
+        index = index + 1;
+        try all_args.append(arg);
+    }
+    return self.lower_resolved_method(tree, receiver.type_name, method, &all_args, out);
+}
+
+/// Dispatches a checked receiver to its std wrapper, declared
+/// implementation, or compiler-known arena operation, the Go
+/// `lowerResolvedMethod`.
+fn (self: &var Lowerer) lower_resolved_method(
+    tree: &var ast::Ast,
+    receiver_type: Name,
+    method: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if try self.array_element_type(receiver_type) |elem| {
+        return self.lower_std_container_method(tree, "std::array::Array", method, elem, args, out);
+    }
+    if try self.map_value_type(receiver_type) |value_type| {
+        return self.lower_std_container_method(tree, "std::map::Map", method, value_type, args, out);
+    }
+    if try self.box_element_type(receiver_type) |elem| {
+        return self.lower_std_container_method(tree, "std::mem::Box", method, elem, args, out);
+    }
+    let elem = try self.arena_element_type(receiver_type);
+    let cleanup = typ::cleanup_method();
+    if !same_name(elem, self.common.unknown) and self.name_is(method, cleanup) {
+        if self.is_owner_type(elem) {
+            return self.lower_std_container_method(tree, "std::arena::Arena", method, elem, args, out);
+        }
+        return self.lower_arena_method(tree, method, receiver_type, args, out);
+    }
+    if try self.impl_method_callee_name(receiver_type, method) |method_name| {
+        return self.lower_impl_method_call(tree, method_name, args, out);
+    }
+    return self.lower_arena_method(tree, method, receiver_type, args, out);
+}
+
+/// Lowers the compiler-known arena methods, the Go `lowerArenaMethod`.
+fn (self: &var Lowerer) lower_arena_method(
+    tree: &var ast::Ast,
+    name: Name,
+    receiver_type: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if self.name_is(name, "add") {
+        let handle = try self.handle_type(receiver_type);
+        out.* = try self.emit_with(Op::ArenaAdd, empty_name(), handle, empty_name(), args);
+        return null;
+    }
+    if self.name_is(name, "at") {
+        let elem = try self.arena_element_type(receiver_type);
+        let result_type = try self.borrow_ir_type(elem, false);
+        out.* = try self.emit_with(Op::ArenaAt, empty_name(), result_type, empty_name(), args);
+        return null;
+    }
+    if self.name_is(name, "at_mut") {
+        let elem = try self.arena_element_type(receiver_type);
+        let result_type = try self.module.names.prefixed("?&var ", elem);
+        out.* = try self.emit_with(Op::ArenaAtMut, empty_name(), result_type, empty_name(), args);
+        return null;
+    }
+    if self.name_is(name, "deinit") {
+        out.* = try self.emit_with(Op::ArenaDeinit, empty_name(), self.common.void_type, empty_name(), args);
+        return null;
+    }
+    return try self.fail1(tree, "ir error: unknown method `%s`", Arg::Str(name));
+}
+
+/// Lowers stack buffer view methods (ADR-0097), the Go `lowerBufferMethod`.
+/// Both view forms hand back the same {ptr, len} value; mutability is a
+/// checker-level permission, not a runtime representation.
+fn (self: &var Lowerer) lower_buffer_method(
+    tree: &var ast::Ast,
+    name: Name,
+    receiver: Value,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if self.name_is(name, "as_bytes") or self.name_is(name, "as_mut_bytes") {
+        if ownership::arg_count(tree, args) != 0 {
+            return try self.fail1(tree, "ir error: buffer `%s` expects 0 args", Arg::Str(name));
+        }
+        out.* = try self.emit1(Op::BufferAsBytes, self.common.bytes_type, receiver);
+        return null;
+    }
+    return try self.fail1(tree, "ir error: unknown buffer method `%s`", Arg::Str(name));
+}
+
+/// Returns the parameters a method call's callee declares after self, the
+/// Go `methodCalleeParams`, so each argument is handed over at the type the
+/// callee receives it as. out keeps no params when the lowerer cannot name
+/// them from the receiver alone, and those arguments keep the types they
+/// carry themselves.
+fn (self: &var Lowerer) method_callee_params(
+    tree: &var ast::Ast,
+    receiver: Name,
+    method: Name,
+    out: &var ParamsView
+) -> !?diagnostic::Diagnostic {
+    if try self.array_element_type(receiver) |elem| {
+        return self.std_container_params(tree, "std::array::Array", method, elem, out);
+    }
+    if try self.map_value_type(receiver) |value_type| {
+        return self.std_container_params(tree, "std::map::Map", method, value_type, out);
+    }
+    if try self.box_element_type(receiver) |elem| {
+        return self.std_container_params(tree, "std::mem::Box", method, elem, out);
+    }
+    if try self.impl_method_callee_name(receiver, method) |name| {
+        if self.signature_named(name) |signature| {
+            out.* = params_after_self(signature);
+        }
+    }
+    return null;
+}
+
+/// Returns the parameters std declares for one container method at this
+/// element type, the Go `stdContainerParams`.
+fn (self: &var Lowerer) std_container_params(
+    tree: &var ast::Ast,
+    receiver: []u8,
+    method: Name,
+    type_arg: Name,
+    out: &var ParamsView
+) -> !?diagnostic::Diagnostic {
+    let symbol = try self.std_method_name(receiver, method);
+    var instance = self.blank_instance();
+    if try self.request_generic_instance(tree, symbol, type_arg, &var instance) |failed| {
+        return move failed;
+    }
+    out.* = params_after_self(instance.signature);
+    return null;
+}
+
+/// Names the declaration one receiver method is, the Go
+/// `stdmethod.MethodName(receiver, method)`.
+fn (self: &var Lowerer) std_method_name(receiver: []u8, method: Name) -> !Name {
+    let receiver_name = try self.name(receiver);
+    return self.module.names.joined(receiver_name, ".", method);
+}
+
+/// Runs the wrapper std declares for a container method, the Go
+/// `lowerStdContainerMethod`, so the body in std/src/*/*.kizu is what the
+/// call does rather than a description of it. There is no second answer to
+/// fall back on: a lookup that stops finding the declaration fails here,
+/// instead of quietly lowering to an instruction the lowerer picked out of a
+/// list of its own.
+fn (self: &var Lowerer) lower_std_container_method(
+    tree: &var ast::Ast,
+    receiver: []u8,
+    method: Name,
+    type_arg: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var resolved = ContainerCallOp { symbol: empty_name(), signature: self.scratch_signature() };
+    if try self.std_container_call_op(tree, receiver, method, type_arg, &var resolved) |failed| {
+        return move failed;
+    }
+    let return_type = self.signature_return(resolved.signature);
+    out.* = try self.emit_with(Op::Call, resolved.symbol, return_type, empty_name(), args);
+    return null;
 }
 
 /// Is the call op of one std container method instance and its signature,
-/// the Go `(string, Signature)` pair `stdContainerCallOp` returns.
+/// the Go `(string, Signature)` pair `stdContainerCallOp` returns: symbol is
+/// what `call.<symbol>` carries.
 pub struct ContainerCallOp {
     pub symbol: Name,
     pub signature: SignatureHandle
 }
 
-fn (self: &var Lowerer) std_container_call_op(tree: &var ast::Ast, receiver: []u8, method: Name, type_arg: Name, out: &var ContainerCallOp) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported std_container_call_op");
-}
-
-fn (self: &var Lowerer) impl_method_callee_name(receiver: Name, method: Name) -> !?Name {
+/// Resolves one std container method to the call op of its generic
+/// instance, the Go `stdContainerCallOp` -- the one resolution direct calls
+/// and deferred cleanups share.
+fn (self: &var Lowerer) std_container_call_op(
+    tree: &var ast::Ast,
+    receiver: []u8,
+    method: Name,
+    type_arg: Name,
+    out: &var ContainerCallOp
+) -> !?diagnostic::Diagnostic {
+    let symbol = try self.std_method_name(receiver, method);
+    var instance = self.blank_instance();
+    if try self.request_generic_instance(tree, symbol, type_arg, &var instance) |failed| {
+        return move failed;
+    }
+    out.* = ContainerCallOp { symbol: instance.symbol, signature: instance.signature };
     return null;
 }
 
+/// Reports whether the method this receiver resolves declares `&var self`,
+/// the Go `methodTakesSelfStorage`, so the call passes storage instead of a
+/// loaded value.
 fn (self: &var Lowerer) method_takes_self_storage(receiver_type: Name, method: Name) -> !bool {
-    return false;
+    let name = try self.impl_method_callee_name(receiver_type, method) orelse return false;
+    let signature = self.signature_named(name) orelse return false;
+    let first = self.signature_param(signature, 0) orelse return false;
+    return first.passing == Passing::CallerStorage;
+}
+
+/// Resolves a checked receiver method to its lowered symbol, the Go
+/// `implMethodCalleeName`; null when no declaration has it.
+fn (self: &var Lowerer) impl_method_callee_name(receiver: Name, method: Name) -> !?Name {
+    let base = try self.deref_type(receiver);
+    let name = try self.module.names.joined(base, ".", method);
+    if self.has_signature(name) {
+        return name;
+    }
+    return null;
+}
+
+/// Lowers receiver.method(args) as Type.method(receiver, args), the Go
+/// `lowerImplMethodCall`.
+fn (self: &var Lowerer) lower_impl_method_call(
+    tree: &var ast::Ast,
+    name: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let signature = self.signature_named(name) orelse return try self.fail1(
+        tree, "ir error: unknown impl method `%s`", Arg::Str(name)
+    );
+    let return_type = self.signature_return(signature);
+    out.* = try self.emit_with(Op::Call, name, return_type, empty_name(), args);
+    return null;
+}
+
+/// Maps a std::internal::builtin Array primitive to the operation it lowers
+/// as, the Go `arrayPrimitives` table. std/src/array/array.kizu forwards
+/// each method to one of these, and lowering the forward is what makes that
+/// line the implementation rather than a description of one.
+fn array_primitive(name: []u8) -> ?Op {
+    if mem::equal_bytes(name, "std::internal::builtin::array_append") {
+        return Op::ArrayAppend;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_as_bytes") {
+        return Op::ArrayAsBytes;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_as_mut_bytes") {
+        // The same view value as as_bytes: mutability is a checker-level
+        // permission, not a different runtime representation (ADR-0096).
+        return Op::ArrayAsBytes;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_at") {
+        return Op::ArrayAt;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_at_mut") {
+        return Op::ArrayAtMut;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_capacity") {
+        return Op::ArrayCapacity;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_clear") {
+        return Op::ArrayClear;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_deinit") {
+        return Op::ArrayDeinit;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_get") {
+        return Op::ArrayGet;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_get_or_panic") {
+        return Op::ArrayGetOrPanic;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_len") {
+        return Op::ArrayLen;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_pop") {
+        return Op::ArrayPop;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_pop_or_panic") {
+        return Op::ArrayPopOrPanic;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_reserve") {
+        return Op::ArrayReserve;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_set") {
+        return Op::ArraySet;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_swap") {
+        return Op::ArraySwap;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::array_truncate") {
+        return Op::ArrayTruncate;
+    }
+    return null;
+}
+
+/// Maps a std::internal::builtin Map primitive to the operation it lowers
+/// as, the Go `mapPrimitives` table.
+fn map_primitive(name: []u8) -> ?Op {
+    if mem::equal_bytes(name, "std::internal::builtin::map_at") {
+        return Op::MapAt;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_at_mut") {
+        return Op::MapAtMut;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_contains") {
+        return Op::MapContains;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_deinit") {
+        return Op::MapDeinit;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_get") {
+        return Op::MapGet;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_insert") {
+        return Op::MapInsert;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_key_at") {
+        return Op::MapKeyAt;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_len") {
+        return Op::MapLen;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::map_take_value_at") {
+        return Op::MapTakeValueAt;
+    }
+    return null;
+}
+
+/// Maps a std::internal::builtin Box primitive to the operation it lowers
+/// as, the Go `boxPrimitives` table. std/src/mem/mem.kizu forwards the
+/// constructor and each method to one of these, reached the same way the
+/// Array and Map primitives are.
+fn box_primitive(name: []u8) -> ?Op {
+    if mem::equal_bytes(name, "std::internal::builtin::box") {
+        return Op::BoxNew;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_borrow") {
+        return Op::BoxBorrow;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_borrow_mut") {
+        return Op::BoxBorrowMut;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_deinit") {
+        return Op::BoxDeinit;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::box_take") {
+        return Op::BoxTake;
+    }
+    return null;
+}
+
+/// Maps the storage operations used only by std::arena's owner-element
+/// cleanup wrapper to their IR instructions, the Go `arenaPrimitives` table.
+fn arena_primitive(name: []u8) -> ?Op {
+    if mem::equal_bytes(name, "std::internal::builtin::arena_len") {
+        return Op::ArenaLen;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::arena_pop_or_panic") {
+        return Op::ArenaPopOrPanic;
+    }
+    if mem::equal_bytes(name, "std::internal::builtin::arena_deinit") {
+        return Op::ArenaDeinit;
+    }
+    return null;
+}
+
+/// Lowers the private storage operations std::arena uses to consume owner
+/// elements before releasing the arena itself, the Go `lowerArenaPrimitive`.
+fn (self: &var Lowerer) lower_arena_primitive(
+    tree: &var ast::Ast,
+    op: Op,
+    elem: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var result_type = empty_name();
+    match op {
+        ArenaLen => {
+            result_type = self.common.i64_type;
+        },
+        ArenaPopOrPanic => {
+            result_type = elem;
+        },
+        ArenaDeinit => {
+            result_type = self.common.void_type;
+        },
+        _ => {
+            let spelling = op_spelling(op);
+            let name = try self.name(spelling);
+            return try self.fail1(tree, "ir error: unknown arena primitive `%s`", Arg::Str(name));
+        },
+    }
+    out.* = try self.emit_with(op, empty_name(), result_type, elem, args);
+    return null;
+}
+
+/// Lowers the runtime primitive one std::mem::Box<T> wrapper forwards to,
+/// the Go `lowerBoxMethod`. Only a wrapper body in std/src/mem/mem.kizu
+/// reaches it.
+fn (self: &var Lowerer) lower_box_method(
+    tree: &var ast::Ast,
+    op: Op,
+    elem: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    match op {
+        BoxNew => {
+            if args.len() != 2 {
+                return try self.fail0("ir error: box.new expects allocator and value");
+            }
+            let box_type = try self.module.names.wrapped("!std::mem::Box<", elem, ">");
+            let value = try self.emit_with(op, empty_name(), box_type, elem, args);
+            let owner = args.get_or_panic(1);
+            return self.release_owner_on_failure(tree, value, owner, out);
+        },
+        BoxBorrow => {
+            // A returned borrow travels under the same rule any borrow return
+            // does: unions stay behind a pointer, everything else as a copy.
+            let spelling = try self.borrow_ir_type(elem, false);
+            out.* = try self.emit_with(op, empty_name(), spelling, elem, args);
+            return null;
+        },
+        BoxBorrowMut => {
+            let spelling = try self.borrow_ir_type(elem, true);
+            out.* = try self.emit_with(op, empty_name(), spelling, elem, args);
+            return null;
+        },
+        BoxDeinit => {
+            out.* = try self.emit_with(op, empty_name(), self.common.void_type, elem, args);
+            return null;
+        },
+        BoxTake => {
+            out.* = try self.emit_with(op, empty_name(), elem, elem, args);
+            return null;
+        },
+        _ => {
+            let spelling = op_spelling(op);
+            let name = try self.name(spelling);
+            return try self.fail1(tree, "ir error: unknown box method `%s`", Arg::Str(name));
+        },
+    }
+}
+
+/// Returns V from the `[]u8, V` static arguments a Map primitive is applied
+/// to, the Go `mapPrimitiveValueType`.
+fn (self: &var Lowerer) map_primitive_value_type(type_arg: Name) -> !Name {
+    var args = try self.split_static_args(type_arg);
+    defer args.deinit();
+    if args.len() != 2 {
+        return type_arg;
+    }
+    return args.get_or_panic(1);
+}
+
+/// Lowers the runtime primitive one std::map::Map<[]u8, V> method forwards
+/// to, the Go `lowerMapMethod`. Only a wrapper body in std/src/map/map.kizu
+/// reaches it: a `m.get(k)` call lowers as a call to that wrapper, and this
+/// is what the wrapper does.
+fn (self: &var Lowerer) lower_map_method(
+    tree: &var ast::Ast,
+    op: Op,
+    value_type: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var result_type = empty_name();
+    match op {
+        MapInsert => {
+            result_type = try self.name("!void");
+        },
+        MapGet => {
+            result_type = try self.module.names.prefixed("?", value_type);
+        },
+        MapAt => {
+            result_type = try self.module.names.prefixed("?&", value_type);
+        },
+        MapAtMut => {
+            result_type = try self.module.names.prefixed("?&var ", value_type);
+        },
+        MapTakeValueAt => {
+            result_type = value_type;
+        },
+        MapKeyAt => {
+            result_type = try self.name("?[]u8");
+        },
+        MapContains => {
+            result_type = self.common.bool_type;
+        },
+        MapLen => {
+            result_type = self.common.i64_type;
+        },
+        MapDeinit => {
+            result_type = self.common.void_type;
+        },
+        _ => {
+            let spelling = op_spelling(op);
+            let name = try self.name(spelling);
+            return try self.fail1(tree, "ir error: unknown map method `%s`", Arg::Str(name));
+        },
+    }
+    out.* = try self.emit_with(op, empty_name(), result_type, value_type, args);
+    return null;
+}
+
+/// Lowers the runtime primitive one std::array::Array<T> method forwards to,
+/// the Go `lowerArrayMethod`, reached the same way lower_map_method is. Only
+/// the methods whose result mentions the element type need to be spelled
+/// out here; the rest carry a fixed result type and go through
+/// array_method_result_type.
+fn (self: &var Lowerer) lower_array_method(
+    tree: &var ast::Ast,
+    op: Op,
+    elem: Name,
+    args: &array::Array<Value>,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if array_method_result_type(op) |result| {
+        let result_type = try self.name(result);
+        let value = try self.emit_with(op, empty_name(), result_type, elem, args);
+        if op == Op::ArrayAppend {
+            let owner = args.get_or_panic(1);
+            return self.release_owner_on_failure(tree, value, owner, out);
+        }
+        out.* = value;
+        return null;
+    }
+    var result_type = empty_name();
+    match op {
+        ArrayPop => {
+            result_type = try self.module.names.prefixed("?", elem);
+        },
+        ArrayPopOrPanic => {
+            result_type = elem;
+        },
+        ArrayGet => {
+            result_type = try self.module.names.prefixed("?", elem);
+        },
+        ArrayGetOrPanic => {
+            result_type = elem;
+        },
+        ArrayAt => {
+            result_type = try self.module.names.prefixed("?&", elem);
+        },
+        ArrayAtMut => {
+            result_type = try self.module.names.prefixed("?&var ", elem);
+        },
+        _ => {
+            let spelling = op_spelling(op);
+            let name = try self.name(spelling);
+            return try self.fail1(tree, "ir error: unknown array method `%s`", Arg::Str(name));
+        },
+    }
+    out.* = try self.emit_with(op, empty_name(), result_type, elem, args);
+    return null;
+}
+
+/// Gives the IR result type of the Array methods that do not hand back an
+/// element, the Go `arrayMethodResultType`, so their lowering is uniform. It
+/// is null for element-typed methods, which keeps unknown names on
+/// lower_array_method's error path rather than lowering them to an
+/// instruction.
+fn array_method_result_type(op: Op) -> ?[]u8 {
+    match op {
+        ArrayAppend => return "!void",
+        ArrayReserve => return "!void",
+        ArraySet => return "!void",
+        ArraySwap => return "!void",
+        ArrayTruncate => return "!void",
+        ArrayLen => return "i64",
+        ArrayCapacity => return "i64",
+        ArrayClear => return "void",
+        ArrayDeinit => return "void",
+        ArrayAsBytes => return "[]u8",
+        _ => return null,
+    }
+}
+
+/// Gives a fallible runtime primitive the cleanup it cannot run itself, the
+/// Go `releaseOwnerOnFailure`. The primitive takes an owner by value and
+/// stores it only after the allocation succeeds, so a failure leaves the
+/// value written nowhere while the caller has already moved it. The
+/// obligation is the callee's, and this is where the callee can meet it:
+/// the wrapper is generic and `T` is bound here, so the element's own
+/// cleanup resolves, while the runtime sees only bytes and a size and could
+/// never call it.
+///
+/// The wrap is `try` plus a re-wrap, so the primitive keeps the `!T` its
+/// wrapper returns and the error still leaves the wrapper as an error.
+fn (self: &var Lowerer) release_owner_on_failure(
+    tree: &var ast::Ast,
+    result: Value,
+    owner: Value,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if !self.is_owner_type(owner.type_name) {
+        out.* = result;
+        return null;
+    }
+    let cleanup_bytes = typ::cleanup_method();
+    let method = try self.name(cleanup_bytes);
+    var cleanup = empty_cleanup();
+    if try self.cleanup_from_method(tree, owner, method, &var cleanup) |failed| {
+        return move failed;
+    }
+    cleanup.on_error = true;
+    let success = try self.error_union_element_type(result.type_name);
+    let value = try self.emit1(Op::ErrorTry, success, result);
+    if self.last_instr() |instr| {
+        try self.module.add_cleanup(instr, cleanup);
+    }
+    if self.name_is(success, "void") {
+        out.* = try self.emit0(Op::ErrorOk, result.type_name);
+        return null;
+    }
+    out.* = try self.emit1(Op::ErrorOk, result.type_name, value);
+    return null;
 }

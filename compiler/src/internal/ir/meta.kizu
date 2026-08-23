@@ -1,20 +1,200 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
 import compiler::internal::stdmeta;
+import compiler::internal::typ;
 import std::array;
+import std::map;
+import std::string;
 
-// STUB: port of internal/ir/meta.go pending.
+// Mechanical port of internal/ir/meta.go: the `std::meta` forms and the
+// `comptime for` / `comptime match` expansions that bind their captures. The
+// Go `metaField` is MetaField in lower.kizu and the Go `metaFields` map is the
+// binding chain behind `bind_meta_field` / `restore_meta` / `meta_field`.
 
-fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported public_fields");
+/// Lowers the body once per field, the Go `lowerComptimeForStmt`. The loop
+/// itself has no runtime form: what reaches the IR is the expansions, in
+/// field order.
+fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: ast::ComptimeForStmt) -> !?diagnostic::Diagnostic {
+    var fields = array::new<MetaField>(self.allocator);
+    defer fields.deinit();
+    if try self.comptime_for_fields(tree, statement.list, &var fields) |failed| {
+        return move failed;
+    }
+    let name = try self.text_name(tree, statement.name);
+    let mark = MetaMark { previous: self.meta_current };
+    var index = 0;
+    while fields.get(index) |field| {
+        index = index + 1;
+        self.restore_meta(mark);
+        try self.bind_meta_field(name, field);
+        if try self.lower_block(tree, statement.body) |failed| {
+            self.restore_meta(mark);
+            return move failed;
+        }
+    }
+    self.restore_meta(mark);
+    return null;
 }
 
+/// Reads the list a `comptime for` walks, the Go `comptimeForFields`.
+fn (self: &var Lowerer) comptime_for_fields(
+    tree: &var ast::Ast,
+    list: ast::Expression,
+    out: &var array::Array<MetaField>
+) -> !?diagnostic::Diagnostic {
+    let call = ownership::call_expr(tree, list) orelse return try self.comptime_for_list_error();
+    let apply = ownership::type_apply_expr(tree, call.callee) orelse return try self.comptime_for_list_error();
+    let name = try self.expression_name(tree, apply.callee);
+    let form = self.meta_form(name) orelse return try self.comptime_for_list_error();
+    let type_arg_text = try self.text_name(tree, apply.type_arg);
+    match form {
+        PublicFields => {
+            let type_arg = try self.resolve_type_args(type_arg_text);
+            return self.public_fields(tree, type_arg, out);
+        },
+        Variants => {
+            let type_arg = try self.resolve_type_args(type_arg_text);
+            return self.variants(tree, type_arg, out);
+        },
+        _ => return try self.comptime_for_list_error(),
+    }
+}
+
+/// Names the lists a `comptime for` accepts, the Go `errComptimeForList`.
+fn (self: &Lowerer) comptime_for_list_error() -> !diagnostic::Diagnostic {
+    return self.fail0(
+        "ir error: comptime for expects `std::meta::public_fields<T>()` or `std::meta::variants<T>()`"
+    );
+}
+
+/// Lists an enum's tags or a union's variants in declaration order, the Go
+/// `variants`.
 fn (self: &var Lowerer) variants(tree: &var ast::Ast, type_arg: Name, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported variants");
+    if declared_in(&self.module.names, &self.enum_decls, type_arg) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Enum(declared) => {
+                var index = 0;
+                while declared.tags.get(index) |tag| {
+                    index = index + 1;
+                    try out.append(MetaField {
+                        owner: type_arg,
+                        name: try self.text_name(tree, tag),
+                        typ: empty_name(),
+                        variant: true
+                    });
+                }
+            },
+            _ => {},
+        }
+        return null;
+    }
+    if declared_in(&self.module.names, &self.union_decls, type_arg) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Union(declared) => {
+                var index = 0;
+                while declared.variants.at(index) |variant| {
+                    index = index + 1;
+                    var payload = empty_name();
+                    if variant.payload |declared_payload| {
+                        payload = try self.resolve_element_forms(tree, declared_payload);
+                    }
+                    try out.append(MetaField {
+                        owner: type_arg,
+                        name: try self.text_name(tree, variant.name),
+                        typ: payload,
+                        variant: true
+                    });
+                }
+            },
+            _ => {},
+        }
+        return null;
+    }
+    let form_name = try self.form_name(stdmeta::Form::Variants);
+    return try self.fail2(
+        tree, "ir error: `%s` expects an enum or union, got %s", Arg::Str(form_name), Arg::Str(type_arg)
+    );
 }
 
+/// Lists a struct's public fields in declaration order, the Go
+/// `publicFields`.
+fn (self: &var Lowerer) public_fields(tree: &var ast::Ast, type_arg: Name, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
+    let declaration = declared_in(&self.module.names, &self.struct_decls, type_arg) orelse return try self.struct_expected(tree, type_arg);
+    match tree.declarations.at(declaration.node) {
+        Struct(declared) => {
+            var index = 0;
+            while declared.fields.at(index) |field| {
+                index = index + 1;
+                if !field.public {
+                    continue;
+                }
+                try out.append(MetaField {
+                    owner: type_arg,
+                    name: try self.text_name(tree, field.name),
+                    typ: try self.resolve_element_forms(tree, field.type_name),
+                    variant: false
+                });
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+/// Rejects a `public_fields` list over other than a struct, the Go
+/// errorf("ir error: `%s` expects a struct, got %s", stdmeta.PublicFields, typeArg).
+fn (self: &var Lowerer) struct_expected(tree: &ast::Ast, type_arg: Name) -> !diagnostic::Diagnostic {
+    let form_name = try self.form_name(stdmeta::Form::PublicFields);
+    return self.fail2(
+        tree, "ir error: `%s` expects a struct, got %s", Arg::Str(form_name), Arg::Str(type_arg)
+    );
+}
+
+/// Returns the declaration one of the declaration indexes holds under a type
+/// name, the Go `l.structDecls[typeArg]` / `enumDecls` / `unionDecls` reads.
+fn declared_in(names: &NameTable, decls: &map::Map<[]u8, ast::Declaration>, type_arg: Name) -> ?ast::Declaration {
+    let retained = name_text(names, type_arg);
+    let bytes = retained.as_bytes();
+    return decls.get(bytes);
+}
+
+/// Names the source spelling of a form for a diagnostic, the Go `%s` of a
+/// `stdmeta.Form`.
+fn (self: &var Lowerer) form_name(form: stdmeta::Form) -> !Name {
+    return self.module.names.intern(stdmeta::spelling(form));
+}
+
+/// Identifies the `std::meta` form a name spells, or null for any other
+/// name, the Go `stdmeta.Lookup(name)` / `stdmeta.Form(name)` pair.
+fn (self: &Lowerer) meta_form(name: Name) -> ?stdmeta::Form {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    let identified = stdmeta::identify(bytes) orelse return null;
+    return identified.form;
+}
+
+/// Resolves the capture named in a form's static arguments, the Go
+/// `metaCapture`.
 fn (self: &var Lowerer) meta_capture(tree: &var ast::Ast, form: stdmeta::Form, type_arg: Name, out: &var MetaField) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported meta_capture");
+    var args = try self.split_static_args(type_arg);
+    defer args.deinit();
+    if args.len() != 2 {
+        let form_name = try self.form_name(form);
+        return try self.fail1(tree, "ir error: `%s` expects 2 static arguments", Arg::Str(form_name));
+    }
+    let capture = args.get_or_panic(1);
+    let field = self.meta_field(capture) orelse return try self.fail1(
+        tree, "ir error: `%s` is not a comptime capture", Arg::Str(capture)
+    );
+    if field.variant != stdmeta::variant_form(form) {
+        let form_name = try self.form_name(form);
+        return try self.fail1(
+            tree, "ir error: `%s` is written against the wrong capture kind", Arg::Str(form_name)
+        );
+    }
+    out.* = field;
+    return null;
 }
 
 /// Binds one capture for the length of one expansion, the Go
@@ -47,27 +227,553 @@ fn (self: &Lowerer) meta_field(name: Name) -> ?MetaField {
     return null;
 }
 
+/// Lists the variants a `comptime match` arm body is written against, the
+/// Go `matchArmVariants`; the arm finds its own by tag. A match written by
+/// hand carries no capture and gets none.
 fn (self: &var Lowerer) match_arm_variants(tree: &var ast::Ast, meta_capture: ast::Text, meta_owner: ast::Text, out: &var array::Array<MetaField>) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported match_arm_variants");
+    if text_empty(tree, meta_capture) {
+        return null;
+    }
+    let owner = try self.text_name(tree, meta_owner);
+    return self.variants(tree, owner, out);
 }
 
-fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
-    return text;
-}
-
-fn (self: &var Lowerer) lower_comptime_for_stmt(tree: &var ast::Ast, statement: ast::ComptimeForStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_comptime_for_stmt");
-}
-
+/// Lowers the match a `comptime match` stands for, with the capture bound to
+/// the arm's own variant while its body is lowered, the Go
+/// `lowerComptimeMatchStmt`. The value is lowered first because it is what
+/// names the declaration the arms come from, and lowering it twice would
+/// emit it twice.
 fn (self: &var Lowerer) lower_comptime_match_stmt(tree: &var ast::Ast, statement: ast::ComptimeMatchStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_comptime_match_stmt");
+    var subject = MatchSubject {
+        value: empty_value(), union_value: empty_value(), enum_name: empty_name(), union_name: empty_name()
+    };
+    if try self.lower_match_value(tree, statement.value, &var subject) |failed| {
+        return move failed;
+    }
+    var owner = subject.union_name;
+    if is_empty(owner) {
+        owner = subject.enum_name;
+    }
+    var variants = array::new<MetaField>(self.allocator);
+    defer variants.deinit();
+    if try self.variants(tree, owner, &var variants) |failed| {
+        return move failed;
+    }
+    let expanded = try self.expand_comptime_match(tree, statement, owner, &variants);
+    return self.lower_match_body(tree, subject, MatchNode::Statement(expanded));
 }
 
+/// Builds the ordinary match a `comptime match` stands for, the
+/// `ast.ComptimeMatchExpansion` call of the Go `lowerComptimeMatchStmt`.
+fn (self: &Lowerer) expand_comptime_match(
+    tree: &var ast::Ast,
+    statement: ast::ComptimeMatchStmt,
+    owner: Name,
+    variants: &array::Array<MetaField>
+) -> !ast::Statement {
+    var list = array::new<ast::MetaVariant>(self.allocator);
+    defer list.deinit();
+    var index = 0;
+    while variants.get(index) |variant| {
+        index = index + 1;
+        let retained = name_text(&self.module.names, variant.name);
+        let name_bytes = retained.as_bytes();
+        let name = try tree.add_text_from_bytes(name_bytes);
+        try list.append(ast::MetaVariant { name: name, has_payload: !is_empty(variant.typ) });
+    }
+    let retained = name_text(&self.module.names, owner);
+    let owner_bytes = retained.as_bytes();
+    let owner_text = try tree.add_text_from_bytes(owner_bytes);
+    let empty = tree.add_empty_text();
+    let expanded = try ast::comptime_match_expansion(self.allocator, &statement, owner_text, empty, &list);
+    return tree.add_statement(ast::StatementNode::Match(move expanded));
+}
+
+/// Lowers one `std::meta` form, the Go `lowerMetaApply`. handled reports
+/// whether the callee was a form at all, leaving every other call to the
+/// ordinary paths.
 fn (self: &var Lowerer) lower_meta_apply(tree: &var ast::Ast, name: Name, type_arg: Name, args: ast::ExpressionList, out: &var Value, handled: &var bool) -> !?diagnostic::Diagnostic {
     handled.* = false;
+    let form = self.meta_form(name) orelse return null;
+    handled.* = true;
+    match form {
+        FieldName => return self.lower_meta_capture_name(tree, form, type_arg, out),
+        VariantName => return self.lower_meta_capture_name(tree, form, type_arg, out),
+        Field => return self.lower_meta_field_borrow(tree, form, type_arg, args, out),
+        Variant => return self.lower_meta_variant(tree, form, type_arg, args, out),
+        Construct => return self.lower_meta_construct(tree, type_arg, args, out),
+        IsStruct => return self.lower_meta_predicate(tree, form, type_arg, out),
+        IsEnum => return self.lower_meta_predicate(tree, form, type_arg, out),
+        IsUnion => return self.lower_meta_predicate(tree, form, type_arg, out),
+        IsOptional => return self.lower_meta_predicate(tree, form, type_arg, out),
+        IsOwner => return self.lower_meta_predicate(tree, form, type_arg, out),
+        HasPayload => return self.lower_meta_predicate(tree, form, type_arg, out),
+        _ => return try self.fail1(tree, "ir error: `%s` cannot be called", Arg::Str(name)),
+    }
+}
+
+/// Lowers `field_name<T, f>` / `variant_name<T, v>` to the quoted name, the
+/// `FieldName` / `VariantName` case of the Go `lowerMetaApply`.
+fn (self: &var Lowerer) lower_meta_capture_name(
+    tree: &var ast::Ast,
+    form: stdmeta::Form,
+    type_arg: Name,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var field = empty_meta_field();
+    if try self.meta_capture(tree, form, type_arg, &var field) |failed| {
+        return move failed;
+    }
+    let retained = name_text(&self.module.names, field.name);
+    let bytes = retained.as_bytes();
+    let quoted = try quote_go(self.allocator, bytes);
+    let immediate = try self.module.names.intern_owned(move quoted);
+    out.* = try self.emit_const(self.common.bytes_type, immediate);
     return null;
 }
 
+/// Lowers a predicate written as a call to the constant it answers, the
+/// predicate case of the Go `lowerMetaApply`.
+fn (self: &var Lowerer) lower_meta_predicate(
+    tree: &var ast::Ast,
+    form: stdmeta::Form,
+    type_arg: Name,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var known = false;
+    if try self.meta_predicate(tree, form, type_arg, &var known) |failed| {
+        return move failed;
+    }
+    if known {
+        out.* = try self.emit_const_text(self.common.bool_type, "true");
+    } else {
+        out.* = try self.emit_const_text(self.common.bool_type, "false");
+    }
+    return null;
+}
+
+/// Lowers `std::meta::field<T, f>(value)` as the field read it is defined to
+/// be (ADR-0113), the Go `lowerMetaFieldBorrow`.
+fn (self: &var Lowerer) lower_meta_field_borrow(
+    tree: &var ast::Ast,
+    form: stdmeta::Form,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var field = empty_meta_field();
+    if try self.meta_capture(tree, form, type_arg, &var field) |failed| {
+        return move failed;
+    }
+    let count = ownership::arg_count(tree, args);
+    if count != 1 {
+        let form_name = try self.form_name(form);
+        return try self.fail2(
+            tree, "ir error: `%s` expects 1 argument, got %d", Arg::Str(form_name), Arg::Int(count)
+        );
+    }
+    let retained = name_text(&self.module.names, field.name);
+    let name_bytes = retained.as_bytes();
+    let name = try tree.add_text_from_bytes(name_bytes);
+    let path = ast::FieldExpr {
+        receiver: args.get_or_panic(tree, 0), name: name, namespace: false, span: ast::zero_span()
+    };
+    return self.lower_field_expr(tree, path, out);
+}
+
+/// Lowers `std::meta::variant<T, v>(payload)` as the `T::v(payload)` it is
+/// defined to be (ast::variant_expansion), the Go `lowerMetaVariant`.
+fn (self: &var Lowerer) lower_meta_variant(
+    tree: &var ast::Ast,
+    form: stdmeta::Form,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var variant = empty_meta_field();
+    if try self.meta_capture(tree, form, type_arg, &var variant) |failed| {
+        return move failed;
+    }
+    let owner_text = name_text(&self.module.names, variant.owner);
+    let owner_bytes = owner_text.as_bytes();
+    let variant_text = name_text(&self.module.names, variant.name);
+    let variant_bytes = variant_text.as_bytes();
+    let expanded = try ast::variant_expansion(tree, owner_bytes, variant_bytes, args);
+    return self.lower_expr(tree, expanded, out);
+}
+
+/// Lowers `std::meta::construct<T, worker>(args...)` as the code it stands
+/// for, the Go `lowerMetaConstruct`. The expansion is built in one place
+/// (ast::construct_expansion_from_names), so what is emitted here is what the
+/// two checkers already read; lowering adds no rule of its own.
+///
+/// The statements go in a cleanup frame of their own: the `errdefer` each
+/// owner field registers protects the fields already built, and it must not
+/// outlive the literal that takes them.
+fn (self: &var Lowerer) lower_meta_construct(
+    tree: &var ast::Ast,
+    type_arg: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var static_args = try self.split_static_args(type_arg);
+    defer static_args.deinit();
+    if static_args.len() != 2 {
+        let form_name = try self.form_name(stdmeta::Form::Construct);
+        return try self.fail1(tree, "ir error: `%s` expects 2 static arguments", Arg::Str(form_name));
+    }
+    let owner = try self.resolve_bound_type(static_args.get_or_panic(0));
+    var fields = array::new<MetaField>(self.allocator);
+    defer fields.deinit();
+    if try self.public_fields(tree, owner, &var fields) |failed| {
+        return move failed;
+    }
+    let expanded = try self.expand_meta_construct(tree, owner, static_args.get_or_panic(1), &fields, args);
+    defer expanded.deinit();
+    let _ = try self.push_defer_frame();
+    if try self.lower_construct_statements(tree, &expanded.statements) |failed| {
+        self.pop_defer_frame();
+        return move failed;
+    }
+    var built = empty_value();
+    if try self.lower_expr(tree, expanded.literal, &var built) |failed| {
+        self.pop_defer_frame();
+        return move failed;
+    }
+    let result_type = try self.module.names.prefixed("!", owner);
+    out.* = try self.emit1(Op::ErrorOk, result_type, built);
+    self.pop_defer_frame();
+    return null;
+}
+
+/// Builds the statements and literal `std::meta::construct<T, worker>(...)`
+/// stands for, the `ast.ConstructExpansion` call of the Go
+/// `lowerMetaConstruct`.
+fn (self: &Lowerer) expand_meta_construct(
+    tree: &var ast::Ast,
+    owner: Name,
+    worker: Name,
+    fields: &array::Array<MetaField>,
+    args: ast::ExpressionList
+) -> !ast::ConstructResult {
+    var names = array::new<string::String>(self.allocator);
+    defer names.deinit();
+    var type_names = array::new<string::String>(self.allocator);
+    defer type_names.deinit();
+    var index = 0;
+    while fields.get(index) |field| {
+        index = index + 1;
+        let name = try self.module.names.copy(field.name);
+        errdefer name.deinit();
+        try names.append(move name);
+        let type_name = try self.module.names.copy(field.typ);
+        errdefer type_name.deinit();
+        try type_names.append(move type_name);
+    }
+    let owner_text = name_text(&self.module.names, owner);
+    let owner_bytes = owner_text.as_bytes();
+    let worker_text = name_text(&self.module.names, worker);
+    let worker_bytes = worker_text.as_bytes();
+    return ast::construct_expansion_from_names(
+        self.allocator, tree, owner_bytes, worker_bytes, &names, &type_names, args, &self.deinit_owners
+    );
+}
+
+/// Lowers the statements of one construct expansion in order. The expansion
+/// registers cleanups the way a block does, which is the one place
+/// `errdefer` is accepted; the statements are a block in everything but the
+/// braces.
+fn (self: &var Lowerer) lower_construct_statements(
+    tree: &var ast::Ast,
+    statements: &array::Array<ast::Statement>
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while statements.get(index) |statement| {
+        index = index + 1;
+        if ownership::errdefer_stmt(tree, statement) |deferred| {
+            if try self.record_cleanup(tree, deferred.expr, true) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        if try self.lower_stmt(tree, statement) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Is the wrapper at the root of one type spelling, what
+/// `resolve_meta_type_deep` rebuilds around the resolved inner spelling.
+enum WrapperKind {
+    ErrorUnion,
+    Optional,
+    Slice,
+    Applied,
+    Other,
+}
+
+/// Resolves the forms inside a wrapped spelling, the Go
+/// `resolveMetaTypeDeep`. A worker returns `!std::meta::field_type<T, f>`,
+/// so the form sits under the error union rather than at the top, and the
+/// wrapper is rebuilt around what the form resolved to.
+fn (self: &var Lowerer) resolve_meta_type_deep(text: Name) -> !Name {
+    let resolved = try self.resolve_meta_type_text(text);
+    if !same_name(resolved, text) {
+        return resolved;
+    }
+    // The Go parse of the empty spelling fails and hands the text back.
+    if is_empty(text) {
+        return text;
+    }
+    let parsed = try self.parse_type(text);
+    var kind = WrapperKind::Other;
+    var err = empty_name();
+    var inner = empty_name();
+    var path = empty_name();
+    var args = array::new<Name>(self.allocator);
+    defer args.deinit();
+    match typ::root_node(&self.types, parsed) {
+        ErrorUnion(node) => {
+            kind = WrapperKind::ErrorUnion;
+            if node.err |err_node| {
+                let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, err_node));
+                err = try self.module.names.intern_owned(move rendered);
+            }
+            let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, node.ok));
+            inner = try self.module.names.intern_owned(move rendered);
+        },
+        Optional(node) => {
+            kind = WrapperKind::Optional;
+            let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, node.elem));
+            inner = try self.module.names.intern_owned(move rendered);
+        },
+        Slice(node) => {
+            kind = WrapperKind::Slice;
+            let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, node.elem));
+            inner = try self.module.names.intern_owned(move rendered);
+        },
+        Name(node) => {
+            if node.args.len() > 0 {
+                kind = WrapperKind::Applied;
+                var path_text = string::new(self.allocator);
+                errdefer path_text.deinit();
+                var part_index = 0;
+                while node.path.at(part_index) |part| {
+                    if part_index > 0 {
+                        try path_text.append_bytes("::");
+                    }
+                    part_index = part_index + 1;
+                    try path_text.append_string(part);
+                }
+                path = try self.module.names.intern_owned(move path_text);
+                var index = 0;
+                while node.args.get(index) |arg| {
+                    index = index + 1;
+                    let rendered = try typ::render(self.allocator, &self.types, typ::child_type(parsed, arg));
+                    try args.append(try self.module.names.intern_owned(move rendered));
+                }
+            }
+        },
+        _ => {},
+    }
+    match kind {
+        ErrorUnion => {
+            let resolved_inner = try self.resolve_meta_type_deep(inner);
+            if is_empty(err) {
+                return self.module.names.prefixed("!", resolved_inner);
+            }
+            return self.module.names.joined(err, "!", resolved_inner);
+        },
+        Optional => {
+            let resolved_inner = try self.resolve_meta_type_deep(inner);
+            return self.module.names.prefixed("?", resolved_inner);
+        },
+        Slice => {
+            let resolved_inner = try self.resolve_meta_type_deep(inner);
+            return self.module.names.prefixed("[]", resolved_inner);
+        },
+        Applied => {
+            var out = string::new(self.allocator);
+            errdefer out.deinit();
+            try self.module.names.append_to(&var out, path);
+            try out.append_byte(cast<u8>(60));
+            var index = 0;
+            while args.get(index) |arg| {
+                if index > 0 {
+                    try out.append_bytes(", ");
+                }
+                index = index + 1;
+                let resolved_arg = try self.resolve_meta_type_deep(arg);
+                try self.module.names.append_to(&var out, resolved_arg);
+            }
+            try out.append_byte(cast<u8>(62));
+            return self.module.names.intern_owned(move out);
+        },
+        Other => return text,
+    }
+}
+
+/// Answers a compile-time predicate about a type, the Go `metaPredicate`.
+fn (self: &var Lowerer) meta_predicate(
+    tree: &var ast::Ast,
+    form: stdmeta::Form,
+    type_arg: Name,
+    out: &var bool
+) -> !?diagnostic::Diagnostic {
+    if form == stdmeta::Form::HasPayload {
+        var variant = empty_meta_field();
+        if try self.meta_capture(tree, form, type_arg, &var variant) |failed| {
+            return move failed;
+        }
+        out.* = !is_empty(variant.typ);
+        return null;
+    }
+    let subject = try self.resolve_type_args(type_arg);
+    out.* = false;
+    match form {
+        IsStruct => {
+            if declared_in(&self.module.names, &self.struct_decls, subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsEnum => {
+            if declared_in(&self.module.names, &self.enum_decls, subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsUnion => {
+            if declared_in(&self.module.names, &self.union_decls, subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsOptional => {
+            if try self.module.names.optional_elem(subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsArray => {
+            if try self.array_element_type(subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsBox => {
+            if try self.box_element_type(subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsMap => {
+            if try self.map_value_type(subject) |_| {
+                out.* = true;
+            }
+            return null;
+        },
+        IsOwner => {
+            out.* = self.is_owner_type(subject);
+            return null;
+        },
+        HasPublicFields => {
+            var fields = array::new<MetaField>(self.allocator);
+            defer fields.deinit();
+            if try self.public_fields(tree, subject, &var fields) |failed| {
+                failed.deinit();
+                return null;
+            }
+            out.* = fields.len() > 0;
+            return null;
+        },
+        _ => {
+            let form_name = try self.form_name(form);
+            return try self.fail1(tree, "ir error: `%s` is not a predicate", Arg::Str(form_name));
+        },
+    }
+}
+
+/// Answers a `std::meta` predicate written as a comptime condition, the Go
+/// `metaPredicateCall`, and reports whether the call was one.
 fn (self: &var Lowerer) meta_predicate_call(tree: &var ast::Ast, call: ast::CallExpr, out: &var bool) -> !bool {
-    return false;
+    let apply = ownership::type_apply_expr(tree, call.callee) orelse return false;
+    let name = try self.expression_name(tree, apply.callee);
+    let form = self.predicate_form(name) orelse return false;
+    if ownership::arg_count(tree, call.args) != 0 {
+        return false;
+    }
+    let type_arg = try self.text_name(tree, apply.type_arg);
+    var value = false;
+    if try self.meta_predicate(tree, form, type_arg, &var value) |failed| {
+        failed.deinit();
+        return false;
+    }
+    out.* = value;
+    return true;
+}
+
+/// Identifies the predicate form a name spells, or null for any other name,
+/// the Go `stdmeta.Predicate(name)` gate on `stdmeta.Form(name)`.
+fn (self: &Lowerer) predicate_form(name: Name) -> ?stdmeta::Form {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    if !stdmeta::predicate(bytes) {
+        return null;
+    }
+    return self.meta_form(name);
+}
+
+/// Rewrites the forms written where a type goes, the Go
+/// `resolveMetaTypeText`. Text with no form in it comes back unchanged.
+fn (self: &var Lowerer) resolve_meta_type_text(text: Name) -> !Name {
+    let copied = try self.module.names.copy(text);
+    defer copied.deinit();
+    let bytes = copied.as_bytes();
+    let parts = try stdmeta::split_apply(self.allocator, bytes) orelse return text;
+    defer parts.deinit();
+    var args = array::new<Name>(self.allocator);
+    defer args.deinit();
+    var index = 0;
+    while parts.args.at(index) |arg| {
+        index = index + 1;
+        let arg_bytes = arg.as_bytes();
+        let arg_name = try self.module.names.intern(arg_bytes);
+        try args.append(try self.resolve_meta_type_text(arg_name));
+    }
+    match parts.form {
+        FieldType => return self.capture_type_text(text, &args),
+        VariantType => return self.capture_type_text(text, &args),
+        Element => return self.element_type_text(text, &args),
+        _ => return text,
+    }
+}
+
+/// Resolves `field_type<T, f>` / `variant_type<T, v>` to the bound capture's
+/// type, or returns text unchanged when the capture is unbound or carries no
+/// type, the `FieldType` / `VariantType` case of the Go `resolveMetaTypeText`.
+fn (self: &Lowerer) capture_type_text(text: Name, args: &array::Array<Name>) -> Name {
+    if args.len() != 2 {
+        return text;
+    }
+    let field = self.meta_field(args.get_or_panic(1)) orelse return text;
+    if is_empty(field.typ) {
+        return text;
+    }
+    return field.typ;
+}
+
+/// Resolves `element<C>` to the element type of the container C, or returns
+/// text unchanged when C holds no element, the `Element` case of the Go
+/// `resolveMetaTypeText`.
+fn (self: &var Lowerer) element_type_text(text: Name, args: &array::Array<Name>) -> !Name {
+    if args.len() != 1 {
+        return text;
+    }
+    let resolved = try self.resolve_bound_type(args.get_or_panic(0));
+    let container = try self.parse_type(resolved);
+    let element = stdmeta::element_type(&self.types, container) orelse return text;
+    let rendered = try typ::render(self.allocator, &self.types, element);
+    return self.module.names.intern_owned(move rendered);
 }

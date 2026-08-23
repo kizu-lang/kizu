@@ -1,8 +1,230 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import std::mem;
 
-// STUB: port of internal/ir/comptime.go pending.
+// Mechanical port of internal/ir/comptime.go: `comptime if` and the constant
+// evaluation that selects its branch. The Go `(value, ok)` pairs come back as
+// the ok flag with the value written through an out parameter.
 
+/// Lowers only the branch selected during compilation, the Go
+/// `lowerComptimeIfStmt`.
 fn (self: &var Lowerer) lower_comptime_if_stmt(tree: &var ast::Ast, statement: ast::ComptimeIfStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_comptime_if_stmt");
+    var cond = false;
+    if !try self.const_bool(tree, statement.condition, &var cond) {
+        return try self.fail0("ir error: comptime if condition must be constant bool");
+    }
+    if cond {
+        return self.lower_block(tree, statement.consequence);
+    }
+    let alternative = statement.alternative orelse return null;
+    return self.lower_block(tree, alternative);
+}
+
+/// Evaluates constant boolean expressions used by comptime if, the Go
+/// `constBool`.
+fn (self: &var Lowerer) const_bool(tree: &var ast::Ast, expression: ast::Expression, out: &var bool) -> !bool {
+    if ownership::comptime_expr(tree, expression) |inner| {
+        return self.const_bool(tree, inner.expr, out);
+    }
+    if ownership::bool_expr(tree, expression) |literal| {
+        out.* = literal.value;
+        return true;
+    }
+    if ownership::call_expr(tree, expression) |call| {
+        return self.meta_predicate_call(tree, call, out);
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        var value = false;
+        let ok = try self.const_bool(tree, prefix.right, &var value);
+        out.* = !value;
+        return ok and text_is(tree, prefix.operator, "!");
+    }
+    if ownership::binary_expr(tree, expression) |binary| {
+        if text_is(tree, binary.operator, "and") or text_is(tree, binary.operator, "or") {
+            return self.const_logical_bool(tree, binary, out);
+        }
+        if text_is(tree, binary.operator, "==") or text_is(tree, binary.operator, "!=") {
+            var equal = false;
+            if try self.const_type_equal(tree, binary.left, binary.right, &var equal) {
+                out.* = equal == text_is(tree, binary.operator, "==");
+                return true;
+            }
+        }
+        var left = 0;
+        let left_ok = const_int(tree, binary.left, &var left);
+        var right = 0;
+        let right_ok = const_int(tree, binary.right, &var right);
+        if left_ok and right_ok {
+            let retained = tree.texts.at(binary.operator.node);
+            let operator = retained.as_bytes();
+            return compare_const_ints(operator, left, right, out);
+        }
+    }
+    return false;
+}
+
+/// Compares two type-valued expressions, the Go `constTypeEqual`, which is
+/// how a generic body asks what its type parameter was bound to.
+fn (self: &var Lowerer) const_type_equal(
+    tree: &var ast::Ast,
+    left: ast::Expression,
+    right: ast::Expression,
+    out: &var bool
+) -> !bool {
+    var left_name = empty_name();
+    let left_ok = try self.const_type_name(tree, left, &var left_name);
+    var right_name = empty_name();
+    let right_ok = try self.const_type_name(tree, right, &var right_name);
+    if !left_ok or !right_ok {
+        return false;
+    }
+    out.* = same_name(left_name, right_name);
+    return true;
+}
+
+/// Resolves an expression that names a type, the Go `constTypeName`.
+fn (self: &var Lowerer) const_type_name(tree: &var ast::Ast, expression: ast::Expression, out: &var Name) -> !bool {
+    if ownership::comptime_expr(tree, expression) |inner| {
+        return self.const_type_name(tree, inner.expr, out);
+    }
+    if ownership::ident_expr(tree, expression) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        let args = self.current_args orelse return false;
+        let bound = self.bound_type(args, name) orelse return false;
+        out.* = bound;
+        return true;
+    }
+    if ownership::type_expr(tree, expression) |typed| {
+        let type_name = try self.text_name(tree, typed.type_name);
+        out.* = try self.resolve_bound_type(type_name);
+        return true;
+    }
+    return false;
+}
+
+/// Evaluates boolean logic for comptime branch selection, the Go
+/// `constLogicalBool`.
+fn (self: &var Lowerer) const_logical_bool(tree: &var ast::Ast, binary: ast::BinaryExpr, out: &var bool) -> !bool {
+    var left = false;
+    if !try self.const_bool(tree, binary.left, &var left) {
+        return false;
+    }
+    let is_and = text_is(tree, binary.operator, "and");
+    if is_and and !left {
+        out.* = false;
+        return true;
+    }
+    if text_is(tree, binary.operator, "or") and left {
+        out.* = true;
+        return true;
+    }
+    var right = false;
+    if !try self.const_bool(tree, binary.right, &var right) {
+        return false;
+    }
+    if is_and {
+        out.* = left and right;
+        return true;
+    }
+    out.* = left or right;
+    return true;
+}
+
+/// Evaluates constant integer arithmetic used by comptime branches, the Go
+/// `constInt`.
+fn const_int(tree: &ast::Ast, expression: ast::Expression, out: &var i64) -> bool {
+    if ownership::comptime_expr(tree, expression) |inner| {
+        return const_int(tree, inner.expr, out);
+    }
+    if ownership::int_expr(tree, expression) |literal| {
+        let retained = tree.texts.at(literal.value.node);
+        let bytes = retained.as_bytes();
+        let value = ownership::decimal_i64(bytes) orelse return false;
+        out.* = value;
+        return true;
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        var value = 0;
+        let ok = const_int(tree, prefix.right, &var value);
+        if text_is(tree, prefix.operator, "-") {
+            out.* = 0 - value;
+            return ok;
+        }
+        return false;
+    }
+    if ownership::binary_expr(tree, expression) |binary| {
+        var left = 0;
+        let left_ok = const_int(tree, binary.left, &var left);
+        var right = 0;
+        let right_ok = const_int(tree, binary.right, &var right);
+        if left_ok and right_ok {
+            let retained = tree.texts.at(binary.operator.node);
+            let operator = retained.as_bytes();
+            return eval_const_int(operator, left, right, out);
+        }
+    }
+    return false;
+}
+
+/// Evaluates integer arithmetic for comptime branch selection, the Go
+/// `evalConstInt`.
+fn eval_const_int(op: []u8, left: i64, right: i64, out: &var i64) -> bool {
+    if mem::equal_bytes(op, "+") {
+        out.* = left + right;
+        return true;
+    }
+    if mem::equal_bytes(op, "-") {
+        out.* = left - right;
+        return true;
+    }
+    if mem::equal_bytes(op, "*") {
+        out.* = left * right;
+        return true;
+    }
+    if mem::equal_bytes(op, "/") {
+        if right == 0 {
+            return false;
+        }
+        out.* = left / right;
+        return true;
+    }
+    if mem::equal_bytes(op, "%") {
+        if right == 0 {
+            return false;
+        }
+        out.* = left % right;
+        return true;
+    }
+    return false;
+}
+
+/// Evaluates integer comparisons for comptime branch selection, the Go
+/// `compareConstInts`.
+fn compare_const_ints(op: []u8, left: i64, right: i64, out: &var bool) -> bool {
+    if mem::equal_bytes(op, "==") {
+        out.* = left == right;
+        return true;
+    }
+    if mem::equal_bytes(op, "!=") {
+        out.* = left != right;
+        return true;
+    }
+    if mem::equal_bytes(op, "<") {
+        out.* = left < right;
+        return true;
+    }
+    if mem::equal_bytes(op, "<=") {
+        out.* = left <= right;
+        return true;
+    }
+    if mem::equal_bytes(op, ">") {
+        out.* = left > right;
+        return true;
+    }
+    if mem::equal_bytes(op, ">=") {
+        out.* = left >= right;
+        return true;
+    }
+    return false;
 }

@@ -1,8 +1,376 @@
 import compiler::internal::diagnostic;
+import std::array;
+import std::map;
+import std::mem;
 
-// STUB: port of internal/ir/optimize.go pending.
+// Mechanical port of internal/ir/optimize.go: the bounded local cleanup
+// passes. Go keys the constants, copies and used-value sets by the Go string
+// of an SSA value name; here they are keyed by the bytes of the interned
+// Name. Go rewrites an instruction through its pointer; here the rewrite
+// goes through the module's instruction arena.
 
-/// Applies bounded local cleanup passes to a module, the Go `Optimize`.
+/// Applies bounded local cleanup passes to a module, the Go `Optimize`. A
+/// pass rewrites values in place, so what it produces is verified the same
+/// way lowering is.
 pub fn optimize(allocator: Allocator, module: &var Module) -> !?diagnostic::Diagnostic {
+    try constant_fold(allocator, module);
+    try copy_propagate(allocator, module);
+    try dead_code_eliminate(allocator, module);
     return verify(allocator, module);
+}
+
+/// Folds binary instructions with integer constants, the Go `ConstantFold`.
+fn constant_fold(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var block_index = 0;
+        while function_block_at(module, function, block_index) |block| {
+            block_index = block_index + 1;
+            var consts = try constants_in(allocator, module, block);
+            defer consts.deinit();
+            var instr_index = 0;
+            while block_instr_at(module, block, instr_index) |instr| {
+                instr_index = instr_index + 1;
+                try fold_instr(module, instr, &var consts);
+            }
+        }
+    }
+    return;
+}
+
+/// Replaces id instruction results with their source values, the Go
+/// `CopyPropagate`.
+fn copy_propagate(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var copies = map::new<[]u8, Value>(allocator);
+        defer copies.deinit();
+        var block_index = 0;
+        while function_block_at(module, function, block_index) |block| {
+            block_index = block_index + 1;
+            var instr_index = 0;
+            while block_instr_at(module, block, instr_index) |instr| {
+                instr_index = instr_index + 1;
+                try replace_args(module, instr, &copies);
+                try record_copy(module, instr, &var copies);
+            }
+            replace_terminator_args(module, block, &copies);
+        }
+    }
+    return;
+}
+
+/// Records the source an id instruction copies, the Go
+/// `copies[instr.Result.Name] = instr.Args[0]`.
+fn record_copy(module: &Module, instr: Instr, copies: &var map::Map<[]u8, Value>) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.op != Op::Id or node.args.len() != 1 {
+        return;
+    }
+    let source = node.args.get_or_panic(0);
+    let result_text = name_text(&module.names, node.result.name);
+    let result_bytes = result_text.as_bytes();
+    return copies.insert(result_bytes, source);
+}
+
+/// Removes unused pure instructions, the Go `DeadCodeEliminate`.
+fn dead_code_eliminate(allocator: Allocator, module: &var Module) -> !void {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        var used = try used_values(allocator, module, function);
+        defer used.deinit();
+        var block_index = 0;
+        while function_block_at(module, function, block_index) |block| {
+            block_index = block_index + 1;
+            try keep_live_instrs(allocator, module, block, &used);
+        }
+    }
+    return;
+}
+
+/// Returns the block at index of a function, null past the last, the Go
+/// `fn.Blocks[index]` read through the module.
+fn function_block_at(module: &Module, function: Function, index: i64) -> ?Block {
+    let node = module.function_nodes.at(function.node);
+    return node.blocks.get(index);
+}
+
+/// Returns the instruction at index of a block, null past the last, the Go
+/// `block.Instrs[index]` read through the module.
+fn block_instr_at(module: &Module, block: Block, index: i64) -> ?Instr {
+    let node = module.blocks.at(block.node);
+    return node.instrs.get(index);
+}
+
+/// Returns integer constants already emitted in a block, the Go
+/// `constantsIn`.
+fn constants_in(allocator: Allocator, module: &Module, block: Block) -> !map::Map<[]u8, i64> {
+    var consts = map::new<[]u8, i64>(allocator);
+    errdefer consts.deinit();
+    let block_node = module.blocks.at(block.node);
+    var index = 0;
+    while block_node.instrs.get(index) |instr| {
+        index = index + 1;
+        let node = module.instrs.at(instr.node);
+        if node.op != Op::Const or !module.names.is(node.result.type_name, "i64") {
+            continue;
+        }
+        let immediate_text = name_text(&module.names, node.immediate);
+        let immediate_bytes = immediate_text.as_bytes();
+        if parse_i64(immediate_bytes) |value| {
+            let result_text = name_text(&module.names, node.result.name);
+            let result_bytes = result_text.as_bytes();
+            try consts.insert(result_bytes, value);
+        }
+    }
+    return move consts;
+}
+
+/// Reads a decimal integer with an optional sign, the Go
+/// `strconv.ParseInt(text, 10, 64)`: null for any other text and for a value
+/// outside i64.
+fn parse_i64(text: []u8) -> ?i64 {
+    let length = mem::len(text);
+    var index = 0;
+    var negative = false;
+    if length > 0 and (text[0] == cast<u8>(45) or text[0] == cast<u8>(43)) {
+        negative = text[0] == cast<u8>(45);
+        index = 1;
+    }
+    if index >= length {
+        return null;
+    }
+    // The magnitude is accumulated below zero, where i64 holds one more
+    // value than above it, so the minimum spelling parses as Go's does.
+    var value = 0;
+    while index < length {
+        let byte = text[index];
+        index = index + 1;
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return null;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value < (-9223372036854775807 - 1 + digit) / 10 {
+            return null;
+        }
+        value = value * 10 - digit;
+    }
+    if negative {
+        return value;
+    }
+    if value == -9223372036854775807 - 1 {
+        return null;
+    }
+    return -value;
+}
+
+/// Folds one instruction when both operands are known constants, the Go
+/// `foldInstr`.
+fn fold_instr(module: &var Module, instr: Instr, consts: &var map::Map<[]u8, i64>) -> !void {
+    let node = module.instrs.at(instr.node);
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "i64") {
+        return;
+    }
+    let left_arg = node.args.get_or_panic(0);
+    let right_arg = node.args.get_or_panic(1);
+    let left = constant_of(&module.names, consts, left_arg.name) orelse return;
+    let right = constant_of(&module.names, consts, right_arg.name) orelse return;
+    let value = fold_binary(module, node.op, node.operand, left, right) orelse return;
+    let result_name = node.result.name;
+    let immediate = try module.names.intern_i64(value);
+    if module.instrs.at_mut(instr.node) |folded| {
+        folded.op = Op::Const;
+        folded.operand = empty_name();
+        while folded.args.pop() |_| {}
+        folded.immediate = immediate;
+    }
+    let result_text = name_text(&module.names, result_name);
+    let result_bytes = result_text.as_bytes();
+    return consts.insert(result_bytes, value);
+}
+
+/// Returns the constant a value name is known to hold, the Go
+/// `consts[name]` read with its ok flag.
+fn constant_of(names: &NameTable, consts: &map::Map<[]u8, i64>, name: Name) -> ?i64 {
+    let retained = name_text(names, name);
+    let bytes = retained.as_bytes();
+    return consts.get(bytes);
+}
+
+/// Computes supported integer binary operations, the Go `foldBinary`: null
+/// for every op it does not fold.
+fn fold_binary(module: &Module, op: Op, operand: Name, left: i64, right: i64) -> ?i64 {
+    if op != Op::Binary {
+        return null;
+    }
+    if module.names.is(operand, "+") {
+        return left + right;
+    }
+    if module.names.is(operand, "-") {
+        return left - right;
+    }
+    if module.names.is(operand, "*") {
+        return left * right;
+    }
+    return null;
+}
+
+/// Applies copy propagation to instruction operands, the Go `replaceArgs`.
+fn replace_args(module: &var Module, instr: Instr, copies: &map::Map<[]u8, Value>) -> !void {
+    let names = &module.names;
+    if module.instrs.at_mut(instr.node) |node| {
+        var index = 0;
+        while node.args.get(index) |arg| {
+            if copy_of(names, copies, arg.name) |replacement| {
+                try node.args.set(index, replacement);
+            }
+            index = index + 1;
+        }
+        index = 0;
+        while node.incoming.get(index) |incoming| {
+            if copy_of(names, copies, incoming.value.name) |replacement| {
+                if node.incoming.at_mut(index) |slot| {
+                    slot.value = replacement;
+                }
+            }
+            index = index + 1;
+        }
+        index = 0;
+        while node.fields.get(index) |field| {
+            if copy_of(names, copies, field.value.name) |replacement| {
+                if node.fields.at_mut(index) |slot| {
+                    slot.value = replacement;
+                }
+            }
+            index = index + 1;
+        }
+        index = 0;
+        while node.cleanups.get(index) |cleanup| {
+            if copy_of(names, copies, cleanup.arg.name) |replacement| {
+                if node.cleanups.at_mut(index) |slot| {
+                    slot.arg = replacement;
+                }
+            }
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+/// Returns the value a name was copied from, the Go `copies[name]` read with
+/// its ok flag.
+fn copy_of(names: &NameTable, copies: &map::Map<[]u8, Value>, name: Name) -> ?Value {
+    let retained = name_text(names, name);
+    let bytes = retained.as_bytes();
+    return copies.get(bytes);
+}
+
+/// Applies copy propagation to terminators, the Go `replaceTerminatorArgs`.
+fn replace_terminator_args(module: &var Module, block: Block, copies: &map::Map<[]u8, Value>) -> void {
+    var term = module.block_terminator(block);
+    if copy_of(&module.names, copies, term.value.name) |replacement| {
+        term.value = replacement;
+    }
+    if copy_of(&module.names, copies, term.cond.name) |replacement| {
+        term.cond = replacement;
+    }
+    module.set_terminator(block, term);
+    return;
+}
+
+/// Returns the set of SSA names read by a function, the Go `usedValues`.
+fn used_values(allocator: Allocator, module: &Module, function: Function) -> !map::Map<[]u8, bool> {
+    var used = map::new<[]u8, bool>(allocator);
+    errdefer used.deinit();
+    let node = module.function_nodes.at(function.node);
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        index = index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            var arg_index = 0;
+            while instr_node.args.get(arg_index) |arg| {
+                arg_index = arg_index + 1;
+                try mark_used(module, &var used, arg.name);
+            }
+            arg_index = 0;
+            while instr_node.incoming.get(arg_index) |incoming| {
+                arg_index = arg_index + 1;
+                try mark_used(module, &var used, incoming.value.name);
+            }
+            arg_index = 0;
+            while instr_node.fields.get(arg_index) |field| {
+                arg_index = arg_index + 1;
+                try mark_used(module, &var used, field.value.name);
+            }
+            arg_index = 0;
+            while instr_node.cleanups.get(arg_index) |cleanup| {
+                arg_index = arg_index + 1;
+                try mark_used(module, &var used, cleanup.arg.name);
+            }
+        }
+        try mark_used(module, &var used, block_node.terminator.value.name);
+        try mark_used(module, &var used, block_node.terminator.cond.name);
+    }
+    return move used;
+}
+
+/// Records one read of an SSA name, the Go `used[name] = true`.
+fn mark_used(module: &Module, used: &var map::Map<[]u8, bool>, name: Name) -> !void {
+    let retained = name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return used.insert(bytes, true);
+}
+
+/// Keeps instructions with effects or used results, the Go
+/// `keepLiveInstrs`, written back over the block's list.
+fn keep_live_instrs(allocator: Allocator, module: &var Module, block: Block, used: &map::Map<[]u8, bool>) -> !void {
+    var kept = array::new<Instr>(allocator);
+    defer kept.deinit();
+    var index = 0;
+    while block_instr_at(module, block, index) |instr| {
+        index = index + 1;
+        if has_effect(module, instr) or result_used(module, used, instr) {
+            try kept.append(instr);
+        }
+    }
+    if module.blocks.at_mut(block.node) |node| {
+        while node.instrs.pop() |_| {}
+        index = 0;
+        while kept.get(index) |instr| {
+            index = index + 1;
+            try node.instrs.append(instr);
+        }
+    }
+    return;
+}
+
+/// Reports whether an instruction's result is read somewhere, the Go
+/// `used[instr.Result.Name]`.
+fn result_used(module: &Module, used: &map::Map<[]u8, bool>, instr: Instr) -> bool {
+    let result = module.instr_result(instr);
+    let retained = name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    return used.contains(bytes);
+}
+
+/// Reports whether an instruction must remain even if its result is unused,
+/// the Go `hasEffect`. A volatile load is here because the access itself is
+/// the effect: device registers change state when read.
+fn has_effect(module: &Module, instr: Instr) -> bool {
+    let node = module.instrs.at(instr.node);
+    if node.op == Op::Call and module.names.is(node.operand, "print") {
+        return true;
+    }
+    if node.op == Op::ArenaAdd or node.op == Op::ArenaAt or node.op == Op::VolatileLoad or
+        node.op == Op::BoxNew or node.op == Op::BoxTake {
+        return true;
+    }
+    return module.names.is(node.result.type_name, "void");
 }

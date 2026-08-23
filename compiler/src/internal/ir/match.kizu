@@ -1,7 +1,13 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import std::array;
 
-// STUB: port of internal/ir/match.go pending.
+// Mechanical port of internal/ir/match.go: enum, error set and union match
+// statements and expressions, lowered to a chain of check blocks, one arm
+// block each, and a merge block. The Go closure `bindMatchPayload` returns
+// is data here: the binding's outer meaning comes back and
+// `unbind_match_payload` puts it back.
 
 /// Names a match node, which the Ast keeps either as a statement or as an
 /// expression; ownership's `match_stmt_head` / `match_expr_head` and
@@ -21,18 +27,423 @@ pub struct MatchSubject {
     pub union_name: Name
 }
 
+/// Returns the subject a match value lowering fills, the Go zero
+/// `matchSubject`.
+fn blank_subject() -> MatchSubject {
+    return MatchSubject {
+        value: empty_value(),
+        union_value: empty_value(),
+        enum_name: empty_name(),
+        union_name: empty_name()
+    };
+}
+
+/// Is what lowering one arm leaves behind, the Go `matchArmResult`: the
+/// block it ended in, the environment it ended in, the value it produced
+/// when one was wanted, and whether it reaches the merge.
+struct MatchArmResult {
+    block: Name,
+    env: EnvHandle,
+    value: Value,
+    reaches: bool
+}
+
+/// Returns the record an arm lowering fills, the Go zero `matchArmResult`.
+fn (self: &Lowerer) blank_arm_result() -> MatchArmResult {
+    return MatchArmResult { block: empty_name(), env: self.env, value: empty_value(), reaches: false };
+}
+
+/// Reads the head of a match node through either of its forms.
+fn match_head(tree: &ast::Ast, node: MatchNode) -> ?ownership::MatchHead {
+    match node {
+        Statement(statement) => return ownership::match_stmt_head(tree, statement),
+        Expression(expression) => return ownership::match_expr_head(tree, expression),
+    }
+}
+
+/// Copies the arms of a match node through either of its forms, the Go
+/// `stmt.Arms`.
+fn match_arms(allocator: Allocator, tree: &ast::Ast, node: MatchNode) -> !array::Array<ast::MatchArm> {
+    match node {
+        Statement(statement) => return ownership::match_stmt_arms(allocator, tree, statement),
+        Expression(expression) => return ownership::match_expr_arms(allocator, tree, expression),
+    }
+}
+
+/// Lowers a checked enum match statement to a branch chain, the Go
+/// `lowerMatchStmt`.
 fn (self: &var Lowerer) lower_match_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_match_stmt");
+    let head = ownership::match_stmt_head(tree, statement) orelse return try self.fail0(
+        "ir error: unsupported statement"
+    );
+    var subject = blank_subject();
+    if try self.lower_match_value(tree, head.value, &var subject) |failed| {
+        return move failed;
+    }
+    return self.lower_match_body(tree, subject, MatchNode::Statement(statement));
 }
 
+/// Lowers the arms of a match whose value is already lowered, the Go
+/// `lowerMatchBody`. A `comptime match` enters here because the value is
+/// what names the variants its arms are built from, so it is lowered before
+/// the arms exist.
 fn (self: &var Lowerer) lower_match_body(tree: &var ast::Ast, subject: MatchSubject, node: MatchNode) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_match_body");
+    let saved = self.env;
+    let end = try self.new_block_named("match.end");
+    let end_name = self.module.block_name(end);
+    var results = array::new<MatchArmResult>(self.allocator);
+    defer results.deinit();
+    if try self.lower_match_arms(tree, subject, node, end_name, saved, false, &var results) |failed| {
+        return move failed;
+    }
+    self.block = end;
+    self.env = try self.merge_match_envs(&results, saved);
+    if !match_has_reachable_arm(&results) {
+        self.terminate(unreachable_terminator());
+    }
+    return null;
 }
 
+/// Lowers a checked enum match expression to a value phi, the Go
+/// `lowerMatchExpr`.
 fn (self: &var Lowerer) lower_match_expr(tree: &var ast::Ast, node: MatchNode, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_match_expr");
+    let head = match_head(tree, node) orelse return try self.fail0("ir error: unsupported expression");
+    var subject = blank_subject();
+    if try self.lower_match_value(tree, head.value, &var subject) |failed| {
+        return move failed;
+    }
+    let saved = self.env;
+    let end = try self.new_block_named("match.end");
+    let end_name = self.module.block_name(end);
+    var results = array::new<MatchArmResult>(self.allocator);
+    defer results.deinit();
+    if try self.lower_match_arms(tree, subject, node, end_name, saved, true, &var results) |failed| {
+        return move failed;
+    }
+    self.block = end;
+    self.env = saved;
+    var incoming = array::new<Incoming>(self.allocator);
+    defer incoming.deinit();
+    var result_type = empty_name();
+    var index = 0;
+    while results.get(index) |result| {
+        index = index + 1;
+        if !result.reaches {
+            continue;
+        }
+        if is_empty(result_type) {
+            result_type = result.value.type_name;
+        }
+        try incoming.append(Incoming { block: result.block, value: result.value });
+    }
+    if incoming.len() == 0 {
+        return try self.fail0("ir error: match expression has no value arms");
+    }
+    out.* = try self.add_phi(end, result_type, &incoming);
+    return null;
 }
 
+/// Lowers and validates the enum or union value used by a match, the Go
+/// `lowerMatchValue`.
 fn (self: &var Lowerer) lower_match_value(tree: &var ast::Ast, expression: ast::Expression, out: &var MatchSubject) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_match_value");
+    var value = empty_value();
+    if try self.lower_expr(tree, expression, &var value) |failed| {
+        return move failed;
+    }
+    if self.module.has_enum_or_error_set(value.type_name) {
+        out.* = MatchSubject {
+            value: value, union_value: empty_value(), enum_name: value.type_name, union_name: empty_name()
+        };
+        return null;
+    }
+    if self.module.has_union(value.type_name) {
+        let tag = try self.emit1(Op::UnionTag, self.common.i64_type, value);
+        out.* = MatchSubject {
+            value: tag, union_value: value, enum_name: empty_name(), union_name: value.type_name
+        };
+        return null;
+    }
+    if self.is_reference_type(value.type_name) {
+        let union_name = try self.deref_type(value.type_name);
+        if self.module.has_union(union_name) {
+            let union_value = try self.emit1(Op::UnionLoad, union_name, value);
+            let tag = try self.emit1(Op::UnionTag, self.common.i64_type, union_value);
+            out.* = MatchSubject {
+                value: tag, union_value: union_value, enum_name: empty_name(), union_name: union_name
+            };
+            return null;
+        }
+    }
+    return try self.fail1(
+        tree, "ir error: match lowering supports enums and unions, got `%s`", Arg::Str(value.type_name)
+    );
+}
+
+/// Emits check and arm blocks for one enum match, the Go `lowerMatchArms`.
+fn (self: &var Lowerer) lower_match_arms(
+    tree: &var ast::Ast,
+    subject: MatchSubject,
+    node: MatchNode,
+    end_label: Name,
+    saved: EnvHandle,
+    want_value: bool,
+    results: &var array::Array<MatchArmResult>
+) -> !?diagnostic::Diagnostic {
+    let head = match_head(tree, node) orelse return try self.fail0("ir error: unsupported expression");
+    let arms = try match_arms(self.allocator, tree, node);
+    defer arms.deinit();
+    var arm_variants = array::new<MetaField>(self.allocator);
+    defer arm_variants.deinit();
+    if try self.match_arm_variants(tree, head.meta_capture, head.meta_owner, &var arm_variants) |failed| {
+        return move failed;
+    }
+    let capture = try self.text_name(tree, head.meta_capture);
+    var check = try self.new_block_named("match.check");
+    let check_name = self.module.block_name(check);
+    self.terminate(jump_terminator(check_name));
+    var index = 0;
+    while arms.get(index) |arm| {
+        index = index + 1;
+        let arm_block = try self.new_block_named("match.arm");
+        var next_check = no_block();
+        if index < arms.len() {
+            next_check = try self.new_block_named("match.check");
+        }
+        self.block = check;
+        if try self.lower_match_check(tree, subject, arm, arm_block, next_check) |failed| {
+            return move failed;
+        }
+        let mark = MetaMark { previous: self.meta_current };
+        let variant = self.arm_variant(tree, &arm_variants, arm.tag);
+        try self.bind_meta_field(capture, variant);
+        var result = self.blank_arm_result();
+        if try self.lower_match_arm_body(tree, subject, arm, arm_block, end_label, saved, want_value, &var result) |failed| {
+            self.restore_meta(mark);
+            return move failed;
+        }
+        self.restore_meta(mark);
+        try results.append(result);
+        if next_check |next| {
+            check = next;
+        }
+    }
+    return null;
+}
+
+/// Returns the variant a `comptime match` arm body is written against, the
+/// Go `armVariants[arm.Tag]`: the blank record when the tag names none,
+/// which is every arm of a match written by hand.
+fn (self: &Lowerer) arm_variant(tree: &ast::Ast, variants: &array::Array<MetaField>, tag: ast::Text) -> MetaField {
+    var index = 0;
+    while variants.get(index) |variant| {
+        index = index + 1;
+        if self.module.names.is_text(variant.name, tree, tag) {
+            return variant;
+        }
+    }
+    return empty_meta_field();
+}
+
+/// Emits the condition for one enum match arm, the Go `lowerMatchCheck`.
+fn (self: &var Lowerer) lower_match_check(
+    tree: &var ast::Ast,
+    subject: MatchSubject,
+    arm: ast::MatchArm,
+    arm_block: Block,
+    next_check: ?Block
+) -> !?diagnostic::Diagnostic {
+    let arm_name = self.module.block_name(arm_block);
+    if arm.is_wildcard(tree) {
+        self.terminate(jump_terminator(arm_name));
+        return null;
+    }
+    var index = 0;
+    if try self.match_tag_index(tree, subject, arm.tag, &var index) |failed| {
+        return move failed;
+    }
+    let tag = Value { name: try self.module.names.intern_i64(index), type_name: subject.value.type_name };
+    let equals = try self.name("==");
+    let cond = try self.emit_op2(Op::Binary, equals, self.common.bool_type, subject.value, tag);
+    var else_label = empty_name();
+    if next_check |next| {
+        else_label = self.module.block_name(next);
+    } else {
+        let unreachable = try self.new_block_named("match.unreachable");
+        self.module.set_terminator(unreachable, unreachable_terminator());
+        else_label = self.module.block_name(unreachable);
+    }
+    self.terminate(branch_terminator(cond, arm_name, else_label));
+    return null;
+}
+
+/// Resolves an enum or union match tag, the Go `matchTagIndex`.
+fn (self: &var Lowerer) match_tag_index(
+    tree: &ast::Ast,
+    subject: MatchSubject,
+    tag: ast::Text,
+    out: &var i64
+) -> !?diagnostic::Diagnostic {
+    let tag_name = try self.text_name(tree, tag);
+    if !is_empty(subject.enum_name) {
+        let index = self.module.enum_tag(subject.enum_name, tag_name) orelse return try self.fail2(
+            tree, "ir error: unknown enum tag `%s::%s`", Arg::Str(subject.enum_name), Arg::Text(tag)
+        );
+        out.* = index;
+        return null;
+    }
+    let variant = self.module.union_variant(subject.union_name, tag_name) orelse return try self.fail2(
+        tree, "ir error: unknown union tag `%s::%s`", Arg::Str(subject.union_name), Arg::Text(tag)
+    );
+    out.* = variant.index;
+    return null;
+}
+
+/// Lowers one arm in an isolated environment, the Go `lowerMatchArmBody`.
+fn (self: &var Lowerer) lower_match_arm_body(
+    tree: &var ast::Ast,
+    subject: MatchSubject,
+    arm: ast::MatchArm,
+    block: Block,
+    end_label: Name,
+    saved: EnvHandle,
+    want_value: bool,
+    out: &var MatchArmResult
+) -> !?diagnostic::Diagnostic {
+    self.env = try self.envs.clone_env(saved);
+    self.block = block;
+    let payload = try self.bind_match_payload(tree, subject, arm);
+    var value = empty_value();
+    if want_value {
+        if try self.lower_match_arm_value(tree, arm.body, &var value) |failed| {
+            return move failed;
+        }
+    } else {
+        if try self.lower_stmt(tree, arm.body) |failed| {
+            return move failed;
+        }
+    }
+    try self.unbind_match_payload(payload);
+    var reaches = false;
+    if !self.terminated() {
+        self.terminate(jump_terminator(end_label));
+        reaches = true;
+    }
+    out.* = MatchArmResult { block: self.block_label(), env: self.env, value: value, reaches: reaches };
+    self.env = saved;
+    return null;
+}
+
+/// Binds a union payload for `Tag(name)` arms, the Go `bindMatchPayload`,
+/// and returns what takes the binding back out of scope, the way a block
+/// does with its declarations: the name's outer meaning, or null when no
+/// payload was bound. A binding left in the arm environment reaches the
+/// merge, where a later match would phi over a value its own arms never
+/// defined.
+fn (self: &var Lowerer) bind_match_payload(
+    tree: &ast::Ast,
+    subject: MatchSubject,
+    arm: ast::MatchArm
+) -> !?ScopedBinding {
+    if text_empty(tree, arm.binding) or arm.is_wildcard(tree) or is_empty(subject.union_name) {
+        return null;
+    }
+    let tag = try self.text_name(tree, arm.tag);
+    let variant = self.module.union_variant(subject.union_name, tag) orelse return null;
+    if is_empty(variant.payload) {
+        return null;
+    }
+    let binding = try self.text_name(tree, arm.binding);
+    let saved = self.saved_binding(binding);
+    let payload = try self.emit_imm1(Op::UnionPayload, variant.payload, variant.name, subject.union_value);
+    try self.envs.bind(self.env, binding, payload);
+    return saved;
+}
+
+/// Takes a bound payload back out of scope, the closure `bindMatchPayload`
+/// returns: the outer meaning is put back, or the name is unbound.
+fn (self: &var Lowerer) unbind_match_payload(saved: ?ScopedBinding) -> !void {
+    let binding = saved orelse return;
+    let env = self.env;
+    return self.restore_branch_var(env, binding);
+}
+
+/// Lowers the value of a match expression arm, the Go `lowerMatchArmValue`:
+/// a block with a trailing expression, or a bare expression.
+fn (self: &var Lowerer) lower_match_arm_value(
+    tree: &var ast::Ast,
+    statement: ast::Statement,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::is_block_stmt(tree, statement) {
+        return self.lower_block_body(tree, ast::Block { node: statement.node }, true, out);
+    }
+    let value = statement_value(tree, statement) orelse return try self.fail0(
+        "ir error: match expression arms must be expressions"
+    );
+    return self.lower_trailing_value(tree, value, out);
+}
+
+/// Creates phi nodes for bindings changed by reachable arms, the Go
+/// `mergeMatchEnvs`.
+fn (self: &var Lowerer) merge_match_envs(results: &array::Array<MatchArmResult>, fallback: EnvHandle) -> !EnvHandle {
+    var incoming_results = array::new<MatchArmResult>(self.allocator);
+    defer incoming_results.deinit();
+    var index = 0;
+    while results.get(index) |result| {
+        index = index + 1;
+        if result.reaches {
+            try incoming_results.append(result);
+        }
+    }
+    if incoming_results.len() == 0 {
+        return fallback;
+    }
+    let first_result = incoming_results.get_or_panic(0);
+    let merged = try self.envs.clone_env(first_result.env);
+    let block = self.block;
+    var position = 0;
+    while self.envs.name_at(fallback, position) |name| {
+        position = position + 1;
+        let first = self.arm_value(first_result, name, fallback);
+        var all_same = true;
+        var incoming = array::new<Incoming>(self.allocator);
+        defer incoming.deinit();
+        var arm = 0;
+        while incoming_results.get(arm) |result| {
+            arm = arm + 1;
+            let value = self.arm_value(result, name, fallback);
+            if !same_value(first, value) {
+                all_same = false;
+            }
+            try incoming.append(Incoming { block: result.block, value: value });
+        }
+        if !all_same {
+            let phi = try self.add_phi(block, first.type_name, &incoming);
+            try self.envs.bind(merged, name, phi);
+        }
+    }
+    return merged;
+}
+
+/// Returns what name holds when an arm reaches the merge, the Go
+/// `armValue`. An arm that never touched the name leaves it at what the
+/// match started from.
+fn (self: &Lowerer) arm_value(result: MatchArmResult, name: Name, fallback: EnvHandle) -> Value {
+    if self.envs.get(result.env, name) |value| {
+        return value;
+    }
+    return self.envs.get(fallback, name) orelse empty_value();
+}
+
+/// Reports whether any arm jumps to the match merge block, the Go
+/// `matchHasReachableArm`.
+fn match_has_reachable_arm(results: &array::Array<MatchArmResult>) -> bool {
+    var index = 0;
+    while results.get(index) |result| {
+        index = index + 1;
+        if result.reaches {
+            return true;
+        }
+    }
+    return false;
 }

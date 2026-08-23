@@ -1,36 +1,1078 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import std::array;
+import std::string;
 
-// STUB: port of internal/ir/control.go pending.
+// Mechanical port of internal/ir/control.go: if statements and expressions,
+// the short-circuit operators, orelse, the loop forms with their header phis,
+// break and continue, and the walk that finds the names a loop body assigns.
+// The Go closures a loop shape carries (`header`, `advance`) are data here: a
+// LoopShape names the form and `lower_loop_header` / `lower_loop_advance`
+// run the part that differs per form, so `lower_loop` stays the one place
+// header phis are made and closed.
 
+/// Is what lowering one branch of an if leaves behind, the Go
+/// `branchResult`: the environment it ended in, the block it ended in,
+/// whether it reaches the merge, and the value it produced when one was
+/// wanted.
+struct BranchResult {
+    env: EnvHandle,
+    end: Name,
+    reachable: bool,
+    value: Value
+}
+
+/// Returns the record a branch lowering fills, the Go zero `branchResult`.
+fn (self: &Lowerer) blank_branch() -> BranchResult {
+    return BranchResult { env: self.env, end: empty_name(), reachable: false, value: empty_value() };
+}
+
+/// Lowers if/else into branches and a merge block, the Go `lowerIfStmt`.
+/// With a capture, the condition is an optional: the branch tests presence
+/// and the payload is bound for the consequence only.
 fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_if_stmt");
+    var cond = empty_value();
+    if try self.lower_expr(tree, statement.condition, &var cond) |failed| {
+        return move failed;
+    }
+    var payload = empty_value();
+    let has_capture = !text_empty(tree, statement.capture);
+    if has_capture {
+        let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
+            tree, "ir error: if capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
+        );
+        payload = try self.emit1(Op::OptValue, elem, cond);
+        cond = try self.emit1(Op::OptHas, self.common.bool_type, cond);
+    }
+    let then_block = try self.new_block_named("if.then");
+    let else_block = try self.new_block_named("if.else");
+    let merge_block = try self.new_block_named("if.end");
+    let merge_name = self.module.block_name(merge_block);
+    self.terminate_branch(cond, then_block, else_block);
+    var saved = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
+    if has_capture {
+        let capture = try self.text_name(tree, statement.capture);
+        saved = self.saved_binding(capture);
+        try self.envs.bind(self.env, capture, payload);
+    }
+    var then_result = self.blank_branch();
+    if try self.lower_branch_block(tree, then_block, statement.consequence, merge_name, false, &var then_result) |failed| {
+        errdefer failed.deinit();
+        if has_capture {
+            try self.restore_loop_var(saved);
+        }
+        return move failed;
+    }
+    if has_capture {
+        // The capture is scoped to the consequence; the else branch and the
+        // merged environment see whatever the name meant outside.
+        try self.restore_loop_var(saved);
+        try self.restore_branch_var(then_result.env, saved);
+    }
+    // An absent else is an empty block, the Go `&ast.BlockStmt{}`.
+    let else_body = statement.alternative orelse tree.add_block(ast::BlockStmt {
+        statements: array::new<ast::Statement>(self.allocator)
+    });
+    var else_result = self.blank_branch();
+    if try self.lower_branch_block(tree, else_block, else_body, merge_name, false, &var else_result) |failed| {
+        return move failed;
+    }
+    self.block = merge_block;
+    if !then_result.reachable and !else_result.reachable {
+        self.terminate(unreachable_terminator());
+        return null;
+    }
+    try self.merge_branch_envs(merge_block, then_result, else_result);
+    return null;
 }
 
-fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStmt, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_if_expr");
+/// Binds the environment the code after a two-way branch starts from, the
+/// `switch` over reachability `lowerIfStmt` and `lowerIfExpr` share: both
+/// reachable merges them, one reachable keeps that one. Neither reachable is
+/// left to the caller, which is the only case the two differ in.
+fn (self: &var Lowerer) merge_branch_envs(
+    merge_block: Block,
+    then_result: BranchResult,
+    else_result: BranchResult
+) -> !void {
+    if then_result.reachable and else_result.reachable {
+        self.env = try self.merge_envs(
+            merge_block, then_result.end, then_result.env, else_result.end, else_result.env
+        );
+        return;
+    }
+    if then_result.reachable {
+        self.env = then_result.env;
+        return;
+    }
+    if else_result.reachable {
+        self.env = else_result.env;
+    }
+    return;
 }
 
-fn (self: &var Lowerer) lower_while_stmt(tree: &var ast::Ast, statement: ast::WhileStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_while_stmt");
+/// Remembers what a scoped name meant before a branch or loop rebinds it,
+/// the Go `previous, hadPrevious := l.env.get(name)` pair.
+fn (self: &Lowerer) saved_binding(name: Name) -> ScopedBinding {
+    if self.envs.get(self.env, name) |previous| {
+        return ScopedBinding { name: name, value: previous, bound: true };
+    }
+    return ScopedBinding { name: name, value: empty_value(), bound: false };
 }
 
-fn (self: &var Lowerer) lower_for_stmt(tree: &var ast::Ast, statement: ast::ForStmt) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_for_stmt");
+/// Puts a scoped capture's outer meaning back into a branch environment, the
+/// Go `restoreBranchVar`, so the merge after the branch never sees the
+/// capture.
+fn (self: &var Lowerer) restore_branch_var(branch_env: EnvHandle, saved: ScopedBinding) -> !void {
+    if saved.bound {
+        return self.envs.bind(branch_env, saved.name, saved.value);
+    }
+    return self.envs.unbind(branch_env, saved.name);
 }
 
-fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool, label: ast::Text) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_loop_branch");
+/// Removes a scoped loop variable after lowering the loop, the Go
+/// `restoreLoopVar`. It reads self.env at call time, so a restore made on an
+/// exit path lands in whatever environment is current then.
+fn (self: &var Lowerer) restore_loop_var(saved: ScopedBinding) -> !void {
+    let env = self.env;
+    return self.restore_branch_var(env, saved);
 }
 
+/// Ends the current block with a branch between two blocks, the Go
+/// `l.block.Terminator = Terminator{Op: "branch", ...}` assignments.
+fn (self: &var Lowerer) terminate_branch(cond: Value, target: Block, else_block: Block) -> void {
+    let target_name = self.module.block_name(target);
+    let else_name = self.module.block_name(else_block);
+    self.terminate(branch_terminator(cond, target_name, else_name));
+    return;
+}
+
+/// Lowers `opt orelse default` as a presence branch merged by a phi, the Go
+/// `lowerOrelseExpr`, the same shape the short-circuit boolean operators
+/// take.
 fn (self: &var Lowerer) lower_orelse_expr(tree: &var ast::Ast, binary: ast::BinaryExpr, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_orelse_expr");
+    var opt = empty_value();
+    if try self.lower_expr(tree, binary.left, &var opt) |failed| {
+        return move failed;
+    }
+    let elem = try self.optional_elem_type(opt.type_name) orelse return try self.fail1(
+        tree, "ir error: orelse needs a `?T` left operand, got %s", Arg::Str(opt.type_name)
+    );
+    let has = try self.emit1(Op::OptHas, self.common.bool_type, opt);
+    let some_block = try self.new_block_named("orelse.some");
+    let else_block = try self.new_block_named("orelse.else");
+    let merge_block = try self.new_block_named("orelse.end");
+    let merge_name = self.module.block_name(merge_block);
+    self.terminate_branch(has, some_block, else_block);
+    self.block = some_block;
+    let value = try self.emit1(Op::OptValue, elem, opt);
+    let some_end = self.block_label();
+    self.terminate(jump_terminator(merge_name));
+    self.block = else_block;
+    var fallback = empty_value();
+    if try self.lower_contextual_expr(tree, binary.right, elem, &var fallback) |failed| {
+        return move failed;
+    }
+    let else_end = self.block_label();
+    if !self.terminated() {
+        self.terminate(jump_terminator(merge_name));
+    }
+    self.block = merge_block;
+    out.* = try self.add_phi2(merge_block, elem, some_end, value, else_end, fallback);
+    return null;
 }
 
+/// Lowers `cond orelse return/break/continue`, the Go
+/// `lowerOrelseGuardExpr`. The null arm lowers the exit statement and never
+/// rejoins, so only the some arm reaches the code after the guard and no
+/// merge phi is needed.
 fn (self: &var Lowerer) lower_orelse_guard_expr(tree: &var ast::Ast, guard: ast::OrelseGuardExpr, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_orelse_guard_expr");
+    var opt = empty_value();
+    if try self.lower_expr(tree, guard.condition, &var opt) |failed| {
+        return move failed;
+    }
+    let elem = try self.optional_elem_type(opt.type_name) orelse return try self.fail1(
+        tree, "ir error: orelse needs a `?T` left operand, got %s", Arg::Str(opt.type_name)
+    );
+    let has = try self.emit1(Op::OptHas, self.common.bool_type, opt);
+    let some_block = try self.new_block_named("guard.some");
+    let exit_block = try self.new_block_named("guard.exit");
+    self.terminate_branch(has, some_block, exit_block);
+    self.block = exit_block;
+    if try self.lower_guard_exit(tree, guard.exit) |failed| {
+        return move failed;
+    }
+    self.block = some_block;
+    out.* = try self.emit1(Op::OptValue, elem, opt);
+    return null;
 }
 
+/// Lowers the exit arm of an orelse guard through the same paths the
+/// statement forms take, defers included, the Go `lowerGuardExit`.
+fn (self: &var Lowerer) lower_guard_exit(tree: &var ast::Ast, exit: ast::Statement) -> !?diagnostic::Diagnostic {
+    if ownership::return_stmt(tree, exit) |returned| {
+        return self.lower_return_stmt(tree, exit, returned);
+    }
+    if ownership::break_stmt(tree, exit) |value| {
+        return self.lower_loop_branch(tree, false, value.label);
+    }
+    if ownership::continue_stmt(tree, exit) |value| {
+        return self.lower_loop_branch(tree, true, value.label);
+    }
+    let kind = try self.name(statement_go_type(tree, exit));
+    return try self.fail1(tree, "ir error: unsupported orelse guard exit %s", Arg::Str(kind));
+}
+
+/// Lowers short-circuit boolean operators into control flow, the Go
+/// `lowerLogicalExpr`.
 fn (self: &var Lowerer) lower_logical_expr(tree: &var ast::Ast, binary: ast::BinaryExpr, out: &var Value) -> !?diagnostic::Diagnostic {
-    return try self.fail0("ir error: unported lower_logical_expr");
+    var left = empty_value();
+    if try self.lower_expr(tree, binary.left, &var left) |failed| {
+        return move failed;
+    }
+    let right_block = try self.new_block_named("logical.right");
+    let const_block = try self.new_block_named("logical.const");
+    let merge_block = try self.new_block_named("logical.end");
+    let merge_name = self.module.block_name(merge_block);
+    let is_and = text_is(tree, binary.operator, "and");
+    if is_and {
+        self.terminate_branch(left, right_block, const_block);
+    } else {
+        self.terminate_branch(left, const_block, right_block);
+    }
+    var right_value = empty_value();
+    var right_end = empty_name();
+    if try self.lower_logical_branch(tree, right_block, binary.right, merge_name, &var right_value, &var right_end) |failed| {
+        return move failed;
+    }
+    var const_end = empty_name();
+    let const_value = try self.lower_logical_const(const_block, is_and, merge_name, &var const_end);
+    self.block = merge_block;
+    out.* = try self.add_phi2(merge_block, self.common.bool_type, right_end, right_value, const_end, const_value);
+    return null;
+}
+
+/// Lowers the RHS of a short-circuit operator, the Go `lowerLogicalBranch`:
+/// its value, and the block it ended in.
+fn (self: &var Lowerer) lower_logical_branch(
+    tree: &var ast::Ast,
+    block: Block,
+    expression: ast::Expression,
+    target: Name,
+    out: &var Value,
+    end: &var Name
+) -> !?diagnostic::Diagnostic {
+    self.block = block;
+    var value = empty_value();
+    if try self.lower_expr(tree, expression, &var value) |failed| {
+        return move failed;
+    }
+    end.* = self.block_label();
+    if !self.terminated() {
+        self.terminate(jump_terminator(target));
+    }
+    out.* = value;
+    return null;
+}
+
+/// Lowers the branch that skips the RHS, the Go `lowerLogicalConst`: the
+/// constant the operator short-circuits to, and the block it ended in.
+fn (self: &var Lowerer) lower_logical_const(block: Block, is_and: bool, target: Name, end: &var Name) -> !Value {
+    self.block = block;
+    var value = empty_value();
+    if is_and {
+        value = try self.emit_const_text(self.common.bool_type, "false");
+    } else {
+        value = try self.emit_const_text(self.common.bool_type, "true");
+    }
+    end.* = self.block_label();
+    self.terminate(jump_terminator(target));
+    return value;
+}
+
+/// Lowers a branch with an isolated environment, the Go `lowerBranchBlock`.
+fn (self: &var Lowerer) lower_branch_block(
+    tree: &var ast::Ast,
+    block: Block,
+    body: ast::Block,
+    target: Name,
+    want_value: bool,
+    out: &var BranchResult
+) -> !?diagnostic::Diagnostic {
+    let saved = self.env;
+    self.env = try self.envs.clone_env(saved);
+    self.block = block;
+    var value = empty_value();
+    if try self.lower_block_body(tree, body, want_value, &var value) |failed| {
+        return move failed;
+    }
+    let end = self.block_label();
+    let reachable = !self.terminated();
+    if reachable {
+        self.terminate(jump_terminator(target));
+    }
+    out.* = BranchResult { env: self.env, end: end, reachable: reachable, value: value };
+    self.env = saved;
+    return null;
+}
+
+/// Lowers an if used as a value, the Go `lowerIfExpr`. It is the branch
+/// lowering an if statement already does, ended by a phi over the value each
+/// side produced, which is how a match expression reaches its value too.
+fn (self: &var Lowerer) lower_if_expr(tree: &var ast::Ast, statement: ast::IfStmt, out: &var Value) -> !?diagnostic::Diagnostic {
+    let alternative = statement.alternative orelse return try self.fail0(
+        "ir error: an if used as a value needs an else branch"
+    );
+    var cond = empty_value();
+    if try self.lower_expr(tree, statement.condition, &var cond) |failed| {
+        return move failed;
+    }
+    let then_block = try self.new_block_named("if.then");
+    let else_block = try self.new_block_named("if.else");
+    let merge_block = try self.new_block_named("if.end");
+    let merge_name = self.module.block_name(merge_block);
+    self.terminate_branch(cond, then_block, else_block);
+    var then_result = self.blank_branch();
+    if try self.lower_branch_block(tree, then_block, statement.consequence, merge_name, true, &var then_result) |failed| {
+        return move failed;
+    }
+    var else_result = self.blank_branch();
+    if try self.lower_branch_block(tree, else_block, alternative, merge_name, true, &var else_result) |failed| {
+        return move failed;
+    }
+    self.block = merge_block;
+    try self.merge_branch_envs(merge_block, then_result, else_result);
+    var incoming = array::new<Incoming>(self.allocator);
+    defer incoming.deinit();
+    var result_type = empty_name();
+    try append_branch_incoming(then_result, &var incoming, &var result_type);
+    try append_branch_incoming(else_result, &var incoming, &var result_type);
+    if incoming.len() == 0 {
+        self.terminate(unreachable_terminator());
+        return try self.fail0("ir error: an if used as a value has no branch that produces one");
+    }
+    out.* = try self.add_phi(merge_block, result_type, &incoming);
+    return null;
+}
+
+/// Adds one reachable branch's value to the phi an if expression ends in,
+/// the body of the Go loop over `[]branchResult{thenResult, elseResult}`;
+/// the first reachable branch names the result type.
+fn append_branch_incoming(
+    result: BranchResult,
+    incoming: &var array::Array<Incoming>,
+    result_type: &var Name
+) -> !void {
+    if !result.reachable {
+        return;
+    }
+    if is_empty(result_type.*) {
+        result_type.* = result.value.type_name;
+    }
+    return incoming.append(Incoming { block: result.end, value: result.value });
+}
+
+/// Creates phi nodes for values that differ across branches, the Go
+/// `mergeEnvs`.
+fn (self: &var Lowerer) merge_envs(
+    block: Block,
+    left_block: Name,
+    left: EnvHandle,
+    right_block: Name,
+    right: EnvHandle
+) -> !EnvHandle {
+    let merged = try self.envs.clone_env(left);
+    var index = 0;
+    while self.envs.name_at(right, index) |name| {
+        index = index + 1;
+        let right_value = self.envs.get(right, name) orelse empty_value();
+        if self.envs.get(left, name) |left_value| {
+            if same_value(left_value, right_value) {
+                continue;
+            }
+            let phi = try self.add_phi2(
+                block, left_value.type_name, left_block, left_value, right_block, right_value
+            );
+            try self.envs.bind(merged, name, phi);
+        } else {
+            try self.envs.bind(merged, name, right_value);
+        }
+    }
+    return merged;
+}
+
+/// Is the part of a loop that `while` and `for` do not share, the Go
+/// `loopShape`: what the header tests, and what runs on every way back to it.
+///
+/// A loop with no advance reaches its header directly, so `continue` jumps
+/// there. A loop with an advance reaches its header through a latch block
+/// that runs the advance, and `continue` jumps to the latch instead. That is
+/// the one difference the phi work has to know about: with a latch, the
+/// header is reached from a single block, so the values arriving from the
+/// body and from each `continue` are merged in the latch rather than handed
+/// to the header phis one by one.
+struct LoopShape {
+    form: LoopForm,
+    label: ast::Text,
+    body: ast::Block
+}
+
+/// Is the form of one loop: what its header closure and advance closure
+/// read in Go.
+union LoopForm {
+    While(WhileShape),
+    For(ForShape),
+}
+
+/// Is what a while header tests: its condition, and the capture the payload
+/// is bound to when the condition is an optional.
+struct WhileShape {
+    condition: ast::Expression,
+    capture: ast::Text
+}
+
+/// Is what a for header tests: the index name, and the lowered start and
+/// end of its range.
+struct ForShape {
+    name: ast::Text,
+    start: Value,
+    end: Value
+}
+
+/// Spells the block label prefix of a loop form, the Go `loopShape.name`.
+fn loop_form_name(form: LoopForm) -> []u8 {
+    match form {
+        While(_) => return "while",
+        For(_) => return "for",
+    }
+}
+
+/// Reports whether a loop form runs an advance on the way back to its
+/// header, the Go `shape.advance != nil`.
+fn loop_has_advance(form: LoopForm) -> bool {
+    match form {
+        While(_) => return false,
+        For(_) => return true,
+    }
+}
+
+/// Returns no latch, the typed null a `var` needs.
+fn no_block() -> ?Block {
+    return null;
+}
+
+/// Is what a loop header lowering leaves behind, the `(Value, error)` of
+/// the Go `loopShape.header` together with the index phi `lowerForStmt`
+/// keeps in a closure variable: a while leaves the condition alone, a for
+/// leaves the condition and the index phi its advance grows.
+union LoopTest {
+    Plain(Value),
+    Indexed(IndexedTest),
+}
+
+/// Is a for header's result: the condition, and the index phi behind it.
+struct IndexedTest {
+    cond: Value,
+    phi: Instr
+}
+
+/// Returns the condition a loop header branches on.
+fn loop_test_cond(test: LoopTest) -> Value {
+    match test {
+        Plain(cond) => return cond,
+        Indexed(indexed) => return indexed.cond,
+    }
+}
+
+/// Appends a block under a fresh label, the Go
+/// `l.newBlock(l.nextBlockName(prefix))`.
+fn (self: &var Lowerer) new_block_named(prefix: []u8) -> !Block {
+    let name = try self.next_block_name(prefix);
+    return self.new_block(name);
+}
+
+/// Appends one loop block under a fresh label, the Go
+/// `l.newBlock(l.nextBlockName(shape.name + ".header"))` and its siblings.
+fn (self: &var Lowerer) new_loop_block(form: LoopForm, suffix: []u8) -> !Block {
+    var prefix = try string::from_bytes(self.allocator, loop_form_name(form));
+    defer prefix.deinit();
+    try prefix.append_bytes(suffix);
+    let bytes = prefix.as_bytes();
+    return self.new_block_named(bytes);
+}
+
+/// Lowers one loop, the Go `lowerLoop`. It is the only place a loop's header
+/// phis are made and closed, so what a name holds around the loop is decided
+/// once for every loop form rather than once per form.
+fn (self: &var Lowerer) lower_loop(tree: &var ast::Ast, shape: LoopShape) -> !?diagnostic::Diagnostic {
+    var assigned = array::new<Name>(self.allocator);
+    defer assigned.deinit();
+    if try self.assigned_names(tree, shape.body, &var assigned) |failed| {
+        return move failed;
+    }
+    let preheader = self.block;
+    let header = try self.new_loop_block(shape.form, ".header");
+    let body = try self.new_loop_block(shape.form, ".body");
+    var latch = no_block();
+    if loop_has_advance(shape.form) {
+        latch = try self.new_loop_block(shape.form, ".step");
+    }
+    let exit = try self.new_loop_block(shape.form, ".end");
+    let header_name = self.module.block_name(header);
+    self.module.set_terminator(preheader, jump_terminator(header_name));
+    var phis = array::new<LoopPhi>(self.allocator);
+    defer phis.deinit();
+    try self.create_loop_phis(header, &assigned, &var phis);
+    self.block = header;
+    let preheader_name = self.module.block_name(preheader);
+    var tested = LoopTest::Plain(empty_value());
+    if try self.lower_loop_header(tree, shape, preheader_name, &var tested) |failed| {
+        return move failed;
+    }
+    // self.block, not header: a short-circuit condition splits the test
+    // across blocks of its own, and the branch belongs to the one it ended
+    // in. That block, not the header, is also the one the exit is reached
+    // from.
+    let test = self.block;
+    self.terminate_branch(loop_test_cond(tested), body, exit);
+    var back = header;
+    if latch |latch_block| {
+        back = latch_block;
+    }
+    let back_name = self.module.block_name(back);
+    let exit_name = self.module.block_name(exit);
+    self.block = body;
+    let label = try self.text_name(tree, shape.label);
+    try self.push_loop(label, exit_name, back_name);
+    if try self.lower_block(tree, shape.body) |failed| {
+        return move failed;
+    }
+    // The Go `popLoop`: the loop leaves the stack, and its edges are read
+    // from the record it was.
+    let loop = self.loops.pop_or_panic();
+    defer loop.deinit();
+    var edges = array::new<LoopEdge>(self.allocator);
+    defer edges.deinit();
+    if !self.terminated() {
+        // The body falling through is one more edge back into the loop, and
+        // it comes first because it is the one the source reads as the loop.
+        // A copy, because closeLoopPhis rebinds the same names in self.env
+        // while it reads what the body left them at.
+        let fallthrough_env = try self.envs.clone_env(self.env);
+        try edges.append(LoopEdge { block: self.block_label(), env: fallthrough_env });
+        self.terminate(jump_terminator(back_name));
+    }
+    var index = 0;
+    while loop.continue_edges.get(index) |edge| {
+        index = index + 1;
+        try edges.append(edge);
+    }
+    if latch |latch_block| {
+        self.block = latch_block;
+    }
+    // Before the advance, so a merge phi stays at the top of the latch.
+    try self.close_loop_phis(&phis, latch, &edges);
+    if latch |latch_block| {
+        try self.lower_loop_advance(latch_block, tested);
+        self.module.set_terminator(latch_block, jump_terminator(header_name));
+    }
+    self.block = exit;
+    let test_name = self.module.block_name(test);
+    try self.finish_loop_exit_phis(exit, &phis, test_name, &loop.break_edges);
+    return null;
+}
+
+/// Lowers what a loop's header tests, the Go `loopShape.header` closures of
+/// `lowerWhileStmt` and `lowerForStmt`. A while lowers its condition; with a
+/// capture the condition is an optional tested per round, the loop runs
+/// while it holds a value, and the payload is the capture binding. A for
+/// creates its index phi from the start value and tests it against the end.
+fn (self: &var Lowerer) lower_loop_header(
+    tree: &var ast::Ast,
+    shape: LoopShape,
+    preheader: Name,
+    out: &var LoopTest
+) -> !?diagnostic::Diagnostic {
+    match shape.form {
+        While(loop) => {
+            var cond = empty_value();
+            if try self.lower_expr(tree, loop.condition, &var cond) |failed| {
+                return move failed;
+            }
+            if text_empty(tree, loop.capture) {
+                out.* = LoopTest::Plain(cond);
+                return null;
+            }
+            let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
+                tree, "ir error: while capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
+            );
+            let capture = try self.text_name(tree, loop.capture);
+            let payload = try self.emit1(Op::OptValue, elem, cond);
+            try self.envs.bind(self.env, capture, payload);
+            out.* = LoopTest::Plain(try self.emit1(Op::OptHas, self.common.bool_type, cond));
+            return null;
+        },
+        For(loop) => {
+            let block = self.block;
+            let phi = try self.create_for_index_phi(block, preheader, loop.start);
+            let index = self.module.instr_result(phi);
+            let name = try self.text_name(tree, loop.name);
+            try self.envs.bind(self.env, name, index);
+            let less = try self.name("<");
+            let cond = try self.emit_op2(Op::Binary, less, self.common.bool_type, index, loop.end);
+            out.* = LoopTest::Indexed(IndexedTest { cond: cond, phi: phi });
+            return null;
+        },
+    }
+}
+
+/// Runs what a loop does on every way back to its header, the Go
+/// `loopShape.advance` closure of `lowerForStmt`: the index phi takes the
+/// incremented value from the latch. A while has no advance and nothing to
+/// do here.
+fn (self: &var Lowerer) lower_loop_advance(latch: Block, test: LoopTest) -> !void {
+    match test {
+        Plain(_) => return,
+        Indexed(indexed) => {
+            let one = try self.emit_const_text(self.common.i64_type, "1");
+            let plus = try self.name("+");
+            let index = self.module.instr_result(indexed.phi);
+            let next = try self.emit_op2(Op::Binary, plus, self.common.i64_type, index, one);
+            let latch_name = self.module.block_name(latch);
+            return self.module.add_incoming(indexed.phi, latch_name, next);
+        },
+    }
+}
+
+/// Lowers a loop that tests a condition and goes straight back, the Go
+/// `lowerWhileStmt`. With a capture, the name the payload is bound to is
+/// restored after the loop on every exit path.
+fn (self: &var Lowerer) lower_while_stmt(tree: &var ast::Ast, statement: ast::WhileStmt) -> !?diagnostic::Diagnostic {
+    let shape = LoopShape {
+        form: LoopForm::While(WhileShape { condition: statement.condition, capture: statement.capture }),
+        label: statement.label,
+        body: statement.body
+    };
+    if text_empty(tree, statement.capture) {
+        return self.lower_loop(tree, shape);
+    }
+    let capture = try self.text_name(tree, statement.capture);
+    let saved = self.saved_binding(capture);
+    if try self.lower_loop(tree, shape) |failed| {
+        errdefer failed.deinit();
+        try self.restore_loop_var(saved);
+        return move failed;
+    }
+    try self.restore_loop_var(saved);
+    return null;
+}
+
+/// Lowers a bounded i64 range loop, the Go `lowerForStmt`. The index is a
+/// header phi of its own, and the advance that closes it is why the loop
+/// needs a latch. The index name is restored after the loop on every exit
+/// path.
+fn (self: &var Lowerer) lower_for_stmt(tree: &var ast::Ast, statement: ast::ForStmt) -> !?diagnostic::Diagnostic {
+    var start = empty_value();
+    if try self.lower_expr(tree, statement.start, &var start) |failed| {
+        return move failed;
+    }
+    var end = empty_value();
+    if try self.lower_expr(tree, statement.end, &var end) |failed| {
+        return move failed;
+    }
+    let name = try self.text_name(tree, statement.name);
+    let saved = self.saved_binding(name);
+    let shape = LoopShape {
+        form: LoopForm::For(ForShape { name: statement.name, start: start, end: end }),
+        label: statement.label,
+        body: statement.body
+    };
+    if try self.lower_loop(tree, shape) |failed| {
+        errdefer failed.deinit();
+        try self.restore_loop_var(saved);
+        return move failed;
+    }
+    try self.restore_loop_var(saved);
+    return null;
+}
+
+/// Creates the SSA loop variable for a for range, the Go
+/// `createForIndexPhi`.
+fn (self: &var Lowerer) create_for_index_phi(block: Block, incoming: Name, start: Value) -> !Instr {
+    return self.add_open_phi(block, self.common.i64_type, incoming, start);
+}
+
+/// Lowers break and continue as jumps to loop blocks, the Go
+/// `lowerLoopBranch`.
+fn (self: &var Lowerer) lower_loop_branch(tree: &var ast::Ast, is_continue: bool, label: ast::Text) -> !?diagnostic::Diagnostic {
+    let index = self.find_loop(tree, label) orelse return try self.fail1(
+        tree, "ir error: unknown loop label `%s`", Arg::Text(label)
+    );
+    let edge = LoopEdge { block: self.block_label(), env: try self.envs.clone_env(self.env) };
+    var target = empty_name();
+    var defer_depth = 0;
+    if self.loops.at_mut(index) |loop| {
+        if is_continue {
+            target = loop.continue_to;
+            try loop.continue_edges.append(edge);
+        } else {
+            target = loop.break_to;
+            try loop.break_edges.append(edge);
+        }
+        defer_depth = loop.defer_depth;
+    }
+    var cleanups = array::new<Cleanup>(self.allocator);
+    defer cleanups.deinit();
+    try self.cleanups_from(defer_depth, false, &var cleanups);
+    try self.emit_cleanups(&cleanups);
+    self.terminate(jump_terminator(target));
+    return null;
+}
+
+/// Records the current loop branch targets, the Go `pushLoop`. The record
+/// is read back by the `pop_or_panic` in `lower_loop`, the Go `popLoop`.
+fn (self: &var Lowerer) push_loop(label: Name, break_to: Name, continue_to: Name) -> !void {
+    return self.loops.append(LoopContext {
+        label: label,
+        break_to: break_to,
+        continue_to: continue_to,
+        defer_depth: self.defer_frames.len(),
+        break_edges: array::new<LoopEdge>(self.allocator),
+        continue_edges: array::new<LoopEdge>(self.allocator)
+    });
+}
+
+/// Resolves an unlabeled or labeled loop branch target, the Go `findLoop`:
+/// its position in the loop stack, innermost first, or null.
+fn (self: &Lowerer) find_loop(tree: &ast::Ast, label: ast::Text) -> ?i64 {
+    var index = self.loops.len();
+    while index > 0 {
+        index = index - 1;
+        if self.loops.at(index) |loop| {
+            if text_empty(tree, label) or self.module.names.is_text(loop.label, tree, label) {
+                return index;
+            }
+        }
+    }
+    return null;
+}
+
+/// Creates header phi nodes for assigned loop variables, the Go
+/// `createLoopPhis`.
+fn (self: &var Lowerer) create_loop_phis(
+    block: Block,
+    assigned: &array::Array<Name>,
+    out: &var array::Array<LoopPhi>
+) -> !void {
+    let current = self.block_label();
+    var index = 0;
+    while assigned.get(index) |name| {
+        index = index + 1;
+        let value = self.envs.get(self.env, name) orelse continue;
+        let phi = try self.add_open_phi(block, value.type_name, current, value);
+        let result = self.module.instr_result(phi);
+        try self.envs.bind(self.env, name, result);
+        try out.append(LoopPhi { name: name, phi: phi });
+    }
+    return;
+}
+
+/// Adds the back edge to each header phi, the Go `closeLoopPhis`. With no
+/// latch the header is reached from every edge directly, so each one is its
+/// own incoming. With a latch the header is reached only from there, so the
+/// edges are merged in the latch first.
+fn (self: &var Lowerer) close_loop_phis(
+    phis: &array::Array<LoopPhi>,
+    latch: ?Block,
+    edges: &array::Array<LoopEdge>
+) -> !void {
+    var index = 0;
+    while phis.get(index) |entry| {
+        index = index + 1;
+        var incoming = array::new<Incoming>(self.allocator);
+        defer incoming.deinit();
+        try self.loop_incoming(entry.name, edges, &var incoming);
+        if latch |latch_block| {
+            let value = try self.latch_value(latch_block, entry, &incoming);
+            let latch_name = self.module.block_name(latch_block);
+            try self.module.add_incoming(entry.phi, latch_name, value);
+        } else {
+            var position = 0;
+            while incoming.get(position) |arriving| {
+                position = position + 1;
+                try self.module.add_incoming(entry.phi, arriving.block, arriving.value);
+            }
+        }
+        let result = self.module.instr_result(entry.phi);
+        try self.envs.bind(self.env, entry.name, result);
+    }
+    return;
+}
+
+/// Appends what name holds on each edge back into the loop, the Go
+/// `loopIncoming`.
+fn (self: &Lowerer) loop_incoming(name: Name, edges: &array::Array<LoopEdge>, out: &var array::Array<Incoming>) -> !void {
+    var index = 0;
+    while edges.get(index) |edge| {
+        index = index + 1;
+        if self.envs.get(edge.env, name) |value| {
+            try out.append(Incoming { block: edge.block, value: value });
+        }
+    }
+    return;
+}
+
+/// Returns what a name holds where the latch starts, the Go `latchValue`.
+/// One edge arrives with one value and needs nothing; several need a phi.
+/// None at all means nothing reaches the latch, and the back edge reads the
+/// header phi.
+fn (self: &var Lowerer) latch_value(latch: Block, entry: LoopPhi, incoming: &array::Array<Incoming>) -> !Value {
+    let result = self.module.instr_result(entry.phi);
+    if incoming.len() == 0 {
+        return result;
+    }
+    if incoming.len() == 1 {
+        return incoming.get_or_panic(0).value;
+    }
+    return self.add_phi(latch, result.type_name, incoming);
+}
+
+/// Merges condition-false exits with explicit break edges, the Go
+/// `finishLoopExitPhis`. test is the block the condition ended in, which is
+/// the one the false edge leaves from -- the header only when the condition
+/// did not split.
+fn (self: &var Lowerer) finish_loop_exit_phis(
+    exit: Block,
+    phis: &array::Array<LoopPhi>,
+    test: Name,
+    break_edges: &array::Array<LoopEdge>
+) -> !void {
+    if break_edges.len() == 0 {
+        return;
+    }
+    var index = 0;
+    while phis.get(index) |entry| {
+        index = index + 1;
+        let result = self.module.instr_result(entry.phi);
+        var incoming = array::new<Incoming>(self.allocator);
+        defer incoming.deinit();
+        try incoming.append(Incoming { block: test, value: result });
+        try self.loop_incoming(entry.name, break_edges, &var incoming);
+        if incoming.len() == 1 {
+            continue;
+        }
+        let phi = try self.add_phi(exit, result.type_name, &incoming);
+        try self.envs.bind(self.env, entry.name, phi);
+    }
+    return;
+}
+
+/// Appends a phi node to block and returns its result, the Go `addPhi`.
+fn (self: &var Lowerer) add_phi(block: Block, type_name: Name, incoming: &array::Array<Incoming>) -> !Value {
+    let result = try self.next(type_name);
+    var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    errdefer instr.deinit();
+    var index = 0;
+    while incoming.get(index) |entry| {
+        index = index + 1;
+        try instr.incoming.append(entry);
+    }
+    let _ = try self.module.add_instr(block, move instr);
+    return result;
+}
+
+/// Appends a phi node over two incoming values, the Go `addPhi` with a
+/// two-entry literal, and returns its result.
+fn (self: &var Lowerer) add_phi2(
+    block: Block,
+    type_name: Name,
+    left_block: Name,
+    left: Value,
+    right_block: Name,
+    right: Value
+) -> !Value {
+    let result = try self.next(type_name);
+    var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    errdefer instr.deinit();
+    try instr.incoming.append(Incoming { block: left_block, value: left });
+    try instr.incoming.append(Incoming { block: right_block, value: right });
+    let _ = try self.module.add_instr(block, move instr);
+    return result;
+}
+
+/// Appends a phi node with one incoming to block and returns its handle, the
+/// Go `&Instr{Result: l.next(typ), Op: "phi", Incoming: ...}` literals of
+/// `createLoopPhis` and `createForIndexPhi`: a phi that grows later through
+/// `add_incoming`.
+fn (self: &var Lowerer) add_open_phi(block: Block, type_name: Name, incoming_block: Name, value: Value) -> !Instr {
+    let result = try self.next(type_name);
+    var instr = self.module.blank_instr(result, Op::Phi, empty_name(), empty_name());
+    errdefer instr.deinit();
+    try instr.incoming.append(Incoming { block: incoming_block, value: value });
+    return self.module.add_instr(block, move instr);
+}
+
+/// Appends the names assigned in a block, in the order they are first
+/// assigned, the Go `assignedNames`. The order is the order the header phis
+/// are created in, so it comes from the source rather than from a set.
+///
+/// An unknown node is an error rather than an empty answer, for the reason
+/// the slot walk makes it one too: a name missed here is a name the loop
+/// carries without a header phi, so every turn of the loop reads what it
+/// held before the loop ran.
+fn (self: &var Lowerer) assigned_names(
+    tree: &ast::Ast,
+    block: ast::Block,
+    out: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    return self.collect_assigned(tree, ast::Statement { node: block.node }, out);
+}
+
+/// Records the names one statement assigns, walking the statements and the
+/// expressions it holds, the Go `collectAssigned`. Walking the expressions is
+/// what finds an assignment written inside an `if` or `match` used as a
+/// value.
+fn (self: &var Lowerer) collect_assigned(
+    tree: &ast::Ast,
+    statement: ast::Statement,
+    names: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    if ownership::assign_stmt(tree, statement) |assign| {
+        if assign_target_root(tree, assign.target) |root| {
+            let name = try self.text_name(tree, root);
+            try add_assigned(names, name);
+        }
+    }
+    var exprs = array::new<ast::Expression>(self.allocator);
+    defer exprs.deinit();
+    var stmts = array::new<ast::Statement>(self.allocator);
+    defer stmts.deinit();
+    if !try statement_children(tree, statement, &var exprs, &var stmts) {
+        let kind = try self.name(statement_go_type(tree, statement));
+        return try self.fail1(tree, "ir error: loop analysis does not know statement `%s`", Arg::Str(kind));
+    }
+    var index = 0;
+    while exprs.get(index) |expression| {
+        index = index + 1;
+        if try self.collect_assigned_expr(tree, expression, names) |failed| {
+            return move failed;
+        }
+    }
+    index = 0;
+    while stmts.get(index) |inner| {
+        index = index + 1;
+        if try self.collect_assigned(tree, inner, names) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Walks one expression for the assignments written inside it, the Go
+/// `collectAssignedExpr`. `if` and `match` are both a statement and an
+/// expression, so in value position they are still walked as statements.
+fn (self: &var Lowerer) collect_assigned_expr(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    names: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    if ownership::if_expr(tree, expression) |branch| {
+        return self.collect_assigned_if(tree, branch, names);
+    }
+    if ownership::is_match_expr(tree, expression) {
+        return self.collect_assigned_match(tree, expression, names);
+    }
+    var children = array::new<ast::Expression>(self.allocator);
+    defer children.deinit();
+    if !try expression_children(tree, expression, &var children) {
+        let kind = try self.name(expression_go_type(tree, expression));
+        return try self.fail1(tree, "ir error: loop analysis does not know expression `%s`", Arg::Str(kind));
+    }
+    var index = 0;
+    while children.get(index) |child| {
+        index = index + 1;
+        if try self.collect_assigned_expr(tree, child, names) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Walks an `if` written in value position as the statement it also is, the
+/// Go `collectAssigned(expr.(ast.Statement))` reaching `statementChildren`
+/// for `*ast.IfStmt`: its condition, then each block it has.
+fn (self: &var Lowerer) collect_assigned_if(
+    tree: &ast::Ast,
+    branch: ast::IfStmt,
+    names: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    if try self.collect_assigned_expr(tree, branch.condition, names) |failed| {
+        return move failed;
+    }
+    let consequence = ast::Statement { node: branch.consequence.node };
+    if try self.collect_assigned(tree, consequence, names) |failed| {
+        return move failed;
+    }
+    let alternative = branch.alternative orelse return null;
+    return self.collect_assigned(tree, ast::Statement { node: alternative.node }, names);
+}
+
+/// Walks a `match` written in value position as the statement it also is,
+/// the Go `collectAssigned(expr.(ast.Statement))` reaching
+/// `statementChildren` for `*ast.MatchStmt`: its value, then each arm body.
+fn (self: &var Lowerer) collect_assigned_match(
+    tree: &ast::Ast,
+    expression: ast::Expression,
+    names: &var array::Array<Name>
+) -> !?diagnostic::Diagnostic {
+    let head = ownership::match_expr_head(tree, expression) orelse return null;
+    if try self.collect_assigned_expr(tree, head.value, names) |failed| {
+        return move failed;
+    }
+    let arms = try ownership::match_expr_arms(self.allocator, tree, expression);
+    defer arms.deinit();
+    var index = 0;
+    while arms.get(index) |arm| {
+        index = index + 1;
+        if try self.collect_assigned(tree, arm.body, names) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Returns the binding an assignment target ultimately rebinds, the Go
+/// `assignTargetRoot`. A field of a value receiver rebuilds the receiver
+/// aggregate up to its root binding, so the root needs a loop header phi
+/// exactly like a direct assignment. A field of a borrowed receiver stores
+/// through the borrow and leaves the root SSA value alone; naming it here
+/// only adds a phi whose incoming values agree.
+fn assign_target_root(tree: &ast::Ast, target: ast::Expression) -> ?ast::Text {
+    var current = target;
+    while true {
+        if ownership::ident_expr(tree, current) |ident| {
+            return ident.name;
+        }
+        if ownership::field_expr(tree, current) |field| {
+            current = field.receiver;
+            continue;
+        }
+        let deref = ownership::deref_expr(tree, current) orelse return null;
+        current = deref.receiver;
+    }
+    return null;
+}
+
+/// Records name once, keeping the order names are first assigned in, the Go
+/// `addAssigned`.
+fn add_assigned(names: &var array::Array<Name>, name: Name) -> !void {
+    var index = 0;
+    while names.get(index) |existing| {
+        index = index + 1;
+        if same_name(existing, name) {
+            return;
+        }
+    }
+    return names.append(name);
 }
