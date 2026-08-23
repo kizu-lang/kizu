@@ -1,0 +1,868 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::fmt;
+import std::fs;
+import std::map;
+import std::mem;
+import std::path;
+import std::process;
+import std::sort;
+import std::string;
+
+// Mechanical port of internal/native/build.go: linking a lowered program
+// with the embedded C runtime into a host executable through the configured
+// C/LLVM toolchain. The build cache is not ported: the runtime object and
+// the executable are built into a claimed temporary directory every time,
+// and the caller removes it when the program has run. The LLVM IR text and
+// the error set numbering are passed alongside Options rather than held in
+// it, because a Kizu struct cannot borrow them.
+
+/// Describes one native link request, the Go `Options` without the fields a
+/// struct cannot borrow (`LLVMIR`, `ErrorSets`).
+pub struct Options {
+    pub output: string::String,
+    pub triple: string::String,
+    pub cpu: string::String,
+    pub abi: string::String,
+    pub libc: string::String,
+    pub runtime: string::String,
+    pub emit: string::String,
+    pub linker: string::String,
+    pub opt: bool
+}
+
+/// Hands out temporary build directories: TMPDIR (or /tmp) plus
+/// `kizu-native-<monotonic_millis>-<sequence>`. The shipping compiler leans
+/// on os.MkdirTemp and the build cache; without either, uniqueness comes
+/// from the clock and a per-process sequence.
+pub struct TempDirs {
+    pub base: string::String,
+    pub stamp: i64,
+    pub next: i64
+}
+
+/// Returns the temporary directory maker for this process.
+pub fn new_temp_dirs(allocator: Allocator) -> !TempDirs {
+    var base = string::new(allocator);
+    errdefer base.deinit();
+    if process::env("TMPDIR") |dir| {
+        try base.append_bytes(dir);
+    }
+    if base.len() == 0 {
+        try base.append_bytes("/tmp");
+    }
+    return TempDirs { base: move base, stamp: process::monotonic_millis(), next: 0 };
+}
+
+/// Creates and returns the next temporary build directory.
+pub fn (self: &var TempDirs) claim_dir(io: Io, allocator: Allocator) -> !string::String {
+    var name = try string::from_bytes(allocator, "kizu-native-");
+    defer name.deinit();
+    try fmt::append_i64(&var name, self.stamp);
+    try name.append_bytes("-");
+    try fmt::append_i64(&var name, self.next);
+    self.next = self.next + 1;
+    let base = self.base.as_bytes();
+    let name_bytes = name.as_bytes();
+    let dir = try path::join(allocator, base, name_bytes);
+    defer dir.deinit();
+    let dir_bytes = dir.as_bytes();
+    try fs::create_dir(io, dir_bytes);
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_string(&dir);
+    return move out;
+}
+
+/// Links a lowered program into the executable the caller names, and records
+/// next to it what it was built from, the Go `Build`. It is the artifact
+/// command: the output is a file the user asked for by name, so it is
+/// written where they asked rather than kept in the build tree.
+pub fn build(
+    io: Io,
+    allocator: Allocator,
+    temps: &var TempDirs,
+    options: &Options,
+    llvm_ir: &string::String,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>
+) -> !?diagnostic::Diagnostic {
+    if options.output.len() == 0 {
+        return try fail_text(allocator, "native error: output path is required");
+    }
+    if try validate_options(allocator, options) |failed| {
+        return move failed;
+    }
+    let dir = try temps.claim_dir(io, allocator);
+    defer dir.deinit();
+    let dir_bytes = dir.as_bytes();
+    var runtime_path = string::new(allocator);
+    defer runtime_path.deinit();
+    if try runtime_object(io, allocator, dir_bytes, options, sets, &var runtime_path) |failed| {
+        errdefer failed.deinit();
+        try clean_build_dir(io, allocator, dir_bytes);
+        return move failed;
+    }
+    let output = options.output.as_bytes();
+    let parent = path::dirname(output);
+    try create_dir_all(io, parent);
+    var command = array::new<string::String>(allocator);
+    defer command.deinit();
+    let runtime_bytes = runtime_path.as_bytes();
+    if try link(io, allocator, dir_bytes, runtime_bytes, output, options, llvm_ir, &var command) |failed| {
+        errdefer failed.deinit();
+        try clean_build_dir(io, allocator, dir_bytes);
+        return move failed;
+    }
+    try clean_build_dir(io, allocator, dir_bytes);
+    try write_metadata(io, allocator, options, &command);
+    return null;
+}
+
+/// Returns an executable for one lowered program, the Go `Executable`
+/// without the build cache: the program is linked into a claimed temporary
+/// directory every time, and the caller removes the directory with
+/// `clean_build_dir` once the program has run.
+pub fn executable(
+    io: Io,
+    allocator: Allocator,
+    temps: &var TempDirs,
+    options: &Options,
+    llvm_ir: &string::String,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    out_dir: &var string::String,
+    out_exe: &var string::String
+) -> !?diagnostic::Diagnostic {
+    if try validate_options(allocator, options) |failed| {
+        return move failed;
+    }
+    let dir = try temps.claim_dir(io, allocator);
+    defer dir.deinit();
+    let dir_bytes = dir.as_bytes();
+    var runtime_path = string::new(allocator);
+    defer runtime_path.deinit();
+    if try runtime_object(io, allocator, dir_bytes, options, sets, &var runtime_path) |failed| {
+        errdefer failed.deinit();
+        try clean_build_dir(io, allocator, dir_bytes);
+        return move failed;
+    }
+    let exe = try path::join(allocator, dir_bytes, "program");
+    defer exe.deinit();
+    let exe_bytes = exe.as_bytes();
+    var command = array::new<string::String>(allocator);
+    defer command.deinit();
+    let runtime_bytes = runtime_path.as_bytes();
+    if try link(io, allocator, dir_bytes, runtime_bytes, exe_bytes, options, llvm_ir, &var command) |failed| {
+        errdefer failed.deinit();
+        try clean_build_dir(io, allocator, dir_bytes);
+        return move failed;
+    }
+    try out_dir.append_string(&dir);
+    try out_exe.append_string(&exe);
+    return null;
+}
+
+/// Removes the files a build wrote into one claimed temporary directory and
+/// the directory itself, the Go `defer os.RemoveAll` of `link` and
+/// `compileRuntime`. Files a failed build did not reach are skipped.
+pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
+    try remove_temp_file(io, allocator, dir, "runtime.c");
+    try remove_temp_file(io, allocator, dir, "runtime.o");
+    try remove_temp_file(io, allocator, dir, "main.ll");
+    try remove_temp_file(io, allocator, dir, "program");
+    let found = try fs::exists(io, dir);
+    if found {
+        try fs::remove_dir(io, dir);
+    }
+    return;
+}
+
+/// Removes one build file when it is there.
+fn remove_temp_file(io: Io, allocator: Allocator, dir: []u8, name: []u8) -> !void {
+    let target = try path::join(allocator, dir, name);
+    defer target.deinit();
+    let target_bytes = target.as_bytes();
+    let found = try fs::exists(io, target_bytes);
+    if found {
+        try fs::remove_file(io, target_bytes);
+    }
+    return;
+}
+
+/// Creates every directory a path names that is not there yet, the Go
+/// `os.MkdirAll`: `fs::create_dir` tolerates an existing directory.
+fn create_dir_all(io: Io, target: []u8) -> !void {
+    var index = 0;
+    while index < mem::len(target) {
+        if target[index] == cast<u8>(47) and index > 0 {
+            let prefix = target[0..index];
+            try fs::create_dir(io, prefix);
+        }
+        index = index + 1;
+    }
+    if mem::len(target) > 0 {
+        try fs::create_dir(io, target);
+    }
+    return;
+}
+
+/// Writes the IR where the toolchain can read it and links it with the
+/// runtime into output, the Go `link`. The IR is transient because the
+/// executable is what is worth keeping.
+fn link(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    runtime_path: []u8,
+    output: []u8,
+    options: &Options,
+    llvm_ir: &string::String,
+    command: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    let ir_path = try path::join(allocator, dir, "main.ll");
+    defer ir_path.deinit();
+    let ir_bytes = ir_path.as_bytes();
+    let text = llvm_ir.as_bytes();
+    try fs::write_file(io, ir_bytes, text);
+    return run_clang(allocator, options, ir_bytes, runtime_path, output, command);
+}
+
+/// Rejects native build modes that do not have a concrete backend yet, the
+/// Go `validateOptions`.
+fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Diagnostic {
+    let libc = options.libc.as_bytes();
+    if !mem::equal_bytes(libc, "on") {
+        return try fail_option(allocator, "native error: --libc ", &options.libc, " is not implemented yet");
+    }
+    let runtime_mode = options.runtime.as_bytes();
+    if !mem::equal_bytes(runtime_mode, "hosted") {
+        return try fail_option(allocator, "native error: --runtime ", &options.runtime, " is not implemented yet");
+    }
+    let emit = options.emit.as_bytes();
+    if !mem::equal_bytes(emit, "exe") {
+        return try fail_option(allocator, "native error: --emit ", &options.emit, " is not implemented yet");
+    }
+    if options.cpu.len() != 0 {
+        return try fail_text(allocator, "native error: --cpu is not implemented yet");
+    }
+    if options.abi.len() != 0 {
+        return try fail_text(allocator, "native error: --abi is not implemented yet");
+    }
+    let linker = options.linker.as_bytes();
+    if !mem::equal_bytes(linker, "clang") {
+        return try fail_option(allocator, "native error: --linker ", &options.linker, " is not implemented yet");
+    }
+    return null;
+}
+
+/// Compiles the runtime the program links with into one object file in the
+/// claimed directory, the Go `runtimeObject` without the build cache, and
+/// appends the object path to out.
+fn runtime_object(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    options: &Options,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    if try require_runtime_error_sets(allocator, sets) |failed| {
+        return move failed;
+    }
+    var source = string::new(allocator);
+    defer source.deinit();
+    try error_set_constants(allocator, sets, &var source);
+    try source.append_bytes(runtime_source());
+    let object = try path::join(allocator, dir, "runtime.o");
+    defer object.deinit();
+    let object_bytes = object.as_bytes();
+    if try compile_runtime(io, allocator, dir, &source, object_bytes, options) |failed| {
+        return move failed;
+    }
+    try out.append_string(&object);
+    return null;
+}
+
+/// Compiles the runtime source into one object file, the Go
+/// `compileRuntime`.
+fn compile_runtime(
+    io: Io,
+    allocator: Allocator,
+    dir: []u8,
+    source: &string::String,
+    object: []u8,
+    options: &Options
+) -> !?diagnostic::Diagnostic {
+    let source_path = try path::join(allocator, dir, "runtime.c");
+    defer source_path.deinit();
+    let source_bytes = source_path.as_bytes();
+    let text = source.as_bytes();
+    try fs::write_file(io, source_bytes, text);
+    var command = array::new<string::String>(allocator);
+    defer command.deinit();
+    let linker = options.linker.as_bytes();
+    try append_copy(allocator, &var command, linker);
+    try clang_flags(allocator, options, &var command);
+    try append_copy(allocator, &var command, "-c");
+    try append_copy(allocator, &var command, source_bytes);
+    try append_copy(allocator, &var command, "-o");
+    try append_copy(allocator, &var command, object);
+    let code = try spawn_command(allocator, &command);
+    if code != 0 {
+        return try fail_linker(allocator, options, code);
+    }
+    return null;
+}
+
+/// Names the sets the runtime reports its failures with, the Go
+/// `runtimeErrorSets` walk: it refers to all of them whatever a program
+/// uses, so a build that does not carry them would fail in the C compiler
+/// with an undeclared name.
+fn require_runtime_error_sets(
+    allocator: Allocator,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>
+) -> !?diagnostic::Diagnostic {
+    if try require_error_set(allocator, sets, "std::fs::Error") |failed| {
+        return move failed;
+    }
+    if try require_error_set(allocator, sets, "std::io::Error") |failed| {
+        return move failed;
+    }
+    return require_error_set(allocator, sets, "std::process::Error");
+}
+
+/// Rejects a build that cannot name what the runtime returns.
+fn require_error_set(
+    allocator: Allocator,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    name: []u8
+) -> !?diagnostic::Diagnostic {
+    if sets.at(name) |members| {
+        if members.len() > 0 {
+            return null;
+        }
+    }
+    var message = try string::from_bytes(allocator, "native error: error set `");
+    defer message.deinit();
+    try message.append_bytes(name);
+    try message.append_bytes("` is missing");
+    let text = message.as_bytes();
+    let failed = try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+    return move failed;
+}
+
+/// Writes the number each error set member lowers to, the Go
+/// `errorSetConstants`, so the runtime names a failure the same way the
+/// program that reads it does.
+fn error_set_constants(
+    allocator: Allocator,
+    sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
+    out: &var string::String
+) -> !void {
+    if sets.len() == 0 {
+        return;
+    }
+    var names = array::new<string::String>(allocator);
+    defer names.deinit();
+    var index = 0;
+    while sets.key_at(index) |key| {
+        index = index + 1;
+        let name = try string::from_bytes(allocator, key);
+        try names.append(move name);
+    }
+    try sort::strings(&var names);
+    try out.append_bytes("/* Generated from the error set declarations. */");
+    try out.append_byte(cast<u8>(10));
+    index = 0;
+    while names.at(index) |name| {
+        index = index + 1;
+        let name_bytes = name.as_bytes();
+        if sets.at(name_bytes) |members| {
+            try append_set_constants(allocator, name_bytes, members, out);
+        }
+    }
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+/// Writes the `#define` lines of one error set in member name order.
+fn append_set_constants(
+    allocator: Allocator,
+    set: []u8,
+    members: &map::Map<[]u8, i64>,
+    out: &var string::String
+) -> !void {
+    var spellings = array::new<string::String>(allocator);
+    defer spellings.deinit();
+    var index = 0;
+    while members.key_at(index) |member| {
+        index = index + 1;
+        let spelling = try string::from_bytes(allocator, member);
+        try spellings.append(move spelling);
+    }
+    try sort::strings(&var spellings);
+    index = 0;
+    while spellings.at(index) |member| {
+        index = index + 1;
+        let member_bytes = member.as_bytes();
+        if members.get(member_bytes) |code| {
+            try out.append_bytes("#define ");
+            let constant = try error_constant_name(allocator, set, member_bytes);
+            defer constant.deinit();
+            try out.append_string(&constant);
+            try out.append_bytes(" ");
+            try fmt::append_i64(out, code);
+            try out.append_byte(cast<u8>(10));
+        }
+    }
+    return;
+}
+
+/// Spells one member as a C identifier, the Go `errorConstantName`.
+fn error_constant_name(allocator: Allocator, set: []u8, member: []u8) -> !string::String {
+    var raw = string::new(allocator);
+    defer raw.deinit();
+    var index = 0;
+    while index < mem::len(set) {
+        let byte = set[index];
+        if byte == cast<u8>(58) and index + 1 < mem::len(set) and set[index + 1] == cast<u8>(58) {
+            try raw.append_byte(cast<u8>(95));
+            index = index + 2;
+            continue;
+        }
+        if byte == cast<u8>(46) {
+            try raw.append_byte(cast<u8>(95));
+            index = index + 1;
+            continue;
+        }
+        try raw.append_byte(byte);
+        index = index + 1;
+    }
+    try raw.append_byte(cast<u8>(95));
+    let snake = try camel_to_snake(allocator, member);
+    defer snake.deinit();
+    try raw.append_string(&snake);
+    var out = try string::from_bytes(allocator, "KIZU_ERR_");
+    errdefer out.deinit();
+    // The view has to be taken again each iteration: a view read inside a
+    // `while` conflicts with the same block's `defer raw.deinit()`.
+    let total = raw.len();
+    index = 0;
+    while index < total {
+        let raw_bytes = raw.as_bytes();
+        let byte = raw_bytes[index];
+        index = index + 1;
+        if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+            try out.append_byte(byte - cast<u8>(32));
+            continue;
+        }
+        try out.append_byte(byte);
+    }
+    return move out;
+}
+
+/// Separates the words in a member name for the C spelling, the Go
+/// `camelToSnake`.
+fn camel_to_snake(allocator: Allocator, name: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while index < mem::len(name) {
+        let byte = name[index];
+        if index > 0 and byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+            try out.append_byte(cast<u8>(95));
+        }
+        try out.append_byte(byte);
+        index = index + 1;
+    }
+    return move out;
+}
+
+/// Invokes the configured C/LLVM toolchain with explicit inputs, the Go
+/// `runClang`, and leaves the command it ran in command for the caller.
+fn run_clang(
+    allocator: Allocator,
+    options: &Options,
+    ir_path: []u8,
+    runtime_path: []u8,
+    output: []u8,
+    command: &var array::Array<string::String>
+) -> !?diagnostic::Diagnostic {
+    let linker = options.linker.as_bytes();
+    try append_copy(allocator, command, linker);
+    try clang_flags(allocator, options, command);
+    try append_copy(allocator, command, ir_path);
+    try append_copy(allocator, command, runtime_path);
+    try append_copy(allocator, command, "-o");
+    try append_copy(allocator, command, output);
+    let code = try spawn_command(allocator, command);
+    if code != 0 {
+        return try fail_linker(allocator, options, code);
+    }
+    return null;
+}
+
+/// Spells what the toolchain is asked to produce, the Go `clangFlags`.
+fn clang_flags(
+    allocator: Allocator,
+    options: &Options,
+    out: &var array::Array<string::String>
+) -> !void {
+    if options.triple.len() > 0 {
+        try append_copy(allocator, out, "-target");
+        let triple = options.triple.as_bytes();
+        try append_copy(allocator, out, triple);
+    }
+    let level = clang_optimization_flag(options.opt);
+    try append_copy(allocator, out, level);
+    return;
+}
+
+/// Selects the native toolchain optimization level, the Go
+/// `clangOptimizationFlag`.
+fn clang_optimization_flag(opt: bool) -> []u8 {
+    if opt {
+        return "-O2";
+    }
+    return "-O0";
+}
+
+/// Appends one owned copy of bytes to a command line.
+fn append_copy(
+    allocator: Allocator,
+    command: &var array::Array<string::String>,
+    bytes: []u8
+) -> !void {
+    let value = try string::from_bytes(allocator, bytes);
+    try command.append(move value);
+    return;
+}
+
+/// Runs one command line and returns the child's exit status. The child
+/// inherits stdout and stderr, so what the toolchain prints has already
+/// reached the terminal when a failure comes back.
+fn spawn_command(allocator: Allocator, command: &array::Array<string::String>) -> !i64 {
+    var a0 = string::new(allocator);
+    defer a0.deinit();
+    var a1 = string::new(allocator);
+    defer a1.deinit();
+    var a2 = string::new(allocator);
+    defer a2.deinit();
+    var a3 = string::new(allocator);
+    defer a3.deinit();
+    var a4 = string::new(allocator);
+    defer a4.deinit();
+    var a5 = string::new(allocator);
+    defer a5.deinit();
+    var a6 = string::new(allocator);
+    defer a6.deinit();
+    var a7 = string::new(allocator);
+    defer a7.deinit();
+    if command.at(0) |arg| {
+        try a0.append_string(arg);
+    }
+    if command.at(1) |arg| {
+        try a1.append_string(arg);
+    }
+    if command.at(2) |arg| {
+        try a2.append_string(arg);
+    }
+    if command.at(3) |arg| {
+        try a3.append_string(arg);
+    }
+    if command.at(4) |arg| {
+        try a4.append_string(arg);
+    }
+    if command.at(5) |arg| {
+        try a5.append_string(arg);
+    }
+    if command.at(6) |arg| {
+        try a6.append_string(arg);
+    }
+    if command.at(7) |arg| {
+        try a7.append_string(arg);
+    }
+    let b0 = a0.as_bytes();
+    let b1 = a1.as_bytes();
+    let b2 = a2.as_bytes();
+    let b3 = a3.as_bytes();
+    let b4 = a4.as_bytes();
+    let b5 = a5.as_bytes();
+    let b6 = a6.as_bytes();
+    let b7 = a7.as_bytes();
+    let argc = command.len();
+    let code = try process::spawn_wait8(argc, b0, b1, b2, b3, b4, b5, b6, b7);
+    return code;
+}
+
+/// Builds the failure one toolchain run reports, the Go
+/// `fmt.Errorf("native error: %s failed: %w\n%s", ...)`. The Go error
+/// carries the toolchain's combined output after the message line;
+/// std::process inherits the child's streams instead, so the line here is
+/// the message alone and the toolchain's own output has already reached
+/// stderr.
+fn fail_linker(allocator: Allocator, options: &Options, code: i64) -> !diagnostic::Diagnostic {
+    var message = try string::from_bytes(allocator, "native error: ");
+    defer message.deinit();
+    try message.append_string(&options.linker);
+    try message.append_bytes(" failed: exit status ");
+    try fmt::append_i64(&var message, code);
+    let text = message.as_bytes();
+    return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one failure from a finished message.
+fn fail_text(allocator: Allocator, text: []u8) -> !diagnostic::Diagnostic {
+    return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one failure around the value of an option.
+fn fail_option(
+    allocator: Allocator,
+    before: []u8,
+    value: &string::String,
+    after: []u8
+) -> !diagnostic::Diagnostic {
+    var message = try string::from_bytes(allocator, before);
+    defer message.deinit();
+    try message.append_string(value);
+    try message.append_bytes(after);
+    let text = message.as_bytes();
+    return diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Records explicit native build inputs next to the output artifact, the Go
+/// `Metadata`.
+pub struct Metadata {
+    pub target: string::String,
+    pub triple: string::String,
+    pub cpu: string::String,
+    pub abi: string::String,
+    pub libc: string::String,
+    pub runtime: string::String,
+    pub emit: string::String,
+    pub linker: string::String,
+    pub opt_mode: string::String,
+    pub output: string::String,
+    pub command: array::Array<string::String>
+}
+
+/// Records the native optimization mode in artifact metadata, the Go
+/// `optimizationModeName`.
+fn optimization_mode_name(opt: bool) -> []u8 {
+    if opt {
+        return "opt";
+    }
+    return "debug";
+}
+
+/// Fills the metadata record for one build.
+fn metadata_of(
+    allocator: Allocator,
+    options: &Options,
+    command: &array::Array<string::String>
+) -> !Metadata {
+    var target = try string::from_bytes(allocator, "native");
+    errdefer target.deinit();
+    var triple = string::new(allocator);
+    errdefer triple.deinit();
+    try triple.append_string(&options.triple);
+    var cpu = string::new(allocator);
+    errdefer cpu.deinit();
+    try cpu.append_string(&options.cpu);
+    var abi = string::new(allocator);
+    errdefer abi.deinit();
+    try abi.append_string(&options.abi);
+    var libc = string::new(allocator);
+    errdefer libc.deinit();
+    try libc.append_string(&options.libc);
+    var runtime_mode = string::new(allocator);
+    errdefer runtime_mode.deinit();
+    try runtime_mode.append_string(&options.runtime);
+    var emit = string::new(allocator);
+    errdefer emit.deinit();
+    try emit.append_string(&options.emit);
+    var linker = string::new(allocator);
+    errdefer linker.deinit();
+    try linker.append_string(&options.linker);
+    let mode = optimization_mode_name(options.opt);
+    var opt_mode = try string::from_bytes(allocator, mode);
+    errdefer opt_mode.deinit();
+    var output = string::new(allocator);
+    errdefer output.deinit();
+    try output.append_string(&options.output);
+    var copied = array::new<string::String>(allocator);
+    errdefer copied.deinit();
+    var index = 0;
+    while command.at(index) |argument| {
+        index = index + 1;
+        var one = string::new(allocator);
+        errdefer one.deinit();
+        try one.append_string(argument);
+        try copied.append(move one);
+    }
+    return Metadata {
+        target: move target,
+        triple: move triple,
+        cpu: move cpu,
+        abi: move abi,
+        libc: move libc,
+        runtime: move runtime_mode,
+        emit: move emit,
+        linker: move linker,
+        opt_mode: move opt_mode,
+        output: move output,
+        command: move copied
+    };
+}
+
+/// Writes the explicit build configuration used for one artifact, the Go
+/// `writeMetadata`: the same JSON `encoding/json` renders, two-space
+/// indented, next to the output as `<output>.kizu-build.json`.
+fn write_metadata(
+    io: Io,
+    allocator: Allocator,
+    options: &Options,
+    command: &array::Array<string::String>
+) -> !void {
+    let metadata = try metadata_of(allocator, options, command);
+    defer metadata.deinit();
+    var out = string::new(allocator);
+    defer out.deinit();
+    try out.append_bytes("{");
+    try out.append_byte(cast<u8>(10));
+    try append_json_field(&var out, "target", &metadata.target);
+    try append_json_field(&var out, "triple", &metadata.triple);
+    try append_json_field(&var out, "cpu", &metadata.cpu);
+    try append_json_field(&var out, "abi", &metadata.abi);
+    try append_json_field(&var out, "libc", &metadata.libc);
+    try append_json_field(&var out, "runtime", &metadata.runtime);
+    try append_json_field(&var out, "emit", &metadata.emit);
+    try append_json_field(&var out, "linker", &metadata.linker);
+    try append_json_field(&var out, "optimization_mode", &metadata.opt_mode);
+    try append_json_field(&var out, "output", &metadata.output);
+    try out.append_bytes("  ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("command");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(": [");
+    try out.append_byte(cast<u8>(10));
+    var index = 0;
+    while metadata.command.at(index) |argument| {
+        index = index + 1;
+        try out.append_bytes("    ");
+        let argument_bytes = argument.as_bytes();
+        try append_json_string(&var out, argument_bytes);
+        if index < metadata.command.len() {
+            try out.append_bytes(",");
+        }
+        try out.append_byte(cast<u8>(10));
+    }
+    try out.append_bytes("  ]");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    var target = string::new(allocator);
+    defer target.deinit();
+    try target.append_string(&options.output);
+    try target.append_bytes(".kizu-build.json");
+    let target_bytes = target.as_bytes();
+    let text = out.as_bytes();
+    try fs::write_file(io, target_bytes, text);
+    return;
+}
+
+/// Writes one `  "name": "value",` metadata line.
+fn append_json_field(out: &var string::String, name: []u8, value: &string::String) -> !void {
+    try out.append_bytes("  ");
+    let quote = cast<u8>(34);
+    try out.append_byte(quote);
+    try out.append_bytes(name);
+    try out.append_byte(quote);
+    try out.append_bytes(": ");
+    let value_bytes = value.as_bytes();
+    try append_json_string(out, value_bytes);
+    try out.append_bytes(",");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+/// Writes one JSON string the way `encoding/json` spells it: quotes,
+/// backslashes and control characters escaped, and `<`, `>`, `&` written as
+/// unicode escapes.
+fn append_json_string(out: &var string::String, value: []u8) -> !void {
+    let quote = cast<u8>(34);
+    let backslash = cast<u8>(92);
+    try out.append_byte(quote);
+    var index = 0;
+    while index < mem::len(value) {
+        let byte = value[index];
+        index = index + 1;
+        if byte == quote {
+            try out.append_byte(backslash);
+            try out.append_byte(quote);
+            continue;
+        }
+        if byte == backslash {
+            try out.append_byte(backslash);
+            try out.append_byte(backslash);
+            continue;
+        }
+        if byte == cast<u8>(10) {
+            try out.append_byte(backslash);
+            try out.append_bytes("n");
+            continue;
+        }
+        if byte == cast<u8>(13) {
+            try out.append_byte(backslash);
+            try out.append_bytes("r");
+            continue;
+        }
+        if byte == cast<u8>(9) {
+            try out.append_byte(backslash);
+            try out.append_bytes("t");
+            continue;
+        }
+        if byte == cast<u8>(60) {
+            try out.append_byte(backslash);
+            try out.append_bytes("u003c");
+            continue;
+        }
+        if byte == cast<u8>(62) {
+            try out.append_byte(backslash);
+            try out.append_bytes("u003e");
+            continue;
+        }
+        if byte == cast<u8>(38) {
+            try out.append_byte(backslash);
+            try out.append_bytes("u0026");
+            continue;
+        }
+        if byte < cast<u8>(32) {
+            try out.append_byte(backslash);
+            try out.append_bytes("u00");
+            try append_hex_byte(out, byte);
+            continue;
+        }
+        try out.append_byte(byte);
+    }
+    try out.append_byte(quote);
+    return;
+}
+
+/// Writes the two lowercase hex digits of one byte.
+fn append_hex_byte(out: &var string::String, byte: u8) -> !void {
+    try append_hex_digit(out, byte / cast<u8>(16));
+    try append_hex_digit(out, byte % cast<u8>(16));
+    return;
+}
+
+/// Writes one lowercase hex digit.
+fn append_hex_digit(out: &var string::String, digit: u8) -> !void {
+    if digit < cast<u8>(10) {
+        try out.append_byte(digit + cast<u8>(48));
+        return;
+    }
+    try out.append_byte(digit - cast<u8>(10) + cast<u8>(97));
+    return;
+}
