@@ -1,0 +1,63 @@
+import std::mem;
+import std::string;
+
+// None of these declares a `deinit`. A type whose obligations are its fields'
+// obligations has only one body it could write -- consume each of them -- so
+// the compiler writes it. `Visitor` holds one plainly and one conditionally,
+// `Slot` holds one in a variant, and `Party` holds a `Visitor`, which is what
+// makes `Party` an owner in turn.
+struct Visitor {
+    name: string::String,
+    nick: ?string::String,
+}
+
+union Slot {
+    Kept(string::String),
+    Vacant,
+}
+
+struct Party {
+    host: Visitor,
+    seat: Slot,
+}
+
+fn build(allocator: Allocator, byte: u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try out.append_byte(byte);
+    return move out;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let host = Visitor {
+        name: try build(allocator, cast<u8>(97)),
+        nick: null,
+    };
+    let party = Party {
+        host: move host,
+        seat: Slot::Kept(try build(allocator, cast<u8>(98))),
+    };
+    defer party.deinit();
+    print(party.host.name.len());
+    return;
+}
+
+// run
+// features: ownership deinit derived optional union std-string errdefer
+// output:
+// 1
+
+
+// check
+// load:
+// struct Visitor { name: std::string::String, nick: ?std::string::String }
+// union Slot { Kept(std::string::String), Vacant }
+// struct Party { host: Visitor, seat: Slot }
+// fn build(allocator: Allocator, byte: u8) -> !std::string::String { var out = std::string::new(allocator); errdefer out.deinit(); try out.append_byte(byte); return move out; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let host = Visitor { name: try build(allocator, cast<u8>(97)), nick: null }; let party = Party { host: move host, seat: Slot::Kept(try build(allocator, cast<u8>(98))) }; defer party.deinit(); print(party.host.name.len()); return; }
+// fn (self: Visitor) Visitor.deinit() -> void { self.name.deinit(); if self.nick { held.deinit(); } return; }
+// fn (self: Slot) Slot.deinit() -> void { match self { Kept(held) => held.deinit();, Vacant => {  } } return; }
+// fn (self: Party) Party.deinit() -> void { self.host.deinit(); self.seat.deinit(); return; }
+// check:
+// ok

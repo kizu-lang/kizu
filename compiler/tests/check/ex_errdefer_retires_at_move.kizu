@@ -1,0 +1,49 @@
+import std::array;
+import std::fmt;
+import std::mem;
+import std::string;
+
+// Building a tree means handing each child to its parent and then carrying on
+// with work that can still fail. The child's `errdefer` covers it only until
+// the parent takes it: from the move onward the parent's cleanup is the one
+// that owns it, and running both would free the same buffer twice (ADR-0114).
+fn build(allocator: Allocator, count: i64) -> !array::Array<string::String> {
+    var parent = array::new<string::String>(allocator);
+    errdefer parent.deinit();     // covers parent until this function returns it
+
+    var i = 0;
+    while i < count {
+        var child = string::new(allocator);
+        errdefer child.deinit();      // covers this iteration's child
+        try child.append_byte(cast<u8>(97) + cast<u8>(i));
+        try parent.append(move child);     // retires it: parent owns the child now
+        i = i + 1;                    // the next iteration's try runs no child cleanup
+    }
+    return move parent;                    // success: parent leaves, its errdefer does not run
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let names = try build(allocator, 3);
+    defer names.deinit();
+
+    var text = string::new(allocator);
+    defer text.deinit();
+    try fmt::append_i64(text, names.len());
+    let bytes = text.as_bytes();
+    print(bytes);
+    return;
+}
+
+// run
+// features: errdefer move deinit std-array std-string std-fmt allocator error-union try
+// output:
+// 3
+
+
+// check
+// load:
+// fn build(allocator: Allocator, count: i64) -> !std::array::Array<std::string::String> { var parent = std::array::new<std::string::String>(allocator); errdefer parent.deinit(); var i = 0; while (i < count) { var child = std::string::new(allocator); errdefer child.deinit(); try child.append_byte((cast<u8>(97) + cast<u8>(i))); try parent.append(move child); i = (i + 1); } return move parent; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let names = try build(allocator, 3); defer names.deinit(); var text = std::string::new(allocator); defer text.deinit(); try std::fmt::append_i64(text, names.len()); let bytes = text.as_bytes(); print(bytes); return; }
+// check:
+// ok

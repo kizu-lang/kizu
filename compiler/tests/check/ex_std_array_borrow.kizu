@@ -1,0 +1,56 @@
+import std::array;
+import std::mem;
+
+struct Token {
+    text: []u8,
+}
+
+fn (self: Token) width() -> i64 {
+    return mem::len(self.text);
+}
+
+// Array.at/at_mut return a borrow optional `?&T`: present in bounds, null past
+// the end. A capture is the only consumer, and it holds the array borrowed for
+// the element borrow's scope.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var tokens = array::new<Token>(allocator);
+    defer tokens.deinit();
+
+    try tokens.append(Token { text: "let" });
+
+    if tokens.at(0) |first| {
+        print(first.text);
+        // A read method reaches the element through the capture: the borrow
+        // names the element's storage, and the receiver is read out of it.
+        print(first.width());
+    }
+
+    if tokens.at_mut(0) |slot| {
+        slot.* = Token { text: "var" };
+    }
+
+    var index = 0;
+    while tokens.at(index) |token| {
+        print(token.text);
+        index = index + 1;
+    }
+
+    return;
+}
+
+// run
+// features: std-array borrow mutation optional capture method
+// output:
+// let
+// 3
+// var
+
+
+// check
+// load:
+// struct Token { text: []u8 }
+// fn (self: Token) Token.width() -> i64 { return std::mem::len(self.text); }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var tokens = std::array::new<Token>(allocator); defer tokens.deinit(); try tokens.append(Token { text: "let" }); if tokens.at(0) { print(first.text); print(first.width()); } if tokens.at_mut(0) { slot.* = Token { text: "var" }; } var index = 0; while tokens.at(index) { print(token.text); index = (index + 1); } return; }
+// check:
+// ok

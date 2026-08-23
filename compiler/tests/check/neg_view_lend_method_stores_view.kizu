@@ -1,0 +1,38 @@
+import std::mem;
+import std::string;
+
+struct Holder {
+    seen: []u8,
+}
+
+fn (self: &var Holder) keep(bytes: []u8) -> void {
+    self.seen = bytes;
+    return;
+}
+
+// A view lends to a method for the call's duration, but only when the method
+// cannot keep it. `Holder` has a view field, so its `&var self` could store
+// the lend and outlive the String the view came from.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var holder = Holder { seen: "" };
+    var text = string::new(allocator);
+    defer text.deinit();
+    try text.append_bytes("abc");
+    let view = text.as_bytes();
+    holder.keep(view);
+    return;
+}
+
+// check-fails
+// features: borrow view method lend
+// error: borrowed value `view` cannot escape
+
+
+// check
+// load:
+// struct Holder { seen: []u8 }
+// fn (self: &var Holder) Holder.keep(bytes: []u8) -> void { self.seen = bytes; return; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var holder = Holder { seen: "" }; var text = std::string::new(allocator); defer text.deinit(); try text.append_bytes("abc"); let view = text.as_bytes(); holder.keep(view); return; }
+// check:
+// ok

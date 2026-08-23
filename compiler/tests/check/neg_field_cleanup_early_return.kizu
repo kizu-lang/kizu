@@ -1,0 +1,45 @@
+import std::mem;
+import std::string;
+
+pub struct Job {
+    pub skip: bool,
+    pub name: string::String,
+}
+
+// A deinit owes its receiver's owner fields on every path that leaves it, not
+// only on the one that falls off the end.
+fn (self: Job) deinit() -> void {
+    if self.skip {
+        return;
+    }
+    self.name.deinit();
+    return;
+}
+
+fn owned(allocator: Allocator) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("x");
+    return text;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var job = Job { skip: true, name: try owned(allocator) };
+    defer job.deinit();
+    return;
+}
+
+// check-fails
+// features: owner cleanup diagnostics
+// error: deinit of `Job` must consume owner field `name`
+
+
+// check
+// load:
+// pub struct Job { pub skip: bool, pub name: std::string::String }
+// fn (self: Job) Job.deinit() -> void { if self.skip { return; } self.name.deinit(); return; }
+// fn owned(allocator: Allocator) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_bytes("x"); return text; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var job = Job { skip: true, name: try owned(allocator) }; defer job.deinit(); return; }
+// check:
+// ok

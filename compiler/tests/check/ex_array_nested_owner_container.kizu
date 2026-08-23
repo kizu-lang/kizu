@@ -1,0 +1,47 @@
+import std::array;
+import std::mem;
+import std::string;
+
+fn one(allocator: Allocator, byte: u8) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_byte(byte);
+    return move text;
+}
+
+fn row(allocator: Allocator, byte: u8) -> !array::Array<string::String> {
+    var texts = array::new<string::String>(allocator);
+    errdefer texts.deinit();
+    try texts.append(try one(allocator, byte));
+    try texts.append(try one(allocator, byte));
+    return move texts;
+}
+
+// A container may hold a container that owns its elements. `deinit` releases
+// what the value holds along with the value, so the outer one releases each row
+// through the row's own `deinit`, and that one releases each string. One name
+// composes to any depth; two names could not, because the outer one would have
+// had to pick which of them its element accepted (ADR-0119).
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var grid = array::new<array::Array<string::String>>(allocator);
+    defer grid.deinit();
+    try grid.append(try row(allocator, cast<u8>(97)));
+    try grid.append(try row(allocator, cast<u8>(98)));
+    print(grid.len());
+    return;
+}
+
+// run
+// features: std-array ownership deinit nested std-string errdefer
+// output:
+// 2
+
+
+// check
+// load:
+// fn one(allocator: Allocator, byte: u8) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_byte(byte); return move text; }
+// fn row(allocator: Allocator, byte: u8) -> !std::array::Array<std::string::String> { var texts = std::array::new<std::string::String>(allocator); errdefer texts.deinit(); try texts.append(try one(allocator, byte)); try texts.append(try one(allocator, byte)); return move texts; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var grid = std::array::new<std::array::Array<std::string::String>>(allocator); defer grid.deinit(); try grid.append(try row(allocator, cast<u8>(97))); try grid.append(try row(allocator, cast<u8>(98))); print(grid.len()); return; }
+// check:
+// ok

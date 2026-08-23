@@ -1,0 +1,78 @@
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+
+struct User {
+    name: []u8,
+}
+
+struct Holder {
+    values: array::Array<i64>,
+}
+
+union Slot {
+    Empty,
+    UserHandle(arena::Handle<User>),
+}
+
+// make_holder builds its element behind one cleanup boundary: error paths
+// release the partial array, the success return moves it out.
+fn make_holder(allocator: Allocator) -> !Holder {
+    let inner = array::new<i64>(allocator);
+    errdefer inner.deinit();
+    try inner.append(7);
+    return Holder { values: move inner };
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let users = arena::new<User>(allocator);
+    defer users.deinit();
+    let handles = array::new<arena::Handle<User>>(allocator);
+    defer handles.deinit();
+    let maps = array::new<map::Map<[]u8, i64>>(allocator);
+    defer maps.deinit();
+    let holders = array::new<Holder>(allocator);
+    defer holders.deinit();
+    let slots = array::new<Slot>(allocator);
+    defer slots.deinit();
+
+    let alice = users.add(User { name: "alice" });
+    try handles.append(alice);
+    print(handles.len());
+
+    let table = map::new<[]u8, i64>(allocator);
+    try maps.append(move table);
+    let moved_table = maps.pop_or_panic();
+    moved_table.deinit();
+
+    try holders.append(try make_holder(allocator));
+    let holder = holders.pop_or_panic();
+    print(holder.values.get_or_panic(0));
+    holder.deinit();
+
+    let bob = users.add(User { name: "bob" });
+    try slots.append(Slot::UserHandle(bob));
+    print(slots.len());
+    return;
+}
+
+// run
+// features: std-array std-map arena ownership resource-element
+// output:
+// 1
+// 7
+// 1
+
+
+// check
+// load:
+// struct User { name: []u8 }
+// struct Holder { values: std::array::Array<i64> }
+// union Slot { Empty, UserHandle(std::arena::Handle<User>) }
+// fn make_holder(allocator: Allocator) -> !Holder { let inner = std::array::new<i64>(allocator); errdefer inner.deinit(); try inner.append(7); return Holder { values: move inner }; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let users = std::arena::new<User>(allocator); defer users.deinit(); let handles = std::array::new<std::arena::Handle<User>>(allocator); defer handles.deinit(); let maps = std::array::new<std::map::Map<[]u8, i64>>(allocator); defer maps.deinit(); let holders = std::array::new<Holder>(allocator); defer holders.deinit(); let slots = std::array::new<Slot>(allocator); defer slots.deinit(); let alice = users.add(User { name: "alice" }); try handles.append(alice); print(handles.len()); let table = std::map::new<[]u8, i64>(allocator); try maps.append(move table); let moved_table = maps.pop_or_panic(); moved_table.deinit(); try holders.append(try make_holder(allocator)); let holder = holders.pop_or_panic(); print(holder.values.get_or_panic(0)); holder.deinit(); let bob = users.add(User { name: "bob" }); try slots.append(Slot::UserHandle(bob)); print(slots.len()); return; }
+// fn (self: Holder) Holder.deinit() -> void { self.values.deinit(); return; }
+// check:
+// ok

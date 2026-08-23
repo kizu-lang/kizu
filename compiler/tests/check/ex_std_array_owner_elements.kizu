@@ -1,0 +1,45 @@
+import std::array;
+import std::mem;
+import std::string;
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return move name;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    let names = array::new<string::String>(allocator);
+    // `deinit` consumes every remaining element through the element's own
+    // `deinit` before releasing the buffer. There is no second name for the
+    // case where the elements own something: this one covers both, which is
+    // what lets generic code write it without knowing the element type.
+    defer names.deinit();
+    try names.append(try make_name(allocator, "alice"));
+    try names.append(try make_name(allocator, "bob"));
+    print(names.len());
+
+    let taken = names.pop_or_panic();
+    defer taken.deinit();
+    let text = taken.as_bytes();
+    print(text);
+    print(names.len());
+    return;
+}
+
+// run
+// features: std-array ownership deinit
+// output:
+// 2
+// bob
+// 1
+
+
+// check
+// load:
+// fn make_name(allocator: Allocator, text: []u8) -> !std::string::String { var name = std::string::new(allocator); errdefer name.deinit(); try name.append_bytes(text); return move name; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); let names = std::array::new<std::string::String>(allocator); defer names.deinit(); try names.append(try make_name(allocator, "alice")); try names.append(try make_name(allocator, "bob")); print(names.len()); let taken = names.pop_or_panic(); defer taken.deinit(); let text = taken.as_bytes(); print(text); print(names.len()); return; }
+// check:
+// ok

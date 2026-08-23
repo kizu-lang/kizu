@@ -1,0 +1,50 @@
+import std::mem;
+import std::string;
+
+struct Noisy {
+    pub name: string::String,
+}
+
+fn (self: Noisy) deinit() -> void {
+    print("released");
+    self.name.deinit();
+    return;
+}
+
+// `box` takes its value by value, so `name` is moved into the struct and the
+// struct into the call: this frame has nothing left to clean up. When the
+// allocation fails, the value was written nowhere, and the obligation is the
+// callee's — `box` releases it before the error leaves. `released` is that
+// cleanup running.
+fn attempt(alloc: Allocator) -> !void {
+    var name = string::new(alloc);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+
+    let boxed = try mem::box<Noisy>(alloc, Noisy { name: move name });
+    defer boxed.deinit();
+    print("unreachable");
+    return;
+}
+
+fn main() -> !void {
+    var buf = [160]u8{};
+    let scratch = buf.as_mut_bytes();
+    let alloc = mem::fixed_buffer(scratch);
+    try attempt(alloc);
+    return;
+}
+
+// run-fails
+// features: ownership deinit errdefer box fixed-buffer allocator error-union
+// error: runtime error: std::mem::Error::OutOfMemory
+
+
+// check
+// load:
+// struct Noisy { pub name: std::string::String }
+// fn (self: Noisy) Noisy.deinit() -> void { print("released"); self.name.deinit(); return; }
+// fn attempt(alloc: Allocator) -> !void { var name = std::string::new(alloc); errdefer name.deinit(); try name.append_byte(cast<u8>(97)); let boxed = try std::mem::box<Noisy>(alloc, Noisy { name: move name }); defer boxed.deinit(); print("unreachable"); return; }
+// fn main() -> !void { var buf = [160]u8{}; let scratch = buf.as_mut_bytes(); let alloc = std::mem::fixed_buffer(scratch); try attempt(alloc); return; }
+// check:
+// ok

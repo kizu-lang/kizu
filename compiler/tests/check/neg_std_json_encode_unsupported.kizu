@@ -1,0 +1,44 @@
+import std::arena;
+import std::json;
+import std::mem;
+import std::string;
+
+pub struct Node {
+    pub id: i64,
+}
+
+pub struct Graph {
+    pub root: arena::Handle<Node>,
+}
+
+// `encode<T>` walks a closed set of types, and a handle is not in it: a handle
+// is a shared reference into an arena, and JSON is a tree. Writing the node
+// inline would turn two handles to one node into two nodes, and a cycle would
+// not terminate. How a graph becomes JSON is a decision, so it is left to the
+// program that owns the graph rather than guessed here.
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var nodes = arena::new<Node>(allocator);
+    defer nodes.deinit();
+    let graph = Graph { root: nodes.add(Node { id: 1 }) };
+
+    var out = string::new(allocator);
+    defer out.deinit();
+    try json::encode<Graph>(allocator, graph, out);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
+// check-fails
+// features: std-json std-meta comptime diagnostics
+// error: does not support type `std::arena::Handle<Node>`
+
+
+// check
+// load:
+// pub struct Node { pub id: i64 }
+// pub struct Graph { pub root: std::arena::Handle<Node> }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var nodes = std::arena::new<Node>(allocator); defer nodes.deinit(); let graph = Graph { root: nodes.add(Node { id: 1 }) }; var out = std::string::new(allocator); defer out.deinit(); try std::json::encode<Graph>(allocator, graph, out); let bytes = out.as_bytes(); print(bytes); return; }
+// check:
+// - comptime error: `std::json::encode_field` does not support type `std::arena::Handle<Node>`

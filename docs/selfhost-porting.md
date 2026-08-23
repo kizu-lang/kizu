@@ -202,6 +202,19 @@ Kizu の unit test に残すのは、入出力で表せない ownership / lifecy
 並列 agent は同じ file を編集しません。shared type と ownership 表は一人の
 integrator だけが変更し、他の agent は変更要求を返します。
 
+## Unattended work
+
+module 単位の機械移植は、次の契約で人の判断を待たずに進めます。
+
+- 範囲は 1 module ずつ。module の完了条件(下)を満たすまで次へ進まない
+- work unit ごとに topic branch へ commit し、review は module 単位の PR で受ける
+- 止まる条件: SPEC / std の変更が要る、分類と修正の後も累計 ratio が 2 倍以上、
+  Go 側の shipping 挙動を変える修正が要る、ir / llvm の内部表現を決める時
+- 見つけた language / std gap は止めずにこの文書末尾の「見つかった gap」へ
+  証拠付きで記録し、仕様を足さない局所解で進める。module 完了時にまとめて判断する
+- 検証は corpus、`kizu check compiler`、`kizu test compiler`、fmt、pre-commit で
+  機械的に行い、人の目は PR で入る
+
 ## Completion
 
 module complete は、対象 Go file の全 declaration が移り、stub と unexplained
@@ -212,3 +225,29 @@ compiler と同じ契約で通した状態です。
 
 binary byte identity や LLVM text identity は要求しません。契約は実行結果、
 diagnostic、artifact の意味が持ちます。
+
+## 見つかった gap
+
+移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
+
+| gap | 証拠 | 局所解 |
+| --- | --- | --- |
+| sequence literal(`[N]T{a, b}` / table / table-driven test)が無い | parser の precedence table(if 連鎖 23 行)、Go の table test 7 本が展開されている | 展開のまま |
+| 文字列組立の std API が `append_*` だけ | parser の message helper 155 行、checker の `errorf` 315 箇所 | parser は `error_*` method に融合(parser.kizu) |
+| struct field からの take / replace が無い | parser が cur/peek を持てず全 token を arena に保持 | `Arena<Token>` + handle stream |
+| `orelse` の右辺に block を書けない | parser の early return | `if opt \|v\| {} else {}` に展開 |
+| owner の `?T` は産出した場所で capture / orelse が必須 | parser test | 同上 |
+| `[]u8` view は関数から返せず、`as_bytes()` は local binding に束縛必須 | loader の `module_name() -> []u8` 系 helper が書けない | `&string::String` を返す / 渡し、callee 側で bind する。append 系 helper に変える |
+| `match try f()` では owner payload を move out できない | loader の `match try self.read_std_graph()` | `let r = try f(); match r { ... }` |
+| `else if` が無い | loader | `else { if ... }` に展開 |
+| owner field への代入不可のため「field を入れ替える」書き方が無い | loader の `self.order` の差し替え、ModuleFile.imports の設定 | 空で作って in place に insert する。入れ替えが要る場合は 2 つの field を持つ |
+| Array.at の結果は capture 限定で `orelse` も不可 | checker body port | `if arr.at(i) \|v\| {} else {}` |
+| `typ::map_names` の rename callback は error set しか返せず diagnostic を運べない | loader の resolve_type_node | mapper struct に失敗を記録して呼び出し後に読む |
+| view field を持つ struct(`ast::ConstructField { []u8, []u8 }`)を view binding から作れない | checker body の construct_expansion 呼び出し | builder(`begin_construct` / `add_field` / `finish_construct`)に変えた |
+| `while` 本体で作った view が同 block の `defer owner.deinit()` と衝突する | checker body | view を iteration ごとに bind し直す |
+| `mem::slice` を view に使えない / `?[]u8` を返す helper に view binding を渡せない | checker body | `x[a..b]` で切る / index を返す helper にする |
+| union payload に `?T` を置けない | loader の qualify(optional child を持つ結果) | optional 子は inline で分岐 |
+| `?Owner` を値で渡せず `&?T` 引数も不可 | loader の qualify(`copy_docs`) | capture した `&Map` を渡す。literal を 2 箇所に複製 |
+| expression の match arm で `return` できない | loader / checker body | statement の match に包む |
+| closure が無いので callback 型 API(`typ::map_names`)に Loader を渡せない(struct に借用を持てない) | loader の resolve_type_node | 2 pass(名前を集めて解決し、rename 表で map_names) |
+

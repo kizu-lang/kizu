@@ -1,0 +1,46 @@
+import std::mem;
+import std::string;
+
+pub struct Job {
+    pub name: string::String,
+}
+
+// The body runs an unknown number of times: zero leaves the field unreleased,
+// two release it twice. The rule a whole owned value already follows, read one
+// level down.
+fn (self: Job) deinit() -> void {
+    var round = 0;
+    while round < 3 {
+        self.name.deinit();
+        round = round + 1;
+    }
+    return;
+}
+
+fn owned(allocator: Allocator) -> !string::String {
+    var text = string::new(allocator);
+    errdefer text.deinit();
+    try text.append_bytes("x");
+    return text;
+}
+
+fn main() -> !void {
+    let allocator = mem::page_allocator();
+    var job = Job { name: try owned(allocator) };
+    defer job.deinit();
+    return;
+}
+
+// check-fails
+// features: owner cleanup diagnostics
+// error: owner field `self.name` is released inside a loop
+
+
+// check
+// load:
+// pub struct Job { pub name: std::string::String }
+// fn (self: Job) Job.deinit() -> void { var round = 0; while (round < 3) { self.name.deinit(); round = (round + 1); } return; }
+// fn owned(allocator: Allocator) -> !std::string::String { var text = std::string::new(allocator); errdefer text.deinit(); try text.append_bytes("x"); return text; }
+// fn main() -> !void { let allocator = std::mem::page_allocator(); var job = Job { name: try owned(allocator) }; defer job.deinit(); return; }
+// check:
+// ok
