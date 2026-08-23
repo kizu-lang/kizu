@@ -1,0 +1,159 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::string;
+
+// Mechanical port of internal/llvm/test.go: the std::testing intrinsics and
+// the one runtime declaration they add. Go builds the failure report of an
+// assertion as a string and writes it after the branch; here it is an owned
+// String handed to write_reported_failure, which releases it.
+
+/// Declares helpers used by test intrinsics, the Go `writeTestRuntimeDecls`.
+/// The failure reporting entries are declared with every other failure by
+/// writePanicDecls.
+fn (self: &var Emitter) write_test_runtime_decls(module: &ir::Module) -> !void {
+    if self.uses_byte_equality_runtime(module) {
+        try self.line("declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)");
+        try self.line("");
+    }
+    return;
+}
+
+/// Reports whether []u8 equality is needed, the Go `usesByteEqualityRuntime`.
+fn (self: &Emitter) uses_byte_equality_runtime(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op == ir::Op::TestExpectEqual and module.names.is(instr_node.immediate, "[]u8") {
+                    return true;
+                }
+                if instr_node.op == ir::Op::Binary and instr_node.args.len() == 2 and
+                    module.names.is(instr_node.args.get_or_panic(0).type_name, "[]u8") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Dispatches std::testing intrinsics, the Go `writeTestInstr`.
+fn (self: &var Emitter) write_test_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        TestFail => return self.write_test_fail(module, node),
+        TestExpectEqual => return self.write_test_expect_equal(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported test instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Reports an explicit std::testing failure and stops, the Go
+/// `writeTestFail`.
+fn (self: &var Emitter) write_test_fail(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.args.get_or_panic(0).type_name, "[]u8") {
+        return try self.fail0("llvm error: test.fail expects one []u8 message");
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let msg_name = try self.suffixed(result_name, ".msg");
+    let info = try self.operand(module, node.args.get_or_panic(0));
+    let parts = try self.write_slice_parts(msg_name, info.operand);
+    let position = try self.panic_position(node.span);
+    try self.line3(
+        "  call void @kizu_panic_test_fail(ptr %s, i64 %s, %s)",
+        Arg::Str(parts.ptr), Arg::Str(parts.len), Arg::Str(position)
+    );
+    try self.line("  unreachable");
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Reports the expected and actual values when they differ, the Go
+/// `writeTestExpectEqual`. The report Go formats with a trailing newline is
+/// built here without one and given its newline before it is handed on.
+fn (self: &var Emitter) write_test_expect_equal(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: test.expect_equal expects two args");
+    }
+    let left_value = node.args.get_or_panic(0);
+    let right_value = node.args.get_or_panic(1);
+    let left = try self.operand(module, left_value);
+    let right = try self.operand(module, right_value);
+    let result_name = try self.local_name(module, node.result.name);
+    let ok_name = try self.suffixed(result_name, ".ok");
+    let position = try self.panic_position(node.span);
+    var report = if module.names.is(left_value.type_name, "bool") {
+        try self.line3("  %s = icmp eq i1 %s, %s", Arg::Str(ok_name), Arg::Str(left.operand), Arg::Str(right.operand));
+        try self.sprint3(
+            "  call void @kizu_panic_expect_equal_bool(i1 %s, i1 %s, %s)",
+            Arg::Str(left.operand), Arg::Str(right.operand), Arg::Str(position)
+        )
+    } else {
+        if module.names.is(left_value.type_name, "[]u8") {
+            let left_name = try self.suffixed(result_name, ".left");
+            let left_parts = try self.write_slice_parts(left_name, left.operand);
+            let right_name = try self.suffixed(result_name, ".right");
+            let right_parts = try self.write_slice_parts(right_name, right.operand);
+            try self.line5(
+                "  %s = call i1 @kizu_bytes_equal(ptr %s, i64 %s, ptr %s, i64 %s)",
+                Arg::Str(ok_name), Arg::Str(left_parts.ptr), Arg::Str(left_parts.len),
+                Arg::Str(right_parts.ptr), Arg::Str(right_parts.len)
+            );
+            try self.sprint5(
+                "  call void @kizu_panic_expect_equal_bytes(ptr %s, i64 %s, ptr %s, i64 %s, %s)",
+                Arg::Str(left_parts.ptr), Arg::Str(left_parts.len), Arg::Str(right_parts.ptr),
+                Arg::Str(right_parts.len), Arg::Str(position)
+            )
+        } else {
+            let left_type = try self.llvm_type_of(module, left_value.type_name);
+            try self.line4(
+                "  %s = icmp eq %s %s, %s",
+                Arg::Str(ok_name), Arg::Str(left_type), Arg::Str(left.operand), Arg::Str(right.operand)
+            );
+            let left_int = try self.runtime_integer_operand(module, left_value.type_name, left.operand);
+            let right_int = try self.runtime_integer_operand(module, right_value.type_name, right.operand);
+            try self.sprint3(
+                "  call void @kizu_panic_expect_equal_int(i64 %s, i64 %s, %s)",
+                Arg::Str(left_int), Arg::Str(right_int), Arg::Str(position)
+            )
+        }
+    };
+    errdefer report.deinit();
+    try report.append_byte(cast<u8>(10));
+    try self.write_reported_failure(module, ok_name, move report);
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Branches to a reporting block unless ok_operand holds, the Go
+/// `writeReportedFailure`; the report is written as it is and released.
+fn (self: &var Emitter) write_reported_failure(module: &ir::Module, ok_operand: ir::Name, report: string::String) -> !void {
+    defer report.deinit();
+    let fail_label = try self.helper_label_local(ok_operand, "fail");
+    let ok_label = try self.helper_label_local(ok_operand, "ok");
+    try self.mark_current_block_exit(module, ok_label);
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_operand), Arg::Str(ok_label), Arg::Str(fail_label));
+    try self.line1("%s:", Arg::Str(fail_label));
+    try self.out.append_string(&report);
+    try self.line("  unreachable");
+    return self.line1("%s:", Arg::Str(ok_label));
+}
+
+/// Builds one text the Go `fmt.Sprintf` way with five arguments, for a text
+/// kept as its own String rather than named; the shape of llvm.kizu's
+/// `sprint2`.
+fn (self: &Emitter) sprint5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !string::String {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try format_args(&var out, &self.names, format, move a, move b, move c, move d, move e, Arg::None);
+    return move out;
+}

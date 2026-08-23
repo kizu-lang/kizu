@@ -1,0 +1,263 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of the call half of internal/llvm/emit.go: `call.<f>`
+// instructions to the runtime print, to module-local functions with the
+// explicit byval ABI, to std hosted runtime entries with the out-pointer
+// ABI, and to external symbols, plus the declaration an external call gets
+// in the header. Go's `functionParams[name]` is read here through the
+// function handle `function_named` hands back.
+
+/// Writes runtime print and user function calls, the Go `writeCall`.
+fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if module.names.is(node.operand, "print") {
+        return self.write_print(module, node);
+    }
+    if try self.uses_hosted_runtime_abi(module, node.operand, node) {
+        return self.write_hosted_runtime_call(module, node.operand, node);
+    }
+    if self.function_named(module, node.operand) |callee| {
+        return self.write_internal_call(module, callee, node);
+    }
+    var args = array::new<string::String>(self.allocator);
+    defer args.deinit();
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let value = try self.operand(module, arg);
+        let arg_type = try self.llvm_type_of(module, arg.type_name);
+        try args.append(try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let symbol = try self.callee_symbol(module, node.operand);
+    let joined = try string::join(self.allocator, &args, ", ");
+    let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+    return self.write_call_line(module, node, call);
+}
+
+/// Writes the call text as a statement or as a result definition, the tail
+/// the Go `writeCall` and `writeInternalCall` share.
+fn (self: &var Emitter) write_call_line(module: &ir::Module, node: &ir::InstrNode, call: ir::Name) -> !?diagnostic::Diagnostic {
+    if module.names.is(node.result.type_name, "void") {
+        try self.line1("  %s", Arg::Str(call));
+        return null;
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line2("  %s = %s", Arg::Str(result_name), Arg::Str(call));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Names the LLVM symbol of a callee the module names, the Go
+/// `llvmFunctionName(name)`.
+fn (self: &var Emitter) callee_symbol(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.llvm_function_name(bytes);
+}
+
+/// Adapts module-local struct values to Kizu's explicit byval pointer ABI,
+/// avoiding target-dependent aggregate argument lowering, the Go
+/// `writeInternalCall`.
+fn (self: &var Emitter) write_internal_call(
+    module: &ir::Module,
+    callee: ir::Function,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    var args = array::new<string::String>(self.allocator);
+    defer args.deinit();
+    let param_count = module.function_param_count(callee);
+    var index = 0;
+    while node.args.get(index) |arg| {
+        // A callee this module does not declare takes its arguments by value,
+        // which is what the zero Param says.
+        var passing = ir::Passing::Value;
+        var param_type = ir::empty_name();
+        if index < param_count {
+            if module.function_param(callee, index) |param| {
+                passing = param.passing;
+                param_type = param.type_name;
+            }
+        }
+        try args.append(try self.internal_call_arg(module, arg, passing, param_type, index));
+        index = index + 1;
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let symbol = try self.callee_symbol(module, node.operand);
+    let joined = try string::join(self.allocator, &args, ", ");
+    let call = try self.text3("call %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+    return self.write_call_line(module, node, call);
+}
+
+/// Returns one module-local call argument in function_param_abi form, the
+/// Go `internalCallArg`. A parameter handed the value its address is taken
+/// of gets that address made here, which is the one thing the callee's
+/// declared Passing decides.
+fn (self: &var Emitter) internal_call_arg(
+    module: &ir::Module,
+    arg: ir::Value,
+    passing: ir::Passing,
+    param_type: ir::Name,
+    index: i64
+) -> !string::String {
+    let value = try self.operand(module, arg);
+    let arg_type = try self.llvm_type_of(module, arg.type_name);
+    if takes_address_of(module, passing, param_type, arg.type_name) {
+        let slot_name = try self.next_arg_slot(index);
+        try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(arg_type), Arg::Int(max_inline_payload_align()));
+        try self.line4(
+            "  store %s %s, ptr %s, align %d",
+            Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+        );
+        return self.sprint2("ptr %s", Arg::Str(slot_name), Arg::None);
+    }
+    let type_text = ir::name_text(&module.names, arg.type_name);
+    let type_bytes = type_text.as_bytes();
+    if !uses_indirect_struct_param_abi(module, type_bytes) {
+        return self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand));
+    }
+    let slot_name = try self.next_arg_slot(index);
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(arg_type));
+    try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(slot_name));
+    return self.sprint2("ptr byval(%s) %s", Arg::Str(arg_type), Arg::Str(slot_name));
+}
+
+/// Names the slot one by-address argument is copied into, the Go
+/// `"%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))`.
+fn (self: &var Emitter) next_arg_slot(index: i64) -> !ir::Name {
+    self.next_label = self.next_label + 1;
+    return self.text2("%%kizu.arg.%d.%d", Arg::Int(index), Arg::Int(self.next_label));
+}
+
+/// Reports whether a parameter reading through an address is being handed
+/// the value that address is taken of, rather than an address the caller
+/// already held, the Go `Param.TakesAddressOf` read without interning.
+fn takes_address_of(module: &ir::Module, passing: ir::Passing, param_type: ir::Name, arg_type: ir::Name) -> bool {
+    if passing != ir::Passing::CopyAddress or ir::same_name(param_type, arg_type) {
+        return false;
+    }
+    let param_text = ir::name_text(&module.names, param_type);
+    let param_bytes = param_text.as_bytes();
+    let arg_text = ir::name_text(&module.names, arg_type);
+    let arg_bytes = arg_text.as_bytes();
+    let deref = deref_borrow_type(param_bytes);
+    return mem::equal_bytes(deref, arg_bytes);
+}
+
+/// Returns T for `&T` and `&var T`, and the spelling itself otherwise, the
+/// Go ir `derefType`.
+fn deref_borrow_type(name: []u8) -> []u8 {
+    if mem::starts_with(name, "&var ") {
+        return name[5..mem::len(name)];
+    }
+    if mem::starts_with(name, "&") {
+        return name[1..mem::len(name)];
+    }
+    return name;
+}
+
+/// Reports whether a std hosted runtime call uses the explicit out-pointer
+/// ABI instead of the platform C aggregate return ABI, the Go
+/// `usesHostedRuntimeABI`. Error unions and optionals are both C-side
+/// aggregates, so both go out through the pointer.
+fn (self: &var Emitter) uses_hosted_runtime_abi(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !bool {
+    let symbol = try self.callee_symbol(module, name);
+    if !self.names.starts_with(symbol, "std__internal__builtin__") {
+        return false;
+    }
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if try self.error_union_success_type(result_type) |success| {
+        success.deinit();
+        return true;
+    }
+    return is_optional_type(result_type);
+}
+
+/// Appends the lowered parameter ABI for hosted runtime calls, the Go
+/// `hostedRuntimeParamTypes`. Aggregates -- slices and module structs --
+/// reach the C runtime behind a pointer, never by value.
+fn (self: &var Emitter) append_hosted_runtime_param_types(
+    module: &ir::Module,
+    args: &array::Array<ir::Value>,
+    params: &var array::Array<string::String>
+) -> !void {
+    var index = 0;
+    while args.get(index) |arg| {
+        index = index + 1;
+        let type_text = ir::name_text(&module.names, arg.type_name);
+        let type_bytes = type_text.as_bytes();
+        if hosted_runtime_indirect_abi(module, type_bytes) {
+            try params.append(try string::from_bytes(self.allocator, "ptr"));
+            continue;
+        }
+        let arg_type = try self.llvm_type_of(module, arg.type_name);
+        try params.append(try self.names.copy(arg_type));
+    }
+    return;
+}
+
+/// Adapts Kizu aggregate values to the narrow hosted C ABI, the Go
+/// `writeHostedRuntimeCall`.
+fn (self: &var Emitter) write_hosted_runtime_call(
+    module: &ir::Module,
+    name: ir::Name,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    let result_name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let result_slot = try self.suffixed(result_name, ".slot");
+    try self.line2("  %s = alloca %s", Arg::Str(result_slot), Arg::Str(result_type));
+    var args = array::new<string::String>(self.allocator);
+    defer args.deinit();
+    try args.append(try self.sprint2("ptr %s", Arg::Str(result_slot), Arg::None));
+    var index = 0;
+    while node.args.get(index) |arg| {
+        let value = try self.operand(module, arg);
+        let type_text = ir::name_text(&module.names, arg.type_name);
+        let type_bytes = type_text.as_bytes();
+        let arg_type = try self.llvm_type_of(module, arg.type_name);
+        if hosted_runtime_indirect_abi(module, type_bytes) {
+            let arg_slot = try self.text2("%s.arg.%d", Arg::Str(result_name), Arg::Int(index));
+            try self.line2("  %s = alloca %s", Arg::Str(arg_slot), Arg::Str(arg_type));
+            try self.line3("  store %s %s, ptr %s", Arg::Str(arg_type), Arg::Str(value.operand), Arg::Str(arg_slot));
+            try args.append(try self.sprint2("ptr %s", Arg::Str(arg_slot), Arg::None));
+            index = index + 1;
+            continue;
+        }
+        try args.append(try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+        index = index + 1;
+    }
+    let symbol = try self.callee_symbol(module, name);
+    let joined = try string::join(self.allocator, &args, ", ");
+    try self.line2("  call void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(result_slot));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Formats one external call declaration from typed IR operands, the Go
+/// `externalCallDecl`.
+fn (self: &var Emitter) external_call_decl(module: &ir::Module, name: ir::Name, node: &ir::InstrNode) -> !string::String {
+    let symbol = try self.callee_symbol(module, name);
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit();
+    if try self.uses_hosted_runtime_abi(module, name, node) {
+        try params.append(try string::from_bytes(self.allocator, "ptr"));
+        try self.append_hosted_runtime_param_types(module, &node.args, &var params);
+        let joined = try string::join(self.allocator, &params, ", ");
+        return self.sprint2("declare void @%s(%s)", Arg::Str(symbol), Arg::Owned(move joined));
+    }
+    var index = 0;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let arg_type = try self.llvm_type_of(module, arg.type_name);
+        try params.append(try self.names.copy(arg_type));
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let joined = try string::join(self.allocator, &params, ", ");
+    return self.sprint3("declare %s @%s(%s)", Arg::Str(result_type), Arg::Str(symbol), Arg::Owned(move joined));
+}

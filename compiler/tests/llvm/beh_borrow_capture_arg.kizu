@@ -1,0 +1,600 @@
+import std::array;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub value: i64,
+}
+
+fn read_it(x: &Item) -> i64 {
+    return x.value;
+}
+
+fn bump(x: &var Item) -> void {
+    x.value = x.value + 1;
+}
+
+// A borrow capture is a reference binding, and a `&T` parameter of a
+// non-union travels as the element value: the call reads the capture the
+// same way a slot-backed borrow is read, whichever mutability the capture
+// carries.
+test "a borrow capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(41, read_it(r));
+    }
+    if xs.at_mut(0) |m| {
+        testing::expect_equal<i64>(41, read_it(m));
+    }
+}
+
+pub union Shape {
+    Dot,
+    Bar(i64),
+}
+
+fn read_shape(s: &Shape) -> i64 {
+    return match s {
+        Dot => 0,
+        Bar(n) => n,
+    };
+}
+
+// A union's `&T` parameter wants an address to match through, and a mutable
+// capture reads down to the value that address is taken of, the same way the
+// struct case does.
+test "a mutable union capture feeds a shared borrow parameter" {
+    let allocator = mem::page_allocator();
+    var shapes = array::new<Shape>(allocator);
+    defer shapes.deinit();
+    try shapes.append(Shape::Bar(42));
+    if shapes.at(0) |r| {
+        testing::expect_equal<i64>(42, read_shape(r));
+    }
+    if shapes.at_mut(0) |m| {
+        testing::expect_equal<i64>(42, read_shape(m));
+    }
+}
+
+// A mutable capture handed on to a `&var T` parameter keeps handing over the
+// same storage, so the callee's write lands in the element.
+test "a mutable capture forwards to a mutable borrow parameter" {
+    let allocator = mem::page_allocator();
+    var xs = array::new<Item>(allocator);
+    defer xs.deinit();
+    try xs.append(Item { value: 41 });
+    if xs.at_mut(0) |m| {
+        bump(m);
+    }
+    if xs.at(0) |r| {
+        testing::expect_equal<i64>(42, read_it(r));
+    }
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._Item = type { i8, ptr }
+// %kizu.opt._Shape = type { i8, ptr }
+// %kizu.opt._var_Item = type { i8, ptr }
+// %kizu.opt._var_Shape = type { i8, ptr }
+// 
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.Shape = type { i64, [8 x i8] }
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Item = type { i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare %kizu.error.void @std__array__Array_append_Item(ptr, %kizu.struct.Item)
+// declare %kizu.error.void @std__array__Array_append_Shape(ptr, %kizu.union.Shape)
+// declare %kizu.opt._Item @std__array__Array_at_Item(ptr, i64)
+// declare %kizu.opt._Shape @std__array__Array_at_Shape(ptr, i64)
+// declare %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr, i64)
+// declare %kizu.opt._var_Shape @std__array__Array_at_mut_Shape(ptr, i64)
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.x.addr) {
+// entry:
+//   %kizu.x = load %kizu.struct.Item, ptr %kizu.x.addr
+//   %kizu.1 = extractvalue %kizu.struct.Item %kizu.x, 0
+//   ret i64 %kizu.1
+// }
+// 
+// define void @bump(ptr %kizu.x) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Item, ptr %kizu.x, i32 0, i32 0
+//   %kizu.1 = load i64, ptr %kizu.1.ptr
+//   %kizu.3 = add i64 %kizu.1, 1
+//   %kizu.4.ptr = getelementptr %kizu.struct.Item, ptr %kizu.x, i32 0, i32 0
+//   store i64 %kizu.3, ptr %kizu.4.ptr
+//   ret void
+// }
+// 
+// define i64 @read_shape(ptr %kizu.s) {
+// entry:
+//   %kizu.6.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.1 = load %kizu.union.Shape, ptr %kizu.s, align 8
+//   %kizu.2 = extractvalue %kizu.union.Shape %kizu.1, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.7 = phi i64 [ 0, %match.arm.3 ], [ %kizu.6, %match.arm.5 ]
+//   ret i64 %kizu.7
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.5 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.5, label %match.arm.5, label %match.unreachable.6
+// match.arm.5:
+//   store %kizu.union.Shape %kizu.1, ptr %kizu.6.slot, align 8
+//   %kizu.6.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.6.slot, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8
+//   br label %match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_a_borrow_capture_feeds_a_shared_borrow_parameter() {
+// entry:
+//   %kizu.arg.0.2 = alloca %kizu.struct.Item
+//   %kizu.arg.0.3 = alloca %kizu.struct.Item
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 41, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Item(ptr %kizu.2, %kizu.struct.Item %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._Item @std__array__Array_at_Item(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._Item %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._Item %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = load %kizu.struct.Item, ptr %kizu.9
+//   store %kizu.struct.Item %kizu.12, ptr %kizu.arg.0.2
+//   %kizu.13 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.2)
+//   %kizu.14.ok = icmp eq i64 41, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.16 = call %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr %kizu.2, i64 0)
+//   %kizu.17 = extractvalue %kizu.opt._var_Item %kizu.16, 1
+//   %kizu.18.tag = extractvalue %kizu.opt._var_Item %kizu.16, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.20 = load %kizu.struct.Item, ptr %kizu.17
+//   store %kizu.struct.Item %kizu.20, ptr %kizu.arg.0.3
+//   %kizu.21 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.3)
+//   %kizu.22.ok = icmp eq i64 41, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_a_mutable_union_capture_feeds_a_shared_borrow_parameter() {
+// entry:
+//   %kizu.4.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.arg.0.2 = alloca %kizu.union.Shape, align 8
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64))
+//   %kizu.4.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.4.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.4.tag.ptr, align 8
+//   %kizu.4.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.4.slot, i32 0, i32 1
+//   store i64 42, ptr %kizu.4.payload.ptr, align 8
+//   %kizu.4 = load %kizu.union.Shape, ptr %kizu.4.slot, align 8
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Shape(ptr %kizu.2, %kizu.union.Shape %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._Shape @std__array__Array_at_Shape(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._Shape %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._Shape %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = call i64 @read_shape(ptr %kizu.9)
+//   %kizu.13.ok = icmp eq i64 42, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.15 = call %kizu.opt._var_Shape @std__array__Array_at_mut_Shape(ptr %kizu.2, i64 0)
+//   %kizu.16 = extractvalue %kizu.opt._var_Shape %kizu.15, 1
+//   %kizu.17.tag = extractvalue %kizu.opt._var_Shape %kizu.15, 0
+//   %kizu.17 = icmp ne i8 %kizu.17.tag, 0
+//   br i1 %kizu.17, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.19 = load %kizu.union.Shape, ptr %kizu.16
+//   store %kizu.union.Shape %kizu.19, ptr %kizu.arg.0.2, align 8
+//   %kizu.20 = call i64 @read_shape(ptr %kizu.arg.0.2)
+//   %kizu.21.ok = icmp eq i64 42, %kizu.20
+//   br i1 %kizu.21.ok, label %kizu.21.ok.ok, label %kizu.21.ok.fail
+// kizu.21.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.21.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.23 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.23
+// }
+// 
+// define %kizu.error.void @test_a_mutable_capture_forwards_to_a_mutable_borrow_parameter() {
+// entry:
+//   %kizu.arg.0.2 = alloca %kizu.struct.Item
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 41, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Item(ptr %kizu.2, %kizu.struct.Item %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._var_Item %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._var_Item %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   call void @bump(ptr %kizu.9)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.13 = call %kizu.opt._Item @std__array__Array_at_Item(ptr %kizu.2, i64 0)
+//   %kizu.14 = extractvalue %kizu.opt._Item %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt._Item %kizu.13, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.17 = load %kizu.struct.Item, ptr %kizu.14
+//   store %kizu.struct.Item %kizu.17, ptr %kizu.arg.0.2
+//   %kizu.18 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.2)
+//   %kizu.19.ok = icmp eq i64 42, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._Item = type { i8, ptr }
+// %kizu.opt._Shape = type { i8, ptr }
+// %kizu.opt._var_Item = type { i8, ptr }
+// %kizu.opt._var_Shape = type { i8, ptr }
+// 
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.Shape = type { i64, [8 x i8] }
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Item = type { i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare %kizu.error.void @std__array__Array_append_Item(ptr, %kizu.struct.Item)
+// declare %kizu.error.void @std__array__Array_append_Shape(ptr, %kizu.union.Shape)
+// declare %kizu.opt._Item @std__array__Array_at_Item(ptr, i64)
+// declare %kizu.opt._Shape @std__array__Array_at_Shape(ptr, i64)
+// declare %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr, i64)
+// declare %kizu.opt._var_Shape @std__array__Array_at_mut_Shape(ptr, i64)
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.x.addr) {
+// entry:
+//   %kizu.x = load %kizu.struct.Item, ptr %kizu.x.addr
+//   %kizu.1 = extractvalue %kizu.struct.Item %kizu.x, 0
+//   ret i64 %kizu.1
+// }
+// 
+// define void @bump(ptr %kizu.x) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Item, ptr %kizu.x, i32 0, i32 0
+//   %kizu.1 = load i64, ptr %kizu.1.ptr
+//   %kizu.3 = add i64 %kizu.1, 1
+//   %kizu.4.ptr = getelementptr %kizu.struct.Item, ptr %kizu.x, i32 0, i32 0
+//   store i64 %kizu.3, ptr %kizu.4.ptr
+//   ret void
+// }
+// 
+// define i64 @read_shape(ptr %kizu.s) {
+// entry:
+//   %kizu.6.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.1 = load %kizu.union.Shape, ptr %kizu.s, align 8
+//   %kizu.2 = extractvalue %kizu.union.Shape %kizu.1, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.7 = phi i64 [ 0, %match.arm.3 ], [ %kizu.6, %match.arm.5 ]
+//   ret i64 %kizu.7
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.5 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.5, label %match.arm.5, label %match.unreachable.6
+// match.arm.5:
+//   store %kizu.union.Shape %kizu.1, ptr %kizu.6.slot, align 8
+//   %kizu.6.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.6.slot, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8
+//   br label %match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_a_borrow_capture_feeds_a_shared_borrow_parameter() {
+// entry:
+//   %kizu.arg.0.2 = alloca %kizu.struct.Item
+//   %kizu.arg.0.3 = alloca %kizu.struct.Item
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 41, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Item(ptr %kizu.2, %kizu.struct.Item %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._Item @std__array__Array_at_Item(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._Item %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._Item %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = load %kizu.struct.Item, ptr %kizu.9
+//   store %kizu.struct.Item %kizu.12, ptr %kizu.arg.0.2
+//   %kizu.13 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.2)
+//   %kizu.14.ok = icmp eq i64 41, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.16 = call %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr %kizu.2, i64 0)
+//   %kizu.17 = extractvalue %kizu.opt._var_Item %kizu.16, 1
+//   %kizu.18.tag = extractvalue %kizu.opt._var_Item %kizu.16, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.20 = load %kizu.struct.Item, ptr %kizu.17
+//   store %kizu.struct.Item %kizu.20, ptr %kizu.arg.0.3
+//   %kizu.21 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.3)
+//   %kizu.22.ok = icmp eq i64 41, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_a_mutable_union_capture_feeds_a_shared_borrow_parameter() {
+// entry:
+//   %kizu.4.slot = alloca %kizu.union.Shape, align 8
+//   %kizu.arg.0.2 = alloca %kizu.union.Shape, align 8
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.union.Shape, ptr null, i64 1) to i64))
+//   %kizu.4.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.4.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.4.tag.ptr, align 8
+//   %kizu.4.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.4.slot, i32 0, i32 1
+//   store i64 42, ptr %kizu.4.payload.ptr, align 8
+//   %kizu.4 = load %kizu.union.Shape, ptr %kizu.4.slot, align 8
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Shape(ptr %kizu.2, %kizu.union.Shape %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._Shape @std__array__Array_at_Shape(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._Shape %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._Shape %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = call i64 @read_shape(ptr %kizu.9)
+//   %kizu.13.ok = icmp eq i64 42, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.15 = call %kizu.opt._var_Shape @std__array__Array_at_mut_Shape(ptr %kizu.2, i64 0)
+//   %kizu.16 = extractvalue %kizu.opt._var_Shape %kizu.15, 1
+//   %kizu.17.tag = extractvalue %kizu.opt._var_Shape %kizu.15, 0
+//   %kizu.17 = icmp ne i8 %kizu.17.tag, 0
+//   br i1 %kizu.17, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.19 = load %kizu.union.Shape, ptr %kizu.16
+//   store %kizu.union.Shape %kizu.19, ptr %kizu.arg.0.2, align 8
+//   %kizu.20 = call i64 @read_shape(ptr %kizu.arg.0.2)
+//   %kizu.21.ok = icmp eq i64 42, %kizu.20
+//   br i1 %kizu.21.ok, label %kizu.21.ok.ok, label %kizu.21.ok.fail
+// kizu.21.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.21.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.23 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.23
+// }
+// 
+// define %kizu.error.void @test_a_mutable_capture_forwards_to_a_mutable_borrow_parameter() {
+// entry:
+//   %kizu.arg.0.2 = alloca %kizu.struct.Item
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.4 = insertvalue %kizu.struct.Item zeroinitializer, i64 41, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Item(ptr %kizu.2, %kizu.struct.Item %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.8 = call %kizu.opt._var_Item @std__array__Array_at_mut_Item(ptr %kizu.2, i64 0)
+//   %kizu.9 = extractvalue %kizu.opt._var_Item %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._var_Item %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   call void @bump(ptr %kizu.9)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.13 = call %kizu.opt._Item @std__array__Array_at_Item(ptr %kizu.2, i64 0)
+//   %kizu.14 = extractvalue %kizu.opt._Item %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt._Item %kizu.13, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.17 = load %kizu.struct.Item, ptr %kizu.14
+//   store %kizu.struct.Item %kizu.17, ptr %kizu.arg.0.2
+//   %kizu.18 = call i64 @read_it(ptr byval(%kizu.struct.Item) %kizu.arg.0.2)
+//   %kizu.19.ok = icmp eq i64 42, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }

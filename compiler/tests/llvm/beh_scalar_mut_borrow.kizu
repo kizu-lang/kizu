@@ -1,0 +1,528 @@
+import std::testing;
+
+fn bump(n: &var i64) -> void {
+    n = n + 1;
+}
+
+fn bump_twice(n: &var i64) -> void {
+    bump(n);
+    bump(n);
+}
+
+// A `&var` scalar parameter is the caller's storage: assigning the binding
+// stores there, under the same rule that lets a field write through a
+// `&var` struct. Forwarding the parameter lends the same storage on.
+test "assignment through a scalar mut borrow reaches the caller" {
+    var count = 0;
+    bump(count);
+    testing::expect_equal<i64>(1, count);
+    bump_twice(count);
+    testing::expect_equal<i64>(3, count);
+}
+
+fn double(n: &var i64) -> void {
+    n = n * 2;
+}
+
+// Reading the binding loads the borrowed storage, so a read-modify-write
+// round-trips through the caller's value.
+test "a scalar mut borrow reads its current value" {
+    var size = 21;
+    double(size);
+    testing::expect_equal<i64>(42, size);
+}
+
+fn halve(n: &var i64) -> void {
+    n.* = n.* / 2;
+}
+
+// Explicit dereference names the same storage the bare binding does, so
+// `n.* = v` and `n = v` store into the same place.
+test "explicit deref assignment through a scalar mut borrow" {
+    var size = 84;
+    halve(size);
+    testing::expect_equal<i64>(42, size);
+}
+
+fn accumulate(total: &var i64, upto: i64) -> void {
+    var i = 1;
+    while i <= upto {
+        total = total + i;
+        i = i + 1;
+    }
+}
+
+// A loop body stores through the borrow on every pass, so the caller sees
+// the final sum rather than the value of any single pass.
+test "a loop writes through a scalar mut borrow" {
+    var sum = 0;
+    accumulate(sum, 4);
+    testing::expect_equal<i64>(10, sum);
+}
+
+struct Point {
+    pub x: i64,
+    pub y: i64,
+}
+
+fn reset(p: &var Point) -> void {
+    p = Point { x: 0, y: 0 };
+}
+
+// Whole-binding assignment through `&var` is the same rule for a copy struct
+// as for a scalar: the new value lands in the caller's storage.
+test "whole struct assignment through a mut borrow reaches the caller" {
+    var origin = Point { x: 3, y: 4 };
+    reset(origin);
+    testing::expect_equal<i64>(0, origin.x + origin.y);
+}
+
+fn set<T>(dst: &var T, v: T) -> void {
+    dst = v;
+}
+
+// A generic `&var T` helper behaves the same at every binding of T: the
+// signature alone says the argument's storage is lent.
+test "a generic mut borrow helper writes through at scalar and struct" {
+    var n = 1;
+    set<i64>(n, 42);
+    testing::expect_equal<i64>(42, n);
+    var p = Point { x: 1, y: 2 };
+    set<Point>(p, Point { x: 40, y: 2 });
+    testing::expect_equal<i64>(42, p.x + p.y);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.struct.Point = type { i64, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define void @bump(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = add i64 %kizu.1, 1
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @bump_twice(ptr %kizu.n) {
+// entry:
+//   call void @bump(ptr %kizu.n)
+//   call void @bump(ptr %kizu.n)
+//   ret void
+// }
+// 
+// define void @double(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = mul i64 %kizu.1, 2
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @halve(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = sdiv i64 %kizu.1, 2
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @accumulate(ptr %kizu.total, i64 %kizu.upto) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi ptr [ %kizu.total, %entry ], [ %kizu.2, %while.body.2 ]
+//   %kizu.3 = phi i64 [ 1, %entry ], [ %kizu.9, %while.body.2 ]
+//   %kizu.4 = icmp sle i64 %kizu.3, %kizu.upto
+//   br i1 %kizu.4, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6 = add i64 %kizu.5, %kizu.3
+//   store i64 %kizu.6, ptr %kizu.2
+//   %kizu.9 = add i64 %kizu.3, 1
+//   br label %while.header.1
+// while.end.3:
+//   ret void
+// }
+// 
+// define void @reset(ptr %kizu.p) {
+// entry:
+//   %kizu.3.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 0, 0
+//   %kizu.3 = insertvalue %kizu.struct.Point %kizu.3.field0, i64 0, 1
+//   store %kizu.struct.Point %kizu.3, ptr %kizu.p
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_assignment_through_a_scalar_mut_borrow_reaches_the_caller() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 0, ptr %kizu.2
+//   call void @bump(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 1, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   call void @bump_twice(ptr %kizu.2)
+//   %kizu.9 = load i64, ptr %kizu.2
+//   %kizu.10.ok = icmp eq i64 3, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }
+// 
+// define %kizu.error.void @test_a_scalar_mut_borrow_reads_its_current_value() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 21, ptr %kizu.2
+//   call void @double(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 42, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
+// 
+// define %kizu.error.void @test_explicit_deref_assignment_through_a_scalar_mut_borrow() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 84, ptr %kizu.2
+//   call void @halve(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 42, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
+// 
+// define %kizu.error.void @test_a_loop_writes_through_a_scalar_mut_borrow() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 0, ptr %kizu.2
+//   call void @accumulate(ptr %kizu.2, i64 4)
+//   %kizu.6 = load i64, ptr %kizu.2
+//   %kizu.7.ok = icmp eq i64 10, %kizu.6
+//   br i1 %kizu.7.ok, label %kizu.7.ok.ok, label %kizu.7.ok.fail
+// kizu.7.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 10, i64 %kizu.6, i64 0, i64 0)
+//   unreachable
+// kizu.7.ok.ok:
+//   %kizu.8 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.8
+// }
+// 
+// define %kizu.error.void @test_whole_struct_assignment_through_a_mut_borrow_reaches_the_caller() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Point
+//   %kizu.3.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 3, 0
+//   %kizu.3 = insertvalue %kizu.struct.Point %kizu.3.field0, i64 4, 1
+//   store %kizu.struct.Point %kizu.3, ptr %kizu.4
+//   call void @reset(ptr %kizu.4)
+//   %kizu.7.ptr = getelementptr %kizu.struct.Point, ptr %kizu.4, i32 0, i32 0
+//   %kizu.7 = load i64, ptr %kizu.7.ptr
+//   %kizu.8.ptr = getelementptr %kizu.struct.Point, ptr %kizu.4, i32 0, i32 1
+//   %kizu.8 = load i64, ptr %kizu.8.ptr
+//   %kizu.9 = add i64 %kizu.7, %kizu.8
+//   %kizu.10.ok = icmp eq i64 0, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }
+// 
+// define %kizu.error.void @test_a_generic_mut_borrow_helper_writes_through_at_scalar_and_struct() {
+// entry:
+//   %kizu.2 = alloca i64
+//   %kizu.11 = alloca %kizu.struct.Point
+//   %kizu.arg.1.1 = alloca %kizu.struct.Point
+//   store i64 1, ptr %kizu.2
+//   call void @set_i64(ptr %kizu.2, i64 42)
+//   %kizu.6 = load i64, ptr %kizu.2
+//   %kizu.7.ok = icmp eq i64 42, %kizu.6
+//   br i1 %kizu.7.ok, label %kizu.7.ok.ok, label %kizu.7.ok.fail
+// kizu.7.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.6, i64 0, i64 0)
+//   unreachable
+// kizu.7.ok.ok:
+//   %kizu.10.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 1, 0
+//   %kizu.10 = insertvalue %kizu.struct.Point %kizu.10.field0, i64 2, 1
+//   store %kizu.struct.Point %kizu.10, ptr %kizu.11
+//   %kizu.14.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 40, 0
+//   %kizu.14 = insertvalue %kizu.struct.Point %kizu.14.field0, i64 2, 1
+//   store %kizu.struct.Point %kizu.14, ptr %kizu.arg.1.1
+//   call void @set_Point(ptr %kizu.11, ptr byval(%kizu.struct.Point) %kizu.arg.1.1)
+//   %kizu.17.ptr = getelementptr %kizu.struct.Point, ptr %kizu.11, i32 0, i32 0
+//   %kizu.17 = load i64, ptr %kizu.17.ptr
+//   %kizu.18.ptr = getelementptr %kizu.struct.Point, ptr %kizu.11, i32 0, i32 1
+//   %kizu.18 = load i64, ptr %kizu.18.ptr
+//   %kizu.19 = add i64 %kizu.17, %kizu.18
+//   %kizu.20.ok = icmp eq i64 42, %kizu.19
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }
+// 
+// define void @set_i64(ptr %kizu.dst, i64 %kizu.v) {
+// entry:
+//   store i64 %kizu.v, ptr %kizu.dst
+//   ret void
+// }
+// 
+// define void @set_Point(ptr %kizu.dst, ptr byval(%kizu.struct.Point) %kizu.v.addr) {
+// entry:
+//   %kizu.v = load %kizu.struct.Point, ptr %kizu.v.addr
+//   store %kizu.struct.Point %kizu.v, ptr %kizu.dst
+//   ret void
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.struct.Point = type { i64, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define void @bump(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = add i64 %kizu.1, 1
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @bump_twice(ptr %kizu.n) {
+// entry:
+//   call void @bump(ptr %kizu.n)
+//   call void @bump(ptr %kizu.n)
+//   ret void
+// }
+// 
+// define void @double(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = mul i64 %kizu.1, 2
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @halve(ptr %kizu.n) {
+// entry:
+//   %kizu.1 = load i64, ptr %kizu.n
+//   %kizu.3 = sdiv i64 %kizu.1, 2
+//   store i64 %kizu.3, ptr %kizu.n
+//   ret void
+// }
+// 
+// define void @accumulate(ptr %kizu.total, i64 %kizu.upto) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi ptr [ %kizu.total, %entry ], [ %kizu.2, %while.body.2 ]
+//   %kizu.3 = phi i64 [ 1, %entry ], [ %kizu.9, %while.body.2 ]
+//   %kizu.4 = icmp sle i64 %kizu.3, %kizu.upto
+//   br i1 %kizu.4, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6 = add i64 %kizu.5, %kizu.3
+//   store i64 %kizu.6, ptr %kizu.2
+//   %kizu.9 = add i64 %kizu.3, 1
+//   br label %while.header.1
+// while.end.3:
+//   ret void
+// }
+// 
+// define void @reset(ptr %kizu.p) {
+// entry:
+//   %kizu.3.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 0, 0
+//   %kizu.3 = insertvalue %kizu.struct.Point %kizu.3.field0, i64 0, 1
+//   store %kizu.struct.Point %kizu.3, ptr %kizu.p
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_assignment_through_a_scalar_mut_borrow_reaches_the_caller() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 0, ptr %kizu.2
+//   call void @bump(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 1, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   call void @bump_twice(ptr %kizu.2)
+//   %kizu.9 = load i64, ptr %kizu.2
+//   %kizu.10.ok = icmp eq i64 3, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }
+// 
+// define %kizu.error.void @test_a_scalar_mut_borrow_reads_its_current_value() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 21, ptr %kizu.2
+//   call void @double(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 42, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
+// 
+// define %kizu.error.void @test_explicit_deref_assignment_through_a_scalar_mut_borrow() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 84, ptr %kizu.2
+//   call void @halve(ptr %kizu.2)
+//   %kizu.5 = load i64, ptr %kizu.2
+//   %kizu.6.ok = icmp eq i64 42, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
+// 
+// define %kizu.error.void @test_a_loop_writes_through_a_scalar_mut_borrow() {
+// entry:
+//   %kizu.2 = alloca i64
+//   store i64 0, ptr %kizu.2
+//   call void @accumulate(ptr %kizu.2, i64 4)
+//   %kizu.6 = load i64, ptr %kizu.2
+//   %kizu.7.ok = icmp eq i64 10, %kizu.6
+//   br i1 %kizu.7.ok, label %kizu.7.ok.ok, label %kizu.7.ok.fail
+// kizu.7.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 10, i64 %kizu.6, i64 0, i64 0)
+//   unreachable
+// kizu.7.ok.ok:
+//   %kizu.8 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.8
+// }
+// 
+// define %kizu.error.void @test_whole_struct_assignment_through_a_mut_borrow_reaches_the_caller() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Point
+//   %kizu.3.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 3, 0
+//   %kizu.3 = insertvalue %kizu.struct.Point %kizu.3.field0, i64 4, 1
+//   store %kizu.struct.Point %kizu.3, ptr %kizu.4
+//   call void @reset(ptr %kizu.4)
+//   %kizu.7.ptr = getelementptr %kizu.struct.Point, ptr %kizu.4, i32 0, i32 0
+//   %kizu.7 = load i64, ptr %kizu.7.ptr
+//   %kizu.8.ptr = getelementptr %kizu.struct.Point, ptr %kizu.4, i32 0, i32 1
+//   %kizu.8 = load i64, ptr %kizu.8.ptr
+//   %kizu.9 = add i64 %kizu.7, %kizu.8
+//   %kizu.10.ok = icmp eq i64 0, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }
+// 
+// define %kizu.error.void @test_a_generic_mut_borrow_helper_writes_through_at_scalar_and_struct() {
+// entry:
+//   %kizu.2 = alloca i64
+//   %kizu.11 = alloca %kizu.struct.Point
+//   %kizu.arg.1.1 = alloca %kizu.struct.Point
+//   store i64 1, ptr %kizu.2
+//   call void @set_i64(ptr %kizu.2, i64 42)
+//   %kizu.6 = load i64, ptr %kizu.2
+//   %kizu.7.ok = icmp eq i64 42, %kizu.6
+//   br i1 %kizu.7.ok, label %kizu.7.ok.ok, label %kizu.7.ok.fail
+// kizu.7.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.6, i64 0, i64 0)
+//   unreachable
+// kizu.7.ok.ok:
+//   %kizu.10.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 1, 0
+//   %kizu.10 = insertvalue %kizu.struct.Point %kizu.10.field0, i64 2, 1
+//   store %kizu.struct.Point %kizu.10, ptr %kizu.11
+//   %kizu.14.field0 = insertvalue %kizu.struct.Point zeroinitializer, i64 40, 0
+//   %kizu.14 = insertvalue %kizu.struct.Point %kizu.14.field0, i64 2, 1
+//   store %kizu.struct.Point %kizu.14, ptr %kizu.arg.1.1
+//   call void @set_Point(ptr %kizu.11, ptr byval(%kizu.struct.Point) %kizu.arg.1.1)
+//   %kizu.17.ptr = getelementptr %kizu.struct.Point, ptr %kizu.11, i32 0, i32 0
+//   %kizu.17 = load i64, ptr %kizu.17.ptr
+//   %kizu.18.ptr = getelementptr %kizu.struct.Point, ptr %kizu.11, i32 0, i32 1
+//   %kizu.18 = load i64, ptr %kizu.18.ptr
+//   %kizu.19 = add i64 %kizu.17, %kizu.18
+//   %kizu.20.ok = icmp eq i64 42, %kizu.19
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }
+// 
+// define void @set_i64(ptr %kizu.dst, i64 %kizu.v) {
+// entry:
+//   store i64 %kizu.v, ptr %kizu.dst
+//   ret void
+// }
+// 
+// define void @set_Point(ptr %kizu.dst, ptr byval(%kizu.struct.Point) %kizu.v.addr) {
+// entry:
+//   %kizu.v = load %kizu.struct.Point, ptr %kizu.v.addr
+//   store %kizu.struct.Point %kizu.v, ptr %kizu.dst
+//   ret void
+// }

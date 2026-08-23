@@ -1,0 +1,579 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Mechanical port of the error-union, optional and return family of
+// internal/llvm/emit.go: the `error.*` and `opt.*` instructions, and the
+// return from a function declared `!T`, `main` included. Go reads the
+// success and error halves of a spelling as strings; here they are the
+// owned Strings of ErrorUnionParts, released where they were read.
+
+/// Dispatches recoverable-result operations, the Go `writeErrorInstr`.
+fn (self: &var Emitter) write_error_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ErrorOk => return self.write_error_ok(module, node),
+        ErrorError => return self.write_error_error(module, node),
+        ErrorTry => return self.write_error_try(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported error instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Builds a successful error-union value, the Go `writeErrorOK`.
+fn (self: &var Emitter) write_error_ok(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if try self.error_union_success_type(result_type) |success| {
+        defer success.deinit();
+        let success_bytes = success.as_bytes();
+        if try self.validate_error_union_type(result_type) |failed| {
+            return move failed;
+        }
+        let result_name = try self.local_name(module, node.result.name);
+        let union_type = try self.llvm_type(module, result_type);
+        if mem::equal_bytes(success_bytes, "void") {
+            if node.args.len() != 0 {
+                return try self.fail0("llvm error: error.ok !void expects 0 args");
+            }
+            try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(result_name), Arg::Str(union_type));
+            try self.set_value(module, node.result, result_name);
+            return null;
+        }
+        if node.args.len() != 1 {
+            let shown = try self.own(module, node.result.type_name);
+            return try self.fail1("llvm error: error.ok %s expects 1 arg", Arg::Str(shown));
+        }
+        let value = node.args.get_or_panic(0);
+        if !module.names.is(value.type_name, success_bytes) {
+            let success_shown = try self.names.intern(success_bytes);
+            let got = try self.own(module, value.type_name);
+            return try self.fail2("llvm error: error.ok expects %s, got %s", Arg::Str(success_shown), Arg::Str(got));
+        }
+        let ok_name = try self.suffixed(result_name, ".ok");
+        let arg_info = try self.operand(module, value);
+        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(ok_name), Arg::Str(union_type));
+        let success_type = try self.llvm_type(module, success_bytes);
+        try self.line5(
+            "  %s = insertvalue %s %s, %s %s, 1",
+            Arg::Str(result_name), Arg::Str(union_type), Arg::Str(ok_name), Arg::Str(success_type), Arg::Str(arg_info.operand)
+        );
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, node.result.type_name);
+    return try self.fail1("llvm error: error.ok result must be !T, got %s", Arg::Str(shown));
+}
+
+/// Builds a failed error-union value, the Go `writeErrorError`. The failure
+/// payload is a member of an error set, and its representation is already
+/// the global code. Go reads the parts of the result twice; the one read
+/// here serves both the shape check and the set check.
+fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if try self.error_union_parts(result_type) |parts| {
+        defer parts.deinit();
+        if try self.validate_error_union_type(result_type) |failed| {
+            return move failed;
+        }
+        if node.args.len() != 1 {
+            return try self.fail0("llvm error: error.error expects one error value");
+        }
+        let arg = node.args.get_or_panic(0);
+        let arg_text = ir::name_text(&module.names, arg.type_name);
+        let arg_bytes = arg_text.as_bytes();
+        if !module.error_sets.contains(arg_bytes) {
+            let shown = try self.own(module, arg.type_name);
+            return try self.fail1("llvm error: error.error expects an error set member, got %s", Arg::Str(shown));
+        }
+        // A declared `E!T` accepts only E. Codes are global, so a member of
+        // another set would lower to a union that claims E while holding
+        // another set's code, and nothing below here records which set a
+        // union carries.
+        let err_bytes = parts.err.as_bytes();
+        if parts.err.len() > 0 and !module.names.is(arg.type_name, err_bytes) {
+            let arg_shown = try self.own(module, arg.type_name);
+            let result_shown = try self.own(module, node.result.type_name);
+            return try self.fail2("llvm error: error.error cannot put %s into %s", Arg::Str(arg_shown), Arg::Str(result_shown));
+        }
+        let result_name = try self.local_name(module, node.result.name);
+        let info = try self.operand(module, arg);
+        try self.write_error_failure_code(module, result_name, result_type, info.operand);
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, node.result.type_name);
+    return try self.fail1("llvm error: error.error result must be !T, got %s", Arg::Str(shown));
+}
+
+/// Builds a failed error union around one error code, the Go
+/// `writeErrorFailureCode`.
+fn (self: &var Emitter) write_error_failure_code(
+    module: &ir::Module,
+    result_name: ir::Name,
+    result_type: []u8,
+    code_operand: ir::Name
+) -> !void {
+    let union_type = try self.llvm_type(module, result_type);
+    let base_name = try self.suffixed(result_name, ".base");
+    try self.line2("  %s = insertvalue %s zeroinitializer, i8 0, 0", Arg::Str(base_name), Arg::Str(union_type));
+    let failure_index = try self.error_union_failure_index(result_type);
+    return self.line5(
+        "  %s = insertvalue %s %s, i64 %s, %d",
+        Arg::Str(result_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Str(code_operand), Arg::Int(failure_index)
+    );
+}
+
+/// Unwraps success or returns failure from the current function, the Go
+/// `writeErrorTry`.
+fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: error.try expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if try self.error_union_parts(source_type) |parts| {
+        defer parts.deinit();
+        if try self.validate_error_union_type(source_type) |failed| {
+            return move failed;
+        }
+        let success_bytes = parts.success.as_bytes();
+        if !module.names.is(node.result.type_name, success_bytes) {
+            let success_shown = try self.names.intern(success_bytes);
+            let result_shown = try self.own(module, node.result.type_name);
+            return try self.fail2("llvm error: error.try returns %s, got %s", Arg::Str(success_shown), Arg::Str(result_shown));
+        }
+        let return_text = ir::name_text(&module.names, self.current_return);
+        let return_bytes = return_text.as_bytes();
+        if try self.error_union_parts(return_bytes) |target| {
+            defer target.deinit();
+            let source_err = parts.err.as_bytes();
+            let target_err = target.err.as_bytes();
+            if target.err.len() > 0 and !mem::equal_bytes(source_err, target_err) {
+                let source_shown = try self.own(module, source.type_name);
+                let return_shown = try self.own(module, self.current_return);
+                return try self.fail2(
+                    "llvm error: error.try cannot propagate %s into %s",
+                    Arg::Str(source_shown), Arg::Str(return_shown)
+                );
+            }
+        } else {
+            return try self.fail0("llvm error: error.try requires function to return !T");
+        }
+        let source_value = try self.operand(module, source);
+        let source_llvm = try self.llvm_type(module, source_type);
+        let result_name = try self.local_name(module, node.result.name);
+        let ok_value = try self.suffixed(result_name, ".ok");
+        let ok_bool = try self.suffixed(ok_value, ".bool");
+        let ok_label = try self.helper_label(module, node.result.name, "try.ok");
+        let err_label = try self.helper_label(module, node.result.name, "try.err");
+        try self.mark_current_block_exit(module, ok_label);
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_value), Arg::Str(source_llvm), Arg::Str(source_value.operand));
+        try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool), Arg::Str(ok_value));
+        try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool), Arg::Str(ok_label), Arg::Str(err_label));
+        try self.line1("%s:", Arg::Str(err_label));
+        var index = 0;
+        while node.cleanups.get(index) |cleanup| {
+            index = index + 1;
+            if try self.write_cleanup(module, cleanup) |failed| {
+                return move failed;
+            }
+        }
+        if try self.write_error_failure_return(module, source) |failed| {
+            return move failed;
+        }
+        try self.line1("%s:", Arg::Str(ok_label));
+        if mem::equal_bytes(success_bytes, "void") {
+            return null;
+        }
+        try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(source_value.operand));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail1("llvm error: error.try expects !T, got %s", Arg::Str(shown));
+}
+
+/// Dispatches optional-value operations, the Go `writeOptInstr`.
+fn (self: &var Emitter) write_opt_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        OptSome => return self.write_opt_some(module, node),
+        OptNull => return self.write_opt_null(module, node),
+        OptHas => return self.write_opt_has(module, node),
+        OptValue => return self.write_opt_value(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported optional instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Wraps a payload into a present optional, the Go `writeOptSome`.
+fn (self: &var Emitter) write_opt_some(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if typ::optional_elem(result_type) |elem| {
+        if node.args.len() == 1 {
+            let result_name = try self.local_name(module, node.result.name);
+            let opt_type = try self.llvm_type(module, result_type);
+            let some_name = try self.suffixed(result_name, ".some");
+            try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(some_name), Arg::Str(opt_type));
+            let elem_type = try self.llvm_type(module, elem);
+            let info = try self.operand(module, node.args.get_or_panic(0));
+            try self.line5(
+                "  %s = insertvalue %s %s, %s %s, 1",
+                Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(some_name), Arg::Str(elem_type), Arg::Str(info.operand)
+            );
+            try self.set_value(module, node.result, result_name);
+            return null;
+        }
+    }
+    return try self.fail0("llvm error: opt.some expects one payload and a `?T` result");
+}
+
+/// Builds the empty optional, the Go `writeOptNull`.
+fn (self: &var Emitter) write_opt_null(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if !is_optional_type(result_type) or node.args.len() != 0 {
+        return try self.fail0("llvm error: opt.null expects no args and a `?T` result");
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let opt_type = try self.llvm_type(module, result_type);
+    try self.line2("  %s = insertvalue %s zeroinitializer, i8 0, 0", Arg::Str(result_name), Arg::Str(opt_type));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Tests whether an optional holds a value, the Go `writeOptHas`. Go records
+/// the result under the type `bool`; the type a ValueInfo records is never
+/// read, so the result is recorded under its own declared type.
+fn (self: &var Emitter) write_opt_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: opt.has expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if !is_optional_type(source_type) {
+        let shown = try self.own(module, source.type_name);
+        return try self.fail1("llvm error: opt.has expects `?T`, got %s", Arg::Str(shown));
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let tag_name = try self.suffixed(result_name, ".tag");
+    let opt_type = try self.llvm_type(module, source_type);
+    let info = try self.operand(module, source);
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(opt_type), Arg::Str(info.operand));
+    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(result_name), Arg::Str(tag_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Extracts the payload of an optional, the Go `writeOptValue`. The caller
+/// has already branched on presence; an absent payload is only ever
+/// produced, never read.
+fn (self: &var Emitter) write_opt_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: opt.value expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if typ::optional_elem(source_type) |elem| {
+        if !module.names.is(node.result.type_name, elem) {
+            let elem_shown = try self.names.intern(elem);
+            let result_shown = try self.own(module, node.result.type_name);
+            return try self.fail2("llvm error: opt.value returns %s, got %s", Arg::Str(elem_shown), Arg::Str(result_shown));
+        }
+        let result_name = try self.local_name(module, node.result.name);
+        let opt_type = try self.llvm_type(module, source_type);
+        let info = try self.operand(module, source);
+        try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(info.operand));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail1("llvm error: opt.value expects `?T`, got %s", Arg::Str(shown));
+}
+
+/// Emits a return from a function declared as !T, the Go
+/// `writeErrorUnionReturn`. Lowering wraps every success in error.ok before
+/// it gets here, so what arrives is the union itself, a failure to name, or
+/// another union to absorb.
+fn (self: &var Emitter) write_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_type = value_text.as_bytes();
+    if self.main_returns_int {
+        if ir::same_name(value.type_name, self.current_return) {
+            return self.write_main_error_union_return(module, value);
+        }
+        if module.error_sets.contains(value_type) {
+            let info = try self.operand(module, value);
+            try self.write_main_error_name(module, info.operand);
+            try self.line("  ret i32 1");
+            return null;
+        }
+        let value_shown = try self.own(module, value.type_name);
+        let return_shown = try self.own(module, self.current_return);
+        return try self.fail2("llvm error: cannot return %s from %s", Arg::Str(value_shown), Arg::Str(return_shown));
+    }
+    if ir::same_name(value.type_name, self.current_return) {
+        let info = try self.operand(module, value);
+        let value_llvm = try self.llvm_type(module, value_type);
+        try self.line2("  ret %s %s", Arg::Str(value_llvm), Arg::Str(info.operand));
+        return null;
+    }
+    if try self.absorbs_error_union_return(module, value) {
+        return self.write_absorbed_error_union_return(module, value);
+    }
+    if module.error_sets.contains(value_type) {
+        let info = try self.operand(module, value);
+        let synthetic = try self.next_synthetic_value("return.err");
+        let name = try self.percent(synthetic);
+        let return_text = ir::name_text(&module.names, self.current_return);
+        let return_bytes = return_text.as_bytes();
+        try self.write_error_failure_code(module, name, return_bytes, info.operand);
+        let return_llvm = try self.llvm_type(module, return_bytes);
+        try self.line2("  ret %s %s", Arg::Str(return_llvm), Arg::Str(name));
+        return null;
+    }
+    let value_shown = try self.own(module, value.type_name);
+    let return_shown = try self.own(module, self.current_return);
+    return try self.fail2("llvm error: cannot return %s from %s", Arg::Str(value_shown), Arg::Str(return_shown));
+}
+
+/// Is the structure of one parsed error union spelling: whether it names an
+/// error set, and the success type it carries.
+struct ParsedErrorUnion {
+    has_err: bool,
+    ok: typ::Type
+}
+
+/// Returns the parts of a parsed error union, null for any other type, the
+/// Go `typ.ErrorUnionParts` on a parsed tree.
+fn parsed_error_union(types: &typ::Table, value: typ::Type) -> ?ParsedErrorUnion {
+    match typ::root_node(types, value) {
+        ErrorUnion(node) => {
+            var has_err = false;
+            if node.err |_| {
+                has_err = true;
+            }
+            return ParsedErrorUnion { has_err: has_err, ok: typ::child_type(value, node.ok) };
+        },
+        _ => {},
+    }
+    return null;
+}
+
+/// Reports whether one error union is returned straight from a function
+/// that declares no error set, which is the absorption `try` does written
+/// as a return, the Go `absorbsErrorUnionReturn` with `typ.AbsorbsErrorSet`
+/// inlined: the declared `!T` names no error set, the returned `E!T` does,
+/// and both carry the same success. Go answers false for a spelling that
+/// does not parse; an empty spelling is the one such case a lowered module
+/// holds, and is answered here before parsing.
+fn (self: &var Emitter) absorbs_error_union_return(module: &ir::Module, value: ir::Value) -> !bool {
+    if ir::is_empty(self.current_return) or ir::is_empty(value.type_name) {
+        return false;
+    }
+    let want_text = ir::name_text(&module.names, self.current_return);
+    let want_bytes = want_text.as_bytes();
+    let want = try self.types.parse(want_bytes);
+    let got_text = ir::name_text(&module.names, value.type_name);
+    let got_bytes = got_text.as_bytes();
+    let got = try self.types.parse(got_bytes);
+    let want_parts = parsed_error_union(&self.types, want) orelse return false;
+    if want_parts.has_err {
+        return false;
+    }
+    let got_parts = parsed_error_union(&self.types, got) orelse return false;
+    return got_parts.has_err and typ::equal(&self.types, got_parts.ok, &self.types, want_parts.ok);
+}
+
+/// Returns one error union as another, naming the failure on the way
+/// because the target describes its own with text, the Go
+/// `writeAbsorbedErrorUnionReturn`. Go registers the extracted success as
+/// a value and resolves it again in writeSuccessReturn; here the operand is
+/// handed over directly, as the synthetic name is the emitter's, not the
+/// module's.
+fn (self: &var Emitter) write_absorbed_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_type = value_text.as_bytes();
+    let success = try self.error_union_success_type(value_type) orelse string::new(self.allocator);
+    defer success.deinit();
+    let success_bytes = success.as_bytes();
+    let source = try self.operand(module, value);
+    let source_type = try self.llvm_type(module, value_type);
+    let ok_synthetic = try self.next_synthetic_value("absorb.ok");
+    let ok_name = try self.percent(ok_synthetic);
+    let ok_bool = try self.suffixed(ok_name, ".bool");
+    let ok_label = try self.next_synthetic_value("absorb.ok.block");
+    let err_label = try self.next_synthetic_value("absorb.err.block");
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_name), Arg::Str(source_type), Arg::Str(source.operand));
+    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool), Arg::Str(ok_name));
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool), Arg::Str(ok_label), Arg::Str(err_label));
+    try self.line1("%s:", Arg::Str(err_label));
+    if try self.write_error_failure_return(module, value) |failed| {
+        return move failed;
+    }
+    try self.line1("%s:", Arg::Str(ok_label));
+    if mem::equal_bytes(success_bytes, "void") {
+        return self.write_success_return(module, "void", source.operand);
+    }
+    let success_synthetic = try self.next_synthetic_value("absorb.value");
+    let success_name = try self.percent(success_synthetic);
+    try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(success_name), Arg::Str(source_type), Arg::Str(source.operand));
+    return self.write_success_return(module, success_bytes, success_name);
+}
+
+/// Returns a success value as the error union around it, the Go
+/// `writeSuccessReturn`. An absorbed return arrives holding the success the
+/// source union carried, so the wrap is written here rather than by the
+/// lowerer that could not name the target union yet. Go takes the value
+/// and resolves its operand; here the operand arrives with the value's
+/// type, and is unused for `void`.
+fn (self: &var Emitter) write_success_return(module: &ir::Module, value_type: []u8, operand: ir::Name) -> !?diagnostic::Diagnostic {
+    let synthetic = try self.next_synthetic_value("return.ok");
+    let name = try self.percent(synthetic);
+    let return_text = ir::name_text(&module.names, self.current_return);
+    let return_bytes = return_text.as_bytes();
+    let union_type = try self.llvm_type(module, return_bytes);
+    if mem::equal_bytes(value_type, "void") {
+        try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(name), Arg::Str(union_type));
+        try self.line2("  ret %s %s", Arg::Str(union_type), Arg::Str(name));
+        return null;
+    }
+    let ok_synthetic = try self.next_synthetic_value("return.ok.flag");
+    let ok_name = try self.percent(ok_synthetic);
+    try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(ok_name), Arg::Str(union_type));
+    let value_llvm = try self.llvm_type(module, value_type);
+    try self.line5(
+        "  %s = insertvalue %s %s, %s %s, 1",
+        Arg::Str(name), Arg::Str(union_type), Arg::Str(ok_name), Arg::Str(value_llvm), Arg::Str(operand)
+    );
+    try self.line2("  ret %s %s", Arg::Str(union_type), Arg::Str(name));
+    return null;
+}
+
+/// Maps main's !T result to process exit status, the Go
+/// `writeMainErrorUnionReturn`.
+fn (self: &var Emitter) write_main_error_union_return(module: &ir::Module, value: ir::Value) -> !?diagnostic::Diagnostic {
+    let value_text = ir::name_text(&module.names, value.type_name);
+    let value_type = value_text.as_bytes();
+    let info = try self.operand(module, value);
+    let union_type = try self.llvm_type(module, value_type);
+    let ok_synthetic = try self.next_synthetic_value("main.ok");
+    let ok_name = try self.percent(ok_synthetic);
+    let ok_bool_name = try self.suffixed(ok_name, ".bool");
+    let code_synthetic = try self.next_synthetic_value("main.code");
+    let code_name = try self.percent(code_synthetic);
+    let success = try self.error_union_success_type(value_type) orelse string::new(self.allocator);
+    defer success.deinit();
+    let success_bytes = success.as_bytes();
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(ok_name), Arg::Str(union_type), Arg::Str(info.operand));
+    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(ok_bool_name), Arg::Str(ok_name));
+    let ok_label = try self.next_synthetic_value("main.exit.ok");
+    let fail_label = try self.next_synthetic_value("main.exit.fail");
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(ok_bool_name), Arg::Str(ok_label), Arg::Str(fail_label));
+    try self.line1("%s:", Arg::Str(fail_label));
+    if try self.write_main_error_message(module, value) |failed| {
+        return move failed;
+    }
+    try self.line("  ret i32 1");
+    try self.line1("%s:", Arg::Str(ok_label));
+    if mem::equal_bytes(success_bytes, "i64") {
+        let success_synthetic = try self.next_synthetic_value("main.success");
+        let success_name = try self.percent(success_synthetic);
+        try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(success_name), Arg::Str(union_type), Arg::Str(info.operand));
+        try self.line2("  %s = trunc i64 %s to i32", Arg::Str(code_name), Arg::Str(success_name));
+        try self.line1("  ret i32 %s", Arg::Str(code_name));
+        return null;
+    }
+    try self.line("  ret i32 0");
+    return null;
+}
+
+/// Names the failure a `main -> !T` process exits with, so it reports why
+/// it exits 1 instead of failing silently, the Go `writeMainErrorMessage`.
+/// The failure is one global code, and the spelling comes from the module's
+/// table of error names.
+fn (self: &var Emitter) write_main_error_message(module: &ir::Module, source: ir::Value) -> !?diagnostic::Diagnostic {
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    let parts = try self.error_union_parts(source_type) orelse return null;
+    parts.deinit();
+    let synthetic = try self.next_synthetic_value("main.err.code");
+    let code_name = try self.percent(synthetic);
+    let code = try self.failure_code(module, code_name, source);
+    try self.write_main_error_name(module, code);
+    return null;
+}
+
+/// Reports one error code by its spelling, the Go `writeMainErrorName`. An
+/// error carries nothing, so the text comes from the table of names rather
+/// than from the value, which is the number saying which member it is.
+fn (self: &var Emitter) write_main_error_name(module: &ir::Module, code_operand: ir::Name) -> !void {
+    let synthetic = try self.next_synthetic_value("main.err.name");
+    let name = try self.percent(synthetic);
+    let row_name = try self.suffixed(name, ".row");
+    let ptr_name = try self.suffixed(name, ".ptr");
+    let len_addr = try self.suffixed(name, ".len.addr");
+    let len_name = try self.suffixed(name, ".len");
+    try self.line4(
+        "  %s = getelementptr [%d x { ptr, i64 }], ptr %s, i64 0, i64 %s",
+        Arg::Str(row_name), Arg::Int(error_name_table_rows(module)), Arg::Lit(error_name_table()), Arg::Str(code_operand)
+    );
+    try self.line2("  %s = load ptr, ptr %s", Arg::Str(ptr_name), Arg::Str(row_name));
+    try self.line2("  %s = getelementptr { ptr, i64 }, ptr %s, i64 0, i32 1", Arg::Str(len_addr), Arg::Str(row_name));
+    try self.line2("  %s = load i64, ptr %s", Arg::Str(len_name), Arg::Str(len_addr));
+    return self.line2("  call void @kizu_main_error_message(ptr %s, i64 %s)", Arg::Str(ptr_name), Arg::Str(len_name));
+}
+
+/// Propagates a failed try from the current function, the Go
+/// `writeErrorFailureReturn`.
+fn (self: &var Emitter) write_error_failure_return(module: &ir::Module, source: ir::Value) -> !?diagnostic::Diagnostic {
+    if self.main_returns_int {
+        if try self.write_main_error_message(module, source) |failed| {
+            return move failed;
+        }
+        try self.line("  ret i32 1");
+        return null;
+    }
+    let source_info = try self.operand(module, source);
+    if ir::same_name(source.type_name, self.current_return) {
+        let source_llvm = try self.llvm_type_of(module, source.type_name);
+        try self.line2("  ret %s %s", Arg::Str(source_llvm), Arg::Str(source_info.operand));
+        return null;
+    }
+    let synthetic = try self.next_synthetic_value("try.err");
+    let name = try self.percent(synthetic);
+    let code_name = try self.suffixed(name, ".code");
+    let code = try self.failure_code(module, code_name, source);
+    let return_text = ir::name_text(&module.names, self.current_return);
+    let return_bytes = return_text.as_bytes();
+    try self.write_error_failure_code(module, name, return_bytes, code);
+    let return_llvm = try self.llvm_type(module, return_bytes);
+    try self.line2("  ret %s %s", Arg::Str(return_llvm), Arg::Str(name));
+    return null;
+}
+
+/// Extracts an error-union failure, the Go `failureCode`. A failure is one
+/// global code, so it reads the same i64 out of every union and needs no
+/// conversion.
+fn (self: &var Emitter) failure_code(module: &ir::Module, result_name: ir::Name, source: ir::Value) -> !ir::Name {
+    let source_llvm = try self.llvm_type_of(module, source.type_name);
+    let info = try self.operand(module, source);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    let failure_index = try self.error_union_failure_index(source_type);
+    try self.line4(
+        "  %s = extractvalue %s %s, %d",
+        Arg::Str(result_name), Arg::Str(source_llvm), Arg::Str(info.operand), Arg::Int(failure_index)
+    );
+    return result_name;
+}

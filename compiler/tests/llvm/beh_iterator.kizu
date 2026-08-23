@@ -1,0 +1,819 @@
+import std::array;
+import std::map;
+import std::mem;
+import std::testing;
+
+// std::mem::bytes_iter is the std spelling of the iterator protocol: a
+// `next() -> ?u8` cursor drives `while` to exhaustion, no has_next needed.
+test "std bytes_iter walks a view to exhaustion" {
+    var it = mem::bytes_iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+    if it.next() |ghost| {
+        testing::expect_equal<i64>(-1, cast<i64>(ghost));
+    }
+}
+
+// Map.key_at(index) walks keys in insertion order (ADR-0088). The key is a
+// view into map storage, so the capture holds the map share-borrowed for the
+// key's scope.
+test "map key_at walks keys in insertion order" {
+    let allocator = mem::page_allocator();
+    let scores = map::new<[]u8, i64>(allocator);
+    defer scores.deinit();
+    try scores.insert("one", 1);
+    try scores.insert("two", 2);
+    try scores.insert("three", 3);
+
+    var lengths = 0;
+    var total = 0;
+    var index = 0;
+    while scores.key_at(index) |key| {
+        lengths = lengths * 10 + mem::len(key);
+        total = total + (scores.get(key) orelse 0);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(335, lengths);
+    testing::expect_equal<i64>(6, total);
+    testing::expect_equal<i64>(3, index);
+}
+
+// Non-copy elements iterate the same way: `at(index) -> ?&T` binds the
+// element borrow as the capture, null past the end stops the loop, and the
+// capture holds the array borrowed for the element's scope.
+test "array at drives non-copy element iteration" {
+    let allocator = mem::page_allocator();
+    var words = array::new<Word>(allocator);
+    defer words.deinit();
+    try words.append(Word { text: "kizu" });
+    try words.append(Word { text: "at" });
+
+    if words.at_mut(1) |slot| {
+        slot.* = Word { text: "iter" };
+    }
+
+    var lengths = 0;
+    var index = 0;
+    while words.at(index) |word| {
+        lengths = lengths * 10 + mem::len(word.text);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(44, lengths);
+    testing::expect_equal<i64>(2, index);
+    if words.at(9) |ghost| {
+        testing::expect_equal<i64>(-1, mem::len(ghost.text));
+    }
+}
+
+struct Word {
+    pub text: []u8,
+}
+
+// Array iteration needs no cursor type: `get(index) -> ?T` already drives a
+// while capture, and null past the end stops the loop.
+test "array get drives index iteration" {
+    let allocator = mem::page_allocator();
+    let values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(5);
+    try values.append(7);
+    try values.append(11);
+
+    var product = 1;
+    var index = 0;
+    while values.get(index) |value| {
+        product = product * value;
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(385, product);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._Word = type { i8, ptr }
+// %kizu.opt._var_Word = type { i8, ptr }
+// %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
+// %kizu.opt.i64 = type { i8, i64 }
+// %kizu.opt.u8 = type { i8, i8 }
+// 
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Word = type { %kizu.slice.u8 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.30 = private unnamed_addr constant [29 x i8] c"std::map::Error::OutOfMemory\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.30, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"kizu\00"
+// @.str.1 = private unnamed_addr constant [4 x i8] c"one\00"
+// @.str.2 = private unnamed_addr constant [4 x i8] c"two\00"
+// @.str.3 = private unnamed_addr constant [6 x i8] c"three\00"
+// @.str.4 = private unnamed_addr constant [3 x i8] c"at\00"
+// @.str.5 = private unnamed_addr constant [5 x i8] c"iter\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare %kizu.error.void @std__array__Array_append_Word(ptr, %kizu.struct.Word)
+// declare %kizu.error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.opt._Word @std__array__Array_at_Word(ptr, i64)
+// declare %kizu.opt._var_Word @std__array__Array_at_mut_Word(ptr, i64)
+// declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_i64(ptr, %kizu.slice.u8)
+// declare %kizu.error.void @std__map__Map_insert_i64(ptr, %kizu.slice.u8, i64)
+// declare %kizu.opt.slice.u8 @std__map__Map_key_at_i64(ptr, i64)
+// declare %kizu.opt.u8 @std__mem__BytesIter_next(ptr)
+// declare %kizu.struct.std__mem__BytesIter @std__mem__bytes_iter(%kizu.slice.u8)
+// declare i64 @std__mem__len(%kizu.slice.u8)
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_std_bytes_iter_walks_a_view_to_exhaustion() {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.std__mem__BytesIter
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2 = call %kizu.struct.std__mem__BytesIter @std__mem__bytes_iter(%kizu.slice.u8 %kizu.1)
+//   store %kizu.struct.std__mem__BytesIter %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.10, %while.body.2 ]
+//   %kizu.6 = call %kizu.opt.u8 @std__mem__BytesIter_next(ptr %kizu.3)
+//   %kizu.7 = extractvalue %kizu.opt.u8 %kizu.6, 1
+//   %kizu.8.tag = extractvalue %kizu.opt.u8 %kizu.6, 0
+//   %kizu.8 = icmp ne i8 %kizu.8.tag, 0
+//   br i1 %kizu.8, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10 = add i64 %kizu.5, %kizu.9
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = call %kizu.opt.u8 @std__mem__BytesIter_next(ptr %kizu.3)
+//   %kizu.14 = extractvalue %kizu.opt.u8 %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt.u8 %kizu.13, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.17 = sub i64 0, 1
+//   %kizu.18 = zext i8 %kizu.14 to i64
+//   %kizu.19.ok = icmp eq i64 %kizu.17, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.17, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.20
+// }
+// 
+// define %kizu.error.void @test_map_key_at_walks_keys_in_insertion_order() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [4 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 3, 1
+//   %kizu.5 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.3, i64 1)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 3, 1
+//   %kizu.9 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.7, i64 2)
+//   %kizu.10.ok = extractvalue %kizu.error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.9
+// kizu.10.try.ok:
+//   %kizu.11.ptr = getelementptr inbounds [6 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 5, 1
+//   %kizu.13 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.11, i64 3)
+//   %kizu.14.ok = extractvalue %kizu.error.void %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.13
+// kizu.14.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.27, %orelse.end.6 ]
+//   %kizu.19 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.33, %orelse.end.6 ]
+//   %kizu.20 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.35, %orelse.end.6 ]
+//   %kizu.21 = call %kizu.opt.slice.u8 @std__map__Map_key_at_i64(ptr %kizu.2, i64 %kizu.20)
+//   %kizu.22 = extractvalue %kizu.opt.slice.u8 %kizu.21, 1
+//   %kizu.23.tag = extractvalue %kizu.opt.slice.u8 %kizu.21, 0
+//   %kizu.23 = icmp ne i8 %kizu.23.tag, 0
+//   br i1 %kizu.23, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.25 = mul i64 %kizu.18, 10
+//   %kizu.26 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.22)
+//   %kizu.27 = add i64 %kizu.25, %kizu.26
+//   %kizu.28 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.22)
+//   %kizu.29.tag = extractvalue %kizu.opt.i64 %kizu.28, 0
+//   %kizu.29 = icmp ne i8 %kizu.29.tag, 0
+//   br i1 %kizu.29, label %orelse.some.4, label %orelse.else.5
+// while.end.3:
+//   %kizu.37.ok = icmp eq i64 335, %kizu.18
+//   br i1 %kizu.37.ok, label %kizu.37.ok.ok, label %kizu.37.ok.fail
+// kizu.37.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 335, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.37.ok.ok:
+//   %kizu.39.ok = icmp eq i64 6, %kizu.19
+//   br i1 %kizu.39.ok, label %kizu.39.ok.ok, label %kizu.39.ok.fail
+// kizu.39.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 6, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.39.ok.ok:
+//   %kizu.41.ok = icmp eq i64 3, %kizu.20
+//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
+// kizu.41.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.41.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.43 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.43
+// orelse.some.4:
+//   %kizu.30 = extractvalue %kizu.opt.i64 %kizu.28, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.32 = phi i64 [ %kizu.30, %orelse.some.4 ], [ 0, %orelse.else.5 ]
+//   %kizu.33 = add i64 %kizu.19, %kizu.32
+//   %kizu.35 = add i64 %kizu.20, 1
+//   br label %while.header.1
+// }
+// 
+// define %kizu.error.void @test_array_at_drives_non_copy_element_iteration() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Word, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.4 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.3, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Word(ptr %kizu.2, %kizu.struct.Word %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [3 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 2, 1
+//   %kizu.8 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.7, 0
+//   %kizu.9 = call %kizu.error.void @std__array__Array_append_Word(ptr %kizu.2, %kizu.struct.Word %kizu.8)
+//   %kizu.10.ok = extractvalue %kizu.error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.9
+// kizu.10.try.ok:
+//   %kizu.12 = call %kizu.opt._var_Word @std__array__Array_at_mut_Word(ptr %kizu.2, i64 1)
+//   %kizu.13 = extractvalue %kizu.opt._var_Word %kizu.12, 1
+//   %kizu.14.tag = extractvalue %kizu.opt._var_Word %kizu.12, 0
+//   %kizu.14 = icmp ne i8 %kizu.14.tag, 0
+//   br i1 %kizu.14, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.5, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.16 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.15, 0
+//   store %kizu.struct.Word %kizu.16, ptr %kizu.13
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   br label %while.header.4
+// while.header.4:
+//   %kizu.20 = phi i64 [ 0, %if.end.3 ], [ %kizu.29, %while.body.5 ]
+//   %kizu.21 = phi i64 [ 0, %if.end.3 ], [ %kizu.31, %while.body.5 ]
+//   %kizu.22 = call %kizu.opt._Word @std__array__Array_at_Word(ptr %kizu.2, i64 %kizu.21)
+//   %kizu.23 = extractvalue %kizu.opt._Word %kizu.22, 1
+//   %kizu.24.tag = extractvalue %kizu.opt._Word %kizu.22, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %while.body.5, label %while.end.6
+// while.body.5:
+//   %kizu.26 = mul i64 %kizu.20, 10
+//   %kizu.27.ptr = getelementptr %kizu.struct.Word, ptr %kizu.23, i32 0, i32 0
+//   %kizu.27 = load %kizu.slice.u8, ptr %kizu.27.ptr
+//   %kizu.28 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.27)
+//   %kizu.29 = add i64 %kizu.26, %kizu.28
+//   %kizu.31 = add i64 %kizu.21, 1
+//   br label %while.header.4
+// while.end.6:
+//   %kizu.33.ok = icmp eq i64 44, %kizu.20
+//   br i1 %kizu.33.ok, label %kizu.33.ok.ok, label %kizu.33.ok.fail
+// kizu.33.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 44, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.33.ok.ok:
+//   %kizu.35.ok = icmp eq i64 2, %kizu.21
+//   br i1 %kizu.35.ok, label %kizu.35.ok.ok, label %kizu.35.ok.fail
+// kizu.35.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.35.ok.ok:
+//   %kizu.37 = call %kizu.opt._Word @std__array__Array_at_Word(ptr %kizu.2, i64 9)
+//   %kizu.38 = extractvalue %kizu.opt._Word %kizu.37, 1
+//   %kizu.39.tag = extractvalue %kizu.opt._Word %kizu.37, 0
+//   %kizu.39 = icmp ne i8 %kizu.39.tag, 0
+//   br i1 %kizu.39, label %if.then.7, label %if.else.8
+// if.then.7:
+//   %kizu.41 = sub i64 0, 1
+//   %kizu.42.ptr = getelementptr %kizu.struct.Word, ptr %kizu.38, i32 0, i32 0
+//   %kizu.42 = load %kizu.slice.u8, ptr %kizu.42.ptr
+//   %kizu.43 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.42)
+//   %kizu.44.ok = icmp eq i64 %kizu.41, %kizu.43
+//   br i1 %kizu.44.ok, label %kizu.44.ok.ok, label %kizu.44.ok.fail
+// kizu.44.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.41, i64 %kizu.43, i64 0, i64 0)
+//   unreachable
+// kizu.44.ok.ok:
+//   br label %if.end.9
+// if.else.8:
+//   br label %if.end.9
+// if.end.9:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.46 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.46
+// }
+// 
+// define %kizu.error.void @test_array_get_drives_index_iteration() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.4 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 5)
+//   %kizu.5.ok = extractvalue %kizu.error.void %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.4
+// kizu.5.try.ok:
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 7)
+//   %kizu.8.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.8.try.ok:
+//   %kizu.10 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 11)
+//   %kizu.11.ok = extractvalue %kizu.error.void %kizu.10, 0
+//   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
+//   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
+// kizu.11.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.10
+// kizu.11.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.14 = phi i64 [ 1, %kizu.11.try.ok ], [ %kizu.19, %while.body.2 ]
+//   %kizu.15 = phi i64 [ 0, %kizu.11.try.ok ], [ %kizu.21, %while.body.2 ]
+//   %kizu.16 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 %kizu.15)
+//   %kizu.17 = extractvalue %kizu.opt.i64 %kizu.16, 1
+//   %kizu.18.tag = extractvalue %kizu.opt.i64 %kizu.16, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.19 = mul i64 %kizu.14, %kizu.17
+//   %kizu.21 = add i64 %kizu.15, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.23.ok = icmp eq i64 385, %kizu.14
+//   br i1 %kizu.23.ok, label %kizu.23.ok.ok, label %kizu.23.ok.fail
+// kizu.23.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 385, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.23.ok.ok:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.25 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.25
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._Word = type { i8, ptr }
+// %kizu.opt._var_Word = type { i8, ptr }
+// %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
+// %kizu.opt.i64 = type { i8, i64 }
+// %kizu.opt.u8 = type { i8, i8 }
+// 
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Word = type { %kizu.slice.u8 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.30 = private unnamed_addr constant [29 x i8] c"std::map::Error::OutOfMemory\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.30, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"kizu\00"
+// @.str.1 = private unnamed_addr constant [4 x i8] c"one\00"
+// @.str.2 = private unnamed_addr constant [4 x i8] c"two\00"
+// @.str.3 = private unnamed_addr constant [6 x i8] c"three\00"
+// @.str.4 = private unnamed_addr constant [3 x i8] c"at\00"
+// @.str.5 = private unnamed_addr constant [5 x i8] c"iter\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare %kizu.error.void @std__array__Array_append_Word(ptr, %kizu.struct.Word)
+// declare %kizu.error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.opt._Word @std__array__Array_at_Word(ptr, i64)
+// declare %kizu.opt._var_Word @std__array__Array_at_mut_Word(ptr, i64)
+// declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_i64(ptr, %kizu.slice.u8)
+// declare %kizu.error.void @std__map__Map_insert_i64(ptr, %kizu.slice.u8, i64)
+// declare %kizu.opt.slice.u8 @std__map__Map_key_at_i64(ptr, i64)
+// declare %kizu.opt.u8 @std__mem__BytesIter_next(ptr)
+// declare %kizu.struct.std__mem__BytesIter @std__mem__bytes_iter(%kizu.slice.u8)
+// declare i64 @std__mem__len(%kizu.slice.u8)
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_std_bytes_iter_walks_a_view_to_exhaustion() {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.std__mem__BytesIter
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2 = call %kizu.struct.std__mem__BytesIter @std__mem__bytes_iter(%kizu.slice.u8 %kizu.1)
+//   store %kizu.struct.std__mem__BytesIter %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.10, %while.body.2 ]
+//   %kizu.6 = call %kizu.opt.u8 @std__mem__BytesIter_next(ptr %kizu.3)
+//   %kizu.7 = extractvalue %kizu.opt.u8 %kizu.6, 1
+//   %kizu.8.tag = extractvalue %kizu.opt.u8 %kizu.6, 0
+//   %kizu.8 = icmp ne i8 %kizu.8.tag, 0
+//   br i1 %kizu.8, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10 = add i64 %kizu.5, %kizu.9
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = call %kizu.opt.u8 @std__mem__BytesIter_next(ptr %kizu.3)
+//   %kizu.14 = extractvalue %kizu.opt.u8 %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt.u8 %kizu.13, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.17 = sub i64 0, 1
+//   %kizu.18 = zext i8 %kizu.14 to i64
+//   %kizu.19.ok = icmp eq i64 %kizu.17, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.17, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.20
+// }
+// 
+// define %kizu.error.void @test_map_key_at_walks_keys_in_insertion_order() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [4 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 3, 1
+//   %kizu.5 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.3, i64 1)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 3, 1
+//   %kizu.9 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.7, i64 2)
+//   %kizu.10.ok = extractvalue %kizu.error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.9
+// kizu.10.try.ok:
+//   %kizu.11.ptr = getelementptr inbounds [6 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 5, 1
+//   %kizu.13 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.11, i64 3)
+//   %kizu.14.ok = extractvalue %kizu.error.void %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.13
+// kizu.14.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.27, %orelse.end.6 ]
+//   %kizu.19 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.33, %orelse.end.6 ]
+//   %kizu.20 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.35, %orelse.end.6 ]
+//   %kizu.21 = call %kizu.opt.slice.u8 @std__map__Map_key_at_i64(ptr %kizu.2, i64 %kizu.20)
+//   %kizu.22 = extractvalue %kizu.opt.slice.u8 %kizu.21, 1
+//   %kizu.23.tag = extractvalue %kizu.opt.slice.u8 %kizu.21, 0
+//   %kizu.23 = icmp ne i8 %kizu.23.tag, 0
+//   br i1 %kizu.23, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.25 = mul i64 %kizu.18, 10
+//   %kizu.26 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.22)
+//   %kizu.27 = add i64 %kizu.25, %kizu.26
+//   %kizu.28 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.22)
+//   %kizu.29.tag = extractvalue %kizu.opt.i64 %kizu.28, 0
+//   %kizu.29 = icmp ne i8 %kizu.29.tag, 0
+//   br i1 %kizu.29, label %orelse.some.4, label %orelse.else.5
+// while.end.3:
+//   %kizu.37.ok = icmp eq i64 335, %kizu.18
+//   br i1 %kizu.37.ok, label %kizu.37.ok.ok, label %kizu.37.ok.fail
+// kizu.37.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 335, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.37.ok.ok:
+//   %kizu.39.ok = icmp eq i64 6, %kizu.19
+//   br i1 %kizu.39.ok, label %kizu.39.ok.ok, label %kizu.39.ok.fail
+// kizu.39.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 6, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.39.ok.ok:
+//   %kizu.41.ok = icmp eq i64 3, %kizu.20
+//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
+// kizu.41.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.41.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.43 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.43
+// orelse.some.4:
+//   %kizu.30 = extractvalue %kizu.opt.i64 %kizu.28, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.32 = phi i64 [ %kizu.30, %orelse.some.4 ], [ 0, %orelse.else.5 ]
+//   %kizu.33 = add i64 %kizu.19, %kizu.32
+//   %kizu.35 = add i64 %kizu.20, 1
+//   br label %while.header.1
+// }
+// 
+// define %kizu.error.void @test_array_at_drives_non_copy_element_iteration() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Word, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.4 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.3, 0
+//   %kizu.5 = call %kizu.error.void @std__array__Array_append_Word(ptr %kizu.2, %kizu.struct.Word %kizu.4)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [3 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 2, 1
+//   %kizu.8 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.7, 0
+//   %kizu.9 = call %kizu.error.void @std__array__Array_append_Word(ptr %kizu.2, %kizu.struct.Word %kizu.8)
+//   %kizu.10.ok = extractvalue %kizu.error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.9
+// kizu.10.try.ok:
+//   %kizu.12 = call %kizu.opt._var_Word @std__array__Array_at_mut_Word(ptr %kizu.2, i64 1)
+//   %kizu.13 = extractvalue %kizu.opt._var_Word %kizu.12, 1
+//   %kizu.14.tag = extractvalue %kizu.opt._var_Word %kizu.12, 0
+//   %kizu.14 = icmp ne i8 %kizu.14.tag, 0
+//   br i1 %kizu.14, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.5, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.16 = insertvalue %kizu.struct.Word zeroinitializer, %kizu.slice.u8 %kizu.15, 0
+//   store %kizu.struct.Word %kizu.16, ptr %kizu.13
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   br label %while.header.4
+// while.header.4:
+//   %kizu.20 = phi i64 [ 0, %if.end.3 ], [ %kizu.29, %while.body.5 ]
+//   %kizu.21 = phi i64 [ 0, %if.end.3 ], [ %kizu.31, %while.body.5 ]
+//   %kizu.22 = call %kizu.opt._Word @std__array__Array_at_Word(ptr %kizu.2, i64 %kizu.21)
+//   %kizu.23 = extractvalue %kizu.opt._Word %kizu.22, 1
+//   %kizu.24.tag = extractvalue %kizu.opt._Word %kizu.22, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %while.body.5, label %while.end.6
+// while.body.5:
+//   %kizu.26 = mul i64 %kizu.20, 10
+//   %kizu.27.ptr = getelementptr %kizu.struct.Word, ptr %kizu.23, i32 0, i32 0
+//   %kizu.27 = load %kizu.slice.u8, ptr %kizu.27.ptr
+//   %kizu.28 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.27)
+//   %kizu.29 = add i64 %kizu.26, %kizu.28
+//   %kizu.31 = add i64 %kizu.21, 1
+//   br label %while.header.4
+// while.end.6:
+//   %kizu.33.ok = icmp eq i64 44, %kizu.20
+//   br i1 %kizu.33.ok, label %kizu.33.ok.ok, label %kizu.33.ok.fail
+// kizu.33.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 44, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.33.ok.ok:
+//   %kizu.35.ok = icmp eq i64 2, %kizu.21
+//   br i1 %kizu.35.ok, label %kizu.35.ok.ok, label %kizu.35.ok.fail
+// kizu.35.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.35.ok.ok:
+//   %kizu.37 = call %kizu.opt._Word @std__array__Array_at_Word(ptr %kizu.2, i64 9)
+//   %kizu.38 = extractvalue %kizu.opt._Word %kizu.37, 1
+//   %kizu.39.tag = extractvalue %kizu.opt._Word %kizu.37, 0
+//   %kizu.39 = icmp ne i8 %kizu.39.tag, 0
+//   br i1 %kizu.39, label %if.then.7, label %if.else.8
+// if.then.7:
+//   %kizu.41 = sub i64 0, 1
+//   %kizu.42.ptr = getelementptr %kizu.struct.Word, ptr %kizu.38, i32 0, i32 0
+//   %kizu.42 = load %kizu.slice.u8, ptr %kizu.42.ptr
+//   %kizu.43 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.42)
+//   %kizu.44.ok = icmp eq i64 %kizu.41, %kizu.43
+//   br i1 %kizu.44.ok, label %kizu.44.ok.ok, label %kizu.44.ok.fail
+// kizu.44.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.41, i64 %kizu.43, i64 0, i64 0)
+//   unreachable
+// kizu.44.ok.ok:
+//   br label %if.end.9
+// if.else.8:
+//   br label %if.end.9
+// if.end.9:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.46 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.46
+// }
+// 
+// define %kizu.error.void @test_array_get_drives_index_iteration() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.4 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 5)
+//   %kizu.5.ok = extractvalue %kizu.error.void %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.4
+// kizu.5.try.ok:
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 7)
+//   %kizu.8.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.8.try.ok:
+//   %kizu.10 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 11)
+//   %kizu.11.ok = extractvalue %kizu.error.void %kizu.10, 0
+//   %kizu.11.ok.bool = icmp ne i8 %kizu.11.ok, 0
+//   br i1 %kizu.11.ok.bool, label %kizu.11.try.ok, label %kizu.11.try.err
+// kizu.11.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.10
+// kizu.11.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.14 = phi i64 [ 1, %kizu.11.try.ok ], [ %kizu.19, %while.body.2 ]
+//   %kizu.15 = phi i64 [ 0, %kizu.11.try.ok ], [ %kizu.21, %while.body.2 ]
+//   %kizu.16 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 %kizu.15)
+//   %kizu.17 = extractvalue %kizu.opt.i64 %kizu.16, 1
+//   %kizu.18.tag = extractvalue %kizu.opt.i64 %kizu.16, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.19 = mul i64 %kizu.14, %kizu.17
+//   %kizu.21 = add i64 %kizu.15, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.23.ok = icmp eq i64 385, %kizu.14
+//   br i1 %kizu.23.ok, label %kizu.23.ok.ok, label %kizu.23.ok.fail
+// kizu.23.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 385, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.23.ok.ok:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.25 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.25
+// }

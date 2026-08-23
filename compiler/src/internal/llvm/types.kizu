@@ -1,0 +1,408 @@
+import compiler::internal::ir;
+import compiler::internal::typ;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/types.go: the spelling of Kizu IR types
+// as LLVM types. Go passes every spelling as a string; here a type the
+// module names arrives as its bytes (a view into the module's NameTable or
+// into a local String), and every LLVM spelling the emitter produces is
+// interned in the emitter's own NameTable and handed on as a Name.
+
+/// Turns Kizu SSA names into valid named LLVM local identifiers, the Go
+/// `localName`: `%x` becomes `%kizu.x`.
+fn (self: &var Emitter) local_name(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    if mem::starts_with(bytes, "%") {
+        var out = try string::from_bytes(self.allocator, "%kizu.");
+        errdefer out.deinit();
+        try out.append_bytes(bytes[1..mem::len(bytes)]);
+        return self.names.intern_owned(move out);
+    }
+    return self.names.intern(bytes);
+}
+
+/// Maps scalar and runtime-view Kizu IR types to LLVM IR types, the Go
+/// `llvmPrimitiveType`.
+fn llvm_primitive_type(typ_name: []u8) -> []u8 {
+    if mem::equal_bytes(typ_name, "void") {
+        return "void";
+    }
+    if mem::equal_bytes(typ_name, "bool") {
+        return "i1";
+    }
+    if integer_bit_width(typ_name) |_| {
+        return integer_llvm_type(typ_name);
+    }
+    if mem::equal_bytes(typ_name, "[]u8") {
+        return "%kizu.slice.u8";
+    }
+    if is_arena_handle_type(typ_name) {
+        return "i64";
+    }
+    return "ptr";
+}
+
+/// Maps Kizu IR types to LLVM IR types, the Go `llvmType`.
+fn (self: &var Emitter) llvm_type(module: &ir::Module, typ_name: []u8) -> !ir::Name {
+    if try self.error_union_success_type(typ_name) |success| {
+        defer success.deinit();
+        return self.llvm_error_union_type_name(typ_name);
+    }
+    if typ::optional_elem(typ_name) |_| {
+        return self.llvm_optional_type_name(typ_name);
+    }
+    if mem::starts_with(typ_name, "std::arena::Handle<") {
+        return self.names.intern("i64");
+    }
+    if mem::starts_with(typ_name, "std::arena::Arena<") {
+        return self.names.intern("ptr");
+    }
+    if is_box_llvm_type(typ_name) {
+        return self.names.intern("ptr");
+    }
+    if module.structs.contains(typ_name) {
+        return self.llvm_struct_type_name(typ_name);
+    }
+    if module.enums.contains(typ_name) {
+        return self.names.intern("i64");
+    }
+    if module.error_sets.contains(typ_name) {
+        return self.names.intern("i64");
+    }
+    if module.unions.contains(typ_name) {
+        return self.llvm_union_type_name(typ_name);
+    }
+    return self.names.intern(llvm_primitive_type(typ_name));
+}
+
+/// Maps a type the module names to its LLVM type.
+fn (self: &var Emitter) llvm_type_of(module: &ir::Module, typ_name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, typ_name);
+    let bytes = retained.as_bytes();
+    return self.llvm_type(module, bytes);
+}
+
+/// Reports whether module-local functions pass a value through an explicit
+/// byval pointer instead of target aggregate lowering, the Go
+/// `usesIndirectStructParamABI`.
+fn uses_indirect_struct_param_abi(module: &ir::Module, typ_name: []u8) -> bool {
+    return module.structs.contains(typ_name);
+}
+
+/// Reports whether a hosted runtime call passes typ behind a pointer, the Go
+/// `hostedRuntimeIndirectABI`: aggregates -- slices, module structs, unions
+/// -- never cross the C boundary by value.
+fn hosted_runtime_indirect_abi(module: &ir::Module, typ_name: []u8) -> bool {
+    if mem::equal_bytes(typ_name, "[]u8") {
+        return true;
+    }
+    if module.structs.contains(typ_name) {
+        return true;
+    }
+    return module.unions.contains(typ_name);
+}
+
+/// Returns T for borrowed Kizu types &T and &var T, and for the raw
+/// pointers ptr<T> and ptr<const T>, the Go `derefLLVMType`.
+fn deref_llvm_type(typ_name: []u8) -> []u8 {
+    if mem::starts_with(typ_name, "&var ") {
+        return typ_name[5..mem::len(typ_name)];
+    }
+    if mem::starts_with(typ_name, "&") {
+        return typ_name[1..mem::len(typ_name)];
+    }
+    if is_raw_pointer_type(typ_name) {
+        let elem = typ_name[4..mem::len(typ_name) - 1];
+        if mem::starts_with(elem, "const ") {
+            return elem[6..mem::len(elem)];
+        }
+        return elem;
+    }
+    return typ_name;
+}
+
+/// Reports whether typ is ptr<T> or ptr<const T>, the Go `isRawPointerType`.
+fn is_raw_pointer_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "ptr<") and ir::ends_with_bytes(typ_name, ">");
+}
+
+/// Maps Kizu integer spellings to LLVM integer widths, the Go
+/// `integerLLVMType`.
+fn integer_llvm_type(typ_name: []u8) -> []u8 {
+    if mem::equal_bytes(typ_name, "i8") or mem::equal_bytes(typ_name, "u8") {
+        return "i8";
+    }
+    if mem::equal_bytes(typ_name, "i16") or mem::equal_bytes(typ_name, "u16") {
+        return "i16";
+    }
+    if mem::equal_bytes(typ_name, "i32") or mem::equal_bytes(typ_name, "u32") {
+        return "i32";
+    }
+    return "i64";
+}
+
+/// Reports the LLVM integer width for scalar Kizu integers, the Go
+/// `integerBitWidth`; null for any other spelling.
+fn integer_bit_width(typ_name: []u8) -> ?i64 {
+    if mem::equal_bytes(typ_name, "i8") or mem::equal_bytes(typ_name, "u8") {
+        return 8;
+    }
+    if mem::equal_bytes(typ_name, "i16") or mem::equal_bytes(typ_name, "u16") {
+        return 16;
+    }
+    if mem::equal_bytes(typ_name, "i32") or mem::equal_bytes(typ_name, "u32") {
+        return 32;
+    }
+    if mem::equal_bytes(typ_name, "i64") or mem::equal_bytes(typ_name, "u64") or
+        mem::equal_bytes(typ_name, "usize") or mem::equal_bytes(typ_name, "isize") {
+        return 64;
+    }
+    return null;
+}
+
+/// Reports whether comparisons and widening should be unsigned, the Go
+/// `isUnsignedIntegerType`.
+fn is_unsigned_integer_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "u") or mem::equal_bytes(typ_name, "usize");
+}
+
+/// Maps a Kizu binary operator to an LLVM integer instruction, the Go
+/// `llvmBinaryOp`. The operator is the name a `binary.<op>` instruction
+/// carries.
+fn llvm_binary_op(names: &ir::NameTable, op: ir::Name) -> []u8 {
+    if names.is(op, "+") {
+        return "add";
+    }
+    if names.is(op, "-") {
+        return "sub";
+    }
+    if names.is(op, "*") {
+        return "mul";
+    }
+    if names.is(op, "/") {
+        return "sdiv";
+    }
+    if names.is(op, "%") {
+        return "srem";
+    }
+    return "add";
+}
+
+/// Maps Kizu comparisons to signed LLVM integer predicates, the Go
+/// `llvmPredicate`.
+fn llvm_predicate(names: &ir::NameTable, op: ir::Name) -> []u8 {
+    if names.is(op, "==") {
+        return "eq";
+    }
+    if names.is(op, "!=") {
+        return "ne";
+    }
+    if names.is(op, "<") {
+        return "slt";
+    }
+    if names.is(op, "<=") {
+        return "sle";
+    }
+    if names.is(op, ">") {
+        return "sgt";
+    }
+    if names.is(op, ">=") {
+        return "sge";
+    }
+    return "eq";
+}
+
+/// Maps a Kizu comparison to a predicate for one integer type, the Go
+/// `llvmTypedPredicate`.
+fn llvm_typed_predicate(names: &ir::NameTable, op: ir::Name, typ_name: ir::Name) -> []u8 {
+    let retained = ir::name_text(names, typ_name);
+    let bytes = retained.as_bytes();
+    if names.is(op, "==") or names.is(op, "!=") or !is_unsigned_integer_type(bytes) {
+        return llvm_predicate(names, op);
+    }
+    if names.is(op, "<") {
+        return "ult";
+    }
+    if names.is(op, "<=") {
+        return "ule";
+    }
+    if names.is(op, ">") {
+        return "ugt";
+    }
+    if names.is(op, ">=") {
+        return "uge";
+    }
+    return llvm_predicate(names, op);
+}
+
+/// Maps Kizu bool constants to LLVM constants, the Go `llvmBool`.
+fn llvm_bool(names: &ir::NameTable, value: ir::Name) -> []u8 {
+    if names.is(value, "true") {
+        return "true";
+    }
+    return "false";
+}
+
+/// Returns a stable named LLVM type for a declared struct, the Go
+/// `llvmStructTypeName`.
+fn (self: &var Emitter) llvm_struct_type_name(name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "%kizu.struct.");
+    errdefer out.deinit();
+    try append_llvm_name_part(&var out, name);
+    return self.names.intern_owned(move out);
+}
+
+/// Returns a stable named LLVM type for a recoverable result, the Go
+/// `llvmErrorUnionTypeName`.
+fn (self: &var Emitter) llvm_error_union_type_name(name: []u8) -> !ir::Name {
+    let parts = try self.error_union_parts(name) orelse return self.names.intern("%kizu.error.unknown");
+    defer parts.deinit();
+    var out = try string::from_bytes(self.allocator, "%kizu.error.");
+    errdefer out.deinit();
+    if parts.err.len() > 0 {
+        let err_bytes = parts.err.as_bytes();
+        try append_llvm_name_part(&var out, err_bytes);
+        try out.append_byte(cast<u8>(46));
+    }
+    let success_bytes = parts.success.as_bytes();
+    try append_llvm_name_part(&var out, success_bytes);
+    return self.names.intern_owned(move out);
+}
+
+/// Returns a stable named LLVM type for a tagged union, the Go
+/// `llvmUnionTypeName`.
+fn (self: &var Emitter) llvm_union_type_name(name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "%kizu.union.");
+    errdefer out.deinit();
+    try append_llvm_name_part(&var out, name);
+    return self.names.intern_owned(move out);
+}
+
+/// Names the LLVM aggregate of one optional type, the Go
+/// `llvmOptionalTypeName`.
+fn (self: &var Emitter) llvm_optional_type_name(name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "%kizu.opt.");
+    errdefer out.deinit();
+    if typ::optional_elem(name) |elem| {
+        try append_llvm_name_part(&var out, elem);
+    }
+    return self.names.intern_owned(move out);
+}
+
+/// Returns a stable LLVM symbol for a Kizu function name, the Go
+/// `llvmFunctionName`. The substitution is what the C runtime spells its own
+/// entry points with, so a host-runtime primitive links only while both
+/// sides agree on it.
+fn (self: &var Emitter) llvm_function_name(name: []u8) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try append_llvm_name_part(&var out, name);
+    return self.names.intern_owned(move out);
+}
+
+/// Reports whether typ is std::arena::Handle<T>, the Go `isArenaHandleType`.
+fn is_arena_handle_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "std::arena::Handle<") and ir::ends_with_bytes(typ_name, ">");
+}
+
+/// Keeps generated LLVM type names deterministic and readable, the Go
+/// `llvmNamePart`: every byte outside `_ a-z A-Z 0-9` becomes `_`.
+fn append_llvm_name_part(out: &var string::String, name: []u8) -> !void {
+    if mem::equal_bytes(name, "[]u8") {
+        return out.append_bytes("slice.u8");
+    }
+    var index = 0;
+    while mem::byte_at(name, index) |ch| {
+        index = index + 1;
+        if ch == cast<u8>(95) or
+            (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or
+            (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or
+            (ch >= cast<u8>(48) and ch <= cast<u8>(57)) {
+            try out.append_byte(ch);
+            continue;
+        }
+        try out.append_byte(cast<u8>(95));
+    }
+    return;
+}
+
+/// Is the error and success side of one `E!T` / `!T` spelling; err is empty
+/// for `!T`. Go hands both back as strings; here they are owned copies the
+/// caller releases.
+struct ErrorUnionParts {
+    err: string::String,
+    success: string::String
+}
+
+/// Returns T for !T or Error!T, the Go `errorUnionSuccessType`; null for any
+/// other spelling.
+fn (self: &var Emitter) error_union_success_type(type_name: []u8) -> !?string::String {
+    let parts = try self.error_union_parts(type_name) orelse return null;
+    parts.err.deinit();
+    return move parts.success;
+}
+
+/// Returns Error and T for Error!T, or empty Error and T for !T, the Go
+/// `errorUnionParts`; null for any other spelling. Go answers false for a
+/// spelling that does not parse; an empty spelling is the one such case a
+/// lowered module holds, and is answered here before parsing.
+fn (self: &var Emitter) error_union_parts(name: []u8) -> !?ErrorUnionParts {
+    if mem::len(name) == 0 {
+        return null;
+    }
+    let parsed = try self.types.parse(name);
+    match typ::root_node(&self.types, parsed) {
+        ErrorUnion(node) => {
+            var err = string::new(self.allocator);
+            errdefer err.deinit();
+            if node.err |err_node| {
+                try typ::append_render(&var err, &self.types, typ::child_type(parsed, err_node));
+            }
+            var success = string::new(self.allocator);
+            errdefer success.deinit();
+            try typ::append_render(&var success, &self.types, typ::child_type(parsed, node.ok));
+            return ErrorUnionParts { err: move err, success: move success };
+        },
+        _ => return null,
+    }
+}
+
+/// Reports whether a spelling is an optional value type `?T`, the `ok` of
+/// the Go `optionalElemLLVM` (`typ.OptionalElem`).
+fn is_optional_type(typ_name: []u8) -> bool {
+    if typ::optional_elem(typ_name) |_| {
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether the current backend can carry T, the Go
+/// `isLowerableErrorUnionSuccess`.
+fn is_lowerable_error_union_success(typ_name: []u8) -> bool {
+    return mem::len(typ_name) != 0;
+}
+
+/// Appends a minimal LLVM string literal escape of value, the Go
+/// `escapeString`.
+fn append_escaped_string(out: &var string::String, value: []u8) -> !void {
+    var index = 0;
+    while mem::byte_at(value, index) |ch| {
+        index = index + 1;
+        if ch == cast<u8>(92) {
+            try out.append_bytes("\5C");
+            continue;
+        }
+        if ch == cast<u8>(34) {
+            try out.append_bytes("\22");
+            continue;
+        }
+        if ch == cast<u8>(10) {
+            try out.append_bytes("\0A");
+            continue;
+        }
+        try out.append_byte(ch);
+    }
+    return;
+}

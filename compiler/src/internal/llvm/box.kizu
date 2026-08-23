@@ -1,0 +1,177 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+
+// Mechanical port of internal/llvm/box.go: the hosted Box runtime
+// declarations and the `box.*` instructions.
+
+/// Reports whether a lowered IR type is a std::mem::Box<T>, the Go
+/// `isBoxLLVMType`.
+fn is_box_llvm_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "std::mem::Box<") and ir::ends_with_bytes(typ_name, ">");
+}
+
+/// Writes declarations for the hosted Box runtime, the Go
+/// `writeBoxRuntimeDecls`.
+fn (self: &var Emitter) write_box_runtime_decls(module: &ir::Module) -> !void {
+    if !self.uses_box_runtime(module) {
+        return;
+    }
+    try self.line("declare ptr @kizu_box_new(ptr, i64, ptr)");
+    try self.line("declare void @kizu_box_deinit(ptr)");
+    return self.line("");
+}
+
+/// Reports whether this module uses std::mem::Box lowering, the Go
+/// `usesBoxRuntime`.
+fn (self: &Emitter) uses_box_runtime(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if mem::starts_with(ir::op_spelling(instr_node.op), "box.") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Dispatches runtime-backed Box operations, the Go `writeBoxInstr`.
+fn (self: &var Emitter) write_box_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        BoxNew => return self.write_box_new(module, node),
+        BoxBorrow => return self.write_box_borrow(module, node),
+        BoxBorrowMut => return self.write_box_borrow(module, node),
+        BoxDeinit => return self.write_box_deinit(module, node),
+        BoxTake => return self.write_box_take(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported box instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Lowers std::mem::box<T>(allocator, value), the Go `writeBoxNew`. The
+/// runtime hands back the payload pointer or null, and the recoverable
+/// result is built branch-free: the null test is the ok flag and selects the
+/// failure code.
+fn (self: &var Emitter) write_box_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    var success_is_box = false;
+    if try self.error_union_success_type(result_type) |success| {
+        defer success.deinit();
+        let success_bytes = success.as_bytes();
+        success_is_box = is_box_llvm_type(success_bytes);
+    }
+    if node.args.len() != 2 or !success_is_box {
+        return try self.fail0("llvm error: box.new expects allocator, T -> !Box<T>");
+    }
+    let looked_up = try self.failure_error_code(module, FailureKey::BoxNew);
+    match looked_up {
+        Error(failed) => return move failed,
+        Code(code) => {
+            let allocator = try self.operand(module, node.args.get_or_panic(0));
+            let result_name = try self.local_name(module, node.result.name);
+            let value_base = try self.suffixed(result_name, ".value");
+            let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
+            let raw_name = try self.suffixed(result_name, ".raw");
+            let size = try self.element_size_operand(module, node.immediate);
+            try self.line4(
+                "  %s = call ptr @kizu_box_new(ptr %s, i64 %s, ptr %s)",
+                Arg::Str(raw_name), Arg::Str(allocator.operand), Arg::Str(size), Arg::Str(value_slot)
+            );
+            let ok_name = try self.suffixed(result_name, ".is_ok");
+            let ok_byte_name = try self.suffixed(result_name, ".ok.byte");
+            let code_name = try self.suffixed(result_name, ".code");
+            try self.line2("  %s = icmp ne ptr %s, null", Arg::Str(ok_name), Arg::Str(raw_name));
+            try self.line2("  %s = zext i1 %s to i8", Arg::Str(ok_byte_name), Arg::Str(ok_name));
+            try self.line3("  %s = select i1 %s, i64 0, i64 %d", Arg::Str(code_name), Arg::Str(ok_name), Arg::Int(code));
+            let union_type = try self.llvm_type(module, result_type);
+            let base_name = try self.suffixed(result_name, ".base");
+            let payload_name = try self.suffixed(result_name, ".payload");
+            try self.line3(
+                "  %s = insertvalue %s zeroinitializer, i8 %s, 0",
+                Arg::Str(base_name), Arg::Str(union_type), Arg::Str(ok_byte_name)
+            );
+            try self.line4(
+                "  %s = insertvalue %s %s, ptr %s, 1",
+                Arg::Str(payload_name), Arg::Str(union_type), Arg::Str(base_name), Arg::Str(raw_name)
+            );
+            let failure_index = try self.error_union_failure_index(result_type);
+            try self.line5(
+                "  %s = insertvalue %s %s, i64 %s, %d",
+                Arg::Str(result_name), Arg::Str(union_type), Arg::Str(payload_name), Arg::Str(code_name), Arg::Int(failure_index)
+            );
+            try self.set_value(module, node.result, result_name);
+            return null;
+        },
+    }
+}
+
+/// Reports whether a type the module names is std::mem::Box<T>, the Go
+/// `isBoxLLVMType` on an IR value's type.
+fn is_box_name(names: &ir::NameTable, typ_name: ir::Name) -> bool {
+    let retained = ir::name_text(names, typ_name);
+    let bytes = retained.as_bytes();
+    return is_box_llvm_type(bytes);
+}
+
+/// Lowers Box.borrow() and Box.borrow_mut(), the Go `writeBoxBorrow`. A Box
+/// value is its payload pointer, so a borrow that travels as a pointer is
+/// that pointer under the borrow's type, and one that travels as a copy
+/// loads the payload.
+fn (self: &var Emitter) write_box_borrow(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
+        let op = try self.op_name(module, node);
+        return try self.fail1("llvm error: %s expects Box<T> -> &T", Arg::Str(op));
+    }
+    let box = try self.operand(module, node.args.get_or_panic(0));
+    if module.names.starts_with(node.result.type_name, "&") {
+        try self.set_value(module, node.result, box.operand);
+        return null;
+    }
+    let result_name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(box.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Box.deinit(), the Go `writeBoxDeinit`: the runtime releases the
+/// cell.
+fn (self: &var Emitter) write_box_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: box.deinit expects Box<T> -> void");
+    }
+    let box = try self.operand(module, node.args.get_or_panic(0));
+    try self.line1("  call void @kizu_box_deinit(ptr %s)", Arg::Str(box.operand));
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Lowers the box_take primitive `Box.deinit` forwards to when the payload
+/// owns something, the Go `writeBoxTake`: it moves out before the runtime
+/// releases the cell.
+fn (self: &var Emitter) write_box_take(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !is_box_name(&module.names, node.args.get_or_panic(0).type_name) {
+        return try self.fail0("llvm error: box.take expects Box<T> -> T");
+    }
+    let box = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(box.operand));
+    try self.line1("  call void @kizu_box_deinit(ptr %s)", Arg::Str(box.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}

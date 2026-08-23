@@ -1,0 +1,217 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/arena.go: the hosted Arena runtime
+// declarations and the `arena.*` instructions.
+
+/// Reports whether a lowered IR type is a std::arena::Arena<T>, the Go
+/// `isArenaLLVMType`.
+fn is_arena_llvm_type(typ_name: []u8) -> bool {
+    return mem::starts_with(typ_name, "std::arena::Arena<") and ir::ends_with_bytes(typ_name, ">");
+}
+
+/// Writes declarations for the hosted Arena runtime, the Go
+/// `writeArenaRuntimeDecls`.
+fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void {
+    if !self.uses_arena_runtime(module) {
+        return;
+    }
+    try self.line("declare ptr @kizu_arena_new(ptr, i64)");
+    try self.line("declare i64 @kizu_arena_add(ptr, ptr)");
+    try self.line("declare ptr @kizu_arena_get(ptr, i64)");
+    try self.line("declare i64 @kizu_arena_len(ptr)");
+    try self.line("declare ptr @kizu_arena_pop(ptr)");
+    try self.line("declare void @kizu_arena_deinit(ptr)");
+    return self.line("");
+}
+
+/// Reports whether this module uses std::arena::Arena lowering, the Go
+/// `usesArenaRuntime`.
+fn (self: &Emitter) uses_arena_runtime(module: &ir::Module) -> bool {
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if mem::starts_with(ir::op_spelling(instr_node.op), "arena.") {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Dispatches runtime-backed Arena operations, the Go `writeArenaInstr`.
+fn (self: &var Emitter) write_arena_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        ArenaNew => return self.write_arena_new(module, node),
+        ArenaAdd => return self.write_arena_add(module, node),
+        ArenaAt => return self.write_arena_at(module, node),
+        ArenaAtMut => return self.write_arena_at_mut(module, node),
+        ArenaLen => return self.write_arena_len(module, node),
+        ArenaPopOrPanic => return self.write_arena_pop_or_panic(module, node),
+        ArenaDeinit => return self.write_arena_deinit(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported arena instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Returns the number of initialized elements still owned by the arena, the
+/// Go `writeArenaLen`.
+fn (self: &var Emitter) write_arena_len(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: arena.len expects Arena<T> -> i64");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    try self.line2("  %s = call i64 @kizu_arena_len(ptr %s)", Arg::Str(result_name), Arg::Str(arena.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Moves the last element out for Arena.deinit's cleanup cascade, the Go
+/// `writeArenaPopOrPanic`.
+fn (self: &var Emitter) write_arena_pop_or_panic(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: arena.pop_or_panic expects Arena<T> -> T");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line2("  %s = call ptr @kizu_arena_pop(ptr %s)", Arg::Str(ptr_name), Arg::Str(arena.operand));
+    let none = self.no_names();
+    defer none.deinit();
+    try self.write_null_failure(module, node, ptr_name, "arena.pop.panic", PanicKey::ArenaEmpty, &none);
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers std::arena::new<T>(allocator), the Go `writeArenaNew`.
+fn (self: &var Emitter) write_arena_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    return self.write_container_new(module, node, "kizu_arena_new", ContainerKind::Arena, "arena.new expects allocator -> Arena<T>");
+}
+
+/// Reports whether a type the module names is std::arena::Handle<T>, the Go
+/// `isArenaHandleType` on an IR value's type.
+fn is_arena_handle_name(names: &ir::NameTable, typ_name: ir::Name) -> bool {
+    let retained = ir::name_text(names, typ_name);
+    let bytes = retained.as_bytes();
+    return is_arena_handle_type(bytes);
+}
+
+/// Lowers Arena.add(value) to an opaque i64 handle, the Go `writeArenaAdd`.
+fn (self: &var Emitter) write_arena_add(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.result.type_name) {
+        return try self.fail0("llvm error: arena.add expects Arena<T>, T -> Handle<T>");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let result_name = try self.local_name(module, node.result.name);
+    let value_base = try self.suffixed(result_name, ".value");
+    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(1));
+    try self.line3(
+        "  %s = call i64 @kizu_arena_add(ptr %s, ptr %s)",
+        Arg::Str(result_name), Arg::Str(arena.operand), Arg::Str(value_slot)
+    );
+    let bad_name = try self.suffixed(result_name, ".bad");
+    try self.line2("  %s = icmp slt i64 %s, 0", Arg::Str(bad_name), Arg::Str(result_name));
+    try self.write_bool_failure(module, node, bad_name, "arena.add", PanicKey::ArenaAdd);
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Arena.at(handle) to a checked shared borrow, the Go `writeArenaAt`.
+/// Borrows with value IR load a copy; address-spelled borrows (currently
+/// unions) keep the runtime element address.
+fn (self: &var Emitter) write_arena_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.args.get_or_panic(1).type_name) {
+        return try self.fail0("llvm error: arena.at expects Arena<T>, Handle<T> -> &T");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let handle = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line3(
+        "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(arena.operand), Arg::Str(handle.operand)
+    );
+    let none = self.no_names();
+    defer none.deinit();
+    try self.write_null_failure(module, node, ptr_name, "arena.at", PanicKey::ArenaHandle, &none);
+    if module.names.starts_with(node.result.type_name, "&") {
+        try self.set_value(module, node.result, ptr_name);
+        return null;
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(result_type), Arg::Str(ptr_name));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Lowers Arena.at_mut(handle) to a borrow optional, the Go
+/// `writeArenaAtMut`: the runtime's nullable element pointer becomes the
+/// payload and its presence, branch-free. It calls the same kizu_arena_get
+/// as Arena.at and skips both the trap and the load.
+fn (self: &var Emitter) write_arena_at_mut(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 or !is_arena_handle_name(&module.names, node.args.get_or_panic(1).type_name) {
+        return try self.fail0("llvm error: arena.at_mut expects Arena<T>, Handle<T> -> ?&var T");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    let handle = try self.operand(module, node.args.get_or_panic(1));
+    let result_name = try self.local_name(module, node.result.name);
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line3(
+        "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(arena.operand), Arg::Str(handle.operand)
+    );
+    return self.write_borrow_optional_result(module, node, ptr_name);
+}
+
+/// Lowers Arena.deinit(), the Go `writeArenaDeinit`.
+fn (self: &var Emitter) write_arena_deinit(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "void") {
+        return try self.fail0("llvm error: arena.deinit expects Arena<T> -> void");
+    }
+    let arena = try self.operand(module, node.args.get_or_panic(0));
+    try self.line1("  call void @kizu_arena_deinit(ptr %s)", Arg::Str(arena.operand));
+    try self.set_void_value(module, node.result);
+    return null;
+}
+
+/// Reports the named failure when bad_operand is true, the Go
+/// `writeBoolFailure`.
+fn (self: &var Emitter) write_bool_failure(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    bad_operand: ir::Name,
+    prefix: []u8,
+    key: PanicKey
+) -> !void {
+    var fail_suffix = try string::from_bytes(self.allocator, prefix);
+    defer fail_suffix.deinit();
+    try fail_suffix.append_bytes(".fail");
+    let fail_suffix_bytes = fail_suffix.as_bytes();
+    let fail_label = try self.helper_label_local(bad_operand, fail_suffix_bytes);
+    let ok_label = try self.helper_label_local(bad_operand, "ok");
+    try self.mark_current_block_exit(module, ok_label);
+    try self.line3("  br i1 %s, label %%%s, label %%%s", Arg::Str(bad_operand), Arg::Str(fail_label), Arg::Str(ok_label));
+    try self.line1("%s:", Arg::Str(fail_label));
+    let spec = panic_entry(key);
+    let position = try self.panic_position(node.span);
+    try self.line2("  call void @%s(%s)", Arg::Lit(spec.entry), Arg::Str(position));
+    try self.line("  unreachable");
+    return self.line1("%s:", Arg::Str(ok_label));
+}

@@ -1,0 +1,204 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/alloca.go: the pass over one function's
+// body text that moves every alloca into the entry block. Go splits the body
+// into a slice of lines and joins the kept and hoisted ones back; here the
+// lines are offsets into the body and the result is written straight to the
+// caller's String.
+
+/// Is the half-open byte range of one body line.
+struct LineSpan {
+    start: i64,
+    end: i64
+}
+
+/// Moves every `alloca` in a function body into its entry block, the Go
+/// `hoistAllocasToEntry`. LLVM folds an entry-block alloca into the
+/// function's frame, allocated once when the function is entered; an alloca
+/// anywhere else allocates on every execution and is only reclaimed when the
+/// function returns. A loop body holding one therefore grows the stack a
+/// slot per turn, and a program that loops long enough dies on the guard
+/// page with nothing in source to point at.
+///
+/// The move is sound for the allocas this backend writes. Each has a fixed
+/// size and reads no register, so the entry block can hold it; and the slots
+/// they name are argument buffers, out-parameters, and locals, none of which
+/// outlive the turn that wrote them, so sharing one slot across turns
+/// changes nothing.
+///
+/// An alloca with an element count is neither: the count is a register the
+/// entry block does not have yet, and a fresh slot per turn is the point of
+/// writing one. This refuses instead of moving it, because reclaiming the
+/// stack around a dynamic alloca is a decision about the loop it sits in —
+/// llvm.stacksave and llvm.stackrestore — not something this can invent.
+fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::String) -> !?diagnostic::Diagnostic {
+    var lines = array::new<LineSpan>(allocator);
+    defer lines.deinit();
+    var start = 0;
+    while start <= mem::len(body) {
+        let end = line_end(body, start);
+        try lines.append(LineSpan { start: start, end: end });
+        start = end + 1;
+    }
+    var entry = -1;
+    var index = 0;
+    while lines.get(index) |span| {
+        if is_block_label_line(body[span.start..span.end]) {
+            entry = index;
+            break;
+        }
+        index = index + 1;
+    }
+    if entry < 0 {
+        try out.append_bytes(body);
+        return null;
+    }
+    var allocas = array::new<LineSpan>(allocator);
+    defer allocas.deinit();
+    var kept = array::new<LineSpan>(allocator);
+    defer kept.deinit();
+    index = 0;
+    while lines.get(index) |span| {
+        let line = body[span.start..span.end];
+        if index > entry and is_alloca_line(line) {
+            if try reject_counted_alloca(allocator, line) |failed| {
+                return move failed;
+            }
+            try allocas.append(span);
+            index = index + 1;
+            continue;
+        }
+        try kept.append(span);
+        index = index + 1;
+    }
+    if allocas.len() == 0 {
+        try out.append_bytes(body);
+        return null;
+    }
+    var written = 0;
+    index = 0;
+    while index <= entry {
+        let span = kept.get_or_panic(index);
+        try append_joined_line(out, body, span, written);
+        written = written + 1;
+        index = index + 1;
+    }
+    index = 0;
+    while allocas.get(index) |span| {
+        try append_joined_line(out, body, span, written);
+        written = written + 1;
+        index = index + 1;
+    }
+    index = entry + 1;
+    while kept.get(index) |span| {
+        try append_joined_line(out, body, span, written);
+        written = written + 1;
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Appends one line of the joined body, the Go `strings.Join(hoisted, "\n")`:
+/// a newline separates it from the line before.
+fn append_joined_line(out: &var string::String, body: []u8, span: LineSpan, written: i64) -> !void {
+    if written > 0 {
+        try out.append_byte(cast<u8>(10));
+    }
+    return out.append_bytes(body[span.start..span.end]);
+}
+
+/// Refuses an alloca that takes an element count, the Go
+/// `rejectCountedAlloca`. Only the attributes that describe the one slot --
+/// align, addrspace, inalloca -- may follow the type.
+fn reject_counted_alloca(allocator: Allocator, line: []u8) -> !?diagnostic::Diagnostic {
+    let trimmed = trim_left_spaces(line);
+    let name_end = leading_percent_name_end(trimmed) orelse return null;
+    var rest = trimmed[name_end..mem::len(trimmed)];
+    if mem::starts_with(rest, " = alloca ") {
+        rest = rest[10..mem::len(rest)];
+    }
+    var operand_start = top_level_comma(rest, 0) orelse return null;
+    while true {
+        operand_start = operand_start + 1;
+        let operand_end = top_level_comma(rest, operand_start) orelse mem::len(rest);
+        let operand = rest[operand_start..operand_end];
+        let field = first_field(operand);
+        if mem::len(field) == 0 or mem::equal_bytes(field, "align") or mem::equal_bytes(field, "inalloca") or
+            mem::starts_with(field, "addrspace") {
+            if operand_end == mem::len(rest) {
+                return null;
+            }
+            operand_start = operand_end;
+            continue;
+        }
+        var message = try string::from_bytes(allocator, "llvm error: emitter bug: `");
+        defer message.deinit();
+        try message.append_bytes(mem::trim_ascii(line));
+        try message.append_bytes("` allocates an element count, which the entry block cannot hold; a per-turn stack slot needs llvm.stacksave and llvm.stackrestore around the loop it sits in");
+        let message_bytes = message.as_bytes();
+        return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
+    }
+    return null;
+}
+
+/// Returns the offset of the next comma at or after start that separates
+/// operands, leaving the ones inside an aggregate type spelling alone, the
+/// Go `splitTopLevelCommas`; null when no operand follows.
+fn top_level_comma(text: []u8, start: i64) -> ?i64 {
+    var depth = 0;
+    var index = start;
+    while mem::byte_at(text, index) |ch| {
+        if ch == cast<u8>(123) or ch == cast<u8>(91) or ch == cast<u8>(60) or ch == cast<u8>(40) {
+            depth = depth + 1;
+        }
+        if ch == cast<u8>(125) or ch == cast<u8>(93) or ch == cast<u8>(62) or ch == cast<u8>(41) {
+            depth = depth - 1;
+        }
+        if ch == cast<u8>(44) and depth == 0 {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Returns the first space-separated word of an operand, the Go
+/// `strings.Fields(operand)[0]`; empty when the operand is blank.
+fn first_field(operand: []u8) -> []u8 {
+    var start = 0;
+    while mem::byte_at(operand, start) |ch| {
+        if ch != cast<u8>(32) and ch != cast<u8>(9) {
+            break;
+        }
+        start = start + 1;
+    }
+    var end = start;
+    while mem::byte_at(operand, end) |ch| {
+        if ch == cast<u8>(32) or ch == cast<u8>(9) {
+            break;
+        }
+        end = end + 1;
+    }
+    return operand[start..end];
+}
+
+/// Reports whether a body line is a register-defining alloca, the Go
+/// `isAllocaLine`.
+fn is_alloca_line(line: []u8) -> bool {
+    let trimmed = trim_left_spaces(line);
+    let name_end = leading_percent_name_end(trimmed) orelse return false;
+    return mem::starts_with(trimmed[name_end..mem::len(trimmed)], " = alloca ");
+}
+
+/// Reports whether a body line opens a basic block, the Go
+/// `isBlockLabelLine`.
+fn is_block_label_line(line: []u8) -> bool {
+    if label_def_name(line) |_| {
+        return true;
+    }
+    return false;
+}

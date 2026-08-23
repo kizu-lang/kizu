@@ -1,0 +1,223 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+
+// Mechanical port of internal/llvm/union.go: the `union.*` instructions
+// under the #991 `tag + inline payload storage` layout. Go resolves a
+// variant with its own `unionVariant`, which hands back the union as well;
+// here the lookup is `ir::Module.union_variant`, and the union Go quotes by
+// `unionType.Name` is quoted by the type name the instruction carries,
+// which is the key the union was declared under.
+
+/// Dispatches tagged union operations, the Go `writeUnionInstr`.
+fn (self: &var Emitter) write_union_instr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    match node.op {
+        UnionNew => return self.write_union_new(module, node),
+        UnionLoad => return self.write_union_load(module, node),
+        UnionTag => return self.write_union_tag(module, node),
+        UnionPayload => return self.write_union_payload(module, node),
+        _ => {
+            let op = try self.op_name(module, node);
+            return try self.fail1("llvm error: unsupported union instruction `%s`", Arg::Str(op));
+        },
+    }
+}
+
+/// Lowers a tagged union constructor to the #991 inline layout, the Go
+/// `writeUnionNew`: it initializes the tag and only the active variant's
+/// inline payload. Go's nullable payload pointer is the optional first
+/// argument: null for a constructor with no argument.
+fn (self: &var Emitter) write_union_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if module.union_variant(node.result.type_name, node.immediate) |variant| {
+        if node.args.len() > 1 {
+            return try self.fail0("llvm error: union.new expects at most one payload");
+        }
+        let payload = node.args.get(0);
+        let result_name = try self.local_name(module, node.result.name);
+        if try self.write_inline_union(module, result_name, node.result.type_name, variant, payload) |failed| {
+            return move failed;
+        }
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let union_shown = try self.own(module, node.result.type_name);
+    let variant_shown = try self.own(module, node.immediate);
+    return try self.fail2("llvm error: unknown union variant `%s::%s`", Arg::Str(union_shown), Arg::Str(variant_shown));
+}
+
+/// Materializes a `tag + inline payload storage` union value named
+/// result_name, the Go `writeInlineUnion`. It writes the active tag and, when
+/// present, stores only the active variant's payload into the inline
+/// storage, leaving the inactive bytes uninitialized per the #991 ABI.
+fn (self: &var Emitter) write_inline_union(
+    module: &ir::Module,
+    result_name: ir::Name,
+    union_ir_type: ir::Name,
+    variant: ir::UnionVariant,
+    payload: ?ir::Value
+) -> !?diagnostic::Diagnostic {
+    if payload |value| {
+        if ir::is_empty(variant.payload) {
+            let union_shown = try self.own(module, union_ir_type);
+            let variant_shown = try self.own(module, variant.name);
+            let got = try self.own(module, value.type_name);
+            return try self.fail3(
+                "llvm error: union variant `%s::%s` stores no payload, got `%s`",
+                Arg::Str(union_shown), Arg::Str(variant_shown), Arg::Str(got)
+            );
+        }
+        if !ir::same_name(value.type_name, variant.payload) {
+            let union_shown = try self.own(module, union_ir_type);
+            let variant_shown = try self.own(module, variant.name);
+            let expected = try self.own(module, variant.payload);
+            let got = try self.own(module, value.type_name);
+            return try self.fail4(
+                "llvm error: union variant `%s::%s` expects payload `%s`, got `%s`",
+                Arg::Str(union_shown), Arg::Str(variant_shown), Arg::Str(expected), Arg::Str(got)
+            );
+        }
+    } else {
+        if !ir::is_empty(variant.payload) {
+            let union_shown = try self.own(module, union_ir_type);
+            let variant_shown = try self.own(module, variant.name);
+            let expected = try self.own(module, variant.payload);
+            return try self.fail3(
+                "llvm error: union variant `%s::%s` requires a `%s` payload",
+                Arg::Str(union_shown), Arg::Str(variant_shown), Arg::Str(expected)
+            );
+        }
+    }
+    let union_type = try self.llvm_type_of(module, union_ir_type);
+    let slot_name = try self.suffixed(result_name, ".slot");
+    let tag_ptr = try self.suffixed(result_name, ".tag.ptr");
+    try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(union_type), Arg::Int(max_inline_payload_align()));
+    try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 0", Arg::Str(tag_ptr), Arg::Str(union_type), Arg::Str(slot_name));
+    try self.line3("  store i64 %d, ptr %s, align %d", Arg::Int(variant.index), Arg::Str(tag_ptr), Arg::Int(max_inline_payload_align()));
+    if payload |value| {
+        let payload_text = ir::name_text(&module.names, value.type_name);
+        let payload_bytes = payload_text.as_bytes();
+        if try self.type_layout(module, payload_bytes) |layout| {
+            let payload_ptr = try self.suffixed(result_name, ".payload.ptr");
+            let info = try self.operand(module, value);
+            try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 1", Arg::Str(payload_ptr), Arg::Str(union_type), Arg::Str(slot_name));
+            let payload_type = try self.llvm_type(module, payload_bytes);
+            try self.line4(
+                "  store %s %s, ptr %s, align %d",
+                Arg::Str(payload_type), Arg::Str(info.operand), Arg::Str(payload_ptr), Arg::Int(layout.align)
+            );
+        } else {
+            let variant_shown = try self.own(module, variant.name);
+            let got = try self.own(module, value.type_name);
+            return try self.fail2(
+                "llvm error: union variant `%s` has an unsupported payload type `%s`; inline payload size/alignment must be compile-time known per the #991 ABI (#495)",
+                Arg::Str(variant_shown), Arg::Str(got)
+            );
+        }
+    }
+    try self.line4(
+        "  %s = load %s, ptr %s, align %d",
+        Arg::Str(result_name), Arg::Str(union_type), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+    );
+    return null;
+}
+
+/// Materializes a borrowed union value for tag/payload matching, the Go
+/// `writeUnionLoad`.
+fn (self: &var Emitter) write_union_load(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: union.load expects one borrowed union argument");
+    }
+    let arg = node.args.get_or_panic(0);
+    let arg_text = ir::name_text(&module.names, arg.type_name);
+    let arg_bytes = arg_text.as_bytes();
+    let union_name = deref_llvm_type(arg_bytes);
+    if !module.names.is(node.result.type_name, union_name) {
+        let union_shown = try self.names.intern(union_name);
+        let result_shown = try self.own(module, node.result.type_name);
+        return try self.fail2("llvm error: union.load returns %s, got %s", Arg::Str(union_shown), Arg::Str(result_shown));
+    }
+    if !module.unions.contains(union_name) {
+        let shown = try self.own(module, arg.type_name);
+        return try self.fail1("llvm error: union.load expects borrowed union, got `%s`", Arg::Str(shown));
+    }
+    let info = try self.operand(module, arg);
+    let result_name = try self.local_name(module, node.result.name);
+    let union_type = try self.llvm_type(module, union_name);
+    try self.line4(
+        "  %s = load %s, ptr %s, align %d",
+        Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand), Arg::Int(max_inline_payload_align())
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Extracts the integer discriminant from a union value, the Go
+/// `writeUnionTag`.
+fn (self: &var Emitter) write_union_tag(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 or !module.names.is(node.result.type_name, "i64") {
+        return try self.fail0("llvm error: union.tag expects union -> i64");
+    }
+    let arg = node.args.get_or_panic(0);
+    let info = try self.operand(module, arg);
+    let result_name = try self.local_name(module, node.result.name);
+    let union_type = try self.llvm_type_of(module, arg.type_name);
+    try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
+    try self.set_value(module, node.result, result_name);
+    return null;
+}
+
+/// Reads the active variant's payload from the inline storage, the Go
+/// `writeUnionPayload`. The tag dispatch happens in match before this runs,
+/// so only the active payload bytes are read; inactive storage is never
+/// touched.
+fn (self: &var Emitter) write_union_payload(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: union.payload expects one union argument");
+    }
+    let arg = node.args.get_or_panic(0);
+    if module.union_variant(arg.type_name, node.immediate) |variant| {
+        if !ir::is_empty(variant.payload) {
+            if !ir::same_name(node.result.type_name, variant.payload) {
+                let union_shown = try self.own(module, arg.type_name);
+                let variant_shown = try self.own(module, variant.name);
+                let expected = try self.own(module, variant.payload);
+                let got = try self.own(module, node.result.type_name);
+                return try self.fail4(
+                    "llvm error: union payload `%s::%s` returns %s, got %s",
+                    Arg::Str(union_shown), Arg::Str(variant_shown), Arg::Str(expected), Arg::Str(got)
+                );
+            }
+            let result_text = ir::name_text(&module.names, node.result.type_name);
+            let result_type = result_text.as_bytes();
+            if try self.type_layout(module, result_type) |layout| {
+                let info = try self.operand(module, arg);
+                let llvm_union = try self.llvm_type_of(module, arg.type_name);
+                let result_name = try self.local_name(module, node.result.name);
+                let slot_name = try self.suffixed(result_name, ".slot");
+                let payload_ptr = try self.suffixed(result_name, ".payload.ptr");
+                try self.line3("  %s = alloca %s, align %d", Arg::Str(slot_name), Arg::Str(llvm_union), Arg::Int(max_inline_payload_align()));
+                try self.line4(
+                    "  store %s %s, ptr %s, align %d",
+                    Arg::Str(llvm_union), Arg::Str(info.operand), Arg::Str(slot_name), Arg::Int(max_inline_payload_align())
+                );
+                try self.line3("  %s = getelementptr %s, ptr %s, i32 0, i32 1", Arg::Str(payload_ptr), Arg::Str(llvm_union), Arg::Str(slot_name));
+                let payload_type = try self.llvm_type(module, result_type);
+                try self.line4(
+                    "  %s = load %s, ptr %s, align %d",
+                    Arg::Str(result_name), Arg::Str(payload_type), Arg::Str(payload_ptr), Arg::Int(layout.align)
+                );
+                try self.set_value(module, node.result, result_name);
+                return null;
+            }
+            let union_shown = try self.own(module, arg.type_name);
+            let variant_shown = try self.own(module, variant.name);
+            let got = try self.own(module, node.result.type_name);
+            return try self.fail3(
+                "llvm error: union payload `%s::%s` has an unsupported type `%s`; inline payload size/alignment must be compile-time known per the #991 ABI (#495)",
+                Arg::Str(union_shown), Arg::Str(variant_shown), Arg::Str(got)
+            );
+        }
+    }
+    let union_shown = try self.own(module, arg.type_name);
+    let variant_shown = try self.own(module, node.immediate);
+    return try self.fail2("llvm error: unknown union payload `%s::%s`", Arg::Str(union_shown), Arg::Str(variant_shown));
+}

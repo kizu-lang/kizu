@@ -125,6 +125,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | interface | static contract / closed union / generic | runtime dispatch を仮定せず、対応が閉じなければ止める |
 | `defer` | `defer` / `errdefer` | cleanup を source に残す。自動 Drop へ移さない |
 | `ir.Module` / `Function` / `Block` / `Instr` の pointer graph と `string` の op / 名前 | `Module` 所有の arena + copy handle(`Function` / `Block` / `Instr`)、`Op` enum + `operand: Name` + spelling 関数、`Module` 所有の `NameTable` に intern した `Name`(value の name / type、block label、call 先、immediate) | `call.<f>` / `field.<f>` / `binary.<op>` は `Op` の種類と運ぶ名前に分ける。llvm / wasm emitter も同じ型を読む。`Cleanup` の `Args` は常に receiver 1 つなので `arg: Value` |
+| `llvm.emitter` の `string` operand / label / LLVM 型名と、SSA 名で引く `map[string]valueInfo` / `blockExitLabel` / `strings` | `Emitter` 所有の `NameTable` に intern した `Name`(operand、label、LLVM 型名、`valueInfo` の typ / operand)、SSA 名・label 名・literal の bytes を key にした `Map`(Go が関数ごとに作り直す map は entry に関数の generation 番号を持たせて区別する。`Map` は空にできない)、IR の型綴りは `module.names` の bytes view を関数間で渡す | `fmt.Fprintf` の format 文字列を `%s` / `%d` / `%%` を展開する `line1..line6` にそのまま渡し(末尾 `\n` だけ helper が足す)、`fmt.Sprintf` は `text*` / `sprint*`。Go に無い template・形状分岐は作らない。`module` は全 method が `&ir::Module` で受け、`emit` だけが cleanup 命令の `void` 型名を intern するため `&var`。emit.go は llvm.kizu(emitter・walk・dispatch・共有 helper)/ header.kizu(module 宣言)/ instr.kizu(scalar・aggregate・memory 命令)/ call.kizu(`call.*` と extern 宣言)/ error.kizu(`error.*` / `opt.*` / return)に分け、他の Go file は同名の .kizu |
 
 Go の `panic`、reflection、goroutine、shared mutable global、unsafe pointer が現れた
 場合は local mapping を発明しません。移植全体で一つの判断が必要な境界として
@@ -212,6 +213,15 @@ module の render)+ `// opt:`(同じ入力を lower し直して optimize した
 `go test ./internal/ir -run TestIRCorpus -update` が生成し、`compiler/src/ir_corpus_test.kizu`
 が同じ file を読みます。case は check corpus の入力のうち check が `ok` のもの(同名)、
 tests/behavior の各 test file(`beh_`)、internal/ir の test source(`ir_`)から採っています。
+LLVM corpus は `compiler/tests/llvm/` で、1 file = 入力 + `// llvm` + `// emit:`(lowering した
+module を emit した LLVM IR)+ `// opt:`(optimize した module を emit した LLVM IR)です。
+どちらも失敗なら `// ` + error text の 1 行で、IR corpus と同じく std の関数(symbol が
+`std::` で始まるもの)は emit する前に module から落とします(std を含む full text は
+`TestSelfhostFrontend` の `build --emit-llvm` 比較が持ちます)。期待 block は
+`go test ./internal/llvm -run TestLLVMCorpus -update` が生成し、
+`compiler/src/llvm_corpus_test.kizu` が同じ file を読みます。case の入力集合は IR corpus と
+同じで、llvm 固有の入力(`llvm_`)は internal/llvm の test source から採っています。LLVM text の
+一致は command の観測挙動を corpus で固定するもので、契約としての text pin ではありません。
 Kizu の unit test に残すのは、入出力で表せない ownership / lifecycle の invariant だけです。
 
 並列 agent は同じ file を編集しません。shared type と ownership 表は一人の
@@ -261,7 +271,8 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | types | 7768 | 15293 | 1.97 | check corpus 765 case(diagnostics) |
 | ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
-| compiler(cmd/kizu の parse / check / ir) | 1041(全 command) | 319 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt(types → ownership → ir → optimize)を Go の front end と byte 比較(1,882 case) |
+| llvm | 3897 | 5761 | 1.48(words 24,388 / 14,875 = 1.64) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
+| compiler(cmd/kizu の parse / check / ir / build --emit-llvm) | 1041(全 command) | 352 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case) |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -300,6 +311,23 @@ Go の ir が string literal を `%q`(`strconv.Quote`)で綴っていたのは `
 の `strconv.Unquote` は両方を読む)。Go が `string` で持つ op を `Op` enum + spelling
 関数にした `ir.kizu` の約 200 行は Mechanical mapping の判断そのもの。2.0 未満に入ったので
 後続 module(llvm)を優先する。
+
+llvm の増分(+1,864 行)の分類。API shape が最大で、閉じ括弧だけの行が Go 762 に対して
+Kizu 1,017(`if try f() \|failed\| {` の block と 100 桁超の `line*` 呼び出しの折返し)、折り返した
+`Arg::` 引数行 170、Go が `fmt.Fprintf` の引数に inline する `localName` / `+ ".ptr"` /
+`nextSyntheticValue` / `llvmType` / module 名の変換を `let` に束縛した行 345(入れ子の
+`&var self` 呼び出しが引数に置けないため)、`while` の `index = index + 1` 77 行(Go の
+`for range`)。ownership の明示は `name_text` + `as_bytes()` の view 束縛 236 行(`[]u8` view を
+関数から返せない gap)と `defer` / `errdefer` 130 行。error 処理は `if try f() \|failed\| { return
+move failed; }` 22 組で、Go の `if err != nil { return err }` 34 組より少ない(Go にも Kizu にも
+tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` / `Fprintf` 相当が無い
+ことによる formatter(`Arg` union、`format_args` / `place_arg`、`line1..6` / `text1..5` /
+`sprint*` / `fail0..4` / `wrap`)188 行、named constant set を enum + spelling / parse 関数にした
+`PanicKey` / `FailureKey` 180 行(Go の table 39 行)、`strconv.Unquote` / `sort.Strings` /
+`strings.Contains` 系 helper 約 145 行。module 単位の result type(`ValueInfo` / `ExitLabel` /
+`SliceParts` / `ResultLabels` / `FailureCode` / `CapacityResult` / `SliceOperand` と callback の
+代わりの `ContainerKind` / `TypeCollector`)約 80 行は API shape。行比 1.48 で 2.0 未満に入った
+ので圧縮 pass は置かず、後続 module(native link)を優先する。
 
 
 ## 見つかった gap
@@ -342,3 +370,12 @@ Go の ir が string literal を `%q`(`strconv.Quote`)で綴っていたのは `
 | `if try f(view) \|x\| { ... }` は capture の間 condition の借用が生きるため、body で `&var self` を呼べない | ir の `split_static_args` / `generic_bindings` | text を local `String` に copy してから split する |
 | `&var ?T` の parameter を書けず、後の file で宣言される型の `?T` field も置けない(struct の field 検査が file 順) | ir の control.kizu(`lower_loop_header` の index phi) | union `LoopTest { Plain(Value), Indexed(cond, phi) }` で header の結果を運ぶ |
 | `if`/`match` は statement と expression で別 node なので、値位置の `if`/`match` を statement として歩けない | ir の `statementValue` / `collectAssigned` / slot walk | `TrailingValue` union と、値位置専用の walk(`collect_assigned_if` / `collect_mut_borrows_value_stmt`) |
+| `Map` を空にできず(`clear` が無い)、owner field の差し替えもできないので、Go が関数ごとに作り直す `map[string]T` を写せない | llvm の `values` / `blockExitLabel`(`writeFunction` が `= map{}` で作り直す) | entry に関数の generation 番号を持たせ、違う generation の entry を無いものとして読む |
+| `Array.clear` / `truncate` は std 専用 method で user code から呼べない | llvm verify の `uses = nil`、corpus runner が std 関数を module から落とす処理 | `while values.pop() \|v\| { v.deinit(); }` で空にする。module の `functions` は全部 pop して user 関数だけ append し直す |
+| 同じ式の中で `&var self.out` と `&self.names` を同時に渡せない(`self` 全体が借用済みになる)。逐次の文なら disjoint field の借用は通る | llvm の `line*`(`format_args(&var self.out, &self.names, ...)`) | `let names = &self.names;` に束縛してから `format_args(&var self.out, names, ...)` |
+| 引数式の中で `&var self` method を入れ子に呼べない(`self.line2(fmt, Arg::Str(try self.own(...)))` は receiver の借用と衝突) | llvm の全 writer | 引数を先に `let` に束縛する |
+| 関数が返した view(`deref_llvm_type(bytes)` の結果)をそのまま別の呼び出しの引数に置けない(escape 扱い)。`let x = f(view)` に束縛すれば通る。`let x = f(view) orelse ...` も escape 扱い | llvm の `takes_address_of` / `write_optional_types` | 束縛してから渡す。`orelse` の代わりに `if f(view) \|x\| {}` |
+| union は copy payload だけでも move-only で、`!` を返す関数に渡した union 引数は `errdefer arg.deinit()` を要求する | llvm の `Arg` union(`fmt.Fprintf` の引数) | formatter は引数を 1 つずつ `place_arg(... move arg)` に渡し、各 helper は `errdefer a.deinit();` を並べる |
+| union payload / struct field に local binding 由来の `[]u8` view を置けない(literal と literal 由来の戻り値だけ) | llvm の `Arg::Lit`(Go の string 引数) | 生成 text は `Name` に intern(`Arg::Str`)か owned `String`(`Arg::Owned`)で渡し、`[]u8` を返す helper(`llvm_binary_op` など)は `&NameTable` + `Name` を受けて literal だけ返す |
+| closure / function value が無いので callback を取る Go 関数(`collectModuleTypeNames(collect func)`、`writeContainerNew(isResultType func)`)を写せない | llvm の header / container | 呼び分けを enum(`TypeCollector`、`ContainerKind`)で受け、中で match する |
+| `typ::walk` の visitor は `&Node` しか受けず、部分木を render する `Type` handle を持てない | llvm の `collectErrorUnionName`(`typ.Walk` で ErrorUnion node を `String()` する) | `root_node` / `child_type` で明示的に再帰する |

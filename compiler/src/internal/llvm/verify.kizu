@@ -1,0 +1,281 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/llvm/verify.go: the scan over emitted text
+// that every register and label a function reads is defined in it. Go keys
+// its sets by string; here they are keyed by the bytes of each token, and
+// the per-function definition set carries the function's ordinal instead of
+// being replaced, as a Map cannot be emptied.
+
+/// Checks that every register and label a function reads is defined in
+/// that function, or is a module-level named type, the Go
+/// `verifyEmittedText`. The emitter resolves values by name while blocks
+/// are written out of control-flow order, so a resolution bug produces text
+/// clang rejects with a bare SSA name and no source position. This scan
+/// reports the same defect as an error that names the function, before the
+/// text leaves the package.
+///
+/// It also checks that every `alloca` sits in its function's entry block. An
+/// alloca anywhere else allocates on every execution and is reclaimed only
+/// when the function returns, so one inside a loop grows the stack a slot
+/// per turn until the program dies on the guard page — a failure with
+/// nothing in source to point at. hoist_allocas_to_entry is what holds this;
+/// the scan is what says so if it ever stops.
+///
+/// The scan checks existence and placement only. It pins no instruction
+/// shape: any text where read names are defined somewhere in the function,
+/// and every alloca is in the entry block, passes.
+fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagnostic {
+    var types = map::new<[]u8, bool>(allocator);
+    defer types.deinit();
+    var function = text[0..0];
+    var in_function = false;
+    var ordinal = 0;
+    var blocks = 0;
+    var defs = map::new<[]u8, i64>(allocator);
+    defer defs.deinit();
+    var uses = array::new<string::String>(allocator);
+    defer uses.deinit();
+    var tokens = array::new<string::String>(allocator);
+    defer tokens.deinit();
+    var start = 0;
+    while start <= mem::len(text) {
+        let end = line_end(text, start);
+        let line = text[start..end];
+        start = end + 1;
+        if !in_function and mem::starts_with(line, "define ") {
+            function = define_name(line);
+            in_function = true;
+            ordinal = ordinal + 1;
+            blocks = 0;
+            drain(&var uses);
+            drain(&var tokens);
+            try append_percent_tokens(allocator, line, &var tokens);
+            var index = 0;
+            while tokens.at(index) |name| {
+                index = index + 1;
+                let name_bytes = name.as_bytes();
+                try defs.insert(name_bytes, ordinal);
+            }
+            continue;
+        }
+        if !in_function {
+            if type_def_name(line) |name| {
+                try types.insert(name, true);
+            }
+            continue;
+        }
+        if mem::equal_bytes(line, "}") {
+            var index = 0;
+            while uses.at(index) |name| {
+                index = index + 1;
+                let name_bytes = name.as_bytes();
+                if !defined_in(&defs, name_bytes, ordinal) and !types.contains(name_bytes) {
+                    var message = try string::from_bytes(allocator, "llvm error: emitter bug: function `");
+                    defer message.deinit();
+                    try message.append_bytes(function);
+                    try message.append_bytes("` reads `%");
+                    try message.append_bytes(name_bytes);
+                    try message.append_bytes("` but nothing defines it");
+                    let message_bytes = message.as_bytes();
+                    return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
+                }
+            }
+            in_function = false;
+            continue;
+        }
+        if label_def_name(line) |label| {
+            try defs.insert(label, ordinal);
+            blocks = blocks + 1;
+            continue;
+        }
+        if blocks > 1 and is_alloca_line(line) {
+            var message = try string::from_bytes(allocator, "llvm error: emitter bug: function `");
+            defer message.deinit();
+            try message.append_bytes(function);
+            try message.append_bytes("` allocates outside its entry block, which grows the stack on every execution: ");
+            try message.append_bytes(mem::trim_ascii(line));
+            let message_bytes = message.as_bytes();
+            return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
+        }
+        drain(&var tokens);
+        try append_percent_tokens(allocator, line, &var tokens);
+        var first = 0;
+        if instruction_def(line) |def| {
+            try defs.insert(def, ordinal);
+            first = 1;
+        }
+        var index = first;
+        while tokens.at(index) |name| {
+            index = index + 1;
+            let name_bytes = name.as_bytes();
+            let copied = try string::from_bytes(allocator, name_bytes);
+            errdefer copied.deinit();
+            try uses.append(move copied);
+        }
+    }
+    return null;
+}
+
+/// Empties a list of owned texts, the Go `uses = nil`.
+fn drain(values: &var array::Array<string::String>) -> void {
+    while values.pop() |value| {
+        value.deinit();
+    }
+    return;
+}
+
+/// Reports whether a name is defined in the function being scanned.
+fn defined_in(defs: &map::Map<[]u8, i64>, name: []u8, ordinal: i64) -> bool {
+    if defs.get(name) |seen| {
+        return seen == ordinal;
+    }
+    return false;
+}
+
+/// Returns the offset of the newline that ends the line starting at start,
+/// or the text length for the last line.
+fn line_end(text: []u8, start: i64) -> i64 {
+    var index = start;
+    while mem::byte_at(text, index) |byte| {
+        if byte == cast<u8>(10) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return mem::len(text);
+}
+
+/// Extracts the symbol a `define` line declares, the Go `defineName`.
+fn define_name(line: []u8) -> []u8 {
+    let start = index_of_byte(line, 0, 64) orelse return line;
+    let end = index_of_byte(line, start, 40) orelse return line[start + 1..mem::len(line)];
+    return line[start + 1..end];
+}
+
+/// Returns the first offset at or after start holding byte, or null.
+fn index_of_byte(line: []u8, start: i64, byte: i64) -> ?i64 {
+    var index = start;
+    while mem::byte_at(line, index) |ch| {
+        if ch == cast<u8>(byte) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+/// Extracts the name of a module-level `%name = type ...` line, the Go
+/// `typeDefName`.
+fn type_def_name(line: []u8) -> ?[]u8 {
+    let name_end = leading_percent_name_end(line) orelse return null;
+    if !mem::starts_with(line[name_end..mem::len(line)], " = type ") {
+        return null;
+    }
+    return line[1..name_end];
+}
+
+/// Extracts the label a block-opening `name:` line defines, the Go
+/// `labelDefName`.
+fn label_def_name(line: []u8) -> ?[]u8 {
+    let length = mem::len(line);
+    if length < 2 or line[length - 1] != cast<u8>(58) {
+        return null;
+    }
+    let name = line[0..length - 1];
+    var index = 0;
+    while mem::byte_at(name, index) |ch| {
+        if !is_llvm_name_byte(ch) {
+            return null;
+        }
+        index = index + 1;
+    }
+    return name;
+}
+
+/// Extracts the register a `  %name = ...` body line defines, the Go
+/// `instructionDef`.
+fn instruction_def(line: []u8) -> ?[]u8 {
+    let trimmed = trim_left_spaces(line);
+    let name_end = leading_percent_name_end(trimmed) orelse return null;
+    if !mem::starts_with(trimmed[name_end..mem::len(trimmed)], " = ") {
+        return null;
+    }
+    return trimmed[1..name_end];
+}
+
+/// Returns where the `%name` head of a line ends, the Go
+/// `leadingPercentName`; null when the line does not start with one.
+fn leading_percent_name_end(line: []u8) -> ?i64 {
+    if !mem::starts_with(line, "%") {
+        return null;
+    }
+    var end = 1;
+    while mem::byte_at(line, end) |ch| {
+        if !is_llvm_name_byte(ch) {
+            break;
+        }
+        end = end + 1;
+    }
+    if end == 1 {
+        return null;
+    }
+    return end;
+}
+
+/// Drops the leading spaces of a line, the Go `strings.TrimLeft(line, " ")`.
+fn trim_left_spaces(line: []u8) -> []u8 {
+    var start = 0;
+    while mem::byte_at(line, start) |ch| {
+        if ch != cast<u8>(32) {
+            break;
+        }
+        start = start + 1;
+    }
+    return line[start..mem::len(line)];
+}
+
+/// Appends each `%name` token in a line in order, skipping quoted spans,
+/// the Go `percentTokens`.
+fn append_percent_tokens(allocator: Allocator, line: []u8, out: &var array::Array<string::String>) -> !void {
+    var in_quote = false;
+    var index = 0;
+    while index < mem::len(line) {
+        let ch = line[index];
+        if ch == cast<u8>(34) {
+            in_quote = !in_quote;
+            index = index + 1;
+            continue;
+        }
+        if in_quote or ch != cast<u8>(37) {
+            index = index + 1;
+            continue;
+        }
+        var end = index + 1;
+        while mem::byte_at(line, end) |next| {
+            if !is_llvm_name_byte(next) {
+                break;
+            }
+            end = end + 1;
+        }
+        if end > index + 1 {
+            let copied = try string::from_bytes(allocator, line[index + 1..end]);
+            errdefer copied.deinit();
+            try out.append(move copied);
+        }
+        index = end;
+    }
+    return;
+}
+
+/// Reports bytes valid in an unquoted LLVM identifier, the Go
+/// `isLLVMNameByte`.
+fn is_llvm_name_byte(ch: u8) -> bool {
+    return ch == cast<u8>(45) or ch == cast<u8>(36) or ch == cast<u8>(46) or ch == cast<u8>(95) or
+        (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or
+        (ch >= cast<u8>(48) and ch <= cast<u8>(57));
+}

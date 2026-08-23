@@ -1,0 +1,187 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+test "ptr_read and ptr_write round-trip a byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe ptr_write(byte, 200);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe ptr_read(byte);
+    testing::expect_equal<i64>(200, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+test "volatile_read and volatile_write round-trip a byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe volatile_write(byte, 3);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe volatile_read(byte);
+    testing::expect_equal<i64>(3, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+test "pointer integer casts preserve the address" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: address の整数化は観測のみで、pointer 自体は使い続けない
+    let address = unsafe int_from_ptr<usize>(byte);
+    // SAFETY: address は直前に有効な pointer から得た値で、指す先は生きている
+    let same = unsafe ptr_from_int<ptr<u8>>(address);
+    // SAFETY: same は byte と同じ有効な 1 バイトを指す
+    unsafe ptr_write(same, 7);
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe ptr_read(byte);
+    testing::expect_equal<i64>(7, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_ptr_read_and_ptr_write_round_trip_a_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store i8 200, ptr %kizu.2
+//   %kizu.5 = load i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 200, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 200, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// 
+// define %kizu.error.void @test_volatile_read_and_volatile_write_round_trip_a_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store volatile i8 3, ptr %kizu.2
+//   %kizu.5 = load volatile i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 3, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// 
+// define %kizu.error.void @test_pointer_integer_casts_preserve_the_address() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   %kizu.3 = ptrtoint ptr %kizu.2 to i64
+//   %kizu.4 = inttoptr i64 %kizu.3 to ptr
+//   store i8 7, ptr %kizu.4
+//   %kizu.7 = load i8, ptr %kizu.2
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10.ok = icmp eq i64 7, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.12
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_ptr_read_and_ptr_write_round_trip_a_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store i8 200, ptr %kizu.2
+//   %kizu.5 = load i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 200, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 200, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// 
+// define %kizu.error.void @test_volatile_read_and_volatile_write_round_trip_a_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store volatile i8 3, ptr %kizu.2
+//   %kizu.5 = load volatile i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 3, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// 
+// define %kizu.error.void @test_pointer_integer_casts_preserve_the_address() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   %kizu.3 = ptrtoint ptr %kizu.2 to i64
+//   %kizu.4 = inttoptr i64 %kizu.3 to ptr
+//   store i8 7, ptr %kizu.4
+//   %kizu.7 = load i8, ptr %kizu.2
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10.ok = icmp eq i64 7, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.12
+// }
