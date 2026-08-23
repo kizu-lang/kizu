@@ -8,9 +8,9 @@ import std::map;
 import std::mem;
 import std::string;
 
-// The real declaration-collection work unit starts with predeclaration,
-// dispatches every type declaration, and constructs its source diagnostic at
-// this Checker boundary. Concrete collectors retain only copy issue payloads.
+// The real declaration-collection work unit predeclares types, then dispatches
+// types, receiver methods, and impl assertions in three source-order passes.
+// This Checker boundary alone constructs source diagnostics from copy issues.
 
 struct CollectionMemberIssue { owner: ast::Text, member: ast::Text }
 
@@ -19,6 +19,8 @@ struct CollectionNamedTypeIssue { name: ast::Text, type_name: Type }
 struct CollectionMemberTypeIssue {
     member: CollectionMemberIssue, type_name: Type
 }
+
+struct CollectionImplMethodIssue { contract_name: ast::Text, type_name: ast::Text, method: FunctionHandle }
 
 struct FunctionParamStorage {
     params: array::Array<Type>,
@@ -33,6 +35,10 @@ union TypeCollectionIssue {
     DuplicateUnionVariant(CollectionMemberIssue),
     DuplicateContract(ast::Text),
     DuplicateContractMethod(CollectionMemberIssue),
+    DuplicateMethod(ast::Text),
+    UnknownContract(ast::Text),
+    MissingContractMethod(CollectionImplMethodIssue),
+    ContractMethodMismatch(CollectionImplMethodIssue),
     Resolution(TypeResolutionIssue),
     UnionOptional(CollectionMemberIssue),
     UnionBorrow(CollectionMemberIssue),
@@ -63,9 +69,9 @@ union DeclaredFunctionResult {
     Issue(TypeCollectionIssue),
 }
 
-// Registers every type declaration in source order and returns its first
-// structured diagnostic, matching the setup phase used by Checker.Check.
-fn (self: &var Checker) collect_type_declarations(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
+// Registers types, receiver methods, then impl assertions in the same three
+// source-order passes as the shipping Checker's collectTypesAndMethods.
+fn (self: &var Checker) collect_types_and_methods(tree: &ast::Ast, program: &ast::Program) -> !?diagnostic::Diagnostic {
     let owners = try ast::deinit_owners(self.allocator, tree, program);
     defer owners.deinit();
     try self.predeclare_type_names(tree, program);
@@ -74,6 +80,27 @@ fn (self: &var Checker) collect_type_declarations(tree: &ast::Ast, program: &ast
         if try self.collect_type_decl(tree, declaration, &owners) |issue| {
             let value = try self.type_collection_diagnostic(tree, issue);
             return move value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        if try self.collect_method_decl(tree, declaration) |issue| {
+            let value = try self.type_collection_diagnostic(tree, issue);
+            return move value;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while program.declarations.get(index) |declaration| {
+        match tree.declarations.at(declaration.node) {
+            Impl(value) => {
+                if try self.collect_impl(tree, value) |issue| {
+                    let diagnostic = try self.type_collection_diagnostic(tree, issue);
+                    return move diagnostic;
+                }
+            },
+            _ => {},
         }
         index = index + 1;
     }
@@ -629,6 +656,49 @@ fn (self: &Checker) type_collection_diagnostic(tree: &ast::Ast, issue: TypeColle
         DuplicateContractMethod(member) => {
             try message.append_bytes("duplicate contract method `");
             try append_collection_member(&var message, tree, member, ".");
+            try message.append_byte(cast<u8>(96));
+        },
+        DuplicateMethod(name) => {
+            try message.append_bytes("duplicate method `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        UnknownContract(name) => {
+            try message.append_bytes("unknown contract `");
+            try append_collection_text(&var message, tree, name);
+            try message.append_byte(cast<u8>(96));
+        },
+        MissingContractMethod(impl_method) => {
+            try message.append_byte(cast<u8>(96));
+            try append_collection_text(
+                &var message, tree, impl_method.type_name
+            );
+            try message.append_bytes("` does not satisfy `");
+            try append_collection_text(
+                &var message, tree, impl_method.contract_name
+            );
+            try message.append_byte(cast<u8>(96));
+            try message.append_bytes(": missing method `");
+            if self.metadata.functions.at(impl_method.method.index) |function| {
+                let name = function.name.as_bytes();
+                try message.append_bytes(name);
+            }
+            try message.append_byte(cast<u8>(96));
+        },
+        ContractMethodMismatch(impl_method) => {
+            try message.append_byte(cast<u8>(96));
+            try append_collection_text(
+                &var message, tree, impl_method.type_name
+            );
+            try message.append_byte(cast<u8>(46));
+            if self.metadata.functions.at(impl_method.method.index) |function| {
+                let name = function.name.as_bytes();
+                try message.append_bytes(name);
+            }
+            try message.append_bytes("` does not match contract `");
+            try append_collection_text(
+                &var message, tree, impl_method.contract_name
+            );
             try message.append_byte(cast<u8>(96));
         },
         Resolution(resolution_issue) => {

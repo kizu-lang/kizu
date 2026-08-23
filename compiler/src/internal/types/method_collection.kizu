@@ -1,0 +1,98 @@
+import compiler::internal::ast;
+import compiler::internal::stdmethod;
+import std::map;
+
+// Registers one receiver method during the second declaration pass.
+fn (self: &var Checker) collect_method_decl(tree: &ast::Ast, declaration: ast::Declaration) -> !?TypeCollectionIssue {
+    match tree.declarations.at(declaration.node) {
+        Function(value) => return self.collect_receiver_method(tree, value),
+        _ => return null,
+    }
+}
+
+fn (self: &var Checker) collect_receiver_method(tree: &ast::Ast, declaration: &ast::FunctionDecl) -> !?TypeCollectionIssue {
+    if !declaration.signature.receiver {
+        return null;
+    }
+    let retained_name = tree.texts.at(declaration.signature.name.node);
+    let full_name = retained_name.as_bytes();
+    if stdmethod::split_method_name(full_name) |parts| {
+        if self.metadata.impls.at(parts.receiver) |methods| {
+            if methods.contains(parts.method) {
+                return TypeCollectionIssue::DuplicateMethod(declaration.signature.name);
+            }
+        }
+        match try self.new_declared_function_type(tree, declaration) {
+            Value(handle) => {
+                try self.insert_impl_method(parts.receiver, parts.method, handle);
+            },
+            Issue(issue) => return issue,
+        }
+    }
+    return null;
+}
+
+fn (self: &var Checker) insert_impl_method(receiver: []u8, name: []u8, handle: FunctionHandle) -> !void {
+    if self.metadata.impls.at_mut(receiver) |methods| {
+        return methods.insert(name, handle);
+    }
+    var methods = map::new<[]u8, FunctionHandle>(self.allocator);
+    errdefer methods.deinit();
+    try methods.insert(name, handle);
+    return self.metadata.impls.insert(receiver, move methods);
+}
+
+// Validates one explicit impl only after every receiver method is registered.
+fn (self: &var Checker) collect_impl(tree: &ast::Ast, declaration: &ast::ImplDecl) -> !?TypeCollectionIssue {
+    let retained_type = tree.texts.at(declaration.type_name.node);
+    let type_name = retained_type.as_bytes();
+    match try self.resolve_type(tree, type_name) {
+        Value(_) => return self.check_satisfies(tree, declaration, type_name),
+        Issue(issue) => return TypeCollectionIssue::Resolution(issue),
+    }
+}
+
+fn (self: &Checker) check_satisfies(tree: &ast::Ast, declaration: &ast::ImplDecl, type_name: []u8) -> !?TypeCollectionIssue {
+    let retained_contract = tree.texts.at(declaration.contract_name.node);
+    let contract_name = retained_contract.as_bytes();
+    if self.metadata.contracts_by_name.get(contract_name) |contract_handle| {
+        if self.metadata.contracts.at(contract_handle.index) |required| {
+            let names = try sorted_method_names(self.allocator, &required.methods);
+            defer names.deinit();
+            var index = 0;
+            while names.at(index) |retained_method| {
+                let method_name = retained_method.as_bytes();
+                if required.methods.get(method_name) |want| {
+                    let issue = CollectionImplMethodIssue {
+                        contract_name: declaration.contract_name,
+                        type_name: declaration.type_name,
+                        method: want
+                    };
+                    if self.impl_method(type_name, method_name) |got| {
+                        var matches = false;
+                        if self.metadata.functions.at(want.index) |want_fn| {
+                            if self.metadata.functions.at(got.index) |got_fn| {
+                                matches = method_matches(want_fn, got_fn);
+                            }
+                        }
+                        if !matches {
+                            return TypeCollectionIssue::ContractMethodMismatch(issue);
+                        }
+                    } else {
+                        return TypeCollectionIssue::MissingContractMethod(issue);
+                    }
+                }
+                index = index + 1;
+            }
+            return null;
+        }
+    }
+    return TypeCollectionIssue::UnknownContract(declaration.contract_name);
+}
+
+fn (self: &Checker) impl_method(type_name: []u8, method: []u8) -> ?FunctionHandle {
+    if self.metadata.impls.at(type_name) |methods| {
+        return methods.get(method);
+    }
+    return null;
+}
