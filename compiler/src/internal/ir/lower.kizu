@@ -781,7 +781,7 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
         try params.append(try self.lower_param(facts));
     }
     let declared_return = self.decl_facts.at(decl.node).return_type;
-    let resolved = try self.resolve_type(declared_return);
+    let resolved = try self.resolve_bound_type(declared_return);
     let returned = try self.lower_return_type(resolved);
     let handle = self.signature_nodes.add(Signature { params: move params, return_type: returned });
     return SignatureHandle { node: handle };
@@ -932,7 +932,7 @@ fn (self: &var Lowerer) lower_function_named(
     while index < count {
         let facts = self.decl_param(decl, index);
         if self.signature_param(signature, index) |param| {
-            try self.envs.set(self.env, facts.name, param.value());
+            try self.envs.bind(self.env, facts.name, param.value());
             // A parameter that arrives as the caller's storage is a storage
             // name like a lent local: reads load, assignments store, and
             // address consumers take the pointer itself.
@@ -966,7 +966,7 @@ fn (self: &var Lowerer) lower_function_named(
 /// stays the cheaper shape -- except for unions, where matching needs an
 /// address and the copy is made for the call.
 fn (self: &var Lowerer) lower_param(facts: ParamFacts) -> !Param {
-    let type_name = try self.resolve_type(facts.type_name);
+    let type_name = try self.resolve_bound_type(facts.type_name);
     var lowered = Param {
         name: try self.module.names.prefixed("%", facts.name),
         type_name: type_name,
@@ -1061,11 +1061,13 @@ fn (self: &var Lowerer) parse_type(name: Name) -> !typ::Type {
 }
 
 /// Binds the type parameters in force, wherever they stand, the Go
-/// `resolveType`. A parameter inside a static argument list counts:
+/// `resolveType` (named resolve_bound_type here: project declares a
+/// `resolve_type` with a `&var` second parameter, and the IR lowering
+/// unions `&var` positions by method name). A parameter inside a static argument list counts:
 /// `std::array::Array<T>` is the receiver of every Array method, and lowering
 /// it as written would leave the instance carrying the parameter it was
 /// instantiated away from.
-fn (self: &var Lowerer) resolve_type(name: Name) -> !Name {
+fn (self: &var Lowerer) resolve_bound_type(name: Name) -> !Name {
     // A `std::meta` form written where a type goes resolves first: it names
     // a type through the capture in force rather than being one (ADR-0113).
     let resolved = try self.resolve_meta_type_deep(name);
@@ -1092,7 +1094,7 @@ fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
     var args = try self.split_static_args(list);
     defer args.deinit();
     if args.len() == 0 {
-        return self.resolve_type(list);
+        return self.resolve_bound_type(list);
     }
     var out = string::new(self.allocator);
     errdefer out.deinit();
@@ -1102,7 +1104,7 @@ fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
             try out.append_bytes(", ");
         }
         index = index + 1;
-        let resolved = try self.resolve_type(arg);
+        let resolved = try self.resolve_bound_type(arg);
         try self.module.names.append_to(&var out, resolved);
     }
     return self.module.names.intern_owned(move out);
