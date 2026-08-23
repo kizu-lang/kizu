@@ -229,21 +229,9 @@ fn (self: &var Parser) parse_top_level_decl_with_doc(
     if kind == token::Kind::Ident and self.starts_error_set_decl() {
         return self.parse_error_set_decl_with_doc(tree, move docs, true);
     }
-    let message = try public_declaration_message(self.allocator, self);
-    try self.record_error(move message);
+    try self.error_token("expected public declaration, got ", self.current_token());
     let function = self.function_stub(tree, true, move docs);
     return add_function_decl(tree, move function);
-}
-
-fn public_declaration_message(
-    allocator: Allocator,
-    parser: &Parser
-) -> !string::String {
-    return unexpected_token_message(
-        allocator,
-        "expected public declaration, got ",
-        parser.current_token()
-    );
 }
 
 fn (self: &var Parser) parse_import_decl(
@@ -403,12 +391,7 @@ fn (self: &var Parser) parse_unsafe_decl(
         try self.next_token();
         return self.parse_function_after_fn(tree, move function);
     }
-    let message = try unexpected_token_message(
-        self.allocator,
-        "expected fn or struct after unsafe, got ",
-        self.peek_token()
-    );
-    try self.record_error(move message);
+    try self.error_token("expected fn or struct after unsafe, got ", self.peek_token());
     let function = self.function_stub(tree, public, move docs);
     return add_function_decl(tree, move function);
 }
@@ -572,13 +555,7 @@ fn (self: &var Parser) parse_name_list(
         self.current_kind() != token::Kind::Eof {
         let handle = self.stream.get_or_panic(self.position);
         if self.current_kind() != token::Kind::Ident {
-            let actual = self.tokens.at(handle);
-            let message = try name_list_token_message(
-                self.allocator,
-                label,
-                actual
-            );
-            try self.record_error(move message);
+            try self.error_expected(label, self.tokens.at(handle));
             return finish_name_list(move names, move docs);
         }
         let current = self.tokens.at(handle);
@@ -625,20 +602,6 @@ fn tag_docs_or_null(
         return null;
     }
     return move docs;
-}
-
-fn name_list_token_message(
-    allocator: Allocator,
-    label: []u8,
-    actual: &token::Token
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes("expected ");
-    try out.append_bytes(label);
-    try out.append_bytes(", got ");
-    try append_token_description(&var out, actual);
-    return move out;
 }
 
 fn (self: &var Parser) parse_union_decl(
@@ -735,17 +698,11 @@ fn (self: &var Parser) parse_union_variant(
 ) -> !?ast::UnionVariant {
     let docs = try self.current_comment_text();
     let doc = tree.add_text(move docs);
-    let current = self.current_token();
     if self.current_kind() != token::Kind::Ident {
-        let message = try name_list_token_message(
-            self.allocator,
-            "union variant",
-            current
-        );
-        try self.record_error(move message);
+        try self.error_expected("union variant", self.current_token());
         return null;
     }
-    let name = try retain_literal(tree, current);
+    let name = try retain_literal(tree, self.current_token());
     if self.peek_kind() != token::Kind::LParen {
         return ast::UnionVariant {
             name: name,
@@ -911,12 +868,7 @@ fn (self: &var Parser) parse_struct_field(
         try self.next_token();
     }
     if self.current_kind() != token::Kind::Ident {
-        let message = try name_list_token_message(
-            self.allocator,
-            "field name",
-            self.current_token()
-        );
-        try self.record_error(move message);
+        try self.error_expected("field name", self.current_token());
         return null;
     }
     let name_handle = self.stream.get_or_panic(self.position);
@@ -1087,12 +1039,7 @@ fn (self: &var Parser) parse_contract_methods(
     while self.current_kind() != token::Kind::RBrace and
         self.current_kind() != token::Kind::Eof {
         if self.current_kind() != token::Kind::Function {
-            let message = try name_list_token_message(
-                self.allocator,
-                "contract method",
-                self.current_token()
-            );
-            try self.record_error(move message);
+            try self.error_expected("contract method", self.current_token());
             return move methods;
         }
         if try self.parse_contract_method(tree) |method| {
@@ -1123,9 +1070,8 @@ fn (self: &var Parser) parse_contract_method(
         &var method.signature
     );
     if method.signature.receiver {
-        try self.record_context_error(
-            "a contract method takes no receiver;",
-            " it says what a method looks like, not what it is on"
+        try self.error_text(
+            "a contract method takes no receiver; it says what a method looks like, not what it is on"
         );
         method.deinit();
         return null;
@@ -1176,19 +1122,13 @@ fn (self: &var Parser) parse_params(
     }
     while true {
         if self.current_kind() == token::Kind::Comptime {
-            try self.record_context_error(
-                "compile-time parameter belongs in `<...>`, not `(...)`",
-                ""
+            try self.error_text(
+                "compile-time parameter belongs in `<...>`, not `(...)`"
             );
             return move params;
         }
         if self.current_kind() != token::Kind::Ident {
-            let message = try unexpected_token_message(
-                self.allocator,
-                "expected parameter name, got ",
-                self.current_token()
-            );
-            try self.record_error(move message);
+            try self.error_token("expected parameter name, got ", self.current_token());
             return move params;
         }
         let name_handle = self.stream.get_or_panic(self.position);
@@ -1245,11 +1185,11 @@ fn (self: &var Parser) parse_receiver(
         return null;
     }
     if params.len() != 1 {
-        var message = string::new(self.allocator);
-        errdefer message.deinit();
-        try message.append_bytes("expected one receiver in `fn (...)`, got ");
-        try fmt::append_i64(&var message, params.len());
-        try self.record_error(move message);
+        var entry = try self.error_entry();
+        errdefer entry.deinit();
+        try entry.message.append_bytes("expected one receiver in `fn (...)`, got ");
+        try fmt::append_i64(&var entry.message, params.len());
+        try self.record(move entry);
         params.deinit();
         return null;
     }
@@ -1264,11 +1204,7 @@ fn (self: &var Parser) parse_impl_decl(
     }
     let contract_handle = self.stream.get_or_panic(self.position);
     if self.peek_kind() != token::Kind::For {
-        let message = try impl_missing_for_message(
-            self.allocator,
-            self.tokens.at(contract_handle)
-        );
-        try self.record_error(move message);
+        try self.error_impl_missing_for(self.tokens.at(contract_handle));
         return add_empty_impl_decl(self.allocator, tree);
     }
     var contract_name = try owned_token_literal(
@@ -1288,12 +1224,7 @@ fn (self: &var Parser) parse_impl_decl(
     );
     errdefer type_name.deinit();
     if self.peek_kind() == token::Kind::LBrace {
-        let message = try impl_body_message(
-            self.allocator,
-            &contract_name,
-            &type_name
-        );
-        try self.record_error(move message);
+        try self.error_impl_body(&contract_name, &type_name);
         return add_impl_decl(tree, move contract_name, move type_name);
     }
     let _ = try self.expect_statement_terminator("impl declaration");
@@ -1322,53 +1253,11 @@ fn add_impl_decl(
     }));
 }
 
-fn impl_missing_for_message(
-    allocator: Allocator,
-    contract_token: &token::Token
-) -> !string::String {
-    var message = string::new(allocator);
-    errdefer message.deinit();
-    try message.append_bytes("expected `impl <contract> for ");
-    let name = contract_token.literal.as_bytes();
-    try message.append_bytes(name);
-    try message.append_bytes(
-        ";`; a method on a type is `fn (self: "
-    );
-    try message.append_bytes(name);
-    try message.append_bytes(") name(...)`");
-    return move message;
-}
-
-fn impl_body_message(
-    allocator: Allocator,
-    contract_name: &string::String,
-    type_name: &string::String
-) -> !string::String {
-    var message = string::new(allocator);
-    errdefer message.deinit();
-    try message.append_bytes("`impl ");
-    try append_retained_string(&var message, contract_name);
-    try message.append_bytes(" for ");
-    try append_retained_string(&var message, type_name);
-    try message.append_bytes(
-        "` takes no body; write the methods as `fn (self: "
-    );
-    try append_retained_string(&var message, type_name);
-    try message.append_bytes(") name(...)` and end this with `;`");
-    return move message;
-}
-
 fn (self: &var Parser) expect_current(expected: token::Kind) -> !bool {
     if self.current_kind() == expected {
         return true;
     }
-    let message = try expected_token_message(
-        self.allocator,
-        "expected ",
-        expected,
-        self.current_token()
-    );
-    try self.record_error(move message);
+    try self.error_expected_kind("expected ", expected, self.current_token());
     return false;
 }
 
@@ -1377,13 +1266,7 @@ fn (self: &var Parser) expect_peek(expected: token::Kind) -> !bool {
         try self.next_token();
         return true;
     }
-    let message = try expected_token_message(
-        self.allocator,
-        "expected next token ",
-        expected,
-        self.peek_token()
-    );
-    try self.record_error(move message);
+    try self.error_expected_kind("expected next token ", expected, self.peek_token());
     return false;
 }
 
@@ -1407,7 +1290,7 @@ fn (self: &var Parser) expect_statement_terminator(
         try self.next_token();
         return true;
     }
-    try self.record_context_error("expected `;` after ", context);
+    try self.error_context("expected `;` after ", context);
     return false;
 }
 
@@ -1420,7 +1303,7 @@ fn (self: &var Parser) consume_list_delimiter(context: []u8) -> !bool {
         RBrace => true,
         Eof => true,
         _ => {
-            try self.record_context_error("expected `,` after ", context);
+            try self.error_context("expected `,` after ", context);
             false
         },
     };
@@ -1438,10 +1321,7 @@ fn (self: &var Parser) finish_expr_stmt(
         RBrace => false,
         Comma => false,
         _ => {
-            try self.record_context_error(
-                "expected `;` after ",
-                "expression statement"
-            );
+            try self.error_text("expected `;` after expression statement");
             false
         },
     };
@@ -1575,12 +1455,12 @@ fn (self: &var Parser) parse_labeled_stmt(
         While => try self.parse_while_stmt(tree, label),
         For => try self.parse_for_stmt(tree, label),
         _ => {
-            var message = string::new(self.allocator);
-            errdefer message.deinit();
-            try message.append_bytes("label `");
-            try append_retained_text(&var message, tree, label);
-            try message.append_bytes("` must be attached to while or for");
-            try self.record_error(move message);
+            var entry = try self.error_entry();
+            errdefer entry.deinit();
+            try entry.message.append_bytes("label `");
+            try append_retained_text(&var entry.message, tree, label);
+            try entry.message.append_bytes("` must be attached to while or for");
+            try self.record(move entry);
             let expression = try add_error_ident(
                 tree,
                 token_span_at(self)
@@ -1754,15 +1634,9 @@ fn (self: &var Parser) parse_defer_stmt(
 ) -> !ast::Statement {
     if deferred_statement_forbidden(self.peek_kind()) {
         if error_path {
-            try self.record_context_error(
-                "errdefer expects an ",
-                "expression statement"
-            );
+            try self.error_text("errdefer expects an expression statement");
         } else {
-            try self.record_context_error(
-                "defer expects an ",
-                "expression statement"
-            );
+            try self.error_text("defer expects an expression statement");
         }
         let expression = try add_error_ident(
             tree,
@@ -1976,9 +1850,8 @@ fn (self: &var Parser) parse_comptime_for_stmt(
     let capture = try self.parse_payload_capture(tree);
     if capture |name| {
         if text_is_empty(tree, name) {
-            try self.record_context_error(
-                "comptime for requires a capture, as in ",
-                "`comptime for list |field| { ... }`"
+            try self.error_text(
+                "comptime for requires a capture, as in `comptime for list |field| { ... }`"
             );
             let body = tree.add_empty_block();
             return add_comptime_for(tree, list, name, body);
@@ -2033,9 +1906,8 @@ fn (self: &var Parser) parse_comptime_match_stmt(
     if try self.parse_variant_capture(tree) |retained_captures| {
         defer retained_captures.deinit();
         if retained_captures.len() == 0 {
-            try self.record_context_error(
-                "comptime match requires a capture, as in ",
-                "`comptime match value |variant| { ... }`"
+            try self.error_text(
+                "comptime match requires a capture, as in `comptime match value |variant| { ... }`"
             );
             let name = tree.add_empty_text();
             let binding = tree.add_empty_text();
@@ -2149,12 +2021,7 @@ fn (self: &var Parser) parse_match_arm(
     tree: &var ast::Ast
 ) -> !?ast::MatchArm {
     if self.current_kind() != token::Kind::Ident {
-        let message = try unexpected_token_message(
-            self.allocator,
-            "expected match tag, got ",
-            self.current_token()
-        );
-        try self.record_error(move message);
+        try self.error_token("expected match tag, got ", self.current_token());
         return null;
     }
     let tag = try self.retain_current_literal(tree);
@@ -2356,10 +2223,7 @@ fn (self: &var Parser) parse_open_start_slice(
     span: ast::Span
 ) -> !ast::Expression {
     if self.peek_kind() == token::Kind::RBracket {
-        try self.record_context_error(
-            "slice expression requires at least ",
-            "one bound"
-        );
+        try self.error_text("slice expression requires at least one bound");
         return add_index_expr(tree, target, null, null, null, true, span);
     }
     try self.next_token();
@@ -2451,12 +2315,7 @@ fn (self: &var Parser) parse_prefix_expression(
         },
         LBracket => try self.parse_buffer_literal_expr(tree),
         _ => {
-            let message = try unexpected_token_message(
-                self.allocator,
-                "expected expression, got ",
-                self.current_token()
-            );
-            try self.record_error(move message);
+            try self.error_token("expected expression, got ", self.current_token());
             try add_error_ident(
                 tree,
                 token_span_at(self)
@@ -2810,12 +2669,7 @@ fn (self: &var Parser) parse_field_value(
     tree: &var ast::Ast
 ) -> !?ast::FieldValue {
     if self.current_kind() != token::Kind::Ident {
-        let message = try unexpected_token_message(
-            self.allocator,
-            "expected field name, got ",
-            self.current_token()
-        );
-        try self.record_error(move message);
+        try self.error_token("expected field name, got ", self.current_token());
         return null;
     }
     let name = try self.retain_current_literal(tree);
@@ -3031,13 +2885,7 @@ fn (self: &var Parser) parse_buffer_literal_expr(
                 );
                 defer elem.deinit();
                 if !string_equals_bytes(&elem, "u8") {
-                    let message = try string_value_message(
-                        self.allocator,
-                        "buffer element must be u8, got ",
-                        &elem,
-                        ""
-                    );
-                    try self.record_error(move message);
+                    try self.error_value("buffer element must be u8, got ", &elem, "");
                     return add_error_ident(tree, span);
                 }
                 if !try self.expect_peek(token::Kind::LBrace) or
@@ -3056,13 +2904,11 @@ fn (self: &var Parser) parse_buffer_literal_expr(
             type_name
         );
         defer rendered.deinit();
-        let message = try string_value_message(
-            self.allocator,
+        try self.error_value(
             "expected buffer literal `[N]u8{}`, got type `",
             &rendered,
             "`"
         );
-        try self.record_error(move message);
     }
     return add_error_ident(tree, span);
 }
@@ -3081,21 +2927,6 @@ fn add_error_ident(
 fn string_equals_bytes(value: &string::String, expected: []u8) -> bool {
     let bytes = value.as_bytes();
     return mem::equal_bytes(bytes, expected);
-}
-
-fn string_value_message(
-    allocator: Allocator,
-    prefix: []u8,
-    value: &string::String,
-    suffix: []u8
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes(prefix);
-    let bytes = value.as_bytes();
-    try out.append_bytes(bytes);
-    try out.append_bytes(suffix);
-    return move out;
 }
 
 fn token_span_at(parser: &Parser) -> ast::Span {
@@ -3194,12 +3025,7 @@ fn (self: &var Parser) parse_type_node(
         Question => return self.parse_optional_type(builder),
         Ident => return self.parse_named_type(builder),
         _ => {
-            let message = try unexpected_token_message(
-                self.allocator,
-                "expected type, got ",
-                self.current_token()
-            );
-            try self.record_error(move message);
+            try self.error_token("expected type, got ", self.current_token());
             return null;
         },
     }
@@ -3383,12 +3209,7 @@ fn (self: &var Parser) parse_generic_param_list(
         var index = 0;
         while params.at(index) |param| {
             if !param.is_type() {
-                let message = try expected_type_param_message(
-                    self.allocator,
-                    tree,
-                    param
-                );
-                try self.record_error(move message);
+                try self.error_expected_type_param(tree, param);
                 names.deinit();
                 return null;
             }
@@ -3411,22 +3232,12 @@ fn (self: &var Parser) parse_static_param_list(
     while true {
         let current = self.current_token();
         if current.kind != token::Kind::Ident {
-            let message = try unexpected_token_message(
-                self.allocator,
-                "expected static parameter, got ",
-                current
-            );
-            try self.record_error(move message);
+            try self.error_token("expected static parameter, got ", current);
             params.deinit();
             return null;
         }
         if static_param_seen(&seen, current) {
-            let message = try token_literal_message(
-                self.allocator,
-                "duplicate static parameter ",
-                current
-            );
-            try self.record_error(move message);
+            try self.error_literal("duplicate static parameter ", current);
             params.deinit();
             return null;
         }
@@ -3475,18 +3286,6 @@ fn retain_static_param_name(
 ) -> !void {
     let key = current.literal.as_bytes();
     return seen.insert(key, true);
-}
-
-fn expected_type_param_message(
-    allocator: Allocator,
-    tree: &ast::Ast,
-    param: &ast::StaticParam
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes("expected type parameter, got ");
-    try ast::append_static_param(&var out, tree, param);
-    return move out;
 }
 
 fn append_retained_text(
@@ -3544,12 +3343,7 @@ fn (self: &var Parser) parse_static_type_arg(
             self.current_token()
         );
     }
-    let message = try unexpected_token_message(
-        self.allocator,
-        "expected static argument, got ",
-        self.current_token()
-    );
-    try self.record_error(move message);
+    try self.error_token("expected static argument, got ", self.current_token());
     return null;
 }
 
@@ -3563,10 +3357,7 @@ fn (self: &var Parser) parse_type_argument(
         return self.parse_type_node(builder);
     }
     if !allow_const {
-        try self.record_context_error(
-            "expected static type argument, got const",
-            ""
-        );
+        try self.error_text("expected static type argument, got const");
         return null;
     }
     try self.next_token();
@@ -3603,12 +3394,7 @@ fn (self: &var Parser) parse_buffer_type(
     if positive_decimal(current) |parsed| {
         size = parsed;
     } else {
-        let message = try token_literal_message(
-            self.allocator,
-            "buffer size must be a positive integer, got ",
-            current
-        );
-        try self.record_error(move message);
+        try self.error_literal("buffer size must be a positive integer, got ", current);
         return null;
     }
     if !try self.expect_peek(token::Kind::RBracket) {
@@ -3669,75 +3455,136 @@ fn positive_decimal(current: &token::Token) -> ?i64 {
 
 fn (self: &var Parser) error_expected_declaration() -> !void {
     let prefix = "expected declaration (fn, test, import, struct, enum, union, contract, impl, extern, pub, or unsafe), got ";
-    let message = try unexpected_token_message(
-        self.allocator,
-        prefix,
-        self.current_token()
-    );
-    return self.record_error(move message);
+    return self.error_token(prefix, self.current_token());
 }
 
-fn (self: &var Parser) record_context_error(
-    prefix: []u8,
-    context: []u8
-) -> !void {
-    var message = string::new(self.allocator);
-    errdefer message.deinit();
-    try message.append_bytes(prefix);
-    try message.append_bytes(context);
-    return self.record_error(move message);
+/// Starts one error diagnostic at the current token with an empty message.
+fn (self: &Parser) error_entry() -> !diagnostic::Diagnostic {
+    return diagnostic_at_token(self.allocator, self.current_token(), "");
 }
 
-fn (self: &var Parser) record_error(message: string::String) -> !void {
-    defer message.deinit();
-    let bytes = message.as_bytes();
-    let entry = try diagnostic_at_token(
-        self.allocator,
-        self.current_token(),
-        bytes
-    );
-    errdefer entry.deinit();
+/// Stores one finished error diagnostic.
+fn (self: &var Parser) record(entry: diagnostic::Diagnostic) -> !void {
     return self.diagnostics_store.append(move entry);
 }
 
-fn expected_token_message(
-    allocator: Allocator,
+/// Records `text` as an error at the current token.
+fn (self: &var Parser) error_text(text: []u8) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(text);
+    return self.record(move entry);
+}
+
+/// Records `prefix` followed by `context` as an error at the current token.
+fn (self: &var Parser) error_context(prefix: []u8, context: []u8) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(prefix);
+    try entry.message.append_bytes(context);
+    return self.record(move entry);
+}
+
+/// Records `prefix` followed by the description of `actual`.
+fn (self: &var Parser) error_token(prefix: []u8, actual: &token::Token) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(prefix);
+    try append_token_description(&var entry.message, actual);
+    return self.record(move entry);
+}
+
+/// Records `expected <label>, got <actual>`.
+fn (self: &var Parser) error_expected(label: []u8, actual: &token::Token) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes("expected ");
+    try entry.message.append_bytes(label);
+    try entry.message.append_bytes(", got ");
+    try append_token_description(&var entry.message, actual);
+    return self.record(move entry);
+}
+
+/// Records `<prefix><expected kind>, got <actual>`.
+fn (self: &var Parser) error_expected_kind(
     prefix: []u8,
     expected: token::Kind,
     actual: &token::Token
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes(prefix);
-    try append_token_type_description(&var out, expected);
-    try out.append_bytes(", got ");
-    try append_token_description(&var out, actual);
-    return move out;
+) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(prefix);
+    try append_token_type_description(&var entry.message, expected);
+    try entry.message.append_bytes(", got ");
+    try append_token_description(&var entry.message, actual);
+    return self.record(move entry);
 }
 
-fn unexpected_token_message(
-    allocator: Allocator,
-    prefix: []u8,
-    actual: &token::Token
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes(prefix);
-    try append_token_description(&var out, actual);
-    return move out;
-}
-
-fn token_literal_message(
-    allocator: Allocator,
-    prefix: []u8,
-    actual: &token::Token
-) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try out.append_bytes(prefix);
+/// Records `prefix` followed by the literal bytes of `actual`.
+fn (self: &var Parser) error_literal(prefix: []u8, actual: &token::Token) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(prefix);
     let bytes = actual.literal.as_bytes();
-    try out.append_bytes(bytes);
-    return move out;
+    try entry.message.append_bytes(bytes);
+    return self.record(move entry);
+}
+
+/// Records `<prefix><value><suffix>`.
+fn (self: &var Parser) error_value(
+    prefix: []u8,
+    value: &string::String,
+    suffix: []u8
+) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes(prefix);
+    let bytes = value.as_bytes();
+    try entry.message.append_bytes(bytes);
+    try entry.message.append_bytes(suffix);
+    return self.record(move entry);
+}
+
+/// Records the `impl <contract> for <type>;` hint for an impl without `for`.
+fn (self: &var Parser) error_impl_missing_for(contract_token: &token::Token) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes("expected `impl <contract> for ");
+    let name = contract_token.literal.as_bytes();
+    try entry.message.append_bytes(name);
+    try entry.message.append_bytes(";`; a method on a type is `fn (self: ");
+    try entry.message.append_bytes(name);
+    try entry.message.append_bytes(") name(...)`");
+    return self.record(move entry);
+}
+
+/// Records the no-body rule for `impl <contract> for <type> { ... }`.
+fn (self: &var Parser) error_impl_body(
+    contract_name: &string::String,
+    type_name: &string::String
+) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes("`impl ");
+    try append_retained_string(&var entry.message, contract_name);
+    try entry.message.append_bytes(" for ");
+    try append_retained_string(&var entry.message, type_name);
+    try entry.message.append_bytes("` takes no body; write the methods as `fn (self: ");
+    try append_retained_string(&var entry.message, type_name);
+    try entry.message.append_bytes(") name(...)` and end this with `;`");
+    return self.record(move entry);
+}
+
+/// Records `expected type parameter, got <param>`.
+fn (self: &var Parser) error_expected_type_param(
+    tree: &ast::Ast,
+    param: &ast::StaticParam
+) -> !void {
+    var entry = try self.error_entry();
+    errdefer entry.deinit();
+    try entry.message.append_bytes("expected type parameter, got ");
+    try ast::append_static_param(&var entry.message, tree, param);
+    return self.record(move entry);
 }
 
 fn append_token_description(
