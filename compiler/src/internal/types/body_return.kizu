@@ -5,7 +5,6 @@ import std::string;
 // Validates a typed non-void return expression against the declared result.
 fn (self: &var Checker) check_return_value(
     tree: &ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
     expression: ast::Expression,
     want: Type,
@@ -13,9 +12,7 @@ fn (self: &var Checker) check_return_value(
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
     var matched = false;
-    if try self.check_error_union_return(
-        tree, expression, want, got, &var matched
-    ) |problem| {
+    if try self.check_error_union_return(tree, expression, want, got, &var matched) |problem| {
         return move problem;
     }
     if matched {
@@ -23,9 +20,7 @@ fn (self: &var Checker) check_return_value(
         return null;
     }
     if try self.types.optional_elem(want) |_| {
-        if try self.wraps_into_optional(
-            tree, expression, want, got, &var matched
-        ) |problem| {
+        if try self.wraps_into_optional(tree, expression, want, got, &var matched) |problem| {
             return move problem;
         }
         if matched {
@@ -34,9 +29,7 @@ fn (self: &var Checker) check_return_value(
         }
         return try self.return_type_mismatch(want, got);
     }
-    if try self.return_value_matches_borrow_param(
-        tree, scopes, scope, expression, want, got
-    ) {
+    if try self.return_value_matches_borrow_param(tree, scope, expression, want, got) {
         out.* = true;
         return null;
     }
@@ -103,9 +96,7 @@ fn (self: &var Checker) check_error_union_return(
             out.* = true;
             return null;
         }
-        if try self.wraps_into_optional(
-            tree, expression, success, got, out
-        ) |problem| {
+        if try self.wraps_into_optional(tree, expression, success, got, out) |problem| {
             return move problem;
         }
         if out.* {
@@ -133,9 +124,7 @@ fn (self: &var Checker) check_error_union_return(
             out.* = true;
             return null;
         }
-        if try self.wraps_into_optional(
-            tree, expression, parts.success, got, out
-        ) |problem| {
+        if try self.wraps_into_optional(tree, expression, parts.success, got, out) |problem| {
             return move problem;
         }
         if out.* {
@@ -170,7 +159,6 @@ fn (self: &var Checker) accepts_bare_return(want: Type) -> !bool {
 // return type.
 fn (self: &var Checker) return_value_matches_borrow_param(
     tree: &ast::Ast,
-    scopes: &ScopeStore,
     scope: ScopeHandle,
     expression: ast::Expression,
     want: Type,
@@ -180,12 +168,12 @@ fn (self: &var Checker) return_value_matches_borrow_param(
         Ident(identifier) => {
             let retained = tree.texts.at(identifier.name.node);
             let name = retained.as_bytes();
-            if !scopes.is_borrowed(scope, name) {
+            if !self.scopes.is_borrowed(scope, name) {
                 return false;
             }
             if try self.types.explicit_borrow_type(want) |parts| {
                 if parts.mutable and
-                    !scopes.is_mut_borrowed(scope, name) {
+                    !self.scopes.is_mut_borrowed(scope, name) {
                     return false;
                 }
                 if !same_type(got, parts.inner) {
@@ -201,17 +189,12 @@ fn (self: &var Checker) return_value_matches_borrow_param(
     return false;
 }
 
-fn (self: &Checker) return_type_mismatch(
-    want: Type,
-    got: Type
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) return_type_mismatch(want: Type, got: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("return expects ");
     try self.append_checker_type(&var message, want);
     try message.append_bytes(", got ");
     try self.append_checker_type(&var message, got);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }

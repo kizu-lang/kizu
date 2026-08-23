@@ -18,9 +18,7 @@ union MatchTarget {
 // Validates a branch and tracks whether both arms return.
 fn (self: &var Checker) check_if_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::IfStmt,
     want_return: Type,
     out: &var bool
@@ -33,32 +31,26 @@ fn (self: &var Checker) check_if_stmt(
     let owned_capture = try string::from_bytes(self.allocator, source_capture);
     defer owned_capture.deinit();
     let capture = owned_capture.as_bytes();
-    let consequence = scopes.new_scope(scope);
+    let consequence = self.scopes.new_scope(scope);
     var handled = false;
     if try self.bind_container_borrow_capture(
-        tree, scopes, scope, mark, capture, condition, consequence, &var handled
+        tree, scope, capture, condition, consequence, &var handled
     ) |problem| {
         return move problem;
     }
     if !handled {
         var cond = empty_type();
-        if try self.check_expr(
-            tree, scopes, scope, mark, condition, &var cond
-        ) |problem| {
+        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
             return move problem;
         }
-        if try self.bind_condition_capture(
-            scopes, "if", capture, cond, consequence
-        ) |problem| {
+        if try self.bind_condition_capture("if", capture, cond, consequence) |problem| {
             return move problem;
         }
     }
     var left_returns = false;
     if try self.check_block(
         tree,
-        scopes,
         consequence,
-        mark,
         consequence_block,
         want_return,
         &var left_returns
@@ -66,13 +58,11 @@ fn (self: &var Checker) check_if_stmt(
         return move problem;
     }
     if alternative |alternative_block| {
-        let child = scopes.new_scope(scope);
+        let child = self.scopes.new_scope(scope);
         var right_returns = false;
         if try self.check_block(
             tree,
-            scopes,
             child,
-            mark,
             alternative_block,
             want_return,
             &var right_returns
@@ -90,7 +80,6 @@ fn (self: &var Checker) check_if_stmt(
 // optional and the payload binds into the branch scope; without one it must
 // be bool.
 fn (self: &var Checker) bind_condition_capture(
-    scopes: &var ScopeStore,
     kind: []u8,
     capture: []u8,
     cond: Type,
@@ -103,9 +92,7 @@ fn (self: &var Checker) bind_condition_capture(
             try message.append_bytes(kind);
             try message.append_bytes(" condition must be bool, got ");
             try self.append_checker_type(&var message, cond);
-            return try self.checker_message_at(
-                "type error", ast::zero_span(), move message
-            );
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
         }
         return null;
     }
@@ -120,11 +107,9 @@ fn (self: &var Checker) bind_condition_capture(
         try message.append_bytes(capture);
         try message.append_bytes("|` requires an optional condition, got ");
         try self.append_checker_type(&var message, cond);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
-    let defined = try scopes.define(scope, capture, elem, false);
+    let defined = try self.scopes.define(scope, capture, elem, false);
     return self.require_scope_definition(capture, defined);
 }
 
@@ -132,9 +117,7 @@ fn (self: &var Checker) bind_condition_capture(
 // payload borrow directly, carrying the container's provenance.
 fn (self: &var Checker) bind_container_borrow_capture(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     capture: []u8,
     condition: ast::Expression,
     branch: ScopeHandle,
@@ -147,7 +130,7 @@ fn (self: &var Checker) bind_container_borrow_capture(
     var elem = empty_type();
     var mutable = false;
     if try self.check_container_borrow_condition(
-        tree, scopes, scope, mark, condition, &var elem, &var mutable, handled
+        tree, scope, condition, &var elem, &var mutable, handled
     ) |problem| {
         return move problem;
     }
@@ -156,15 +139,13 @@ fn (self: &var Checker) bind_container_borrow_capture(
     }
     var sources = array::new<string::String>(self.allocator);
     errdefer sources.deinit();
-    try self.expr_borrow_source_list(
-        tree, scopes, scope, mark, condition, &var sources
-    );
+    try self.expr_borrow_source_list(tree, scope, condition, &var sources);
     if sources.len() == 0 {
         let owned = try string::from_bytes(self.allocator, capture);
         errdefer owned.deinit();
         try sources.append(move owned);
     }
-    let defined = try scopes.define_param_with_source(
+    let defined = try self.scopes.define_param_with_source(
         branch, capture, elem, true, mutable, move sources, false
     );
     return self.require_scope_definition(capture, defined);
@@ -175,9 +156,7 @@ fn (self: &var Checker) bind_container_borrow_capture(
 // condition path.
 fn (self: &var Checker) check_container_borrow_condition(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     expression: ast::Expression,
     elem_out: &var Type,
     mutable_out: &var bool,
@@ -188,9 +167,7 @@ fn (self: &var Checker) check_container_borrow_condition(
         Call(call) => match tree.expressions.at(call.callee.node) {
             Field(callee) => {
                 let receiver = callee.receiver;
-                if !(try capture_receiver_shape(
-                    self.allocator, tree, receiver
-                )) {
+                if !(try capture_receiver_shape(self.allocator, tree, receiver)) {
                     return null;
                 }
             },
@@ -202,9 +179,7 @@ fn (self: &var Checker) check_container_borrow_condition(
     let saved = self.capture_condition;
     self.capture_condition = true;
     var result = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, expression, &var result
-    ) |problem| {
+    if try self.check_expr(tree, scope, expression, &var result) |problem| {
         self.capture_condition = saved;
         handled.* = true;
         return move problem;
@@ -224,9 +199,7 @@ fn (self: &var Checker) check_container_borrow_condition(
 // Validates loop condition and body types.
 fn (self: &var Checker) check_while_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::WhileStmt,
     want_return: Type,
     out: &var bool
@@ -239,23 +212,19 @@ fn (self: &var Checker) check_while_stmt(
     let owned_capture = try string::from_bytes(self.allocator, source_capture);
     defer owned_capture.deinit();
     let capture = owned_capture.as_bytes();
-    let body = scopes.new_scope(scope);
+    let body = self.scopes.new_scope(scope);
     var handled = false;
     if try self.bind_container_borrow_capture(
-        tree, scopes, scope, mark, capture, condition, body, &var handled
+        tree, scope, capture, condition, body, &var handled
     ) |problem| {
         return move problem;
     }
     if !handled {
         var cond = empty_type();
-        if try self.check_expr(
-            tree, scopes, scope, mark, condition, &var cond
-        ) |problem| {
+        if try self.check_expr(tree, scope, condition, &var cond) |problem| {
             return move problem;
         }
-        if try self.bind_condition_capture(
-            scopes, "while", capture, cond, body
-        ) |problem| {
+        if try self.bind_condition_capture("while", capture, cond, body) |problem| {
             return move problem;
         }
     }
@@ -265,9 +234,7 @@ fn (self: &var Checker) check_while_stmt(
         return move problem;
     }
     var returns = false;
-    if try self.check_block(
-        tree, scopes, body, mark, body_block, want_return, &var returns
-    ) |problem| {
+    if try self.check_block(tree, body, body_block, want_return, &var returns) |problem| {
         self.leave_loop();
         return move problem;
     }
@@ -279,9 +246,7 @@ fn (self: &var Checker) check_while_stmt(
 // Validates a bounded integer range loop.
 fn (self: &var Checker) check_for_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::ForStmt,
     want_return: Type,
     out: &var bool
@@ -291,9 +256,7 @@ fn (self: &var Checker) check_for_stmt(
     let start = statement.start;
     let end = statement.end;
     let body_block = statement.body;
-    if try self.check_for_bounds(
-        tree, scopes, scope, mark, start, end
-    ) |problem| {
+    if try self.check_for_bounds(tree, scope, start, end) |problem| {
         return move problem;
     }
     let retained_label = tree.texts.at(label_text.node);
@@ -301,19 +264,17 @@ fn (self: &var Checker) check_for_stmt(
     if try self.enter_loop(label) |problem| {
         return move problem;
     }
-    let child = scopes.new_scope(scope);
+    let child = self.scopes.new_scope(scope);
     let retained_name = tree.texts.at(name_text.node);
     let name = retained_name.as_bytes();
     let index_type = try self.types.i64_type();
-    let defined = try scopes.define(child, name, index_type, false);
+    let defined = try self.scopes.define(child, name, index_type, false);
     if try self.require_scope_definition(name, defined) |problem| {
         self.leave_loop();
         return move problem;
     }
     var returns = false;
-    if try self.check_block(
-        tree, scopes, child, mark, body_block, want_return, &var returns
-    ) |problem| {
+    if try self.check_block(tree, child, body_block, want_return, &var returns) |problem| {
         self.leave_loop();
         return move problem;
     }
@@ -325,22 +286,16 @@ fn (self: &var Checker) check_for_stmt(
 // Validates the start and end expressions for a range loop.
 fn (self: &var Checker) check_for_bounds(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     start: ast::Expression,
     end: ast::Expression
 ) -> !?diagnostic::Diagnostic {
     var start_type = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, start, &var start_type
-    ) |problem| {
+    if try self.check_expr(tree, scope, start, &var start_type) |problem| {
         return move problem;
     }
     var end_type = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, end, &var end_type
-    ) |problem| {
+    if try self.check_expr(tree, scope, end, &var end_type) |problem| {
         return move problem;
     }
     if !self.types.is_text(start_type, "i64") or
@@ -351,9 +306,7 @@ fn (self: &var Checker) check_for_bounds(
         try self.append_checker_type(&var message, start_type);
         try message.append_bytes("..");
         try self.append_checker_type(&var message, end_type);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     return null;
 }
@@ -390,9 +343,7 @@ fn (self: &Checker) match_target(value_type: Type) -> ?MatchTarget {
 // Validates exhaustive simple enum tag matches.
 fn (self: &var Checker) check_match_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: ast::Statement,
     want_return: Type,
     out: &var bool
@@ -405,18 +356,14 @@ fn (self: &var Checker) check_match_stmt(
             let arms = try value.arms.clone(self.allocator);
             defer arms.deinit();
             var value_type = empty_type();
-            if try self.check_expr(
-                tree, scopes, scope, mark, value_expr, &var value_type
-            ) |problem| {
+            if try self.check_expr(tree, scope, value_expr, &var value_type) |problem| {
                 return move problem;
             }
             value_type = try self.types.borrowed_value_type(value_type);
             if self.match_target(value_type) |target| {
                 return self.check_match_arms(
                     tree,
-                    scopes,
                     scope,
-                    mark,
                     &arms,
                     target,
                     meta_capture,
@@ -436,9 +383,7 @@ fn (self: &var Checker) check_match_stmt(
 // Validates tag patterns and return flow for match arms.
 fn (self: &var Checker) check_match_arms(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     arms: &array::Array<ast::MatchArm>,
     target: MatchTarget,
     meta_capture: ast::Text,
@@ -448,9 +393,7 @@ fn (self: &var Checker) check_match_arms(
 ) -> !?diagnostic::Diagnostic {
     var arm_variants = map::new<[]u8, MetaFieldHandle>(self.allocator);
     defer arm_variants.deinit();
-    if try self.match_arm_variants(
-        tree, meta_capture, meta_owner, &var arm_variants
-    ) |problem| {
+    if try self.match_arm_variants(tree, meta_capture, meta_owner, &var arm_variants) |problem| {
         return move problem;
     }
     let retained_capture = tree.texts.at(meta_capture.node);
@@ -467,9 +410,7 @@ fn (self: &var Checker) check_match_arms(
         let retained_tag = tree.texts.at(arm.tag.node);
         let tag = retained_tag.as_bytes();
         if arm.is_wildcard(tree) {
-            if try self.validate_wildcard_match_arm(
-                tree, arm, index, arms.len()
-            ) |problem| {
+            if try self.validate_wildcard_match_arm(tree, arm, index, arms.len()) |problem| {
                 return move problem;
             }
             if wildcard {
@@ -480,23 +421,19 @@ fn (self: &var Checker) check_match_arms(
             }
             wildcard = true;
         } else {
-            if try self.match_payload_type(
-                tree, target, arm, &var payload
-            ) |problem| {
+            if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
                 return move problem;
             }
             if seen.contains(tag) {
-                return try self.match_tag_error(
-                    tree, "duplicate match tag `", target, tag, "`"
-                );
+                return try self.match_tag_error(tree, "duplicate match tag `", target, tag, "`");
             }
             try seen.insert(tag, true);
         }
-        let arm_scope = scopes.new_scope(scope);
+        let arm_scope = self.scopes.new_scope(scope);
         let retained_binding = tree.texts.at(arm.binding.node);
         let binding = retained_binding.as_bytes();
         if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
-            let defined = try scopes.define(arm_scope, binding, payload, false);
+            let defined = try self.scopes.define(arm_scope, binding, payload, false);
             if try self.require_scope_definition(binding, defined) |problem| {
                 return move problem;
             }
@@ -508,9 +445,7 @@ fn (self: &var Checker) check_match_arms(
             try self.bind_meta_field(capture, field);
         }
         var returns = false;
-        if try self.check_stmt(
-            tree, scopes, arm_scope, mark, arm.body, want_return, &var returns
-        ) |problem| {
+        if try self.check_stmt(tree, arm_scope, arm.body, want_return, &var returns) |problem| {
             self.meta_bindings.restore(previous_meta);
             return move problem;
         }
@@ -591,9 +526,7 @@ fn (self: &var Checker) meta_variants(
             }
         }
     } else {
-        return try self.comptime_form_error(
-            stdmeta::Form::Variants, "` expects 1 static argument"
-        );
+        return try self.comptime_form_error(stdmeta::Form::Variants, "` expects 1 static argument");
     }
     let owner_text = try self.types.copy_text(self.allocator, owner);
     defer owner_text.deinit();
@@ -614,9 +547,7 @@ fn (self: &var Checker) meta_variants(
             try message.append_bytes(stdmeta::spelling(stdmeta::Form::Variants));
             try message.append_bytes("` expects an enum or union, got ");
             try self.append_checker_type(&var message, owner);
-            return try self.checker_message_at(
-                "comptime error", ast::zero_span(), move message
-            );
+            return try self.checker_message_at("comptime error", ast::zero_span(), move message);
         }
     }
     var index = 0;
@@ -711,9 +642,7 @@ fn (self: &Checker) match_payload_type(
     match target {
         Enum(handle) => {
             if !self.enum_has_tag(handle, tag) {
-                return try self.match_tag_error(
-                    tree, "unknown match tag `", target, tag, "`"
-                );
+                return try self.match_tag_error(tree, "unknown match tag `", target, tag, "`");
             }
             if mem::len(binding) > 0 {
                 return try self.match_tag_error(
@@ -725,9 +654,7 @@ fn (self: &Checker) match_payload_type(
         },
         Union(handle) => {
             let payload = self.union_variant_payload(handle, tag) orelse
-                return try self.match_tag_error(
-                tree, "unknown match tag `", target, tag, "`"
-            );
+                return try self.match_tag_error(tree, "unknown match tag `", target, tag, "`");
             if same_type(payload, empty_type()) and mem::len(binding) > 0 {
                 return try self.match_tag_error(
                     tree, "union variant `", target, tag, "` has no payload"
@@ -746,10 +673,7 @@ fn (self: &Checker) enum_has_tag(handle: EnumHandle, tag: []u8) -> bool {
     return false;
 }
 
-fn (self: &Checker) union_variant_payload(
-    handle: UnionHandle,
-    tag: []u8
-) -> ?Type {
+fn (self: &Checker) union_variant_payload(handle: UnionHandle, tag: []u8) -> ?Type {
     if self.metadata.unions.at(handle.index) |union_type| {
         return union_type.variants.get(tag);
     }
@@ -836,16 +760,12 @@ fn (self: &Checker) missing_match_variants(
     return sort::strings(out);
 }
 
-fn (self: &Checker) match_target_error(
-    value_type: Type
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) match_target_error(value_type: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("match expects enum or union, got ");
     try self.append_checker_type(&var message, value_type);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) match_tag_error(
@@ -862,9 +782,7 @@ fn (self: &Checker) match_tag_error(
     try message.append_bytes("::");
     try message.append_bytes(tag);
     try message.append_bytes(suffix);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &Checker) match_not_exhaustive_error(
@@ -884,27 +802,21 @@ fn (self: &Checker) match_not_exhaustive_error(
     try self.append_match_type_name(&var message, tree, target);
     try message.append_bytes("` is not exhaustive: missing ");
     try message.append_bytes(joined_bytes);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Types `cond orelse return/break/continue`: on null the guard leaves the
 // enclosing function or loop, so the guard itself always yields the payload.
 fn (self: &var Checker) check_orelse_guard_expr(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     expression: &ast::OrelseGuardExpr,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     let condition = expression.condition;
     let exit = expression.exit;
     var cond = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, condition, &var cond
-    ) |problem| {
+    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
         return move problem;
     }
     var elem = empty_type();
@@ -915,9 +827,7 @@ fn (self: &var Checker) check_orelse_guard_expr(
         errdefer message.deinit();
         try message.append_bytes("`orelse` expects an optional left operand, got ");
         try self.append_checker_type(&var message, cond);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     match tree.statements.at(exit.node) {
         Return(value) => {
@@ -925,9 +835,7 @@ fn (self: &var Checker) check_orelse_guard_expr(
             var returns = false;
             if try self.check_return_stmt(
                 tree,
-                scopes,
                 scope,
-                mark,
                 &copied,
                 self.current_return_type(),
                 &var returns
@@ -937,9 +845,7 @@ fn (self: &var Checker) check_orelse_guard_expr(
         },
         Break(value) => {
             var ignored = false;
-            if try self.check_loop_branch_stmt(
-                tree, "break", value.label, &var ignored
-            ) |problem| {
+            if try self.check_loop_branch_stmt(tree, "break", value.label, &var ignored) |problem| {
                 return move problem;
             }
         },
@@ -963,9 +869,7 @@ fn (self: &var Checker) check_orelse_guard_expr(
 // Validates an if expression and returns the common branch type.
 fn (self: &var Checker) check_if_expr(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::IfStmt,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -981,9 +885,7 @@ fn (self: &var Checker) check_if_expr(
         );
     }
     var cond = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, condition, &var cond
-    ) |problem| {
+    if try self.check_expr(tree, scope, condition, &var cond) |problem| {
         return move problem;
     }
     if !self.types.is_text(cond, "bool") {
@@ -991,25 +893,19 @@ fn (self: &var Checker) check_if_expr(
         errdefer message.deinit();
         try message.append_bytes("if condition must be bool, got ");
         try self.append_checker_type(&var message, cond);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     let alternative_block = alternative orelse return try self.checker_error_at(
         "type error", ast::zero_span(), "if expression requires else branch"
     );
-    let left_scope = scopes.new_scope(scope);
+    let left_scope = self.scopes.new_scope(scope);
     var left = empty_type();
-    if try self.check_block_value(
-        tree, scopes, left_scope, mark, consequence, &var left
-    ) |problem| {
+    if try self.check_block_value(tree, left_scope, consequence, &var left) |problem| {
         return move problem;
     }
-    let right_scope = scopes.new_scope(scope);
+    let right_scope = self.scopes.new_scope(scope);
     var right = empty_type();
-    if try self.check_block_value(
-        tree, scopes, right_scope, mark, alternative_block, &var right
-    ) |problem| {
+    if try self.check_block_value(tree, right_scope, alternative_block, &var right) |problem| {
         return move problem;
     }
     if !same_type(left, right) {
@@ -1019,9 +915,7 @@ fn (self: &var Checker) check_if_expr(
         try self.append_checker_type(&var message, left);
         try message.append_bytes(" vs ");
         try self.append_checker_type(&var message, right);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     out.* = left;
     return null;
@@ -1030,9 +924,7 @@ fn (self: &var Checker) check_if_expr(
 // Validates a block used as an expression branch.
 fn (self: &var Checker) check_block_value(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     block: ast::Block,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -1040,16 +932,12 @@ fn (self: &var Checker) check_block_value(
     var index = 0;
     while block_statement_at(tree, block, index) |statement| {
         if index == count - 1 {
-            return self.check_stmt_value(
-                tree, scopes, scope, mark, statement, out
-            );
+            return self.check_stmt_value(tree, scope, statement, out);
         }
         var returns = false;
         if try self.check_stmt(
             tree,
-            scopes,
             scope,
-            mark,
             statement,
             self.current_return_type(),
             &var returns
@@ -1079,9 +967,7 @@ fn block_statement_count(tree: &ast::Ast, block: ast::Block) -> i64 {
 // Computes the value type of a statement in expression-tail position.
 fn (self: &var Checker) check_stmt_value(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: ast::Statement,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -1094,9 +980,7 @@ fn (self: &var Checker) check_stmt_value(
                 );
             }
             let expression = value.expr;
-            return self.check_expr(
-                tree, scopes, scope, mark, expression, out
-            );
+            return self.check_expr(tree, scope, expression, out);
         },
         If(value) => {
             let copied = ast::IfStmt {
@@ -1105,27 +989,16 @@ fn (self: &var Checker) check_stmt_value(
                 alternative: value.alternative,
                 capture: value.capture
             };
-            return self.check_if_expr(
-                tree, scopes, scope, mark, &copied, out
-            );
+            return self.check_if_expr(tree, scope, &copied, out);
         },
-        Match(value) => return self.check_match_expr(
-            tree, scopes, scope, mark, value, out
-        ),
+        Match(value) => return self.check_match_expr(tree, scope, value, out),
         Return(_) => return try self.checker_error_at(
             "type error", ast::zero_span(),
             "expression match arm cannot `return`"
         ),
         Block(_) => {
-            let child = scopes.new_scope(scope);
-            return self.check_block_value(
-                tree,
-                scopes,
-                child,
-                mark,
-                ast::Block { node: statement.node },
-                out
-            );
+            let child = self.scopes.new_scope(scope);
+            return self.check_block_value(tree, child, ast::Block { node: statement.node }, out);
         },
         _ => return try self.checker_error_at(
             "type error", ast::zero_span(),
@@ -1137,9 +1010,7 @@ fn (self: &var Checker) check_stmt_value(
 // Validates an exhaustive match expression and its arm result type.
 fn (self: &var Checker) check_match_expr(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::MatchStmt,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
@@ -1147,25 +1018,19 @@ fn (self: &var Checker) check_match_expr(
     let arms = try statement.arms.clone(self.allocator);
     defer arms.deinit();
     var value_type = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, value_expr, &var value_type
-    ) |problem| {
+    if try self.check_expr(tree, scope, value_expr, &var value_type) |problem| {
         return move problem;
     }
     value_type = try self.types.borrowed_value_type(value_type);
     let target = self.match_target(value_type) orelse
         return try self.match_target_error(value_type);
-    return self.check_match_expr_arms(
-        tree, scopes, scope, mark, &arms, target, out
-    );
+    return self.check_match_expr_arms(tree, scope, &arms, target, out);
 }
 
 // Validates match expression arms and returns their common type.
 fn (self: &var Checker) check_match_expr_arms(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     arms: &array::Array<ast::MatchArm>,
     target: MatchTarget,
     out: &var Type
@@ -1178,9 +1043,7 @@ fn (self: &var Checker) check_match_expr_arms(
     while arms.at(index) |arm| {
         var got = empty_type();
         if arm.is_wildcard(tree) {
-            if try self.validate_wildcard_match_arm(
-                tree, arm, index, arms.len()
-            ) |problem| {
+            if try self.validate_wildcard_match_arm(tree, arm, index, arms.len()) |problem| {
                 return move problem;
             }
             if wildcard {
@@ -1190,24 +1053,18 @@ fn (self: &var Checker) check_match_expr_arms(
                 );
             }
             wildcard = true;
-            let child = scopes.new_scope(scope);
-            if try self.check_stmt_value(
-                tree, scopes, child, mark, arm.body, &var got
-            ) |problem| {
+            let child = self.scopes.new_scope(scope);
+            if try self.check_stmt_value(tree, child, arm.body, &var got) |problem| {
                 return move problem;
             }
         } else {
-            if try self.check_match_expr_arm(
-                tree, scopes, scope, mark, arm, target, &var got
-            ) |problem| {
+            if try self.check_match_expr_arm(tree, scope, arm, target, &var got) |problem| {
                 return move problem;
             }
             let retained_tag = tree.texts.at(arm.tag.node);
             let tag = retained_tag.as_bytes();
             if seen.contains(tag) {
-                return try self.match_tag_error(
-                    tree, "duplicate match tag `", target, tag, "`"
-                );
+                return try self.match_tag_error(tree, "duplicate match tag `", target, tag, "`");
             }
             try seen.insert(tag, true);
         }
@@ -1221,9 +1078,7 @@ fn (self: &var Checker) check_match_expr_arms(
                 try self.append_checker_type(&var message, result);
                 try message.append_bytes(" vs ");
                 try self.append_checker_type(&var message, got);
-                return try self.checker_message_at(
-                    "type error", ast::zero_span(), move message
-                );
+                return try self.checker_message_at("type error", ast::zero_span(), move message);
             }
         }
         index = index + 1;
@@ -1238,33 +1093,27 @@ fn (self: &var Checker) check_match_expr_arms(
 // Validates one match expression arm and returns its value type.
 fn (self: &var Checker) check_match_expr_arm(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     arm: &ast::MatchArm,
     target: MatchTarget,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if arm.is_wildcard(tree) {
-        let child = scopes.new_scope(scope);
-        return self.check_stmt_value(
-            tree, scopes, child, mark, arm.body, out
-        );
+        let child = self.scopes.new_scope(scope);
+        return self.check_stmt_value(tree, child, arm.body, out);
     }
     var payload = empty_type();
     if try self.match_payload_type(tree, target, arm, &var payload) |problem| {
         return move problem;
     }
-    let arm_scope = scopes.new_scope(scope);
+    let arm_scope = self.scopes.new_scope(scope);
     let retained_binding = tree.texts.at(arm.binding.node);
     let binding = retained_binding.as_bytes();
     if !same_type(payload, empty_type()) and mem::len(binding) > 0 {
-        let defined = try scopes.define(arm_scope, binding, payload, false);
+        let defined = try self.scopes.define(arm_scope, binding, payload, false);
         if try self.require_scope_definition(binding, defined) |problem| {
             return move problem;
         }
     }
-    return self.check_stmt_value(
-        tree, scopes, arm_scope, mark, arm.body, out
-    );
+    return self.check_stmt_value(tree, arm_scope, arm.body, out);
 }

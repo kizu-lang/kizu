@@ -226,6 +226,25 @@ compiler と同じ契約で通した状態です。
 binary byte identity や LLVM text identity は要求しません。契約は実行結果、
 diagnostic、artifact の意味が持ちます。
 
+## Module status
+
+code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。検証欄は挙動一致を
+何で確認しているか。ratio が 2.0 以上の module は gate 未達で、圧縮 pass が残っている。
+
+| module | Go | Kizu | ratio | 検証 |
+| --- | --- | --- | --- | --- |
+| source | 44 | 39 | 0.89 | unit |
+| token | 123 | 254 | 2.07 | unit(parser corpus 経由) |
+| diagnostic | 126 | 291 | 2.31 | unit(corpus の render 経由) |
+| lexer | 325 | 593 | 1.82 | unit + parser corpus |
+| ast | 1042 | 2330 | 2.24 | parser corpus(render) |
+| parser | 1796 | 2990 | 1.66 | parser corpus 308 case(diagnostics + render) |
+| typ | 524 | 1047 | 2.00 | unit |
+| stdprim / stdmeta / stdmethod / unsafecap | 140 / 211 / 80 / 60 | 259 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
+| manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
+| project(+stdlib) | 1820 | 3262 | 1.79 | check corpus 635 case の load 段 + package 単位 render |
+| types | 7768 | 15293 | 1.97 | check corpus 635 case(diagnostics) |
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。

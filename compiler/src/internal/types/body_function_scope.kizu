@@ -27,14 +27,11 @@ fn (self: &var Checker) check_main_return_type(
     try message.append_bytes("`main` returns `");
     try self.append_checker_type(&var message, return_type);
     try message.append_bytes("`, expected `void` or `!void`");
-    return try self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Binds a parameter and derives root provenance from its type.
 fn (self: &var Checker) define_scope_param(
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
     name: []u8,
     type_name: Type,
@@ -50,7 +47,7 @@ fn (self: &var Checker) define_scope_param(
         errdefer source.deinit();
         try sources.append(move source);
     }
-    return scopes.define_param_with_source(
+    return self.scopes.define_param_with_source(
         scope,
         name,
         type_name,
@@ -65,7 +62,6 @@ fn (self: &var Checker) define_scope_param(
 // declared types for static-argument forwarding. Parameters are copied out
 // of metadata one at a time so the scope definition can mutate the checker.
 fn (self: &var Checker) define_static_value_params(
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
     function: FunctionHandle,
     out: &var map::Map<[]u8, Type>
@@ -81,7 +77,6 @@ fn (self: &var Checker) define_static_value_params(
         if !parameter.is_type {
             let name = parameter.name.as_bytes();
             let defined = try self.define_scope_param(
-                scopes,
                 scope,
                 name,
                 parameter.type_name,
@@ -112,17 +107,12 @@ fn (self: &Checker) require_scope_definition(
     try message.append_bytes("duplicate variable `");
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(96));
-    return try self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Reports the stable first unread binding declared directly in one scope.
-fn (self: &Checker) unread_local_error(
-    scopes: &ScopeStore,
-    scope: ScopeHandle
-) -> !?diagnostic::Diagnostic {
-    let retained = scopes.scopes.at(scope.node);
+fn (self: &Checker) unread_local_error(scope: ScopeHandle) -> !?diagnostic::Diagnostic {
+    let retained = self.scopes.scopes.at(scope.node);
     var names = array::new<string::String>(self.allocator);
     defer names.deinit();
     var index = 0;
@@ -149,9 +139,7 @@ fn (self: &Checker) unread_local_error(
                 try message.append_bytes("local `");
                 try message.append_bytes(name);
                 try message.append_bytes("` is never read");
-                var problem = try self.checker_message_at(
-                    "type error", span, move message
-                );
+                var problem = try self.checker_message_at("type error", span, move message);
                 errdefer problem.deinit();
                 try problem.with_code("type.unused_local");
                 try problem.with_help(

@@ -108,7 +108,9 @@ struct Checker {
     instantiation_depth: i64,
     capture_condition: bool,
     deinit_owner_maps: arena::Arena<map::Map<[]u8, bool>>,
-    deinit_owners: ?arena::Handle<map::Map<[]u8, bool>>
+    deinit_owners: ?arena::Handle<map::Map<[]u8, bool>>,
+    scopes: ScopeStore,
+    mark: UnsafeMark
 }
 
 fn new_checker(allocator: Allocator) -> Checker {
@@ -128,7 +130,9 @@ fn new_checker(allocator: Allocator) -> Checker {
         instantiation_depth: 0,
         capture_condition: false,
         deinit_owner_maps: arena::new<map::Map<[]u8, bool>>(allocator),
-        deinit_owners: null
+        deinit_owners: null,
+        scopes: new_scope_store(allocator),
+        mark: UnsafeMark { used: null }
     };
 }
 
@@ -150,50 +154,33 @@ fn (self: &var Checker) retain_meta_field(
 }
 
 // Selects one retained field under a live comptime capture name.
-fn (self: &var Checker) bind_meta_field(
-    capture: []u8,
-    field: MetaFieldHandle
-) -> !void {
+fn (self: &var Checker) bind_meta_field(capture: []u8, field: MetaFieldHandle) -> !void {
     let previous = try self.meta_bindings.bind(capture, field);
     if previous |_| {}
     return;
 }
 
-fn (self: &var Checker) bind_type_arg_value(
-    name: []u8,
-    value: Type
-) -> !void {
+fn (self: &var Checker) bind_type_arg_value(name: []u8, value: Type) -> !void {
     return self.type_args.bind(name, value);
 }
 
 // Copies one retained type at the checker diagnostic boundary.
-fn (self: &Checker) copy_resolution_text(
-    allocator: Allocator,
-    value: Type
-) -> !string::String {
+fn (self: &Checker) copy_resolution_text(allocator: Allocator, value: Type) -> !string::String {
     return self.types.copy_text(allocator, value);
 }
 
 // Returns the owner needed to describe one retained meta field.
-fn (self: &Checker) meta_field_owner(
-    handle: MetaFieldHandle
-) -> Type {
+fn (self: &Checker) meta_field_owner(handle: MetaFieldHandle) -> Type {
     return self.meta_field_entries.at(handle.node).owner;
 }
 
 // resolve_type validates one compiler-owned type spelling.
-fn (self: &var Checker) resolve_type(
-    tree: &ast::Ast,
-    name: []u8
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_type(tree: &ast::Ast, name: []u8) -> !TypeResolution {
     let retained = try self.types.intern(name);
     return self.resolve_retained_type(tree, retained);
 }
 
-fn (self: &var Checker) resolve_retained_type(
-    tree: &ast::Ast,
-    retained: Type
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_retained_type(tree: &ast::Ast, retained: Type) -> !TypeResolution {
     var resolved = retained;
     match try self.resolve_meta_type(tree, resolved) {
         Value(value) => {
@@ -211,21 +198,13 @@ fn (self: &var Checker) resolve_retained_type(
 
 // resolve_type_node validates one parser-owned graph and retains its canonical
 // identity in the checker table.
-fn (self: &var Checker) resolve_type_node(
-    tree: &ast::Ast,
-    parsed: ?typ::Type
-) -> !TypeResolution {
-    let source = parsed orelse return TypeResolution::Issue(
-        TypeResolutionIssue::Missing
-    );
+fn (self: &var Checker) resolve_type_node(tree: &ast::Ast, parsed: ?typ::Type) -> !TypeResolution {
+    let source = parsed orelse return TypeResolution::Issue(TypeResolutionIssue::Missing);
     let value = try self.types.remember(&tree.types, source);
     return self.resolve_type_value(tree, value);
 }
 
-fn (self: &var Checker) resolve_type_value(
-    tree: &ast::Ast,
-    value: Type
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, value: Type) -> !TypeResolution {
     let parsed = self.types.lookup(value) orelse return TypeResolution::Issue(
         TypeResolutionIssue::Unknown(value)
     );
@@ -251,15 +230,8 @@ fn (self: &var Checker) resolve_type_value(
             let elem = try self.types.retain_parsed(child);
             return self.resolve_nullable_type(tree, value, elem);
         },
-        Name(node) => return self.resolve_name_type(
-            tree,
-            value,
-            parsed,
-            node
-        ),
-        _ => return TypeResolution::Issue(
-            TypeResolutionIssue::Unknown(value)
-        ),
+        Name(node) => return self.resolve_name_type(tree, value, parsed, node),
+        _ => return TypeResolution::Issue(TypeResolutionIssue::Unknown(value)),
     }
 }
 
@@ -269,20 +241,12 @@ fn (self: &var Checker) resolve_wrapping_type(
     elem: Type
 ) -> !TypeResolution {
     if self.is_optional_root(elem) {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::WrapsOptional(name)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::WrapsOptional(name));
     }
-    return retain_resolution_name(
-        name,
-        try self.resolve_type_value(tree, elem)
-    );
+    return retain_resolution_name(name, try self.resolve_type_value(tree, elem));
 }
 
-fn (self: &var Checker) resolve_error_union_type(
-    tree: &ast::Ast,
-    name: Type
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_error_union_type(tree: &ast::Ast, name: Type) -> !TypeResolution {
     let parts = try self.types.error_union_parts(name) orelse
         return TypeResolution::Issue(TypeResolutionIssue::Unknown(name));
     if !same_type(parts.err, empty_type()) {
@@ -290,18 +254,13 @@ fn (self: &var Checker) resolve_error_union_type(
             Issue(issue) => return TypeResolution::Issue(issue),
             Value(error_name) => {
                 if !self.has_error_set(error_name) {
-                    return TypeResolution::Issue(
-                        TypeResolutionIssue::ErrorSetRequired(error_name)
-                    );
+                    return TypeResolution::Issue(TypeResolutionIssue::ErrorSetRequired(error_name));
                 }
             },
         }
     }
     if self.is_optional_root(parts.success) {
-        return retain_resolution_name(
-            name,
-            try self.resolve_type_value(tree, parts.success)
-        );
+        return retain_resolution_name(name, try self.resolve_type_value(tree, parts.success));
     }
     return self.resolve_wrapping_type(tree, name, parts.success);
 }
@@ -312,25 +271,15 @@ fn (self: &var Checker) resolve_nullable_type(
     elem: Type
 ) -> !TypeResolution {
     if self.is_optional_root(elem) {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::OptionalOptional(elem)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::OptionalOptional(elem));
     }
     if self.is_error_union_root(elem) {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::OptionalErrorUnion(elem)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::OptionalErrorUnion(elem));
     }
-    return retain_resolution_name(
-        name,
-        try self.resolve_type_value(tree, elem)
-    );
+    return retain_resolution_name(name, try self.resolve_type_value(tree, elem));
 }
 
-fn retain_resolution_name(
-    name: Type,
-    resolved: TypeResolution
-) -> TypeResolution {
+fn retain_resolution_name(name: Type, resolved: TypeResolution) -> TypeResolution {
     return match resolved {
         Value(_) => TypeResolution::Value(name),
         Issue(issue) => TypeResolution::Issue(issue),
@@ -379,10 +328,7 @@ fn (self: &var Checker) resolve_name_type(
     return self.resolve_generic_type(tree, name, parsed, node, bytes);
 }
 
-fn copy_name_path(
-    allocator: Allocator,
-    node: &typ::Name
-) -> !string::String {
+fn copy_name_path(allocator: Allocator, node: &typ::Name) -> !string::String {
     var out = string::new(allocator);
     errdefer out.deinit();
     var index = 0;
@@ -397,12 +343,8 @@ fn copy_name_path(
     return move out;
 }
 
-fn (self: &Checker) resolve_named_type(
-    name: Type
-) -> TypeResolution {
-    let handle = name.node orelse return TypeResolution::Issue(
-        TypeResolutionIssue::Unknown(name)
-    );
+fn (self: &Checker) resolve_named_type(name: Type) -> TypeResolution {
+    let handle = name.node orelse return TypeResolution::Issue(TypeResolutionIssue::Unknown(name));
     let entry = self.types.entries.at(handle);
     let bytes = entry.spelling.as_bytes();
     if self.type_params.contains(bytes) or self.metadata.is_type_name(bytes) {
@@ -423,9 +365,7 @@ fn (self: &var Checker) resolve_generic_type(
         let child = typ::child_type(parsed, argument);
         let retained = try self.types.retain_parsed(child);
         if try self.types.optional_elem(retained) |_| {
-            return TypeResolution::Issue(
-                TypeResolutionIssue::OptionalStaticArg(retained)
-            );
+            return TypeResolution::Issue(TypeResolutionIssue::OptionalStaticArg(retained));
         }
         index = index + 1;
     }
@@ -440,52 +380,26 @@ fn (self: &var Checker) resolve_generic_type(
     }
     let base_type = try self.types.intern(base);
     if mem::equal_bytes(base, "std::mem::Box") {
-        return self.resolve_single_generic_type(
-            tree,
-            name,
-            base_type,
-            parsed,
-            node
-        );
+        return self.resolve_single_generic_type(tree, name, base_type, parsed, node);
     }
     if mem::equal_bytes(base, "std::map::Map") {
         return self.resolve_map_type(tree, name, parsed, node);
     }
     if mem::equal_bytes(base, "ptr") {
         if node.args.len() != 1 {
-            return TypeResolution::Issue(
-                TypeResolutionIssue::SingleGenericArity(base_type)
-            );
+            return TypeResolution::Issue(TypeResolutionIssue::SingleGenericArity(base_type));
         }
-        let argument = typ::child_type(
-            parsed,
-            node.args.get_or_panic(0)
-        );
+        let argument = typ::child_type(parsed, node.args.get_or_panic(0));
         let retained = try self.types.retain_parsed(argument);
         return self.resolve_pointer_type(tree, name, retained);
     }
     if self.user_generic_arity(tree, base) |expected| {
-        return self.resolve_user_generic_type(
-            tree,
-            name,
-            base_type,
-            parsed,
-            node,
-            expected
-        );
+        return self.resolve_user_generic_type(tree, name, base_type, parsed, node, expected);
     }
     if !is_known_generic_base(base) {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::UnknownGeneric(base_type)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::UnknownGeneric(base_type));
     }
-    return self.resolve_single_generic_type(
-        tree,
-        name,
-        base_type,
-        parsed,
-        node
-    );
+    return self.resolve_single_generic_type(tree, name, base_type, parsed, node);
 }
 
 fn (self: &var Checker) resolve_single_generic_type(
@@ -496,19 +410,11 @@ fn (self: &var Checker) resolve_single_generic_type(
     node: &typ::Name
 ) -> !TypeResolution {
     if node.args.len() != 1 {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::SingleGenericArity(base)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::SingleGenericArity(base));
     }
-    let argument = typ::child_type(
-        parsed,
-        node.args.get_or_panic(0)
-    );
+    let argument = typ::child_type(parsed, node.args.get_or_panic(0));
     let retained = try self.types.retain_parsed(argument);
-    return retain_resolution_name(
-        name,
-        try self.resolve_type_value(tree, retained)
-    );
+    return retain_resolution_name(name, try self.resolve_type_value(tree, retained));
 }
 
 fn (self: &var Checker) resolve_user_generic_type(
@@ -556,10 +462,7 @@ fn (self: &var Checker) resolve_map_type(
     }
     let value_node = typ::child_type(parsed, node.args.get_or_panic(1));
     let value = try self.types.retain_parsed(value_node);
-    return retain_resolution_name(
-        name,
-        try self.resolve_type_value(tree, value)
-    );
+    return retain_resolution_name(name, try self.resolve_type_value(tree, value));
 }
 
 fn (self: &Checker) is_type_parameter(value: Type) -> bool {
@@ -584,16 +487,10 @@ fn (self: &var Checker) resolve_pointer_type(
             _ => {},
         }
     }
-    return retain_resolution_name(
-        name,
-        try self.resolve_type_value(tree, inner)
-    );
+    return retain_resolution_name(name, try self.resolve_type_value(tree, inner));
 }
 
-fn (self: &Checker) user_generic_arity(
-    tree: &ast::Ast,
-    base: []u8
-) -> ?i64 {
+fn (self: &Checker) user_generic_arity(tree: &ast::Ast, base: []u8) -> ?i64 {
     if self.metadata.structs.get(base) |declaration| {
         match tree.declarations.at(declaration.node) {
             Struct(value) => return value.type_params.len(),
@@ -616,9 +513,7 @@ fn (self: &var Checker) resolve_meta_type_form(
     actual: i64
 ) -> !TypeResolution {
     if !shape.type_form {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::MetaNotType(form)
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::MetaNotType(form));
     }
     if actual != shape.static_args {
         return TypeResolution::Issue(
@@ -649,10 +544,7 @@ fn (self: &var Checker) resolve_meta_type_form(
 // returns `!std::meta::field_type<T, f>`, so the form sits under the error
 // union rather than at the top, and the wrapper has to be rebuilt around what
 // the form resolved to.
-fn (self: &var Checker) resolve_meta_type_deep(
-    tree: &ast::Ast,
-    value: Type
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_meta_type_deep(tree: &ast::Ast, value: Type) -> !TypeResolution {
     match try self.resolve_meta_type(tree, value) {
         Value(resolved) => {
             if !same_type(resolved, value) {
@@ -675,34 +567,22 @@ fn (self: &var Checker) resolve_meta_type_deep(
                 );
             }
             try out.append_bytes("!");
-            let ok = try self.types.retain_parsed(
-                typ::child_type(parsed, node.ok)
-            );
-            if try self.append_meta_type_deep(
-                tree, &var out, ok
-            ) |issue| {
+            let ok = try self.types.retain_parsed(typ::child_type(parsed, node.ok));
+            if try self.append_meta_type_deep(tree, &var out, ok) |issue| {
                 return TypeResolution::Issue(issue);
             }
         },
         Optional(node) => {
             try out.append_bytes("?");
-            let elem = try self.types.retain_parsed(
-                typ::child_type(parsed, node.elem)
-            );
-            if try self.append_meta_type_deep(
-                tree, &var out, elem
-            ) |issue| {
+            let elem = try self.types.retain_parsed(typ::child_type(parsed, node.elem));
+            if try self.append_meta_type_deep(tree, &var out, elem) |issue| {
                 return TypeResolution::Issue(issue);
             }
         },
         Slice(node) => {
             try out.append_bytes("[]");
-            let elem = try self.types.retain_parsed(
-                typ::child_type(parsed, node.elem)
-            );
-            if try self.append_meta_type_deep(
-                tree, &var out, elem
-            ) |issue| {
+            let elem = try self.types.retain_parsed(typ::child_type(parsed, node.elem));
+            if try self.append_meta_type_deep(tree, &var out, elem) |issue| {
                 return TypeResolution::Issue(issue);
             }
         },
@@ -719,12 +599,8 @@ fn (self: &var Checker) resolve_meta_type_deep(
                 if index > 0 {
                     try out.append_bytes(", ");
                 }
-                let arg = try self.types.retain_parsed(
-                    typ::child_type(parsed, argument)
-                );
-                if try self.append_meta_type_deep(
-                    tree, &var out, arg
-                ) |issue| {
+                let arg = try self.types.retain_parsed(typ::child_type(parsed, argument));
+                if try self.append_meta_type_deep(tree, &var out, arg) |issue| {
                     return TypeResolution::Issue(issue);
                 }
                 index = index + 1;
@@ -753,19 +629,11 @@ fn (self: &var Checker) append_meta_type_deep(
     }
 }
 
-fn (self: &var Checker) resolve_meta_type(
-    tree: &ast::Ast,
-    value: Type
-) -> !TypeResolution {
+fn (self: &var Checker) resolve_meta_type(tree: &ast::Ast, value: Type) -> !TypeResolution {
     let parsed = self.types.lookup(value) orelse
         return TypeResolution::Value(value);
     match typ::root_node(&self.types.parsed, parsed) {
-        Name(node) => return self.resolve_meta_name_type(
-            tree,
-            value,
-            parsed,
-            node
-        ),
+        Name(node) => return self.resolve_meta_name_type(tree, value, parsed, node),
         _ => return TypeResolution::Value(value),
     }
 }
@@ -791,9 +659,7 @@ fn (self: &var Checker) resolve_meta_name_type(
     while node.args.get(index) |argument| {
         let child = typ::child_type(parsed, argument);
         let retained = try self.types.retain_parsed(child);
-        let substituted = try self.type_args.substitute(
-            &var self.types, retained
-        );
+        let substituted = try self.type_args.substitute(&var self.types, retained);
         match try self.resolve_meta_type(tree, substituted) {
             Value(resolved) => try args.append(resolved),
             Issue(issue) => return TypeResolution::Issue(issue),
@@ -832,9 +698,7 @@ fn (self: &var Checker) resolve_meta_variant_type(
         Value(handle) => {
             let field = self.meta_field_entries.at(handle.node);
             if same_type(field.type_name, empty_type()) {
-                return TypeResolution::Issue(
-                    TypeResolutionIssue::MetaVariantNoPayload(handle)
-                );
+                return TypeResolution::Issue(TypeResolutionIssue::MetaVariantNoPayload(handle));
             }
             return TypeResolution::Value(field.type_name);
         },
@@ -857,9 +721,7 @@ fn (self: &var Checker) resolve_meta_capture(
     }
     let capture = args.get_or_panic(1);
     let handle = self.meta_field_handle(capture) orelse
-        return MetaCaptureResolution::Issue(
-        TypeResolutionIssue::MetaCaptureUnbound(capture)
-    );
+        return MetaCaptureResolution::Issue(TypeResolutionIssue::MetaCaptureUnbound(capture));
     let field = self.meta_field_entries.at(handle.node);
     if field.variant != stdmeta::variant_form(form) {
         return MetaCaptureResolution::Issue(
@@ -889,9 +751,7 @@ fn (self: &var Checker) resolve_meta_capture(
     return MetaCaptureResolution::Value(handle);
 }
 
-fn (self: &Checker) meta_field_handle(
-    capture: Type
-) -> ?MetaFieldHandle {
+fn (self: &Checker) meta_field_handle(capture: Type) -> ?MetaFieldHandle {
     let handle = capture.node orelse return null;
     let entry = self.types.entries.at(handle);
     let bytes = entry.spelling.as_bytes();
@@ -903,9 +763,7 @@ fn (self: &var Checker) resolve_meta_element(
     args: &array::Array<Type>
 ) -> !TypeResolution {
     if args.len() != 1 {
-        return TypeResolution::Issue(
-            TypeResolutionIssue::MetaElementArity
-        );
+        return TypeResolution::Issue(TypeResolutionIssue::MetaElementArity);
     }
     let container = args.get_or_panic(0);
     match try self.resolve_type_value(tree, container) {
@@ -913,14 +771,10 @@ fn (self: &var Checker) resolve_meta_element(
         Value(_) => {},
     }
     let parsed = self.types.lookup(container) orelse
-        return TypeResolution::Issue(
-        TypeResolutionIssue::MetaElementUnsupported(container)
-    );
+        return TypeResolution::Issue(TypeResolutionIssue::MetaElementUnsupported(container));
     if stdmeta::element_type(&self.types.parsed, parsed) |element| {
         let retained = try self.types.retain_parsed(element);
         return self.resolve_retained_type(tree, retained);
     }
-    return TypeResolution::Issue(
-        TypeResolutionIssue::MetaElementUnsupported(container)
-    );
+    return TypeResolution::Issue(TypeResolutionIssue::MetaElementUnsupported(container));
 }

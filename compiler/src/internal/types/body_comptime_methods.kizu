@@ -24,17 +24,13 @@ struct UnionVariantFacts {
 // Checks only the branch selected by a compile-time bool.
 fn (self: &var Checker) check_comptime_if_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::ComptimeIfStmt,
     want_return: Type,
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
     var condition = ComptimeValue::Integer(0);
-    if try self.eval_comptime(
-        tree, statement.condition, &var condition
-    ) |problem| {
+    if try self.eval_comptime(tree, statement.condition, &var condition) |problem| {
         return move problem;
     }
     var selected = false;
@@ -52,22 +48,12 @@ fn (self: &var Checker) check_comptime_if_stmt(
         },
     }
     if selected {
-        let child = scopes.new_scope(scope);
-        return self.check_block(
-            tree,
-            scopes,
-            child,
-            mark,
-            statement.consequence,
-            want_return,
-            out
-        );
+        let child = self.scopes.new_scope(scope);
+        return self.check_block(tree, child, statement.consequence, want_return, out);
     }
     if statement.alternative |alternative| {
-        let child = scopes.new_scope(scope);
-        return self.check_block(
-            tree, scopes, child, mark, alternative, want_return, out
-        );
+        let child = self.scopes.new_scope(scope);
+        return self.check_block(tree, child, alternative, want_return, out);
     }
     out.* = false;
     return null;
@@ -77,18 +63,14 @@ fn (self: &var Checker) check_comptime_if_stmt(
 // ordinary Kizu code checked once per field, not a rewritten token stream.
 fn (self: &var Checker) check_comptime_for_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::ComptimeForStmt,
     want_return: Type,
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
     var fields = array::new<MetaFieldHandle>(self.allocator);
     defer fields.deinit();
-    if try self.comptime_for_fields(
-        tree, statement.list, &var fields
-    ) |problem| {
+    if try self.comptime_for_fields(tree, statement.list, &var fields) |problem| {
         return move problem;
     }
     let retained_name = tree.texts.at(statement.name.node);
@@ -101,13 +83,11 @@ fn (self: &var Checker) check_comptime_for_stmt(
     while fields.get(index) |field| {
         let name = owned_name.as_bytes();
         try self.bind_meta_field(name, field);
-        let child = scopes.new_scope(scope);
+        let child = self.scopes.new_scope(scope);
         var expansion_returns = false;
         if try self.check_block(
             tree,
-            scopes,
             child,
-            mark,
             statement.body,
             want_return,
             &var expansion_returns
@@ -134,9 +114,7 @@ fn (self: &var Checker) comptime_for_fields(
     match tree.expressions.at(list.node) {
         Call(call) => match tree.expressions.at(call.callee.node) {
             TypeApply(applied) => {
-                if try qualified_name(
-                    self.allocator, tree, applied.callee
-                ) |name| {
+                if try qualified_name(self.allocator, tree, applied.callee) |name| {
                     defer name.deinit();
                     return self.comptime_for_named_fields(
                         tree, call.args, applied.type_arg, &name, out
@@ -159,25 +137,19 @@ fn (self: &var Checker) comptime_for_named_fields(
 ) -> !?diagnostic::Diagnostic {
     let name_bytes = name.as_bytes();
     if args.len(tree) != 0 {
-        return try self.comptime_named_error(
-            name_bytes, " takes no arguments"
-        );
+        return try self.comptime_named_error(name_bytes, " takes no arguments");
     }
     let identified = stdmeta::identify(name_bytes) orelse
         return try self.comptime_for_list_error();
     match identified.form {
         PublicFields => {
-            let instantiated = try self.instantiate_type_arg_text(
-                tree, type_arg
-            );
+            let instantiated = try self.instantiate_type_arg_text(tree, type_arg);
             defer instantiated.deinit();
             let argument_text = instantiated.as_bytes();
             return self.comptime_public_fields(tree, argument_text, out);
         },
         Variants => {
-            let instantiated = try self.instantiate_type_arg_text(
-                tree, type_arg
-            );
+            let instantiated = try self.instantiate_type_arg_text(tree, type_arg);
             defer instantiated.deinit();
             let argument_text = instantiated.as_bytes();
             return self.comptime_variants(tree, argument_text, out);
@@ -215,9 +187,7 @@ fn (self: &var Checker) comptime_variants(
     out: &var array::Array<MetaFieldHandle>
 ) -> !?diagnostic::Diagnostic {
     var owner = empty_type();
-    if try self.comptime_list_owner(
-        tree, stdmeta::Form::Variants, type_arg, &var owner
-    ) |problem| {
+    if try self.comptime_list_owner(tree, stdmeta::Form::Variants, type_arg, &var owner) |problem| {
         return move problem;
     }
     return self.variant_meta_fields(tree, owner, out);
@@ -230,14 +200,10 @@ fn (self: &var Checker) comptime_list_owner(
     type_arg: []u8,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if try typ::split_args_optional(
-        self.allocator, type_arg
-    ) |arguments| {
+    if try typ::split_args_optional(self.allocator, type_arg) |arguments| {
         defer arguments.deinit();
         if arguments.len() != 1 {
-            return try self.comptime_form_error(
-                form, "` expects 1 static argument"
-            );
+            return try self.comptime_form_error(form, "` expects 1 static argument");
         }
         if arguments.at(0) |argument| {
             let bytes = argument.as_bytes();
@@ -252,9 +218,7 @@ fn (self: &var Checker) comptime_list_owner(
             }
         }
     }
-    return try self.comptime_form_error(
-        form, "` expects 1 static argument"
-    );
+    return try self.comptime_form_error(form, "` expects 1 static argument");
 }
 
 // Retains one meta field per enum tag or union variant of owner.
@@ -271,9 +235,7 @@ fn (self: &var Checker) variant_meta_fields(
         while self.enum_tag_at(enum_handle, index) |tag| {
             let retained_tag = tree.texts.at(tag.node);
             let tag_name = retained_tag.as_bytes();
-            let handle = try self.retain_meta_field(
-                owner, tag_name, empty_type(), true
-            );
+            let handle = try self.retain_meta_field(owner, tag_name, empty_type(), true);
             try out.append(handle);
             index = index + 1;
         }
@@ -287,9 +249,7 @@ fn (self: &var Checker) variant_meta_fields(
         if try self.copy_union_variant(union_handle, index) |variant| {
             defer variant.deinit();
             let variant_name = variant.name.as_bytes();
-            let handle = try self.retain_meta_field(
-                owner, variant_name, variant.payload, true
-            );
+            let handle = try self.retain_meta_field(owner, variant_name, variant.payload, true);
             try out.append(handle);
         }
         index = index + 1;
@@ -304,20 +264,14 @@ fn (self: &Checker) union_variant_count(handle: UnionHandle) -> i64 {
     return 0;
 }
 
-fn (self: &Checker) enum_tag_at(
-    handle: EnumHandle,
-    index: i64
-) -> ?ast::Text {
+fn (self: &Checker) enum_tag_at(handle: EnumHandle, index: i64) -> ?ast::Text {
     if self.metadata.enums.at(handle.index) |value| {
         return value.order.get(index);
     }
     return null;
 }
 
-fn (self: &Checker) copy_union_variant(
-    handle: UnionHandle,
-    index: i64
-) -> !?UnionVariantFacts {
+fn (self: &Checker) copy_union_variant(handle: UnionHandle, index: i64) -> !?UnionVariantFacts {
     if self.metadata.unions.at(handle.index) |value| {
         if value.order.at(index) |retained| {
             let name = retained.as_bytes();
@@ -331,14 +285,10 @@ fn (self: &Checker) copy_union_variant(
     return null;
 }
 
-fn (self: &Checker) meta_variants_type_error(
-    owner: Type
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) meta_variants_type_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
-    try message.append_bytes(
-        "`std::meta::variants` expects an enum or union, got "
-    );
+    try message.append_bytes("`std::meta::variants` expects an enum or union, got ");
     try self.append_checker_type(&var message, owner);
     return self.comptime_message(move message);
 }
@@ -349,17 +299,13 @@ fn (self: &Checker) meta_variants_type_error(
 // rules match already has.
 fn (self: &var Checker) check_comptime_match_stmt(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     statement: &ast::ComptimeMatchStmt,
     want_return: Type,
     out: &var bool
 ) -> !?diagnostic::Diagnostic {
     var value_type = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, statement.value, &var value_type
-    ) |problem| {
+    if try self.check_expr(tree, scope, statement.value, &var value_type) |problem| {
         return move problem;
     }
     let owner = try self.types.borrowed_value_type(value_type);
@@ -373,19 +319,13 @@ fn (self: &var Checker) check_comptime_match_stmt(
     if binding_len == 0 and self.meta_fields_carry_payload(&variants) {
         return try self.comptime_match_capture_error(owner);
     }
-    let expanded = try self.expand_comptime_match(
-        tree, statement, owner, &variants
-    );
-    return self.check_stmt(
-        tree, scopes, scope, mark, expanded, want_return, out
-    );
+    let expanded = try self.expand_comptime_match(tree, statement, owner, &variants);
+    return self.check_stmt(tree, scope, expanded, want_return, out);
 }
 
 // Reports whether any variant holds a payload, which is what makes the
 // second capture necessary.
-fn (self: &Checker) meta_fields_carry_payload(
-    variants: &array::Array<MetaFieldHandle>
-) -> bool {
+fn (self: &Checker) meta_fields_carry_payload(variants: &array::Array<MetaFieldHandle>) -> bool {
     var index = 0;
     while variants.get(index) |handle| {
         let field = self.meta_field_entries.at(handle.node);
@@ -428,21 +368,15 @@ fn (self: &Checker) expand_comptime_match(
     return tree.add_statement(ast::StatementNode::Match(move expanded));
 }
 
-fn (self: &Checker) comptime_match_subject_error(
-    value_type: Type
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) comptime_match_subject_error(value_type: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
-    try message.append_bytes(
-        "comptime match expects an enum or union, got "
-    );
+    try message.append_bytes("comptime match expects an enum or union, got ");
     try self.append_checker_type(&var message, value_type);
     return self.comptime_message(move message);
 }
 
-fn (self: &Checker) comptime_match_capture_error(
-    owner: Type
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) comptime_match_capture_error(owner: Type) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("comptime match on `");
@@ -456,9 +390,7 @@ fn (self: &Checker) comptime_match_capture_error(
 // Validates receiver-sensitive Box<T> methods.
 fn (self: &var Checker) check_box_receiver_method(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     field: &ast::FieldExpr,
     name: []u8,
     receiver: Type,
@@ -482,21 +414,15 @@ fn (self: &var Checker) check_box_receiver_method(
         if receiver_ident(tree, field.receiver) |_| {} else {
             return try self.box_local_receiver_error(name);
         }
-        return self.check_box_std_method(
-            tree, scopes, scope, mark, elem, name, args, out
-        );
+        return self.check_box_std_method(tree, scope, elem, name, args, out);
     }
     if mem::equal_bytes(name, "deinit") {
         if receiver_ident(tree, field.receiver) |_| {} else {
-            if !self.direct_field_cleanup_receiver(
-                tree, scopes, scope, field.receiver
-            ) {
+            if !self.direct_field_cleanup_receiver(tree, scope, field.receiver) {
                 return try self.box_local_receiver_error(name);
             }
         }
-        return self.check_box_std_method(
-            tree, scopes, scope, mark, elem, name, args, out
-        );
+        return self.check_box_std_method(tree, scope, elem, name, args, out);
     }
     let receiver_name = try self.types.copy_text(self.allocator, receiver);
     defer receiver_name.deinit();
@@ -504,9 +430,7 @@ fn (self: &var Checker) check_box_receiver_method(
     if self.impl_method(receiver_text, name) |method| {
         return self.check_method_args(
             tree,
-            scopes,
             scope,
-            mark,
             method,
             receiver,
             field.receiver,
@@ -520,9 +444,7 @@ fn (self: &var Checker) check_box_receiver_method(
 
 fn (self: &var Checker) check_box_std_method(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     elem: Type,
     name: []u8,
     args: ast::ExpressionList,
@@ -533,9 +455,7 @@ fn (self: &var Checker) check_box_std_method(
     try type_args.append(elem);
     return self.check_std_method(
         tree,
-        scopes,
         scope,
-        mark,
         "std::mem::Box",
         &type_args,
         "Box",
@@ -546,25 +466,18 @@ fn (self: &var Checker) check_box_std_method(
     );
 }
 
-fn (self: &Checker) box_local_receiver_error(
-    name: []u8
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) box_local_receiver_error(name: []u8) -> !diagnostic::Diagnostic {
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("`Box.");
     try message.append_bytes(name);
     try message.append_bytes("` requires local Box receiver");
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Returns the identifier a receiver names directly, or null for any other
 // receiver shape.
-fn receiver_ident(
-    tree: &ast::Ast,
-    expression: ast::Expression
-) -> ?ast::IdentExpr {
+fn receiver_ident(tree: &ast::Ast, expression: ast::Expression) -> ?ast::IdentExpr {
     match tree.expressions.at(expression.node) {
         Ident(identifier) => return ast::IdentExpr {
             name: identifier.name,
@@ -577,9 +490,7 @@ fn receiver_ident(
 // Validates receiver-sensitive String methods.
 fn (self: &var Checker) check_string_receiver_method(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     field: &ast::FieldExpr,
     name: []u8,
     args: ast::ExpressionList,
@@ -589,44 +500,36 @@ fn (self: &var Checker) check_string_receiver_method(
         let retained = tree.texts.at(identifier.name.node);
         let binding = retained.as_bytes();
         if mem::equal_bytes(name, "deinit") and
-            scopes.is_borrowed(scope, binding) {
+            self.scopes.is_borrowed(scope, binding) {
             return try self.checker_error_at(
                 "type error", ast::zero_span(),
                 "`String.deinit` requires owned String receiver"
             );
         }
         if is_string_mutating_method(name) and
-            scopes.is_borrowed(scope, binding) and
-            !scopes.is_mut_borrowed(scope, binding) {
+            self.scopes.is_borrowed(scope, binding) and
+            !self.scopes.is_mut_borrowed(scope, binding) {
             var message = string::new(self.allocator);
             errdefer message.deinit();
             try message.append_bytes("`String.");
             try message.append_bytes(name);
             try message.append_bytes("` requires mutable String receiver");
-            return try self.checker_message_at(
-                "type error", ast::zero_span(), move message
-            );
+            return try self.checker_message_at("type error", ast::zero_span(), move message);
         }
     }
-    return self.check_string_method(
-        tree, scopes, scope, mark, name, args, out
-    );
+    return self.check_string_method(tree, scope, name, args, out);
 }
 
 // Validates owned String prototype methods.
 fn (self: &var Checker) check_string_method(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     name: []u8,
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if is_string_mutator_method(name) {
-        if try self.check_string_mutator_arg(
-            tree, scopes, scope, mark, name, args
-        ) |problem| {
+        if try self.check_string_mutator_arg(tree, scope, name, args) |problem| {
             return move problem;
         }
         let void_type = try self.types.void_type();
@@ -636,9 +539,7 @@ fn (self: &var Checker) check_string_method(
     if mem::equal_bytes(name, "len") or
         mem::equal_bytes(name, "capacity") {
         if args.len(tree) != 0 {
-            return try self.receiver_arity_error(
-                "String", name, 0, args.len(tree)
-            );
+            return try self.receiver_arity_error("String", name, 0, args.len(tree));
         }
         out.* = try self.types.i64_type();
         return null;
@@ -652,16 +553,12 @@ fn (self: &var Checker) check_string_method(
         try message.append_bytes("` must be bound with `let name = string.");
         try message.append_bytes(name);
         try message.append_bytes("()`");
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     if mem::equal_bytes(name, "clear") or
         mem::equal_bytes(name, "deinit") {
         if args.len(tree) != 0 {
-            return try self.receiver_arity_error(
-                "String", name, 0, args.len(tree)
-            );
+            return try self.receiver_arity_error("String", name, 0, args.len(tree));
         }
         out.* = try self.types.void_type();
         return null;
@@ -672,9 +569,7 @@ fn (self: &var Checker) check_string_method(
 // Validates the single argument each String mutator takes.
 fn (self: &var Checker) check_string_mutator_arg(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     name: []u8,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
@@ -685,9 +580,7 @@ fn (self: &var Checker) check_string_mutator_arg(
     var got = empty_type();
     if mem::equal_bytes(name, "append_byte") {
         let want = try self.types.u8_type();
-        if try self.check_contextual_expr(
-            tree, scopes, scope, mark, argument, want, &var got
-        ) |problem| {
+        if try self.check_contextual_expr(tree, scope, argument, want, &var got) |problem| {
             return move problem;
         }
         if !same_type(got, want) {
@@ -695,9 +588,7 @@ fn (self: &var Checker) check_string_mutator_arg(
         }
         return null;
     }
-    if try self.check_expr(
-        tree, scopes, scope, mark, argument, &var got
-    ) |problem| {
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
     }
     if mem::equal_bytes(name, "append_bytes") {
@@ -720,10 +611,7 @@ fn (self: &var Checker) check_string_mutator_arg(
     return null;
 }
 
-fn (self: &Checker) string_method_arg_count_error(
-    name: []u8,
-    got: i64
-) -> !diagnostic::Diagnostic {
+fn (self: &Checker) string_method_arg_count_error(name: []u8, got: i64) -> !diagnostic::Diagnostic {
     var label = string::new(self.allocator);
     defer label.deinit();
     try label.append_bytes("String.");
@@ -742,9 +630,7 @@ fn (self: &Checker) string_method_string_arg_error(
     try message.append_bytes(name);
     try message.append_bytes("` expects String, got ");
     try self.append_checker_type(&var message, got);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Reports whether a String method takes one argument and returns `!void`.
@@ -766,9 +652,7 @@ fn is_string_mutating_method(name: []u8) -> bool {
 // Validates the std::arena::Arena<T> methods a receiver call may name.
 fn (self: &var Checker) check_arena_method(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     field: &ast::FieldExpr,
     name: []u8,
     elem: Type,
@@ -776,41 +660,29 @@ fn (self: &var Checker) check_arena_method(
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
     if mem::equal_bytes(name, "add") {
-        return self.check_arena_add(
-            tree, scopes, scope, mark, elem, args, out
-        );
+        return self.check_arena_add(tree, scope, elem, args, out);
     }
     if mem::equal_bytes(name, "at") {
-        return self.check_arena_at(
-            tree, scopes, scope, mark, elem, args, out
-        );
+        return self.check_arena_at(tree, scope, elem, args, out);
     }
     if mem::equal_bytes(name, "at_mut") {
-        return self.check_arena_at_mut(
-            tree, scopes, scope, mark, field, elem, args, out
-        );
+        return self.check_arena_at_mut(tree, scope, field, elem, args, out);
     }
     if mem::equal_bytes(name, "deinit") {
-        return self.check_arena_deinit(
-            tree, scopes, scope, field, args, out
-        );
+        return self.check_arena_deinit(tree, scope, field, args, out);
     }
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("unknown arena method `");
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(96));
-    return try self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Validates std::arena::Arena<T>.add(value).
 fn (self: &var Checker) check_arena_add(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     elem: Type,
     args: ast::ExpressionList,
     out: &var Type
@@ -820,9 +692,7 @@ fn (self: &var Checker) check_arena_add(
     }
     let argument = args.get_or_panic(tree, 0);
     var got = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, argument, &var got
-    ) |problem| {
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
     }
     if !same_type(got, elem) {
@@ -835,16 +705,12 @@ fn (self: &var Checker) check_arena_add(
 // Validates std::arena::Arena<T>.at(std::arena::Handle<T>).
 fn (self: &var Checker) check_arena_at(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     elem: Type,
     args: ast::ExpressionList,
     out: &var Type
 ) -> !?diagnostic::Diagnostic {
-    if try self.check_arena_handle_arg(
-        tree, scopes, scope, mark, elem, args, "arena.at"
-    ) |problem| {
+    if try self.check_arena_handle_arg(tree, scope, elem, args, "arena.at") |problem| {
         return move problem;
     }
     out.* = try self.types.borrow_wrapped_type(true, false, elem);
@@ -855,9 +721,7 @@ fn (self: &var Checker) check_arena_at(
 // the `?&var T` it returns, everywhere else refuses it.
 fn (self: &var Checker) check_arena_at_mut(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     field: &ast::FieldExpr,
     elem: Type,
     args: ast::ExpressionList,
@@ -869,9 +733,7 @@ fn (self: &var Checker) check_arena_at_mut(
             "`Arena.at_mut` must be consumed by a capture (`if a.at_mut(handle) |name|` or `while a.at_mut(handle) |name|`)"
         );
     }
-    if !try mutable_receiver_place(
-        self.allocator, tree, scopes, scope, field.receiver
-    ) {
+    if !try self.mutable_receiver_place(tree, scope, field.receiver) {
         return try self.checker_error_at(
             "type error", ast::zero_span(),
             "`Arena.at_mut` requires mutable arena binding"
@@ -880,9 +742,7 @@ fn (self: &var Checker) check_arena_at_mut(
     // The flag covers exactly this call: off while the argument is read,
     // and back on for the result the call gate reads.
     self.capture_condition = false;
-    if try self.check_arena_handle_arg(
-        tree, scopes, scope, mark, elem, args, "Arena.at_mut"
-    ) |problem| {
+    if try self.check_arena_handle_arg(tree, scope, elem, args, "Arena.at_mut") |problem| {
         self.capture_condition = true;
         return move problem;
     }
@@ -895,9 +755,7 @@ fn (self: &var Checker) check_arena_at_mut(
 // arena's element type. label names the accessor in errors.
 fn (self: &var Checker) check_arena_handle_arg(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     elem: Type,
     args: ast::ExpressionList,
     label: []u8
@@ -907,9 +765,7 @@ fn (self: &var Checker) check_arena_handle_arg(
     }
     let argument = args.get_or_panic(tree, 0);
     var got = empty_type();
-    if try self.check_expr(
-        tree, scopes, scope, mark, argument, &var got
-    ) |problem| {
+    if try self.check_expr(tree, scope, argument, &var got) |problem| {
         return move problem;
     }
     let want = try self.intern_arena_handle_type(elem);
@@ -922,7 +778,6 @@ fn (self: &var Checker) check_arena_handle_arg(
 // Validates explicit arena cleanup syntax.
 fn (self: &var Checker) check_arena_deinit(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
     field: &ast::FieldExpr,
     args: ast::ExpressionList,
@@ -931,16 +786,14 @@ fn (self: &var Checker) check_arena_deinit(
     if receiver_ident(tree, field.receiver) |identifier| {
         let retained = tree.texts.at(identifier.name.node);
         let binding = retained.as_bytes();
-        if scopes.is_borrowed(scope, binding) {
+        if self.scopes.is_borrowed(scope, binding) {
             return try self.checker_error_at(
                 "type error", ast::zero_span(),
                 "`arena.deinit` requires owned arena receiver"
             );
         }
     } else {
-        if !self.direct_field_cleanup_receiver(
-            tree, scopes, scope, field.receiver
-        ) {
+        if !self.direct_field_cleanup_receiver(tree, scope, field.receiver) {
             return try self.checker_error_at(
                 "type error", ast::zero_span(),
                 "`arena.deinit` requires local arena receiver"
@@ -948,9 +801,7 @@ fn (self: &var Checker) check_arena_deinit(
         }
     }
     if args.len(tree) != 0 {
-        return try self.named_arity_error(
-            "arena.deinit", 0, args.len(tree)
-        );
+        return try self.named_arity_error("arena.deinit", 0, args.len(tree));
     }
     out.* = try self.types.void_type();
     return null;
@@ -973,9 +824,7 @@ fn (self: &Checker) labeled_arg_type_error(
     try self.append_checker_type(&var message, want);
     try message.append_bytes(", got ");
     try self.append_checker_type(&var message, got);
-    return self.checker_message_at(
-        "type error", ast::zero_span(), move message
-    );
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 // Rejects a marker that covers no unproven operation after its value was
@@ -1006,9 +855,7 @@ fn (self: &Checker) check_under_mark(
         );
         errdefer failure.deinit();
         try failure.with_code("unsafe.missing_safety_comment");
-        try failure.with_help(
-            "write `// SAFETY: <why this holds>` on the line above"
-        );
+        try failure.with_help("write `// SAFETY: <why this holds>` on the line above");
         return move failure;
     }
     return null;
@@ -1032,14 +879,10 @@ fn (self: &var Checker) check_function(
     if try self.check_main_return_type(name, facts.return_type) |problem| {
         return move problem;
     }
-    var scopes = new_scope_store(self.allocator);
-    defer scopes.deinit();
-    let root = scopes.new_scope(null);
+    let root = self.scopes.new_scope(null);
     var static_values = map::new<[]u8, Type>(self.allocator);
     errdefer static_values.deinit();
-    if try self.define_static_value_params(
-        &var scopes, root, function, &var static_values
-    ) |problem| {
+    if try self.define_static_value_params(root, function, &var static_values) |problem| {
         static_values.deinit();
         return move problem;
     }
@@ -1050,7 +893,6 @@ fn (self: &var Checker) check_function(
             defer parameter.deinit();
             let parameter_name = parameter.name.as_bytes();
             let defined = try self.define_scope_param(
-                &var scopes,
                 root,
                 parameter_name,
                 parameter.type_name,
@@ -1058,9 +900,7 @@ fn (self: &var Checker) check_function(
                 parameter.mutable,
                 true
             );
-            if try self.require_scope_definition(
-                parameter_name, defined
-            ) |problem| {
+            if try self.require_scope_definition(parameter_name, defined) |problem| {
                 static_values.deinit();
                 return move problem;
             }
@@ -1084,20 +924,15 @@ fn (self: &var Checker) check_function(
         move type_args,
         move static_values
     );
-    var mark = UnsafeMark { used: null };
+    let saved_mark = self.mark;
+    self.mark = UnsafeMark { used: null };
     var returns = false;
-    if try self.check_block(
-        tree,
-        &var scopes,
-        root,
-        &var mark,
-        body,
-        facts.return_type,
-        &var returns
-    ) |problem| {
+    if try self.check_block(tree, root, body, facts.return_type, &var returns) |problem| {
+        self.mark = saved_mark;
         self.restore_body_context(previous_context);
         return move problem;
     }
+    self.mark = saved_mark;
     self.restore_body_context(previous_context);
     if !self.types.is_text(facts.return_type, "void") and
         !self.function_implicit_return(function) and !returns {
@@ -1107,9 +942,7 @@ fn (self: &var Checker) check_function(
         try message.append_bytes(name);
         try message.append_bytes("` must return ");
         try self.append_checker_type(&var message, facts.return_type);
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     return null;
 }
@@ -1121,9 +954,7 @@ fn (self: &Checker) function_is_extern(function: FunctionHandle) -> bool {
     return false;
 }
 
-fn (self: &Checker) function_implicit_return(
-    function: FunctionHandle
-) -> bool {
+fn (self: &Checker) function_implicit_return(function: FunctionHandle) -> bool {
     if self.metadata.functions.at(function.index) |value| {
         return value.implicit_return;
     }
@@ -1131,9 +962,7 @@ fn (self: &Checker) function_implicit_return(
 }
 
 // Collects the type-valued static parameter names of one cached signature.
-fn (self: &Checker) signature_type_params(
-    function: FunctionHandle
-) -> !map::Map<[]u8, bool> {
+fn (self: &Checker) signature_type_params(function: FunctionHandle) -> !map::Map<[]u8, bool> {
     var names = map::new<[]u8, bool>(self.allocator);
     errdefer names.deinit();
     if self.metadata.functions.at(function.index) |value| {

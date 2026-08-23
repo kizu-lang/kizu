@@ -11,9 +11,7 @@ union BorrowPrefixResult {
 // Validates an explicit borrow and returns the value type it borrows.
 fn (self: &var Checker) check_borrow_prefix(
     tree: &var ast::Ast,
-    scopes: &var ScopeStore,
     scope: ScopeHandle,
-    mark: &var UnsafeMark,
     expression: &ast::PrefixExpr,
     out: &var Type,
     mutable_out: &var bool
@@ -21,20 +19,11 @@ fn (self: &var Checker) check_borrow_prefix(
     let retained = tree.texts.at(expression.operator.node);
     let operator = retained.as_bytes();
     let mutable = mem::equal_bytes(operator, "&var");
-    if try self.check_borrow_target_shape(
-        tree, expression.right
-    ) |problem| {
+    if try self.check_borrow_target_shape(tree, expression.right) |problem| {
         return move problem;
     }
     var value_type = empty_type();
-    if try self.check_expr(
-        tree,
-        scopes,
-        scope,
-        mark,
-        expression.right,
-        &var value_type
-    ) |problem| {
+    if try self.check_expr(tree, scope, expression.right, &var value_type) |problem| {
         return move problem;
     }
     if self.types.is_buffer_type(value_type) {
@@ -47,7 +36,6 @@ fn (self: &var Checker) check_borrow_prefix(
     if mutable {
         if try self.require_mutable_borrow_arg(
             tree,
-            scopes,
             scope,
             expression.right,
             value_type
@@ -60,10 +48,7 @@ fn (self: &var Checker) check_borrow_prefix(
     return null;
 }
 
-fn borrow_prefix(
-    tree: &ast::Ast,
-    expression: ast::Expression
-) -> BorrowPrefixResult {
+fn borrow_prefix(tree: &ast::Ast, expression: ast::Expression) -> BorrowPrefixResult {
     match tree.expressions.at(expression.node) {
         Prefix(prefix) => {
             let retained = tree.texts.at(prefix.operator.node);
@@ -89,9 +74,7 @@ fn (self: &Checker) check_borrow_target_shape(
         Ident(_) => return null,
         _ => {},
     }
-    if try ast::field_path_root(
-        self.allocator, tree, expression
-    ) |path| {
+    if try ast::field_path_root(self.allocator, tree, expression) |path| {
         path.deinit();
         return null;
     }
@@ -124,7 +107,6 @@ fn mutable_place_base(
 
 fn (self: &Checker) require_mutable_borrow_arg(
     tree: &ast::Ast,
-    scopes: &ScopeStore,
     scope: ScopeHandle,
     expression: ast::Expression,
     want: Type
@@ -134,7 +116,7 @@ fn (self: &Checker) require_mutable_borrow_arg(
             Ident(identifier) => {
                 let retained = tree.texts.at(identifier.name.node);
                 let name = retained.as_bytes();
-                if scopes.is_mut_borrowed(scope, name) {
+                if self.scopes.is_mut_borrowed(scope, name) {
                     return null;
                 }
             },
@@ -146,13 +128,11 @@ fn (self: &Checker) require_mutable_borrow_arg(
             "`&var []u8` argument must be a writable view binding"
         );
     }
-    if try mutable_place_base(
-        self.allocator, tree, expression
-    ) |base| {
+    if try mutable_place_base(self.allocator, tree, expression) |base| {
         let retained = tree.texts.at(base.name.node);
         let name = retained.as_bytes();
-        if scopes.is_mutable(scope, name) or
-            scopes.is_mut_borrowed(scope, name) {
+        if self.scopes.is_mutable(scope, name) or
+            self.scopes.is_mut_borrowed(scope, name) {
             return null;
         }
         var message = string::new(self.allocator);
@@ -160,9 +140,7 @@ fn (self: &Checker) require_mutable_borrow_arg(
         try message.append_bytes("&var argument `");
         try message.append_bytes(name);
         try message.append_bytes("` must be mutable");
-        return try self.checker_message_at(
-            "type error", ast::zero_span(), move message
-        );
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     return try self.checker_error_at(
         "type error",
