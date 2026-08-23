@@ -2,6 +2,7 @@ import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::lexer;
 import compiler::internal::manifest;
+import compiler::internal::parser;
 import compiler::internal::token;
 import std::array;
 import std::fs;
@@ -429,4 +430,107 @@ fn (self: &var Loader) add_source_overrides(
         }
     }
     return;
+}
+
+/// Is every error set std declares, with the number each member lowers to,
+/// and the first code available to error sets a program declares itself, the
+/// Go `StdErrorSets` / `StdErrorCodeBase`. The runtime refers to them all
+/// whatever a program uses, so they are read from the whole of std rather
+/// than from the modules one program imported. Numbering is global: an error
+/// value is one integer, and that integer means the same member in every
+/// error union it travels through. Code 0 is reserved for "no error".
+pub struct StdErrorCodes {
+    pub sets: map::Map<[]u8, map::Map<[]u8, i64>>,
+    pub base: i64
+}
+
+/// Is the std error set numbering or the reason std could not be read.
+pub union StdErrorCodesResult {
+    Codes(StdErrorCodes),
+    Error(diagnostic::Diagnostic),
+}
+
+/// Reads std once for the numbers its error set members lower to, the Go
+/// `readStdErrorSets`. Modules are read in module-path order and files in
+/// path order, so the numbers a build assigns depend on what std declares
+/// and on nothing else. The Go compiler caches the read in a `sync.Once`;
+/// here the caller reads it once per lowering and passes the codes on.
+pub fn (self: &Loader) std_error_codes() -> !StdErrorCodesResult {
+    let outcome = try self.read_std_graph();
+    match outcome {
+        Error(failed) => return StdErrorCodesResult::Error(move failed),
+        Graph(graph) => {
+            defer graph.deinit();
+            var sets = map::new<[]u8, map::Map<[]u8, i64>>(self.allocator);
+            errdefer sets.deinit();
+            var code = 1;
+            var index = 0;
+            while graph.modules.at(index) |module| {
+                index = index + 1;
+                let files = try module.source_files(self.allocator, false);
+                defer files.deinit();
+                var file_index = 0;
+                while files.at(file_index) |file| {
+                    file_index = file_index + 1;
+                    let file_bytes = file.as_bytes();
+                    let module_path = module.path.as_bytes();
+                    if try self.collect_error_sets(file_bytes, module_path, &var sets, &var code) |failed| {
+                        sets.deinit();
+                        return StdErrorCodesResult::Error(move failed);
+                    }
+                }
+            }
+            return StdErrorCodesResult::Codes(StdErrorCodes { sets: move sets, base: code });
+        },
+    }
+}
+
+/// Parses one std file on its own and records the error sets it declares
+/// under their module-qualified names, numbering members from code on.
+fn (self: &Loader) collect_error_sets(
+    file: []u8,
+    module_path: []u8,
+    sets: &var map::Map<[]u8, map::Map<[]u8, i64>>,
+    code: &var i64
+) -> !?diagnostic::Diagnostic {
+    let text = try fs::read_file(self.io, self.allocator, file, mem::Limit::Unlimited);
+    defer text.deinit();
+    var tree = ast::new(self.allocator);
+    defer tree.deinit();
+    let bytes = text.as_bytes();
+    let scanner = lexer::new(self.allocator, bytes);
+    var source_parser = try parser::new(self.allocator, move scanner);
+    defer source_parser.deinit();
+    let program = try source_parser.parse_program(&var tree);
+    defer program.deinit();
+    if source_parser.diagnostic(0) |first| {
+        return try first.clone(self.allocator);
+    }
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            ErrorSet(set) => {
+                var members = map::new<[]u8, i64>(self.allocator);
+                errdefer members.deinit();
+                var member_index = 0;
+                while set.members.at(member_index) |member| {
+                    member_index = member_index + 1;
+                    let member_text = tree.texts.at(member.node);
+                    let member_bytes = member_text.as_bytes();
+                    try members.insert(member_bytes, code.*);
+                    code.* = code.* + 1;
+                }
+                var qualified = try string::from_bytes(self.allocator, module_path);
+                defer qualified.deinit();
+                try qualified.append_bytes("::");
+                let set_name = tree.texts.at(set.name.node);
+                try qualified.append_string(set_name);
+                let qualified_bytes = qualified.as_bytes();
+                try sets.insert(qualified_bytes, move members);
+            },
+            _ => {},
+        }
+    }
+    return null;
 }

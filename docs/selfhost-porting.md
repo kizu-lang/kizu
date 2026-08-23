@@ -124,6 +124,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | nullable value | `?T` | absence と failure を混ぜない |
 | interface | static contract / closed union / generic | runtime dispatch を仮定せず、対応が閉じなければ止める |
 | `defer` | `defer` / `errdefer` | cleanup を source に残す。自動 Drop へ移さない |
+| `ir.Module` / `Function` / `Block` / `Instr` の pointer graph と `string` の op / 名前 | `Module` 所有の arena + copy handle(`Function` / `Block` / `Instr`)、`Op` enum + `operand: Name` + spelling 関数、`Module` 所有の `NameTable` に intern した `Name`(value の name / type、block label、call 先、immediate) | `call.<f>` / `field.<f>` / `binary.<op>` は `Op` の種類と運ぶ名前に分ける。llvm / wasm emitter も同じ型を読む。`Cleanup` の `Args` は常に receiver 1 つなので `arg: Value` |
 
 Go の `panic`、reflection、goroutine、shared mutable global、unsafe pointer が現れた
 場合は local mapping を発明しません。移植全体で一つの判断が必要な境界として

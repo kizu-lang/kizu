@@ -1,0 +1,360 @@
+import compiler::internal::ast;
+import std::arena;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Holds the Go `string` values internal/ir passes around: SSA value names,
+// type spellings, block labels, call symbols, immediates. Go shares immutable
+// strings freely; here every distinct text is retained once in the NameTable
+// a Module owns and handed on as the copy handle Name, so instructions hold
+// no owner Strings and equal spellings compare by handle. The type spelling
+// helpers of helpers.go that only read text live here as well.
+
+/// Identifies one retained text; a null node is the empty text.
+pub struct Name {
+    node: ?arena::Handle<string::String>
+}
+
+/// Returns the empty text, the Go `""`.
+pub fn empty_name() -> Name {
+    return Name { node: null };
+}
+
+/// Reports whether two names spell the same text.
+pub fn same_name(left: Name, right: Name) -> bool {
+    if left.node |left_node| {
+        if right.node |right_node| {
+            return left_node == right_node;
+        }
+        return false;
+    }
+    if right.node |_| {
+        return false;
+    }
+    return true;
+}
+
+/// Reports whether a name is the empty text.
+pub fn is_empty(name: Name) -> bool {
+    if name.node |_| {
+        return false;
+    }
+    return true;
+}
+
+/// Retains every text one module names.
+pub struct NameTable {
+    allocator: Allocator,
+    texts: arena::Arena<string::String>,
+    by_text: map::Map<[]u8, Name>,
+    empty: arena::Handle<string::String>
+}
+
+/// Creates a table holding only the empty text.
+pub fn new_name_table(allocator: Allocator) -> NameTable {
+    var texts = arena::new<string::String>(allocator);
+    let empty = texts.add(string::new(allocator));
+    return NameTable {
+        allocator: allocator,
+        texts: move texts,
+        by_text: map::new<[]u8, Name>(allocator),
+        empty: empty
+    };
+}
+
+fn (self: NameTable) deinit() -> void {
+    self.texts.deinit();
+    self.by_text.deinit();
+    return;
+}
+
+/// Returns the retained text of a name; callers bind `as_bytes()` locally.
+pub fn name_text(names: &NameTable, name: Name) -> &string::String {
+    let node = name.node orelse names.empty;
+    return names.texts.at(node);
+}
+
+/// Returns the one name that spells text, retaining it on first use.
+pub fn (self: &var NameTable) intern(text: []u8) -> !Name {
+    if mem::len(text) == 0 {
+        return empty_name();
+    }
+    if self.by_text.get(text) |known| {
+        return known;
+    }
+    let owned = try string::from_bytes(self.allocator, text);
+    return self.intern_owned(move owned);
+}
+
+/// Returns the one name that spells an owned text, consuming the text.
+pub fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
+    if text.len() == 0 {
+        text.deinit();
+        return empty_name();
+    }
+    if self.find_name(&text) |known| {
+        text.deinit();
+        return known;
+    }
+    let handle = self.texts.add(move text);
+    let name = Name { node: handle };
+    let retained = self.texts.at(handle);
+    let retained_bytes = retained.as_bytes();
+    try self.by_text.insert(retained_bytes, name);
+    return name;
+}
+
+fn (self: &NameTable) find_name(text: &string::String) -> ?Name {
+    let bytes = text.as_bytes();
+    return self.by_text.get(bytes);
+}
+
+/// Names bytes `start..end` of an already retained name.
+pub fn (self: &var NameTable) intern_slice(name: Name, start: i64, end: i64) -> !Name {
+    if start >= end {
+        return empty_name();
+    }
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if self.by_text.get(bytes[start..end]) |known| {
+        return known;
+    }
+    let copied = try string::from_bytes(self.allocator, bytes[start..end]);
+    return self.intern_owned(move copied);
+}
+
+/// Names one Ast text.
+pub fn (self: &var NameTable) intern_text(tree: &ast::Ast, text: ast::Text) -> !Name {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    return self.intern(bytes);
+}
+
+/// Names the decimal spelling of an integer, the Go `strconv.Itoa`.
+pub fn (self: &var NameTable) intern_i64(value: i64) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try fmt::append_i64(&var out, value);
+    return self.intern_owned(move out);
+}
+
+/// Reports whether name spells text.
+pub fn (self: &NameTable) is(name: Name, text: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, text);
+}
+
+/// Reports whether a name and an Ast text spell the same bytes.
+pub fn (self: &NameTable) is_text(name: Name, tree: &ast::Ast, text: ast::Text) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    let other = tree.texts.at(text.node);
+    let other_bytes = other.as_bytes();
+    return mem::equal_bytes(bytes, other_bytes);
+}
+
+pub fn (self: &NameTable) len(name: Name) -> i64 {
+    let retained = name_text(self, name);
+    return retained.len();
+}
+
+pub fn (self: &NameTable) starts_with(name: Name, prefix: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::starts_with(bytes, prefix);
+}
+
+pub fn (self: &NameTable) ends_with(name: Name, suffix: []u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return ends_with_bytes(bytes, suffix);
+}
+
+/// Reports whether bytes end with suffix, the Go `strings.HasSuffix`.
+pub fn ends_with_bytes(bytes: []u8, suffix: []u8) -> bool {
+    let length = mem::len(bytes);
+    let suffix_length = mem::len(suffix);
+    if suffix_length > length {
+        return false;
+    }
+    return mem::equal_bytes(bytes[length - suffix_length..length], suffix);
+}
+
+/// Appends the text of a name to a message under construction.
+pub fn (self: &NameTable) append_to(out: &var string::String, name: Name) -> !void {
+    let retained = name_text(self, name);
+    return out.append_string(retained);
+}
+
+/// Names `prefix` + name, the Go `"..." + name`.
+pub fn (self: &var NameTable) prefixed(prefix: []u8, name: Name) -> !Name {
+    var out = try string::from_bytes(self.allocator, prefix);
+    errdefer out.deinit();
+    try self.append_to(&var out, name);
+    return self.intern_owned(move out);
+}
+
+/// Names name + `suffix`, the Go `name + "..."`.
+pub fn (self: &var NameTable) suffixed(name: Name, suffix: []u8) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try self.append_to(&var out, name);
+    try out.append_bytes(suffix);
+    return self.intern_owned(move out);
+}
+
+/// Names `prefix` + name + `suffix`, the Go `"<" + name + ">"` shapes.
+pub fn (self: &var NameTable) wrapped(prefix: []u8, name: Name, suffix: []u8) -> !Name {
+    var out = try string::from_bytes(self.allocator, prefix);
+    errdefer out.deinit();
+    try self.append_to(&var out, name);
+    try out.append_bytes(suffix);
+    return self.intern_owned(move out);
+}
+
+/// Names left + right.
+pub fn (self: &var NameTable) concat(left: Name, right: Name) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try self.append_to(&var out, left);
+    try self.append_to(&var out, right);
+    return self.intern_owned(move out);
+}
+
+/// Names left + `middle` + right, the Go `a + "." + b` shapes.
+pub fn (self: &var NameTable) joined(left: Name, middle: []u8, right: Name) -> !Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try self.append_to(&var out, left);
+    try out.append_bytes(middle);
+    try self.append_to(&var out, right);
+    return self.intern_owned(move out);
+}
+
+/// Names name with a leading prefix removed, the Go `strings.TrimPrefix`.
+pub fn (self: &var NameTable) trim_prefix(name: Name, prefix: []u8) -> !Name {
+    if !self.starts_with(name, prefix) {
+        return name;
+    }
+    return self.intern_slice(name, mem::len(prefix), self.len(name));
+}
+
+/// Names T for `&T` and `&var T`, and name itself otherwise, the Go
+/// `derefType`.
+pub fn (self: &var NameTable) deref_type(name: Name) -> !Name {
+    if self.starts_with(name, "&var ") {
+        return self.intern_slice(name, 5, self.len(name));
+    }
+    if self.starts_with(name, "&") {
+        return self.intern_slice(name, 1, self.len(name));
+    }
+    return name;
+}
+
+/// Reports whether a type is a local borrow, the Go `isReferenceType`.
+pub fn (self: &NameTable) is_reference_type(name: Name) -> bool {
+    return self.starts_with(name, "&");
+}
+
+/// Reports whether name is `&var T`, the borrow a write can go through, the
+/// Go `isMutableReferenceType`.
+pub fn (self: &NameTable) is_mutable_reference_type(name: Name) -> bool {
+    return self.starts_with(name, "&var ");
+}
+
+/// Names T for `ptr<T>` and `ptr<const T>`, the Go `rawPointerElem`.
+/// Nullable `?ptr<T>` is not dereferenceable, so it stays out.
+pub fn (self: &var NameTable) raw_pointer_elem(name: Name) -> !?Name {
+    if !self.starts_with(name, "ptr<") or !self.ends_with(name, ">") {
+        return null;
+    }
+    let elem = try self.intern_slice(name, 4, self.len(name) - 1);
+    return try self.trim_prefix(elem, "const ");
+}
+
+/// Names T for `?T`, the Go `typ.OptionalElem`.
+pub fn (self: &var NameTable) optional_elem(name: Name) -> !?Name {
+    if !self.starts_with(name, "?") or self.starts_with(name, "?ptr<") {
+        return null;
+    }
+    return try self.intern_slice(name, 1, self.len(name));
+}
+
+/// Names T for `Base<T>`, and null when name is not applied to base.
+pub fn (self: &var NameTable) generic_arg_of(name: Name, base: []u8) -> !?Name {
+    let prefix_len = mem::len(base) + 1;
+    let end = self.generic_arg_end(name, base, prefix_len) orelse return null;
+    return try self.intern_slice(name, prefix_len, end);
+}
+
+/// Returns where the argument of `Base<T>` ends, or null when name is not
+/// applied to base.
+fn (self: &NameTable) generic_arg_end(name: Name, base: []u8, prefix_len: i64) -> ?i64 {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    if !mem::starts_with(bytes, base) or mem::len(bytes) <= prefix_len or
+        bytes[prefix_len - 1] != cast<u8>(60) or !ends_with_bytes(bytes, ">") {
+        return null;
+    }
+    return mem::len(bytes) - 1;
+}
+
+/// Reports whether an IR type spelling is a fixed-length stack buffer
+/// (`[N]u8`), the Go `isBufferIRType`.
+pub fn (self: &NameTable) is_buffer_type(name: Name) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return mem::len(bytes) > 1 and bytes[0] == cast<u8>(91) and
+        bytes[1] >= cast<u8>(48) and bytes[1] <= cast<u8>(57);
+}
+
+/// Returns the last index of byte in bytes, or -1.
+pub fn last_index_of_byte(bytes: []u8, byte: u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 0 {
+        index = index - 1;
+        if bytes[index] == byte {
+            return index;
+        }
+    }
+    return -1;
+}
+
+/// Reports whether the text of name contains byte.
+pub fn (self: &NameTable) contains_byte(name: Name, byte: u8) -> bool {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == byte {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Copies the text of a name into an owned String, for the places that need
+/// its bytes while the table is mutated.
+pub fn (self: &NameTable) copy(name: Name) -> !string::String {
+    let retained = name_text(self, name);
+    let bytes = retained.as_bytes();
+    return string::from_bytes(self.allocator, bytes);
+}
+
+/// Names every retained String of a list in order.
+pub fn (self: &var NameTable) intern_all(parts: &array::Array<string::String>) -> !array::Array<Name> {
+    var out = array::new<Name>(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while parts.at(index) |part| {
+        let bytes = part.as_bytes();
+        try out.append(try self.intern(bytes));
+        index = index + 1;
+    }
+    return move out;
+}

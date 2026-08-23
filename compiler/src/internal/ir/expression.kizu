@@ -1,0 +1,682 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import std::array;
+import std::mem;
+import std::string;
+
+// Mechanical port of the expression half of internal/ir/lower.go:
+// expression dispatch, contextual lowering, literals, identifiers, casts,
+// unary and binary operators, struct literals, field reads, union and enum
+// spellings, and checked byte-slice indexing.
+
+/// Lowers an expression and returns its typed SSA value, the Go
+/// `lowerExpr`.
+fn (self: &var Lowerer) lower_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ast::marker_value(tree, expression) |inner| {
+        // A marker is a claim about the expression, not an operation, so it
+        // lowers to whatever it covers.
+        return self.lower_expr(tree, inner, out);
+    }
+    if ownership::int_expr(tree, expression) |_| {
+        return self.lower_literal_expr(tree, expression, out);
+    }
+    if ownership::bool_expr(tree, expression) |_| {
+        return self.lower_literal_expr(tree, expression, out);
+    }
+    if is_string_expr(tree, expression) or is_null_expr(tree, expression) {
+        return self.lower_literal_expr(tree, expression, out);
+    }
+    if ownership::type_expr(tree, expression) |typed| {
+        let immediate = try self.text_name(tree, typed.type_name);
+        out.* = try self.emit_const(self.common.type_type, immediate);
+        return null;
+    }
+    if ownership::ident_expr(tree, expression) |ident| {
+        return self.lower_ident_expr(tree, expression, ident, out);
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        return self.lower_prefix_expr(tree, prefix, out);
+    }
+    if ownership::binary_expr(tree, expression) |binary| {
+        return self.lower_binary_expr(tree, binary, out);
+    }
+    if ownership::call_expr(tree, expression) |call| {
+        return self.lower_call_expr(tree, call, out);
+    }
+    if ownership::cast_expr(tree, expression) |cast| {
+        return self.lower_cast_expr(tree, cast, out);
+    }
+    if ownership::try_expr(tree, expression) |attempt| {
+        return self.lower_try_expr(tree, expression, attempt, out);
+    }
+    if ownership::if_expr(tree, expression) |branch| {
+        return self.lower_if_expr(tree, branch, out);
+    }
+    if ownership::is_match_expr(tree, expression) {
+        return self.lower_match_expr(tree, MatchNode::Expression(expression), out);
+    }
+    if ownership::orelse_guard_expr(tree, expression) |guard| {
+        return self.lower_orelse_guard_expr(tree, guard, out);
+    }
+    if ownership::is_struct_literal_expr(tree, expression) {
+        return self.lower_struct_literal_expr(tree, expression, out);
+    }
+    if try buffer_literal_type(self.allocator, tree, expression) |type_text| {
+        defer type_text.deinit();
+        let bytes = type_text.as_bytes();
+        let type_name = try self.name(bytes);
+        out.* = try self.emit0(Op::BufferNew, type_name);
+        return null;
+    }
+    if ownership::field_expr(tree, expression) |field| {
+        return self.lower_field_expr(tree, field, out);
+    }
+    if ownership::index_expr(tree, expression) |index| {
+        return self.lower_index_expr(tree, index, out);
+    }
+    if ownership::deref_expr(tree, expression) |deref| {
+        return self.lower_deref_expr(tree, deref, out);
+    }
+    let rendered = try self.expression_name(tree, expression);
+    return try self.fail1(tree, "ir error: unsupported expression `%s`", Arg::Str(rendered));
+}
+
+/// Reports whether an expression is a string literal.
+fn is_string_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        String(_) => return true,
+        _ => return false,
+    }
+}
+
+/// Reports whether an expression is the `null` literal.
+fn is_null_expr(tree: &ast::Ast, expression: ast::Expression) -> bool {
+    match tree.expressions.at(expression.node) {
+        Null(_) => return true,
+        _ => return false,
+    }
+}
+
+/// Returns the type spelling of a buffer literal, the Go
+/// `BufferLiteralExpr.TypeText`, or null for another expression.
+fn buffer_literal_type(allocator: Allocator, tree: &ast::Ast, expression: ast::Expression) -> !?string::String {
+    match tree.expressions.at(expression.node) {
+        BufferLiteral(literal) => return try literal.type_text(allocator),
+        _ => return null,
+    }
+}
+
+/// Reads what a borrow or raw pointer points at, the Go `lowerDerefExpr`.
+fn (self: &var Lowerer) lower_deref_expr(
+    tree: &var ast::Ast,
+    deref: ast::DerefExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var receiver = empty_value();
+    if try self.lower_expr(tree, deref.receiver, &var receiver) |failed| {
+        return move failed;
+    }
+    if try self.raw_pointer_elem(receiver.type_name) |elem| {
+        out.* = try self.emit1(Op::RefLoad, elem, receiver);
+        return null;
+    }
+    if !self.is_reference_type(receiver.type_name) {
+        out.* = receiver;
+        return null;
+    }
+    let elem = try self.deref_type(receiver.type_name);
+    out.* = try self.emit1(Op::RefLoad, elem, receiver);
+    return null;
+}
+
+/// Lowers an expression whose type the position it appears in already
+/// fixes, the Go `lowerContextualExpr`: a function return, a struct field, a
+/// union payload, a parameter. An integer literal takes that type there, the
+/// way the checker already read it. want may be empty or any non-integer
+/// type; the expression then lowers with the type it carries itself.
+fn (self: &var Lowerer) lower_contextual_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    want_type: Name,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let want = try self.resolve_type(want_type);
+    if try self.optional_elem_type(want) |elem| {
+        return self.lower_optional_context_expr(tree, expression, want, elem, out);
+    }
+    // A `&var` context wants the storage itself, not the value read out of
+    // it: a `&var` argument and a returned `&var self` both hand over the
+    // same pointer the caller lent. This is the one place that decides it.
+    if self.is_mutable_reference_type(want) {
+        let target = borrow_target_expr(tree, expression);
+        if try self.slot_pointer(tree, target) |slot| {
+            out.* = slot;
+            return null;
+        }
+        if try self.lower_field_storage(tree, target) |storage| {
+            out.* = storage;
+            return null;
+        }
+    }
+    if !self.narrows_integer_literal(want) {
+        var value = empty_value();
+        if try self.lower_expr(tree, expression, &var value) |failed| {
+            return move failed;
+        }
+        out.* = try self.read_borrow_for_context(value, want);
+        return null;
+    }
+    if ownership::int_expr(tree, expression) |literal| {
+        let immediate = try self.text_name(tree, literal.value);
+        out.* = try self.emit_const(want, immediate);
+        return null;
+    }
+    if ownership::prefix_expr(tree, expression) |prefix| {
+        // A negated literal is still a literal in the position it is written
+        // in, and `unary.-` takes the type of its operand.
+        if text_is(tree, prefix.operator, "-") {
+            if ownership::int_expr(tree, prefix.right) |_| {
+                var value = empty_value();
+                if try self.lower_contextual_expr(tree, prefix.right, want, &var value) |failed| {
+                    return move failed;
+                }
+                let operator = try self.text_name(tree, prefix.operator);
+                out.* = try self.emit_op1(Op::Unary, operator, value.type_name, value);
+                return null;
+            }
+        }
+    }
+    return self.lower_expr(tree, expression, out);
+}
+
+/// Reads a borrow's value where the position wants the value itself, the Go
+/// `readBorrowForContext`. A borrow-capture binding is a raw reference
+/// value, and a `&T` parameter travels as a copy, so handing the capture to
+/// such a parameter needs the read a slot-backed borrow gets in
+/// lowerIdentExpr. A union's `&T` spelling wants the copy's address; the
+/// read produces the value that address is taken of, so a mutable capture
+/// degrades through the same load.
+fn (self: &var Lowerer) read_borrow_for_context(value: Value, want: Name) -> !Value {
+    if is_empty(want) or !self.is_reference_type(value.type_name) or
+        self.is_mutable_reference_type(want) {
+        return value;
+    }
+    if !self.is_reference_type(want) {
+        let deref = try self.deref_type(value.type_name);
+        if !same_name(deref, want) {
+            return value;
+        }
+        return self.emit1(Op::RefLoad, want, value);
+    }
+    let value_deref = try self.deref_type(value.type_name);
+    let want_deref = try self.deref_type(want);
+    if !self.is_mutable_reference_type(value.type_name) or !same_name(value_deref, want_deref) {
+        return value;
+    }
+    return self.emit1(Op::RefLoad, want_deref, value);
+}
+
+/// Lowers an expression written where a `?T` is expected, the Go
+/// `lowerOptionalContextExpr`: `null` becomes the empty optional, a plain T
+/// wraps, and a value that is already optional passes through.
+fn (self: &var Lowerer) lower_optional_context_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    want: Name,
+    elem: Name,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if is_null_expr(tree, expression) {
+        out.* = try self.emit0(Op::OptNull, want);
+        return null;
+    }
+    var value = empty_value();
+    if try self.lower_contextual_expr(tree, expression, elem, &var value) |failed| {
+        return move failed;
+    }
+    if !same_name(value.type_name, elem) {
+        // Not the payload: an already-wrapped optional passes through, and
+        // so does an error-set member on its way to the enclosing error path.
+        out.* = value;
+        return null;
+    }
+    out.* = try self.emit1(Op::OptSome, want, value);
+    return null;
+}
+
+/// Reports whether an integer literal written in a position of this type
+/// lowers as that type, the Go `narrowsIntegerLiteral`. i64 is what a
+/// literal lowers as on its own, so it needs no contextual form.
+fn (self: &Lowerer) narrows_integer_literal(type_name: Name) -> bool {
+    let retained = name_text(&self.module.names, type_name);
+    let bytes = retained.as_bytes();
+    return mem::equal_bytes(bytes, "i8") or mem::equal_bytes(bytes, "i16") or
+        mem::equal_bytes(bytes, "i32") or mem::equal_bytes(bytes, "u8") or
+        mem::equal_bytes(bytes, "u16") or mem::equal_bytes(bytes, "u32") or
+        mem::equal_bytes(bytes, "u64") or mem::equal_bytes(bytes, "usize") or
+        mem::equal_bytes(bytes, "isize");
+}
+
+/// Lowers scalar literals, the Go `lowerLiteralExpr`.
+fn (self: &var Lowerer) lower_literal_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::int_expr(tree, expression) |literal| {
+        let immediate = try self.text_name(tree, literal.value);
+        out.* = try self.emit_const(self.common.i64_type, immediate);
+        return null;
+    }
+    if string_literal_text(tree, expression) |text| {
+        let quoted = try self.quoted_name(tree, text);
+        out.* = try self.emit_const(self.common.bytes_type, quoted);
+        return null;
+    }
+    if ownership::bool_expr(tree, expression) |literal| {
+        if literal.value {
+            out.* = try self.emit_const_text(self.common.bool_type, "true");
+        } else {
+            out.* = try self.emit_const_text(self.common.bool_type, "false");
+        }
+        return null;
+    }
+    if is_null_expr(tree, expression) {
+        // A `null` with no `?T` context never reaches a type; the contextual
+        // path (lower_optional_context_expr) is the one that lowers it.
+        return try self.fail0("ir error: `null` needs an optional context");
+    }
+    let kind = try self.name(expression_go_type(tree, expression));
+    return try self.fail1(tree, "ir error: unsupported literal %s", Arg::Str(kind));
+}
+
+/// Returns the text of a string literal, or null for another expression.
+fn string_literal_text(tree: &ast::Ast, expression: ast::Expression) -> ?ast::Text {
+    match tree.expressions.at(expression.node) {
+        String(literal) => return literal.value,
+        _ => return null,
+    }
+}
+
+/// Names the Go `%q` spelling of one string literal's text.
+fn (self: &var Lowerer) quoted_name(tree: &ast::Ast, text: ast::Text) -> !Name {
+    let retained = tree.texts.at(text.node);
+    let bytes = retained.as_bytes();
+    let quoted = try quote_go(self.allocator, bytes);
+    return self.module.names.intern_owned(move quoted);
+}
+
+/// Spells the Go node type of an expression, what `%T` printed for it.
+fn expression_go_type(tree: &ast::Ast, expression: ast::Expression) -> []u8 {
+    match tree.expressions.at(expression.node) {
+        Ident(_) => return "*ast.IdentExpr",
+        Int(_) => return "*ast.IntExpr",
+        String(_) => return "*ast.StringExpr",
+        Null(_) => return "*ast.NullExpr",
+        OrelseGuard(_) => return "*ast.OrelseGuardExpr",
+        Bool(_) => return "*ast.BoolExpr",
+        Type(_) => return "*ast.TypeExpr",
+        Comptime(_) => return "*ast.ComptimeExpr",
+        Prefix(_) => return "*ast.PrefixExpr",
+        Binary(_) => return "*ast.BinaryExpr",
+        Call(_) => return "*ast.CallExpr",
+        TypeApply(_) => return "*ast.TypeApplyExpr",
+        Cast(_) => return "*ast.CastExpr",
+        Try(_) => return "*ast.TryExpr",
+        Move(_) => return "*ast.MoveExpr",
+        Unsafe(_) => return "*ast.UnsafeExpr",
+        Index(_) => return "*ast.IndexExpr",
+        StructLiteral(_) => return "*ast.StructLiteralExpr",
+        BufferLiteral(_) => return "*ast.BufferLiteralExpr",
+        Field(_) => return "*ast.FieldExpr",
+        Deref(_) => return "*ast.DerefExpr",
+        If(_) => return "*ast.IfStmt",
+        Match(_) => return "*ast.MatchStmt",
+        Recovered(_) => return "*ast.RecoveredNode",
+    }
+}
+
+/// Lowers a local binding, a static value, or the built-in void, the Go
+/// `lowerIdentExpr`.
+fn (self: &var Lowerer) lower_ident_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    ident: ast::IdentExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if try self.slot_pointer(tree, expression) |slot| {
+        let elem = try self.deref_type(slot.type_name);
+        out.* = try self.emit1(Op::RefLoad, elem, slot);
+        return null;
+    }
+    let name = try self.text_name(tree, ident.name);
+    if self.envs.get(self.env, name) |value| {
+        out.* = value;
+        return null;
+    }
+    // A static value is known at this point, so it lowers to the constant it
+    // was instantiated with. `Function` is a name, not a value, and is read
+    // by the call that forwards it rather than here.
+    if self.static_value(name) |static| {
+        if !self.name_is(static.typ, "Function") {
+            out.* = try self.emit_const(static.typ, static.text);
+            return null;
+        }
+    }
+    if self.name_is(name, "void") {
+        out.* = self.common.void_value;
+        return null;
+    }
+    return try self.fail1(tree, "ir error: undefined value `%s`", Arg::Str(name));
+}
+
+/// Lowers an explicit cast as a typed conversion instruction, the Go
+/// `lowerCastExpr`.
+fn (self: &var Lowerer) lower_cast_expr(
+    tree: &var ast::Ast,
+    cast: ast::CastExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var value = empty_value();
+    if try self.lower_expr(tree, cast.value, &var value) |failed| {
+        return move failed;
+    }
+    let target = try self.intern_type(tree, cast.target_type);
+    out.* = try self.emit_imm1(Op::Cast, target, target, value);
+    return null;
+}
+
+/// Lowers unary operators, the Go `lowerPrefixExpr`. A borrow marker
+/// preserves the current value-level ABI for checked borrow arguments (the
+/// Go `lowerBorrowExpr`).
+fn (self: &var Lowerer) lower_prefix_expr(
+    tree: &var ast::Ast,
+    prefix: ast::PrefixExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if text_is(tree, prefix.operator, "&") or text_is(tree, prefix.operator, "&var") {
+        return self.lower_expr(tree, prefix.right, out);
+    }
+    var right = empty_value();
+    if try self.lower_expr(tree, prefix.right, &var right) |failed| {
+        return move failed;
+    }
+    let operator = try self.text_name(tree, prefix.operator);
+    out.* = try self.emit_op1(Op::Unary, operator, right.type_name, right);
+    return null;
+}
+
+/// Lowers binary operators, the Go `lowerBinaryExpr`.
+fn (self: &var Lowerer) lower_binary_expr(
+    tree: &var ast::Ast,
+    binary: ast::BinaryExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if text_is(tree, binary.operator, "and") or text_is(tree, binary.operator, "or") {
+        return self.lower_logical_expr(tree, binary, out);
+    }
+    if text_is(tree, binary.operator, "orelse") {
+        return self.lower_orelse_expr(tree, binary, out);
+    }
+    var left = empty_value();
+    if try self.lower_expr(tree, binary.left, &var left) |failed| {
+        return move failed;
+    }
+    var right = empty_value();
+    if try self.lower_expr(tree, binary.right, &var right) |failed| {
+        return move failed;
+    }
+    let operator = try self.text_name(tree, binary.operator);
+    let result_type = self.binary_result_type(operator, left.type_name);
+    out.* = try self.emit_op2(Op::Binary, operator, result_type, left, right);
+    return null;
+}
+
+/// Lowers struct construction, the Go `lowerStructLiteralExpr`.
+fn (self: &var Lowerer) lower_struct_literal_expr(
+    tree: &var ast::Ast,
+    expression: ast::Expression,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let head = ownership::struct_literal_head(tree, expression) orelse return try self.fail0("ir error: unsupported expression");
+    let type_name = try self.text_name(tree, head.type_name);
+    var fields = array::new<FieldArg>(self.allocator);
+    defer fields.deinit();
+    var index = 0;
+    while ownership::struct_literal_field_at(tree, expression, index) |field| {
+        index = index + 1;
+        let field_name = try self.text_name(tree, field.name);
+        let want = try self.field_type(type_name, field_name);
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, field.value, want, &var value) |failed| {
+            return move failed;
+        }
+        try fields.append(FieldArg { name: field_name, value: value });
+    }
+    let result = try self.next(type_name);
+    var instr = self.module.blank_instr(result, Op::StructNew, empty_name(), empty_name());
+    errdefer instr.deinit();
+    index = 0;
+    while fields.get(index) |field| {
+        index = index + 1;
+        try instr.fields.append(field);
+    }
+    let _ = try self.module.add_instr(self.block, move instr);
+    out.* = result;
+    return null;
+}
+
+/// Lowers struct field reads, the Go `lowerFieldExpr`.
+fn (self: &var Lowerer) lower_field_expr(
+    tree: &var ast::Ast,
+    field: ast::FieldExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    if field.namespace {
+        if try self.lower_enum_tag_expr(tree, field) |value| {
+            out.* = value;
+            return null;
+        }
+        if try self.lower_payload_free_union_expr(tree, field) |value| {
+            out.* = value;
+            return null;
+        }
+    }
+    // A storage-backed receiver reads the field through its address, so one
+    // field read does not load the whole aggregate out of the storage.
+    var receiver = empty_value();
+    if try self.lower_receiver_address(tree, field.receiver, &var receiver) |failed| {
+        return move failed;
+    }
+    let field_name = try self.text_name(tree, field.name);
+    let receiver_type = try self.deref_type(receiver.type_name);
+    let field_type = try self.field_type(receiver_type, field_name);
+    if self.is_reference_type(receiver.type_name) {
+        out.* = try self.emit_op1(Op::FieldRef, field_name, field_type, receiver);
+        return null;
+    }
+    out.* = try self.emit_op1(Op::Field, field_name, field_type, receiver);
+    return null;
+}
+
+/// Lowers `Union::Variant(payload)` expressions, the Go
+/// `lowerUnionConstructor`; handled reports whether the callee was a union
+/// variant at all, leaving every other call to the ordinary paths.
+fn (self: &var Lowerer) lower_union_constructor(
+    tree: &var ast::Ast,
+    field: ast::FieldExpr,
+    args: ast::ExpressionList,
+    out: &var Value,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    handled.* = false;
+    let found = try self.union_variant_of(tree, field) orelse return null;
+    handled.* = true;
+    let variant = found.variant;
+    if is_empty(variant.payload) {
+        if ownership::arg_count(tree, args) != 0 {
+            return try self.fail2(
+                tree, "ir error: union variant `%s::%s` expects no payload",
+                Arg::Str(found.union_name), Arg::Str(variant.name)
+            );
+        }
+        out.* = try self.emit_imm0(Op::UnionNew, found.union_name, variant.name);
+        return null;
+    }
+    if ownership::arg_count(tree, args) != 1 {
+        return try self.fail2(
+            tree, "ir error: union variant `%s::%s` expects one payload",
+            Arg::Str(found.union_name), Arg::Str(variant.name)
+        );
+    }
+    let payload_expr = ownership::arg_at(tree, args, 0) orelse return null;
+    var payload = empty_value();
+    if try self.lower_contextual_expr(tree, payload_expr, variant.payload, &var payload) |failed| {
+        return move failed;
+    }
+    out.* = try self.emit_imm1(Op::UnionNew, found.union_name, variant.name, payload);
+    return null;
+}
+
+/// Is one resolved `Union::Variant` namespace spelling.
+pub struct ResolvedVariant {
+    pub union_name: Name,
+    pub variant: UnionVariant
+}
+
+/// Resolves a namespace field as a known union variant, the Go
+/// `unionVariant`.
+fn (self: &var Lowerer) union_variant_of(tree: &ast::Ast, field: ast::FieldExpr) -> !?ResolvedVariant {
+    let union_name = try self.expression_name(tree, field.receiver);
+    let variant_name = try self.text_name(tree, field.name);
+    let variant = self.module.union_variant(union_name, variant_name) orelse return null;
+    return ResolvedVariant { union_name: union_name, variant: variant };
+}
+
+/// Lowers `Union::Variant` without a payload, the Go
+/// `lowerPayloadFreeUnionExpr`; null for any other spelling.
+fn (self: &var Lowerer) lower_payload_free_union_expr(tree: &ast::Ast, field: ast::FieldExpr) -> !?Value {
+    let found = try self.union_variant_of(tree, field) orelse return null;
+    if !is_empty(found.variant.payload) {
+        return null;
+    }
+    return try self.emit_imm0(Op::UnionNew, found.union_name, found.variant.name);
+}
+
+/// Lowers `Enum::Tag` namespace expressions to integer tags, the Go
+/// `lowerEnumTagExpr`; error set members resolve the same way. null for any
+/// other spelling.
+fn (self: &var Lowerer) lower_enum_tag_expr(tree: &ast::Ast, field: ast::FieldExpr) -> !?Value {
+    let enum_name = try self.expression_name(tree, field.receiver);
+    let tag = try self.text_name(tree, field.name);
+    let index = self.module.enum_tag(enum_name, tag) orelse return null;
+    let immediate = try self.module.names.intern_i64(index);
+    return try self.emit_const(enum_name, immediate);
+}
+
+/// Lowers checked byte-slice indexing and slicing, the Go `lowerIndexExpr`.
+/// The bounds test lives here rather than in a backend, so every backend
+/// inherits the same check and the same message from one place.
+fn (self: &var Lowerer) lower_index_expr(
+    tree: &var ast::Ast,
+    index: ast::IndexExpr,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var target = empty_value();
+    if try self.lower_expr(tree, index.target, &var target) |failed| {
+        return move failed;
+    }
+    if !index.slice {
+        var position = empty_value();
+        if index.index |index_expr| {
+            if try self.lower_expr(tree, index_expr, &var position) |failed| {
+                return move failed;
+            }
+        }
+        let length = try self.emit1(Op::SliceLen, self.common.i64_type, target);
+        let bounds = try self.name("bounds");
+        try self.cond_fail2(index.span, "<", position, self.common.zero_index, bounds, position, length);
+        try self.cond_fail2(index.span, ">=", position, length, bounds, position, length);
+        out.* = try self.emit2(Op::SliceIndex, self.common.u8_type, target, position);
+        return null;
+    }
+    var start = self.common.zero_index;
+    if index.start |start_expr| {
+        if try self.lower_expr(tree, start_expr, &var start) |failed| {
+            return move failed;
+        }
+    }
+    var end = empty_value();
+    if index.end |end_expr| {
+        if try self.lower_expr(tree, end_expr, &var end) |failed| {
+            return move failed;
+        }
+    } else {
+        end = try self.emit1(Op::SliceLen, self.common.i64_type, target);
+    }
+    let length = try self.emit1(Op::SliceLen, self.common.i64_type, target);
+    let range = try self.name("range");
+    try self.cond_fail3(index.span, "<", start, self.common.zero_index, range, start, end, length);
+    try self.cond_fail3(index.span, ">", start, end, range, start, end, length);
+    try self.cond_fail3(index.span, ">", end, length, range, start, end, length);
+    out.* = try self.emit3(Op::SliceSlice, self.common.bytes_type, target, start, end);
+    return null;
+}
+
+/// Emits a comparison and aborts with the named failure when it holds, the
+/// Go `condFail` with two reported values. The values a failure reports
+/// travel with it, so the wording lives in the runtime rather than here.
+fn (self: &var Lowerer) cond_fail2(
+    span: ast::Span,
+    operator: []u8,
+    left: Value,
+    right: Value,
+    kind: Name,
+    a: Value,
+    b: Value
+) -> !void {
+    let bad = try self.emit_compare(operator, left, right);
+    var instr = self.module.blank_instr(empty_value(), Op::CondFail, empty_name(), kind);
+    errdefer instr.deinit();
+    instr.span = span;
+    try instr.args.append(bad);
+    try instr.args.append(a);
+    try instr.args.append(b);
+    let _ = try self.module.add_instr(self.block, move instr);
+    return;
+}
+
+/// Emits a comparison and aborts with the named failure when it holds, the
+/// Go `condFail` with three reported values.
+fn (self: &var Lowerer) cond_fail3(
+    span: ast::Span,
+    operator: []u8,
+    left: Value,
+    right: Value,
+    kind: Name,
+    a: Value,
+    b: Value,
+    c: Value
+) -> !void {
+    let bad = try self.emit_compare(operator, left, right);
+    var instr = self.module.blank_instr(empty_value(), Op::CondFail, empty_name(), kind);
+    errdefer instr.deinit();
+    instr.span = span;
+    try instr.args.append(bad);
+    try instr.args.append(a);
+    try instr.args.append(b);
+    try instr.args.append(c);
+    let _ = try self.module.add_instr(self.block, move instr);
+    return;
+}
+
+/// Emits `binary.<operator>` over two operands with a bool result.
+fn (self: &var Lowerer) emit_compare(operator: []u8, left: Value, right: Value) -> !Value {
+    let operand = try self.name(operator);
+    return self.emit_op2(Op::Binary, operand, self.common.bool_type, left, right);
+}

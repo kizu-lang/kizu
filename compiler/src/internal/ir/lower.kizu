@@ -1,0 +1,1161 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::stdmeta;
+import compiler::internal::typ;
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/ir/lower.go: the entry point, the lowerer
+// state, declaration collection, signatures, and function lowering. The Go
+// lowerer keeps pointers into the AST and swaps maps in and out; here every
+// declaration fact the body lowering reads is copied into FunctionFacts
+// first, so no borrow of the Ast is held while a body is lowered (the
+// `std::meta` expansions add nodes to it), and the sets a generic
+// instantiation binds live in arenas behind copy handles.
+
+/// Converts a checked Kizu AST into typed SSA IR, the Go `Lower`: the module
+/// is left in `self.module` for the caller to render, optimize or emit, and
+/// the first failure comes back as a diagnostic. The ownership checker was
+/// read for the errdefers a move retired (ADR-0114) when the lowerer was
+/// created, and std_errors gives the codes std error sets lower to.
+pub fn (self: &var Lowerer) lower(
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    std_errors: &project::StdErrorCodes
+) -> !?diagnostic::Diagnostic {
+    if try self.lower_module(tree, program, std_errors) |failed| {
+        return move failed;
+    }
+    return verify(self.allocator, &self.module);
+}
+
+/// Is one function declaration as the lowering reads it, the Go
+/// `*ast.FunctionDecl`: the signature facts rendered once, and the body.
+pub struct FunctionFacts {
+    pub name: Name,
+    pub static_params: array::Array<StaticParamFacts>,
+    pub params: array::Array<ParamFacts>,
+    pub return_type: Name,
+    pub extern_abi: Name,
+    pub body: ?ast::Block
+}
+
+/// Is one static parameter: its name, whether it is a type parameter, and
+/// the declared type of a value parameter (`Field`, `Function`, `i64`).
+pub struct StaticParamFacts {
+    pub name: Name,
+    pub is_type: bool,
+    pub type_name: Name
+}
+
+/// Is one runtime parameter as written: name, rendered type, borrow marks.
+pub struct ParamFacts {
+    pub name: Name,
+    pub type_name: Name,
+    pub borrow: bool,
+    pub mut_borrow: bool
+}
+
+/// Identifies one FunctionFacts retained by the lowerer.
+pub struct FactsHandle {
+    node: arena::Handle<FunctionFacts>
+}
+
+/// Identifies one Signature retained by the lowerer.
+pub struct SignatureHandle {
+    node: arena::Handle<Signature>
+}
+
+/// Names the parameters a call hands its arguments over at: a signature's
+/// params from position offset on, or none at all, the Go `[]Param` slices
+/// `lowerCallArgsAs` receives.
+pub struct ParamsView {
+    pub signature: ?SignatureHandle,
+    pub offset: i64
+}
+
+/// Returns the parameter list a callee the lowerer has no signature for
+/// gets: every argument keeps the type it carries itself.
+pub fn no_params() -> ParamsView {
+    return ParamsView { signature: null, offset: 0 };
+}
+
+/// Is one compile-time value bound to a static parameter, the Go
+/// `staticValue`.
+pub struct StaticValue {
+    pub name: Name,
+    pub typ: Name,
+    pub text: Name
+}
+
+/// Is one type parameter bound to a type argument.
+pub struct TypeBinding {
+    pub name: Name,
+    pub bound: Name
+}
+
+/// Is what one generic declaration's static parameters are bound to for one
+/// call, the Go `genericArguments`: the type arguments, the compile-time
+/// values, and the order they were declared in. The type arguments are kept
+/// as parallel owned texts as well, for the type parser's substitution.
+pub struct GenericArgs {
+    pub order: array::Array<Name>,
+    pub bindings: array::Array<TypeBinding>,
+    pub binding_names: array::Array<string::String>,
+    pub binding_types: array::Array<string::String>,
+    pub values: array::Array<StaticValue>
+}
+
+/// Identifies one GenericArgs retained by the lowerer.
+pub struct GenericArgsHandle {
+    node: arena::Handle<GenericArgs>
+}
+
+/// Is one generic function with its static parameters bound, the Go
+/// `genericInstance`.
+pub struct GenericInstance {
+    pub decl: FactsHandle,
+    pub args: GenericArgsHandle,
+    pub symbol: Name
+}
+
+/// Is the per-function loop stack entry, the Go `loopContext`.
+pub struct LoopContext {
+    pub label: Name,
+    pub break_to: Name,
+    pub continue_to: Name,
+    pub defer_depth: i64,
+    pub break_edges: array::Array<LoopEdge>,
+    pub continue_edges: array::Array<LoopEdge>
+}
+
+/// Is one edge back into or out of a loop: the block it leaves from and the
+/// environment it carries.
+pub struct LoopEdge {
+    pub block: Name,
+    pub env: EnvHandle
+}
+
+/// Is a header phi and the name it carries around the loop, the Go
+/// `loopPhi`.
+pub struct LoopPhi {
+    pub name: Name,
+    pub phi: Instr
+}
+
+/// Is the field or variant a comptime capture names for the length of one
+/// expansion, the Go `metaField`. A variant that carries no payload has no
+/// type, so typ is empty for it.
+pub struct MetaField {
+    pub owner: Name,
+    pub name: Name,
+    pub typ: Name,
+    pub variant: bool
+}
+
+/// Returns a capture record to fill in, the Go zero `metaField`.
+pub fn empty_meta_field() -> MetaField {
+    return MetaField { owner: empty_name(), name: empty_name(), typ: empty_name(), variant: false };
+}
+
+// MetaBinding is one `comptime` capture in force, the Go `metaFields` map
+// entry; the chain through parent is the map, newest first.
+struct MetaBinding {
+    parent: ?arena::Handle<MetaBinding>,
+    name: Name,
+    field: MetaField
+}
+
+/// Identifies the captures in force before a bind, what its restore puts
+/// back, the Go closure `bindMetaField` returns.
+pub struct MetaMark {
+    previous: ?arena::Handle<MetaBinding>
+}
+
+/// Is one errdefer receiver the ownership checker retired at one return
+/// statement or try expression, the Go `Result` maps flattened.
+pub struct RetiredReceiver {
+    pub statement: ?arena::Handle<ast::StatementNode>,
+    pub expression: ?arena::Handle<ast::ExpressionNode>,
+    pub name: Name
+}
+
+/// Holds the names every lowering spells, interned once.
+pub struct CommonNames {
+    pub bool_type: Name,
+    pub i64_type: Name,
+    pub u8_type: Name,
+    pub void_type: Name,
+    pub bytes_type: Name,
+    pub unknown: Name,
+    pub type_type: Name,
+    pub void_value: Value,
+    pub zero_index: Value
+}
+
+/// Lowers one program, the Go `lowerer`. The module it builds is read in
+/// place after `lower` succeeds.
+pub struct Lowerer {
+    allocator: Allocator,
+    pub module: Module,
+    types: typ::Table,
+    common: CommonNames,
+    // decls lists the program's function declarations in order; tests the
+    // test blocks, which lower after the functions.
+    decl_facts: arena::Arena<FunctionFacts>,
+    decls: array::Array<FactsHandle>,
+    // scratch_facts and scratch_args fill result slots before a resolver
+    // writes them, so out parameters need no optional wrapper.
+    scratch_facts: FactsHandle,
+    scratch_args: GenericArgsHandle,
+    tests: array::Array<TestFacts>,
+    signature_nodes: arena::Arena<Signature>,
+    signatures: map::Map<[]u8, SignatureHandle>,
+    current: Function,
+    block: Block,
+    envs: EnvStore,
+    env: EnvHandle,
+    next_value: i64,
+    next_block: i64,
+    loops: array::Array<LoopContext>,
+    defer_frames: array::Array<array::Array<Cleanup>>,
+    // current_args binds the type parameters and static values in force:
+    // those of the generic function being instantiated, the Go
+    // `typeBindings` and `staticValues`. null binds nothing.
+    generic_args: arena::Arena<GenericArgs>,
+    current_args: ?GenericArgsHandle,
+    // instantiated records the generic instances already requested, keyed
+    // by the symbol they were given; pending the ones still to lower, read
+    // from pending_next on.
+    instantiated: map::Map<[]u8, bool>,
+    pending: array::Array<GenericInstance>,
+    pending_next: i64,
+    // slots names the locals of the function being lowered that live in
+    // memory because something writes through a `&var` borrow of them, and
+    // the `&var` parameters that arrive as such storage.
+    slots: array::Array<Name>,
+    // generic_decls indexes the program's generic function declarations by
+    // name; struct_decls, enum_decls and union_decls the sum and product
+    // declarations, which is what `comptime for` and `std::meta::variants`
+    // walk in source order.
+    generic_decls: map::Map<[]u8, FactsHandle>,
+    struct_decls: map::Map<[]u8, ast::Declaration>,
+    enum_decls: map::Map<[]u8, ast::Declaration>,
+    union_decls: map::Map<[]u8, ast::Declaration>,
+    // meta_fields binds the captures of the `comptime for` expansions
+    // currently being lowered.
+    meta_bindings: arena::Arena<MetaBinding>,
+    meta_current: ?arena::Handle<MetaBinding>,
+    // extern_symbols maps a resolved extern "c" function name to its C
+    // symbol.
+    extern_symbols: map::Map<[]u8, Name>,
+    // next_error_code is the next global code for an error set the program
+    // declares itself; std members keep the codes std assigns.
+    next_error_code: i64,
+    // deinit_owners names the types that carry a deinit contract, seeded
+    // from ast::deinit_owners so lowering reads the same owner-ness the
+    // checkers do.
+    deinit_owners: map::Map<[]u8, bool>,
+    // retired is the preceding phase's output: the errdefer receivers a
+    // move retired before each return statement and try expression.
+    retired: array::Array<RetiredReceiver>
+}
+
+/// Is one `test "name" { ... }` block: the symbol it lowers under and its
+/// body.
+pub struct TestFacts {
+    pub symbol: Name,
+    pub body: ?ast::Block
+}
+
+/// Prepares the lookup tables used during lowering, the Go `newLowerer`.
+pub fn new_lowerer(
+    allocator: Allocator,
+    tree: &ast::Ast,
+    program: &ast::Program,
+    checker: &ownership::Checker
+) -> !Lowerer {
+    var module = new_module(allocator);
+    errdefer module.deinit();
+    let common = try intern_common(&var module.names);
+    let deinit_owners = try ast::deinit_owners(allocator, tree, program);
+    errdefer deinit_owners.deinit();
+    var envs = new_env_store(allocator);
+    errdefer envs.deinit();
+    let env = envs.new_env();
+    // A function and a block that belong to no lowered function fill the
+    // current slots until the first function opens, so the fields need no
+    // optional wrapper.
+    let scratch_function = Function {
+        node: module.function_nodes.add(FunctionNode {
+            name: empty_name(),
+            params: array::new<Param>(allocator),
+            return_type: empty_name(),
+            blocks: array::new<Block>(allocator)
+        })
+    };
+    let scratch_block = try module.add_block(scratch_function, empty_name());
+    var decl_facts = arena::new<FunctionFacts>(allocator);
+    errdefer decl_facts.deinit();
+    let scratch_facts = FactsHandle {
+        node: decl_facts.add(FunctionFacts {
+            name: empty_name(),
+            static_params: array::new<StaticParamFacts>(allocator),
+            params: array::new<ParamFacts>(allocator),
+            return_type: empty_name(),
+            extern_abi: empty_name(),
+            body: null
+        })
+    };
+    var generic_args = arena::new<GenericArgs>(allocator);
+    errdefer generic_args.deinit();
+    let scratch_args = GenericArgsHandle { node: generic_args.add(blank_generic_args(allocator)) };
+    var lowerer = Lowerer {
+        allocator: allocator,
+        module: move module,
+        types: typ::new(allocator),
+        common: common,
+        decl_facts: move decl_facts,
+        decls: array::new<FactsHandle>(allocator),
+        scratch_facts: scratch_facts,
+        scratch_args: scratch_args,
+        tests: array::new<TestFacts>(allocator),
+        signature_nodes: arena::new<Signature>(allocator),
+        signatures: map::new<[]u8, SignatureHandle>(allocator),
+        current: scratch_function,
+        block: scratch_block,
+        envs: move envs,
+        env: env,
+        next_value: 0,
+        next_block: 0,
+        loops: array::new<LoopContext>(allocator),
+        defer_frames: array::new<array::Array<Cleanup>>(allocator),
+        generic_args: move generic_args,
+        current_args: null,
+        instantiated: map::new<[]u8, bool>(allocator),
+        pending: array::new<GenericInstance>(allocator),
+        pending_next: 0,
+        slots: array::new<Name>(allocator),
+        generic_decls: map::new<[]u8, FactsHandle>(allocator),
+        struct_decls: map::new<[]u8, ast::Declaration>(allocator),
+        enum_decls: map::new<[]u8, ast::Declaration>(allocator),
+        union_decls: map::new<[]u8, ast::Declaration>(allocator),
+        meta_bindings: arena::new<MetaBinding>(allocator),
+        meta_current: null,
+        extern_symbols: map::new<[]u8, Name>(allocator),
+        next_error_code: 0,
+        deinit_owners: move deinit_owners,
+        retired: array::new<RetiredReceiver>(allocator)
+    };
+    errdefer lowerer.deinit();
+    try lowerer.collect_facts(tree, program);
+    try lowerer.copy_retired(checker);
+    return move lowerer;
+}
+
+fn intern_common(names: &var NameTable) -> !CommonNames {
+    let i64_type = try names.intern("i64");
+    let void_type = try names.intern("void");
+    return CommonNames {
+        bool_type: try names.intern("bool"),
+        i64_type: i64_type,
+        u8_type: try names.intern("u8"),
+        void_type: void_type,
+        bytes_type: try names.intern("[]u8"),
+        unknown: try names.intern("unknown"),
+        type_type: try names.intern("type"),
+        void_value: Value { name: void_type, type_name: void_type },
+        zero_index: Value { name: try names.intern("0"), type_name: i64_type }
+    };
+}
+
+/// Copies the declaration facts the lowering reads out of the program: the
+/// function declarations in order, the test blocks, and the indexes of the
+/// generic, struct, enum and union declarations.
+fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -> !void {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Function(function) => {
+                let handle = try self.function_facts(tree, function);
+                try self.decls.append(handle);
+                let facts = self.decl_facts.at(handle.node);
+                if facts.static_params.len() > 0 {
+                    let retained = name_text(&self.module.names, facts.name);
+                    let name_bytes = retained.as_bytes();
+                    try self.generic_decls.insert(name_bytes, handle);
+                }
+            },
+            Test(test) => {
+                let retained = tree.texts.at(test.name.node);
+                let name_bytes = retained.as_bytes();
+                let symbol = try test_function_name(self.allocator, name_bytes);
+                let symbol_name = try self.module.names.intern_owned(move symbol);
+                try self.tests.append(TestFacts { symbol: symbol_name, body: test.body });
+            },
+            Struct(declared) => {
+                let retained = tree.texts.at(declared.name.node);
+                let name_bytes = retained.as_bytes();
+                try self.struct_decls.insert(name_bytes, declaration);
+            },
+            Enum(declared) => {
+                let retained = tree.texts.at(declared.name.node);
+                let name_bytes = retained.as_bytes();
+                try self.enum_decls.insert(name_bytes, declaration);
+            },
+            Union(declared) => {
+                let retained = tree.texts.at(declared.name.node);
+                let name_bytes = retained.as_bytes();
+                try self.union_decls.insert(name_bytes, declaration);
+            },
+            _ => {},
+        }
+    }
+    return;
+}
+
+/// Copies one function declaration's facts.
+fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::FunctionDecl) -> !FactsHandle {
+    var static_params = array::new<StaticParamFacts>(self.allocator);
+    errdefer static_params.deinit();
+    var index = 0;
+    while function.signature.static_params.at(index) |param| {
+        index = index + 1;
+        var type_name = empty_name();
+        if param.type_name |declared| {
+            type_name = try self.intern_type(tree, declared);
+        }
+        try static_params.append(StaticParamFacts {
+            name: try self.module.names.intern_text(tree, param.name),
+            is_type: param.is_type(),
+            type_name: type_name
+        });
+    }
+    var params = array::new<ParamFacts>(self.allocator);
+    errdefer params.deinit();
+    index = 0;
+    while function.signature.params.at(index) |param| {
+        index = index + 1;
+        try params.append(ParamFacts {
+            name: try self.module.names.intern_text(tree, param.name),
+            type_name: try self.intern_type(tree, param.type_name),
+            borrow: param.borrow,
+            mut_borrow: param.mut_borrow
+        });
+    }
+    var return_type = empty_name();
+    if function.signature.return_type |declared| {
+        return_type = try self.intern_type(tree, declared);
+    }
+    let facts = FunctionFacts {
+        name: try self.module.names.intern_text(tree, function.signature.name),
+        static_params: move static_params,
+        params: move params,
+        return_type: return_type,
+        extern_abi: try self.module.names.intern_text(tree, function.signature.extern_abi),
+        body: function.body
+    };
+    return FactsHandle { node: self.decl_facts.add(move facts) };
+}
+
+/// Names the canonical spelling of one parsed type, the Go `typ.Text`.
+fn (self: &var Lowerer) intern_type(tree: &ast::Ast, value: typ::Type) -> !Name {
+    let rendered = try typ::render(self.allocator, &tree.types, value);
+    return self.module.names.intern_owned(move rendered);
+}
+
+/// Copies the errdefer receivers the ownership checker retired, the Go
+/// `ownership.Result`, so no borrow of the checker is kept.
+fn (self: &var Lowerer) copy_retired(checker: &ownership::Checker) -> !void {
+    var index = 0;
+    while checker.retired_return_at(index) |statement| {
+        index = index + 1;
+        var position = 0;
+        while checker.retired_err_defer_for_return(statement, position) |name| {
+            position = position + 1;
+            let retained = ownership::retired_name_text(checker, name);
+            let bytes = retained.as_bytes();
+            let copied = try self.module.names.intern(bytes);
+            try self.retired.append(RetiredReceiver {
+                statement: statement.node, expression: null, name: copied
+            });
+        }
+    }
+    index = 0;
+    while checker.retired_try_at(index) |expression| {
+        index = index + 1;
+        var position = 0;
+        while checker.retired_err_defer_for_try(expression, position) |name| {
+            position = position + 1;
+            let retained = ownership::retired_name_text(checker, name);
+            let bytes = retained.as_bytes();
+            let copied = try self.module.names.intern(bytes);
+            try self.retired.append(RetiredReceiver {
+                statement: null, expression: expression.node, name: copied
+            });
+        }
+    }
+    return;
+}
+
+/// Reports whether the ownership checker retired the errdefer on receiver
+/// before this return statement, the Go
+/// `Result.RetiredErrDefersForReturn` membership.
+fn (self: &Lowerer) retired_for_return(statement: ast::Statement, receiver: Name) -> bool {
+    var index = 0;
+    while self.retired.get(index) |entry| {
+        index = index + 1;
+        if entry.statement |node| {
+            if node == statement.node and same_name(entry.name, receiver) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether the ownership checker retired the errdefer on receiver
+/// before this try expression, the Go `Result.RetiredErrDefersForTry`
+/// membership.
+fn (self: &Lowerer) retired_for_try(expression: ast::Expression, receiver: Name) -> bool {
+    var index = 0;
+    while self.retired.get(index) |entry| {
+        index = index + 1;
+        if entry.expression |node| {
+            if node == expression.node and same_name(entry.name, receiver) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Performs declaration collection and function lowering, the Go `lower`.
+fn (self: &var Lowerer) lower_module(
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    std_errors: &project::StdErrorCodes
+) -> !?diagnostic::Diagnostic {
+    if try self.collect_decls(tree, program, std_errors) |failed| {
+        return move failed;
+    }
+    var index = 0;
+    while self.decls.get(index) |handle| {
+        index = index + 1;
+        let facts = self.decl_facts.at(handle.node);
+        if !is_empty(facts.extern_abi) or facts.static_params.len() > 0 {
+            continue;
+        }
+        let name = facts.name;
+        if try self.lower_function_named(tree, handle, name) |failed| {
+            return move failed;
+        }
+    }
+    if try self.lower_tests(tree) |failed| {
+        return move failed;
+    }
+    return self.lower_pending_generics(tree);
+}
+
+/// Lowers each `test "name" { ... }` block into a function, the Go
+/// `lowerTests`, so a test runs through the same lowering as the rest of the
+/// program. A test body may `try`, so it lowers as a function returning
+/// `!void`.
+fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while self.tests.get(index) |test| {
+        index = index + 1;
+        let facts = FunctionFacts {
+            name: test.symbol,
+            static_params: array::new<StaticParamFacts>(self.allocator),
+            params: array::new<ParamFacts>(self.allocator),
+            return_type: try self.module.names.intern("!void"),
+            extern_abi: empty_name(),
+            body: test.body
+        };
+        let handle = FactsHandle { node: self.decl_facts.add(move facts) };
+        if try self.lower_function_named(tree, handle, test.symbol) |failed| {
+            return move failed;
+        }
+    }
+    return null;
+}
+
+/// Records signatures and struct layouts, the Go `collectDecls`.
+fn (self: &var Lowerer) collect_decls(
+    tree: &var ast::Ast,
+    program: &ast::Program,
+    std_errors: &project::StdErrorCodes
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while program.declarations.get(index) |declaration| {
+        index = index + 1;
+        match tree.declarations.at(declaration.node) {
+            Struct(declared) => try self.lower_struct(tree, declared),
+            Enum(declared) => try self.lower_enum(tree, declared),
+            ErrorSet(declared) => try self.lower_error_set(tree, declared, std_errors),
+            Union(declared) => try self.lower_union(tree, declared),
+            _ => {},
+        }
+    }
+    index = 0;
+    while self.decls.get(index) |handle| {
+        index = index + 1;
+        let facts = self.decl_facts.at(handle.node);
+        let name = facts.name;
+        let extern_abi = facts.extern_abi;
+        let signature = try self.lower_signature(handle);
+        try self.record_signature(name, signature);
+        if self.module.names.is(extern_abi, "c") {
+            let symbol = try self.extern_c_symbol(name);
+            try self.record_extern_symbol(name, symbol);
+        }
+    }
+    return null;
+}
+
+/// Records the signature callers of name see, the Go `l.signatures[name] =`.
+fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle) -> !void {
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    if self.signatures.at_mut(name_bytes) |slot| {
+        slot.* = signature;
+        return;
+    }
+    return self.signatures.insert(name_bytes, signature);
+}
+
+/// Records the C symbol an extern "c" declaration links to.
+fn (self: &var Lowerer) record_extern_symbol(name: Name, symbol: Name) -> !void {
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    return self.extern_symbols.insert(name_bytes, symbol);
+}
+
+/// Strips the module qualification a resolver added to an extern "c"
+/// declaration, the Go `externCSymbol`: the C symbol is the identifier the
+/// declaration was written with.
+fn (self: &var Lowerer) extern_c_symbol(name: Name) -> !Name {
+    let start = self.qualification_end(name);
+    if start < 0 {
+        return name;
+    }
+    return self.module.names.intern_slice(name, start, self.module.names.len(name));
+}
+
+/// Returns the index after the last `::` of a name, or -1 for an unqualified
+/// name.
+fn (self: &Lowerer) qualification_end(name: Name) -> i64 {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    var index = mem::len(bytes);
+    while index >= 2 {
+        if bytes[index - 2] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index - 1;
+    }
+    return -1;
+}
+
+/// Converts an AST union declaration to IR metadata, the Go `lowerUnion`.
+fn (self: &var Lowerer) lower_union(tree: &ast::Ast, declared: &ast::UnionDecl) -> !void {
+    var variants = map::new<[]u8, UnionVariant>(self.allocator);
+    errdefer variants.deinit();
+    var index = 0;
+    while declared.variants.at(index) |variant| {
+        var payload = empty_name();
+        if variant.payload |declared_payload| {
+            payload = try self.resolve_element_forms(tree, declared_payload);
+        }
+        let variant_name = try self.module.names.intern_text(tree, variant.name);
+        let retained = name_text(&self.module.names, variant_name);
+        let variant_bytes = retained.as_bytes();
+        try variants.insert(variant_bytes, UnionVariant {
+            name: variant_name, index: index, payload: payload
+        });
+        index = index + 1;
+    }
+    let name = try self.module.names.intern_text(tree, declared.name);
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    return self.module.unions.insert(name_bytes, Union { name: name, variants: move variants });
+}
+
+/// Converts an AST enum declaration to IR metadata, the Go `lowerEnum`.
+fn (self: &var Lowerer) lower_enum(tree: &ast::Ast, declared: &ast::EnumDecl) -> !void {
+    var tags = map::new<[]u8, i64>(self.allocator);
+    errdefer tags.deinit();
+    var index = 0;
+    while declared.tags.at(index) |tag| {
+        let retained = tree.texts.at(tag.node);
+        let tag_bytes = retained.as_bytes();
+        try tags.insert(tag_bytes, index);
+        index = index + 1;
+    }
+    let name = try self.module.names.intern_text(tree, declared.name);
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    return self.module.enums.insert(name_bytes, Enum { name: name, tags: move tags });
+}
+
+/// Converts an AST error set to IR metadata, the Go `lowerErrorSet`. An
+/// error value is one integer, globally unique across every set: std members
+/// keep the codes std assigns, and sets a program declares take the codes
+/// after them.
+fn (self: &var Lowerer) lower_error_set(
+    tree: &ast::Ast,
+    declared: &ast::ErrorSetDecl,
+    std_errors: &project::StdErrorCodes
+) -> !void {
+    let name = try self.module.names.intern_text(tree, declared.name);
+    var members = map::new<[]u8, i64>(self.allocator);
+    errdefer members.deinit();
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    if std_errors.sets.at(name_bytes) |codes| {
+        var position = 0;
+        while codes.key_at(position) |member| {
+            position = position + 1;
+            if codes.get(member) |code| {
+                try members.insert(member, code);
+            }
+        }
+        return self.module.error_sets.insert(name_bytes, Enum { name: name, tags: move members });
+    }
+    if self.next_error_code == 0 {
+        self.next_error_code = std_errors.base;
+    }
+    var index = 0;
+    while declared.members.at(index) |member| {
+        index = index + 1;
+        let member_text = tree.texts.at(member.node);
+        let member_bytes = member_text.as_bytes();
+        try members.insert(member_bytes, self.next_error_code);
+        self.next_error_code = self.next_error_code + 1;
+    }
+    return self.module.error_sets.insert(name_bytes, Enum { name: name, tags: move members });
+}
+
+/// Converts an AST struct declaration to IR metadata, the Go `lowerStruct`.
+fn (self: &var Lowerer) lower_struct(tree: &ast::Ast, declared: &ast::StructDecl) -> !void {
+    var fields = array::new<Field>(self.allocator);
+    errdefer fields.deinit();
+    var index = 0;
+    while declared.fields.at(index) |field| {
+        index = index + 1;
+        try fields.append(Field {
+            name: try self.module.names.intern_text(tree, field.name),
+            type_name: try self.resolve_element_forms(tree, field.type_name)
+        });
+    }
+    let name = try self.module.names.intern_text(tree, declared.name);
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    return self.module.structs.insert(name_bytes, Struct { name: name, fields: move fields });
+}
+
+/// Names a declared type with its `std::meta::element<T>` forms resolved,
+/// the Go `stdmeta.ResolveElementTypeForms(typ.Text(value))`.
+fn (self: &var Lowerer) resolve_element_forms(tree: &ast::Ast, value: typ::Type) -> !Name {
+    let resolved = try stdmeta::resolve_element_type_forms(self.allocator, &tree.types, value);
+    return self.module.names.intern_owned(move resolved);
+}
+
+/// Extracts the callable type of a function declaration, the Go
+/// `lowerSignature`, against the type bindings in force.
+fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
+    var params = array::new<Param>(self.allocator);
+    errdefer params.deinit();
+    let count = self.decl_param_count(decl);
+    var index = 0;
+    while index < count {
+        let facts = self.decl_param(decl, index);
+        index = index + 1;
+        try params.append(try self.lower_param(facts));
+    }
+    let declared_return = self.decl_facts.at(decl.node).return_type;
+    let resolved = try self.resolve_type(declared_return);
+    let returned = try self.lower_return_type(resolved);
+    let handle = self.signature_nodes.add(Signature { params: move params, return_type: returned });
+    return SignatureHandle { node: handle };
+}
+
+/// Returns the number of runtime parameters a declaration has.
+fn (self: &Lowerer) decl_param_count(decl: FactsHandle) -> i64 {
+    let facts = self.decl_facts.at(decl.node);
+    return facts.params.len();
+}
+
+/// Returns one runtime parameter of a declaration; the blank record past the
+/// last, which no caller reads.
+fn (self: &Lowerer) decl_param(decl: FactsHandle, index: i64) -> ParamFacts {
+    let facts = self.decl_facts.at(decl.node);
+    if facts.params.get(index) |param| {
+        return param;
+    }
+    return ParamFacts { name: empty_name(), type_name: empty_name(), borrow: false, mut_borrow: false };
+}
+
+/// Returns the number of static parameters a declaration has.
+fn (self: &Lowerer) decl_static_param_count(decl: FactsHandle) -> i64 {
+    let facts = self.decl_facts.at(decl.node);
+    return facts.static_params.len();
+}
+
+/// Returns one static parameter of a declaration; the blank record past the
+/// last, which no caller reads.
+fn (self: &Lowerer) decl_static_param(decl: FactsHandle, index: i64) -> StaticParamFacts {
+    let facts = self.decl_facts.at(decl.node);
+    if facts.static_params.get(index) |param| {
+        return param;
+    }
+    return StaticParamFacts { name: empty_name(), is_type: false, type_name: empty_name() };
+}
+
+/// Returns the name of a declaration.
+fn (self: &Lowerer) decl_name(decl: FactsHandle) -> Name {
+    return self.decl_facts.at(decl.node).name;
+}
+
+/// Returns the body of a declaration, null for one that has none.
+fn (self: &Lowerer) decl_body(decl: FactsHandle) -> ?ast::Block {
+    return self.decl_facts.at(decl.node).body;
+}
+
+/// Returns the return type of a signature.
+fn (self: &Lowerer) signature_return(signature: SignatureHandle) -> Name {
+    return self.signature_nodes.at(signature.node).return_type;
+}
+
+/// Returns one parameter of a signature, or null past the last.
+fn (self: &Lowerer) signature_param(signature: SignatureHandle, index: i64) -> ?Param {
+    let node = self.signature_nodes.at(signature.node);
+    return node.params.get(index);
+}
+
+/// Returns the number of parameters a signature declares.
+fn (self: &Lowerer) signature_param_count(signature: SignatureHandle) -> i64 {
+    let node = self.signature_nodes.at(signature.node);
+    return node.params.len();
+}
+
+/// Returns the parameter a call hands its argument at index over at, or
+/// null when the view has none there.
+fn (self: &Lowerer) view_param(view: ParamsView, index: i64) -> ?Param {
+    let signature = view.signature orelse return null;
+    return self.signature_param(signature, index + view.offset);
+}
+
+/// Returns the parameters of a signature, the Go `sig.Params`.
+fn params_of(signature: SignatureHandle) -> ParamsView {
+    return ParamsView { signature: signature, offset: 0 };
+}
+
+/// Drops the receiver, which a method call lowers on its own, the Go
+/// `paramsAfterSelf`.
+fn params_after_self(signature: SignatureHandle) -> ParamsView {
+    return ParamsView { signature: signature, offset: 1 };
+}
+
+/// Returns the signature recorded under name, the Go `l.signatures[name]`.
+fn (self: &Lowerer) signature_named(name: Name) -> ?SignatureHandle {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return self.signatures.get(bytes);
+}
+
+/// Reports whether name is a declared function, the Go `l.signatures[name]`
+/// membership.
+fn (self: &Lowerer) has_signature(name: Name) -> bool {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return self.signatures.contains(bytes);
+}
+
+/// Returns the params the lowerer declares for a callee, the Go
+/// `l.signatures[name].Params`: none when it has no signature for it.
+fn (self: &Lowerer) callee_params(name: Name) -> ParamsView {
+    if self.signature_named(name) |signature| {
+        return params_of(signature);
+    }
+    return no_params();
+}
+
+/// Lowers one function into SSA blocks under an explicit IR symbol name, the
+/// Go `lowerFunctionNamed`. The function it builds wears the signature
+/// callers were given, rather than a second reading of the same declaration.
+fn (self: &var Lowerer) lower_function_named(
+    tree: &var ast::Ast,
+    decl: FactsHandle,
+    name: Name
+) -> !?diagnostic::Diagnostic {
+    let signature = try self.lower_signature(decl);
+    var params = array::new<Param>(self.allocator);
+    errdefer params.deinit();
+    let count = self.signature_param_count(signature);
+    var index = 0;
+    while index < count {
+        if self.signature_param(signature, index) |param| {
+            try params.append(param);
+        }
+        index = index + 1;
+    }
+    self.current = Function {
+        node: self.module.function_nodes.add(FunctionNode {
+            name: name,
+            params: move params,
+            return_type: self.signature_return(signature),
+            blocks: array::new<Block>(self.allocator)
+        })
+    };
+    try self.module.functions.append(self.current);
+    self.env = self.envs.new_env();
+    if try self.mutably_borrowed_locals(tree, decl) |failed| {
+        return move failed;
+    }
+    self.next_value = 0;
+    self.next_block = 0;
+    while self.loops.pop() |loop| {
+        loop.deinit();
+    }
+    while self.defer_frames.pop() |frame| {
+        frame.deinit();
+    }
+    index = 0;
+    while index < count {
+        let facts = self.decl_param(decl, index);
+        if self.signature_param(signature, index) |param| {
+            try self.envs.set(self.env, facts.name, param.value());
+            // A parameter that arrives as the caller's storage is a storage
+            // name like a lent local: reads load, assignments store, and
+            // address consumers take the pointer itself.
+            if param.passing == Passing::CallerStorage {
+                try self.slots.append(facts.name);
+            }
+        }
+        index = index + 1;
+    }
+    let entry = try self.module.names.intern("entry");
+    self.block = try self.new_block(entry);
+    if self.decl_body(decl) |body| {
+        if try self.lower_block(tree, body) |failed| {
+            return move failed;
+        }
+    }
+    if !self.terminated() {
+        // A body that runs off its end returns what a written `return;`
+        // returns, which for `!void` is a wrapped success rather than a bare
+        // void.
+        let value = try self.return_void_value();
+        self.terminate(return_terminator(value));
+    }
+    return null;
+}
+
+/// Gives a parameter the type the callee sees and how the call hands it
+/// over, the Go `lowerParam`. A `&var` parameter is the caller's own
+/// storage, because a write through it has to land there rather than in a
+/// copy. A `&` parameter cannot write, so a copy is the same observation and
+/// stays the cheaper shape -- except for unions, where matching needs an
+/// address and the copy is made for the call.
+fn (self: &var Lowerer) lower_param(facts: ParamFacts) -> !Param {
+    let type_name = try self.resolve_type(facts.type_name);
+    var lowered = Param {
+        name: try self.module.names.prefixed("%", facts.name),
+        type_name: type_name,
+        passing: Passing::Value
+    };
+    if facts.borrow or facts.mut_borrow {
+        lowered = try self.borrow_ir_param(lowered, type_name, facts.mut_borrow);
+    }
+    return lowered;
+}
+
+/// Applies `borrow_ir_type` to one parameter record.
+fn (self: &var Lowerer) borrow_ir_param(param: Param, elem: Name, mutable: bool) -> !Param {
+    let passing = self.borrow_passing(elem, mutable);
+    return Param {
+        name: param.name,
+        type_name: try self.borrow_ir_type(elem, mutable),
+        passing: passing
+    };
+}
+
+/// Decides how a borrow of elem travels: what it is spelled as, the Go
+/// `borrowIRType` spelling half. `borrow_passing` is the other half; a
+/// parameter and a return ask the same question, so they get the same
+/// answer.
+fn (self: &var Lowerer) borrow_ir_type(elem: Name, mutable: bool) -> !Name {
+    if mutable {
+        // A mutable slice borrow writes through the view's own pointer, never
+        // into the caller's binding -- element writes only, no re-pointing
+        // (ADR-0096) -- so the fat pointer itself is the storage and travels
+        // flat, exactly like a shared slice view.
+        if self.module.names.is(elem, "[]u8") {
+            return elem;
+        }
+        return self.module.names.prefixed("&var ", elem);
+    }
+    if self.module.has_union(elem) {
+        return self.module.names.prefixed("&", elem);
+    }
+    return elem;
+}
+
+/// Decides how a borrow of elem is handed over, the Go `borrowIRType`
+/// passing half.
+fn (self: &Lowerer) borrow_passing(elem: Name, mutable: bool) -> Passing {
+    if mutable {
+        if self.module.names.is(elem, "[]u8") {
+            return Passing::Value;
+        }
+        return Passing::CallerStorage;
+    }
+    if self.module.has_union(elem) {
+        return Passing::CopyAddress;
+    }
+    return Passing::Value;
+}
+
+/// Gives a function's result the type it travels as, the Go
+/// `lowerReturnType`, so a returned borrow follows the same rule a borrowed
+/// parameter does.
+fn (self: &var Lowerer) lower_return_type(name: Name) -> !Name {
+    if is_empty(name) {
+        return self.return_type(name);
+    }
+    let parsed = try self.parse_type(name);
+    var is_borrow = false;
+    var mutable = false;
+    var elem_name = empty_name();
+    match typ::root_node(&self.types, parsed) {
+        Borrow(borrow) => {
+            is_borrow = true;
+            mutable = borrow.mutable;
+            let elem = typ::child_type(parsed, borrow.elem);
+            let rendered = try typ::render(self.allocator, &self.types, elem);
+            elem_name = try self.module.names.intern_owned(move rendered);
+        },
+        _ => {},
+    }
+    if !is_borrow {
+        return self.return_type(name);
+    }
+    let spelling = try self.borrow_ir_type(elem_name, mutable);
+    return self.return_type(spelling);
+}
+
+/// Parses one IR type spelling through the lowerer's table, the Go
+/// `l.types.Parse`.
+fn (self: &var Lowerer) parse_type(name: Name) -> !typ::Type {
+    let retained = name_text(&self.module.names, name);
+    let bytes = retained.as_bytes();
+    return self.types.parse(bytes);
+}
+
+/// Binds the type parameters in force, wherever they stand, the Go
+/// `resolveType`. A parameter inside a static argument list counts:
+/// `std::array::Array<T>` is the receiver of every Array method, and lowering
+/// it as written would leave the instance carrying the parameter it was
+/// instantiated away from.
+fn (self: &var Lowerer) resolve_type(name: Name) -> !Name {
+    // A `std::meta` form written where a type goes resolves first: it names
+    // a type through the capture in force rather than being one (ADR-0113).
+    let resolved = try self.resolve_meta_type_deep(name);
+    let args = self.current_args orelse return resolved;
+    if self.bound_type(args, resolved) |bound| {
+        return bound;
+    }
+    if self.binding_count(args) == 0 or is_empty(resolved) {
+        return resolved;
+    }
+    let node = self.generic_args.at(args.node);
+    let retained = name_text(&self.module.names, resolved);
+    let bytes = retained.as_bytes();
+    let substituted = try typ::substitute_owned_text(
+        self.allocator, bytes, &node.binding_names, &node.binding_types
+    );
+    return self.module.names.intern_owned(move substituted);
+}
+
+/// Binds the type parameters in force across a static argument list, the Go
+/// `resolveTypeArgs`. A list is not a type, so each entry is resolved on its
+/// own.
+fn (self: &var Lowerer) resolve_type_args(list: Name) -> !Name {
+    var args = try self.split_static_args(list);
+    defer args.deinit();
+    if args.len() == 0 {
+        return self.resolve_type(list);
+    }
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while args.get(index) |arg| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        index = index + 1;
+        let resolved = try self.resolve_type(arg);
+        try self.module.names.append_to(&var out, resolved);
+    }
+    return self.module.names.intern_owned(move out);
+}
+
+/// Returns what a type parameter is bound to in the bindings in force, or
+/// null when name is not a bound parameter.
+fn (self: &Lowerer) bound_type(args: GenericArgsHandle, name: Name) -> ?Name {
+    let node = self.generic_args.at(args.node);
+    var index = 0;
+    while node.bindings.get(index) |binding| {
+        index = index + 1;
+        if same_name(binding.name, name) {
+            return binding.bound;
+        }
+    }
+    return null;
+}
+
+/// Returns the number of type parameters the bindings bind.
+fn (self: &Lowerer) binding_count(args: GenericArgsHandle) -> i64 {
+    let node = self.generic_args.at(args.node);
+    return node.bindings.len();
+}
+
+/// Returns the compile-time value bound to name in the instance being
+/// lowered, the Go `l.staticValues[name]`, or null.
+fn (self: &Lowerer) static_value(name: Name) -> ?StaticValue {
+    let args = self.current_args orelse return null;
+    let node = self.generic_args.at(args.node);
+    var index = 0;
+    while node.values.get(index) |value| {
+        index = index + 1;
+        if same_name(value.name, name) {
+            return value;
+        }
+    }
+    return null;
+}
+
+/// Forwards a static value through an outer binding, the Go
+/// `resolveStaticValue`, so a generic passing its own static value on keeps
+/// the caller's argument.
+fn (self: &Lowerer) resolve_static_value(text: Name) -> Name {
+    if self.static_value(text) |bound| {
+        return bound.text;
+    }
+    return text;
+}
+
+/// Returns what a function is running as when it holds no instance bindings,
+/// the Go empty `typeBindings`.
+fn (self: &var Lowerer) clear_bindings() -> void {
+    self.current_args = null;
+    return;
+}

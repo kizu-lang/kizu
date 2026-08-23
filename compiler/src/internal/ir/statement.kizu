@@ -1,0 +1,528 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ownership;
+import std::array;
+
+// Mechanical port of the block and statement half of internal/ir/lower.go:
+// block scoping, statement dispatch, let / assign / return lowering.
+
+/// Remembers what a name meant before a block rebound it, the Go
+/// `scopedBinding`.
+pub struct ScopedBinding {
+    pub name: Name,
+    pub value: Value,
+    pub bound: bool
+}
+
+/// Makes the declarations written directly in block local to it, the Go
+/// `scopeBlockBindings`: the enclosing bindings are recorded and
+/// `restore_block_bindings` puts them back. Nested blocks scope themselves,
+/// so only this level is collected.
+fn (self: &var Lowerer) scope_block_bindings(
+    tree: &ast::Ast,
+    block: ast::Block,
+    saved: &var array::Array<ScopedBinding>
+) -> !void {
+    var index = 0;
+    while ownership::block_statement_at(tree, block, index) |statement| {
+        index = index + 1;
+        let declaration = ownership::let_stmt(tree, statement) orelse continue;
+        let name = try self.text_name(tree, declaration.name);
+        if self.envs.get(self.env, name) |previous| {
+            try saved.append(ScopedBinding { name: name, value: previous, bound: true });
+        } else {
+            try saved.append(ScopedBinding { name: name, value: empty_value(), bound: false });
+        }
+    }
+    return;
+}
+
+/// Puts the enclosing bindings back, the closure `scopeBlockBindings`
+/// returns. Reverse order, so a name declared twice in one block ends on the
+/// binding that was in scope before either declaration.
+fn (self: &var Lowerer) restore_block_bindings(saved: &array::Array<ScopedBinding>) -> !void {
+    var index = saved.len();
+    while index > 0 {
+        index = index - 1;
+        if saved.get(index) |binding| {
+            if binding.bound {
+                try self.envs.set(self.env, binding.name, binding.value);
+            } else {
+                try self.envs.remove(self.env, binding.name);
+            }
+        }
+    }
+    return;
+}
+
+/// Lowers statements into the current block, the Go `lowerBlock`.
+fn (self: &var Lowerer) lower_block(tree: &var ast::Ast, block: ast::Block) -> !?diagnostic::Diagnostic {
+    var ignored = empty_value();
+    return self.lower_block_body(tree, block, false, &var ignored);
+}
+
+/// Is what a statement in value position produces, the Go `statementValue`
+/// result: an expression written without a semicolon, or an `if` / `match`
+/// statement, which are both a statement and an expression.
+pub union TrailingValue {
+    Expression(ast::Expression),
+    If(ast::IfStmt),
+    Match(ast::Statement),
+}
+
+/// Returns the value a statement produces when it stands in value position,
+/// the Go `statementValue`, and null when it has none.
+fn statement_value(tree: &ast::Ast, statement: ast::Statement) -> ?TrailingValue {
+    if ownership::expr_stmt(tree, statement) |value| {
+        if value.semicolon {
+            return null;
+        }
+        return TrailingValue::Expression(value.expr);
+    }
+    if ownership::if_stmt(tree, statement) |value| {
+        return TrailingValue::If(value);
+    }
+    if ownership::is_match_stmt(tree, statement) {
+        return TrailingValue::Match(statement);
+    }
+    return null;
+}
+
+/// Returns no trailing value, the typed null a `var` needs.
+fn no_trailing() -> ?TrailingValue {
+    return null;
+}
+
+/// Returns the value a block ends with, the Go `trailingExpr`.
+fn trailing_value(tree: &ast::Ast, block: ast::Block) -> ?TrailingValue {
+    let count = ownership::block_len(tree, block);
+    if count == 0 {
+        return null;
+    }
+    let last = ownership::block_statement_at(tree, block, count - 1) orelse return null;
+    return statement_value(tree, last);
+}
+
+/// Lowers a value-position statement's value, the `lowerExpr` call on what
+/// `statementValue` returned.
+fn (self: &var Lowerer) lower_trailing_value(
+    tree: &var ast::Ast,
+    value: TrailingValue,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    match value {
+        Expression(expression) => return self.lower_expr(tree, expression, out),
+        If(branch) => return self.lower_if_expr(tree, branch, out),
+        Match(statement) => return self.lower_match_expr(tree, MatchNode::Statement(statement), out),
+    }
+}
+
+/// Lowers the statements of a block, and its trailing expression as a value
+/// when one is wanted, the Go `lowerBlockBody`. The cleanup frame and the
+/// block's bindings are opened here and closed on both exits.
+fn (self: &var Lowerer) lower_block_body(
+    tree: &var ast::Ast,
+    block: ast::Block,
+    want_value: bool,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    let frame = try self.push_defer_frame();
+    var saved = array::new<ScopedBinding>(self.allocator);
+    defer saved.deinit();
+    try self.scope_block_bindings(tree, block, &var saved);
+    if try self.lower_block_statements(tree, block, want_value, frame, out) |failed| {
+        errdefer failed.deinit();
+        try self.pop_defer_frame();
+        try self.restore_block_bindings(&saved);
+        return move failed;
+    }
+    try self.pop_defer_frame();
+    try self.restore_block_bindings(&saved);
+    return null;
+}
+
+/// Lowers the statements of one block inside its open frame: every
+/// statement but a wanted trailing value, then that value, then the frame's
+/// fallthrough cleanups.
+fn (self: &var Lowerer) lower_block_statements(
+    tree: &var ast::Ast,
+    block: ast::Block,
+    want_value: bool,
+    frame: i64,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var count = ownership::block_len(tree, block);
+    var trailing = no_trailing();
+    if want_value {
+        if trailing_value(tree, block) |found| {
+            trailing = found;
+            count = count - 1;
+        } else {
+            return try self.fail0("ir error: a branch used as a value must end in an expression");
+        }
+    }
+    var index = 0;
+    while index < count {
+        let statement = ownership::block_statement_at(tree, block, index) orelse break;
+        index = index + 1;
+        if self.terminated() {
+            return null;
+        }
+        if ownership::defer_stmt(tree, statement) |deferred| {
+            if try self.lower_defer_stmt(tree, deferred) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        if ownership::errdefer_stmt(tree, statement) |deferred| {
+            if try self.lower_err_defer_stmt(tree, deferred) |failed| {
+                return move failed;
+            }
+            continue;
+        }
+        if try self.lower_stmt(tree, statement) |failed| {
+            return move failed;
+        }
+    }
+    if trailing |found| {
+        if !self.terminated() {
+            if try self.lower_trailing_value(tree, found, out) |failed| {
+                return move failed;
+            }
+        }
+    }
+    if !self.terminated() {
+        try self.emit_cleanup_frame(frame);
+    }
+    return null;
+}
+
+/// Lowers one statement, the Go `lowerStmt`.
+fn (self: &var Lowerer) lower_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
+    if ownership::let_stmt(tree, statement) |value| {
+        return self.lower_let_stmt(tree, value);
+    }
+    if ownership::assign_stmt(tree, statement) |value| {
+        let want = try self.assign_target_type(tree, value.target);
+        var lowered = empty_value();
+        if try self.lower_contextual_expr(tree, value.value, want, &var lowered) |failed| {
+            return move failed;
+        }
+        return self.lower_assign_target(tree, value.target, lowered);
+    }
+    if ownership::return_stmt(tree, statement) |value| {
+        return self.lower_return_stmt(tree, statement, value);
+    }
+    if ownership::defer_stmt(tree, statement) |_| {
+        return try self.fail0("ir error: defer statement must appear directly in a block");
+    }
+    if ownership::errdefer_stmt(tree, statement) |_| {
+        return try self.fail0("ir error: defer statement must appear directly in a block");
+    }
+    if ownership::expr_stmt(tree, statement) |value| {
+        var ignored = empty_value();
+        return self.lower_expr(tree, value.expr, &var ignored);
+    }
+    return self.lower_body_stmt(tree, statement);
+}
+
+/// Lowers the statements that carry a body of their own, and the branches
+/// that leave one, the Go `lowerBodyStmt`.
+fn (self: &var Lowerer) lower_body_stmt(tree: &var ast::Ast, statement: ast::Statement) -> !?diagnostic::Diagnostic {
+    if ownership::if_stmt(tree, statement) |value| {
+        return self.lower_if_stmt(tree, value);
+    }
+    if ownership::while_stmt(tree, statement) |value| {
+        return self.lower_while_stmt(tree, value);
+    }
+    if ownership::for_stmt(tree, statement) |value| {
+        return self.lower_for_stmt(tree, value);
+    }
+    if ownership::break_stmt(tree, statement) |value| {
+        return self.lower_loop_branch(tree, false, value.label);
+    }
+    if ownership::continue_stmt(tree, statement) |value| {
+        return self.lower_loop_branch(tree, true, value.label);
+    }
+    if ownership::is_match_stmt(tree, statement) {
+        return self.lower_match_stmt(tree, statement);
+    }
+    if ownership::is_block_stmt(tree, statement) {
+        // Only a match arm body is a bare block statement (SPEC §6.12).
+        return self.lower_block(tree, ast::Block { node: statement.node });
+    }
+    if ownership::comptime_if_stmt(tree, statement) |value| {
+        return self.lower_comptime_if_stmt(tree, value);
+    }
+    if ownership::comptime_for_stmt(tree, statement) |value| {
+        return self.lower_comptime_for_stmt(tree, value);
+    }
+    if ownership::comptime_match_stmt(tree, statement) |value| {
+        return self.lower_comptime_match_stmt(tree, value);
+    }
+    let kind = try self.name(statement_go_type(tree, statement));
+    return try self.fail1(tree, "ir error: unsupported statement %s", Arg::Str(kind));
+}
+
+/// Spells the Go node type of a statement, what `%T` printed for it.
+fn statement_go_type(tree: &ast::Ast, statement: ast::Statement) -> []u8 {
+    match tree.statements.at(statement.node) {
+        Block(_) => return "*ast.BlockStmt",
+        Let(_) => return "*ast.LetStmt",
+        Assign(_) => return "*ast.AssignStmt",
+        Return(_) => return "*ast.ReturnStmt",
+        Defer(_) => return "*ast.DeferStmt",
+        ErrDefer(_) => return "*ast.ErrDeferStmt",
+        If(_) => return "*ast.IfStmt",
+        While(_) => return "*ast.WhileStmt",
+        For(_) => return "*ast.ForStmt",
+        Break(_) => return "*ast.BreakStmt",
+        Continue(_) => return "*ast.ContinueStmt",
+        Match(_) => return "*ast.MatchStmt",
+        ComptimeIf(_) => return "*ast.ComptimeIfStmt",
+        ComptimeFor(_) => return "*ast.ComptimeForStmt",
+        ComptimeMatch(_) => return "*ast.ComptimeMatchStmt",
+        Expr(_) => return "*ast.ExprStmt",
+        Recovered(_) => return "*ast.RecoveredNode",
+    }
+}
+
+/// Binds one declaration to the value it was written with, the Go
+/// `lowerLetStmt`.
+fn (self: &var Lowerer) lower_let_stmt(tree: &var ast::Ast, statement: ast::LetStmt) -> !?diagnostic::Diagnostic {
+    var value = empty_value();
+    if try self.lower_expr(tree, statement.value, &var value) |failed| {
+        return move failed;
+    }
+    let name = try self.text_name(tree, statement.name);
+    try self.bind_local(name, value);
+    return null;
+}
+
+/// Returns the declared type an assignment writes into, the Go
+/// `assignTargetType`, read without emitting anything so the value can be
+/// lowered against it. Empty means the lowerer cannot name the type from the
+/// target alone, and the value keeps the type it carries itself.
+fn (self: &var Lowerer) assign_target_type(tree: &ast::Ast, target: ast::Expression) -> !Name {
+    if ownership::ident_expr(tree, target) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        let value = self.envs.get(self.env, name) orelse return empty_name();
+        return self.deref_type(value.type_name);
+    }
+    if ownership::field_expr(tree, target) |field| {
+        let receiver = try self.assign_target_type(tree, field.receiver);
+        if is_empty(receiver) {
+            return empty_name();
+        }
+        let field_name = try self.text_name(tree, field.name);
+        return self.field_type(receiver, field_name);
+    }
+    if ownership::deref_expr(tree, target) |deref| {
+        let receiver = try self.assign_target_type(tree, deref.receiver);
+        if try self.raw_pointer_elem(receiver) |elem| {
+            return elem;
+        }
+        return receiver;
+    }
+    if ownership::unsafe_expr(tree, target) |marked| {
+        return self.assign_target_type(tree, marked.value);
+    }
+    if ownership::index_expr(tree, target) |index| {
+        if !index.slice {
+            return self.common.u8_type;
+        }
+        return empty_name();
+    }
+    return empty_name();
+}
+
+/// Writes value into an assignment target, the Go `lowerAssignTarget`. An
+/// identifier rebinds the SSA name. A field of a borrowed receiver stores
+/// through the borrow, while a field of a value receiver rebuilds the
+/// receiver aggregate and assigns that back through the same rule, so
+/// `a.b.c = v` reaches whichever of `a` and `a.b` owns memory. An explicit
+/// dereference stores through the borrowed pointer. Any other target is
+/// rejected: dropping the store would silently compile the assignment away.
+fn (self: &var Lowerer) lower_assign_target(
+    tree: &var ast::Ast,
+    target: ast::Expression,
+    value: Value
+) -> !?diagnostic::Diagnostic {
+    if ownership::unsafe_expr(tree, target) |marked| {
+        // The marker says who owns the obligation, not where the store goes.
+        return self.lower_assign_target(tree, marked.value, value);
+    }
+    if ownership::ident_expr(tree, target) |ident| {
+        let name = try self.text_name(tree, ident.name);
+        if try self.slot_pointer(tree, target) |slot| {
+            let _ = try self.emit2(Op::RefStore, self.common.void_type, slot, value);
+            return null;
+        }
+        try self.envs.set(self.env, name, value);
+        return null;
+    }
+    if ownership::field_expr(tree, target) |field| {
+        var receiver = empty_value();
+        if try self.lower_receiver_address(tree, field.receiver, &var receiver) |failed| {
+            return move failed;
+        }
+        let field_name = try self.text_name(tree, field.name);
+        if self.is_reference_type(receiver.type_name) {
+            let _ = try self.emit_op2(Op::FieldRefSet, field_name, self.common.void_type, receiver, value);
+            return null;
+        }
+        let updated = try self.emit_op2(Op::FieldSet, field_name, receiver.type_name, receiver, value);
+        return self.lower_assign_target(tree, field.receiver, updated);
+    }
+    if ownership::deref_expr(tree, target) |deref| {
+        // `.*` through a `&var` parameter names the same storage the bare
+        // name does, so both spellings assign through the same rule.
+        if ownership::ident_expr(tree, deref.receiver) |ident| {
+            let name = try self.text_name(tree, ident.name);
+            if self.is_storage_param(name) {
+                return self.lower_assign_target(tree, deref.receiver, value);
+            }
+        }
+        var receiver = empty_value();
+        if try self.lower_expr(tree, deref.receiver, &var receiver) |failed| {
+            return move failed;
+        }
+        let raw = try self.raw_pointer_elem(receiver.type_name);
+        if raw |_| {} else {
+            if !self.is_reference_type(receiver.type_name) {
+                let rendered = try self.expression_name(tree, target);
+                return try self.fail1(
+                    tree,
+                    "ir error: dereference assignment target `%s` is not a borrow or raw pointer",
+                    Arg::Str(rendered)
+                );
+            }
+        }
+        let _ = try self.emit2(Op::RefStore, self.common.void_type, receiver, value);
+        return null;
+    }
+    if ownership::index_expr(tree, target) |index| {
+        return self.lower_index_assign(tree, target, index, value);
+    }
+    let rendered = try self.expression_name(tree, target);
+    return try self.fail1(tree, "ir error: unsupported assignment target `%s`", Arg::Str(rendered));
+}
+
+/// Stores one byte through a writable slice view, the Go `lowerIndexAssign`.
+/// The bounds test is emitted here for the same reason lowerIndexExpr emits
+/// it: every backend inherits one check from one place.
+fn (self: &var Lowerer) lower_index_assign(
+    tree: &var ast::Ast,
+    target: ast::Expression,
+    index: ast::IndexExpr,
+    value: Value
+) -> !?diagnostic::Diagnostic {
+    if index.slice {
+        let rendered = try self.expression_name(tree, target);
+        return try self.fail1(tree, "ir error: unsupported assignment target `%s`", Arg::Str(rendered));
+    }
+    var slice = empty_value();
+    if try self.lower_expr(tree, index.target, &var slice) |failed| {
+        return move failed;
+    }
+    var position = empty_value();
+    let index_expr = index.index orelse return try self.fail0("ir error: unsupported assignment target");
+    if try self.lower_expr(tree, index_expr, &var position) |failed| {
+        return move failed;
+    }
+    let length = try self.emit1(Op::SliceLen, self.common.i64_type, slice);
+    let bounds = try self.name("bounds");
+    try self.cond_fail2(index.span, "<", position, self.common.zero_index, bounds, position, length);
+    try self.cond_fail2(index.span, ">=", position, length, bounds, position, length);
+    let _ = try self.emit3(Op::SliceStore, self.common.void_type, slice, position, value);
+    return null;
+}
+
+/// Lowers explicit returns and wraps !T success values, the Go
+/// `lowerReturnStmt`.
+fn (self: &var Lowerer) lower_return_stmt(
+    tree: &var ast::Ast,
+    statement: ast::Statement,
+    returned: ast::ReturnStmt
+) -> !?diagnostic::Diagnostic {
+    let returned_value = returned.value orelse return self.lower_void_return();
+    let want = try self.return_value_type();
+    var value = empty_value();
+    if try self.lower_contextual_expr(tree, returned_value, want, &var value) |failed| {
+        return move failed;
+    }
+    var error_return = self.produces_error_value(value);
+    let current_return = self.module.function_return(self.current);
+    if try self.error_union_parts(current_return) |parts| {
+        if same_name(value.type_name, parts.success) {
+            // A `!void` success carries no payload, so its wrap takes no
+            // operand.
+            if self.name_is(parts.success, "void") {
+                value = try self.emit0(Op::ErrorOk, current_return);
+            } else {
+                value = try self.emit1(Op::ErrorOk, current_return, value);
+            }
+        } else {
+            if self.module.has_error_set(value.type_name) {
+                value = try self.emit1(Op::ErrorError, current_return, value);
+                error_return = true;
+            }
+        }
+    }
+    if error_return {
+        try self.emit_error_cleanups_for_return(statement);
+    } else {
+        try self.emit_normal_cleanups();
+    }
+    self.terminate(return_terminator(value));
+    return null;
+}
+
+/// Lowers `return;`, the no-value arm of `lowerReturnStmt`.
+fn (self: &var Lowerer) lower_void_return() -> !?diagnostic::Diagnostic {
+    try self.emit_normal_cleanups();
+    let value = try self.return_void_value();
+    self.terminate(return_terminator(value));
+    return null;
+}
+
+/// Reports whether v was defined by an error.error instruction in the
+/// current block, the Go `producesErrorValue`. Such a return exits through
+/// the error path and must run errdefer cleanups.
+fn (self: &Lowerer) produces_error_value(value: Value) -> bool {
+    let node = self.module.blocks.at(self.block.node);
+    var index = node.instrs.len();
+    while index > 0 {
+        index = index - 1;
+        if node.instrs.get(index) |instr| {
+            let result = self.module.instr_result(instr);
+            if same_name(result.name, value.name) {
+                return self.module.instr_op(instr) == Op::ErrorError;
+            }
+        }
+    }
+    return false;
+}
+
+/// Returns the type a returned value has to have, the Go
+/// `returnValueType`: the success type of a `!T` function, or the return
+/// type itself.
+fn (self: &var Lowerer) return_value_type() -> !Name {
+    let current_return = self.module.function_return(self.current);
+    if try self.error_union_success_type(current_return) |success| {
+        return success;
+    }
+    return current_return;
+}
+
+/// Returns the correct SSA return value for void-like returns, the Go
+/// `returnVoidValue`.
+fn (self: &var Lowerer) return_void_value() -> !Value {
+    let current_return = self.module.function_return(self.current);
+    if try self.error_union_success_type(current_return) |success| {
+        if self.name_is(success, "void") {
+            return self.emit0(Op::ErrorOk, current_return);
+        }
+    }
+    return self.common.void_value;
+}
