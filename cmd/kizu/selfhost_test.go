@@ -13,18 +13,20 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestSelfhostFrontend builds the selfhost compiler with the shipping one and
-// runs its `parse`, `check` and `ir` commands over the examples, the negative
-// examples, tests/behavior, the module examples and compiler/ itself. What it
-// prints must be what the Go front end (parse, load, type check, ownership
-// check, lowering and optimizing to typed SSA IR) prints for the same target
-// through the same CLI paths. The selfhost `check` stops at the ownership
-// checker, so the Go side here stops there too; the later gates join the
-// comparison with their modules.
+// runs its `parse`, `check`, `ir` and `build --emit-llvm` commands over the
+// examples, the negative examples, tests/behavior, the module examples and
+// compiler/ itself. What it prints must be what the Go front end (parse,
+// load, type check, ownership check, lowering and optimizing to typed SSA
+// IR) and the Go LLVM emitter print for the same target through the same
+// CLI paths. The selfhost `check` stops at the ownership checker, so the Go
+// side here stops there too; the native link joins the comparison with its
+// module.
 func TestSelfhostFrontend(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler")
@@ -62,8 +64,9 @@ func TestSelfhostFrontend(t *testing.T) {
 	}
 }
 
-// runSelfhostIRSubtests compares the selfhost `ir` and `ir --opt` output for
-// one target with what the Go lowerer and optimizer print for it.
+// runSelfhostIRSubtests compares the selfhost `ir`, `ir --opt`,
+// `build --emit-llvm` and `build --emit-llvm --opt` output for one target
+// with what the Go lowerer, optimizer and LLVM emitter print for it.
 func runSelfhostIRSubtests(t *testing.T, selfhost string, name string, target string) {
 	t.Helper()
 	t.Run("ir/"+name, func(t *testing.T) {
@@ -73,6 +76,16 @@ func runSelfhostIRSubtests(t *testing.T, selfhost string, name string, target st
 	t.Run("ir-opt/"+name, func(t *testing.T) {
 		t.Parallel()
 		compareSelfhostArgs(t, selfhost, goIrOutput(target, true), "ir", "--opt", target)
+	})
+	t.Run("llvm/"+name, func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostArgs(t, selfhost, goEmitLLVMOutput(target, false),
+			"build", "--emit-llvm", target)
+	})
+	t.Run("llvm-opt/"+name, func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostArgs(t, selfhost, goEmitLLVMOutput(target, true),
+			"build", "--emit-llvm", "--opt", target)
 	})
 }
 
@@ -171,6 +184,21 @@ func goIrOutput(target string, opt bool) cliOutput {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: ir.Dump(module) + "\n"}
+}
+
+// goEmitLLVMOutput renders what `kizu build --emit-llvm` prints for a
+// target: the LLVM IR emitted from the lowered module, optimized when opt is
+// set.
+func goEmitLLVMOutput(target string, opt bool) cliOutput {
+	module, err := lowerFrontendTarget(target, opt)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	text, err := llvm.Emit(module)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	return cliOutput{stdout: text + "\n"}
 }
 
 // lowerFrontendTarget lowers a file the way the ir command does, or a package

@@ -1,0 +1,166 @@
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+struct Node {
+    tag: i64,
+    count: i64,
+}
+
+fn read_tag(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.tag;
+}
+
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    unsafe node.*.tag = tag;
+}
+
+fn replace(node: ptr<Node>, value: Node) -> void {
+    // SAFETY: node が有効な Node を指し、上書きしてよいことは呼び出し側が保証する
+    unsafe node.* = value;
+}
+
+fn main() -> void {
+    // SAFETY: Node が収まる大きさを確保する。失敗しない前提の例示専用呼び出し
+    let raw = unsafe malloc(64);
+    // SAFETY: raw は Node 1 個分の書き込み可能な領域を指す
+    let node = unsafe cast<ptr<Node>>(raw);
+    // SAFETY: pointer 間 cast は値の再解釈のみで、指す先は同じ有効な Node
+    let reader = unsafe cast<ptr<const Node>>(node);
+
+    replace(node, Node { tag: 7, count: 1 });
+    print(read_tag(reader));
+
+    write_tag(node, 42);
+    print(read_tag(reader));
+
+    // SAFETY: node は有効な Node を指す
+    let copy = unsafe node.*;
+    print(copy.count);
+
+    // SAFETY: raw は malloc が返した領域で、以後使わない
+    unsafe free(raw);
+}
+
+// run
+// features: unsafe raw-pointer deref extern-c cast
+// output:
+// 7
+// 42
+// 1
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.struct.Node = type { i64, i64 }
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// define i64 @read_tag(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 0
+//   ret i64 %kizu.2
+// }
+// 
+// define void @write_tag(ptr %kizu.node, i64 %kizu.tag) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = insertvalue %kizu.struct.Node %kizu.1, i64 %kizu.tag, 0
+//   store %kizu.struct.Node %kizu.2, ptr %kizu.node
+//   ret void
+// }
+// 
+// define void @replace(ptr %kizu.node, ptr byval(%kizu.struct.Node) %kizu.value.addr) {
+// entry:
+//   %kizu.value = load %kizu.struct.Node, ptr %kizu.value.addr
+//   store %kizu.struct.Node %kizu.value, ptr %kizu.node
+//   ret void
+// }
+// 
+// define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+// entry:
+//   %kizu.arg.1.1 = alloca %kizu.struct.Node
+//   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
+//   %kizu.2 = call ptr @malloc(i64 64)
+//   %kizu.7.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 7, 0
+//   %kizu.7 = insertvalue %kizu.struct.Node %kizu.7.field0, i64 1, 1
+//   store %kizu.struct.Node %kizu.7, ptr %kizu.arg.1.1
+//   call void @replace(ptr %kizu.2, ptr byval(%kizu.struct.Node) %kizu.arg.1.1)
+//   %kizu.9 = call i64 @read_tag(ptr %kizu.2)
+//   call void @kizu_print_int(i64 %kizu.9)
+//   call void @write_tag(ptr %kizu.2, i64 42)
+//   %kizu.13 = call i64 @read_tag(ptr %kizu.2)
+//   call void @kizu_print_int(i64 %kizu.13)
+//   %kizu.15 = load %kizu.struct.Node, ptr %kizu.2
+//   %kizu.16 = extractvalue %kizu.struct.Node %kizu.15, 1
+//   call void @kizu_print_int(i64 %kizu.16)
+//   call void @free(ptr %kizu.2)
+//   ret i32 0
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.struct.Node = type { i64, i64 }
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// define i64 @read_tag(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 0
+//   ret i64 %kizu.2
+// }
+// 
+// define void @write_tag(ptr %kizu.node, i64 %kizu.tag) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = insertvalue %kizu.struct.Node %kizu.1, i64 %kizu.tag, 0
+//   store %kizu.struct.Node %kizu.2, ptr %kizu.node
+//   ret void
+// }
+// 
+// define void @replace(ptr %kizu.node, ptr byval(%kizu.struct.Node) %kizu.value.addr) {
+// entry:
+//   %kizu.value = load %kizu.struct.Node, ptr %kizu.value.addr
+//   store %kizu.struct.Node %kizu.value, ptr %kizu.node
+//   ret void
+// }
+// 
+// define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
+// entry:
+//   %kizu.arg.1.1 = alloca %kizu.struct.Node
+//   call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
+//   %kizu.2 = call ptr @malloc(i64 64)
+//   %kizu.7.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 7, 0
+//   %kizu.7 = insertvalue %kizu.struct.Node %kizu.7.field0, i64 1, 1
+//   store %kizu.struct.Node %kizu.7, ptr %kizu.arg.1.1
+//   call void @replace(ptr %kizu.2, ptr byval(%kizu.struct.Node) %kizu.arg.1.1)
+//   %kizu.9 = call i64 @read_tag(ptr %kizu.2)
+//   call void @kizu_print_int(i64 %kizu.9)
+//   call void @write_tag(ptr %kizu.2, i64 42)
+//   %kizu.13 = call i64 @read_tag(ptr %kizu.2)
+//   call void @kizu_print_int(i64 %kizu.13)
+//   %kizu.15 = load %kizu.struct.Node, ptr %kizu.2
+//   %kizu.16 = extractvalue %kizu.struct.Node %kizu.15, 1
+//   call void @kizu_print_int(i64 %kizu.16)
+//   call void @free(ptr %kizu.2)
+//   ret i32 0
+// }

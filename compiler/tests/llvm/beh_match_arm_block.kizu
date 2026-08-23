@@ -1,0 +1,374 @@
+import std::testing;
+
+enum Kind {
+    Count,
+    Skip,
+}
+
+fn kind_of(index: i64) -> Kind {
+    if index - (index / 2) * 2 == 0 {
+        return Kind::Count;
+    }
+    return Kind::Skip;
+}
+
+// A statement match arm block runs its statements in place (ADR-0107):
+// assignments mutate the enclosing scope and the loop keeps running.
+test "statement match arm block runs assignments in place" {
+    var count = 0;
+    var i = 0;
+    while i < 6 {
+        match kind_of(i) {
+            Count => {
+                count = count + 1;
+            },
+            Skip => {},
+        }
+        i = i + 1;
+    }
+    testing::expect_equal<i64>(3, count);
+    testing::expect_equal<i64>(6, i);
+}
+
+// An expression match arm block yields its trailing value, like an if
+// expression branch.
+test "expression match arm block ends with a value" {
+    let doubled = match kind_of(0) {
+        Count => {
+            let base = 2;
+            base * 2
+        },
+        Skip => 0,
+    };
+    testing::expect_equal<i64>(4, doubled);
+}
+
+// `return` inside an arm block leaves the function like any block return.
+fn first_skip(limit: i64) -> i64 {
+    var i = 0;
+    while i < limit {
+        match kind_of(i) {
+            Count => {},
+            Skip => {
+                return i;
+            },
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+test "return inside a match arm block leaves the function" {
+    testing::expect_equal<i64>(1, first_skip(6));
+    testing::expect_equal<i64>(-1, first_skip(0));
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @kind_of(i64 %kizu.index) {
+// entry:
+//   %kizu.2 = sdiv i64 %kizu.index, 2
+//   %kizu.4 = mul i64 %kizu.2, 2
+//   %kizu.5 = sub i64 %kizu.index, %kizu.4
+//   %kizu.7 = icmp eq i64 %kizu.5, 0
+//   br i1 %kizu.7, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret i64 0
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret i64 1
+// }
+// 
+// define i64 @first_skip(i64 %kizu.limit) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.8, %match.end.4 ]
+//   %kizu.3 = icmp slt i64 %kizu.2, %kizu.limit
+//   br i1 %kizu.3, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.4 = call i64 @kind_of(i64 %kizu.2)
+//   br label %match.check.5
+// while.end.3:
+//   %kizu.10 = sub i64 0, 1
+//   ret i64 %kizu.10
+// match.end.4:
+//   %kizu.8 = add i64 %kizu.2, 1
+//   br label %while.header.1
+// match.check.5:
+//   %kizu.5 = icmp eq i64 %kizu.4, 0
+//   br i1 %kizu.5, label %match.arm.6, label %match.check.7
+// match.arm.6:
+//   br label %match.end.4
+// match.check.7:
+//   %kizu.6 = icmp eq i64 %kizu.4, 1
+//   br i1 %kizu.6, label %match.arm.8, label %match.unreachable.9
+// match.arm.8:
+//   ret i64 %kizu.2
+// match.unreachable.9:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_statement_match_arm_block_runs_assignments_in_place() {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.3 = phi i64 [ 0, %entry ], [ %kizu.12, %match.end.4 ]
+//   %kizu.4 = phi i64 [ 0, %entry ], [ %kizu.14, %match.end.4 ]
+//   %kizu.6 = icmp slt i64 %kizu.4, 6
+//   br i1 %kizu.6, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.7 = call i64 @kind_of(i64 %kizu.4)
+//   br label %match.check.5
+// while.end.3:
+//   %kizu.16.ok = icmp eq i64 3, %kizu.3
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.18.ok = icmp eq i64 6, %kizu.4
+//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
+// kizu.18.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 6, i64 %kizu.4, i64 0, i64 0)
+//   unreachable
+// kizu.18.ok.ok:
+//   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.19
+// match.end.4:
+//   %kizu.12 = phi i64 [ %kizu.10, %match.arm.6 ], [ %kizu.3, %match.arm.8 ]
+//   %kizu.14 = add i64 %kizu.4, 1
+//   br label %while.header.1
+// match.check.5:
+//   %kizu.8 = icmp eq i64 %kizu.7, 0
+//   br i1 %kizu.8, label %match.arm.6, label %match.check.7
+// match.arm.6:
+//   %kizu.10 = add i64 %kizu.3, 1
+//   br label %match.end.4
+// match.check.7:
+//   %kizu.11 = icmp eq i64 %kizu.7, 1
+//   br i1 %kizu.11, label %match.arm.8, label %match.unreachable.9
+// match.arm.8:
+//   br label %match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_expression_match_arm_block_ends_with_a_value() {
+// entry:
+//   %kizu.2 = call i64 @kind_of(i64 0)
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.9 = phi i64 [ %kizu.6, %match.arm.3 ], [ 0, %match.arm.5 ]
+//   %kizu.11.ok = icmp eq i64 4, %kizu.9
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.12
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   %kizu.6 = mul i64 2, 2
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.7 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.7, label %match.arm.5, label %match.unreachable.6
+// match.arm.5:
+//   br label %match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_return_inside_a_match_arm_block_leaves_the_function() {
+// entry:
+//   %kizu.3 = call i64 @first_skip(i64 6)
+//   %kizu.4.ok = icmp eq i64 1, %kizu.3
+//   br i1 %kizu.4.ok, label %kizu.4.ok.ok, label %kizu.4.ok.fail
+// kizu.4.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.4.ok.ok:
+//   %kizu.6 = sub i64 0, 1
+//   %kizu.8 = call i64 @first_skip(i64 0)
+//   %kizu.9.ok = icmp eq i64 %kizu.6, %kizu.8
+//   br i1 %kizu.9.ok, label %kizu.9.ok.ok, label %kizu.9.ok.fail
+// kizu.9.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.6, i64 %kizu.8, i64 0, i64 0)
+//   unreachable
+// kizu.9.ok.ok:
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @kind_of(i64 %kizu.index) {
+// entry:
+//   %kizu.2 = sdiv i64 %kizu.index, 2
+//   %kizu.4 = mul i64 %kizu.2, 2
+//   %kizu.5 = sub i64 %kizu.index, %kizu.4
+//   %kizu.7 = icmp eq i64 %kizu.5, 0
+//   br i1 %kizu.7, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret i64 0
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret i64 1
+// }
+// 
+// define i64 @first_skip(i64 %kizu.limit) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.8, %match.end.4 ]
+//   %kizu.3 = icmp slt i64 %kizu.2, %kizu.limit
+//   br i1 %kizu.3, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.4 = call i64 @kind_of(i64 %kizu.2)
+//   br label %match.check.5
+// while.end.3:
+//   %kizu.10 = sub i64 0, 1
+//   ret i64 %kizu.10
+// match.end.4:
+//   %kizu.8 = add i64 %kizu.2, 1
+//   br label %while.header.1
+// match.check.5:
+//   %kizu.5 = icmp eq i64 %kizu.4, 0
+//   br i1 %kizu.5, label %match.arm.6, label %match.check.7
+// match.arm.6:
+//   br label %match.end.4
+// match.check.7:
+//   %kizu.6 = icmp eq i64 %kizu.4, 1
+//   br i1 %kizu.6, label %match.arm.8, label %match.unreachable.9
+// match.arm.8:
+//   ret i64 %kizu.2
+// match.unreachable.9:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_statement_match_arm_block_runs_assignments_in_place() {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.3 = phi i64 [ 0, %entry ], [ %kizu.12, %match.end.4 ]
+//   %kizu.4 = phi i64 [ 0, %entry ], [ %kizu.14, %match.end.4 ]
+//   %kizu.6 = icmp slt i64 %kizu.4, 6
+//   br i1 %kizu.6, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.7 = call i64 @kind_of(i64 %kizu.4)
+//   br label %match.check.5
+// while.end.3:
+//   %kizu.16.ok = icmp eq i64 3, %kizu.3
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.18.ok = icmp eq i64 6, %kizu.4
+//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
+// kizu.18.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 6, i64 %kizu.4, i64 0, i64 0)
+//   unreachable
+// kizu.18.ok.ok:
+//   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.19
+// match.end.4:
+//   %kizu.12 = phi i64 [ %kizu.10, %match.arm.6 ], [ %kizu.3, %match.arm.8 ]
+//   %kizu.14 = add i64 %kizu.4, 1
+//   br label %while.header.1
+// match.check.5:
+//   %kizu.8 = icmp eq i64 %kizu.7, 0
+//   br i1 %kizu.8, label %match.arm.6, label %match.check.7
+// match.arm.6:
+//   %kizu.10 = add i64 %kizu.3, 1
+//   br label %match.end.4
+// match.check.7:
+//   %kizu.11 = icmp eq i64 %kizu.7, 1
+//   br i1 %kizu.11, label %match.arm.8, label %match.unreachable.9
+// match.arm.8:
+//   br label %match.end.4
+// match.unreachable.9:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_expression_match_arm_block_ends_with_a_value() {
+// entry:
+//   %kizu.2 = call i64 @kind_of(i64 0)
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.9 = phi i64 [ 4, %match.arm.3 ], [ 0, %match.arm.5 ]
+//   %kizu.11.ok = icmp eq i64 4, %kizu.9
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   %kizu.12 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.12
+// match.check.2:
+//   %kizu.3 = icmp eq i64 %kizu.2, 0
+//   br i1 %kizu.3, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.7 = icmp eq i64 %kizu.2, 1
+//   br i1 %kizu.7, label %match.arm.5, label %match.unreachable.6
+// match.arm.5:
+//   br label %match.end.1
+// match.unreachable.6:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_return_inside_a_match_arm_block_leaves_the_function() {
+// entry:
+//   %kizu.3 = call i64 @first_skip(i64 6)
+//   %kizu.4.ok = icmp eq i64 1, %kizu.3
+//   br i1 %kizu.4.ok, label %kizu.4.ok.ok, label %kizu.4.ok.fail
+// kizu.4.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.4.ok.ok:
+//   %kizu.6 = sub i64 0, 1
+//   %kizu.8 = call i64 @first_skip(i64 0)
+//   %kizu.9.ok = icmp eq i64 %kizu.6, %kizu.8
+//   br i1 %kizu.9.ok, label %kizu.9.ok.ok, label %kizu.9.ok.fail
+// kizu.9.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.6, i64 %kizu.8, i64 0, i64 0)
+//   unreachable
+// kizu.9.ok.ok:
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }

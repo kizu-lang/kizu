@@ -1,0 +1,3055 @@
+import std::arena;
+import std::array;
+import std::map;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+fn find(bytes: []u8, needle: u8) -> ?i64 {
+    var index = 0;
+    while index < mem::len(bytes) {
+        if bytes[index] == needle {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// An optional return wraps its value implicitly, and `orelse` supplies the
+// default on null.
+test "orelse takes the value or the default" {
+    testing::expect_equal<i64>(2, find("kizu", cast<u8>(122)) orelse -1);
+    testing::expect_equal<i64>(-1, find("kizu", cast<u8>(120)) orelse -1);
+}
+
+// An if capture opens the payload only when a value is present.
+test "if capture branches on presence" {
+    var hit = 0;
+    if find("kizu", cast<u8>(107)) |at| {
+        hit = at + 10;
+    } else {
+        hit = -1;
+    }
+    testing::expect_equal<i64>(10, hit);
+    if find("kizu", cast<u8>(120)) |at| {
+        hit = at;
+    } else {
+        hit = -2;
+    }
+    testing::expect_equal<i64>(-2, hit);
+}
+
+struct BytesIter {
+    pub bytes: []u8,
+    pub index: i64,
+}
+
+fn iter(bytes: []u8) -> BytesIter {
+    return BytesIter { bytes: bytes, index: 0 };
+}
+
+fn (self: &var BytesIter) next() -> ?u8 {
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+// A single `next() -> ?u8` drives the loop to exhaustion: the iterator
+// protocol needs no separate has_next.
+test "while capture loops until null" {
+    var it = iter("kizu");
+    var total = 0;
+    while it.next() |byte| {
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(451, total);
+}
+
+error ReadError {
+    Broken,
+}
+
+struct Stream {
+    pub bytes: []u8,
+    pub index: i64,
+    pub broken: bool,
+}
+
+fn (self: &var Stream) next() -> ReadError!?u8 {
+    if self.broken {
+        return ReadError::Broken;
+    }
+    if self.index >= mem::len(self.bytes) {
+        return null;
+    }
+    let byte = self.bytes[self.index];
+    self.index = self.index + 1;
+    return byte;
+}
+
+fn drain(bytes: []u8, broken: bool) -> ReadError!i64 {
+    var s = Stream { bytes: bytes, index: 0, broken: broken };
+    var sum = 0;
+    while try s.next() |byte| {
+        sum = sum + cast<i64>(byte);
+    }
+    return sum;
+}
+
+// `E!?T` composes: the call can fail, and succeeding can still find nothing.
+// One signature carries the error member, null, and the payload; the failure
+// path is pinned by examples/negative/optional_stream_broken.kizu.
+test "error union with optional success drives a fallible stream" {
+    testing::expect_equal<i64>(451, try drain("kizu", false));
+    var s = Stream { bytes: "k", index: 0, broken: false };
+    testing::expect_equal<i64>(107, cast<i64>(try s.next() orelse 0));
+    testing::expect_equal<i64>(0, cast<i64>(try s.next() orelse 0));
+}
+
+// Container lookups answer a question, and "not there" is an answer: the
+// miss is null, not an error (docs/style.md).
+test "container lookups miss as null" {
+    let allocator = mem::page_allocator();
+    var values = array::new<i64>(allocator);
+    defer values.deinit();
+    try values.append(41);
+    testing::expect_equal<i64>(41, values.get(0) orelse -1);
+    testing::expect_equal<i64>(-1, values.get(9) orelse -1);
+    testing::expect_equal<i64>(41, values.pop() orelse -1);
+    testing::expect_equal<i64>(-1, values.pop() orelse -1);
+
+    var table = map::new<[]u8, i64>(allocator);
+    defer table.deinit();
+    try table.insert("hit", 7);
+    testing::expect_equal<i64>(7, table.get("hit") orelse -1);
+    testing::expect_equal<i64>(-1, table.get("miss") orelse -1);
+}
+
+// A borrow payload rides the optional too: `at(key) -> ?&V` binds the value
+// borrow as the capture, at_mut writes through it in place, and the else arm
+// runs the miss path with the map no longer borrowed.
+test "map at_mut updates values in place" {
+    let allocator = mem::page_allocator();
+    var counts = map::new<[]u8, i64>(allocator);
+    defer counts.deinit();
+    try counts.insert("kizu", 41);
+
+    if counts.at_mut("kizu") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("kizu", 1);
+    }
+    if counts.at_mut("lang") |count| {
+        count.* = count.* + 1;
+    } else {
+        try counts.insert("lang", 1);
+    }
+
+    testing::expect_equal<i64>(42, counts.get("kizu") orelse -1);
+    testing::expect_equal<i64>(1, counts.get("lang") orelse -1);
+    if counts.at("miss") |ghost| {
+        testing::expect_equal<i64>(-1, ghost.*);
+    }
+}
+
+struct Visitor {
+    pub age: i64,
+    pub visits: i64,
+}
+
+// An arena borrow payload writes through the handle in place: at_mut binds
+// the element borrow as the capture and releases the arena at its last use.
+test "arena at_mut updates elements in place" {
+    let allocator = mem::page_allocator();
+    var visitors = arena::new<Visitor>(allocator);
+    defer visitors.deinit();
+    let alice = visitors.add(Visitor { age: 30, visits: 0 });
+
+    if visitors.at_mut(alice) |v| {
+        v.visits = v.visits + 1;
+    }
+
+    testing::expect_equal<i64>(1, visitors.at(alice).visits);
+    testing::expect_equal<i64>(30, visitors.at(alice).age);
+}
+
+struct Ledger {
+    pub entries: array::Array<i64>,
+}
+
+fn (self: &var Ledger) bump(index: i64) -> void {
+    if self.entries.at_mut(index) |v| {
+        v.* = v.* + 1;
+    }
+}
+
+// A capture reaches one direct container field of an owner: the borrow lands
+// on that field, and a `&var self` method can hold it.
+test "at_mut captures an owner's container field" {
+    let allocator = mem::page_allocator();
+    var ledger = Ledger { entries: array::new<i64>(allocator) };
+    defer ledger.deinit();
+    try ledger.entries.append(7);
+    ledger.bump(0);
+    if ledger.entries.at(0) |v| {
+        testing::expect_equal<i64>(8, v.*);
+    }
+}
+
+fn (self: &var Ledger) entry(index: i64) -> ?&var i64 {
+    return self.entries.at_mut(index);
+}
+
+// A declared borrow-optional return moves the accessor out of the call site:
+// the capture borrows `self` for its scope, and the body may only return a
+// borrow rooted in a borrowed parameter.
+test "borrow optional returns flow to the caller's capture" {
+    let allocator = mem::page_allocator();
+    var ledger = Ledger { entries: array::new<i64>(allocator) };
+    defer ledger.deinit();
+    try ledger.entries.append(7);
+    if ledger.entry(0) |v| {
+        v.* = v.* + 1;
+    }
+    testing::expect_equal<i64>(8, ledger.entries.get_or_panic(0));
+    if ledger.entry(9) |ghost| {
+        ghost.* = 0;
+        testing::expect(false);
+    }
+}
+
+fn bump_first(items: &var array::Array<i64>) -> void {
+    if items.at_mut(0) |v| {
+        v.* = v.* + 1;
+    }
+}
+
+// A `&var` borrow is a mutable place: a helper taking the container by
+// `&var` consumes at_mut itself, so update logic leaves the call site.
+test "at_mut works through a &var parameter" {
+    let allocator = mem::page_allocator();
+    var items = array::new<i64>(allocator);
+    defer items.deinit();
+    try items.append(7);
+    bump_first(items);
+    testing::expect_equal<i64>(8, items.get_or_panic(0));
+}
+
+// A view payload rides the optional: mem::slice misses as null, and the
+// unset-environment lookup does too.
+test "view payloads miss as null" {
+    testing::expect_equal<[]u8>("ab", mem::slice("abc", 0, 2) orelse "");
+    testing::expect_equal<[]u8>("", mem::slice("abc", 0, 4) orelse "");
+    testing::expect_equal<[]u8>(
+        "",
+        process::env("KIZU_SURELY_UNSET_VAR_12345") orelse "");
+}
+
+fn guarded_find(bytes: []u8, needle: u8) -> i64 {
+    let at = find(bytes, needle) orelse return -1;
+    return at + 100;
+}
+
+// `orelse return/break` is the guard form: the null arm leaves the function
+// or loop, so the payload flows on without a nested capture.
+test "orelse guards exit on null" {
+    testing::expect_equal<i64>(102, guarded_find("kizu", cast<u8>(122)));
+    testing::expect_equal<i64>(-1, guarded_find("kizu", cast<u8>(120)));
+
+    var it = iter("kz");
+    var total = 0;
+    while true {
+        let byte = it.next() orelse break;
+        total = total + cast<i64>(byte);
+    }
+    testing::expect_equal<i64>(229, total);
+}
+
+fn make_name(allocator: Allocator, text: []u8) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_bytes(text);
+    return move name;
+}
+
+// An owner payload moves out through the capture and owes its cleanup there.
+test "owner payload pops through the capture" {
+    let allocator = mem::page_allocator();
+    var names = array::new<string::String>(allocator);
+    defer names.deinit();
+    try names.append(try make_name(allocator, "kizu"));
+
+    var length = 0;
+    if names.pop() |taken| {
+        length = taken.len();
+        taken.deinit();
+    }
+    testing::expect_equal<i64>(4, length);
+    if names.pop() |ghost| {
+        ghost.deinit();
+        testing::expect(false);
+    }
+}
+
+fn or_one(value: ?u8) -> i64 {
+    return cast<i64>(value orelse cast<u8>(1));
+}
+
+// Optionals travel as arguments, and `null` is legal wherever a `?T` is
+// expected.
+test "optional arguments accept null and values" {
+    testing::expect_equal<i64>(1, or_one(null));
+    testing::expect_equal<i64>(9, or_one(cast<u8>(9)));
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._i64 = type { i8, ptr }
+// %kizu.opt._var_Visitor = type { i8, ptr }
+// %kizu.opt._var_i64 = type { i8, ptr }
+// %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
+// %kizu.opt.i64 = type { i8, i64 }
+// %kizu.opt.std__string__String = type { i8, %kizu.struct.std__string__String }
+// %kizu.opt.u8 = type { i8, i8 }
+// 
+// %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.ReadError._u8 = type { i8, %kizu.opt.u8, i64 }
+// %kizu.error.ReadError.i64 = type { i8, i64, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.Ledger = type { ptr }
+// %kizu.struct.Stream = type { %kizu.slice.u8, i64, i1 }
+// %kizu.struct.Visitor = type { i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__string__Scalar = type { i64, i64 }
+// %kizu.struct.std__string__String = type { ptr }
+// %kizu.struct.std__string__TrimBounds = type { i64, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.30 = private unnamed_addr constant [29 x i8] c"std::map::Error::OutOfMemory\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.name.32 = private unnamed_addr constant [42 x i8] c"std::process::Error::InvalidArgumentCount\00"
+// @.kizu.error.name.33 = private unnamed_addr constant [39 x i8] c"std::process::Error::MissingExecutable\00"
+// @.kizu.error.name.34 = private unnamed_addr constant [33 x i8] c"std::process::Error::OutOfMemory\00"
+// @.kizu.error.name.35 = private unnamed_addr constant [41 x i8] c"std::process::Error::ArgIndexOutOfBounds\00"
+// @.kizu.error.name.36 = private unnamed_addr constant [34 x i8] c"std::string::Error::InvalidLength\00"
+// @.kizu.error.name.37 = private unnamed_addr constant [18 x i8] c"ReadError::Broken\00"
+// @.kizu.error.names = private unnamed_addr constant [38 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.30, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.32, i64 41 }, { ptr, i64 } { ptr @.kizu.error.name.33, i64 38 }, { ptr, i64 } { ptr @.kizu.error.name.34, i64 32 }, { ptr, i64 } { ptr @.kizu.error.name.35, i64 40 }, { ptr, i64 } { ptr @.kizu.error.name.36, i64 33 }, { ptr, i64 } { ptr @.kizu.error.name.37, i64 17 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"kizu\00"
+// @.str.1 = private unnamed_addr constant [2 x i8] c"k\00"
+// @.str.2 = private unnamed_addr constant [4 x i8] c"hit\00"
+// @.str.3 = private unnamed_addr constant [5 x i8] c"miss\00"
+// @.str.4 = private unnamed_addr constant [5 x i8] c"lang\00"
+// @.str.5 = private unnamed_addr constant [3 x i8] c"ab\00"
+// @.str.6 = private unnamed_addr constant [4 x i8] c"abc\00"
+// @.str.7 = private unnamed_addr constant [1 x i8] c"\00"
+// @.str.8 = private unnamed_addr constant [28 x i8] c"KIZU_SURELY_UNSET_VAR_12345\00"
+// @.str.9 = private unnamed_addr constant [3 x i8] c"kz\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare ptr @kizu_arena_new(ptr, i64)
+// declare i64 @kizu_arena_add(ptr, ptr)
+// declare ptr @kizu_arena_get(ptr, i64)
+// declare i64 @kizu_arena_len(ptr)
+// declare ptr @kizu_arena_pop(ptr)
+// declare void @kizu_arena_deinit(ptr)
+// 
+// declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
+// 
+// declare %kizu.error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
+// declare %kizu.opt._i64 @std__array__Array_at_i64(ptr, i64)
+// declare %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr, i64)
+// declare void @std__array__Array_deinit_i64(ptr)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr)
+// declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
+// declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__array__Array_pop_i64(ptr)
+// declare %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr)
+// declare %kizu.opt._i64 @std__map__Map_at_i64(ptr, %kizu.slice.u8)
+// declare %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr, %kizu.slice.u8)
+// declare %kizu.opt.i64 @std__map__Map_get_i64(ptr, %kizu.slice.u8)
+// declare %kizu.error.void @std__map__Map_insert_i64(ptr, %kizu.slice.u8, i64)
+// declare i64 @std__mem__len(%kizu.slice.u8)
+// declare ptr @std__mem__page_allocator()
+// declare %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8, i64, i64)
+// declare %kizu.opt.slice.u8 @std__process__env(%kizu.slice.u8)
+// declare %kizu.error.void @std__string__String_append_bytes(%kizu.struct.std__string__String, %kizu.slice.u8)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare i64 @std__string__String_len(%kizu.struct.std__string__String)
+// declare %kizu.struct.std__string__String @std__string__new(ptr)
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_arena_add(i64, i64)
+// declare void @kizu_panic_arena_handle(i64, i64)
+// declare void @kizu_panic_bounds(i64, i64, i64, i64)
+// declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.12, %if.end.6 ]
+//   %kizu.3 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.bytes)
+//   %kizu.4 = icmp slt i64 %kizu.2, %kizu.3
+//   br i1 %kizu.4, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.5 = extractvalue %kizu.slice.u8 %kizu.bytes, 1
+//   %kizu.6 = icmp slt i64 %kizu.2, 0
+//   br i1 %kizu.6, label %kizu.6.fail, label %kizu.6.pass
+// kizu.6.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.2, i64 %kizu.5, i64 12, i64 17)
+//   unreachable
+// kizu.6.pass:
+//   %kizu.7 = icmp sge i64 %kizu.2, %kizu.5
+//   br i1 %kizu.7, label %kizu.7.fail, label %kizu.7.pass
+// kizu.7.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.2, i64 %kizu.5, i64 12, i64 17)
+//   unreachable
+// kizu.7.pass:
+//   %kizu.8.ptr = extractvalue %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.8.elem.ptr = getelementptr i8, ptr %kizu.8.ptr, i64 %kizu.2
+//   %kizu.8 = load i8, ptr %kizu.8.elem.ptr
+//   %kizu.9 = icmp eq i8 %kizu.8, %kizu.needle
+//   br i1 %kizu.9, label %if.then.4, label %if.else.5
+// while.end.3:
+//   %kizu.13 = insertvalue %kizu.opt.i64 zeroinitializer, i8 0, 0
+//   ret %kizu.opt.i64 %kizu.13
+// if.then.4:
+//   %kizu.10.some = insertvalue %kizu.opt.i64 zeroinitializer, i8 1, 0
+//   %kizu.10 = insertvalue %kizu.opt.i64 %kizu.10.some, i64 %kizu.2, 1
+//   ret %kizu.opt.i64 %kizu.10
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.12 = add i64 %kizu.2, 1
+//   br label %while.header.1
+// }
+// 
+// define %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.bytes) {
+// entry:
+//   %kizu.2.field0 = insertvalue %kizu.struct.BytesIter zeroinitializer, %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.2 = insertvalue %kizu.struct.BytesIter %kizu.2.field0, i64 0, 1
+//   ret %kizu.struct.BytesIter %kizu.2
+// }
+// 
+// define %kizu.opt.u8 @BytesIter_next(ptr %kizu.self) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.1 = load i64, ptr %kizu.1.ptr
+//   %kizu.2.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = load %kizu.slice.u8, ptr %kizu.2.ptr
+//   %kizu.3 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.2)
+//   %kizu.4 = icmp sge i64 %kizu.1, %kizu.3
+//   br i1 %kizu.4, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.5 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   ret %kizu.opt.u8 %kizu.5
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.6.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 0
+//   %kizu.6 = load %kizu.slice.u8, ptr %kizu.6.ptr
+//   %kizu.7.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.7.ptr
+//   %kizu.8 = extractvalue %kizu.slice.u8 %kizu.6, 1
+//   %kizu.9 = icmp slt i64 %kizu.7, 0
+//   br i1 %kizu.9, label %kizu.9.fail, label %kizu.9.pass
+// kizu.9.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 %kizu.8, i64 57, i64 26)
+//   unreachable
+// kizu.9.pass:
+//   %kizu.10 = icmp sge i64 %kizu.7, %kizu.8
+//   br i1 %kizu.10, label %kizu.10.fail, label %kizu.10.pass
+// kizu.10.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 %kizu.8, i64 57, i64 26)
+//   unreachable
+// kizu.10.pass:
+//   %kizu.11.ptr = extractvalue %kizu.slice.u8 %kizu.6, 0
+//   %kizu.11.elem.ptr = getelementptr i8, ptr %kizu.11.ptr, i64 %kizu.7
+//   %kizu.11 = load i8, ptr %kizu.11.elem.ptr
+//   %kizu.12.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.12 = load i64, ptr %kizu.12.ptr
+//   %kizu.14 = add i64 %kizu.12, 1
+//   %kizu.15.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   store i64 %kizu.14, ptr %kizu.15.ptr
+//   %kizu.16.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.16 = insertvalue %kizu.opt.u8 %kizu.16.some, i8 %kizu.11, 1
+//   ret %kizu.opt.u8 %kizu.16
+// }
+// 
+// define %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.self) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 2
+//   %kizu.1 = load i1, ptr %kizu.1.ptr
+//   br i1 %kizu.1, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.3.base = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 0, 0
+//   %kizu.3 = insertvalue %kizu.error.ReadError._u8 %kizu.3.base, i64 37, 2
+//   ret %kizu.error.ReadError._u8 %kizu.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.4.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.4 = load i64, ptr %kizu.4.ptr
+//   %kizu.5.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 0
+//   %kizu.5 = load %kizu.slice.u8, ptr %kizu.5.ptr
+//   %kizu.6 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.5)
+//   %kizu.7 = icmp sge i64 %kizu.4, %kizu.6
+//   br i1 %kizu.7, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.8 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   %kizu.9.ok = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.error.ReadError._u8 %kizu.9.ok, %kizu.opt.u8 %kizu.8, 1
+//   ret %kizu.error.ReadError._u8 %kizu.9
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.10.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 0
+//   %kizu.10 = load %kizu.slice.u8, ptr %kizu.10.ptr
+//   %kizu.11.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.11 = load i64, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.slice.u8 %kizu.10, 1
+//   %kizu.13 = icmp slt i64 %kizu.11, 0
+//   br i1 %kizu.13, label %kizu.13.fail, label %kizu.13.pass
+// kizu.13.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.11, i64 %kizu.12, i64 90, i64 26)
+//   unreachable
+// kizu.13.pass:
+//   %kizu.14 = icmp sge i64 %kizu.11, %kizu.12
+//   br i1 %kizu.14, label %kizu.14.fail, label %kizu.14.pass
+// kizu.14.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.11, i64 %kizu.12, i64 90, i64 26)
+//   unreachable
+// kizu.14.pass:
+//   %kizu.15.ptr = extractvalue %kizu.slice.u8 %kizu.10, 0
+//   %kizu.15.elem.ptr = getelementptr i8, ptr %kizu.15.ptr, i64 %kizu.11
+//   %kizu.15 = load i8, ptr %kizu.15.elem.ptr
+//   %kizu.16.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.16 = load i64, ptr %kizu.16.ptr
+//   %kizu.18 = add i64 %kizu.16, 1
+//   %kizu.19.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   store i64 %kizu.18, ptr %kizu.19.ptr
+//   %kizu.20.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.20 = insertvalue %kizu.opt.u8 %kizu.20.some, i8 %kizu.15, 1
+//   %kizu.21.ok = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 1, 0
+//   %kizu.21 = insertvalue %kizu.error.ReadError._u8 %kizu.21.ok, %kizu.opt.u8 %kizu.20, 1
+//   ret %kizu.error.ReadError._u8 %kizu.21
+// }
+// 
+// define %kizu.error.ReadError.i64 @drain(%kizu.slice.u8 %kizu.bytes, i1 %kizu.broken) {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.Stream
+//   %kizu.2.field0 = insertvalue %kizu.struct.Stream zeroinitializer, %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.2.field1 = insertvalue %kizu.struct.Stream %kizu.2.field0, i64 0, 1
+//   %kizu.2 = insertvalue %kizu.struct.Stream %kizu.2.field1, i1 %kizu.broken, 2
+//   store %kizu.struct.Stream %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.11, %while.body.2 ]
+//   %kizu.6 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.3)
+//   %kizu.7.ok = extractvalue %kizu.error.ReadError._u8 %kizu.6, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.ReadError._u8 %kizu.6, 2
+//   %kizu.try.err.1.base = insertvalue %kizu.error.ReadError.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.ReadError.i64 %kizu.try.err.1.base, i64 %kizu.try.err.1.code, 2
+//   ret %kizu.error.ReadError.i64 %kizu.try.err.1
+// kizu.7.try.ok:
+//   %kizu.7 = extractvalue %kizu.error.ReadError._u8 %kizu.6, 1
+//   %kizu.8 = extractvalue %kizu.opt.u8 %kizu.7, 1
+//   %kizu.9.tag = extractvalue %kizu.opt.u8 %kizu.7, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.10 = zext i8 %kizu.8 to i64
+//   %kizu.11 = add i64 %kizu.5, %kizu.10
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = insertvalue %kizu.error.ReadError.i64 zeroinitializer, i8 1, 0
+//   %kizu.12 = insertvalue %kizu.error.ReadError.i64 %kizu.12.ok, i64 %kizu.5, 1
+//   ret %kizu.error.ReadError.i64 %kizu.12
+// }
+// 
+// define void @Ledger_bump(ptr %kizu.self, i64 %kizu.index) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 %kizu.index)
+//   %kizu.3 = extractvalue %kizu.opt._var_i64 %kizu.2, 1
+//   %kizu.4.tag = extractvalue %kizu.opt._var_i64 %kizu.2, 0
+//   %kizu.4 = icmp ne i8 %kizu.4.tag, 0
+//   br i1 %kizu.4, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.5 = load i64, ptr %kizu.3
+//   %kizu.7 = add i64 %kizu.5, 1
+//   store i64 %kizu.7, ptr %kizu.3
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret void
+// }
+// 
+// define %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.self, i64 %kizu.index) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 %kizu.index)
+//   ret %kizu.opt._var_i64 %kizu.2
+// }
+// 
+// define void @bump_first(ptr %kizu.items) {
+// entry:
+//   %kizu.1 = load ptr, ptr %kizu.items
+//   %kizu.3 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 0)
+//   %kizu.4 = extractvalue %kizu.opt._var_i64 %kizu.3, 1
+//   %kizu.5.tag = extractvalue %kizu.opt._var_i64 %kizu.3, 0
+//   %kizu.5 = icmp ne i8 %kizu.5.tag, 0
+//   br i1 %kizu.5, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.6 = load i64, ptr %kizu.4
+//   %kizu.8 = add i64 %kizu.6, 1
+//   store i64 %kizu.8, ptr %kizu.4
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret void
+// }
+// 
+// define i64 @guarded_find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle) {
+// entry:
+//   %kizu.1 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle)
+//   %kizu.2.tag = extractvalue %kizu.opt.i64 %kizu.1, 0
+//   %kizu.2 = icmp ne i8 %kizu.2.tag, 0
+//   br i1 %kizu.2, label %guard.some.1, label %guard.exit.2
+// guard.some.1:
+//   %kizu.5 = extractvalue %kizu.opt.i64 %kizu.1, 1
+//   %kizu.7 = add i64 %kizu.5, 100
+//   ret i64 %kizu.7
+// guard.exit.2:
+//   %kizu.4 = sub i64 0, 1
+//   ret i64 %kizu.4
+// }
+// 
+// define %kizu.error.std__string__String @make_name(ptr %kizu.allocator, %kizu.slice.u8 %kizu.text) {
+// entry:
+//   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
+//   %kizu.2 = call %kizu.error.void @std__string__String_append_bytes(%kizu.struct.std__string__String %kizu.1, %kizu.slice.u8 %kizu.text)
+//   %kizu.3.ok = extractvalue %kizu.error.void %kizu.2, 0
+//   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
+//   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
+// kizu.3.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.void %kizu.2, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
+//   ret %kizu.error.std__string__String %kizu.try.err.2
+// kizu.3.try.ok:
+//   %kizu.4.ok = insertvalue %kizu.error.std__string__String zeroinitializer, i8 1, 0
+//   %kizu.4 = insertvalue %kizu.error.std__string__String %kizu.4.ok, %kizu.struct.std__string__String %kizu.1, 1
+//   ret %kizu.error.std__string__String %kizu.4
+// }
+// 
+// define i64 @or_one(%kizu.opt.u8 %kizu.value) {
+// entry:
+//   %kizu.1.tag = extractvalue %kizu.opt.u8 %kizu.value, 0
+//   %kizu.1 = icmp ne i8 %kizu.1.tag, 0
+//   br i1 %kizu.1, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.2 = extractvalue %kizu.opt.u8 %kizu.value, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.4 = trunc i64 1 to i8
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.5 = phi i8 [ %kizu.2, %orelse.some.1 ], [ %kizu.4, %orelse.else.2 ]
+//   %kizu.6 = zext i8 %kizu.5 to i64
+//   ret i64 %kizu.6
+// }
+// 
+// define void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.self.addr) {
+// entry:
+//   %kizu.self = load %kizu.struct.Ledger, ptr %kizu.self.addr
+//   %kizu.1 = extractvalue %kizu.struct.Ledger %kizu.self, 0
+//   call void @std__array__Array_deinit_i64(ptr %kizu.1)
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_orelse_takes_the_value_or_the_default() {
+// entry:
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 122 to i8
+//   %kizu.5 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6.tag = extractvalue %kizu.opt.i64 %kizu.5, 0
+//   %kizu.6 = icmp ne i8 %kizu.6.tag, 0
+//   br i1 %kizu.6, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.7 = extractvalue %kizu.opt.i64 %kizu.5, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.9 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.10 = phi i64 [ %kizu.7, %orelse.some.1 ], [ %kizu.9, %orelse.else.2 ]
+//   %kizu.11.ok = icmp eq i64 2, %kizu.10
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.10, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   %kizu.13 = sub i64 0, 1
+//   %kizu.14.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.14.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.14.ptr, 0
+//   %kizu.14 = insertvalue %kizu.slice.u8 %kizu.14.base, i64 4, 1
+//   %kizu.16 = trunc i64 120 to i8
+//   %kizu.17 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.14, i8 %kizu.16)
+//   %kizu.18.tag = extractvalue %kizu.opt.i64 %kizu.17, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.19 = extractvalue %kizu.opt.i64 %kizu.17, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.21 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.22 = phi i64 [ %kizu.19, %orelse.some.4 ], [ %kizu.21, %orelse.else.5 ]
+//   %kizu.23.ok = icmp eq i64 %kizu.13, %kizu.22
+//   br i1 %kizu.23.ok, label %kizu.23.ok.ok, label %kizu.23.ok.fail
+// kizu.23.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.13, i64 %kizu.22, i64 0, i64 0)
+//   unreachable
+// kizu.23.ok.ok:
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_if_capture_branches_on_presence() {
+// entry:
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 107 to i8
+//   %kizu.5 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6 = extractvalue %kizu.opt.i64 %kizu.5, 1
+//   %kizu.7.tag = extractvalue %kizu.opt.i64 %kizu.5, 0
+//   %kizu.7 = icmp ne i8 %kizu.7.tag, 0
+//   br i1 %kizu.7, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.9 = add i64 %kizu.6, 10
+//   br label %if.end.3
+// if.else.2:
+//   %kizu.11 = sub i64 0, 1
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.12 = phi i64 [ %kizu.9, %if.then.1 ], [ %kizu.11, %if.else.2 ]
+//   %kizu.14.ok = icmp eq i64 10, %kizu.12
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 10, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.17 = trunc i64 120 to i8
+//   %kizu.18 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.15, i8 %kizu.17)
+//   %kizu.19 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   %kizu.20.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.20 = icmp ne i8 %kizu.20.tag, 0
+//   br i1 %kizu.20, label %if.then.4, label %if.else.5
+// if.then.4:
+//   br label %if.end.6
+// if.else.5:
+//   %kizu.22 = sub i64 0, 2
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.23 = phi i64 [ %kizu.19, %if.then.4 ], [ %kizu.22, %if.else.5 ]
+//   %kizu.25 = sub i64 0, 2
+//   %kizu.26.ok = icmp eq i64 %kizu.25, %kizu.23
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.25, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.26.ok.ok:
+//   %kizu.27 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.27
+// }
+// 
+// define %kizu.error.void @test_while_capture_loops_until_null() {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.BytesIter
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2 = call %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.1)
+//   store %kizu.struct.BytesIter %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.10, %while.body.2 ]
+//   %kizu.6 = call %kizu.opt.u8 @BytesIter_next(ptr %kizu.3)
+//   %kizu.7 = extractvalue %kizu.opt.u8 %kizu.6, 1
+//   %kizu.8.tag = extractvalue %kizu.opt.u8 %kizu.6, 0
+//   %kizu.8 = icmp ne i8 %kizu.8.tag, 0
+//   br i1 %kizu.8, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10 = add i64 %kizu.5, %kizu.9
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.13
+// }
+// 
+// define %kizu.error.void @test_error_union_with_optional_success_drives_a_fallible_stream() {
+// entry:
+//   %kizu.11 = alloca %kizu.struct.Stream
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = call %kizu.error.ReadError.i64 @drain(%kizu.slice.u8 %kizu.2, i1 false)
+//   %kizu.5.ok = extractvalue %kizu.error.ReadError.i64 %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.ReadError.i64 %kizu.4, 2
+//   %kizu.try.err.1.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.void %kizu.try.err.1.base, i64 %kizu.try.err.1.code, 1
+//   ret %kizu.error.void %kizu.try.err.1
+// kizu.5.try.ok:
+//   %kizu.5 = extractvalue %kizu.error.ReadError.i64 %kizu.4, 1
+//   %kizu.6.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
+//   %kizu.10.field0 = insertvalue %kizu.struct.Stream zeroinitializer, %kizu.slice.u8 %kizu.7, 0
+//   %kizu.10.field1 = insertvalue %kizu.struct.Stream %kizu.10.field0, i64 0, 1
+//   %kizu.10 = insertvalue %kizu.struct.Stream %kizu.10.field1, i1 false, 2
+//   store %kizu.struct.Stream %kizu.10, ptr %kizu.11
+//   %kizu.13 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.11)
+//   %kizu.14.ok = extractvalue %kizu.error.ReadError._u8 %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   %kizu.try.err.2.code = extractvalue %kizu.error.ReadError._u8 %kizu.13, 2
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.14.try.ok:
+//   %kizu.14 = extractvalue %kizu.error.ReadError._u8 %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt.u8 %kizu.14, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.16 = extractvalue %kizu.opt.u8 %kizu.14, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.18 = phi i8 [ %kizu.16, %orelse.some.1 ], [ 0, %orelse.else.2 ]
+//   %kizu.19 = zext i8 %kizu.18 to i64
+//   %kizu.20.ok = icmp eq i64 107, %kizu.19
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 107, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.22 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.11)
+//   %kizu.23.ok = extractvalue %kizu.error.ReadError._u8 %kizu.22, 0
+//   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
+//   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
+// kizu.23.try.err:
+//   %kizu.try.err.3.code = extractvalue %kizu.error.ReadError._u8 %kizu.22, 2
+//   %kizu.try.err.3.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.3 = insertvalue %kizu.error.void %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 1
+//   ret %kizu.error.void %kizu.try.err.3
+// kizu.23.try.ok:
+//   %kizu.23 = extractvalue %kizu.error.ReadError._u8 %kizu.22, 1
+//   %kizu.24.tag = extractvalue %kizu.opt.u8 %kizu.23, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.25 = extractvalue %kizu.opt.u8 %kizu.23, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.27 = phi i8 [ %kizu.25, %orelse.some.4 ], [ 0, %orelse.else.5 ]
+//   %kizu.28 = zext i8 %kizu.27 to i64
+//   %kizu.29.ok = icmp eq i64 0, %kizu.28
+//   br i1 %kizu.29.ok, label %kizu.29.ok.ok, label %kizu.29.ok.fail
+// kizu.29.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.28, i64 0, i64 0)
+//   unreachable
+// kizu.29.ok.ok:
+//   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.30
+// }
+// 
+// define %kizu.error.void @test_container_lookups_miss_as_null() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.4 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 41)
+//   %kizu.5.ok = extractvalue %kizu.error.void %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.4
+// kizu.5.try.ok:
+//   %kizu.8 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 0)
+//   %kizu.9.tag = extractvalue %kizu.opt.i64 %kizu.8, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.10 = extractvalue %kizu.opt.i64 %kizu.8, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.12 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.13 = phi i64 [ %kizu.10, %orelse.some.1 ], [ %kizu.12, %orelse.else.2 ]
+//   %kizu.14.ok = icmp eq i64 41, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.16 = sub i64 0, 1
+//   %kizu.18 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 9)
+//   %kizu.19.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.22 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.23 = phi i64 [ %kizu.20, %orelse.some.4 ], [ %kizu.22, %orelse.else.5 ]
+//   %kizu.24.ok = icmp eq i64 %kizu.16, %kizu.23
+//   br i1 %kizu.24.ok, label %kizu.24.ok.ok, label %kizu.24.ok.fail
+// kizu.24.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.16, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.24.ok.ok:
+//   %kizu.26 = call %kizu.opt.i64 @std__array__Array_pop_i64(ptr %kizu.2)
+//   %kizu.27.tag = extractvalue %kizu.opt.i64 %kizu.26, 0
+//   %kizu.27 = icmp ne i8 %kizu.27.tag, 0
+//   br i1 %kizu.27, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.28 = extractvalue %kizu.opt.i64 %kizu.26, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.30 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.31 = phi i64 [ %kizu.28, %orelse.some.7 ], [ %kizu.30, %orelse.else.8 ]
+//   %kizu.32.ok = icmp eq i64 41, %kizu.31
+//   br i1 %kizu.32.ok, label %kizu.32.ok.ok, label %kizu.32.ok.fail
+// kizu.32.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.31, i64 0, i64 0)
+//   unreachable
+// kizu.32.ok.ok:
+//   %kizu.34 = sub i64 0, 1
+//   %kizu.35 = call %kizu.opt.i64 @std__array__Array_pop_i64(ptr %kizu.2)
+//   %kizu.36.tag = extractvalue %kizu.opt.i64 %kizu.35, 0
+//   %kizu.36 = icmp ne i8 %kizu.36.tag, 0
+//   br i1 %kizu.36, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.37 = extractvalue %kizu.opt.i64 %kizu.35, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.39 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.40 = phi i64 [ %kizu.37, %orelse.some.10 ], [ %kizu.39, %orelse.else.11 ]
+//   %kizu.41.ok = icmp eq i64 %kizu.34, %kizu.40
+//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
+// kizu.41.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.34, i64 %kizu.40, i64 0, i64 0)
+//   unreachable
+// kizu.41.ok.ok:
+//   %kizu.42 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.43.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.43.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.43.ptr, 0
+//   %kizu.43 = insertvalue %kizu.slice.u8 %kizu.43.base, i64 3, 1
+//   %kizu.45 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.43, i64 7)
+//   %kizu.46.ok = extractvalue %kizu.error.void %kizu.45, 0
+//   %kizu.46.ok.bool = icmp ne i8 %kizu.46.ok, 0
+//   br i1 %kizu.46.ok.bool, label %kizu.46.try.ok, label %kizu.46.try.err
+// kizu.46.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.42)
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.45
+// kizu.46.try.ok:
+//   %kizu.48.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.48.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.48.ptr, 0
+//   %kizu.48 = insertvalue %kizu.slice.u8 %kizu.48.base, i64 3, 1
+//   %kizu.49 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.48)
+//   %kizu.50.tag = extractvalue %kizu.opt.i64 %kizu.49, 0
+//   %kizu.50 = icmp ne i8 %kizu.50.tag, 0
+//   br i1 %kizu.50, label %orelse.some.13, label %orelse.else.14
+// orelse.some.13:
+//   %kizu.51 = extractvalue %kizu.opt.i64 %kizu.49, 1
+//   br label %orelse.end.15
+// orelse.else.14:
+//   %kizu.53 = sub i64 0, 1
+//   br label %orelse.end.15
+// orelse.end.15:
+//   %kizu.54 = phi i64 [ %kizu.51, %orelse.some.13 ], [ %kizu.53, %orelse.else.14 ]
+//   %kizu.55.ok = icmp eq i64 7, %kizu.54
+//   br i1 %kizu.55.ok, label %kizu.55.ok.ok, label %kizu.55.ok.fail
+// kizu.55.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.54, i64 0, i64 0)
+//   unreachable
+// kizu.55.ok.ok:
+//   %kizu.57 = sub i64 0, 1
+//   %kizu.58.ptr = getelementptr inbounds [5 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.58.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.58.ptr, 0
+//   %kizu.58 = insertvalue %kizu.slice.u8 %kizu.58.base, i64 4, 1
+//   %kizu.59 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.58)
+//   %kizu.60.tag = extractvalue %kizu.opt.i64 %kizu.59, 0
+//   %kizu.60 = icmp ne i8 %kizu.60.tag, 0
+//   br i1 %kizu.60, label %orelse.some.16, label %orelse.else.17
+// orelse.some.16:
+//   %kizu.61 = extractvalue %kizu.opt.i64 %kizu.59, 1
+//   br label %orelse.end.18
+// orelse.else.17:
+//   %kizu.63 = sub i64 0, 1
+//   br label %orelse.end.18
+// orelse.end.18:
+//   %kizu.64 = phi i64 [ %kizu.61, %orelse.some.16 ], [ %kizu.63, %orelse.else.17 ]
+//   %kizu.65.ok = icmp eq i64 %kizu.57, %kizu.64
+//   br i1 %kizu.65.ok, label %kizu.65.ok.ok, label %kizu.65.ok.fail
+// kizu.65.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.57, i64 %kizu.64, i64 0, i64 0)
+//   unreachable
+// kizu.65.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.42)
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.68 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.68
+// }
+// 
+// define %kizu.error.void @test_map_at_mut_updates_values_in_place() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.5 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.3, i64 41)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 4, 1
+//   %kizu.8 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.7)
+//   %kizu.9 = extractvalue %kizu.opt._var_i64 %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._var_i64 %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.11 = load i64, ptr %kizu.9
+//   %kizu.13 = add i64 %kizu.11, 1
+//   store i64 %kizu.13, ptr %kizu.9
+//   br label %if.end.3
+// if.else.2:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.17 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.15, i64 1)
+//   %kizu.18.ok = extractvalue %kizu.error.void %kizu.17, 0
+//   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
+//   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
+// kizu.18.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.17
+// kizu.18.try.ok:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.19.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
+//   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 4, 1
+//   %kizu.20 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.19)
+//   %kizu.21 = extractvalue %kizu.opt._var_i64 %kizu.20, 1
+//   %kizu.22.tag = extractvalue %kizu.opt._var_i64 %kizu.20, 0
+//   %kizu.22 = icmp ne i8 %kizu.22.tag, 0
+//   br i1 %kizu.22, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.23 = load i64, ptr %kizu.21
+//   %kizu.25 = add i64 %kizu.23, 1
+//   store i64 %kizu.25, ptr %kizu.21
+//   br label %if.end.6
+// if.else.5:
+//   %kizu.27.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.27.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.27.ptr, 0
+//   %kizu.27 = insertvalue %kizu.slice.u8 %kizu.27.base, i64 4, 1
+//   %kizu.29 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.27, i64 1)
+//   %kizu.30.ok = extractvalue %kizu.error.void %kizu.29, 0
+//   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
+//   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
+// kizu.30.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.29
+// kizu.30.try.ok:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.32.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.32.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.32.ptr, 0
+//   %kizu.32 = insertvalue %kizu.slice.u8 %kizu.32.base, i64 4, 1
+//   %kizu.33 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.32)
+//   %kizu.34.tag = extractvalue %kizu.opt.i64 %kizu.33, 0
+//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   br i1 %kizu.34, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.35 = extractvalue %kizu.opt.i64 %kizu.33, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.37 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.38 = phi i64 [ %kizu.35, %orelse.some.7 ], [ %kizu.37, %orelse.else.8 ]
+//   %kizu.39.ok = icmp eq i64 42, %kizu.38
+//   br i1 %kizu.39.ok, label %kizu.39.ok.ok, label %kizu.39.ok.fail
+// kizu.39.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.38, i64 0, i64 0)
+//   unreachable
+// kizu.39.ok.ok:
+//   %kizu.41.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.41.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.41.ptr, 0
+//   %kizu.41 = insertvalue %kizu.slice.u8 %kizu.41.base, i64 4, 1
+//   %kizu.42 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.41)
+//   %kizu.43.tag = extractvalue %kizu.opt.i64 %kizu.42, 0
+//   %kizu.43 = icmp ne i8 %kizu.43.tag, 0
+//   br i1 %kizu.43, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.44 = extractvalue %kizu.opt.i64 %kizu.42, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.46 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.47 = phi i64 [ %kizu.44, %orelse.some.10 ], [ %kizu.46, %orelse.else.11 ]
+//   %kizu.48.ok = icmp eq i64 1, %kizu.47
+//   br i1 %kizu.48.ok, label %kizu.48.ok.ok, label %kizu.48.ok.fail
+// kizu.48.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.47, i64 0, i64 0)
+//   unreachable
+// kizu.48.ok.ok:
+//   %kizu.49.ptr = getelementptr inbounds [5 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
+//   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 4, 1
+//   %kizu.50 = call %kizu.opt._i64 @std__map__Map_at_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.49)
+//   %kizu.51 = extractvalue %kizu.opt._i64 %kizu.50, 1
+//   %kizu.52.tag = extractvalue %kizu.opt._i64 %kizu.50, 0
+//   %kizu.52 = icmp ne i8 %kizu.52.tag, 0
+//   br i1 %kizu.52, label %if.then.13, label %if.else.14
+// if.then.13:
+//   %kizu.54 = sub i64 0, 1
+//   %kizu.55 = load i64, ptr %kizu.51
+//   %kizu.56.ok = icmp eq i64 %kizu.54, %kizu.55
+//   br i1 %kizu.56.ok, label %kizu.56.ok.ok, label %kizu.56.ok.fail
+// kizu.56.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.54, i64 %kizu.55, i64 0, i64 0)
+//   unreachable
+// kizu.56.ok.ok:
+//   br label %if.end.15
+// if.else.14:
+//   br label %if.end.15
+// if.end.15:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.58 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.58
+// }
+// 
+// define %kizu.error.void @test_arena_at_mut_updates_elements_in_place() {
+// entry:
+//   %kizu.6.value.slot = alloca %kizu.struct.Visitor
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64))
+//   %kizu.5.field0 = insertvalue %kizu.struct.Visitor zeroinitializer, i64 30, 0
+//   %kizu.5 = insertvalue %kizu.struct.Visitor %kizu.5.field0, i64 0, 1
+//   store %kizu.struct.Visitor %kizu.5, ptr %kizu.6.value.slot
+//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
+//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.6.bad.ok:
+//   %kizu.7.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.7.live = icmp ne ptr %kizu.7.ptr, null
+//   %kizu.7.tag = zext i1 %kizu.7.live to i8
+//   %kizu.7.some = insertvalue %kizu.opt._var_Visitor zeroinitializer, i8 %kizu.7.tag, 0
+//   %kizu.7 = insertvalue %kizu.opt._var_Visitor %kizu.7.some, ptr %kizu.7.ptr, 1
+//   %kizu.8 = extractvalue %kizu.opt._var_Visitor %kizu.7, 1
+//   %kizu.9.tag = extractvalue %kizu.opt._var_Visitor %kizu.7, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.10.ptr = getelementptr %kizu.struct.Visitor, ptr %kizu.8, i32 0, i32 1
+//   %kizu.10 = load i64, ptr %kizu.10.ptr
+//   %kizu.12 = add i64 %kizu.10, 1
+//   %kizu.13.ptr = getelementptr %kizu.struct.Visitor, ptr %kizu.8, i32 0, i32 1
+//   store i64 %kizu.12, ptr %kizu.13.ptr
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.15.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.arena.at.is_null.1 = icmp eq ptr %kizu.15.ptr, null
+//   br i1 %kizu.arena.at.is_null.1, label %kizu.15.ptr.arena.at.null, label %kizu.15.ptr.ok
+// kizu.15.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.15.ptr.ok:
+//   %kizu.15 = load %kizu.struct.Visitor, ptr %kizu.15.ptr
+//   %kizu.16 = extractvalue %kizu.struct.Visitor %kizu.15, 1
+//   %kizu.17.ok = icmp eq i64 1, %kizu.16
+//   br i1 %kizu.17.ok, label %kizu.17.ok.ok, label %kizu.17.ok.fail
+// kizu.17.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.17.ok.ok:
+//   %kizu.19.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.arena.at.is_null.2 = icmp eq ptr %kizu.19.ptr, null
+//   br i1 %kizu.arena.at.is_null.2, label %kizu.19.ptr.arena.at.null, label %kizu.19.ptr.ok
+// kizu.19.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.19.ptr.ok:
+//   %kizu.19 = load %kizu.struct.Visitor, ptr %kizu.19.ptr
+//   %kizu.20 = extractvalue %kizu.struct.Visitor %kizu.19, 0
+//   %kizu.21.ok = icmp eq i64 30, %kizu.20
+//   br i1 %kizu.21.ok, label %kizu.21.ok.ok, label %kizu.21.ok.fail
+// kizu.21.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 30, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.21.ok.ok:
+//   call void @kizu_arena_deinit(ptr %kizu.2)
+//   %kizu.23 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.23
+// }
+// 
+// define %kizu.error.void @test_at_mut_captures_an_owner_s_container_field() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.2 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.3 = alloca %kizu.struct.Ledger
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Ledger zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Ledger %kizu.3, ptr %kizu.4
+//   %kizu.5.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.5 = load ptr, ptr %kizu.5.ptr
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.5, i64 7)
+//   %kizu.8 = load %kizu.struct.Ledger, ptr %kizu.4
+//   %kizu.9.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
+//   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
+// kizu.9.try.err:
+//   store %kizu.struct.Ledger %kizu.8, ptr %kizu.arg.0.2
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.9.try.ok:
+//   call void @Ledger_bump(ptr %kizu.4, i64 0)
+//   %kizu.12.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.12 = load ptr, ptr %kizu.12.ptr
+//   %kizu.14 = call %kizu.opt._i64 @std__array__Array_at_i64(ptr %kizu.12, i64 0)
+//   %kizu.15 = extractvalue %kizu.opt._i64 %kizu.14, 1
+//   %kizu.16.tag = extractvalue %kizu.opt._i64 %kizu.14, 0
+//   %kizu.16 = icmp ne i8 %kizu.16.tag, 0
+//   br i1 %kizu.16, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.18 = load i64, ptr %kizu.15
+//   %kizu.19.ok = icmp eq i64 8, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.20 = load %kizu.struct.Ledger, ptr %kizu.4
+//   store %kizu.struct.Ledger %kizu.20, ptr %kizu.arg.0.3
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.3)
+//   %kizu.22 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.22
+// }
+// 
+// define %kizu.error.void @test_borrow_optional_returns_flow_to_the_caller_s_capture() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.2 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.3 = alloca %kizu.struct.Ledger
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Ledger zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Ledger %kizu.3, ptr %kizu.4
+//   %kizu.5.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.5 = load ptr, ptr %kizu.5.ptr
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.5, i64 7)
+//   %kizu.8 = load %kizu.struct.Ledger, ptr %kizu.4
+//   %kizu.9.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
+//   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
+// kizu.9.try.err:
+//   store %kizu.struct.Ledger %kizu.8, ptr %kizu.arg.0.2
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.9.try.ok:
+//   %kizu.11 = call %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.4, i64 0)
+//   %kizu.12 = extractvalue %kizu.opt._var_i64 %kizu.11, 1
+//   %kizu.13.tag = extractvalue %kizu.opt._var_i64 %kizu.11, 0
+//   %kizu.13 = icmp ne i8 %kizu.13.tag, 0
+//   br i1 %kizu.13, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.14 = load i64, ptr %kizu.12
+//   %kizu.16 = add i64 %kizu.14, 1
+//   store i64 %kizu.16, ptr %kizu.12
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.19.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.19 = load ptr, ptr %kizu.19.ptr
+//   %kizu.21 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.19, i64 0)
+//   %kizu.22.ok = icmp eq i64 8, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   %kizu.24 = call %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.4, i64 9)
+//   %kizu.25 = extractvalue %kizu.opt._var_i64 %kizu.24, 1
+//   %kizu.26.tag = extractvalue %kizu.opt._var_i64 %kizu.24, 0
+//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   br i1 %kizu.26, label %if.then.4, label %if.else.5
+// if.then.4:
+//   store i64 0, ptr %kizu.25
+//   call void @std__testing__expect(i1 false)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.31 = load %kizu.struct.Ledger, ptr %kizu.4
+//   store %kizu.struct.Ledger %kizu.31, ptr %kizu.arg.0.3
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.3)
+//   %kizu.33 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.33
+// }
+// 
+// define %kizu.error.void @test_at_mut_works_through_a__var_parameter() {
+// entry:
+//   %kizu.3 = alloca ptr
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   store ptr %kizu.2, ptr %kizu.3
+//   %kizu.4 = load ptr, ptr %kizu.3
+//   %kizu.6 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.4, i64 7)
+//   %kizu.7 = load ptr, ptr %kizu.3
+//   %kizu.8.ok = extractvalue %kizu.error.void %kizu.6, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.7)
+//   ret %kizu.error.void %kizu.6
+// kizu.8.try.ok:
+//   call void @bump_first(ptr %kizu.3)
+//   %kizu.11 = load ptr, ptr %kizu.3
+//   %kizu.13 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.11, i64 0)
+//   %kizu.14.ok = icmp eq i64 8, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.15 = load ptr, ptr %kizu.3
+//   call void @kizu_array_deinit(ptr %kizu.15)
+//   %kizu.17 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.17
+// }
+// 
+// define %kizu.error.void @test_view_payloads_miss_as_null() {
+// entry:
+//   %kizu.1.ptr = getelementptr inbounds [3 x i8], ptr @.str.5, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 2, 1
+//   %kizu.2.ptr = getelementptr inbounds [4 x i8], ptr @.str.6, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 3, 1
+//   %kizu.5 = call %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8 %kizu.2, i64 0, i64 2)
+//   %kizu.6.tag = extractvalue %kizu.opt.slice.u8 %kizu.5, 0
+//   %kizu.6 = icmp ne i8 %kizu.6.tag, 0
+//   br i1 %kizu.6, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.7 = extractvalue %kizu.opt.slice.u8 %kizu.5, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.8.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.9 = phi %kizu.slice.u8 [ %kizu.7, %orelse.some.1 ], [ %kizu.8, %orelse.else.2 ]
+//   %kizu.10.left.ptr = extractvalue %kizu.slice.u8 %kizu.1, 0
+//   %kizu.10.left.len = extractvalue %kizu.slice.u8 %kizu.1, 1
+//   %kizu.10.right.ptr = extractvalue %kizu.slice.u8 %kizu.9, 0
+//   %kizu.10.right.len = extractvalue %kizu.slice.u8 %kizu.9, 1
+//   %kizu.10.ok = call i1 @kizu_bytes_equal(ptr %kizu.10.left.ptr, i64 %kizu.10.left.len, ptr %kizu.10.right.ptr, i64 %kizu.10.right.len)
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.10.left.ptr, i64 %kizu.10.left.len, ptr %kizu.10.right.ptr, i64 %kizu.10.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 0, 1
+//   %kizu.12.ptr = getelementptr inbounds [4 x i8], ptr @.str.6, i64 0, i64 0
+//   %kizu.12.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.12.ptr, 0
+//   %kizu.12 = insertvalue %kizu.slice.u8 %kizu.12.base, i64 3, 1
+//   %kizu.15 = call %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8 %kizu.12, i64 0, i64 4)
+//   %kizu.16.tag = extractvalue %kizu.opt.slice.u8 %kizu.15, 0
+//   %kizu.16 = icmp ne i8 %kizu.16.tag, 0
+//   br i1 %kizu.16, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.17 = extractvalue %kizu.opt.slice.u8 %kizu.15, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.18.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
+//   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.19 = phi %kizu.slice.u8 [ %kizu.17, %orelse.some.4 ], [ %kizu.18, %orelse.else.5 ]
+//   %kizu.20.left.ptr = extractvalue %kizu.slice.u8 %kizu.11, 0
+//   %kizu.20.left.len = extractvalue %kizu.slice.u8 %kizu.11, 1
+//   %kizu.20.right.ptr = extractvalue %kizu.slice.u8 %kizu.19, 0
+//   %kizu.20.right.len = extractvalue %kizu.slice.u8 %kizu.19, 1
+//   %kizu.20.ok = call i1 @kizu_bytes_equal(ptr %kizu.20.left.ptr, i64 %kizu.20.left.len, ptr %kizu.20.right.ptr, i64 %kizu.20.right.len)
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.20.left.ptr, i64 %kizu.20.left.len, ptr %kizu.20.right.ptr, i64 %kizu.20.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.21.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.21.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.21.ptr, 0
+//   %kizu.21 = insertvalue %kizu.slice.u8 %kizu.21.base, i64 0, 1
+//   %kizu.22.ptr = getelementptr inbounds [28 x i8], ptr @.str.8, i64 0, i64 0
+//   %kizu.22.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.22.ptr, 0
+//   %kizu.22 = insertvalue %kizu.slice.u8 %kizu.22.base, i64 27, 1
+//   %kizu.23 = call %kizu.opt.slice.u8 @std__process__env(%kizu.slice.u8 %kizu.22)
+//   %kizu.24.tag = extractvalue %kizu.opt.slice.u8 %kizu.23, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.25 = extractvalue %kizu.opt.slice.u8 %kizu.23, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.26.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.26.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.26.ptr, 0
+//   %kizu.26 = insertvalue %kizu.slice.u8 %kizu.26.base, i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.27 = phi %kizu.slice.u8 [ %kizu.25, %orelse.some.7 ], [ %kizu.26, %orelse.else.8 ]
+//   %kizu.28.left.ptr = extractvalue %kizu.slice.u8 %kizu.21, 0
+//   %kizu.28.left.len = extractvalue %kizu.slice.u8 %kizu.21, 1
+//   %kizu.28.right.ptr = extractvalue %kizu.slice.u8 %kizu.27, 0
+//   %kizu.28.right.len = extractvalue %kizu.slice.u8 %kizu.27, 1
+//   %kizu.28.ok = call i1 @kizu_bytes_equal(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len)
+//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
+// kizu.28.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.28.ok.ok:
+//   %kizu.29 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.29
+// }
+// 
+// define %kizu.error.void @test_orelse_guards_exit_on_null() {
+// entry:
+//   %kizu.16 = alloca %kizu.struct.BytesIter
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 122 to i8
+//   %kizu.5 = call i64 @guarded_find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6.ok = icmp eq i64 102, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 102, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.8 = sub i64 0, 1
+//   %kizu.9.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.9.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.9.ptr, 0
+//   %kizu.9 = insertvalue %kizu.slice.u8 %kizu.9.base, i64 4, 1
+//   %kizu.11 = trunc i64 120 to i8
+//   %kizu.12 = call i64 @guarded_find(%kizu.slice.u8 %kizu.9, i8 %kizu.11)
+//   %kizu.13.ok = icmp eq i64 %kizu.8, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.8, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   %kizu.14.ptr = getelementptr inbounds [3 x i8], ptr @.str.9, i64 0, i64 0
+//   %kizu.14.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.14.ptr, 0
+//   %kizu.14 = insertvalue %kizu.slice.u8 %kizu.14.base, i64 2, 1
+//   %kizu.15 = call %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.14)
+//   store %kizu.struct.BytesIter %kizu.15, ptr %kizu.16
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.18 = phi i64 [ 0, %kizu.13.ok.ok ], [ %kizu.24, %guard.some.4 ]
+//   br i1 true, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.20 = call %kizu.opt.u8 @BytesIter_next(ptr %kizu.16)
+//   %kizu.21.tag = extractvalue %kizu.opt.u8 %kizu.20, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %guard.some.4, label %guard.exit.5
+// while.end.3:
+//   %kizu.25 = phi i64 [ %kizu.18, %while.header.1 ], [ %kizu.18, %guard.exit.5 ]
+//   %kizu.27.ok = icmp eq i64 229, %kizu.25
+//   br i1 %kizu.27.ok, label %kizu.27.ok.ok, label %kizu.27.ok.fail
+// kizu.27.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 229, i64 %kizu.25, i64 0, i64 0)
+//   unreachable
+// kizu.27.ok.ok:
+//   %kizu.28 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.28
+// guard.some.4:
+//   %kizu.22 = extractvalue %kizu.opt.u8 %kizu.20, 1
+//   %kizu.23 = zext i8 %kizu.22 to i64
+//   %kizu.24 = add i64 %kizu.18, %kizu.23
+//   br label %while.header.1
+// guard.exit.5:
+//   br label %while.end.3
+// }
+// 
+// define %kizu.error.void @test_owner_payload_pops_through_the_capture() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.std__string__String, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.4 = call %kizu.error.std__string__String @make_name(ptr %kizu.1, %kizu.slice.u8 %kizu.3)
+//   %kizu.5.ok = extractvalue %kizu.error.std__string__String %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__string__String %kizu.4, 2
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.5.try.ok:
+//   %kizu.5 = extractvalue %kizu.error.std__string__String %kizu.4, 1
+//   %kizu.6 = call %kizu.error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr %kizu.2, %kizu.struct.std__string__String %kizu.5)
+//   %kizu.7.ok = extractvalue %kizu.error.void %kizu.6, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.6
+// kizu.7.try.ok:
+//   %kizu.9 = call %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.10 = extractvalue %kizu.opt.std__string__String %kizu.9, 1
+//   %kizu.11.tag = extractvalue %kizu.opt.std__string__String %kizu.9, 0
+//   %kizu.11 = icmp ne i8 %kizu.11.tag, 0
+//   br i1 %kizu.11, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.10)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.14 = phi i64 [ %kizu.12, %if.then.1 ], [ 0, %if.else.2 ]
+//   %kizu.16.ok = icmp eq i64 4, %kizu.14
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.17 = call %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.18 = extractvalue %kizu.opt.std__string__String %kizu.17, 1
+//   %kizu.19.tag = extractvalue %kizu.opt.std__string__String %kizu.17, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %if.then.4, label %if.else.5
+// if.then.4:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.18)
+//   call void @std__testing__expect(i1 false)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_optional_arguments_accept_null_and_values() {
+// entry:
+//   %kizu.2 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   %kizu.3 = call i64 @or_one(%kizu.opt.u8 %kizu.2)
+//   %kizu.4.ok = icmp eq i64 1, %kizu.3
+//   br i1 %kizu.4.ok, label %kizu.4.ok.ok, label %kizu.4.ok.fail
+// kizu.4.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.4.ok.ok:
+//   %kizu.7 = trunc i64 9 to i8
+//   %kizu.8.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.8 = insertvalue %kizu.opt.u8 %kizu.8.some, i8 %kizu.7, 1
+//   %kizu.9 = call i64 @or_one(%kizu.opt.u8 %kizu.8)
+//   %kizu.10.ok = icmp eq i64 9, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 9, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._i64 = type { i8, ptr }
+// %kizu.opt._var_Visitor = type { i8, ptr }
+// %kizu.opt._var_i64 = type { i8, ptr }
+// %kizu.opt.slice.u8 = type { i8, %kizu.slice.u8 }
+// %kizu.opt.i64 = type { i8, i64 }
+// %kizu.opt.std__string__String = type { i8, %kizu.struct.std__string__String }
+// %kizu.opt.u8 = type { i8, i8 }
+// 
+// %kizu.error.std__string__String = type { i8, %kizu.struct.std__string__String, i64 }
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.ReadError._u8 = type { i8, %kizu.opt.u8, i64 }
+// %kizu.error.ReadError.i64 = type { i8, i64, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.Ledger = type { ptr }
+// %kizu.struct.Stream = type { %kizu.slice.u8, i64, i1 }
+// %kizu.struct.Visitor = type { i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// %kizu.struct.std__string__Scalar = type { i64, i64 }
+// %kizu.struct.std__string__String = type { ptr }
+// %kizu.struct.std__string__TrimBounds = type { i64, i64 }
+// 
+// @.kizu.error.name.1 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfMemory\00"
+// @.kizu.error.name.2 = private unnamed_addr constant [31 x i8] c"std::array::Error::OutOfBounds\00"
+// @.kizu.error.name.30 = private unnamed_addr constant [29 x i8] c"std::map::Error::OutOfMemory\00"
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.name.32 = private unnamed_addr constant [42 x i8] c"std::process::Error::InvalidArgumentCount\00"
+// @.kizu.error.name.33 = private unnamed_addr constant [39 x i8] c"std::process::Error::MissingExecutable\00"
+// @.kizu.error.name.34 = private unnamed_addr constant [33 x i8] c"std::process::Error::OutOfMemory\00"
+// @.kizu.error.name.35 = private unnamed_addr constant [41 x i8] c"std::process::Error::ArgIndexOutOfBounds\00"
+// @.kizu.error.name.36 = private unnamed_addr constant [34 x i8] c"std::string::Error::InvalidLength\00"
+// @.kizu.error.name.37 = private unnamed_addr constant [18 x i8] c"ReadError::Broken\00"
+// @.kizu.error.names = private unnamed_addr constant [38 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.1, i64 30 }, { ptr, i64 } { ptr @.kizu.error.name.2, i64 30 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.30, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }, { ptr, i64 } { ptr @.kizu.error.name.32, i64 41 }, { ptr, i64 } { ptr @.kizu.error.name.33, i64 38 }, { ptr, i64 } { ptr @.kizu.error.name.34, i64 32 }, { ptr, i64 } { ptr @.kizu.error.name.35, i64 40 }, { ptr, i64 } { ptr @.kizu.error.name.36, i64 33 }, { ptr, i64 } { ptr @.kizu.error.name.37, i64 17 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"kizu\00"
+// @.str.1 = private unnamed_addr constant [2 x i8] c"k\00"
+// @.str.2 = private unnamed_addr constant [4 x i8] c"hit\00"
+// @.str.3 = private unnamed_addr constant [5 x i8] c"miss\00"
+// @.str.4 = private unnamed_addr constant [5 x i8] c"lang\00"
+// @.str.5 = private unnamed_addr constant [3 x i8] c"ab\00"
+// @.str.6 = private unnamed_addr constant [4 x i8] c"abc\00"
+// @.str.7 = private unnamed_addr constant [1 x i8] c"\00"
+// @.str.8 = private unnamed_addr constant [28 x i8] c"KIZU_SURELY_UNSET_VAR_12345\00"
+// @.str.9 = private unnamed_addr constant [3 x i8] c"kz\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_array_new(ptr, i64)
+// declare i1 @kizu_array_append(ptr, ptr)
+// declare i64 @kizu_array_len(ptr)
+// declare i64 @kizu_array_capacity(ptr)
+// declare i1 @kizu_array_reserve(ptr, i64)
+// declare ptr @kizu_array_get(ptr, i64)
+// declare ptr @kizu_array_pop(ptr)
+// declare i1 @kizu_array_set(ptr, i64, ptr)
+// declare i1 @kizu_array_swap(ptr, i64, i64)
+// declare i1 @kizu_array_truncate(ptr, i64)
+// declare void @kizu_array_clear(ptr)
+// declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)
+// declare void @kizu_array_deinit(ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare ptr @kizu_arena_new(ptr, i64)
+// declare i64 @kizu_arena_add(ptr, ptr)
+// declare ptr @kizu_arena_get(ptr, i64)
+// declare i64 @kizu_arena_len(ptr)
+// declare ptr @kizu_arena_pop(ptr)
+// declare void @kizu_arena_deinit(ptr)
+// 
+// declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
+// 
+// declare %kizu.error.void @std__array__Array_append_i64(ptr, i64)
+// declare %kizu.error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr, %kizu.struct.std__string__String)
+// declare %kizu.opt._i64 @std__array__Array_at_i64(ptr, i64)
+// declare %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr, i64)
+// declare void @std__array__Array_deinit_i64(ptr)
+// declare void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr)
+// declare %kizu.opt.i64 @std__array__Array_get_i64(ptr, i64)
+// declare i64 @std__array__Array_get_or_panic_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__array__Array_pop_i64(ptr)
+// declare %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr)
+// declare %kizu.opt._i64 @std__map__Map_at_i64(ptr, %kizu.slice.u8)
+// declare %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr, %kizu.slice.u8)
+// declare %kizu.opt.i64 @std__map__Map_get_i64(ptr, %kizu.slice.u8)
+// declare %kizu.error.void @std__map__Map_insert_i64(ptr, %kizu.slice.u8, i64)
+// declare i64 @std__mem__len(%kizu.slice.u8)
+// declare ptr @std__mem__page_allocator()
+// declare %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8, i64, i64)
+// declare %kizu.opt.slice.u8 @std__process__env(%kizu.slice.u8)
+// declare %kizu.error.void @std__string__String_append_bytes(%kizu.struct.std__string__String, %kizu.slice.u8)
+// declare void @std__string__String_deinit(%kizu.struct.std__string__String)
+// declare i64 @std__string__String_len(%kizu.struct.std__string__String)
+// declare %kizu.struct.std__string__String @std__string__new(ptr)
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_arena_add(i64, i64)
+// declare void @kizu_panic_arena_handle(i64, i64)
+// declare void @kizu_panic_bounds(i64, i64, i64, i64)
+// declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle) {
+// entry:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.12, %if.end.6 ]
+//   %kizu.3 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.bytes)
+//   %kizu.4 = icmp slt i64 %kizu.2, %kizu.3
+//   br i1 %kizu.4, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.5 = extractvalue %kizu.slice.u8 %kizu.bytes, 1
+//   %kizu.6 = icmp slt i64 %kizu.2, 0
+//   br i1 %kizu.6, label %kizu.6.fail, label %kizu.6.pass
+// kizu.6.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.2, i64 %kizu.5, i64 12, i64 17)
+//   unreachable
+// kizu.6.pass:
+//   %kizu.7 = icmp sge i64 %kizu.2, %kizu.5
+//   br i1 %kizu.7, label %kizu.7.fail, label %kizu.7.pass
+// kizu.7.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.2, i64 %kizu.5, i64 12, i64 17)
+//   unreachable
+// kizu.7.pass:
+//   %kizu.8.ptr = extractvalue %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.8.elem.ptr = getelementptr i8, ptr %kizu.8.ptr, i64 %kizu.2
+//   %kizu.8 = load i8, ptr %kizu.8.elem.ptr
+//   %kizu.9 = icmp eq i8 %kizu.8, %kizu.needle
+//   br i1 %kizu.9, label %if.then.4, label %if.else.5
+// while.end.3:
+//   %kizu.13 = insertvalue %kizu.opt.i64 zeroinitializer, i8 0, 0
+//   ret %kizu.opt.i64 %kizu.13
+// if.then.4:
+//   %kizu.10.some = insertvalue %kizu.opt.i64 zeroinitializer, i8 1, 0
+//   %kizu.10 = insertvalue %kizu.opt.i64 %kizu.10.some, i64 %kizu.2, 1
+//   ret %kizu.opt.i64 %kizu.10
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.12 = add i64 %kizu.2, 1
+//   br label %while.header.1
+// }
+// 
+// define %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.bytes) {
+// entry:
+//   %kizu.2.field0 = insertvalue %kizu.struct.BytesIter zeroinitializer, %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.2 = insertvalue %kizu.struct.BytesIter %kizu.2.field0, i64 0, 1
+//   ret %kizu.struct.BytesIter %kizu.2
+// }
+// 
+// define %kizu.opt.u8 @BytesIter_next(ptr %kizu.self) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.1 = load i64, ptr %kizu.1.ptr
+//   %kizu.2.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 0
+//   %kizu.2 = load %kizu.slice.u8, ptr %kizu.2.ptr
+//   %kizu.3 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.2)
+//   %kizu.4 = icmp sge i64 %kizu.1, %kizu.3
+//   br i1 %kizu.4, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.5 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   ret %kizu.opt.u8 %kizu.5
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.6.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 0
+//   %kizu.6 = load %kizu.slice.u8, ptr %kizu.6.ptr
+//   %kizu.7.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.7.ptr
+//   %kizu.8 = extractvalue %kizu.slice.u8 %kizu.6, 1
+//   %kizu.9 = icmp slt i64 %kizu.7, 0
+//   br i1 %kizu.9, label %kizu.9.fail, label %kizu.9.pass
+// kizu.9.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 %kizu.8, i64 57, i64 26)
+//   unreachable
+// kizu.9.pass:
+//   %kizu.10 = icmp sge i64 %kizu.7, %kizu.8
+//   br i1 %kizu.10, label %kizu.10.fail, label %kizu.10.pass
+// kizu.10.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.7, i64 %kizu.8, i64 57, i64 26)
+//   unreachable
+// kizu.10.pass:
+//   %kizu.11.ptr = extractvalue %kizu.slice.u8 %kizu.6, 0
+//   %kizu.11.elem.ptr = getelementptr i8, ptr %kizu.11.ptr, i64 %kizu.7
+//   %kizu.11 = load i8, ptr %kizu.11.elem.ptr
+//   %kizu.12.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   %kizu.12 = load i64, ptr %kizu.12.ptr
+//   %kizu.14 = add i64 %kizu.12, 1
+//   %kizu.15.ptr = getelementptr %kizu.struct.BytesIter, ptr %kizu.self, i32 0, i32 1
+//   store i64 %kizu.14, ptr %kizu.15.ptr
+//   %kizu.16.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.16 = insertvalue %kizu.opt.u8 %kizu.16.some, i8 %kizu.11, 1
+//   ret %kizu.opt.u8 %kizu.16
+// }
+// 
+// define %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.self) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 2
+//   %kizu.1 = load i1, ptr %kizu.1.ptr
+//   br i1 %kizu.1, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.3.base = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 0, 0
+//   %kizu.3 = insertvalue %kizu.error.ReadError._u8 %kizu.3.base, i64 37, 2
+//   ret %kizu.error.ReadError._u8 %kizu.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.4.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.4 = load i64, ptr %kizu.4.ptr
+//   %kizu.5.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 0
+//   %kizu.5 = load %kizu.slice.u8, ptr %kizu.5.ptr
+//   %kizu.6 = call i64 @std__mem__len(%kizu.slice.u8 %kizu.5)
+//   %kizu.7 = icmp sge i64 %kizu.4, %kizu.6
+//   br i1 %kizu.7, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.8 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   %kizu.9.ok = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 1, 0
+//   %kizu.9 = insertvalue %kizu.error.ReadError._u8 %kizu.9.ok, %kizu.opt.u8 %kizu.8, 1
+//   ret %kizu.error.ReadError._u8 %kizu.9
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.10.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 0
+//   %kizu.10 = load %kizu.slice.u8, ptr %kizu.10.ptr
+//   %kizu.11.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.11 = load i64, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.slice.u8 %kizu.10, 1
+//   %kizu.13 = icmp slt i64 %kizu.11, 0
+//   br i1 %kizu.13, label %kizu.13.fail, label %kizu.13.pass
+// kizu.13.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.11, i64 %kizu.12, i64 90, i64 26)
+//   unreachable
+// kizu.13.pass:
+//   %kizu.14 = icmp sge i64 %kizu.11, %kizu.12
+//   br i1 %kizu.14, label %kizu.14.fail, label %kizu.14.pass
+// kizu.14.fail:
+//   call void @kizu_panic_bounds(i64 %kizu.11, i64 %kizu.12, i64 90, i64 26)
+//   unreachable
+// kizu.14.pass:
+//   %kizu.15.ptr = extractvalue %kizu.slice.u8 %kizu.10, 0
+//   %kizu.15.elem.ptr = getelementptr i8, ptr %kizu.15.ptr, i64 %kizu.11
+//   %kizu.15 = load i8, ptr %kizu.15.elem.ptr
+//   %kizu.16.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   %kizu.16 = load i64, ptr %kizu.16.ptr
+//   %kizu.18 = add i64 %kizu.16, 1
+//   %kizu.19.ptr = getelementptr %kizu.struct.Stream, ptr %kizu.self, i32 0, i32 1
+//   store i64 %kizu.18, ptr %kizu.19.ptr
+//   %kizu.20.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.20 = insertvalue %kizu.opt.u8 %kizu.20.some, i8 %kizu.15, 1
+//   %kizu.21.ok = insertvalue %kizu.error.ReadError._u8 zeroinitializer, i8 1, 0
+//   %kizu.21 = insertvalue %kizu.error.ReadError._u8 %kizu.21.ok, %kizu.opt.u8 %kizu.20, 1
+//   ret %kizu.error.ReadError._u8 %kizu.21
+// }
+// 
+// define %kizu.error.ReadError.i64 @drain(%kizu.slice.u8 %kizu.bytes, i1 %kizu.broken) {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.Stream
+//   %kizu.2.field0 = insertvalue %kizu.struct.Stream zeroinitializer, %kizu.slice.u8 %kizu.bytes, 0
+//   %kizu.2.field1 = insertvalue %kizu.struct.Stream %kizu.2.field0, i64 0, 1
+//   %kizu.2 = insertvalue %kizu.struct.Stream %kizu.2.field1, i1 %kizu.broken, 2
+//   store %kizu.struct.Stream %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.11, %while.body.2 ]
+//   %kizu.6 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.3)
+//   %kizu.7.ok = extractvalue %kizu.error.ReadError._u8 %kizu.6, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.ReadError._u8 %kizu.6, 2
+//   %kizu.try.err.1.base = insertvalue %kizu.error.ReadError.i64 zeroinitializer, i8 0, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.ReadError.i64 %kizu.try.err.1.base, i64 %kizu.try.err.1.code, 2
+//   ret %kizu.error.ReadError.i64 %kizu.try.err.1
+// kizu.7.try.ok:
+//   %kizu.7 = extractvalue %kizu.error.ReadError._u8 %kizu.6, 1
+//   %kizu.8 = extractvalue %kizu.opt.u8 %kizu.7, 1
+//   %kizu.9.tag = extractvalue %kizu.opt.u8 %kizu.7, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.10 = zext i8 %kizu.8 to i64
+//   %kizu.11 = add i64 %kizu.5, %kizu.10
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = insertvalue %kizu.error.ReadError.i64 zeroinitializer, i8 1, 0
+//   %kizu.12 = insertvalue %kizu.error.ReadError.i64 %kizu.12.ok, i64 %kizu.5, 1
+//   ret %kizu.error.ReadError.i64 %kizu.12
+// }
+// 
+// define void @Ledger_bump(ptr %kizu.self, i64 %kizu.index) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 %kizu.index)
+//   %kizu.3 = extractvalue %kizu.opt._var_i64 %kizu.2, 1
+//   %kizu.4.tag = extractvalue %kizu.opt._var_i64 %kizu.2, 0
+//   %kizu.4 = icmp ne i8 %kizu.4.tag, 0
+//   br i1 %kizu.4, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.5 = load i64, ptr %kizu.3
+//   %kizu.7 = add i64 %kizu.5, 1
+//   store i64 %kizu.7, ptr %kizu.3
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret void
+// }
+// 
+// define %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.self, i64 %kizu.index) {
+// entry:
+//   %kizu.1.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 %kizu.index)
+//   ret %kizu.opt._var_i64 %kizu.2
+// }
+// 
+// define void @bump_first(ptr %kizu.items) {
+// entry:
+//   %kizu.1 = load ptr, ptr %kizu.items
+//   %kizu.3 = call %kizu.opt._var_i64 @std__array__Array_at_mut_i64(ptr %kizu.1, i64 0)
+//   %kizu.4 = extractvalue %kizu.opt._var_i64 %kizu.3, 1
+//   %kizu.5.tag = extractvalue %kizu.opt._var_i64 %kizu.3, 0
+//   %kizu.5 = icmp ne i8 %kizu.5.tag, 0
+//   br i1 %kizu.5, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.6 = load i64, ptr %kizu.4
+//   %kizu.8 = add i64 %kizu.6, 1
+//   store i64 %kizu.8, ptr %kizu.4
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret void
+// }
+// 
+// define i64 @guarded_find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle) {
+// entry:
+//   %kizu.1 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.bytes, i8 %kizu.needle)
+//   %kizu.2.tag = extractvalue %kizu.opt.i64 %kizu.1, 0
+//   %kizu.2 = icmp ne i8 %kizu.2.tag, 0
+//   br i1 %kizu.2, label %guard.some.1, label %guard.exit.2
+// guard.some.1:
+//   %kizu.5 = extractvalue %kizu.opt.i64 %kizu.1, 1
+//   %kizu.7 = add i64 %kizu.5, 100
+//   ret i64 %kizu.7
+// guard.exit.2:
+//   %kizu.4 = sub i64 0, 1
+//   ret i64 %kizu.4
+// }
+// 
+// define %kizu.error.std__string__String @make_name(ptr %kizu.allocator, %kizu.slice.u8 %kizu.text) {
+// entry:
+//   %kizu.1 = call %kizu.struct.std__string__String @std__string__new(ptr %kizu.allocator)
+//   %kizu.2 = call %kizu.error.void @std__string__String_append_bytes(%kizu.struct.std__string__String %kizu.1, %kizu.slice.u8 %kizu.text)
+//   %kizu.3.ok = extractvalue %kizu.error.void %kizu.2, 0
+//   %kizu.3.ok.bool = icmp ne i8 %kizu.3.ok, 0
+//   br i1 %kizu.3.ok.bool, label %kizu.3.try.ok, label %kizu.3.try.err
+// kizu.3.try.err:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.1)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.void %kizu.2, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.std__string__String zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.std__string__String %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 2
+//   ret %kizu.error.std__string__String %kizu.try.err.2
+// kizu.3.try.ok:
+//   %kizu.4.ok = insertvalue %kizu.error.std__string__String zeroinitializer, i8 1, 0
+//   %kizu.4 = insertvalue %kizu.error.std__string__String %kizu.4.ok, %kizu.struct.std__string__String %kizu.1, 1
+//   ret %kizu.error.std__string__String %kizu.4
+// }
+// 
+// define i64 @or_one(%kizu.opt.u8 %kizu.value) {
+// entry:
+//   %kizu.1.tag = extractvalue %kizu.opt.u8 %kizu.value, 0
+//   %kizu.1 = icmp ne i8 %kizu.1.tag, 0
+//   br i1 %kizu.1, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.2 = extractvalue %kizu.opt.u8 %kizu.value, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.4 = trunc i64 1 to i8
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.5 = phi i8 [ %kizu.2, %orelse.some.1 ], [ %kizu.4, %orelse.else.2 ]
+//   %kizu.6 = zext i8 %kizu.5 to i64
+//   ret i64 %kizu.6
+// }
+// 
+// define void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.self.addr) {
+// entry:
+//   %kizu.self = load %kizu.struct.Ledger, ptr %kizu.self.addr
+//   %kizu.1 = extractvalue %kizu.struct.Ledger %kizu.self, 0
+//   call void @std__array__Array_deinit_i64(ptr %kizu.1)
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_orelse_takes_the_value_or_the_default() {
+// entry:
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 122 to i8
+//   %kizu.5 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6.tag = extractvalue %kizu.opt.i64 %kizu.5, 0
+//   %kizu.6 = icmp ne i8 %kizu.6.tag, 0
+//   br i1 %kizu.6, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.7 = extractvalue %kizu.opt.i64 %kizu.5, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.9 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.10 = phi i64 [ %kizu.7, %orelse.some.1 ], [ %kizu.9, %orelse.else.2 ]
+//   %kizu.11.ok = icmp eq i64 2, %kizu.10
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.10, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   %kizu.13 = sub i64 0, 1
+//   %kizu.14.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.14.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.14.ptr, 0
+//   %kizu.14 = insertvalue %kizu.slice.u8 %kizu.14.base, i64 4, 1
+//   %kizu.16 = trunc i64 120 to i8
+//   %kizu.17 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.14, i8 %kizu.16)
+//   %kizu.18.tag = extractvalue %kizu.opt.i64 %kizu.17, 0
+//   %kizu.18 = icmp ne i8 %kizu.18.tag, 0
+//   br i1 %kizu.18, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.19 = extractvalue %kizu.opt.i64 %kizu.17, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.21 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.22 = phi i64 [ %kizu.19, %orelse.some.4 ], [ %kizu.21, %orelse.else.5 ]
+//   %kizu.23.ok = icmp eq i64 %kizu.13, %kizu.22
+//   br i1 %kizu.23.ok, label %kizu.23.ok.ok, label %kizu.23.ok.fail
+// kizu.23.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.13, i64 %kizu.22, i64 0, i64 0)
+//   unreachable
+// kizu.23.ok.ok:
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_if_capture_branches_on_presence() {
+// entry:
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 107 to i8
+//   %kizu.5 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6 = extractvalue %kizu.opt.i64 %kizu.5, 1
+//   %kizu.7.tag = extractvalue %kizu.opt.i64 %kizu.5, 0
+//   %kizu.7 = icmp ne i8 %kizu.7.tag, 0
+//   br i1 %kizu.7, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.9 = add i64 %kizu.6, 10
+//   br label %if.end.3
+// if.else.2:
+//   %kizu.11 = sub i64 0, 1
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.12 = phi i64 [ %kizu.9, %if.then.1 ], [ %kizu.11, %if.else.2 ]
+//   %kizu.14.ok = icmp eq i64 10, %kizu.12
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 10, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.17 = trunc i64 120 to i8
+//   %kizu.18 = call %kizu.opt.i64 @find(%kizu.slice.u8 %kizu.15, i8 %kizu.17)
+//   %kizu.19 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   %kizu.20.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.20 = icmp ne i8 %kizu.20.tag, 0
+//   br i1 %kizu.20, label %if.then.4, label %if.else.5
+// if.then.4:
+//   br label %if.end.6
+// if.else.5:
+//   %kizu.22 = sub i64 0, 2
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.23 = phi i64 [ %kizu.19, %if.then.4 ], [ %kizu.22, %if.else.5 ]
+//   %kizu.25 = sub i64 0, 2
+//   %kizu.26.ok = icmp eq i64 %kizu.25, %kizu.23
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.25, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.26.ok.ok:
+//   %kizu.27 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.27
+// }
+// 
+// define %kizu.error.void @test_while_capture_loops_until_null() {
+// entry:
+//   %kizu.3 = alloca %kizu.struct.BytesIter
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2 = call %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.1)
+//   store %kizu.struct.BytesIter %kizu.2, ptr %kizu.3
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.5 = phi i64 [ 0, %entry ], [ %kizu.10, %while.body.2 ]
+//   %kizu.6 = call %kizu.opt.u8 @BytesIter_next(ptr %kizu.3)
+//   %kizu.7 = extractvalue %kizu.opt.u8 %kizu.6, 1
+//   %kizu.8.tag = extractvalue %kizu.opt.u8 %kizu.6, 0
+//   %kizu.8 = icmp ne i8 %kizu.8.tag, 0
+//   br i1 %kizu.8, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.9 = zext i8 %kizu.7 to i64
+//   %kizu.10 = add i64 %kizu.5, %kizu.9
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.12.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.13
+// }
+// 
+// define %kizu.error.void @test_error_union_with_optional_success_drives_a_fallible_stream() {
+// entry:
+//   %kizu.11 = alloca %kizu.struct.Stream
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = call %kizu.error.ReadError.i64 @drain(%kizu.slice.u8 %kizu.2, i1 false)
+//   %kizu.5.ok = extractvalue %kizu.error.ReadError.i64 %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   %kizu.try.err.1.code = extractvalue %kizu.error.ReadError.i64 %kizu.4, 2
+//   %kizu.try.err.1.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.1 = insertvalue %kizu.error.void %kizu.try.err.1.base, i64 %kizu.try.err.1.code, 1
+//   ret %kizu.error.void %kizu.try.err.1
+// kizu.5.try.ok:
+//   %kizu.5 = extractvalue %kizu.error.ReadError.i64 %kizu.4, 1
+//   %kizu.6.ok = icmp eq i64 451, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 451, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7.ptr = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 1, 1
+//   %kizu.10.field0 = insertvalue %kizu.struct.Stream zeroinitializer, %kizu.slice.u8 %kizu.7, 0
+//   %kizu.10.field1 = insertvalue %kizu.struct.Stream %kizu.10.field0, i64 0, 1
+//   %kizu.10 = insertvalue %kizu.struct.Stream %kizu.10.field1, i1 false, 2
+//   store %kizu.struct.Stream %kizu.10, ptr %kizu.11
+//   %kizu.13 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.11)
+//   %kizu.14.ok = extractvalue %kizu.error.ReadError._u8 %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   %kizu.try.err.2.code = extractvalue %kizu.error.ReadError._u8 %kizu.13, 2
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.14.try.ok:
+//   %kizu.14 = extractvalue %kizu.error.ReadError._u8 %kizu.13, 1
+//   %kizu.15.tag = extractvalue %kizu.opt.u8 %kizu.14, 0
+//   %kizu.15 = icmp ne i8 %kizu.15.tag, 0
+//   br i1 %kizu.15, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.16 = extractvalue %kizu.opt.u8 %kizu.14, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.18 = phi i8 [ %kizu.16, %orelse.some.1 ], [ 0, %orelse.else.2 ]
+//   %kizu.19 = zext i8 %kizu.18 to i64
+//   %kizu.20.ok = icmp eq i64 107, %kizu.19
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 107, i64 %kizu.19, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.22 = call %kizu.error.ReadError._u8 @Stream_next(ptr %kizu.11)
+//   %kizu.23.ok = extractvalue %kizu.error.ReadError._u8 %kizu.22, 0
+//   %kizu.23.ok.bool = icmp ne i8 %kizu.23.ok, 0
+//   br i1 %kizu.23.ok.bool, label %kizu.23.try.ok, label %kizu.23.try.err
+// kizu.23.try.err:
+//   %kizu.try.err.3.code = extractvalue %kizu.error.ReadError._u8 %kizu.22, 2
+//   %kizu.try.err.3.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.3 = insertvalue %kizu.error.void %kizu.try.err.3.base, i64 %kizu.try.err.3.code, 1
+//   ret %kizu.error.void %kizu.try.err.3
+// kizu.23.try.ok:
+//   %kizu.23 = extractvalue %kizu.error.ReadError._u8 %kizu.22, 1
+//   %kizu.24.tag = extractvalue %kizu.opt.u8 %kizu.23, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.25 = extractvalue %kizu.opt.u8 %kizu.23, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.27 = phi i8 [ %kizu.25, %orelse.some.4 ], [ 0, %orelse.else.5 ]
+//   %kizu.28 = zext i8 %kizu.27 to i64
+//   %kizu.29.ok = icmp eq i64 0, %kizu.28
+//   br i1 %kizu.29.ok, label %kizu.29.ok.ok, label %kizu.29.ok.fail
+// kizu.29.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.28, i64 0, i64 0)
+//   unreachable
+// kizu.29.ok.ok:
+//   %kizu.30 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.30
+// }
+// 
+// define %kizu.error.void @test_container_lookups_miss_as_null() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.4 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.2, i64 41)
+//   %kizu.5.ok = extractvalue %kizu.error.void %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.4
+// kizu.5.try.ok:
+//   %kizu.8 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 0)
+//   %kizu.9.tag = extractvalue %kizu.opt.i64 %kizu.8, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.10 = extractvalue %kizu.opt.i64 %kizu.8, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.12 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.13 = phi i64 [ %kizu.10, %orelse.some.1 ], [ %kizu.12, %orelse.else.2 ]
+//   %kizu.14.ok = icmp eq i64 41, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.16 = sub i64 0, 1
+//   %kizu.18 = call %kizu.opt.i64 @std__array__Array_get_i64(ptr %kizu.2, i64 9)
+//   %kizu.19.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.22 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.23 = phi i64 [ %kizu.20, %orelse.some.4 ], [ %kizu.22, %orelse.else.5 ]
+//   %kizu.24.ok = icmp eq i64 %kizu.16, %kizu.23
+//   br i1 %kizu.24.ok, label %kizu.24.ok.ok, label %kizu.24.ok.fail
+// kizu.24.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.16, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.24.ok.ok:
+//   %kizu.26 = call %kizu.opt.i64 @std__array__Array_pop_i64(ptr %kizu.2)
+//   %kizu.27.tag = extractvalue %kizu.opt.i64 %kizu.26, 0
+//   %kizu.27 = icmp ne i8 %kizu.27.tag, 0
+//   br i1 %kizu.27, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.28 = extractvalue %kizu.opt.i64 %kizu.26, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.30 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.31 = phi i64 [ %kizu.28, %orelse.some.7 ], [ %kizu.30, %orelse.else.8 ]
+//   %kizu.32.ok = icmp eq i64 41, %kizu.31
+//   br i1 %kizu.32.ok, label %kizu.32.ok.ok, label %kizu.32.ok.fail
+// kizu.32.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 41, i64 %kizu.31, i64 0, i64 0)
+//   unreachable
+// kizu.32.ok.ok:
+//   %kizu.34 = sub i64 0, 1
+//   %kizu.35 = call %kizu.opt.i64 @std__array__Array_pop_i64(ptr %kizu.2)
+//   %kizu.36.tag = extractvalue %kizu.opt.i64 %kizu.35, 0
+//   %kizu.36 = icmp ne i8 %kizu.36.tag, 0
+//   br i1 %kizu.36, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.37 = extractvalue %kizu.opt.i64 %kizu.35, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.39 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.40 = phi i64 [ %kizu.37, %orelse.some.10 ], [ %kizu.39, %orelse.else.11 ]
+//   %kizu.41.ok = icmp eq i64 %kizu.34, %kizu.40
+//   br i1 %kizu.41.ok, label %kizu.41.ok.ok, label %kizu.41.ok.fail
+// kizu.41.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.34, i64 %kizu.40, i64 0, i64 0)
+//   unreachable
+// kizu.41.ok.ok:
+//   %kizu.42 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.43.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.43.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.43.ptr, 0
+//   %kizu.43 = insertvalue %kizu.slice.u8 %kizu.43.base, i64 3, 1
+//   %kizu.45 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.43, i64 7)
+//   %kizu.46.ok = extractvalue %kizu.error.void %kizu.45, 0
+//   %kizu.46.ok.bool = icmp ne i8 %kizu.46.ok, 0
+//   br i1 %kizu.46.ok.bool, label %kizu.46.try.ok, label %kizu.46.try.err
+// kizu.46.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.42)
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.45
+// kizu.46.try.ok:
+//   %kizu.48.ptr = getelementptr inbounds [4 x i8], ptr @.str.2, i64 0, i64 0
+//   %kizu.48.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.48.ptr, 0
+//   %kizu.48 = insertvalue %kizu.slice.u8 %kizu.48.base, i64 3, 1
+//   %kizu.49 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.48)
+//   %kizu.50.tag = extractvalue %kizu.opt.i64 %kizu.49, 0
+//   %kizu.50 = icmp ne i8 %kizu.50.tag, 0
+//   br i1 %kizu.50, label %orelse.some.13, label %orelse.else.14
+// orelse.some.13:
+//   %kizu.51 = extractvalue %kizu.opt.i64 %kizu.49, 1
+//   br label %orelse.end.15
+// orelse.else.14:
+//   %kizu.53 = sub i64 0, 1
+//   br label %orelse.end.15
+// orelse.end.15:
+//   %kizu.54 = phi i64 [ %kizu.51, %orelse.some.13 ], [ %kizu.53, %orelse.else.14 ]
+//   %kizu.55.ok = icmp eq i64 7, %kizu.54
+//   br i1 %kizu.55.ok, label %kizu.55.ok.ok, label %kizu.55.ok.fail
+// kizu.55.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.54, i64 0, i64 0)
+//   unreachable
+// kizu.55.ok.ok:
+//   %kizu.57 = sub i64 0, 1
+//   %kizu.58.ptr = getelementptr inbounds [5 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.58.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.58.ptr, 0
+//   %kizu.58 = insertvalue %kizu.slice.u8 %kizu.58.base, i64 4, 1
+//   %kizu.59 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.42, %kizu.slice.u8 %kizu.58)
+//   %kizu.60.tag = extractvalue %kizu.opt.i64 %kizu.59, 0
+//   %kizu.60 = icmp ne i8 %kizu.60.tag, 0
+//   br i1 %kizu.60, label %orelse.some.16, label %orelse.else.17
+// orelse.some.16:
+//   %kizu.61 = extractvalue %kizu.opt.i64 %kizu.59, 1
+//   br label %orelse.end.18
+// orelse.else.17:
+//   %kizu.63 = sub i64 0, 1
+//   br label %orelse.end.18
+// orelse.end.18:
+//   %kizu.64 = phi i64 [ %kizu.61, %orelse.some.16 ], [ %kizu.63, %orelse.else.17 ]
+//   %kizu.65.ok = icmp eq i64 %kizu.57, %kizu.64
+//   br i1 %kizu.65.ok, label %kizu.65.ok.ok, label %kizu.65.ok.fail
+// kizu.65.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.57, i64 %kizu.64, i64 0, i64 0)
+//   unreachable
+// kizu.65.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.42)
+//   call void @kizu_array_deinit(ptr %kizu.2)
+//   %kizu.68 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.68
+// }
+// 
+// define %kizu.error.void @test_map_at_mut_updates_values_in_place() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.5 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.3, i64 41)
+//   %kizu.6.ok = extractvalue %kizu.error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.5
+// kizu.6.try.ok:
+//   %kizu.7.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 4, 1
+//   %kizu.8 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.7)
+//   %kizu.9 = extractvalue %kizu.opt._var_i64 %kizu.8, 1
+//   %kizu.10.tag = extractvalue %kizu.opt._var_i64 %kizu.8, 0
+//   %kizu.10 = icmp ne i8 %kizu.10.tag, 0
+//   br i1 %kizu.10, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.11 = load i64, ptr %kizu.9
+//   %kizu.13 = add i64 %kizu.11, 1
+//   store i64 %kizu.13, ptr %kizu.9
+//   br label %if.end.3
+// if.else.2:
+//   %kizu.15.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.15.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.15.ptr, 0
+//   %kizu.15 = insertvalue %kizu.slice.u8 %kizu.15.base, i64 4, 1
+//   %kizu.17 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.15, i64 1)
+//   %kizu.18.ok = extractvalue %kizu.error.void %kizu.17, 0
+//   %kizu.18.ok.bool = icmp ne i8 %kizu.18.ok, 0
+//   br i1 %kizu.18.ok.bool, label %kizu.18.try.ok, label %kizu.18.try.err
+// kizu.18.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.17
+// kizu.18.try.ok:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.19.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.19.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.19.ptr, 0
+//   %kizu.19 = insertvalue %kizu.slice.u8 %kizu.19.base, i64 4, 1
+//   %kizu.20 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.19)
+//   %kizu.21 = extractvalue %kizu.opt._var_i64 %kizu.20, 1
+//   %kizu.22.tag = extractvalue %kizu.opt._var_i64 %kizu.20, 0
+//   %kizu.22 = icmp ne i8 %kizu.22.tag, 0
+//   br i1 %kizu.22, label %if.then.4, label %if.else.5
+// if.then.4:
+//   %kizu.23 = load i64, ptr %kizu.21
+//   %kizu.25 = add i64 %kizu.23, 1
+//   store i64 %kizu.25, ptr %kizu.21
+//   br label %if.end.6
+// if.else.5:
+//   %kizu.27.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.27.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.27.ptr, 0
+//   %kizu.27 = insertvalue %kizu.slice.u8 %kizu.27.base, i64 4, 1
+//   %kizu.29 = call %kizu.error.void @std__map__Map_insert_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.27, i64 1)
+//   %kizu.30.ok = extractvalue %kizu.error.void %kizu.29, 0
+//   %kizu.30.ok.bool = icmp ne i8 %kizu.30.ok, 0
+//   br i1 %kizu.30.ok.bool, label %kizu.30.try.ok, label %kizu.30.try.err
+// kizu.30.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.29
+// kizu.30.try.ok:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.32.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.32.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.32.ptr, 0
+//   %kizu.32 = insertvalue %kizu.slice.u8 %kizu.32.base, i64 4, 1
+//   %kizu.33 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.32)
+//   %kizu.34.tag = extractvalue %kizu.opt.i64 %kizu.33, 0
+//   %kizu.34 = icmp ne i8 %kizu.34.tag, 0
+//   br i1 %kizu.34, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.35 = extractvalue %kizu.opt.i64 %kizu.33, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.37 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.38 = phi i64 [ %kizu.35, %orelse.some.7 ], [ %kizu.37, %orelse.else.8 ]
+//   %kizu.39.ok = icmp eq i64 42, %kizu.38
+//   br i1 %kizu.39.ok, label %kizu.39.ok.ok, label %kizu.39.ok.fail
+// kizu.39.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.38, i64 0, i64 0)
+//   unreachable
+// kizu.39.ok.ok:
+//   %kizu.41.ptr = getelementptr inbounds [5 x i8], ptr @.str.4, i64 0, i64 0
+//   %kizu.41.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.41.ptr, 0
+//   %kizu.41 = insertvalue %kizu.slice.u8 %kizu.41.base, i64 4, 1
+//   %kizu.42 = call %kizu.opt.i64 @std__map__Map_get_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.41)
+//   %kizu.43.tag = extractvalue %kizu.opt.i64 %kizu.42, 0
+//   %kizu.43 = icmp ne i8 %kizu.43.tag, 0
+//   br i1 %kizu.43, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.44 = extractvalue %kizu.opt.i64 %kizu.42, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.46 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.47 = phi i64 [ %kizu.44, %orelse.some.10 ], [ %kizu.46, %orelse.else.11 ]
+//   %kizu.48.ok = icmp eq i64 1, %kizu.47
+//   br i1 %kizu.48.ok, label %kizu.48.ok.ok, label %kizu.48.ok.fail
+// kizu.48.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.47, i64 0, i64 0)
+//   unreachable
+// kizu.48.ok.ok:
+//   %kizu.49.ptr = getelementptr inbounds [5 x i8], ptr @.str.3, i64 0, i64 0
+//   %kizu.49.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.49.ptr, 0
+//   %kizu.49 = insertvalue %kizu.slice.u8 %kizu.49.base, i64 4, 1
+//   %kizu.50 = call %kizu.opt._i64 @std__map__Map_at_i64(ptr %kizu.2, %kizu.slice.u8 %kizu.49)
+//   %kizu.51 = extractvalue %kizu.opt._i64 %kizu.50, 1
+//   %kizu.52.tag = extractvalue %kizu.opt._i64 %kizu.50, 0
+//   %kizu.52 = icmp ne i8 %kizu.52.tag, 0
+//   br i1 %kizu.52, label %if.then.13, label %if.else.14
+// if.then.13:
+//   %kizu.54 = sub i64 0, 1
+//   %kizu.55 = load i64, ptr %kizu.51
+//   %kizu.56.ok = icmp eq i64 %kizu.54, %kizu.55
+//   br i1 %kizu.56.ok, label %kizu.56.ok.ok, label %kizu.56.ok.fail
+// kizu.56.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.54, i64 %kizu.55, i64 0, i64 0)
+//   unreachable
+// kizu.56.ok.ok:
+//   br label %if.end.15
+// if.else.14:
+//   br label %if.end.15
+// if.end.15:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.58 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.58
+// }
+// 
+// define %kizu.error.void @test_arena_at_mut_updates_elements_in_place() {
+// entry:
+//   %kizu.6.value.slot = alloca %kizu.struct.Visitor
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Visitor, ptr null, i64 1) to i64))
+//   %kizu.5.field0 = insertvalue %kizu.struct.Visitor zeroinitializer, i64 30, 0
+//   %kizu.5 = insertvalue %kizu.struct.Visitor %kizu.5.field0, i64 0, 1
+//   store %kizu.struct.Visitor %kizu.5, ptr %kizu.6.value.slot
+//   %kizu.6 = call i64 @kizu_arena_add(ptr %kizu.2, ptr %kizu.6.value.slot)
+//   %kizu.6.bad = icmp slt i64 %kizu.6, 0
+//   br i1 %kizu.6.bad, label %kizu.6.bad.arena.add.fail, label %kizu.6.bad.ok
+// kizu.6.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.6.bad.ok:
+//   %kizu.7.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.7.live = icmp ne ptr %kizu.7.ptr, null
+//   %kizu.7.tag = zext i1 %kizu.7.live to i8
+//   %kizu.7.some = insertvalue %kizu.opt._var_Visitor zeroinitializer, i8 %kizu.7.tag, 0
+//   %kizu.7 = insertvalue %kizu.opt._var_Visitor %kizu.7.some, ptr %kizu.7.ptr, 1
+//   %kizu.8 = extractvalue %kizu.opt._var_Visitor %kizu.7, 1
+//   %kizu.9.tag = extractvalue %kizu.opt._var_Visitor %kizu.7, 0
+//   %kizu.9 = icmp ne i8 %kizu.9.tag, 0
+//   br i1 %kizu.9, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.10.ptr = getelementptr %kizu.struct.Visitor, ptr %kizu.8, i32 0, i32 1
+//   %kizu.10 = load i64, ptr %kizu.10.ptr
+//   %kizu.12 = add i64 %kizu.10, 1
+//   %kizu.13.ptr = getelementptr %kizu.struct.Visitor, ptr %kizu.8, i32 0, i32 1
+//   store i64 %kizu.12, ptr %kizu.13.ptr
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.15.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.arena.at.is_null.1 = icmp eq ptr %kizu.15.ptr, null
+//   br i1 %kizu.arena.at.is_null.1, label %kizu.15.ptr.arena.at.null, label %kizu.15.ptr.ok
+// kizu.15.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.15.ptr.ok:
+//   %kizu.15 = load %kizu.struct.Visitor, ptr %kizu.15.ptr
+//   %kizu.16 = extractvalue %kizu.struct.Visitor %kizu.15, 1
+//   %kizu.17.ok = icmp eq i64 1, %kizu.16
+//   br i1 %kizu.17.ok, label %kizu.17.ok.ok, label %kizu.17.ok.fail
+// kizu.17.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.17.ok.ok:
+//   %kizu.19.ptr = call ptr @kizu_arena_get(ptr %kizu.2, i64 %kizu.6)
+//   %kizu.arena.at.is_null.2 = icmp eq ptr %kizu.19.ptr, null
+//   br i1 %kizu.arena.at.is_null.2, label %kizu.19.ptr.arena.at.null, label %kizu.19.ptr.ok
+// kizu.19.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.19.ptr.ok:
+//   %kizu.19 = load %kizu.struct.Visitor, ptr %kizu.19.ptr
+//   %kizu.20 = extractvalue %kizu.struct.Visitor %kizu.19, 0
+//   %kizu.21.ok = icmp eq i64 30, %kizu.20
+//   br i1 %kizu.21.ok, label %kizu.21.ok.ok, label %kizu.21.ok.fail
+// kizu.21.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 30, i64 %kizu.20, i64 0, i64 0)
+//   unreachable
+// kizu.21.ok.ok:
+//   call void @kizu_arena_deinit(ptr %kizu.2)
+//   %kizu.23 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.23
+// }
+// 
+// define %kizu.error.void @test_at_mut_captures_an_owner_s_container_field() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.2 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.3 = alloca %kizu.struct.Ledger
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Ledger zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Ledger %kizu.3, ptr %kizu.4
+//   %kizu.5.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.5 = load ptr, ptr %kizu.5.ptr
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.5, i64 7)
+//   %kizu.8 = load %kizu.struct.Ledger, ptr %kizu.4
+//   %kizu.9.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
+//   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
+// kizu.9.try.err:
+//   store %kizu.struct.Ledger %kizu.8, ptr %kizu.arg.0.2
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.9.try.ok:
+//   call void @Ledger_bump(ptr %kizu.4, i64 0)
+//   %kizu.12.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.12 = load ptr, ptr %kizu.12.ptr
+//   %kizu.14 = call %kizu.opt._i64 @std__array__Array_at_i64(ptr %kizu.12, i64 0)
+//   %kizu.15 = extractvalue %kizu.opt._i64 %kizu.14, 1
+//   %kizu.16.tag = extractvalue %kizu.opt._i64 %kizu.14, 0
+//   %kizu.16 = icmp ne i8 %kizu.16.tag, 0
+//   br i1 %kizu.16, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.18 = load i64, ptr %kizu.15
+//   %kizu.19.ok = icmp eq i64 8, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.20 = load %kizu.struct.Ledger, ptr %kizu.4
+//   store %kizu.struct.Ledger %kizu.20, ptr %kizu.arg.0.3
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.3)
+//   %kizu.22 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.22
+// }
+// 
+// define %kizu.error.void @test_borrow_optional_returns_flow_to_the_caller_s_capture() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.2 = alloca %kizu.struct.Ledger
+//   %kizu.arg.0.3 = alloca %kizu.struct.Ledger
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Ledger zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Ledger %kizu.3, ptr %kizu.4
+//   %kizu.5.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.5 = load ptr, ptr %kizu.5.ptr
+//   %kizu.7 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.5, i64 7)
+//   %kizu.8 = load %kizu.struct.Ledger, ptr %kizu.4
+//   %kizu.9.ok = extractvalue %kizu.error.void %kizu.7, 0
+//   %kizu.9.ok.bool = icmp ne i8 %kizu.9.ok, 0
+//   br i1 %kizu.9.ok.bool, label %kizu.9.try.ok, label %kizu.9.try.err
+// kizu.9.try.err:
+//   store %kizu.struct.Ledger %kizu.8, ptr %kizu.arg.0.2
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.2)
+//   ret %kizu.error.void %kizu.7
+// kizu.9.try.ok:
+//   %kizu.11 = call %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.4, i64 0)
+//   %kizu.12 = extractvalue %kizu.opt._var_i64 %kizu.11, 1
+//   %kizu.13.tag = extractvalue %kizu.opt._var_i64 %kizu.11, 0
+//   %kizu.13 = icmp ne i8 %kizu.13.tag, 0
+//   br i1 %kizu.13, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.14 = load i64, ptr %kizu.12
+//   %kizu.16 = add i64 %kizu.14, 1
+//   store i64 %kizu.16, ptr %kizu.12
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.19.ptr = getelementptr %kizu.struct.Ledger, ptr %kizu.4, i32 0, i32 0
+//   %kizu.19 = load ptr, ptr %kizu.19.ptr
+//   %kizu.21 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.19, i64 0)
+//   %kizu.22.ok = icmp eq i64 8, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   %kizu.24 = call %kizu.opt._var_i64 @Ledger_entry(ptr %kizu.4, i64 9)
+//   %kizu.25 = extractvalue %kizu.opt._var_i64 %kizu.24, 1
+//   %kizu.26.tag = extractvalue %kizu.opt._var_i64 %kizu.24, 0
+//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   br i1 %kizu.26, label %if.then.4, label %if.else.5
+// if.then.4:
+//   store i64 0, ptr %kizu.25
+//   call void @std__testing__expect(i1 false)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   %kizu.31 = load %kizu.struct.Ledger, ptr %kizu.4
+//   store %kizu.struct.Ledger %kizu.31, ptr %kizu.arg.0.3
+//   call void @Ledger_deinit(ptr byval(%kizu.struct.Ledger) %kizu.arg.0.3)
+//   %kizu.33 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.33
+// }
+// 
+// define %kizu.error.void @test_at_mut_works_through_a__var_parameter() {
+// entry:
+//   %kizu.3 = alloca ptr
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   store ptr %kizu.2, ptr %kizu.3
+//   %kizu.4 = load ptr, ptr %kizu.3
+//   %kizu.6 = call %kizu.error.void @std__array__Array_append_i64(ptr %kizu.4, i64 7)
+//   %kizu.7 = load ptr, ptr %kizu.3
+//   %kizu.8.ok = extractvalue %kizu.error.void %kizu.6, 0
+//   %kizu.8.ok.bool = icmp ne i8 %kizu.8.ok, 0
+//   br i1 %kizu.8.ok.bool, label %kizu.8.try.ok, label %kizu.8.try.err
+// kizu.8.try.err:
+//   call void @kizu_array_deinit(ptr %kizu.7)
+//   ret %kizu.error.void %kizu.6
+// kizu.8.try.ok:
+//   call void @bump_first(ptr %kizu.3)
+//   %kizu.11 = load ptr, ptr %kizu.3
+//   %kizu.13 = call i64 @std__array__Array_get_or_panic_i64(ptr %kizu.11, i64 0)
+//   %kizu.14.ok = icmp eq i64 8, %kizu.13
+//   br i1 %kizu.14.ok, label %kizu.14.ok.ok, label %kizu.14.ok.fail
+// kizu.14.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.13, i64 0, i64 0)
+//   unreachable
+// kizu.14.ok.ok:
+//   %kizu.15 = load ptr, ptr %kizu.3
+//   call void @kizu_array_deinit(ptr %kizu.15)
+//   %kizu.17 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.17
+// }
+// 
+// define %kizu.error.void @test_view_payloads_miss_as_null() {
+// entry:
+//   %kizu.1.ptr = getelementptr inbounds [3 x i8], ptr @.str.5, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 2, 1
+//   %kizu.2.ptr = getelementptr inbounds [4 x i8], ptr @.str.6, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 3, 1
+//   %kizu.5 = call %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8 %kizu.2, i64 0, i64 2)
+//   %kizu.6.tag = extractvalue %kizu.opt.slice.u8 %kizu.5, 0
+//   %kizu.6 = icmp ne i8 %kizu.6.tag, 0
+//   br i1 %kizu.6, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.7 = extractvalue %kizu.opt.slice.u8 %kizu.5, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.8.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.9 = phi %kizu.slice.u8 [ %kizu.7, %orelse.some.1 ], [ %kizu.8, %orelse.else.2 ]
+//   %kizu.10.left.ptr = extractvalue %kizu.slice.u8 %kizu.1, 0
+//   %kizu.10.left.len = extractvalue %kizu.slice.u8 %kizu.1, 1
+//   %kizu.10.right.ptr = extractvalue %kizu.slice.u8 %kizu.9, 0
+//   %kizu.10.right.len = extractvalue %kizu.slice.u8 %kizu.9, 1
+//   %kizu.10.ok = call i1 @kizu_bytes_equal(ptr %kizu.10.left.ptr, i64 %kizu.10.left.len, ptr %kizu.10.right.ptr, i64 %kizu.10.right.len)
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.10.left.ptr, i64 %kizu.10.left.len, ptr %kizu.10.right.ptr, i64 %kizu.10.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 0, 1
+//   %kizu.12.ptr = getelementptr inbounds [4 x i8], ptr @.str.6, i64 0, i64 0
+//   %kizu.12.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.12.ptr, 0
+//   %kizu.12 = insertvalue %kizu.slice.u8 %kizu.12.base, i64 3, 1
+//   %kizu.15 = call %kizu.opt.slice.u8 @std__mem__slice(%kizu.slice.u8 %kizu.12, i64 0, i64 4)
+//   %kizu.16.tag = extractvalue %kizu.opt.slice.u8 %kizu.15, 0
+//   %kizu.16 = icmp ne i8 %kizu.16.tag, 0
+//   br i1 %kizu.16, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.17 = extractvalue %kizu.opt.slice.u8 %kizu.15, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.18.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.18.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.18.ptr, 0
+//   %kizu.18 = insertvalue %kizu.slice.u8 %kizu.18.base, i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.19 = phi %kizu.slice.u8 [ %kizu.17, %orelse.some.4 ], [ %kizu.18, %orelse.else.5 ]
+//   %kizu.20.left.ptr = extractvalue %kizu.slice.u8 %kizu.11, 0
+//   %kizu.20.left.len = extractvalue %kizu.slice.u8 %kizu.11, 1
+//   %kizu.20.right.ptr = extractvalue %kizu.slice.u8 %kizu.19, 0
+//   %kizu.20.right.len = extractvalue %kizu.slice.u8 %kizu.19, 1
+//   %kizu.20.ok = call i1 @kizu_bytes_equal(ptr %kizu.20.left.ptr, i64 %kizu.20.left.len, ptr %kizu.20.right.ptr, i64 %kizu.20.right.len)
+//   br i1 %kizu.20.ok, label %kizu.20.ok.ok, label %kizu.20.ok.fail
+// kizu.20.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.20.left.ptr, i64 %kizu.20.left.len, ptr %kizu.20.right.ptr, i64 %kizu.20.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.20.ok.ok:
+//   %kizu.21.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.21.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.21.ptr, 0
+//   %kizu.21 = insertvalue %kizu.slice.u8 %kizu.21.base, i64 0, 1
+//   %kizu.22.ptr = getelementptr inbounds [28 x i8], ptr @.str.8, i64 0, i64 0
+//   %kizu.22.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.22.ptr, 0
+//   %kizu.22 = insertvalue %kizu.slice.u8 %kizu.22.base, i64 27, 1
+//   %kizu.23 = call %kizu.opt.slice.u8 @std__process__env(%kizu.slice.u8 %kizu.22)
+//   %kizu.24.tag = extractvalue %kizu.opt.slice.u8 %kizu.23, 0
+//   %kizu.24 = icmp ne i8 %kizu.24.tag, 0
+//   br i1 %kizu.24, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.25 = extractvalue %kizu.opt.slice.u8 %kizu.23, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.26.ptr = getelementptr inbounds [1 x i8], ptr @.str.7, i64 0, i64 0
+//   %kizu.26.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.26.ptr, 0
+//   %kizu.26 = insertvalue %kizu.slice.u8 %kizu.26.base, i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.27 = phi %kizu.slice.u8 [ %kizu.25, %orelse.some.7 ], [ %kizu.26, %orelse.else.8 ]
+//   %kizu.28.left.ptr = extractvalue %kizu.slice.u8 %kizu.21, 0
+//   %kizu.28.left.len = extractvalue %kizu.slice.u8 %kizu.21, 1
+//   %kizu.28.right.ptr = extractvalue %kizu.slice.u8 %kizu.27, 0
+//   %kizu.28.right.len = extractvalue %kizu.slice.u8 %kizu.27, 1
+//   %kizu.28.ok = call i1 @kizu_bytes_equal(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len)
+//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
+// kizu.28.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.28.left.ptr, i64 %kizu.28.left.len, ptr %kizu.28.right.ptr, i64 %kizu.28.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.28.ok.ok:
+//   %kizu.29 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.29
+// }
+// 
+// define %kizu.error.void @test_orelse_guards_exit_on_null() {
+// entry:
+//   %kizu.16 = alloca %kizu.struct.BytesIter
+//   %kizu.2.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 4, 1
+//   %kizu.4 = trunc i64 122 to i8
+//   %kizu.5 = call i64 @guarded_find(%kizu.slice.u8 %kizu.2, i8 %kizu.4)
+//   %kizu.6.ok = icmp eq i64 102, %kizu.5
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 102, i64 %kizu.5, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.8 = sub i64 0, 1
+//   %kizu.9.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.9.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.9.ptr, 0
+//   %kizu.9 = insertvalue %kizu.slice.u8 %kizu.9.base, i64 4, 1
+//   %kizu.11 = trunc i64 120 to i8
+//   %kizu.12 = call i64 @guarded_find(%kizu.slice.u8 %kizu.9, i8 %kizu.11)
+//   %kizu.13.ok = icmp eq i64 %kizu.8, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.8, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   %kizu.14.ptr = getelementptr inbounds [3 x i8], ptr @.str.9, i64 0, i64 0
+//   %kizu.14.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.14.ptr, 0
+//   %kizu.14 = insertvalue %kizu.slice.u8 %kizu.14.base, i64 2, 1
+//   %kizu.15 = call %kizu.struct.BytesIter @iter(%kizu.slice.u8 %kizu.14)
+//   store %kizu.struct.BytesIter %kizu.15, ptr %kizu.16
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.18 = phi i64 [ 0, %kizu.13.ok.ok ], [ %kizu.24, %guard.some.4 ]
+//   br i1 true, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.20 = call %kizu.opt.u8 @BytesIter_next(ptr %kizu.16)
+//   %kizu.21.tag = extractvalue %kizu.opt.u8 %kizu.20, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %guard.some.4, label %guard.exit.5
+// while.end.3:
+//   %kizu.25 = phi i64 [ %kizu.18, %while.header.1 ], [ %kizu.18, %guard.exit.5 ]
+//   %kizu.27.ok = icmp eq i64 229, %kizu.25
+//   br i1 %kizu.27.ok, label %kizu.27.ok.ok, label %kizu.27.ok.fail
+// kizu.27.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 229, i64 %kizu.25, i64 0, i64 0)
+//   unreachable
+// kizu.27.ok.ok:
+//   %kizu.28 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.28
+// guard.some.4:
+//   %kizu.22 = extractvalue %kizu.opt.u8 %kizu.20, 1
+//   %kizu.23 = zext i8 %kizu.22 to i64
+//   %kizu.24 = add i64 %kizu.18, %kizu.23
+//   br label %while.header.1
+// guard.exit.5:
+//   br label %while.end.3
+// }
+// 
+// define %kizu.error.void @test_owner_payload_pops_through_the_capture() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_array_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.std__string__String, ptr null, i64 1) to i64))
+//   %kizu.3.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.3.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.3.ptr, 0
+//   %kizu.3 = insertvalue %kizu.slice.u8 %kizu.3.base, i64 4, 1
+//   %kizu.4 = call %kizu.error.std__string__String @make_name(ptr %kizu.1, %kizu.slice.u8 %kizu.3)
+//   %kizu.5.ok = extractvalue %kizu.error.std__string__String %kizu.4, 0
+//   %kizu.5.ok.bool = icmp ne i8 %kizu.5.ok, 0
+//   br i1 %kizu.5.ok.bool, label %kizu.5.try.ok, label %kizu.5.try.err
+// kizu.5.try.err:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__string__String %kizu.4, 2
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.5.try.ok:
+//   %kizu.5 = extractvalue %kizu.error.std__string__String %kizu.4, 1
+//   %kizu.6 = call %kizu.error.void @std__array__Array_append_std_3a_3astring_3a_3aString(ptr %kizu.2, %kizu.struct.std__string__String %kizu.5)
+//   %kizu.7.ok = extractvalue %kizu.error.void %kizu.6, 0
+//   %kizu.7.ok.bool = icmp ne i8 %kizu.7.ok, 0
+//   br i1 %kizu.7.ok.bool, label %kizu.7.try.ok, label %kizu.7.try.err
+// kizu.7.try.err:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   ret %kizu.error.void %kizu.6
+// kizu.7.try.ok:
+//   %kizu.9 = call %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.10 = extractvalue %kizu.opt.std__string__String %kizu.9, 1
+//   %kizu.11.tag = extractvalue %kizu.opt.std__string__String %kizu.9, 0
+//   %kizu.11 = icmp ne i8 %kizu.11.tag, 0
+//   br i1 %kizu.11, label %if.then.1, label %if.else.2
+// if.then.1:
+//   %kizu.12 = call i64 @std__string__String_len(%kizu.struct.std__string__String %kizu.10)
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.10)
+//   br label %if.end.3
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   %kizu.14 = phi i64 [ %kizu.12, %if.then.1 ], [ 0, %if.else.2 ]
+//   %kizu.16.ok = icmp eq i64 4, %kizu.14
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 4, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.17 = call %kizu.opt.std__string__String @std__array__Array_pop_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.18 = extractvalue %kizu.opt.std__string__String %kizu.17, 1
+//   %kizu.19.tag = extractvalue %kizu.opt.std__string__String %kizu.17, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %if.then.4, label %if.else.5
+// if.then.4:
+//   call void @std__string__String_deinit(%kizu.struct.std__string__String %kizu.18)
+//   call void @std__testing__expect(i1 false)
+//   br label %if.end.6
+// if.else.5:
+//   br label %if.end.6
+// if.end.6:
+//   call void @std__array__Array_deinit_std_3a_3astring_3a_3aString(ptr %kizu.2)
+//   %kizu.24 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.24
+// }
+// 
+// define %kizu.error.void @test_optional_arguments_accept_null_and_values() {
+// entry:
+//   %kizu.2 = insertvalue %kizu.opt.u8 zeroinitializer, i8 0, 0
+//   %kizu.3 = call i64 @or_one(%kizu.opt.u8 %kizu.2)
+//   %kizu.4.ok = icmp eq i64 1, %kizu.3
+//   br i1 %kizu.4.ok, label %kizu.4.ok.ok, label %kizu.4.ok.fail
+// kizu.4.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.3, i64 0, i64 0)
+//   unreachable
+// kizu.4.ok.ok:
+//   %kizu.7 = trunc i64 9 to i8
+//   %kizu.8.some = insertvalue %kizu.opt.u8 zeroinitializer, i8 1, 0
+//   %kizu.8 = insertvalue %kizu.opt.u8 %kizu.8.some, i8 %kizu.7, 1
+//   %kizu.9 = call i64 @or_one(%kizu.opt.u8 %kizu.8)
+//   %kizu.10.ok = icmp eq i64 9, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 9, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.11 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.11
+// }

@@ -1,0 +1,263 @@
+import std::testing;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+struct Node {
+    pub tag: i64,
+    pub count: i64,
+}
+
+fn read_tag(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.tag;
+}
+
+fn read_count(node: ptr<const Node>) -> i64 {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    return unsafe node.*.count;
+}
+
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    // SAFETY: node が有効な Node を指すことは呼び出し側が保証する
+    unsafe node.*.tag = tag;
+}
+
+fn replace(node: ptr<Node>, value: Node) -> void {
+    // SAFETY: node が有効な Node を指し、上書きしてよいことは呼び出し側が保証する
+    unsafe node.* = value;
+}
+
+test "raw pointer struct deref reads and writes" {
+    // SAFETY: Node が収まる十分な大きさを確保する。試験専用で失敗は考えない
+    let raw = unsafe malloc(64);
+    // SAFETY: raw は Node 1 個分の書き込み可能な領域を指す
+    let node = unsafe cast<ptr<Node>>(raw);
+    // SAFETY: pointer 間 cast は値の再解釈のみで、指す先は同じ有効な Node
+    let reader = unsafe cast<ptr<const Node>>(node);
+
+    replace(node, Node { tag: 7, count: 1 });
+    testing::expect_equal<i64>(7, read_tag(reader));
+
+    write_tag(node, 42);
+    testing::expect_equal<i64>(42, read_tag(reader));
+    testing::expect_equal<i64>(1, read_count(reader));
+
+    // SAFETY: raw は malloc が返した領域で、以後使わない
+    unsafe free(raw);
+}
+
+test "raw pointer whole deref stores a contextual byte" {
+    // SAFETY: 1 バイト書ける領域を確保する。試験専用で失敗は考えない
+    let byte = unsafe malloc(1);
+    // SAFETY: byte は 1 バイト書ける有効な pointer である
+    unsafe byte.* = 9;
+    // SAFETY: byte は直前に書いた 1 バイトを指す
+    let read = unsafe byte.*;
+    testing::expect_equal<i64>(9, cast<i64>(read));
+    // SAFETY: byte は malloc が返した領域で、以後使わない
+    unsafe free(byte);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.struct.Node = type { i64, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @read_tag(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 0
+//   ret i64 %kizu.2
+// }
+// 
+// define i64 @read_count(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 1
+//   ret i64 %kizu.2
+// }
+// 
+// define void @write_tag(ptr %kizu.node, i64 %kizu.tag) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = insertvalue %kizu.struct.Node %kizu.1, i64 %kizu.tag, 0
+//   store %kizu.struct.Node %kizu.2, ptr %kizu.node
+//   ret void
+// }
+// 
+// define void @replace(ptr %kizu.node, ptr byval(%kizu.struct.Node) %kizu.value.addr) {
+// entry:
+//   %kizu.value = load %kizu.struct.Node, ptr %kizu.value.addr
+//   store %kizu.struct.Node %kizu.value, ptr %kizu.node
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_raw_pointer_struct_deref_reads_and_writes() {
+// entry:
+//   %kizu.arg.1.1 = alloca %kizu.struct.Node
+//   %kizu.2 = call ptr @malloc(i64 64)
+//   %kizu.7.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 7, 0
+//   %kizu.7 = insertvalue %kizu.struct.Node %kizu.7.field0, i64 1, 1
+//   store %kizu.struct.Node %kizu.7, ptr %kizu.arg.1.1
+//   call void @replace(ptr %kizu.2, ptr byval(%kizu.struct.Node) %kizu.arg.1.1)
+//   %kizu.10 = call i64 @read_tag(ptr %kizu.2)
+//   %kizu.11.ok = icmp eq i64 7, %kizu.10
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.10, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   call void @write_tag(ptr %kizu.2, i64 42)
+//   %kizu.15 = call i64 @read_tag(ptr %kizu.2)
+//   %kizu.16.ok = icmp eq i64 42, %kizu.15
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.15, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.18 = call i64 @read_count(ptr %kizu.2)
+//   %kizu.19.ok = icmp eq i64 1, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }
+// 
+// define %kizu.error.void @test_raw_pointer_whole_deref_stores_a_contextual_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store i8 9, ptr %kizu.2
+//   %kizu.5 = load i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 9, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 9, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.struct.Node = type { i64, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @free(ptr)
+// declare ptr @malloc(i64)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @read_tag(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 0
+//   ret i64 %kizu.2
+// }
+// 
+// define i64 @read_count(ptr %kizu.node) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = extractvalue %kizu.struct.Node %kizu.1, 1
+//   ret i64 %kizu.2
+// }
+// 
+// define void @write_tag(ptr %kizu.node, i64 %kizu.tag) {
+// entry:
+//   %kizu.1 = load %kizu.struct.Node, ptr %kizu.node
+//   %kizu.2 = insertvalue %kizu.struct.Node %kizu.1, i64 %kizu.tag, 0
+//   store %kizu.struct.Node %kizu.2, ptr %kizu.node
+//   ret void
+// }
+// 
+// define void @replace(ptr %kizu.node, ptr byval(%kizu.struct.Node) %kizu.value.addr) {
+// entry:
+//   %kizu.value = load %kizu.struct.Node, ptr %kizu.value.addr
+//   store %kizu.struct.Node %kizu.value, ptr %kizu.node
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_raw_pointer_struct_deref_reads_and_writes() {
+// entry:
+//   %kizu.arg.1.1 = alloca %kizu.struct.Node
+//   %kizu.2 = call ptr @malloc(i64 64)
+//   %kizu.7.field0 = insertvalue %kizu.struct.Node zeroinitializer, i64 7, 0
+//   %kizu.7 = insertvalue %kizu.struct.Node %kizu.7.field0, i64 1, 1
+//   store %kizu.struct.Node %kizu.7, ptr %kizu.arg.1.1
+//   call void @replace(ptr %kizu.2, ptr byval(%kizu.struct.Node) %kizu.arg.1.1)
+//   %kizu.10 = call i64 @read_tag(ptr %kizu.2)
+//   %kizu.11.ok = icmp eq i64 7, %kizu.10
+//   br i1 %kizu.11.ok, label %kizu.11.ok.ok, label %kizu.11.ok.fail
+// kizu.11.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.10, i64 0, i64 0)
+//   unreachable
+// kizu.11.ok.ok:
+//   call void @write_tag(ptr %kizu.2, i64 42)
+//   %kizu.15 = call i64 @read_tag(ptr %kizu.2)
+//   %kizu.16.ok = icmp eq i64 42, %kizu.15
+//   br i1 %kizu.16.ok, label %kizu.16.ok.ok, label %kizu.16.ok.fail
+// kizu.16.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.15, i64 0, i64 0)
+//   unreachable
+// kizu.16.ok.ok:
+//   %kizu.18 = call i64 @read_count(ptr %kizu.2)
+//   %kizu.19.ok = icmp eq i64 1, %kizu.18
+//   br i1 %kizu.19.ok, label %kizu.19.ok.ok, label %kizu.19.ok.fail
+// kizu.19.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.19.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.21 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.21
+// }
+// 
+// define %kizu.error.void @test_raw_pointer_whole_deref_stores_a_contextual_byte() {
+// entry:
+//   %kizu.2 = call ptr @malloc(i64 1)
+//   store i8 9, ptr %kizu.2
+//   %kizu.5 = load i8, ptr %kizu.2
+//   %kizu.7 = zext i8 %kizu.5 to i64
+//   %kizu.8.ok = icmp eq i64 9, %kizu.7
+//   br i1 %kizu.8.ok, label %kizu.8.ok.ok, label %kizu.8.ok.fail
+// kizu.8.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 9, i64 %kizu.7, i64 0, i64 0)
+//   unreachable
+// kizu.8.ok.ok:
+//   call void @free(ptr %kizu.2)
+//   %kizu.10 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.10
+// }

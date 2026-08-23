@@ -1,0 +1,277 @@
+import std::arena;
+import std::mem;
+import std::testing;
+
+pub struct Item {
+    pub value: i64,
+}
+
+pub struct Registry {
+    pub items: arena::Arena<Item>,
+}
+
+fn (self: &var Registry) add_direct(v: i64) -> arena::Handle<Item> {
+    return self.items.add(Item { value: v });
+}
+
+fn (self: &var Registry) add_bound(v: i64) -> arena::Handle<Item> {
+    let handle = self.items.add(Item { value: v });
+    return handle;
+}
+
+// A factory method on a borrowed receiver hands back the handle it added:
+// the arena is the caller's storage, so the handle does not outlive it
+// (§10). A handle from an arena the frame itself owns still cannot escape.
+test "a factory method returns a handle into its receiver's field arena" {
+    let allocator = mem::page_allocator();
+    var registry = Registry { items: arena::new<Item>(allocator) };
+    let first = registry.add_direct(7);
+    let second = registry.add_bound(35);
+    testing::expect_equal<i64>(42, registry.items.at(first).value + registry.items.at(second).value);
+    registry.deinit();
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Item = type { i64 }
+// %kizu.struct.Registry = type { ptr }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_arena_new(ptr, i64)
+// declare i64 @kizu_arena_add(ptr, ptr)
+// declare ptr @kizu_arena_get(ptr, i64)
+// declare i64 @kizu_arena_len(ptr)
+// declare ptr @kizu_arena_pop(ptr)
+// declare void @kizu_arena_deinit(ptr)
+// 
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_arena_add(i64, i64)
+// declare void @kizu_panic_arena_handle(i64, i64)
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @Registry_add_direct(ptr %kizu.self, i64 %kizu.v) {
+// entry:
+//   %kizu.3.value.slot = alloca %kizu.struct.Item
+//   %kizu.1.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = insertvalue %kizu.struct.Item zeroinitializer, i64 %kizu.v, 0
+//   store %kizu.struct.Item %kizu.2, ptr %kizu.3.value.slot
+//   %kizu.3 = call i64 @kizu_arena_add(ptr %kizu.1, ptr %kizu.3.value.slot)
+//   %kizu.3.bad = icmp slt i64 %kizu.3, 0
+//   br i1 %kizu.3.bad, label %kizu.3.bad.arena.add.fail, label %kizu.3.bad.ok
+// kizu.3.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.3.bad.ok:
+//   ret i64 %kizu.3
+// }
+// 
+// define i64 @Registry_add_bound(ptr %kizu.self, i64 %kizu.v) {
+// entry:
+//   %kizu.3.value.slot = alloca %kizu.struct.Item
+//   %kizu.1.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = insertvalue %kizu.struct.Item zeroinitializer, i64 %kizu.v, 0
+//   store %kizu.struct.Item %kizu.2, ptr %kizu.3.value.slot
+//   %kizu.3 = call i64 @kizu_arena_add(ptr %kizu.1, ptr %kizu.3.value.slot)
+//   %kizu.3.bad = icmp slt i64 %kizu.3, 0
+//   br i1 %kizu.3.bad, label %kizu.3.bad.arena.add.fail, label %kizu.3.bad.ok
+// kizu.3.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.3.bad.ok:
+//   ret i64 %kizu.3
+// }
+// 
+// define void @Registry_deinit(ptr byval(%kizu.struct.Registry) %kizu.self.addr) {
+// entry:
+//   %kizu.self = load %kizu.struct.Registry, ptr %kizu.self.addr
+//   %kizu.1 = extractvalue %kizu.struct.Registry %kizu.self, 0
+//   call void @kizu_arena_deinit(ptr %kizu.1)
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_a_factory_method_returns_a_handle_into_its_receiver_s_field_arena() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Registry
+//   %kizu.arg.0.3 = alloca %kizu.struct.Registry
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Registry %kizu.3, ptr %kizu.4
+//   %kizu.6 = call i64 @Registry_add_direct(ptr %kizu.4, i64 7)
+//   %kizu.8 = call i64 @Registry_add_bound(ptr %kizu.4, i64 35)
+//   %kizu.10.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.4, i32 0, i32 0
+//   %kizu.10 = load ptr, ptr %kizu.10.ptr
+//   %kizu.11.ptr = call ptr @kizu_arena_get(ptr %kizu.10, i64 %kizu.6)
+//   %kizu.arena.at.is_null.1 = icmp eq ptr %kizu.11.ptr, null
+//   br i1 %kizu.arena.at.is_null.1, label %kizu.11.ptr.arena.at.null, label %kizu.11.ptr.ok
+// kizu.11.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.11.ptr.ok:
+//   %kizu.11 = load %kizu.struct.Item, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.struct.Item %kizu.11, 0
+//   %kizu.13.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.4, i32 0, i32 0
+//   %kizu.13 = load ptr, ptr %kizu.13.ptr
+//   %kizu.14.ptr = call ptr @kizu_arena_get(ptr %kizu.13, i64 %kizu.8)
+//   %kizu.arena.at.is_null.2 = icmp eq ptr %kizu.14.ptr, null
+//   br i1 %kizu.arena.at.is_null.2, label %kizu.14.ptr.arena.at.null, label %kizu.14.ptr.ok
+// kizu.14.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.14.ptr.ok:
+//   %kizu.14 = load %kizu.struct.Item, ptr %kizu.14.ptr
+//   %kizu.15 = extractvalue %kizu.struct.Item %kizu.14, 0
+//   %kizu.16 = add i64 %kizu.12, %kizu.15
+//   %kizu.17.ok = icmp eq i64 42, %kizu.16
+//   br i1 %kizu.17.ok, label %kizu.17.ok.ok, label %kizu.17.ok.fail
+// kizu.17.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.17.ok.ok:
+//   %kizu.18 = load %kizu.struct.Registry, ptr %kizu.4
+//   store %kizu.struct.Registry %kizu.18, ptr %kizu.arg.0.3
+//   call void @Registry_deinit(ptr byval(%kizu.struct.Registry) %kizu.arg.0.3)
+//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.20
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.Item = type { i64 }
+// %kizu.struct.Registry = type { ptr }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.31 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [32 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.31, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_arena_new(ptr, i64)
+// declare i64 @kizu_arena_add(ptr, ptr)
+// declare ptr @kizu_arena_get(ptr, i64)
+// declare i64 @kizu_arena_len(ptr)
+// declare ptr @kizu_arena_pop(ptr)
+// declare void @kizu_arena_deinit(ptr)
+// 
+// declare ptr @std__mem__page_allocator()
+// 
+// declare void @kizu_panic_arena_add(i64, i64)
+// declare void @kizu_panic_arena_handle(i64, i64)
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @Registry_add_direct(ptr %kizu.self, i64 %kizu.v) {
+// entry:
+//   %kizu.3.value.slot = alloca %kizu.struct.Item
+//   %kizu.1.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = insertvalue %kizu.struct.Item zeroinitializer, i64 %kizu.v, 0
+//   store %kizu.struct.Item %kizu.2, ptr %kizu.3.value.slot
+//   %kizu.3 = call i64 @kizu_arena_add(ptr %kizu.1, ptr %kizu.3.value.slot)
+//   %kizu.3.bad = icmp slt i64 %kizu.3, 0
+//   br i1 %kizu.3.bad, label %kizu.3.bad.arena.add.fail, label %kizu.3.bad.ok
+// kizu.3.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.3.bad.ok:
+//   ret i64 %kizu.3
+// }
+// 
+// define i64 @Registry_add_bound(ptr %kizu.self, i64 %kizu.v) {
+// entry:
+//   %kizu.3.value.slot = alloca %kizu.struct.Item
+//   %kizu.1.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.self, i32 0, i32 0
+//   %kizu.1 = load ptr, ptr %kizu.1.ptr
+//   %kizu.2 = insertvalue %kizu.struct.Item zeroinitializer, i64 %kizu.v, 0
+//   store %kizu.struct.Item %kizu.2, ptr %kizu.3.value.slot
+//   %kizu.3 = call i64 @kizu_arena_add(ptr %kizu.1, ptr %kizu.3.value.slot)
+//   %kizu.3.bad = icmp slt i64 %kizu.3, 0
+//   br i1 %kizu.3.bad, label %kizu.3.bad.arena.add.fail, label %kizu.3.bad.ok
+// kizu.3.bad.arena.add.fail:
+//   call void @kizu_panic_arena_add(i64 0, i64 0)
+//   unreachable
+// kizu.3.bad.ok:
+//   ret i64 %kizu.3
+// }
+// 
+// define void @Registry_deinit(ptr byval(%kizu.struct.Registry) %kizu.self.addr) {
+// entry:
+//   %kizu.self = load %kizu.struct.Registry, ptr %kizu.self.addr
+//   %kizu.1 = extractvalue %kizu.struct.Registry %kizu.self, 0
+//   call void @kizu_arena_deinit(ptr %kizu.1)
+//   ret void
+// }
+// 
+// define %kizu.error.void @test_a_factory_method_returns_a_handle_into_its_receiver_s_field_arena() {
+// entry:
+//   %kizu.4 = alloca %kizu.struct.Registry
+//   %kizu.arg.0.3 = alloca %kizu.struct.Registry
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_arena_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (%kizu.struct.Item, ptr null, i64 1) to i64))
+//   %kizu.3 = insertvalue %kizu.struct.Registry zeroinitializer, ptr %kizu.2, 0
+//   store %kizu.struct.Registry %kizu.3, ptr %kizu.4
+//   %kizu.6 = call i64 @Registry_add_direct(ptr %kizu.4, i64 7)
+//   %kizu.8 = call i64 @Registry_add_bound(ptr %kizu.4, i64 35)
+//   %kizu.10.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.4, i32 0, i32 0
+//   %kizu.10 = load ptr, ptr %kizu.10.ptr
+//   %kizu.11.ptr = call ptr @kizu_arena_get(ptr %kizu.10, i64 %kizu.6)
+//   %kizu.arena.at.is_null.1 = icmp eq ptr %kizu.11.ptr, null
+//   br i1 %kizu.arena.at.is_null.1, label %kizu.11.ptr.arena.at.null, label %kizu.11.ptr.ok
+// kizu.11.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.11.ptr.ok:
+//   %kizu.11 = load %kizu.struct.Item, ptr %kizu.11.ptr
+//   %kizu.12 = extractvalue %kizu.struct.Item %kizu.11, 0
+//   %kizu.13.ptr = getelementptr %kizu.struct.Registry, ptr %kizu.4, i32 0, i32 0
+//   %kizu.13 = load ptr, ptr %kizu.13.ptr
+//   %kizu.14.ptr = call ptr @kizu_arena_get(ptr %kizu.13, i64 %kizu.8)
+//   %kizu.arena.at.is_null.2 = icmp eq ptr %kizu.14.ptr, null
+//   br i1 %kizu.arena.at.is_null.2, label %kizu.14.ptr.arena.at.null, label %kizu.14.ptr.ok
+// kizu.14.ptr.arena.at.null:
+//   call void @kizu_panic_arena_handle(i64 0, i64 0)
+//   unreachable
+// kizu.14.ptr.ok:
+//   %kizu.14 = load %kizu.struct.Item, ptr %kizu.14.ptr
+//   %kizu.15 = extractvalue %kizu.struct.Item %kizu.14, 0
+//   %kizu.16 = add i64 %kizu.12, %kizu.15
+//   %kizu.17.ok = icmp eq i64 42, %kizu.16
+//   br i1 %kizu.17.ok, label %kizu.17.ok.ok, label %kizu.17.ok.fail
+// kizu.17.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 42, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.17.ok.ok:
+//   %kizu.18 = load %kizu.struct.Registry, ptr %kizu.4
+//   store %kizu.struct.Registry %kizu.18, ptr %kizu.arg.0.3
+//   call void @Registry_deinit(ptr byval(%kizu.struct.Registry) %kizu.arg.0.3)
+//   %kizu.20 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.20
+// }

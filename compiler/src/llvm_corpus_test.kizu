@@ -1,0 +1,286 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import compiler::internal::llvm;
+import compiler::internal::ownership;
+import compiler::internal::project;
+import compiler::internal::source;
+import compiler::internal::types;
+import std::array;
+import std::fs;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The LLVM corpus in compiler/tests/llvm is shared with the Go emitter,
+// which generates each case's expectation block: the LLVM IR emitted for
+// the lowered module (`// emit:`) and for the optimized one (`// opt:`), or
+// the failure a stage reports. The std functions a case pulls in are
+// dropped before emitting, as in the IR corpus; the selfhost test compares
+// them through the `build --emit-llvm` command. This runner loads every
+// case through this loader, type- and ownership-checks it, lowers it with
+// this module, emits it with this emitter, and requires the same bytes.
+
+/// The blank line plus `// llvm` line that ends a case input.
+fn llvm_marker() -> []u8 {
+    return
+        \\
+        \\
+        \\// llvm
+        \\
+    ;
+}
+
+/// Separates one case into its input and its expectation block.
+fn split_llvm_case(data: []u8) -> ?i64 {
+    let marker = llvm_marker();
+    let marker_len = mem::len(marker);
+    var index = mem::len(data) - marker_len;
+    while index >= 0 {
+        if mem::slice(data, index, index + marker_len) |candidate| {
+            if mem::equal_bytes(candidate, marker) {
+                return index;
+            }
+        }
+        index = index - 1;
+    }
+    return null;
+}
+
+/// Appends text as one expectation line: embedded newlines become `\n`.
+fn append_folded_llvm_line(out: &var string::String, text: []u8) -> !void {
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        if byte == cast<u8>(10) {
+            try out.append_byte(cast<u8>(92));
+            try out.append_byte(cast<u8>(110));
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Appends emitted text with every line prefixed by `// `.
+fn append_emitted(out: &var string::String, text: []u8) -> !void {
+    try out.append_bytes("// ");
+    var index = 0;
+    while mem::byte_at(text, index) |byte| {
+        try out.append_byte(byte);
+        if byte == cast<u8>(10) {
+            try out.append_bytes("// ");
+        }
+        index = index + 1;
+    }
+    return out.append_byte(cast<u8>(10));
+}
+
+/// Drops the std functions of a module, the Go `userModule` of the corpus
+/// test: the functions whose symbol starts with `std::`, in place, keeping
+/// the others in order. The dropped list comes back in reverse so the
+/// caller can restore the module with `restore_functions`.
+fn keep_user_functions(allocator: Allocator, module: &var ir::Module) -> !array::Array<ir::Function> {
+    var reversed = array::new<ir::Function>(allocator);
+    errdefer reversed.deinit();
+    while module.functions.pop() |function| {
+        try reversed.append(function);
+    }
+    var index = reversed.len();
+    while index > 0 {
+        index = index - 1;
+        let function = reversed.get_or_panic(index);
+        let name = module.function_name(function);
+        if module.names.starts_with(name, "std::") {
+            continue;
+        }
+        try module.functions.append(function);
+    }
+    return move reversed;
+}
+
+/// Puts every function back in its original order after an emission that
+/// saw the user functions only.
+fn restore_functions(module: &var ir::Module, reversed: &array::Array<ir::Function>) -> !void {
+    while module.functions.pop() |_| {}
+    var index = reversed.len();
+    while index > 0 {
+        index = index - 1;
+        try module.functions.append(reversed.get_or_panic(index));
+    }
+    return;
+}
+
+/// Appends the `// ` + folded text of one failed stage.
+fn append_llvm_failure(
+    allocator: Allocator,
+    sources: &source::SourceMap,
+    failed: &diagnostic::Diagnostic,
+    prefix: []u8,
+    out: &var string::String
+) -> !void {
+    try out.append_bytes(prefix);
+    let text = try failed.error(allocator, sources);
+    defer text.deinit();
+    let bytes = text.as_bytes();
+    return append_folded_llvm_line(out, bytes);
+}
+
+/// Appends one section: the LLVM IR emitted for the user functions of a
+/// module, which is left as it was.
+fn emit_llvm_section(
+    allocator: Allocator,
+    sources: &source::SourceMap,
+    module: &var ir::Module,
+    out: &var string::String
+) -> !void {
+    let dropped = try keep_user_functions(allocator, module);
+    defer dropped.deinit();
+    var emitted = string::new(allocator);
+    defer emitted.deinit();
+    if try llvm::emit(allocator, module, &var emitted) |failed| {
+        defer failed.deinit();
+        try append_llvm_failure(allocator, sources, &failed, "// ", out);
+    } else {
+        let emitted_bytes = emitted.as_bytes();
+        try append_emitted(out, emitted_bytes);
+    }
+    return restore_functions(module, &dropped);
+}
+
+/// Appends the same `check failed:` line to both sections, the way the Go
+/// test reports a program the front end rejects.
+fn append_check_failure(
+    allocator: Allocator,
+    sources: &source::SourceMap,
+    failed: &diagnostic::Diagnostic,
+    out: &var string::String
+) -> !void {
+    try out.append_bytes("// emit:");
+    try out.append_byte(cast<u8>(10));
+    try append_llvm_failure(allocator, sources, failed, "// check failed: ", out);
+    try out.append_bytes("// opt:");
+    try out.append_byte(cast<u8>(10));
+    return append_llvm_failure(allocator, sources, failed, "// check failed: ", out);
+}
+
+/// Renders the expectation block of one case: `// emit:` then `// opt:`.
+/// Go lowers afresh for each section because Optimize rewrites the module
+/// in place; here the one lowering is emitted, then optimized, then emitted
+/// again -- the emitter reads the module, so the optimized module is the
+/// one a fresh lowering would give, and the front end, the costly half,
+/// runs once per case.
+fn render_llvm_case(
+    io: Io,
+    allocator: Allocator,
+    std_errors: &project::StdErrorCodes,
+    input: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer loader.deinit();
+    let loaded = try loader.load_source(&var tree, "", input);
+    match loaded {
+        Error(failed) => {
+            defer failed.deinit();
+            try append_check_failure(allocator, &loader.sources, &failed, &var out);
+            return move out;
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                defer failed.deinit();
+                try append_check_failure(allocator, &loader.sources, &failed, &var out);
+                return move out;
+            }
+            var checker = try ownership::new_checker(allocator, &tree, &program);
+            defer checker.deinit();
+            if try checker.check_program(&var tree, &program) |failed| {
+                defer failed.deinit();
+                try append_check_failure(allocator, &loader.sources, &failed, &var out);
+                return move out;
+            }
+            var lowerer = try ir::new_lowerer(allocator, &tree, &program, &checker);
+            defer lowerer.deinit();
+            try out.append_bytes("// emit:");
+            try out.append_byte(cast<u8>(10));
+            if try lowerer.lower(&var tree, &program, std_errors) |failed| {
+                defer failed.deinit();
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                try out.append_bytes("// opt:");
+                try out.append_byte(cast<u8>(10));
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                return move out;
+            }
+            try emit_llvm_section(allocator, &loader.sources, &var lowerer.module, &var out);
+            try out.append_bytes("// opt:");
+            try out.append_byte(cast<u8>(10));
+            if try ir::optimize(allocator, &var lowerer.module) |failed| {
+                defer failed.deinit();
+                try append_llvm_failure(allocator, &loader.sources, &failed, "// ", &var out);
+                return move out;
+            }
+            try emit_llvm_section(allocator, &loader.sources, &var lowerer.module, &var out);
+            return move out;
+        },
+    }
+}
+
+test "llvm corpus emits like the shipping compiler" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    var std_loader = try project::new_loader(io, allocator, "lib/kizu");
+    defer std_loader.deinit();
+    let codes = try std_loader.std_error_codes();
+    match codes {
+        Error(failed) => {
+            defer failed.deinit();
+            try io::write_stderr_line(io, "std error codes could not be read");
+            testing::expect(false);
+        },
+        Codes(std_errors) => {
+            defer std_errors.deinit();
+            var entries = try fs::read_dir(io, "compiler/tests/llvm");
+            defer entries.deinit();
+            var cases = 0;
+            var failures = 0;
+            var index = 0;
+            while index < entries.len() {
+                let entry = entries.get_or_panic(index);
+                index = index + 1;
+                if entry.is_dir {
+                    continue;
+                }
+                cases = cases + 1;
+                let data = try fs::read_file(io, allocator, entry.path, mem::Limit::Unlimited);
+                defer data.deinit();
+                let bytes = data.as_bytes();
+                if split_llvm_case(bytes) |cut| {
+                    let input = bytes[0..cut];
+                    let want = bytes[cut + mem::len(llvm_marker())..mem::len(bytes)];
+                    let got = try render_llvm_case(io, allocator, &std_errors, input);
+                    defer got.deinit();
+                    let got_bytes = got.as_bytes();
+                    if !mem::equal_bytes(want, got_bytes) {
+                        failures = failures + 1;
+                        try io::write_stderr_line(io, entry.path);
+                        try io::write_stderr_line(io, "--- want");
+                        try io::write_stderr(io, want);
+                        try io::write_stderr_line(io, "--- got");
+                        try io::write_stderr(io, got_bytes);
+                    }
+                } else {
+                    failures = failures + 1;
+                    try io::write_stderr(io, "no `// llvm` marker: ");
+                    try io::write_stderr_line(io, entry.path);
+                }
+            }
+            testing::expect(cases > 0);
+            testing::expect_equal<i64>(0, failures);
+        },
+    }
+}

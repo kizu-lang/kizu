@@ -1,0 +1,536 @@
+import std::testing;
+
+union Slot {
+    Empty,
+    A(i64),
+    B(i64),
+}
+
+fn pick(s: Slot) -> i64 {
+    match s {
+        A(x) => { return x; },
+        B(y) => { return y * 10; },
+        Empty => {},
+    }
+    return -1;
+}
+
+// A payload binding is scoped to its arm: two matches over payload unions in
+// one function stay independent, even when some arms do not bind the payload.
+test "two payload matches in one function stay independent" {
+    var w = -1;
+    let p = Slot::A(1);
+    match p {
+        A(x) => { w = x; },
+        B(x) => { w = x; },
+        Empty => { w = 0; },
+    }
+    let q = Slot::B(2);
+    match q {
+        A(x) => { w = w + x; },
+        B(x) => { w = w + x; },
+        Empty => { w = 0; },
+    }
+    testing::expect_equal<i64>(3, w);
+}
+
+test "wildcard arms between payload matches stay independent" {
+    var w = 0;
+    match Slot::A(1) {
+        A(x) => { w = x; },
+        _ => { w = -1; },
+    }
+    match Slot::B(2) {
+        B(z) => { w = w + z; },
+        _ => {},
+    }
+    testing::expect_equal<i64>(3, w);
+}
+
+test "return arms and differing binding names stay independent" {
+    testing::expect_equal<i64>(3, pick(Slot::A(3)));
+    testing::expect_equal<i64>(30, pick(Slot::B(3)));
+    testing::expect_equal<i64>(-1, pick(Slot::Empty));
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.Slot = type { i64, [8 x i8] }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @pick(%kizu.union.Slot %kizu.s) {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.5.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.1 = extractvalue %kizu.union.Slot %kizu.s, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.10 = sub i64 0, 1
+//   ret i64 %kizu.10
+// match.check.2:
+//   %kizu.2 = icmp eq i64 %kizu.1, 1
+//   br i1 %kizu.2, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.s, ptr %kizu.3.slot, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   %kizu.3 = load i64, ptr %kizu.3.payload.ptr, align 8
+//   ret i64 %kizu.3
+// match.check.4:
+//   %kizu.4 = icmp eq i64 %kizu.1, 2
+//   br i1 %kizu.4, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Slot %kizu.s, ptr %kizu.5.slot, align 8
+//   %kizu.5.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.5.slot, i32 0, i32 1
+//   %kizu.5 = load i64, ptr %kizu.5.payload.ptr, align 8
+//   %kizu.7 = mul i64 %kizu.5, 10
+//   ret i64 %kizu.7
+// match.check.6:
+//   %kizu.8 = icmp eq i64 %kizu.1, 0
+//   br i1 %kizu.8, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   br label %match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_two_payload_matches_in_one_function_stay_independent() {
+// entry:
+//   %kizu.4.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.14.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.7.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.9.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.17.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.20.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.2 = sub i64 0, 1
+//   %kizu.4.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.4.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.4.tag.ptr, align 8
+//   %kizu.4.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.4.slot, i32 0, i32 1
+//   store i64 1, ptr %kizu.4.payload.ptr, align 8
+//   %kizu.4 = load %kizu.union.Slot, ptr %kizu.4.slot, align 8
+//   %kizu.5 = extractvalue %kizu.union.Slot %kizu.4, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.12 = phi i64 [ %kizu.7, %match.arm.3 ], [ %kizu.9, %match.arm.5 ], [ 0, %match.arm.7 ]
+//   %kizu.14.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.14.tag.ptr, align 8
+//   %kizu.14.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 1
+//   store i64 2, ptr %kizu.14.payload.ptr, align 8
+//   %kizu.14 = load %kizu.union.Slot, ptr %kizu.14.slot, align 8
+//   %kizu.15 = extractvalue %kizu.union.Slot %kizu.14, 0
+//   br label %match.check.10
+// match.check.2:
+//   %kizu.6 = icmp eq i64 %kizu.5, 1
+//   br i1 %kizu.6, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.4, ptr %kizu.7.slot, align 8
+//   %kizu.7.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.7.slot, i32 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.7.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.8 = icmp eq i64 %kizu.5, 2
+//   br i1 %kizu.8, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Slot %kizu.4, ptr %kizu.9.slot, align 8
+//   %kizu.9.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.9.slot, i32 0, i32 1
+//   %kizu.9 = load i64, ptr %kizu.9.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.6:
+//   %kizu.10 = icmp eq i64 %kizu.5, 0
+//   br i1 %kizu.10, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   br label %match.end.1
+// match.unreachable.8:
+//   unreachable
+// match.end.9:
+//   %kizu.24 = phi i64 [ %kizu.18, %match.arm.11 ], [ %kizu.21, %match.arm.13 ], [ 0, %match.arm.15 ]
+//   %kizu.26.ok = icmp eq i64 3, %kizu.24
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.24, i64 0, i64 0)
+//   unreachable
+// kizu.26.ok.ok:
+//   %kizu.27 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.27
+// match.check.10:
+//   %kizu.16 = icmp eq i64 %kizu.15, 1
+//   br i1 %kizu.16, label %match.arm.11, label %match.check.12
+// match.arm.11:
+//   store %kizu.union.Slot %kizu.14, ptr %kizu.17.slot, align 8
+//   %kizu.17.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.17.slot, i32 0, i32 1
+//   %kizu.17 = load i64, ptr %kizu.17.payload.ptr, align 8
+//   %kizu.18 = add i64 %kizu.12, %kizu.17
+//   br label %match.end.9
+// match.check.12:
+//   %kizu.19 = icmp eq i64 %kizu.15, 2
+//   br i1 %kizu.19, label %match.arm.13, label %match.check.14
+// match.arm.13:
+//   store %kizu.union.Slot %kizu.14, ptr %kizu.20.slot, align 8
+//   %kizu.20.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.20.slot, i32 0, i32 1
+//   %kizu.20 = load i64, ptr %kizu.20.payload.ptr, align 8
+//   %kizu.21 = add i64 %kizu.12, %kizu.20
+//   br label %match.end.9
+// match.check.14:
+//   %kizu.22 = icmp eq i64 %kizu.15, 0
+//   br i1 %kizu.22, label %match.arm.15, label %match.unreachable.16
+// match.arm.15:
+//   br label %match.end.9
+// match.unreachable.16:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_wildcard_arms_between_payload_matches_stay_independent() {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.11.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.6.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.14.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.3.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.3.tag.ptr, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   store i64 1, ptr %kizu.3.payload.ptr, align 8
+//   %kizu.3 = load %kizu.union.Slot, ptr %kizu.3.slot, align 8
+//   %kizu.4 = extractvalue %kizu.union.Slot %kizu.3, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.9 = phi i64 [ %kizu.6, %match.arm.3 ], [ %kizu.8, %match.arm.5 ]
+//   %kizu.11.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.11.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.11.tag.ptr, align 8
+//   %kizu.11.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.11.slot, i32 0, i32 1
+//   store i64 2, ptr %kizu.11.payload.ptr, align 8
+//   %kizu.11 = load %kizu.union.Slot, ptr %kizu.11.slot, align 8
+//   %kizu.12 = extractvalue %kizu.union.Slot %kizu.11, 0
+//   br label %match.check.7
+// match.check.2:
+//   %kizu.5 = icmp eq i64 %kizu.4, 1
+//   br i1 %kizu.5, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.3, ptr %kizu.6.slot, align 8
+//   %kizu.6.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.6.slot, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.4:
+//   br label %match.arm.5
+// match.arm.5:
+//   %kizu.8 = sub i64 0, 1
+//   br label %match.end.1
+// match.end.6:
+//   %kizu.16 = phi i64 [ %kizu.15, %match.arm.8 ], [ %kizu.9, %match.arm.10 ]
+//   %kizu.18.ok = icmp eq i64 3, %kizu.16
+//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
+// kizu.18.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.18.ok.ok:
+//   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.19
+// match.check.7:
+//   %kizu.13 = icmp eq i64 %kizu.12, 2
+//   br i1 %kizu.13, label %match.arm.8, label %match.check.9
+// match.arm.8:
+//   store %kizu.union.Slot %kizu.11, ptr %kizu.14.slot, align 8
+//   %kizu.14.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 1
+//   %kizu.14 = load i64, ptr %kizu.14.payload.ptr, align 8
+//   %kizu.15 = add i64 %kizu.9, %kizu.14
+//   br label %match.end.6
+// match.check.9:
+//   br label %match.arm.10
+// match.arm.10:
+//   br label %match.end.6
+// }
+// 
+// define %kizu.error.void @test_return_arms_and_differing_binding_names_stay_independent() {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.8.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.13.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.3.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.3.tag.ptr, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   store i64 3, ptr %kizu.3.payload.ptr, align 8
+//   %kizu.3 = load %kizu.union.Slot, ptr %kizu.3.slot, align 8
+//   %kizu.4 = call i64 @pick(%kizu.union.Slot %kizu.3)
+//   %kizu.5.ok = icmp eq i64 3, %kizu.4
+//   br i1 %kizu.5.ok, label %kizu.5.ok.ok, label %kizu.5.ok.fail
+// kizu.5.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.4, i64 0, i64 0)
+//   unreachable
+// kizu.5.ok.ok:
+//   %kizu.8.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.8.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.8.tag.ptr, align 8
+//   %kizu.8.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.8.slot, i32 0, i32 1
+//   store i64 3, ptr %kizu.8.payload.ptr, align 8
+//   %kizu.8 = load %kizu.union.Slot, ptr %kizu.8.slot, align 8
+//   %kizu.9 = call i64 @pick(%kizu.union.Slot %kizu.8)
+//   %kizu.10.ok = icmp eq i64 30, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 30, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.12 = sub i64 0, 1
+//   %kizu.13.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.13.slot, i32 0, i32 0
+//   store i64 0, ptr %kizu.13.tag.ptr, align 8
+//   %kizu.13 = load %kizu.union.Slot, ptr %kizu.13.slot, align 8
+//   %kizu.14 = call i64 @pick(%kizu.union.Slot %kizu.13)
+//   %kizu.15.ok = icmp eq i64 %kizu.12, %kizu.14
+//   br i1 %kizu.15.ok, label %kizu.15.ok.ok, label %kizu.15.ok.fail
+// kizu.15.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.12, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.15.ok.ok:
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.error.void = type { i8, i64 }
+// 
+// %kizu.union.Slot = type { i64, [8 x i8] }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define i64 @pick(%kizu.union.Slot %kizu.s) {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.5.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.1 = extractvalue %kizu.union.Slot %kizu.s, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.10 = sub i64 0, 1
+//   ret i64 %kizu.10
+// match.check.2:
+//   %kizu.2 = icmp eq i64 %kizu.1, 1
+//   br i1 %kizu.2, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.s, ptr %kizu.3.slot, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   %kizu.3 = load i64, ptr %kizu.3.payload.ptr, align 8
+//   ret i64 %kizu.3
+// match.check.4:
+//   %kizu.4 = icmp eq i64 %kizu.1, 2
+//   br i1 %kizu.4, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Slot %kizu.s, ptr %kizu.5.slot, align 8
+//   %kizu.5.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.5.slot, i32 0, i32 1
+//   %kizu.5 = load i64, ptr %kizu.5.payload.ptr, align 8
+//   %kizu.7 = mul i64 %kizu.5, 10
+//   ret i64 %kizu.7
+// match.check.6:
+//   %kizu.8 = icmp eq i64 %kizu.1, 0
+//   br i1 %kizu.8, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   br label %match.end.1
+// match.unreachable.8:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_two_payload_matches_in_one_function_stay_independent() {
+// entry:
+//   %kizu.4.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.14.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.7.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.9.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.17.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.20.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.4.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.4.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.4.tag.ptr, align 8
+//   %kizu.4.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.4.slot, i32 0, i32 1
+//   store i64 1, ptr %kizu.4.payload.ptr, align 8
+//   %kizu.4 = load %kizu.union.Slot, ptr %kizu.4.slot, align 8
+//   %kizu.5 = extractvalue %kizu.union.Slot %kizu.4, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.12 = phi i64 [ %kizu.7, %match.arm.3 ], [ %kizu.9, %match.arm.5 ], [ 0, %match.arm.7 ]
+//   %kizu.14.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.14.tag.ptr, align 8
+//   %kizu.14.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 1
+//   store i64 2, ptr %kizu.14.payload.ptr, align 8
+//   %kizu.14 = load %kizu.union.Slot, ptr %kizu.14.slot, align 8
+//   %kizu.15 = extractvalue %kizu.union.Slot %kizu.14, 0
+//   br label %match.check.10
+// match.check.2:
+//   %kizu.6 = icmp eq i64 %kizu.5, 1
+//   br i1 %kizu.6, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.4, ptr %kizu.7.slot, align 8
+//   %kizu.7.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.7.slot, i32 0, i32 1
+//   %kizu.7 = load i64, ptr %kizu.7.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.4:
+//   %kizu.8 = icmp eq i64 %kizu.5, 2
+//   br i1 %kizu.8, label %match.arm.5, label %match.check.6
+// match.arm.5:
+//   store %kizu.union.Slot %kizu.4, ptr %kizu.9.slot, align 8
+//   %kizu.9.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.9.slot, i32 0, i32 1
+//   %kizu.9 = load i64, ptr %kizu.9.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.6:
+//   %kizu.10 = icmp eq i64 %kizu.5, 0
+//   br i1 %kizu.10, label %match.arm.7, label %match.unreachable.8
+// match.arm.7:
+//   br label %match.end.1
+// match.unreachable.8:
+//   unreachable
+// match.end.9:
+//   %kizu.24 = phi i64 [ %kizu.18, %match.arm.11 ], [ %kizu.21, %match.arm.13 ], [ 0, %match.arm.15 ]
+//   %kizu.26.ok = icmp eq i64 3, %kizu.24
+//   br i1 %kizu.26.ok, label %kizu.26.ok.ok, label %kizu.26.ok.fail
+// kizu.26.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.24, i64 0, i64 0)
+//   unreachable
+// kizu.26.ok.ok:
+//   %kizu.27 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.27
+// match.check.10:
+//   %kizu.16 = icmp eq i64 %kizu.15, 1
+//   br i1 %kizu.16, label %match.arm.11, label %match.check.12
+// match.arm.11:
+//   store %kizu.union.Slot %kizu.14, ptr %kizu.17.slot, align 8
+//   %kizu.17.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.17.slot, i32 0, i32 1
+//   %kizu.17 = load i64, ptr %kizu.17.payload.ptr, align 8
+//   %kizu.18 = add i64 %kizu.12, %kizu.17
+//   br label %match.end.9
+// match.check.12:
+//   %kizu.19 = icmp eq i64 %kizu.15, 2
+//   br i1 %kizu.19, label %match.arm.13, label %match.check.14
+// match.arm.13:
+//   store %kizu.union.Slot %kizu.14, ptr %kizu.20.slot, align 8
+//   %kizu.20.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.20.slot, i32 0, i32 1
+//   %kizu.20 = load i64, ptr %kizu.20.payload.ptr, align 8
+//   %kizu.21 = add i64 %kizu.12, %kizu.20
+//   br label %match.end.9
+// match.check.14:
+//   %kizu.22 = icmp eq i64 %kizu.15, 0
+//   br i1 %kizu.22, label %match.arm.15, label %match.unreachable.16
+// match.arm.15:
+//   br label %match.end.9
+// match.unreachable.16:
+//   unreachable
+// }
+// 
+// define %kizu.error.void @test_wildcard_arms_between_payload_matches_stay_independent() {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.11.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.6.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.14.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.3.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.3.tag.ptr, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   store i64 1, ptr %kizu.3.payload.ptr, align 8
+//   %kizu.3 = load %kizu.union.Slot, ptr %kizu.3.slot, align 8
+//   %kizu.4 = extractvalue %kizu.union.Slot %kizu.3, 0
+//   br label %match.check.2
+// match.end.1:
+//   %kizu.9 = phi i64 [ %kizu.6, %match.arm.3 ], [ %kizu.8, %match.arm.5 ]
+//   %kizu.11.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.11.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.11.tag.ptr, align 8
+//   %kizu.11.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.11.slot, i32 0, i32 1
+//   store i64 2, ptr %kizu.11.payload.ptr, align 8
+//   %kizu.11 = load %kizu.union.Slot, ptr %kizu.11.slot, align 8
+//   %kizu.12 = extractvalue %kizu.union.Slot %kizu.11, 0
+//   br label %match.check.7
+// match.check.2:
+//   %kizu.5 = icmp eq i64 %kizu.4, 1
+//   br i1 %kizu.5, label %match.arm.3, label %match.check.4
+// match.arm.3:
+//   store %kizu.union.Slot %kizu.3, ptr %kizu.6.slot, align 8
+//   %kizu.6.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.6.slot, i32 0, i32 1
+//   %kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8
+//   br label %match.end.1
+// match.check.4:
+//   br label %match.arm.5
+// match.arm.5:
+//   %kizu.8 = sub i64 0, 1
+//   br label %match.end.1
+// match.end.6:
+//   %kizu.16 = phi i64 [ %kizu.15, %match.arm.8 ], [ %kizu.9, %match.arm.10 ]
+//   %kizu.18.ok = icmp eq i64 3, %kizu.16
+//   br i1 %kizu.18.ok, label %kizu.18.ok.ok, label %kizu.18.ok.fail
+// kizu.18.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.16, i64 0, i64 0)
+//   unreachable
+// kizu.18.ok.ok:
+//   %kizu.19 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.19
+// match.check.7:
+//   %kizu.13 = icmp eq i64 %kizu.12, 2
+//   br i1 %kizu.13, label %match.arm.8, label %match.check.9
+// match.arm.8:
+//   store %kizu.union.Slot %kizu.11, ptr %kizu.14.slot, align 8
+//   %kizu.14.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.14.slot, i32 0, i32 1
+//   %kizu.14 = load i64, ptr %kizu.14.payload.ptr, align 8
+//   %kizu.15 = add i64 %kizu.9, %kizu.14
+//   br label %match.end.6
+// match.check.9:
+//   br label %match.arm.10
+// match.arm.10:
+//   br label %match.end.6
+// }
+// 
+// define %kizu.error.void @test_return_arms_and_differing_binding_names_stay_independent() {
+// entry:
+//   %kizu.3.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.8.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.13.slot = alloca %kizu.union.Slot, align 8
+//   %kizu.3.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 0
+//   store i64 1, ptr %kizu.3.tag.ptr, align 8
+//   %kizu.3.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.3.slot, i32 0, i32 1
+//   store i64 3, ptr %kizu.3.payload.ptr, align 8
+//   %kizu.3 = load %kizu.union.Slot, ptr %kizu.3.slot, align 8
+//   %kizu.4 = call i64 @pick(%kizu.union.Slot %kizu.3)
+//   %kizu.5.ok = icmp eq i64 3, %kizu.4
+//   br i1 %kizu.5.ok, label %kizu.5.ok.ok, label %kizu.5.ok.fail
+// kizu.5.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.4, i64 0, i64 0)
+//   unreachable
+// kizu.5.ok.ok:
+//   %kizu.8.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.8.slot, i32 0, i32 0
+//   store i64 2, ptr %kizu.8.tag.ptr, align 8
+//   %kizu.8.payload.ptr = getelementptr %kizu.union.Slot, ptr %kizu.8.slot, i32 0, i32 1
+//   store i64 3, ptr %kizu.8.payload.ptr, align 8
+//   %kizu.8 = load %kizu.union.Slot, ptr %kizu.8.slot, align 8
+//   %kizu.9 = call i64 @pick(%kizu.union.Slot %kizu.8)
+//   %kizu.10.ok = icmp eq i64 30, %kizu.9
+//   br i1 %kizu.10.ok, label %kizu.10.ok.ok, label %kizu.10.ok.fail
+// kizu.10.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 30, i64 %kizu.9, i64 0, i64 0)
+//   unreachable
+// kizu.10.ok.ok:
+//   %kizu.12 = sub i64 0, 1
+//   %kizu.13.tag.ptr = getelementptr %kizu.union.Slot, ptr %kizu.13.slot, i32 0, i32 0
+//   store i64 0, ptr %kizu.13.tag.ptr, align 8
+//   %kizu.13 = load %kizu.union.Slot, ptr %kizu.13.slot, align 8
+//   %kizu.14 = call i64 @pick(%kizu.union.Slot %kizu.13)
+//   %kizu.15.ok = icmp eq i64 %kizu.12, %kizu.14
+//   br i1 %kizu.15.ok, label %kizu.15.ok.ok, label %kizu.15.ok.fail
+// kizu.15.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.12, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.15.ok.ok:
+//   %kizu.16 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.16
+// }

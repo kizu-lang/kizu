@@ -1,0 +1,234 @@
+import std::testing;
+
+// ADR-0098: a view return is tied to every view argument, derived from the
+// signature alone. The body may return any of them; the caller treats the
+// result as borrowing all of them.
+
+fn pick(a: []u8, b: []u8, take_first: bool) -> []u8 {
+    if take_first {
+        return a;
+    }
+    return b;
+}
+
+fn larger(left: &i64, right: &i64) -> &i64 {
+    if left.* >= right.* {
+        return left;
+    }
+    return right;
+}
+
+test "multi-source borrow return picks either slice source" {
+    testing::expect_equal<[]u8>(pick("left", "right", true), "left");
+    testing::expect_equal<[]u8>(pick("left", "right", false), "right");
+}
+
+test "multi-source borrow return of shared references" {
+    var small = 1;
+    var large = 2;
+    let winner = larger(small, large);
+    testing::expect(winner.* == 2);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"left\00"
+// @.str.1 = private unnamed_addr constant [6 x i8] c"right\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
+// 
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
+// 
+// define %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.a, %kizu.slice.u8 %kizu.b, i1 %kizu.take_first) {
+// entry:
+//   br i1 %kizu.take_first, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret %kizu.slice.u8 %kizu.a
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret %kizu.slice.u8 %kizu.b
+// }
+// 
+// define i64 @larger(i64 %kizu.left, i64 %kizu.right) {
+// entry:
+//   %kizu.1 = icmp sge i64 %kizu.left, %kizu.right
+//   br i1 %kizu.1, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret i64 %kizu.left
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret i64 %kizu.right
+// }
+// 
+// define %kizu.error.void @test_multi_source_borrow_return_picks_either_slice_source() {
+// entry:
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 5, 1
+//   %kizu.4 = call %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.1, %kizu.slice.u8 %kizu.2, i1 true)
+//   %kizu.5.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.5.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.5.ptr, 0
+//   %kizu.5 = insertvalue %kizu.slice.u8 %kizu.5.base, i64 4, 1
+//   %kizu.6.left.ptr = extractvalue %kizu.slice.u8 %kizu.4, 0
+//   %kizu.6.left.len = extractvalue %kizu.slice.u8 %kizu.4, 1
+//   %kizu.6.right.ptr = extractvalue %kizu.slice.u8 %kizu.5, 0
+//   %kizu.6.right.len = extractvalue %kizu.slice.u8 %kizu.5, 1
+//   %kizu.6.ok = call i1 @kizu_bytes_equal(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len)
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 4, 1
+//   %kizu.8.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 5, 1
+//   %kizu.10 = call %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.7, %kizu.slice.u8 %kizu.8, i1 false)
+//   %kizu.11.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 5, 1
+//   %kizu.12.left.ptr = extractvalue %kizu.slice.u8 %kizu.10, 0
+//   %kizu.12.left.len = extractvalue %kizu.slice.u8 %kizu.10, 1
+//   %kizu.12.right.ptr = extractvalue %kizu.slice.u8 %kizu.11, 0
+//   %kizu.12.right.len = extractvalue %kizu.slice.u8 %kizu.11, 1
+//   %kizu.12.ok = call i1 @kizu_bytes_equal(ptr %kizu.12.left.ptr, i64 %kizu.12.left.len, ptr %kizu.12.right.ptr, i64 %kizu.12.right.len)
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.12.left.ptr, i64 %kizu.12.left.len, ptr %kizu.12.right.ptr, i64 %kizu.12.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.13
+// }
+// 
+// define %kizu.error.void @test_multi_source_borrow_return_of_shared_references() {
+// entry:
+//   %kizu.3 = call i64 @larger(i64 1, i64 2)
+//   %kizu.5 = icmp eq i64 %kizu.3, 2
+//   call void @std__testing__expect(i1 %kizu.5)
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.error.void = type { i8, i64 }
+// 
+// @.kizu.error.names = private unnamed_addr constant [1 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }]
+// 
+// @.str.0 = private unnamed_addr constant [5 x i8] c"left\00"
+// @.str.1 = private unnamed_addr constant [6 x i8] c"right\00"
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare i1 @kizu_bytes_equal(ptr, i64, ptr, i64)
+// 
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_expect_equal_bytes(ptr, i64, ptr, i64, i64, i64)
+// 
+// define %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.a, %kizu.slice.u8 %kizu.b, i1 %kizu.take_first) {
+// entry:
+//   br i1 %kizu.take_first, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret %kizu.slice.u8 %kizu.a
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret %kizu.slice.u8 %kizu.b
+// }
+// 
+// define i64 @larger(i64 %kizu.left, i64 %kizu.right) {
+// entry:
+//   %kizu.1 = icmp sge i64 %kizu.left, %kizu.right
+//   br i1 %kizu.1, label %if.then.1, label %if.else.2
+// if.then.1:
+//   ret i64 %kizu.left
+// if.else.2:
+//   br label %if.end.3
+// if.end.3:
+//   ret i64 %kizu.right
+// }
+// 
+// define %kizu.error.void @test_multi_source_borrow_return_picks_either_slice_source() {
+// entry:
+//   %kizu.1.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+//   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 4, 1
+//   %kizu.2.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.2.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.2.ptr, 0
+//   %kizu.2 = insertvalue %kizu.slice.u8 %kizu.2.base, i64 5, 1
+//   %kizu.4 = call %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.1, %kizu.slice.u8 %kizu.2, i1 true)
+//   %kizu.5.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.5.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.5.ptr, 0
+//   %kizu.5 = insertvalue %kizu.slice.u8 %kizu.5.base, i64 4, 1
+//   %kizu.6.left.ptr = extractvalue %kizu.slice.u8 %kizu.4, 0
+//   %kizu.6.left.len = extractvalue %kizu.slice.u8 %kizu.4, 1
+//   %kizu.6.right.ptr = extractvalue %kizu.slice.u8 %kizu.5, 0
+//   %kizu.6.right.len = extractvalue %kizu.slice.u8 %kizu.5, 1
+//   %kizu.6.ok = call i1 @kizu_bytes_equal(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len)
+//   br i1 %kizu.6.ok, label %kizu.6.ok.ok, label %kizu.6.ok.fail
+// kizu.6.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.6.left.ptr, i64 %kizu.6.left.len, ptr %kizu.6.right.ptr, i64 %kizu.6.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.6.ok.ok:
+//   %kizu.7.ptr = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
+//   %kizu.7.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.7.ptr, 0
+//   %kizu.7 = insertvalue %kizu.slice.u8 %kizu.7.base, i64 4, 1
+//   %kizu.8.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.8.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.8.ptr, 0
+//   %kizu.8 = insertvalue %kizu.slice.u8 %kizu.8.base, i64 5, 1
+//   %kizu.10 = call %kizu.slice.u8 @pick(%kizu.slice.u8 %kizu.7, %kizu.slice.u8 %kizu.8, i1 false)
+//   %kizu.11.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+//   %kizu.11.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.11.ptr, 0
+//   %kizu.11 = insertvalue %kizu.slice.u8 %kizu.11.base, i64 5, 1
+//   %kizu.12.left.ptr = extractvalue %kizu.slice.u8 %kizu.10, 0
+//   %kizu.12.left.len = extractvalue %kizu.slice.u8 %kizu.10, 1
+//   %kizu.12.right.ptr = extractvalue %kizu.slice.u8 %kizu.11, 0
+//   %kizu.12.right.len = extractvalue %kizu.slice.u8 %kizu.11, 1
+//   %kizu.12.ok = call i1 @kizu_bytes_equal(ptr %kizu.12.left.ptr, i64 %kizu.12.left.len, ptr %kizu.12.right.ptr, i64 %kizu.12.right.len)
+//   br i1 %kizu.12.ok, label %kizu.12.ok.ok, label %kizu.12.ok.fail
+// kizu.12.ok.fail:
+//   call void @kizu_panic_expect_equal_bytes(ptr %kizu.12.left.ptr, i64 %kizu.12.left.len, ptr %kizu.12.right.ptr, i64 %kizu.12.right.len, i64 0, i64 0)
+//   unreachable
+// kizu.12.ok.ok:
+//   %kizu.13 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.13
+// }
+// 
+// define %kizu.error.void @test_multi_source_borrow_return_of_shared_references() {
+// entry:
+//   %kizu.3 = call i64 @larger(i64 1, i64 2)
+//   %kizu.5 = icmp eq i64 %kizu.3, 2
+//   call void @std__testing__expect(i1 %kizu.5)
+//   %kizu.7 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.7
+// }
