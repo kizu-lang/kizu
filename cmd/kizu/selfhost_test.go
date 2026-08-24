@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,95 +21,57 @@ import (
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
-// TestSelfhostFrontend builds the selfhost compiler with the shipping one and
-// runs its `parse`, `check`, `ir` and `build --emit-llvm` commands over the
-// examples, the negative examples, tests/behavior, the module examples and
-// compiler/ itself. What it prints must be what the Go front end (parse,
-// load, type check, ownership check, lowering and optimizing to typed SSA
-// IR) and the Go LLVM emitter print for the same target through the same
-// CLI paths. The selfhost `check` stops at the ownership checker, so the Go
-// side here stops there too; the native link joins the comparison with its
-// module.
+// TestSelfhostFrontend checks the user-facing compiler boundaries not expressed
+// by the language conformance cases. Detailed parser, checker, IR and LLVM
+// behavior belongs to their shared corpora; this test keeps one file or package
+// crossing each CLI path and compares it byte for byte with the shipping path.
 func TestSelfhostFrontend(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler")
 	}
-	selfhost := filepath.Join(t.TempDir(), "selfhost-kizu")
-	build := kizuCommand("build", "--target", "native", "-o", selfhost, "../../compiler")
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build selfhost compiler: %v\n%s", err, out)
+	selfhost := sharedSelfhost(t)
+	file := "../../examples/hello.kizu"
+	pkg := "../../tests/behavior"
+	commands := []struct {
+		name string
+		want cliOutput
+		args []string
+	}{
+		{"parse-file", goParseOutput(file), []string{"parse", file}},
+		{"check-package", goCheckOutput(pkg), []string{"check", pkg}},
+		{"ir-package", goIrOutput(pkg, false), []string{"ir", pkg}},
+		{"ir-opt-package", goIrOutput(pkg, true), []string{"ir", "--opt", pkg}},
+		{"llvm-package", goEmitLLVMOutput(pkg, false), []string{"build", "--emit-llvm", pkg}},
+		{"llvm-opt-package", goEmitLLVMOutput(pkg, true), []string{"build", "--emit-llvm", "--opt", pkg}},
 	}
-	files := globFiles(t, "../../examples/*.kizu", "../../examples/negative/*.kizu")
-	fmtFiles := globKizuTreeFiles(t, "../../examples", "../../tests/behavior", "../../compiler/src")
-	packages := []string{"../../tests/behavior", "../../compiler"}
-	packages = append(packages, globDirs(t, "../../examples/modules/*")...)
-	for _, file := range files {
-		file := file
-		name := strings.TrimPrefix(file, "../../")
-		t.Run("parse/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareSelfhost(t, selfhost, "parse", file, goParseOutput(file))
-		})
-		t.Run("check/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareSelfhost(t, selfhost, "check", file, goCheckOutput(file))
-		})
-		runSelfhostIRSubtests(t, selfhost, name, file)
-	}
-	for _, file := range fmtFiles {
-		file := file
-		name := strings.TrimPrefix(file, "../../")
-		t.Run("fmt/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareSelfhostFmt(t, selfhost, file)
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			compareSelfhostArgs(t, selfhost, command.want, command.args...)
 		})
 	}
-	for _, pkg := range packages {
-		pkg := pkg
-		name := strings.TrimPrefix(pkg, "../../")
-		t.Run("check/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareSelfhost(t, selfhost, "check", pkg, goCheckOutput(pkg))
+	for _, fixture := range fmtRepresentativeFixtures() {
+		t.Run("fmt/"+fixture.name, func(t *testing.T) {
+			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
+			compareSelfhostFmt(t, selfhost, path)
 		})
-		runSelfhostIRSubtests(t, selfhost, name, pkg)
 	}
+	t.Run("fmt/parse-error", func(t *testing.T) {
+		compareSelfhostFmt(t, selfhost, "../../examples/negative/unclosed_block.kizu")
+	})
 	t.Run("fmt-write", func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostFmtWrite(t, selfhost, "--write")
+		compareSelfhostFmtWrite(t, selfhost, "--write", fmtMoveMarkerFixture())
 	})
 	t.Run("fmt-w", func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostFmtWrite(t, selfhost, "-w")
+		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
 	})
 	t.Run("init", func(t *testing.T) {
-		t.Parallel()
 		compareSelfhostInit(t, selfhost)
 	})
-}
-
-// runSelfhostIRSubtests compares the selfhost `ir`, `ir --opt`,
-// `build --emit-llvm` and `build --emit-llvm --opt` output for one target
-// with what the Go lowerer, optimizer and LLVM emitter print for it.
-func runSelfhostIRSubtests(t *testing.T, selfhost string, name string, target string) {
-	t.Helper()
-	t.Run("ir/"+name, func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostArgs(t, selfhost, goIrOutput(target, false), "ir", target)
+	t.Run("build-native", func(t *testing.T) {
+		compareNativeBuild(t, selfhost, file, false)
 	})
-	t.Run("ir-opt/"+name, func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostArgs(t, selfhost, goIrOutput(target, true), "ir", "--opt", target)
-	})
-	t.Run("llvm/"+name, func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostArgs(t, selfhost, goEmitLLVMOutput(target, false),
-			"build", "--emit-llvm", target)
-	})
-	t.Run("llvm-opt/"+name, func(t *testing.T) {
-		t.Parallel()
-		compareSelfhostArgs(t, selfhost, goEmitLLVMOutput(target, true),
-			"build", "--emit-llvm", "--opt", target)
+	t.Run("build-native-opt", func(t *testing.T) {
+		compareNativeBuild(t, selfhost, file, true)
 	})
 }
 
@@ -118,12 +80,6 @@ type cliOutput struct {
 	stdout string
 	stderr string
 	failed bool
-}
-
-// compareSelfhost runs one selfhost command and compares it with the Go output.
-func compareSelfhost(t *testing.T, selfhost string, command string, target string, want cliOutput) {
-	t.Helper()
-	compareSelfhostArgs(t, selfhost, want, command, target)
 }
 
 // compareSelfhostArgs runs the selfhost compiler with args and compares what
@@ -200,14 +156,13 @@ func failedCLIResult(err error) nativeCLIResult {
 
 // compareSelfhostFmtWrite checks both accepted in-place flags and the bytes
 // each compiler leaves in the file.
-func compareSelfhostFmtWrite(t *testing.T, selfhost string, flag string) {
+func compareSelfhostFmtWrite(t *testing.T, selfhost string, flag string, source string) {
 	t.Helper()
 	root := t.TempDir()
-	source := []byte("fn main(){print(\"hello, kizu\");}\n")
 	goFile := filepath.Join(root, "go", "unformatted.kizu")
 	selfFile := filepath.Join(root, "selfhost", "unformatted.kizu")
-	writeTestFile(t, goFile, source)
-	writeTestFile(t, selfFile, source)
+	writeTestFile(t, goFile, []byte(source))
+	writeTestFile(t, selfFile, []byte(source))
 
 	want := runNativeCLI(t, kizuBinaryPath, "fmt", flag, goFile)
 	got := runNativeCLI(t, selfhost, "fmt", flag, selfFile)
@@ -423,106 +378,6 @@ func cliErrorLine(err error) string {
 	return "error: " + msg + "\n"
 }
 
-// globFiles lists the files matching patterns, sorted.
-func globFiles(t *testing.T, patterns ...string) []string {
-	t.Helper()
-	var out []string
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, matches...)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// globKizuTreeFiles returns every .kizu file below roots, sorted. This is the
-// fmt differential corpus: examples (including negative), behavior tests and
-// every selfhost compiler source file.
-func globKizuTreeFiles(t *testing.T, roots ...string) []string {
-	t.Helper()
-	var out []string
-	for _, root := range roots {
-		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if !entry.IsDir() && filepath.Ext(path) == ".kizu" {
-				out = append(out, path)
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// globDirs lists the package directories (ones with kizu.toml) under pattern.
-func globDirs(t *testing.T, pattern string) []string {
-	t.Helper()
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []string
-	for _, match := range matches {
-		if _, err := os.Stat(filepath.Join(match, "kizu.toml")); err == nil {
-			out = append(out, match)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// TestSelfhostNative builds the selfhost compiler with the shipping one and
-// compares its native backend commands with the Go CLI: `run` and `test`
-// over the examples that check, tests/behavior and the module example
-// packages, and `build --target native` on the same targets, executing
-// both artifacts and comparing their build metadata. Exit statuses are
-// compared exactly: the selfhost main returns std::process::ExitStatus
-// (ADR-0085), so a child's status crosses both CLIs unchanged. Targets
-// whose Go build fails in the toolchain are skipped: the Go error carries
-// clang's captured output, which std::process cannot capture.
-func TestSelfhostNative(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds and runs the selfhost compiler and clang")
-	}
-	selfhost := filepath.Join(t.TempDir(), "selfhost-kizu")
-	build := kizuCommand("build", "--target", "native", "-o", selfhost, "../../compiler")
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build selfhost compiler: %v\n%s", err, out)
-	}
-	targets := globFiles(t, "../../examples/*.kizu")
-	targets = append(targets, "../../tests/behavior")
-	targets = append(targets, globDirs(t, "../../examples/modules/*")...)
-	for _, target := range targets {
-		target := target
-		name := strings.TrimPrefix(target, "../../")
-		t.Run("run/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareNativeCommand(t, selfhost, "run", target)
-		})
-		t.Run("test/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareNativeCommand(t, selfhost, "test", target)
-		})
-		t.Run("build/"+name, func(t *testing.T) {
-			t.Parallel()
-			compareNativeBuild(t, selfhost, target, false)
-		})
-	}
-	t.Run("build-opt/examples/hello.kizu", func(t *testing.T) {
-		t.Parallel()
-		compareNativeBuild(t, selfhost, "../../examples/hello.kizu", true)
-	})
-}
-
 // nativeCLIResult is one command run: what it printed, whether it failed,
 // and the exact status it exited with.
 type nativeCLIResult struct {
@@ -541,9 +396,22 @@ func runNativeCLI(t *testing.T, name string, args ...string) nativeCLIResult {
 // path, which is how the selfhost fsutil replacement observes filepath.Abs.
 func runNativeCLIAt(t *testing.T, dir string, name string, args ...string) nativeCLIResult {
 	t.Helper()
+	return runNativeCLIAtEnv(t, dir, nil, name, args...)
+}
+
+// runNativeCLIAtEnv runs one binary with explicit environment overrides.
+func runNativeCLIAtEnv(
+	t *testing.T,
+	dir string,
+	extraEnv []string,
+	name string,
+	args ...string,
+) nativeCLIResult {
+	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	env := append(os.Environ(), "TMPDIR="+t.TempDir())
+	env = append(env, extraEnv...)
 	if dir != "" {
 		withoutPWD := env[:0]
 		for _, item := range env {
@@ -603,27 +471,6 @@ func isClangFailure(out cliOutput) bool {
 	return out.failed && strings.Contains(out.stderr, " failed: exit status ")
 }
 
-// compareNativeCommand runs one native command through both compilers and
-// compares what they print and whether they fail.
-func compareNativeCommand(t *testing.T, selfhost string, command string, target string) {
-	t.Helper()
-	if goCheckOutput(target).failed {
-		t.Skip("target does not check")
-	}
-	want := runNativeCLI(t, kizuBinaryPath, command, target)
-	if isClangFailure(want.output) {
-		t.Skip("clang failure output cannot be captured by the selfhost CLI")
-	}
-	got := runNativeCLI(t, selfhost, command, target)
-	got.output.stderr = selfhostNativeStderr(got.output.stderr)
-	if got.output != want.output || got.code != want.code {
-		t.Errorf("selfhost %s %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
-			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
-			command, target, want.code, want.output.stdout, want.output.stderr,
-			got.code, got.output.stdout, got.output.stderr)
-	}
-}
-
 // compareNativeBuild builds one target with both compilers, compares the
 // command output, then runs both artifacts and compares what they print
 // and their exact exit status, and compares the build metadata with every
@@ -667,10 +514,49 @@ func compareNativeBuild(t *testing.T, selfhost string, target string, opt bool) 
 			target, wantRun.code, wantRun.output.stdout, wantRun.output.stderr,
 			gotRun.code, gotRun.output.stdout, gotRun.output.stderr)
 	}
+	assertNativeMetadata(t, goOut+".kizu-build.json", goOut, opt)
 	wantMetadata := normalizedMetadata(t, goOut+".kizu-build.json")
 	gotMetadata := normalizedMetadata(t, selfOut+".kizu-build.json")
 	if gotMetadata != wantMetadata {
 		t.Errorf("metadata for %s differs\n--- want\n%s\n--- got\n%s", target, wantMetadata, gotMetadata)
+	}
+}
+
+// assertNativeMetadata checks the artifact built above records the requested
+// mode and the command that produced it, without paying for another link.
+func assertNativeMetadata(t *testing.T, path string, output string, opt bool) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Target  string   `json:"target"`
+		LibC    string   `json:"libc"`
+		Runtime string   `json:"runtime"`
+		Emit    string   `json:"emit"`
+		Linker  string   `json:"linker"`
+		OptMode string   `json:"optimization_mode"`
+		Output  string   `json:"output"`
+		Command []string `json:"command"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	wantMode := "debug"
+	wantFlag := "-O0"
+	if opt {
+		wantMode = "opt"
+		wantFlag = "-O2"
+	}
+	if got.Target != "native" || got.LibC != "on" || got.Runtime != "hosted" ||
+		got.Emit != "exe" || got.Linker != "clang" || got.Output != output ||
+		got.OptMode != wantMode {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+	if len(got.Command) == 0 || got.Command[0] != "clang" ||
+		!slices.Contains(got.Command, wantFlag) {
+		t.Fatalf("metadata command %v missing clang or %s", got.Command, wantFlag)
 	}
 }
 

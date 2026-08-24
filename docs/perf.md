@@ -95,6 +95,13 @@ prune 条件と status 表示はどれも共通で、`cache prune` が全消し�
 古い順に落ちます。測定は `scripts/measure-cache.sh` が cold/warm と single-file
 edit を通しで測ります。
 
+CI は `KIZU_CACHE_DIR` を runner の一時 directory に固定し、commit ごとの key で
+content-addressed artifact を復元・保存します。新しい commit は直近 cache を prefix
+match で復元しますが、全 test は毎回実行し、key が合わない artifact だけを
+再 build します。shipping compiler が build する selfhost の第 1 stage も、全入力 file の
+hash が一致するときだけ復元します。`TestSelfhostBootstrap` の第 2 stage は毎回
+build するため、fixed point の検査は cache hit で省略しません。
+
 ## キャッシュ設計の制約
 
 - デフォルト上限を持つ

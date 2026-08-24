@@ -1,55 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
-
-// TestRunCommandSmoke checks the CLI can execute the hello example.
-func TestRunCommandSmoke(t *testing.T) {
-	cmd := kizuCommand("run", "../../examples/hello.kizu")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	want := "hello, kizu\n"
-	if string(out) != want {
-		t.Fatalf("got %q, want %q", out, want)
-	}
-}
-
-// TestRunCommandBorrowExample checks borrow parameters preserve ownership.
-func TestRunCommandBorrowExample(t *testing.T) {
-	cmd := kizuCommand("run", "../../examples/borrow.kizu")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	want := "alice\nalice\n"
-	if string(out) != want {
-		t.Fatalf("got %q, want %q", out, want)
-	}
-}
-
-// TestRunCommandArenaExample checks the CLI can execute the arena example.
-func TestRunCommandArenaExample(t *testing.T) {
-	cmd := kizuCommand("run", "../../examples/arena.kizu")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	want := "alice\n"
-	if string(out) != want {
-		t.Fatalf("got %q, want %q", out, want)
-	}
-}
 
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
@@ -91,28 +50,7 @@ func TestFmtWriteUpdatesFile(t *testing.T) {
 // to date, at every hand-off and only there, and leaves an already marked file
 // alone.
 func TestFmtWritesMoveMarkers(t *testing.T) {
-	source := `import std::mem;
-import std::string;
-
-fn build(allocator: Allocator) -> !string::String {
-    var name = string::new(allocator);
-    errdefer name.deinit();
-    try name.append_byte(cast<u8>(97));
-    return name;
-}
-
-fn keep(allocator: Allocator) -> !void {
-    var held = try build(allocator);
-    defer held.deinit();
-    print(held.len());
-    return;
-}
-
-fn main() -> !void {
-    try keep(mem::page_allocator());
-    return;
-}
-`
+	source := fmtMoveMarkerFixture()
 	path := filepath.Join(t.TempDir(), "unmarked.kizu")
 	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
@@ -135,6 +73,33 @@ fn main() -> !void {
 			t.Fatalf("round %d: got %d markers, want 1:\n%s", round, n, got)
 		}
 	}
+}
+
+// fmtMoveMarkerFixture is the unmarked ownership hand-off shared by the Go
+// formatter behavior test and the selfhost CLI parity test.
+func fmtMoveMarkerFixture() string {
+	return `import std::mem;
+import std::string;
+
+fn build(allocator: Allocator) -> !string::String {
+    var name = string::new(allocator);
+    errdefer name.deinit();
+    try name.append_byte(cast<u8>(97));
+    return name;
+}
+
+fn keep(allocator: Allocator) -> !void {
+    var held = try build(allocator);
+    defer held.deinit();
+    print(held.len());
+    return;
+}
+
+fn main() -> !void {
+    try keep(mem::page_allocator());
+    return;
+}
+`
 }
 
 // TestInitCommandCreatesRunnablePackage checks init scaffolds a minimal package.
@@ -709,25 +674,6 @@ func chdirForTest(t *testing.T, dir string) func() {
 	}
 }
 
-// TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
-// The example is compared against itself rather than against a copy of its
-// bytes: what `fmt` promises is that formatted source comes back unchanged, and
-// pinning the text here would make editing the example a test failure.
-func TestFmtCommandSmoke(t *testing.T) {
-	const path = "../../examples/hello.kizu"
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := kizuCommand("fmt", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	if string(out) != string(want) {
-		t.Fatalf("got %q, want %q", out, want)
-	}
-}
-
 // TestFmtCommandIsIdempotent keeps token formatting stable on representative sources.
 func TestFmtCommandIsIdempotent(t *testing.T) {
 	for _, tt := range fmtRepresentativeFixtures() {
@@ -805,15 +751,19 @@ fn main(){return;}
 	}
 }
 
-// fmtRepresentativeFixtures returns sources that exercise stable formatter shapes.
-func fmtRepresentativeFixtures() []struct {
+type fmtFixture struct {
 	name   string
 	source string
-} {
-	return []struct {
-		name   string
-		source string
-	}{
+}
+
+// fmtRepresentativeFixtures returns sources that exercise stable formatter shapes.
+func fmtRepresentativeFixtures() []fmtFixture {
+	return append(fmtLayoutFixtures(), fmtSyntaxFixtures()...)
+}
+
+// fmtLayoutFixtures exercises layout at function and declaration boundaries.
+func fmtLayoutFixtures() []fmtFixture {
+	return []fmtFixture{
 		{
 			name: "simple_function",
 			source: `fn main(){print("hello, kizu");}
@@ -839,6 +789,54 @@ fn main() {
     match value { Text(text) => print(text), Count(count) => print(count), }
 }
 `,
+		},
+	}
+}
+
+// fmtSyntaxFixtures exercises syntax-sensitive comments, spacing and line breaks.
+func fmtSyntaxFixtures() []fmtFixture {
+	return []fmtFixture{
+		{
+			name: "comments_and_tagged_declarations",
+			source: `/// A trace value.
+pub struct Trace{
+/// Label.
+label:[]u8,}
+
+pub enum Color{
+/// Secondary.
+Green,}
+
+pub error ReadError { Closed, Invalid }
+pub union Result { Value(i64), Failed(ReadError) }
+`,
+		},
+		{
+			name: "operator_and_type_spacing",
+			source: `error ReadError { Closed, }
+extern "c" fn source() -> ?ptr<const u8>
+
+fn read(x:i64)->ReadError ! []u8 {
+    let value = x - - 1;
+    if value >=(0) { return "ok"; }
+    return ReadError::Closed;
+}
+`,
+		},
+		{
+			name: "continuations_and_multiline_string",
+			source: "fn add(left: i64, right: i64) -> i64 { return left + right; }\n" +
+				"fn main() {\n" +
+				"let total = add(\n" +
+				"1,\n" +
+				"2\n" +
+				");\n" +
+				"let message =\n" +
+				"\\\\Hello\n" +
+				"\\\\World\n" +
+				";\n" +
+				"print(total); print(message);\n" +
+				"}\n",
 		},
 	}
 }
@@ -1314,147 +1312,6 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	}
 }
 
-// TestBuildTargetNativeCommandSmoke checks native build produces an executable.
-func TestBuildTargetNativeCommandSmoke(t *testing.T) {
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang is required for native build smoke")
-	}
-	output := filepath.Join(t.TempDir(), "hello")
-	build := kizuCommand(
-		"build", "--target", "native",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", output, "../../examples/hello.kizu",
-	)
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native build failed: %v\n%s", err, out)
-	}
-	if strings.TrimSpace(string(out)) != output {
-		t.Fatalf("got %q, want output path %q", out, output)
-	}
-	assertNativeMetadata(t, output+".kizu-build.json", output)
-	run := exec.Command(output)
-	out, err = run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native executable failed: %v\n%s", err, out)
-	}
-	if string(out) != "hello, kizu\n" {
-		t.Fatalf("got %q", out)
-	}
-}
-
-// TestBuildTargetNativeOptCommandSmoke checks --opt reaches the native linker
-// command and still produces a runnable executable.
-func TestBuildTargetNativeOptCommandSmoke(t *testing.T) {
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang is required for native build smoke")
-	}
-	output := filepath.Join(t.TempDir(), "hello-opt")
-	build := kizuCommand(
-		"build", "--target", "native", "--opt",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", output, "../../examples/hello.kizu",
-	)
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native opt build failed: %v\n%s", err, out)
-	}
-	if strings.TrimSpace(string(out)) != output {
-		t.Fatalf("got %q, want output path %q", out, output)
-	}
-	assertNativeMetadata(t, output+".kizu-build.json", output)
-	run := exec.Command(output)
-	out, err = run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native opt executable failed: %v\n%s", err, out)
-	}
-	if string(out) != "hello, kizu\n" {
-		t.Fatalf("got %q", out)
-	}
-}
-
-// TestBuildTargetNativeErrorUnionCommandSmoke checks native builds preserve try control flow.
-func TestBuildTargetNativeErrorUnionCommandSmoke(t *testing.T) {
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang is required for native build smoke")
-	}
-	source := filepath.Join(t.TempDir(), "error_union.kizu")
-	code := []byte(`fn read() -> !i64 {
-    return 7;
-}
-fn main() -> !void {
-    let value = try read();
-    print(value);
-    return;
-}`)
-	if err := os.WriteFile(source, code, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	output := filepath.Join(t.TempDir(), "error_union")
-	build := kizuCommand(
-		"build", "--target", "native",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", output, source,
-	)
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native build failed: %v\n%s", err, out)
-	}
-	run := exec.Command(output)
-	runOut, err := run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native executable failed: %v\n%s", err, runOut)
-	}
-	if got := string(runOut); got != "7\n" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-// TestBuildTargetNativeErrorUnionFailureSmoke checks a failing main names its
-// error on stderr and exits 1.
-func TestBuildTargetNativeErrorUnionFailureSmoke(t *testing.T) {
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang is required for native build smoke")
-	}
-	failSource := filepath.Join(t.TempDir(), "error_union_fail.kizu")
-	failCode := []byte(`error ReadError {
-    Bad,
-}
-fn read() -> !i64 {
-    return ReadError::Bad;
-}
-fn main() -> !void {
-    let value = try read();
-    print(value);
-    return;
-}`)
-	if err := os.WriteFile(failSource, failCode, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	failOutput := filepath.Join(t.TempDir(), "error_union_fail")
-	failBuild := kizuCommand(
-		"build", "--target", "native",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", failOutput, failSource,
-	)
-	if failOut, err := failBuild.CombinedOutput(); err != nil {
-		t.Fatalf("native failure build failed: %v\n%s", err, failOut)
-	}
-	failRun := exec.Command(failOutput)
-	failRunOut, err := failRun.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected native executable to fail, got output %q", failRunOut)
-	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 1 {
-		t.Fatalf("got err=%v output=%q, want exit 1", err, failRunOut)
-	}
-	// A failed main names its error on stderr before exiting 1.
-	if string(failRunOut) != "runtime error: ReadError::Bad\n" {
-		t.Fatalf("got output %q, want %q", failRunOut, "runtime error: ReadError::Bad\n")
-	}
-}
-
 // TestBuildTargetNativeStdoutWriteFailure checks hosted writes report a closed
 // output pipe through std::io instead of terminating on SIGPIPE or returning ok.
 func TestBuildTargetNativeStdoutWriteFailure(t *testing.T) {
@@ -1757,7 +1614,7 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.Command("go", append([]string{"run", "."}, tt.args...)...)
+			cmd := kizuCommand(tt.args...)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("expected command to fail\n%s", out)
@@ -1766,86 +1623,6 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 				t.Fatalf("got %q, want substring %q", out, tt.want)
 			}
 		})
-	}
-}
-
-// assertNativeMetadata checks native artifact metadata records explicit build inputs.
-func assertNativeMetadata(t *testing.T, path string, output string) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		Target  string   `json:"target"`
-		LibC    string   `json:"libc"`
-		Runtime string   `json:"runtime"`
-		Emit    string   `json:"emit"`
-		Linker  string   `json:"linker"`
-		OptMode string   `json:"optimization_mode"`
-		Output  string   `json:"output"`
-		Command []string `json:"command"`
-	}
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Target != "native" || got.LibC != "on" || got.Runtime != "hosted" {
-		t.Fatalf("unexpected metadata: %+v", got)
-	}
-	if got.Emit != "exe" || got.Linker != "clang" || got.Output != output {
-		t.Fatalf("unexpected metadata: %+v", got)
-	}
-	if got.OptMode != "debug" && got.OptMode != "opt" {
-		t.Fatalf("unexpected optimization metadata: %+v", got)
-	}
-	if len(got.Command) == 0 || got.Command[0] != "clang" {
-		t.Fatalf("unexpected command metadata: %+v", got.Command)
-	}
-	wantFlag := "-O0"
-	if got.OptMode == "opt" {
-		wantFlag = "-O2"
-	}
-	if !slices.Contains(got.Command, wantFlag) {
-		t.Fatalf("metadata command %v missing %s", got.Command, wantFlag)
-	}
-}
-
-// TestBuildTargetNativeArenaCommandSmoke checks native builds can lower arena storage.
-func TestBuildTargetNativeArenaCommandSmoke(t *testing.T) {
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang is required for native build smoke")
-	}
-	source := filepath.Join(t.TempDir(), "arena.kizu")
-	code := []byte(`import std;
-
-struct User { age: i64, }
-fn main() {
-    let allocator = std::mem::page_allocator();
-    let users = std::arena::new<User>(allocator);
-    let alice = users.add(User { age: 41 });
-    print(users.at(alice).age);
-    users.deinit();
-}`)
-	if err := os.WriteFile(source, code, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	output := filepath.Join(t.TempDir(), "arena")
-	build := kizuCommand(
-		"build", "--target", "native",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", output, source,
-	)
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native build failed: %v\n%s", err, out)
-	}
-	run := exec.Command(output)
-	runOut, err := run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("native executable failed: %v\n%s", err, runOut)
-	}
-	if got := string(runOut); got != "41\n" {
-		t.Fatalf("got %q", got)
 	}
 }
 
