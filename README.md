@@ -79,8 +79,10 @@ There is no interpreter. `kizu test` builds and runs test blocks the same way
 implementation.
 
 `kizu run` and `kizu test` need host `clang` and libc, the same requirement the
-native build path already had. no-libc / freestanding builds are part of the
-accepted build policy but are not implemented.
+native build path already had. The emitted LLVM IR uses opaque pointers, so
+`clang` must be 15 or newer; clang 14 rejects it with `expected type`. no-libc /
+freestanding builds are part of the accepted build policy but are not
+implemented.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
