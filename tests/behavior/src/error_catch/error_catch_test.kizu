@@ -1,0 +1,221 @@
+import std::mem;
+import std::string;
+import std::testing;
+
+error FsError {
+    NotFound,
+    Denied,
+}
+
+error JsonError {
+    Truncated,
+    NotFound,
+}
+
+error CacheError = FsError or JsonError;
+
+error FsAlias = FsError;
+
+fn read_port(ok: bool) -> FsError!i64 {
+    if ok {
+        return 8080;
+    }
+    return FsError::NotFound;
+}
+
+// `catch` supplies the default on failure the way `orelse` does on null, and
+// the default is evaluated only when the call fails.
+test "catch takes the value or the default" {
+    testing::expect_equal<i64>(8080, read_port(true) catch -1);
+    testing::expect_equal<i64>(-1, read_port(false) catch -1);
+}
+
+fn guarded_port(ok: bool) -> i64 {
+    let port = read_port(ok) catch return -1;
+    return port + 1;
+}
+
+// `catch return/break/continue` is the guard form: the failure arm leaves the
+// function or loop, so the success payload flows on without a capture.
+test "catch guards exit on failure" {
+    testing::expect_equal<i64>(8081, guarded_port(true));
+    testing::expect_equal<i64>(-1, guarded_port(false));
+
+    var total = 0;
+    var i = 0;
+    while i < 3 {
+        i = i + 1;
+        let port = read_port(i != 2) catch continue;
+        total = total + port;
+    }
+    testing::expect_equal<i64>(16160, total);
+}
+
+// The statement form binds the success payload in the consequence and the
+// error member in `else |err|`, which a `match` splits exhaustively like an
+// enum.
+test "else err binds the member for an exhaustive match" {
+    var got = 0;
+    if read_port(true) |port| {
+        got = port;
+    } else |err| {
+        match err {
+            NotFound => { got = -1; },
+            Denied => { got = -2; },
+        }
+    }
+    testing::expect_equal<i64>(8080, got);
+
+    if read_port(false) |port| {
+        got = port;
+    } else |err| {
+        match err {
+            NotFound => { got = -1; },
+            Denied => { got = -2; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+}
+
+fn ping(ok: bool) -> FsError!void {
+    if ok {
+        return;
+    }
+    return FsError::Denied;
+}
+
+// `E!void` has no success payload, so the statement form writes no success
+// capture; the wildcard arm stands in for the members a handler treats alike.
+test "void success form captures only the error" {
+    var got = 0;
+    if ping(true) {
+        got = 1;
+    } else |err| {
+        match err {
+            _ => { got = -1; },
+        }
+    }
+    testing::expect_equal<i64>(1, got);
+
+    if ping(false) {
+        got = 1;
+    } else |err| {
+        match err {
+            _ => { got = -1; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+}
+
+fn parse_entry(kind: i64) -> JsonError!i64 {
+    if kind == 1 {
+        return JsonError::Truncated;
+    }
+    if kind == 2 {
+        return JsonError::NotFound;
+    }
+    return 7;
+}
+
+fn load(kind: i64) -> CacheError!i64 {
+    if kind < 3 {
+        let value = try parse_entry(kind);
+        return value;
+    }
+    let port = try read_port(false);
+    return port;
+}
+
+// A combined set is the union of its parts' member values: `try` propagates a
+// part's member unchanged, and a member name two parts share is matched by
+// its declaring set's qualified spelling.
+test "combined set propagates and qualifies collisions" {
+    var got = 0;
+    if load(3) |value| {
+        got = value;
+    } else |err| {
+        match err {
+            FsError::NotFound => { got = -1; },
+            Denied => { got = -2; },
+            Truncated => { got = -3; },
+            JsonError::NotFound => { got = -4; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+
+    if load(2) |value| {
+        got = value;
+    } else |err| {
+        match err {
+            FsError::NotFound => { got = -1; },
+            Denied => { got = -2; },
+            Truncated => { got = -3; },
+            JsonError::NotFound => { got = -4; },
+        }
+    }
+    testing::expect_equal<i64>(-4, got);
+
+    testing::expect_equal<i64>(7, load(0) catch -9);
+}
+
+fn alias_port(ok: bool) -> FsAlias!i64 {
+    let port = try read_port(ok);
+    return port;
+}
+
+// A single right-hand set is an alias: it carries the same member values, so
+// propagation and catch work across the two names without conversion.
+test "alias declares the same set under a new name" {
+    testing::expect_equal<i64>(8080, alias_port(true) catch -1);
+    var got = 0;
+    if alias_port(false) |port| {
+        got = port;
+    } else |err| {
+        match err {
+            NotFound => { got = -1; },
+            Denied => { got = -2; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+}
+
+fn build_label(allocator: Allocator, ok: bool) -> !string::String {
+    var label = string::new(allocator);
+    errdefer label.deinit();
+    try label.append_bytes("ki");
+    let port = read_port(ok) catch 0;
+    if port < 0 {
+        return FsError::Denied;
+    }
+    try label.append_bytes("zu");
+    return move label;
+}
+
+fn build_label_capture(allocator: Allocator, ok: bool) -> !string::String {
+    var label = string::new(allocator);
+    errdefer label.deinit();
+    try label.append_bytes("ki");
+    if read_port(ok) |port| {
+        testing::expect_equal<i64>(8080, port);
+    } else |err| {
+        match err {
+            _ => try label.append_bytes("?"),
+        }
+    }
+    try label.append_bytes("zu");
+    return move label;
+}
+
+// A failure handled by `catch` or `else |err|` never leaves the function, so
+// it is not an error return path and `errdefer` does not run: the string
+// built before the caught failure stays intact and is still owned here.
+test "caught errors do not run errdefer" {
+    let allocator = mem::page_allocator();
+    let caught = try build_label(allocator, false);
+    testing::expect_equal<i64>(4, caught.len());
+    caught.deinit();
+
+    let bound = try build_label_capture(allocator, false);
+    testing::expect_equal<i64>(5, bound.len());
+    bound.deinit();
+}
