@@ -271,12 +271,12 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | stdprim / stdmeta / stdmethod / unsafecap | 140 / 211 / 80 / 60 | 259 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1861 | 3448 | 1.85 | check corpus 635 case の load 段 + package 単位 render |
-| types | 8141 | 16029 | 1.97 | check corpus 765 case(diagnostics)+ unit(catch / error set 合成の diagnostics) |
-| ownership | 7887 | 12981 | 1.65(words 46,283 / 28,209 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
-| ir | 5085 | 9130 | 1.80(words 32,806 / 17,479 = 1.88) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
-| llvm | 4030 | 5918 | 1.47(words 25,206 / 15,488 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
+| types | 8154 | 16051 | 1.97 | check corpus 765 case(diagnostics)+ unit(catch / error set 合成の diagnostics) |
+| ownership | 7893 | 12998 | 1.65(words 46,330 / 28,224 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
+| ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
+| llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
 | native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)・gate 未達 | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
-| buildcache | 217 | 421 | 1.94(words 1,418 / 764 = 1.86) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
+| buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 68 | —(別記録) | buildcache / native の経路と `TestSelfhostCache` 経由 |
@@ -426,7 +426,6 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 | `spawn_wait8` は引数 8 個の固定形 | clang の link argv は `--triple` 付きでちょうど 8。`run` の child args は exe + 7 個まで | clang は triple 有無で 2 つの呼び出し形に分岐。8 個を超える構成が要る場合は止めて報告する |
 | `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostNative` は絶対 path を正規化して比較する |
 | generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
-| `std::json::decode_ignore_unknown` が `!T` を返すため decode の失敗を catch できない(`catch` は `E!T` 限定、SPEC §11.1) | buildcache の `read_entry` / `append_entry_at`: Go は壊れた entry JSON も miss / skip に落とす | `catch` / `else \|err\|` の実装で read の失敗は Go と揃えた: `read_entry` は read のどの失敗も miss、`append_entry_at` は NotFound だけ skip して残りを伝播(exists の事前検査は不要になり窓は閉じた)。decode の失敗だけ伝播が残る。閉じるには std::json が宣言 set の union を返す必要があるが、内部の String / container mutator が bare `!void` を返すため、その宣言は std API の別判断として保留 |
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
 | `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
 | `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | `compiler::internal::timestamp`(別記録): 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |

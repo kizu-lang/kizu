@@ -314,11 +314,9 @@ fn write_field(encoder: &var json::Encoder, name: []u8, value: &string::String) 
 }
 
 /// Reads one metadata entry, the Go `readEntry`. A read that fails for any
-/// reason is a miss, the way Go treats any `os.ReadFile` error — no exists
-/// probe narrows a window any more, the failure itself is caught. A file
-/// std::json cannot decode still propagates rather than missing, because
-/// `decode_ignore_unknown` returns `!T` and only a declared `E!T` can be
-/// caught (recorded gap).
+/// reason is a miss, the way Go treats any `os.ReadFile` error, and a file
+/// std::json cannot decode is a miss the way Go treats any `json.Unmarshal`
+/// error: a stale or corrupt entry never becomes a failure of the caller.
 pub fn (self: &Cache) read_entry(io: Io, allocator: Allocator, key: []u8) -> !?Entry {
     let meta = try self.meta_path(allocator, key);
     defer meta.deinit();
@@ -326,8 +324,13 @@ pub fn (self: &Cache) read_entry(io: Io, allocator: Allocator, key: []u8) -> !?E
     if fs::read_file(io, allocator, meta_bytes, mem::Limit::Unlimited) |text| {
         defer text.deinit();
         let data = text.as_bytes();
-        let entry = try json::decode_ignore_unknown<Entry>(allocator, data);
-        return move entry;
+        if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
+            return move entry;
+        } else |err| {
+            match err {
+                _ => return null,
+            }
+        }
     } else |err| {
         match err {
             _ => return null,
@@ -364,16 +367,19 @@ pub fn (self: &Cache) entries(io: Io, allocator: Allocator, out: &var array::Arr
 fn append_entry_at(io: Io, allocator: Allocator, full: []u8, out: &var array::Array<Entry>) -> !void {
     // A concurrent process may evict an entry between the walk and the
     // read: work that is gone is a miss, not a failure, and every other
-    // failure propagates — the Go `os.IsNotExist` split, with the window
-    // closed now that the read error itself is caught. A file std::json
-    // cannot decode still propagates rather than skipping, because
-    // `decode_ignore_unknown` returns `!T` and only a declared `E!T` can be
-    // caught (recorded gap).
+    // read failure propagates — the Go `os.IsNotExist` split. A file
+    // std::json cannot decode is skipped, the Go continue on a
+    // `json.Unmarshal` error.
     if fs::read_file(io, allocator, full, mem::Limit::Unlimited) |text| {
         defer text.deinit();
         let data = text.as_bytes();
-        let entry = try json::decode_ignore_unknown<Entry>(allocator, data);
-        try out.append(move entry);
+        if json::decode_ignore_unknown<Entry>(allocator, data) |entry| {
+            try out.append(move entry);
+        } else |err| {
+            match err {
+                _ => return,
+            }
+        }
     } else |err| {
         match err {
             NotFound => return,
