@@ -127,7 +127,7 @@ LOC を揃えるために lifecycle、境界 check、意味のある名前を消
 | `ir.Module` / `Function` / `Block` / `Instr` の pointer graph と `string` の op / 名前 | `Module` 所有の arena + copy handle(`Function` / `Block` / `Instr`)、`Op` enum + `operand: Name` + spelling 関数、`Module` 所有の `NameTable` に intern した `Name`(value の name / type、block label、call 先、immediate) | `call.<f>` / `field.<f>` / `binary.<op>` は `Op` の種類と運ぶ名前に分ける。llvm / wasm emitter も同じ型を読む。`Cleanup` の `Args` は常に receiver 1 つなので `arg: Value` |
 | `llvm.emitter` の `string` operand / label / LLVM 型名と、SSA 名で引く `map[string]valueInfo` / `blockExitLabel` / `strings` | `Emitter` 所有の `NameTable` に intern した `Name`(operand、label、LLVM 型名、`valueInfo` の typ / operand)、SSA 名・label 名・literal の bytes を key にした `Map`(Go が関数ごとに作り直す map は entry に関数の generation 番号を持たせて区別する。`Map` は空にできない)、IR の型綴りは `module.names` の bytes view を関数間で渡す | `fmt.Fprintf` の format 文字列を `%s` / `%d` / `%%` を展開する `line1..line6` にそのまま渡し(末尾 `\n` だけ helper が足す)、`fmt.Sprintf` は `text*` / `sprint*`。Go に無い template・形状分岐は作らない。`module` は全 method が `&ir::Module` で受け、`emit` だけが cleanup 命令の `void` 型名を intern するため `&var`。emit.go は llvm.kizu(emitter・walk・dispatch・共有 helper)/ header.kizu(module 宣言)/ instr.kizu(scalar・aggregate・memory 命令)/ call.kizu(`call.*` と extern 宣言)/ error.kizu(`error.*` / `opt.*` / return)に分け、他の Go file は同名の .kizu |
 
-| `internal/native` の埋め込み runtime C(`//go:embed runtime/runtime.c`)と build cache | 生成 file `runtime_source.kizu`(multi-line literal を返す 1 関数)。cache は移植せず、runtime object と executable は TMPDIR の `kizu-native-<monotonic_millis>-<連番>` に毎回 build し、run / test が終わったら `clean_build_dir` で片付ける | runtime C の byte 一致は `go test ./internal/native -run TestRuntimeSourceKizu -update` が gate する(data の同一性 gate であって構造 pin ではない)。`Metadata` は json tag の担体なので `std::json` encoder の field 列に写す。cache 統合は buildcache module の goal で扱う |
+| `internal/native` の埋め込み runtime C(`//go:embed runtime/runtime.c`)と build cache | 生成 file `runtime_source.kizu`(multi-line literal を返す 1 関数)。cache は `compiler::internal::buildcache` に移植し、runtime object と executable は Go CLI と byte 一致する key で共有 cache に置く(temp dir は toolchain の transient input 置き場だけになる)。builder closure は module 境界を越えられないので `GetOrBuild` / `GetOrBuildArtifact` は「hit 判定と入力を返す前半 + caller が build して渡す後半(`finish_get_or_build` / `finish_artifact` / `discard_artifact`)」の 2 段 API に写す。`Result` はこの分割に溶ける。sha256 は `compiler::internal::sha256`(pure Kizu。bitwise 演算子が無いので AND / XOR は byte-pair table、shift / rotate は 2 の冪の乗除)で、Go 対応が crypto/sha256(標準 library)のため LOC ratio は別記録。key の host 部(Go `runtime.GOOS-GOARCH`)は `sh -c "PATH=/usr/bin:/bin uname -sm > file"` の probe で写す | runtime C の byte 一致は `go test ./internal/native -run TestRuntimeSourceKizu -update` が gate する(data の同一性 gate であって構造 pin ではない)。cache key・entry / artifact file 名の Go との一致と双方向の cache 再利用・`cache status` / `prune` の出力一致は `TestSelfhostCache` が gate する(識別子の一致 gate であって構造 pin ではない)。sha256 は共有 corpus `compiler/tests/sha256/vectors.txt` を Go 側 `TestSharedSHA256Vectors`(crypto/sha256)と Kizu 側 unit test の両方が読む。`Metadata` / `Entry` は json tag の担体なので `std::json` encoder の field 列に写す |
 
 Go の `panic`、reflection、goroutine、shared mutable global、unsafe pointer が現れた
 場合は local mapping を発明しません。移植全体で一つの判断が必要な境界として
@@ -160,6 +160,7 @@ production fileを分ける場合も同じdirectoryへ置きます。別module�
 | `internal/ir` | `compiler::internal::ir` |
 | `internal/llvm` | `compiler::internal::llvm` |
 | `internal/wasm` | `compiler::internal::wasm` |
+| `internal/buildcache` | `compiler::internal::buildcache` |
 | `internal/project` | `compiler::internal::project` |
 | `internal/fmt` | `compiler::internal::fmt` |
 | `cmd/kizu` | `compiler` |
@@ -274,8 +275,10 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | ownership | 7788 | 12794 | 1.64(words 45,653 / 27,872 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | llvm | 3897 | 5761 | 1.48(words 24,388 / 14,875 = 1.64) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
-| native | 249 | 494 | 1.98(words 1,755 / 869 = 2.02) | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
-| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test) | 1041(全 command) | 840 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
+| native | 249 | 654 | 2.64(words 2,261 / 867 = 2.61)・gate 未達 | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
+| buildcache | 264 | 660 | 2.50(words 2,319 / 944 = 2.46)・gate 未達 | unit(created_at の spelling / stamp 順序 / artifact・text の round trip / eviction)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化)、emit-llvm の GetOrBuild 共有 |
+| sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
+| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1041(全 command) | 947 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -346,6 +349,31 @@ escaper と Metadata copy を `std::json` encoder に、8 slot argv copy を vie
 呼び出しと encoder の field 列が語数を持つためで、行の折返しでは動いていない。
 
 
+native の cache 統合の増分(494 → 654、+160 行。Go 側は変わらず 249 で、cache key
+3 関数 14 行を含む)の分類。host probe(`host_key` 38 + `append_host_of` 19 行)は
+Go の `runtime.GOOS + "-" + runtime.GOARCH` 1 式に当たる std gap。cache key builder
+3 関数(65 行)は Go の 14 行に対し、`/` join と `&var` receiver の入れ子制約で
+`append_*` 形に展開した API shape。`executable` / `runtime_object` の Miss arm
+(scratch copy 7 行 × 2 と discard / finish / clean の分岐)約 55 行は、closure を
+module 境界へ渡せないことによる 2 段 API の caller 側 protocol(language gap)。
+旧経路の削除で -30。module 累計 2.64 は gate 未達で、増分は上の 3 分類で
+尽きる: 圧縮余地は signature の折返し(100 桁制限で不可)以外に見つからなかった。
+
+buildcache の増分(+396 行、660 / 264 = 2.50)の分類。標準 library 置換が 131 行
+(`append_created_at` + `append_padded` の civil 変換 = Go の time.Time JSON、
+`stamp_before` + `fraction_digit` + `entry_before` = `time.Before` + `sort.Slice`、
+`create_dir_all` = `os.MkdirAll`、`has_suffix` = glob の `*.json`、
+`append_abs_path` = `filepath.Abs`)。closure gap の 2 段 API(`GetOrBuild` /
+`ArtifactPlan` / `PendingArtifact` の宣言と `finish_*` / `discard_artifact` /
+`install_artifact` / `remove_scratch` / `read_hit` / `artifact_hit` /
+`output_name_of` / `output_path_of` の borrow shim)が約 95 行: shim は
+「`errdefer` の cleanup receiver は error path で borrow されていてはならない」
+規則が、view を callee scope へ閉じることを要求するため消せない。残りは
+ownership の明示(`as_bytes` 束縛約 35、defer / errdefer 約 25)と 100 桁超
+signature の折返し(約 55 行)。std 置換を sha256 と同じ別記録に置いても
+529 / 264 = 2.00 で、gate(2.0 未満)に届かない。これは Unattended work の
+停止条件なので、module は complete と記録せず判断をユーザーに返す。
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
@@ -399,3 +427,9 @@ escaper と Metadata copy を `std::json` encoder に、8 slot argv copy を vie
 | `spawn_wait8` は引数 8 個の固定形 | clang の link argv は `--triple` 付きでちょうど 8。`run` の child args は exe + 7 個まで | clang は triple 有無で 2 つの呼び出し形に分岐。8 個を超える構成が要る場合は止めて報告する |
 | `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostNative` は絶対 path を正規化して比較する |
 | generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
+| `!T` の error を catch する構文が無い(`try` は伝播だけ) | buildcache の `readEntry` / `entries`: Go は壊れた entry JSON を `json.Unmarshal` の失敗として miss / skip に落とす | `std::json::decode_ignore_unknown` の失敗をそのまま伝播する。壊れた entry は Go: miss、selfhost: error という観測差が残る(実 cache は両 CLI しか書かないので、手で壊した場合だけ) |
+| getcwd 相当が無い | buildcache の `filepath.Abs`(emit-llvm の cache key が絶対 path を含む) | `$PWD` を読んで join / clean する。cwd と PWD がずれた環境では key が Go と揃わない(挙動は正しく、cache 共有だけ効かない)。`TestSelfhostCache` は PWD を明示して比較する |
+| `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
+| `os.CreateTemp` 相当が無い | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `artifact-<unix_millis>-<連番>` を Cache が振る。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
+| `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC を組み立て(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |
+| emit-llvm text cache の key に compiler version が入らない(Go 由来の挙動) | `cacheTarget("emit-llvm")` + 絶対 path + source hash が key の全部で、compiler を変えても同じ key を引く | Go と同じ挙動で移植した。compiler 変更後は stale hit があり得て、実 cache を共有する `TestSelfhostFrontend` の `build --emit-llvm` byte 比較を割り得る(Go CLI 自身も stale text を返す)。cache format の変更は goal の停止条件なので、直すなら別判断(`kizu cache prune` が回避策) |
