@@ -264,6 +264,9 @@ seed をどう供給するか(過去の release binary を使うのか、他の�
 
 1 は `TestSelfhostBootstrap` が gate にします。shipping compiler が build した
 compiler と、それが同じ source から build した compiler の byte 一致を見ます。
+Mach-O では linker が link ごとに作る `LC_UUID` と、そこから導出される ad-hoc code
+signature だけを比較前に zero 化します。これは compiler 出力ではない identity metadata
+で、それ以外の code、data、symbol、load command field はすべて byte 一致を要求します。
 2 は `TestSelfhostFrontend` と `TestSelfhostNative` が持ちます。3 に gate はなく、
 「未移植」表が残りを持ちます。
 selfhost が自分の source を最後まで build する経路はここにしかありません
