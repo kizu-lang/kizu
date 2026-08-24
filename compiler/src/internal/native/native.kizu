@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::buildcache;
 import compiler::internal::diagnostic;
 import std::array;
 import std::fmt;
@@ -13,11 +14,13 @@ import std::string;
 
 // Mechanical port of internal/native/build.go: linking a lowered program
 // with the embedded C runtime into a host executable through the configured
-// C/LLVM toolchain. The build cache is not ported: the runtime object and
-// the executable are built into a claimed temporary directory every time,
-// and the caller removes it when the program has run. The LLVM IR text and
-// the error set numbering are passed alongside Options rather than held in
-// it, because a Kizu struct cannot borrow them.
+// C/LLVM toolchain. The runtime object and the executable live in the
+// shared build cache (compiler::internal::buildcache), keyed the same way
+// the Go CLI keys them, so a build made by one CLI is reused by the other.
+// Claimed temporary directories only hold the toolchain's transient inputs
+// now. The LLVM IR text and the error set numbering are passed alongside
+// Options rather than held in it, because a Kizu struct cannot borrow
+// them.
 
 /// Describes one native link request, the Go `Options` without the fields a
 /// struct cannot borrow (`LLVMIR`, `ErrorSets`).
@@ -34,9 +37,10 @@ pub struct Options {
 }
 
 /// Hands out temporary build directories: TMPDIR (or /tmp) plus
-/// `kizu-native-<monotonic_millis>-<sequence>`. The shipping compiler leans
-/// on os.MkdirTemp and the build cache; without either, uniqueness comes
-/// from the clock and a per-process sequence.
+/// `kizu-native-<monotonic_millis>-<sequence>`, the Go `os.MkdirTemp`.
+/// They hold the toolchain's transient inputs -- the IR, the runtime C
+/// source, the host probe answer -- never the outputs, which the build
+/// cache stores.
 pub struct TempDirs {
     pub base: string::String,
     pub stamp: i64,
@@ -90,19 +94,24 @@ pub fn build(
     if try validate_options(allocator, options) |failed| {
         return move failed;
     }
-    let dir = try temps.claim_dir(io, allocator);
-    defer dir.deinit();
-    let dir_bytes = dir.as_bytes();
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit();
+    var host = string::new(allocator);
+    defer host.deinit();
+    if try host_key(io, allocator, temps, &var host) |failed| {
+        return move failed;
+    }
     var runtime_path = string::new(allocator);
     defer runtime_path.deinit();
-    if try runtime_object(io, allocator, dir_bytes, options, sets, &var runtime_path) |failed| {
-        errdefer failed.deinit();
-        try clean_build_dir(io, allocator, dir_bytes);
+    if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
         return move failed;
     }
     let output = options.output.as_bytes();
     let parent = path::dirname(output);
     try create_dir_all(io, parent);
+    let dir = try temps.claim_dir(io, allocator);
+    defer dir.deinit();
+    let dir_bytes = dir.as_bytes();
     var command = array::new<string::String>(allocator);
     defer command.deinit();
     let runtime_bytes = runtime_path.as_bytes();
@@ -116,10 +125,10 @@ pub fn build(
     return null;
 }
 
-/// Returns an executable for one lowered program, the Go `Executable`
-/// without the build cache: the program is linked into a claimed temporary
-/// directory every time, and the caller removes that directory (the
-/// executable's parent) with `clean_build_dir` once the program has run.
+/// Returns an executable for one lowered program, linking it only when
+/// nothing has it yet, the Go `Executable`: the same IR linked against the
+/// same runtime by the same toolchain is the same executable however often
+/// it is asked for, and the cache is shared with the Go CLI.
 pub fn executable(
     io: Io,
     allocator: Allocator,
@@ -132,38 +141,181 @@ pub fn executable(
     if try validate_options(allocator, options) |failed| {
         return move failed;
     }
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit();
+    var host = string::new(allocator);
+    defer host.deinit();
+    if try host_key(io, allocator, temps, &var host) |failed| {
+        return move failed;
+    }
+    var runtime_path = string::new(allocator);
+    defer runtime_path.deinit();
+    if try runtime_object(io, allocator, temps, &var cache, options, &host, sets, &var runtime_path) |failed| {
+        return move failed;
+    }
+    var target_spelling = string::new(allocator);
+    defer target_spelling.deinit();
+    let runtime_bytes = runtime_path.as_bytes();
+    try executable_cache_target(options, &host, runtime_bytes, &var target_spelling);
+    let target_bytes = target_spelling.as_bytes();
+    let ir_bytes = llvm_ir.as_bytes();
+    let plan = try cache.get_or_build_artifact(
+        io,
+        allocator,
+        "native-exe",
+        target_bytes,
+        ir_bytes,
+        out_exe
+    );
+    match plan {
+        Hit => {
+            return null;
+        },
+        Miss(pending) => {
+            errdefer pending.deinit();
+            var scratch_copy = string::new(allocator);
+            defer scratch_copy.deinit();
+            try scratch_copy.append_string(&pending.scratch);
+            let dir = try temps.claim_dir(io, allocator);
+            defer dir.deinit();
+            let dir_bytes = dir.as_bytes();
+            let scratch_bytes = scratch_copy.as_bytes();
+            var command = array::new<string::String>(allocator);
+            defer command.deinit();
+            if try link(io, allocator, dir_bytes, runtime_bytes, scratch_bytes, options, llvm_ir, &var command) |failed| {
+                errdefer failed.deinit();
+                try cache.discard_artifact(io, move pending);
+                try clean_build_dir(io, allocator, dir_bytes);
+                return move failed;
+            }
+            try cache.finish_artifact(io, allocator, move pending);
+            try clean_build_dir(io, allocator, dir_bytes);
+            return null;
+        },
+    }
+}
+
+/// Spells the host the way the Go toolchain key spells `runtime.GOOS` and
+/// `runtime.GOARCH`, so the cache keys match the Go CLI's byte for byte.
+/// std::process has no host name API: the probe runs `uname -sm` through
+/// the shell into a claimed temporary file and maps the answer. A host the
+/// map does not name is an error rather than a guessed key.
+fn host_key(
+    io: Io,
+    allocator: Allocator,
+    temps: &var TempDirs,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
     let dir = try temps.claim_dir(io, allocator);
     defer dir.deinit();
     let dir_bytes = dir.as_bytes();
-    var runtime_path = string::new(allocator);
-    defer runtime_path.deinit();
-    if try runtime_object(io, allocator, dir_bytes, options, sets, &var runtime_path) |failed| {
-        errdefer failed.deinit();
+    let probe = try path::join(allocator, dir_bytes, "uname.txt");
+    defer probe.deinit();
+    var script = string::new(allocator);
+    defer script.deinit();
+    try script.append_bytes("PATH=/usr/bin:/bin uname -sm > '");
+    try script.append_string(&probe);
+    try script.append_bytes("'");
+    let script_bytes = script.as_bytes();
+    let code = try process::spawn_wait8(3, "/bin/sh", "-c", script_bytes, "", "", "", "", "");
+    if code != 0 {
         try clean_build_dir(io, allocator, dir_bytes);
-        return move failed;
+        return try fail_parts(allocator, "native error: host probe failed", "", "");
     }
-    try out_exe.append_string(&dir);
-    try out_exe.append_bytes("/program");
-    let exe_bytes = out_exe.as_bytes();
-    var command = array::new<string::String>(allocator);
-    defer command.deinit();
-    let runtime_bytes = runtime_path.as_bytes();
-    if try link(io, allocator, dir_bytes, runtime_bytes, exe_bytes, options, llvm_ir, &var command) |failed| {
-        errdefer failed.deinit();
-        try clean_build_dir(io, allocator, dir_bytes);
-        return move failed;
+    let probe_bytes = probe.as_bytes();
+    let text = try fs::read_file(io, allocator, probe_bytes, mem::Limit::Unlimited);
+    defer text.deinit();
+    let answer = text.as_bytes();
+    var end = mem::len(answer);
+    while end > 0 and (answer[end - 1] == cast<u8>(10) or answer[end - 1] == cast<u8>(13)) {
+        end = end - 1;
+    }
+    let trimmed = answer[0..end];
+    let mapped = try append_host_of(trimmed, out);
+    try clean_build_dir(io, allocator, dir_bytes);
+    if !mapped {
+        return try fail_parts(allocator, "native error: unsupported host `", trimmed, "`");
     }
     return null;
 }
 
-/// Removes the files a build wrote into one claimed temporary directory and
-/// the directory itself, the Go `defer os.RemoveAll` of `link` and
-/// `compileRuntime`. Files a failed build did not reach are skipped.
+/// Maps one `uname -sm` answer to the Go `GOOS-GOARCH` spelling.
+fn append_host_of(answer: []u8, out: &var string::String) -> !bool {
+    if mem::equal_bytes(answer, "Darwin arm64") {
+        try out.append_bytes("darwin-arm64");
+        return true;
+    }
+    if mem::equal_bytes(answer, "Darwin x86_64") {
+        try out.append_bytes("darwin-amd64");
+        return true;
+    }
+    if mem::equal_bytes(answer, "Linux x86_64") {
+        try out.append_bytes("linux-amd64");
+        return true;
+    }
+    if mem::equal_bytes(answer, "Linux aarch64") {
+        try out.append_bytes("linux-arm64");
+        return true;
+    }
+    return false;
+}
+
+/// Spells what changes the runtime object but is not in its source, the Go
+/// `runtimeCacheTarget` over `toolchainKey`, `/`-joined in the same order.
+fn runtime_cache_target(
+    options: &Options,
+    host: &string::String,
+    out: &var string::String
+) -> !void {
+    try out.append_bytes("native-runtime");
+    return append_toolchain_key(options, host, out);
+}
+
+/// Spells what the executable is made of besides the IR, the Go
+/// `executableCacheTarget`: the toolchain key and the runtime object's own
+/// stored name, so a program built against an older runtime is a different
+/// artifact rather than the same one.
+fn executable_cache_target(
+    options: &Options,
+    host: &string::String,
+    runtime_path: []u8,
+    out: &var string::String
+) -> !void {
+    try out.append_bytes("native-exe");
+    try append_toolchain_key(options, host, out);
+    try out.append_byte(cast<u8>(47));
+    let base = path::basename(runtime_path);
+    return out.append_bytes(base);
+}
+
+/// Appends the Go `toolchainKey` parts, `/`-joined: the driver, the host
+/// it builds on, and the flags it is asked to honour.
+fn append_toolchain_key(
+    options: &Options,
+    host: &string::String,
+    out: &var string::String
+) -> !void {
+    try out.append_byte(cast<u8>(47));
+    try out.append_string(&options.linker);
+    try out.append_byte(cast<u8>(47));
+    try out.append_string(host);
+    if options.triple.len() > 0 {
+        try out.append_bytes("/-target/");
+        try out.append_string(&options.triple);
+    }
+    try out.append_byte(cast<u8>(47));
+    let level = clang_optimization_flag(options.opt);
+    return out.append_bytes(level);
+}
+
+/// Removes the transient inputs a build wrote into one claimed temporary
+/// directory and the directory itself, the Go `defer os.RemoveAll` of
+/// `link`, `compileRuntime` and the host probe. Files a failed build did
+/// not reach are skipped.
 pub fn clean_build_dir(io: Io, allocator: Allocator, dir: []u8) -> !void {
     try remove_temp_file(io, allocator, dir, "runtime.c");
-    try remove_temp_file(io, allocator, dir, "runtime.o");
     try remove_temp_file(io, allocator, dir, "main.ll");
-    try remove_temp_file(io, allocator, dir, "program");
+    try remove_temp_file(io, allocator, dir, "uname.txt");
     let found = try fs::exists(io, dir);
     if found {
         try fs::remove_dir(io, dir);
@@ -249,14 +401,18 @@ fn validate_options(allocator: Allocator, options: &Options) -> !?diagnostic::Di
     return null;
 }
 
-/// Compiles the runtime the program links with into one object file in the
-/// claimed directory, the Go `runtimeObject` without the build cache, and
-/// appends the object path to out.
+/// Returns the compiled runtime to link, compiling it only when nothing
+/// has it yet, the Go `runtimeObject`: the object lives in the shared
+/// build cache under the toolchain key, so a runtime compiled by either
+/// CLI serves both. On a miss the source is compiled into the cache's
+/// scratch path through a claimed temporary directory.
 fn runtime_object(
     io: Io,
     allocator: Allocator,
-    dir: []u8,
+    temps: &var TempDirs,
+    cache: &var buildcache::Cache,
     options: &Options,
+    host: &string::String,
     sets: &map::Map<[]u8, map::Map<[]u8, i64>>,
     out: &var string::String
 ) -> !?diagnostic::Diagnostic {
@@ -267,10 +423,43 @@ fn runtime_object(
     defer source.deinit();
     try error_set_constants(allocator, sets, &var source);
     try source.append_bytes(runtime_source());
-    try out.append_bytes(dir);
-    try out.append_bytes("/runtime.o");
-    let object_bytes = out.as_bytes();
-    return compile_runtime(io, allocator, dir, &source, object_bytes, options);
+    var target_spelling = string::new(allocator);
+    defer target_spelling.deinit();
+    try runtime_cache_target(options, host, &var target_spelling);
+    let target_bytes = target_spelling.as_bytes();
+    let source_bytes = source.as_bytes();
+    let plan = try cache.get_or_build_artifact(
+        io,
+        allocator,
+        "native-runtime.c",
+        target_bytes,
+        source_bytes,
+        out
+    );
+    match plan {
+        Hit => {
+            return null;
+        },
+        Miss(pending) => {
+            errdefer pending.deinit();
+            var scratch_copy = string::new(allocator);
+            defer scratch_copy.deinit();
+            try scratch_copy.append_string(&pending.scratch);
+            let dir = try temps.claim_dir(io, allocator);
+            defer dir.deinit();
+            let dir_bytes = dir.as_bytes();
+            let scratch_bytes = scratch_copy.as_bytes();
+            if try compile_runtime(io, allocator, dir_bytes, &source, scratch_bytes, options) |failed| {
+                errdefer failed.deinit();
+                try cache.discard_artifact(io, move pending);
+                try clean_build_dir(io, allocator, dir_bytes);
+                return move failed;
+            }
+            try cache.finish_artifact(io, allocator, move pending);
+            try clean_build_dir(io, allocator, dir_bytes);
+            return null;
+        },
+    }
 }
 
 /// Compiles the runtime source into one object file, the Go

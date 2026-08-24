@@ -1,4 +1,5 @@
 import compiler::internal::ast;
+import compiler::internal::buildcache;
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
 import compiler::internal::lexer;
@@ -87,6 +88,10 @@ fn main() -> !process::ExitStatus {
         let code = try test_command(io, allocator, lib_dir_bytes, target, next, count);
         return exit_of(code);
     }
+    if mem::equal_bytes(command, "cache") {
+        let code = try cache_command(io, allocator, target, next, count);
+        return exit_of(code);
+    }
     if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--target") {
         if count - next < 3 {
             try usage(io);
@@ -150,8 +155,63 @@ fn usage(io: Io) -> !void {
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] test <file|package> [-- args...]");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
     try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --emit-llvm [--opt] <file|package>");
     return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --target native [native-options] <file|package>");
+}
+
+/// Runs `cache <status|prune>`, the Go `cacheCommand`, printing the same
+/// lines the Go CLI prints.
+fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i64) -> !i64 {
+    if count - next != 2 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid cache command");
+        return 1;
+    }
+    if mem::equal_bytes(action, "status") {
+        var cache = try buildcache::new(io, allocator);
+        defer cache.deinit();
+        let current = try cache.status(io, allocator);
+        defer current.deinit();
+        var dir_line = string::new(allocator);
+        defer dir_line.deinit();
+        try dir_line.append_bytes("cache dir: ");
+        try dir_line.append_string(&current.dir);
+        let dir_line_bytes = dir_line.as_bytes();
+        try io::write_stdout_line(io, dir_line_bytes);
+        try write_count_line(io, allocator, "entries: ", current.entries);
+        try write_count_line(io, allocator, "size bytes: ", current.size_bytes);
+        try write_count_line(io, allocator, "max bytes: ", current.max_bytes);
+        return 0;
+    }
+    if mem::equal_bytes(action, "prune") {
+        var cache = try buildcache::new(io, allocator);
+        defer cache.deinit();
+        let removed = try cache.prune(io, allocator);
+        var line = string::new(allocator);
+        defer line.deinit();
+        try line.append_bytes("cache pruned: removed ");
+        try fmt::append_i64(&var line, removed.entries);
+        try line.append_bytes(" entries, freed ");
+        try fmt::append_i64(&var line, removed.bytes);
+        try line.append_bytes(" bytes");
+        let line_bytes = line.as_bytes();
+        try io::write_stdout_line(io, line_bytes);
+        return 0;
+    }
+    try usage(io);
+    try io::write_stderr_line(io, "error: invalid cache command");
+    return 1;
+}
+
+/// Writes one `label: value` stdout line.
+fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !void {
+    var line = string::new(allocator);
+    defer line.deinit();
+    try line.append_bytes(label);
+    try fmt::append_i64(&var line, value);
+    let line_bytes = line.as_bytes();
+    return io::write_stdout_line(io, line_bytes);
 }
 
 /// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
@@ -246,11 +306,80 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !i
     }
 }
 
-/// Lowers a checked file or package to typed SSA IR and prints it, the Go
-/// `irCommand` over `lowerFile` / `lowerPackage`, or the LLVM IR emitted
-/// from it, the Go `emitLLVMFile`: a package also gets the `main` entry
-/// wrapper the native build adds.
+/// Lowers a checked file or package and prints its IR dump or its LLVM
+/// IR. `build --emit-llvm` for one source file goes through the build
+/// cache the way the Go `emitLLVMFile` does; a package and the `ir`
+/// command lower every time, the Go `irCommand` and `lowerPackage`.
 fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
+    if output == Output::Llvm {
+        let package = try is_package_root(io, target);
+        if !package {
+            return emit_llvm_file(io, allocator, lib_dir, target, opt);
+        }
+    }
+    var text = string::new(allocator);
+    defer text.deinit();
+    let code = try collect_target_output(io, allocator, lib_dir, target, opt, output, &var text);
+    if code != 0 {
+        return code;
+    }
+    let text_bytes = text.as_bytes();
+    try io::write_stdout_line(io, text_bytes);
+    return 0;
+}
+
+/// Prints the LLVM IR one source file lowers to, reusing the cached text
+/// when the file has not changed, the Go `emitLLVMFile` over `GetOrBuild`.
+fn emit_llvm_file(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool) -> !i64 {
+    var cache = try buildcache::new(io, allocator);
+    defer cache.deinit();
+    var text = string::new(allocator);
+    defer text.deinit();
+    let cache_target = emit_llvm_cache_target(opt);
+    let plan = try cache.get_or_build(io, allocator, target, cache_target, &var text);
+    match plan {
+        Hit => {
+            let text_bytes = text.as_bytes();
+            try io::write_stdout_line(io, text_bytes);
+            return 0;
+        },
+        Miss(input) => {
+            errdefer input.deinit();
+            let code = try collect_target_output(io, allocator, lib_dir, target, opt, Output::Llvm, &var text);
+            if code != 0 {
+                input.deinit();
+                return code;
+            }
+            let text_bytes = text.as_bytes();
+            try cache.finish_get_or_build(io, allocator, move input, text_bytes);
+            try io::write_stdout_line(io, text_bytes);
+            return 0;
+        },
+    }
+}
+
+/// Names the emit-llvm cache target, the Go `cacheTarget` over the
+/// optimization level.
+fn emit_llvm_cache_target(opt: bool) -> []u8 {
+    if opt {
+        return "emit-llvm-opt";
+    }
+    return "emit-llvm";
+}
+
+/// Lowers a checked file or package to typed SSA IR or LLVM IR and
+/// appends the text to out_text: a package also gets the `main` entry
+/// wrapper the native build adds. Diagnostics are reported here; the
+/// caller prints the collected text.
+fn collect_target_output(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    target: []u8,
+    opt: bool,
+    output: Output,
+    out_text: &var string::String
+) -> !i64 {
     var tree = ast::new(allocator);
     defer tree.deinit();
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -314,21 +443,17 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
                         }
                     }
                     if output == Output::Llvm {
-                        var text = string::new(allocator);
-                        defer text.deinit();
-                        if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
+                        if try llvm::emit(allocator, &var lowerer.module, out_text) |failed| {
                             defer failed.deinit();
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
                         }
-                        let text_bytes = text.as_bytes();
-                        try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
                     let rendered = try ir::render(allocator, &lowerer.module);
                     defer rendered.deinit();
                     let rendered_bytes = rendered.as_bytes();
-                    try io::write_stdout_line(io, rendered_bytes);
+                    try out_text.append_bytes(rendered_bytes);
                     return 0;
                 },
             }
@@ -776,8 +901,6 @@ fn native_target(
                     }
                     let exe_bytes = exe.as_bytes();
                     let code = try execute_built(allocator, exe_bytes, child_start, child_count);
-                    let run_dir_bytes = path::dirname(exe_bytes);
-                    try native::clean_build_dir(io, allocator, run_dir_bytes);
                     if code != 0 {
                         return code;
                     }
