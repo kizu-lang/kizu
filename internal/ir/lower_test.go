@@ -870,10 +870,10 @@ fn main() -> !void {
 }`)
 	got := Dump(module)
 	for _, want := range []string{
-		"  error.try %1: !void, cleanup call.std::string::String.deinit" +
+		"  error.try %1: std::mem::Error!void, cleanup call.std::string::String.deinit" +
 			" %value: std::string::String\n",
 		"  %2: std::mem::Box<std::string::String> = error.try" +
-			" %1: !std::mem::Box<std::string::String>," +
+			" %1: std::mem::Error!std::mem::Box<std::string::String>," +
 			" cleanup call.std::string::String.deinit %value: std::string::String\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -894,8 +894,9 @@ fn main() -> !void {
     return;
 }`)
 	got := Dump(module)
-	want := "  %1: !void = array.append %self: std::array::Array<i64>, %value: i64, i64\n" +
-		"  return %1: !void\n"
+	want := "  %1: std::mem::Error!void = array.append" +
+		" %self: std::array::Array<i64>, %value: i64, i64\n" +
+		"  return %1: std::mem::Error!void\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
 	}

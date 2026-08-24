@@ -9,7 +9,7 @@ allocator の規則)は言語の一部なので SPEC §14.3 と §14.4 にあり
 
 ```text
 std::mem::page_allocator() -> Allocator
-std::mem::box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
+std::mem::box<T>(allocator: Allocator, value: T) -> std::mem::Error!std::mem::Box<T>
 std::mem::leak<T>(value: T) -> void
 box.borrow() -> &T
 box.borrow_mut() -> &var T

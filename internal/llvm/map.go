@@ -70,8 +70,9 @@ func (e *emitter) writeMapNew(instr *ir.Instr) error {
 
 // writeMapInsert lowers Map.insert(key, value).
 func (e *emitter) writeMapInsert(instr *ir.Instr) error {
-	if len(instr.Args) != 3 || instr.Args[1].Type != "[]u8" || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: map.insert expects Map, []u8, V -> !void")
+	if len(instr.Args) != 3 || instr.Args[1].Type != "[]u8" ||
+		instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf("llvm error: map.insert expects Map, []u8, V -> std::mem::Error!void")
 	}
 	mapValue := e.value(instr.Args[0])
 	key, err := e.sliceValue(instr.Args[1])

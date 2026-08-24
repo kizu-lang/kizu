@@ -4254,7 +4254,7 @@ func (c *Checker) checkBoxConstructor(
 		return "", true, errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
 	}
-	return Type(fmt.Sprintf("!std::mem::Box<%s>", elem)), true, nil
+	return Type(fmt.Sprintf("std::mem::Error!std::mem::Box<%s>", elem)), true, nil
 }
 
 // checkBuiltinBoxMethod validates Box primitives that back source wrappers.
@@ -4548,7 +4548,7 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 			return "", errorf("type error: `Map.insert` expects %s value, got %s",
 				valueType, got)
 		}
-		return "!void", nil
+		return "std::mem::Error!void", nil
 	case "get":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
 			return "", err
@@ -5807,11 +5807,24 @@ func (c *Checker) checkStringMethod(
 	unsafe unsafeMark,
 ) (Type, error) {
 	switch name {
-	case "append_bytes", "append_byte", "append_string", "reserve", "truncate":
+	case "append_bytes", "append_byte", "append_string":
+		// Growing needs memory and nothing else, so the failure is the
+		// allocator's one value (ADR-0128).
 		if err := c.checkStringMutatorArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return "!void", nil
+		return "std::mem::Error!void", nil
+	case "reserve":
+		// The requested size itself can be refused, and memory can run out.
+		if err := c.checkStringMutatorArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "std::string::GrowError!void", nil
+	case "truncate":
+		if err := c.checkStringMutatorArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "std::string::Error!void", nil
 	case "len", "capacity":
 		if len(args) != 0 {
 			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
@@ -6182,7 +6195,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return "!void", nil
+		return "std::array::Error!void", nil
 	case "clear":
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
@@ -6362,7 +6375,7 @@ func (c *Checker) checkMapInsert(
 	if !sameType(got, valueType) {
 		return "", errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkMapKeyArg validates one []u8 lookup key.

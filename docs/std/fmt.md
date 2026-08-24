@@ -6,16 +6,17 @@ caller が明示 allocator 付きの `std::string::String` を用意し、
 formatting API はその buffer に bytes を append します。
 
 ```text
-std::fmt::append_i64(out: &var std::string::String, value: i64) -> !void
-std::fmt::append_bool(out: &var std::string::String, value: bool) -> !void
+std::fmt::append_i64(out: &var std::string::String, value: i64) -> std::mem::Error!void
+std::fmt::append_bool(out: &var std::string::String, value: bool) -> std::mem::Error!void
 std::fmt::append_bytes_literal(
     out: &var std::string::String,
     bytes: []u8,
-) -> !void
+) -> std::mem::Error!void
 ```
 
 hidden global allocator は使いません。
-allocation failure は `String` の allocator から `!void` error として伝播します。
+allocation failure は `String` の allocator から `std::mem::Error::OutOfMemory`
+として伝播します(ADR-0128)。
 output は conformance test 向けに deterministic ASCII とします。
 `append_i64` は 10 進表記で、負数には `-` を付け、`+` と不要な leading zero は出しません。
 `append_bool` は `true` または `false` を出します。

@@ -4996,7 +4996,7 @@ func (c *Checker) checkBoxConstructor(
 		return "", errorf("box error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
 	}
-	return fmt.Sprintf("!std::mem::Box<%s>", elem), nil
+	return fmt.Sprintf("std::mem::Error!std::mem::Box<%s>", elem), nil
 }
 
 // checkBuiltinBoxMethod validates std-only Box method primitives.
@@ -5212,7 +5212,7 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 		if got != valueType {
 			return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 		}
-		return "!void", nil
+		return "std::mem::Error!void", nil
 	case "get":
 		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env); err != nil {
 			return "", err
@@ -6609,7 +6609,7 @@ func (c *Checker) checkStringBytesArg(
 	if !sameOwnershipType(got, "[]u8") {
 		return "", errorf("string error: `String.%s` expects []u8, got %s", name, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkStringSourceArg validates append_string reading its source String
@@ -6629,7 +6629,7 @@ func (c *Checker) checkStringSourceArg(
 	if !sameOwnershipType(got, "std::string::String") {
 		return "", errorf("string error: `String.%s` expects String, got %s", name, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkStringReserveArg validates reserve without moving the count.
@@ -6648,7 +6648,12 @@ func (c *Checker) checkStringReserveArg(
 	if got != "i64" {
 		return "", errorf("string error: `String.%s` expects i64, got %s", name, got)
 	}
-	return "!void", nil
+	// reserve can be refused a size or run out of memory; truncate only
+	// refuses a bad length.
+	if name == "truncate" {
+		return "std::string::Error!void", nil
+	}
+	return "std::string::GrowError!void", nil
 }
 
 // checkStringByteArg validates append_byte without moving the source value.
@@ -6667,7 +6672,7 @@ func (c *Checker) checkStringByteArg(
 	if got != "u8" {
 		return "", errorf("string error: `String.%s` expects u8, got %s", name, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkArrayMethod validates ownership effects for owned Array<T> methods.
@@ -6748,7 +6753,7 @@ func (c *Checker) checkArraySwap(args []ast.Expression, env *scope) (string, err
 			return "", errorf("array error: `Array.swap` expects i64 index, got %s", got)
 		}
 	}
-	return "!void", nil
+	return "std::array::Error!void", nil
 }
 
 // checkArrayCopyMethod dispatches operations whose result duplicates copy
@@ -6785,7 +6790,7 @@ func (c *Checker) checkArrayClone(
 	if !c.isCopyType(elem) {
 		return "", errorf("array error: `Array.clone` requires copy element")
 	}
-	return "!std::array::Array<" + elem + ">", nil
+	return "std::mem::Error!std::array::Array<" + elem + ">", nil
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
@@ -6831,7 +6836,11 @@ func (c *Checker) checkArrayCountMutation(
 	} else if got != "i64" {
 		return "", errorf("array error: `Array.%s` expects i64, got %s", name, got)
 	}
-	return "!void", nil
+	// reserve fails only for memory; truncate refuses a bad length.
+	if name == "truncate" {
+		return "std::array::Error!void", nil
+	}
+	return "std::mem::Error!void", nil
 }
 
 // checkArrayAppend validates append mutation and element move.
@@ -6850,7 +6859,7 @@ func (c *Checker) checkArrayAppend(
 	if got != elem {
 		return "", errorf("array error: `Array.append` expects %s, got %s", elem, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkArrayPop validates moving one initialized element out of an Array.
@@ -6954,7 +6963,7 @@ func (c *Checker) checkArraySet(
 	if got != elem {
 		return "", errorf("array error: `Array.set` expects %s value, got %s", elem, got)
 	}
-	return "!void", nil
+	return "std::array::Error!void", nil
 }
 
 // checkArrayGet validates copy-only Array<T> reads in the prototype.
@@ -7088,7 +7097,7 @@ func (c *Checker) checkMapInsert(
 	if !sameOwnershipType(got, valueType) {
 		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
-	return "!void", nil
+	return "std::mem::Error!void", nil
 }
 
 // checkMapIndexArg validates one i64 insertion-position argument.

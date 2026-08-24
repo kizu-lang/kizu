@@ -367,6 +367,12 @@ func (c *Checker) checkMetaConstruct(
 	if err != nil {
 		return "", err
 	}
+	// The union wraps the per-field worker's failures, and those already
+	// propagate into the enclosing function's return set through the
+	// expansion's own `try`s — so the result carries that set (ADR-0128).
+	if errorPart, _, ok := c.types.errorUnionParts(c.currentReturn); ok && errorPart != "" {
+		return Type(string(errorPart) + "!" + string(built)), nil
+	}
 	return Type("!" + string(built)), nil
 }
 

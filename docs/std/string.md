@@ -4,14 +4,14 @@
 
 ```text
 std::string::new(allocator: Allocator) -> std::string::String
-std::string::from_bytes(allocator: Allocator, bytes: []u8) -> !std::string::String
-std::string::join(allocator: Allocator, parts: &std::array::Array<std::string::String>, separator: []u8) -> !std::string::String
+std::string::from_bytes(allocator: Allocator, bytes: []u8) -> std::mem::Error!std::string::String
+std::string::join(allocator: Allocator, parts: &std::array::Array<std::string::String>, separator: []u8) -> std::string::GrowError!std::string::String
 std::string::trim_space_in_place(value: &var std::string::String) -> void
-string.append_bytes(bytes: []u8) -> !void
-string.append_byte(byte: u8) -> !void
-string.append_string(other: &std::string::String) -> !void
-string.reserve(additional: i64) -> !void
-string.truncate(length: i64) -> !void
+string.append_bytes(bytes: []u8) -> std::mem::Error!void
+string.append_byte(byte: u8) -> std::mem::Error!void
+string.append_string(other: &std::string::String) -> std::mem::Error!void
+string.reserve(additional: i64) -> std::string::GrowError!void
+string.truncate(length: i64) -> std::string::Error!void
 string.len() -> i64
 string.capacity() -> i64
 string.as_bytes() -> []u8
@@ -33,15 +33,18 @@ move されません。
 空の String を返します。要素が 1 つでも borrow を返り値へ escape させず、独立した
 owner を返すため bytes を copy します。出力長が `i64` に収まらない場合は
 `std::string::Error::InvalidLength`、確保できない場合は
-`std::array::Error::OutOfMemory` です。
+`std::mem::Error::OutOfMemory` です(`GrowError` は両 set の合成、ADR-0128)。
 `trim_space_in_place` は String の両端から次の Unicode White_Space 25 code point を
 除きます: U+0009–U+000D、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、
 U+2028–U+2029、U+202F、U+205F、U+3000。この集合は Unicode 15.0 / Go 1.22 と
 一致し、暗黙には更新しません。U+180E、U+FEFF、妥当な U+FFFD、不正 UTF-8 byte は
 空白ではありません。不正 byte は 1 byte の非空白として保持します。処理は確保せず、
 capacity を保ち、内部の byte と空白は変更しません。
-`reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
-`truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
+`reserve` は少なくとも `additional` byte 分の追加 capacity を確保します。負の
+`additional` は `Error::InvalidLength`、確保できない場合は
+`std::mem::Error::OutOfMemory` です。
+`truncate` は length を短くし、capacity は保持します。範囲外の length は
+`Error::InvalidLength` です。
 `capacity` は現在の capacity を `i64` で返します。
 capacity の増加戦略は実装が決めます。保証するのは `capacity() >= len()` だけであり、
 特定の値に依存するコードは実装を固定してしまうため書けません。

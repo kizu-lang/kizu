@@ -9,21 +9,21 @@ encode は明示 streaming encoder です。derive、hidden hook、method discov
 std::json::encoder(allocator: Allocator) -> std::json::Encoder
 std::json::encoder_with_spaces(allocator: Allocator, width: i64) -> std::json::Encoder
 std::json::encoder_with_tabs(allocator: Allocator, width: i64) -> std::json::Encoder
-encoder.begin_object() -> !void
-encoder.end_object() -> !void
-encoder.begin_array() -> !void
-encoder.end_array() -> !void
-encoder.begin_object_field(name: []u8) -> !void
-encoder.begin_array_field(name: []u8) -> !void
-encoder.write_i64(value: i64) -> !void
-encoder.write_bool(value: bool) -> !void
-encoder.write_null() -> !void
-encoder.write_bytes(value: []u8) -> !void
-encoder.write_i64_field(name: []u8, value: i64) -> !void
-encoder.write_bool_field(name: []u8, value: bool) -> !void
-encoder.write_null_field(name: []u8) -> !void
-encoder.write_bytes_field(name: []u8, value: []u8) -> !void
-encoder.finish_into(out: &var std::string::String) -> !void
+encoder.begin_object() -> std::mem::Error!void
+encoder.end_object() -> std::mem::Error!void
+encoder.begin_array() -> std::mem::Error!void
+encoder.end_array() -> std::mem::Error!void
+encoder.begin_object_field(name: []u8) -> std::mem::Error!void
+encoder.begin_array_field(name: []u8) -> std::mem::Error!void
+encoder.write_i64(value: i64) -> std::mem::Error!void
+encoder.write_bool(value: bool) -> std::mem::Error!void
+encoder.write_null() -> std::mem::Error!void
+encoder.write_bytes(value: []u8) -> std::mem::Error!void
+encoder.write_i64_field(name: []u8, value: i64) -> std::mem::Error!void
+encoder.write_bool_field(name: []u8, value: bool) -> std::mem::Error!void
+encoder.write_null_field(name: []u8) -> std::mem::Error!void
+encoder.write_bytes_field(name: []u8, value: []u8) -> std::mem::Error!void
+encoder.finish_into(out: &var std::string::String) -> std::mem::Error!void
 encoder.deinit() -> void
 ```
 
@@ -70,20 +70,20 @@ std::json::encode<T>(
     allocator: Allocator,
     value: &T,
     out: &var std::string::String,
-) -> !void
-std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> !void
+) -> std::mem::Error!void
+std::json::encode_value<T>(encoder: &var std::json::Encoder, value: &T) -> std::mem::Error!void
 std::json::encode_with_spaces<T>(
     allocator: Allocator,
     width: i64,
     value: &T,
     out: &var std::string::String,
-) -> !void
+) -> std::mem::Error!void
 std::json::encode_with_tabs<T>(
     allocator: Allocator,
     width: i64,
     value: &T,
     out: &var std::string::String,
-) -> !void
+) -> std::mem::Error!void
 ```
 
 encode できる型は次で閉じています。
@@ -135,8 +135,8 @@ program の型ではなく JSON 自身の形を名指しているので、tag �
 ## decode
 
 ```text
-std::json::decode<T>(allocator: Allocator, bytes: []u8) -> !T
-std::json::decode_ignore_unknown<T>(allocator: Allocator, bytes: []u8) -> !T
+std::json::decode<T>(allocator: Allocator, bytes: []u8) -> std::json::DecodeError!T
+std::json::decode_ignore_unknown<T>(allocator: Allocator, bytes: []u8) -> std::json::DecodeError!T
 ```
 
 bytes から直接 `T` を組み立てます。document object を挟みません。DOM を持つと
@@ -219,7 +219,10 @@ std::json::Error::DepthExceeded     入れ子が 128 段を超えた
 ```
 
 原因と回復が違うものを分けています(原理 7)。壊れた入力、型と document の
-食い違い、上限超過、確保失敗はそれぞれ別の error です。
+食い違い、上限超過、確保失敗はそれぞれ別の error です。decode は document の
+失敗(`Error`)と確保失敗(`std::mem::Error`)の両方を運ぶため、合成 set
+`std::json::DecodeError = Error or std::mem::Error` を返します(ADR-0128)。
+`else |err|` の `match` は両 set の member を網羅するか `_` で受けます。
 
 ### 制限
 

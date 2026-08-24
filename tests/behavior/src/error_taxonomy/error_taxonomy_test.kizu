@@ -1,0 +1,116 @@
+import std::array;
+import std::json;
+import std::mem;
+import std::string;
+import std::testing;
+
+// A fixed buffer this small refuses growth deterministically, so the tests
+// can watch the allocator's failure value without depending on the host.
+fn tiny_allocator(scratch: &var []u8) -> Allocator {
+    return mem::fixed_buffer(scratch);
+}
+
+// Allocation failure is one value: a container that cannot grow reports the
+// allocator's `std::mem::Error::OutOfMemory`, not a set of its own
+// (ADR-0128), so a caller can catch it and match one member.
+test "container growth failure is the allocator's value" {
+    var storage = [16]u8{};
+    let scratch = storage.as_mut_bytes();
+    let limited = tiny_allocator(scratch);
+    var values = array::new<i64>(limited);
+    defer values.deinit();
+    var caught = 0;
+    var index = 0;
+    while index < 100 {
+        index = index + 1;
+        if values.append(index) {
+            continue;
+        } else |err| {
+            match err {
+                OutOfMemory => { caught = caught + 1; },
+            }
+            break;
+        }
+    }
+    testing::expect(caught == 1);
+}
+
+// String growth reports the same allocator value: the String being built on
+// Array<u8> is an implementation detail and stays out of the signature.
+test "string growth failure is the allocator's value" {
+    var storage = [16]u8{};
+    let scratch = storage.as_mut_bytes();
+    let limited = tiny_allocator(scratch);
+    var text = string::new(limited);
+    defer text.deinit();
+    let long = "0123456789abcdef0123456789abcdef";
+    var got = 0;
+    if text.append_bytes(long) {
+        got = 1;
+    } else |err| {
+        match err {
+            OutOfMemory => { got = -1; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+}
+
+pub struct Visit {
+    pub user: string::String,
+    pub count: i64,
+}
+
+fn (self: Visit) deinit() -> void {
+    self.user.deinit();
+    return;
+}
+
+// `DecodeError = Error or std::mem::Error` carries a document failure and an
+// allocation failure through one union without converting either: the match
+// covers members of both sets, qualified only where nothing collides.
+test "json decode failures are caught and matched" {
+    let allocator = mem::page_allocator();
+    var got = 0;
+    let broken_document =
+        \\{"user": 12}
+    ;
+    if json::decode<Visit>(allocator, broken_document) |visit| {
+        visit.deinit();
+        got = 1;
+    } else |err| {
+        match err {
+            UnexpectedToken => { got = -1; },
+            MissingField => { got = -2; },
+            UnknownField => { got = -3; },
+            DuplicateField => { got = -4; },
+            InvalidNumber => { got = -5; },
+            InvalidEscape => { got = -6; },
+            DepthExceeded => { got = -7; },
+            OutOfMemory => { got = -8; },
+        }
+    }
+    testing::expect_equal<i64>(-1, got);
+}
+
+// The catch default form works on the composed set the same way: a broken
+// document falls back without touching the member.
+test "json decode catch takes the default" {
+    let allocator = mem::page_allocator();
+    let full_document =
+        \\{"user": "alice", "count": 3}
+    ;
+    let count = decode_count(allocator, full_document) catch -1;
+    testing::expect_equal<i64>(3, count);
+    let cut_document =
+        \\{"user": "alice"
+    ;
+    let broken = decode_count(allocator, cut_document) catch -1;
+    testing::expect_equal<i64>(-1, broken);
+}
+
+fn decode_count(allocator: Allocator, bytes: []u8) -> json::DecodeError!i64 {
+    let visit = try json::decode_ignore_unknown<Visit>(allocator, bytes);
+    let count = visit.count;
+    visit.deinit();
+    return count;
+}
