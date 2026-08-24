@@ -251,8 +251,20 @@ compiler 全体の cutover は module の完了とは別で、self-build した 
 source をもう一度 build でき、既存の examples と `tests/behavior/` を shipping
 compiler と同じ契約で通した状態です。
 
-binary byte identity や LLVM text identity は要求しません。契約は実行結果、
-diagnostic、artifact の意味が持ちます。
+前半は `TestSelfhostBootstrap` が gate にします。shipping compiler が build した
+compiler と、それが同じ source から build した compiler の byte 一致を見ます。
+selfhost が自分の source を最後まで build する経路はここにしかありません
+(`TestSelfhostFrontend` は `compiler/` を emit-llvm text までしか見ず、
+`TestSelfhostNative` が link して実行するのは examples / `tests/behavior` /
+module examples で、`compiler/` は入っていない)。
+
+ここだけ byte 一致を使うのは、fixed point の主張がまさに「両者が同じもの」で
+あることと、代わりに挙動で示すなら corpus 全体をもう一周する必要があるからです。
+golden text との一致ではなく、同じものを作るはずの 2 実装の差分比較なので、
+codegen が変われば両方が一緒に動きます。
+
+それ以外に binary byte identity や LLVM text identity は要求しません。契約は
+実行結果、diagnostic、artifact の意味が持ちます。
 
 ## Module status
 
@@ -280,7 +292,7 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 68 | —(別記録) | buildcache / native の経路と `TestSelfhostCache` 経由 |
-| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 893 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
+| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 893 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative`、compiler/ 自身を最後まで build して同じ compiler になることは `TestSelfhostBootstrap` |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
