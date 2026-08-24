@@ -60,7 +60,7 @@ fn main() -> !process::ExitStatus {
         }
     }
     if lib_dir.len() == 0 {
-        try resolve_lib_dir(&var lib_dir);
+        try resolve_lib_dir(io, allocator, &var lib_dir);
     }
     if count - next < 1 {
         try usage(io);
@@ -454,14 +454,41 @@ fn import_c_header_source(io: Io, allocator: Allocator, source_text: string::Str
     }
 }
 
-/// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
-/// The Go CLI also looks next to its own binary, but std::process does not
-/// expose the executable path, so the tree has to be named explicitly here.
-fn resolve_lib_dir(out: &var string::String) -> !void {
+/// Decides the library tree std is read from, the Go `resolveLibDir`: the
+/// caller says where it is, or it sits next to the running binary. Nothing is
+/// searched for, and the current directory is never consulted -- a program has
+/// to mean the same thing whatever directory it is compiled from.
+fn resolve_lib_dir(io: Io, allocator: Allocator, out: &var string::String) -> !void {
+    // Go reads the variable with os.Getenv, which cannot tell an empty value
+    // from an unset one, so an empty one names no tree here either.
     if process::env("KIZU_LIB_DIR") |from_env| {
-        return out.append_bytes(from_env);
+        if mem::len(from_env) > 0 {
+            return out.append_bytes(from_env);
+        }
     }
-    return out.append_bytes("lib/kizu");
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit();
+    let executable_bytes = executable.as_bytes();
+    // An install reached through a symlink names the tree beside the real
+    // binary, so resolve it; a path that cannot be resolved is used as it is.
+    let resolved = fs::real_path(io, allocator, executable_bytes) catch
+        return append_lib_dir_beside(allocator, out, executable_bytes);
+    defer resolved.deinit();
+    let resolved_bytes = resolved.as_bytes();
+    return append_lib_dir_beside(allocator, out, resolved_bytes);
+}
+
+/// Appends `<prefix>/lib/kizu` for an executable at `<prefix>/bin/kizu`.
+fn append_lib_dir_beside(
+    allocator: Allocator,
+    out: &var string::String,
+    executable: []u8
+) -> !void {
+    let prefix = path::dirname(path::dirname(executable));
+    let lib = try path::join(allocator, prefix, "lib/kizu");
+    defer lib.deinit();
+    let lib_bytes = lib.as_bytes();
+    return out.append_bytes(lib_bytes);
 }
 
 union MarkerInsertResult {
