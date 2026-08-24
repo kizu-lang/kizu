@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
+	kizufmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
@@ -39,6 +41,7 @@ func TestSelfhostFrontend(t *testing.T) {
 		t.Fatalf("build selfhost compiler: %v\n%s", err, out)
 	}
 	files := globFiles(t, "../../examples/*.kizu", "../../examples/negative/*.kizu")
+	fmtFiles := globKizuTreeFiles(t, "../../examples", "../../tests/behavior", "../../compiler/src")
 	packages := []string{"../../tests/behavior", "../../compiler"}
 	packages = append(packages, globDirs(t, "../../examples/modules/*")...)
 	for _, file := range files {
@@ -54,6 +57,14 @@ func TestSelfhostFrontend(t *testing.T) {
 		})
 		runSelfhostIRSubtests(t, selfhost, name, file)
 	}
+	for _, file := range fmtFiles {
+		file := file
+		name := strings.TrimPrefix(file, "../../")
+		t.Run("fmt/"+name, func(t *testing.T) {
+			t.Parallel()
+			compareSelfhostFmt(t, selfhost, file)
+		})
+	}
 	for _, pkg := range packages {
 		pkg := pkg
 		name := strings.TrimPrefix(pkg, "../../")
@@ -63,6 +74,18 @@ func TestSelfhostFrontend(t *testing.T) {
 		})
 		runSelfhostIRSubtests(t, selfhost, name, pkg)
 	}
+	t.Run("fmt-write", func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostFmtWrite(t, selfhost, "--write")
+	})
+	t.Run("fmt-w", func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostFmtWrite(t, selfhost, "-w")
+	})
+	t.Run("init", func(t *testing.T) {
+		t.Parallel()
+		compareSelfhostInit(t, selfhost)
+	})
 }
 
 // runSelfhostIRSubtests compares the selfhost `ir`, `ir --opt`,
@@ -122,6 +145,190 @@ func compareSelfhostArgs(t *testing.T, selfhost string, want cliOutput, args ...
 			"--- got (failed=%v)\nstdout:\n%sstderr:\n%s",
 			strings.Join(args, " "), want.failed, want.stdout, want.stderr,
 			got.failed, got.stdout, got.stderr)
+	}
+}
+
+// compareSelfhostFmt compares the selfhost command with the same Go stages the
+// shipping fmt command calls: parse diagnostics, move markers and formatting.
+func compareSelfhostFmt(t *testing.T, selfhost string, target string) {
+	t.Helper()
+	want := goFmtOutput(target)
+	got := runNativeCLI(t, selfhost, "fmt", target)
+	if got != want {
+		t.Errorf("selfhost fmt %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			target, want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
+	}
+}
+
+// goFmtOutput renders the shipping fmt path without starting one Go process
+// per corpus file. The existing frontend comparisons use the same pattern.
+func goFmtOutput(file string) nativeCLIResult {
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return failedCLIResult(err)
+	}
+	if _, diagnostics, err := parsePath(file); err != nil {
+		return failedCLIResult(err)
+	} else if len(diagnostics) > 0 {
+		var stderr strings.Builder
+		for _, diagnostic := range diagnostics {
+			stderr.WriteString(diagnostic.CLIError())
+			stderr.WriteByte('\n')
+		}
+		stderr.WriteString("error: parse failed\n")
+		return nativeCLIResult{
+			output: cliOutput{stderr: stderr.String(), failed: true},
+			code:   1,
+		}
+	}
+	marked, err := insertMoveMarkers(file, string(source))
+	if err != nil {
+		return failedCLIResult(err)
+	}
+	return nativeCLIResult{output: cliOutput{stdout: kizufmt.Format(marked)}}
+}
+
+// failedCLIResult renders one Go error through the shipping top-level prefix.
+func failedCLIResult(err error) nativeCLIResult {
+	return nativeCLIResult{
+		output: cliOutput{stderr: cliErrorLine(err), failed: true},
+		code:   1,
+	}
+}
+
+// compareSelfhostFmtWrite checks both accepted in-place flags and the bytes
+// each compiler leaves in the file.
+func compareSelfhostFmtWrite(t *testing.T, selfhost string, flag string) {
+	t.Helper()
+	root := t.TempDir()
+	source := []byte("fn main(){print(\"hello, kizu\");}\n")
+	goFile := filepath.Join(root, "go", "unformatted.kizu")
+	selfFile := filepath.Join(root, "selfhost", "unformatted.kizu")
+	writeTestFile(t, goFile, source)
+	writeTestFile(t, selfFile, source)
+
+	want := runNativeCLI(t, kizuBinaryPath, "fmt", flag, goFile)
+	got := runNativeCLI(t, selfhost, "fmt", flag, selfFile)
+	if got != want {
+		t.Errorf("selfhost fmt %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			flag, want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
+	}
+	compareFileBytes(t, goFile, selfFile)
+}
+
+// compareSelfhostInit checks the created package, success output and both
+// existing-file rejection paths in isolated directory trees.
+func compareSelfhostInit(t *testing.T, selfhost string) {
+	t.Helper()
+	root := t.TempDir()
+	goTarget := filepath.Join(root, "go", "my-app")
+	selfTarget := filepath.Join(root, "selfhost", "my-app")
+
+	compareInitRun(t, selfhost, goTarget, selfTarget)
+	compareFileBytes(t,
+		filepath.Join(goTarget, "kizu.toml"),
+		filepath.Join(selfTarget, "kizu.toml"))
+	compareFileBytes(t,
+		filepath.Join(goTarget, "src", "main.kizu"),
+		filepath.Join(selfTarget, "src", "main.kizu"))
+
+	// A second run rejects kizu.toml before touching either generated file.
+	compareInitRun(t, selfhost, goTarget, selfTarget)
+
+	goMainTarget := filepath.Join(root, "go", "main-existing")
+	selfMainTarget := filepath.Join(root, "selfhost", "main-existing")
+	existing := []byte("keep me\n")
+	writeTestFile(t, filepath.Join(goMainTarget, "src", "main.kizu"), existing)
+	writeTestFile(t, filepath.Join(selfMainTarget, "src", "main.kizu"), existing)
+	compareInitRun(t, selfhost, goMainTarget, selfMainTarget)
+	compareFileBytes(t,
+		filepath.Join(goMainTarget, "src", "main.kizu"),
+		filepath.Join(selfMainTarget, "src", "main.kizu"))
+	for _, target := range []string{goMainTarget, selfMainTarget} {
+		if _, err := os.Stat(filepath.Join(target, "kizu.toml")); !os.IsNotExist(err) {
+			t.Errorf("%s kizu.toml stat error = %v, want not exist", target, err)
+		}
+	}
+
+	goCurrent := filepath.Join(root, "go", "current-project")
+	selfCurrent := filepath.Join(root, "selfhost", "current-project")
+	for _, target := range []string{goCurrent, selfCurrent} {
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := normalizeInitResult(
+		runNativeCLIAt(t, goCurrent, kizuBinaryPath, "init"), goCurrent)
+	got := normalizeInitResult(
+		runNativeCLIAt(t, selfCurrent, selfhost, "init"), selfCurrent)
+	if got != want {
+		t.Errorf("selfhost init current directory differs\n"+
+			"--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
+	}
+	compareFileBytes(t,
+		filepath.Join(goCurrent, "kizu.toml"),
+		filepath.Join(selfCurrent, "kizu.toml"))
+	compareFileBytes(t,
+		filepath.Join(goCurrent, "src", "main.kizu"),
+		filepath.Join(selfCurrent, "src", "main.kizu"))
+}
+
+// compareInitRun normalizes only the deliberately different absolute target
+// roots; everything else, including stdout/stderr and exact exit status, must
+// match byte for byte.
+func compareInitRun(t *testing.T, selfhost string, goTarget string, selfTarget string) {
+	t.Helper()
+	want := normalizeInitResult(runNativeCLI(t, kizuBinaryPath, "init", goTarget), goTarget)
+	got := normalizeInitResult(runNativeCLI(t, selfhost, "init", selfTarget), selfTarget)
+	if got != want {
+		t.Errorf("selfhost init differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
+	}
+}
+
+// normalizeInitResult replaces the one path that must differ between the two
+// isolated init targets.
+func normalizeInitResult(result nativeCLIResult, target string) nativeCLIResult {
+	result.output.stdout = strings.ReplaceAll(result.output.stdout, target, "<target>")
+	result.output.stderr = strings.ReplaceAll(result.output.stderr, target, "<target>")
+	return result
+}
+
+// writeTestFile creates parent directories and writes one isolated fixture.
+func writeTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// compareFileBytes checks two generated files without normalizing their
+// contents.
+func compareFileBytes(t *testing.T, left string, right string) {
+	t.Helper()
+	leftBytes, err := os.ReadFile(left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightBytes, err := os.ReadFile(right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(leftBytes, rightBytes) {
+		t.Errorf("generated files differ\n--- %s\n%s--- %s\n%s",
+			left, leftBytes, right, rightBytes)
 	}
 }
 
@@ -231,6 +438,30 @@ func globFiles(t *testing.T, patterns ...string) []string {
 	return out
 }
 
+// globKizuTreeFiles returns every .kizu file below roots, sorted. This is the
+// fmt differential corpus: examples (including negative), behavior tests and
+// every selfhost compiler source file.
+func globKizuTreeFiles(t *testing.T, roots ...string) []string {
+	t.Helper()
+	var out []string
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && filepath.Ext(path) == ".kizu" {
+				out = append(out, path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // globDirs lists the package directories (ones with kizu.toml) under pattern.
 func globDirs(t *testing.T, pattern string) []string {
 	t.Helper()
@@ -303,8 +534,26 @@ type nativeCLIResult struct {
 // temporary build directories of parallel cases cannot collide.
 func runNativeCLI(t *testing.T, name string, args ...string) nativeCLIResult {
 	t.Helper()
+	return runNativeCLIAt(t, "", name, args...)
+}
+
+// runNativeCLIAt runs one binary from dir and pins PWD to the same absolute
+// path, which is how the selfhost fsutil replacement observes filepath.Abs.
+func runNativeCLIAt(t *testing.T, dir string, name string, args ...string) nativeCLIResult {
+	t.Helper()
 	cmd := exec.Command(name, args...)
-	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+	cmd.Dir = dir
+	env := append(os.Environ(), "TMPDIR="+t.TempDir())
+	if dir != "" {
+		withoutPWD := env[:0]
+		for _, item := range env {
+			if !strings.HasPrefix(item, "PWD=") {
+				withoutPWD = append(withoutPWD, item)
+			}
+		}
+		env = append(withoutPWD, "PWD="+dir)
+	}
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

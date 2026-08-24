@@ -1,6 +1,8 @@
 import compiler::internal::ast;
 import compiler::internal::buildcache;
 import compiler::internal::diagnostic;
+import compiler::internal::fmt;
+import compiler::internal::fsutil;
 import compiler::internal::ir;
 import compiler::internal::lexer;
 import compiler::internal::llvm;
@@ -10,9 +12,9 @@ import compiler::internal::ownership;
 import compiler::internal::parser;
 import compiler::internal::project;
 import compiler::internal::source;
+import compiler::internal::stdfmt;
 import compiler::internal::types;
 import std::array;
-import std::fmt;
 import std::fs;
 import std::io;
 import std::mem;
@@ -21,8 +23,9 @@ import std::process;
 import std::string;
 
 // Port of cmd/kizu for the commands the selfhost compiler can run so far:
-// `parse` prints the program a file parses to, `check` loads a file or a
-// package with its std modules, type-checks it, and ownership-checks it,
+// `parse` prints the program a file parses to, `fmt` validates and formats a
+// file, `init` scaffolds a package, `check` loads a file or a package with its
+// std modules, type-checks it, and ownership-checks it,
 // `ir` lowers a checked file or package to typed SSA IR and prints it,
 // `build --emit-llvm` prints the LLVM IR the lowered module emits to,
 // `build --target native` links a program into the executable it names,
@@ -52,11 +55,19 @@ fn main() -> !process::ExitStatus {
     if lib_dir.len() == 0 {
         try resolve_lib_dir(&var lib_dir);
     }
-    if count - next < 2 {
+    if count - next < 1 {
         try usage(io);
         return process::ExitStatus::Specific(2);
     }
     let command = try process::arg(next);
+    if mem::equal_bytes(command, "init") {
+        let code = try init_command(io, allocator, next, count);
+        return exit_of(code);
+    }
+    if count - next < 2 {
+        try usage(io);
+        return process::ExitStatus::Specific(2);
+    }
     let target = try process::arg(next + 1);
     let lib_dir_bytes = lib_dir.as_bytes();
     if mem::equal_bytes(command, "parse") {
@@ -65,6 +76,16 @@ fn main() -> !process::ExitStatus {
     }
     if mem::equal_bytes(command, "check") {
         let code = try check_target(io, allocator, lib_dir_bytes, target);
+        return exit_of(code);
+    }
+    if mem::equal_bytes(command, "fmt") {
+        let code = try fmt_command(
+            io,
+            allocator,
+            lib_dir_bytes,
+            next,
+            count
+        );
         return exit_of(code);
     }
     if mem::equal_bytes(command, "ir") {
@@ -150,14 +171,16 @@ enum Output {
 
 /// Writes the usage lines for the commands this binary has.
 fn usage(io: Io) -> !void {
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] parse <file>");
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] run <file|package> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] check <file|package>");
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] test <file|package> [-- args...]");
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] ir [--opt] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu <parse|run|check|test> <file> [-- args...]");
+    try io::write_stderr_line(io, "usage: kizu init [path]");
+    try io::write_stderr_line(io, "usage: kizu fmt [--write] <file>");
+    try io::write_stderr_line(io, "usage: kizu ir [--opt] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --emit-llvm [--opt] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target native [native-options] <file>");
+    try io::write_stderr_line(io, "usage: kizu build --target wasm32-wasi [--opt] <file>");
     try io::write_stderr_line(io, "usage: kizu cache <status|prune>");
-    try io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --emit-llvm [--opt] <file|package>");
-    return io::write_stderr_line(io, "usage: kizu [--lib-dir PATH] build --target native [native-options] <file|package>");
+    try io::write_stderr_line(io, "usage: kizu import-c-header <file>");
+    return io::write_stderr_line(io, "usage: kizu version");
 }
 
 /// Runs `cache <status|prune>`, the Go `cacheCommand`, printing the same
@@ -191,9 +214,9 @@ fn cache_command(io: Io, allocator: Allocator, action: []u8, next: i64, count: i
         var line = string::new(allocator);
         defer line.deinit();
         try line.append_bytes("cache pruned: removed ");
-        try fmt::append_i64(&var line, removed.entries);
+        try stdfmt::append_i64(&var line, removed.entries);
         try line.append_bytes(" entries, freed ");
-        try fmt::append_i64(&var line, removed.bytes);
+        try stdfmt::append_i64(&var line, removed.bytes);
         try line.append_bytes(" bytes");
         let line_bytes = line.as_bytes();
         try io::write_stdout_line(io, line_bytes);
@@ -209,7 +232,7 @@ fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !v
     var line = string::new(allocator);
     defer line.deinit();
     try line.append_bytes(label);
-    try fmt::append_i64(&var line, value);
+    try stdfmt::append_i64(&var line, value);
     let line_bytes = line.as_bytes();
     return io::write_stdout_line(io, line_bytes);
 }
@@ -222,6 +245,573 @@ fn resolve_lib_dir(out: &var string::String) -> !void {
         return out.append_bytes(from_env);
     }
     return out.append_bytes("lib/kizu");
+}
+
+union MarkerInsertResult {
+    Ok,
+    Outside(ast::Position),
+}
+
+enum InitNameError {
+    None,
+    Empty,
+    Reserved,
+    Invalid,
+}
+
+struct InitPackageNameResult {
+    name: string::String,
+    failed: InitNameError
+}
+
+fn (self: InitPackageNameResult) deinit() -> void {
+    self.name.deinit();
+}
+
+/// Prints or rewrites one source file in canonical form, the Go
+/// `fmtCommand` including parse validation and move-marker insertion.
+fn fmt_command(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    command_index: i64,
+    count: i64
+) -> !i64 {
+    let argument_count = count - command_index - 1;
+    var write = false;
+    var file_index = command_index + 1;
+    if argument_count == 2 {
+        let flag = try process::arg(file_index);
+        if is_fmt_write_flag(flag) {
+            write = true;
+            file_index = file_index + 1;
+        }
+    }
+    let file = try process::arg(file_index);
+    if (argument_count != 1 and !write) or
+        (argument_count == 1 and starts_with_dash(file)) {
+        try usage(io);
+        try io::write_stderr_line(
+            io,
+            "error: fmt takes an optional --write and one target"
+        );
+        return 1;
+    }
+    var source_text = try fs::read_file(
+        io,
+        allocator,
+        file,
+        mem::Limit::Unlimited
+    );
+    defer source_text.deinit();
+    if !try validate_fmt_parse(io, allocator, file) {
+        return 1;
+    }
+    let inserted = try insert_move_markers(
+        io,
+        allocator,
+        lib_dir,
+        file,
+        &var source_text
+    );
+    match inserted {
+        Ok => {},
+        Outside(position) => {
+            try write_fmt_outside_error(io, allocator, file, position);
+            return 1;
+        },
+    }
+    let source_bytes = source_text.as_bytes();
+    let formatted = try fmt::format(allocator, source_bytes);
+    defer formatted.deinit();
+    let formatted_bytes = formatted.as_bytes();
+    if write {
+        try fs::write_file(io, file, formatted_bytes);
+        return 0;
+    }
+    try io::write_stdout(io, formatted_bytes);
+    return 0;
+}
+
+/// Reports whether an argument selects in-place formatting, the Go
+/// `isFmtWriteFlag`.
+fn is_fmt_write_flag(argument: []u8) -> bool {
+    return mem::equal_bytes(argument, "--write") or mem::equal_bytes(argument, "-w");
+}
+
+fn starts_with_dash(argument: []u8) -> bool {
+    return mem::len(argument) > 0 and argument[0] == cast<u8>(45);
+}
+
+/// Validates syntax before token formatting, the parse-first part of the Go
+/// `fmtCommand`.
+fn validate_fmt_parse(io: Io, allocator: Allocator, file: []u8) -> !bool {
+    let text = try fs::read_file(io, allocator, file, mem::Limit::Unlimited);
+    errdefer text.deinit();
+    var sources = source::new(allocator);
+    defer sources.deinit();
+    let path_copy = try string::from_bytes(allocator, file);
+    let id = try sources.add(move path_copy, move text);
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    if sources.at(id) |input| {
+        let bytes = input.text.as_bytes();
+        let scanner = lexer::new_source(allocator, id, bytes);
+        var source_parser = try parser::new(allocator, move scanner);
+        defer source_parser.deinit();
+        let program = try source_parser.parse_program(&var tree);
+        defer program.deinit();
+        if source_parser.diagnostics_len() == 0 {
+            return true;
+        }
+        var index = 0;
+        while source_parser.diagnostic(index) |failed| {
+            try report(io, allocator, &sources, failed);
+            index = index + 1;
+        }
+        try io::write_stderr_line(io, "error: parse failed");
+        return false;
+    }
+    return true;
+}
+
+/// Inserts every missing move marker after successful load, type, and
+/// ownership checks, the Go `insertMoveMarkers`. Any diagnostic leaves source
+/// unchanged so `check` remains the command that reports it.
+fn insert_move_markers(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    file: []u8,
+    source_text: &var string::String
+) -> !MarkerInsertResult {
+    var tree = ast::new(allocator);
+    defer tree.deinit();
+    var loader = try project::new_loader(io, allocator, lib_dir);
+    defer loader.deinit();
+    let source_bytes = source_text.as_bytes();
+    let loaded = try loader.load_source(
+        &var tree,
+        file,
+        source_bytes
+    );
+    match loaded {
+        Error(failed) => {
+            failed.deinit();
+            return MarkerInsertResult::Ok;
+        },
+        Program(program) => {
+            defer program.deinit();
+            if try types::check(allocator, &var tree, &program) |failed| {
+                failed.deinit();
+                return MarkerInsertResult::Ok;
+            }
+            var markers = array::new<ast::Span>(allocator);
+            defer markers.deinit();
+            if try ownership::missing_move_markers(
+                allocator,
+                &var tree,
+                &program,
+                &var markers
+            ) |failed| {
+                failed.deinit();
+                return MarkerInsertResult::Ok;
+            }
+            var offsets = array::new<i64>(allocator);
+            defer offsets.deinit();
+            var index = 0;
+            while markers.get(index) |marker| {
+                index = index + 1;
+                var belongs_to_file = false;
+                if marker.source |source_id| {
+                    if loader.sources.at(source_id) |source_file| {
+                        let source_path = source_file.path.as_bytes();
+                        belongs_to_file = mem::equal_bytes(source_path, file);
+                    }
+                }
+                if !belongs_to_file {
+                    continue;
+                }
+                let offset = line_column_offset(
+                    source_bytes,
+                    marker.start.line,
+                    marker.start.column
+                ) orelse return MarkerInsertResult::Outside(marker.start);
+                try offsets.append(offset);
+            }
+            try sort_offsets_descending(&var offsets);
+            var offset_index = 0;
+            while offsets.get(offset_index) |offset| {
+                try insert_move_at(source_text, offset);
+                offset_index = offset_index + 1;
+            }
+            return MarkerInsertResult::Ok;
+        },
+    }
+}
+
+/// Converts a one-based line and column to a byte offset, the Go
+/// `lineColumnOffset`.
+fn line_column_offset(source_text: []u8, line_value: i64, column: i64) -> ?i64 {
+    if line_value < 1 or column < 1 {
+        return null;
+    }
+    var line = line_value;
+    var offset = 0;
+    while line > 1 {
+        var next = offset;
+        var found = false;
+        while next < mem::len(source_text) {
+            if source_text[next] == cast<u8>(10) {
+                found = true;
+                break;
+            }
+            next = next + 1;
+        }
+        if !found {
+            return null;
+        }
+        offset = next + 1;
+        line = line - 1;
+    }
+    offset = offset + column - 1;
+    if offset > mem::len(source_text) {
+        return null;
+    }
+    return offset;
+}
+
+fn sort_offsets_descending(offsets: &var array::Array<i64>) -> !void {
+    var index = 1;
+    while index < offsets.len() {
+        var cursor = index;
+        while cursor > 0 and offsets.get_or_panic(cursor) >
+            offsets.get_or_panic(cursor - 1) {
+            try offsets.swap(cursor, cursor - 1);
+            cursor = cursor - 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn insert_move_at(source_text: &var string::String, offset: i64) -> !void {
+    let old_length = source_text.len();
+    try source_text.append_bytes("move ");
+    let bytes = source_text.as_mut_bytes();
+    var cursor = old_length;
+    while cursor > offset {
+        bytes[cursor + 4] = bytes[cursor - 1];
+        cursor = cursor - 1;
+    }
+    bytes[offset] = cast<u8>(109);
+    bytes[offset + 1] = cast<u8>(111);
+    bytes[offset + 2] = cast<u8>(118);
+    bytes[offset + 3] = cast<u8>(101);
+    bytes[offset + 4] = cast<u8>(32);
+    return;
+}
+
+fn write_fmt_outside_error(
+    io: Io,
+    allocator: Allocator,
+    file: []u8,
+    position: ast::Position
+) -> !void {
+    var message = try string::from_bytes(allocator, "error: fmt: ");
+    defer message.deinit();
+    try message.append_bytes(file);
+    try message.append_byte(cast<u8>(58));
+    try stdfmt::append_i64(&var message, position.line);
+    try message.append_byte(cast<u8>(58));
+    try stdfmt::append_i64(&var message, position.column);
+    try message.append_bytes(" is outside the file");
+    let bytes = message.as_bytes();
+    return io::write_stderr_line(io, bytes);
+}
+
+/// Scaffolds a minimal package, the Go `initCommand`.
+fn init_command(
+    io: Io,
+    allocator: Allocator,
+    command_index: i64,
+    count: i64
+) -> !i64 {
+    let argument_count = count - command_index - 1;
+    if argument_count > 1 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid init command");
+        return 1;
+    }
+    var target = ".";
+    if argument_count == 1 {
+        target = try process::arg(command_index + 1);
+    }
+    let absolute_target = try fsutil::absolute(allocator, target);
+    defer absolute_target.deinit();
+    let absolute_bytes = absolute_target.as_bytes();
+    let package = try init_package_name(allocator, absolute_bytes);
+    defer package.deinit();
+    let package_bytes = package.name.as_bytes();
+    if package.failed == InitNameError::Empty {
+        try io::write_stderr_line(io, "error: init error: package name is empty");
+        return 1;
+    }
+    if package.failed == InitNameError::Reserved {
+        try io::write_stderr_line(io, "error: init error: package name `std` is reserved");
+        return 1;
+    }
+    if package.failed == InitNameError::Invalid {
+        try write_init_invalid_name(io, allocator, package_bytes);
+        return 1;
+    }
+    if !try ensure_init_target(io, absolute_bytes) {
+        try write_init_path_error(
+            io,
+            allocator,
+            "error: init error: target `",
+            absolute_bytes,
+            "` is not a directory"
+        );
+        return 1;
+    }
+    if try reject_existing_init_files(io, allocator, absolute_bytes) |existing| {
+        defer existing.deinit();
+        let existing_bytes = existing.as_bytes();
+        try write_init_path_error(
+            io,
+            allocator,
+            "error: init error: `",
+            existing_bytes,
+            "` already exists"
+        );
+        return 1;
+    }
+    let source_dir = try path::join(allocator, absolute_bytes, "src");
+    defer source_dir.deinit();
+    let source_dir_bytes = source_dir.as_bytes();
+    try fsutil::create_dir_all(io, source_dir_bytes);
+    let manifest = try init_manifest(allocator, package_bytes);
+    defer manifest.deinit();
+    let manifest_path = try path::join(allocator, absolute_bytes, "kizu.toml");
+    defer manifest_path.deinit();
+    let manifest_path_bytes = manifest_path.as_bytes();
+    let manifest_bytes = manifest.as_bytes();
+    try write_new_file(io, manifest_path_bytes, manifest_bytes);
+    let main_path = try path::join(allocator, source_dir_bytes, "main.kizu");
+    defer main_path.deinit();
+    let main_path_bytes = main_path.as_bytes();
+    let init_main_source =
+        \\fn main() {
+        \\    print("hello, kizu");
+        \\}
+        \\
+    ;
+    try write_new_file(
+        io,
+        main_path_bytes,
+        init_main_source
+    );
+    var line = try string::from_bytes(allocator, "initialized Kizu package `");
+    defer line.deinit();
+    try line.append_bytes(package_bytes);
+    try line.append_bytes("` in ");
+    try line.append_bytes(absolute_bytes);
+    let line_bytes = line.as_bytes();
+    try io::write_stdout_line(io, line_bytes);
+    return 0;
+}
+
+/// Derives and validates the namespace from target, the Go
+/// `initPackageName`.
+fn init_package_name(
+    allocator: Allocator,
+    target: []u8
+) -> !InitPackageNameResult {
+    let name = try normalize_init_package_name(allocator, path::basename(target));
+    let bytes = name.as_bytes();
+    var failed = InitNameError::None;
+    if mem::len(bytes) == 0 {
+        failed = InitNameError::Empty;
+    } else {
+        if mem::equal_bytes(bytes, "std") {
+            failed = InitNameError::Reserved;
+        } else {
+            if !is_valid_init_package_name(bytes) {
+                failed = InitNameError::Invalid;
+            }
+        }
+    }
+    return InitPackageNameResult { name: move name, failed: failed };
+}
+
+/// Maps a directory spelling to an identifier, the Go
+/// `normalizeInitPackageName`.
+fn normalize_init_package_name(
+    allocator: Allocator,
+    name: []u8
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var last_underscore = false;
+    var index = 0;
+    while index < mem::len(name) {
+        let current = name[index];
+        if current >= cast<u8>(65) and current <= cast<u8>(90) {
+            try out.append_byte(current + cast<u8>(32));
+            last_underscore = false;
+        } else {
+            if (current >= cast<u8>(97) and current <= cast<u8>(122)) or
+                (current >= cast<u8>(48) and current <= cast<u8>(57)) {
+                try out.append_byte(current);
+                last_underscore = false;
+            } else {
+                if current == cast<u8>(95) or current == cast<u8>(45) {
+                    if out.len() > 0 and !last_underscore {
+                        try out.append_byte(cast<u8>(95));
+                        last_underscore = true;
+                    }
+                } else {
+                    out.clear();
+                    return move out;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    while ends_with_byte(&out, cast<u8>(95)) {
+        try out.truncate(out.len() - 1);
+    }
+    return move out;
+}
+
+fn ends_with_byte(value: &string::String, byte: u8) -> bool {
+    if value.len() == 0 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    return bytes[value.len() - 1] == byte;
+}
+
+/// Reports whether name is an identifier-like package root, the Go
+/// `isValidInitPackageName`.
+fn is_valid_init_package_name(name: []u8) -> bool {
+    if mem::len(name) == 0 {
+        return false;
+    }
+    let first = name[0];
+    if !((first >= cast<u8>(97) and first <= cast<u8>(122)) or
+        first == cast<u8>(95)) {
+        return false;
+    }
+    var index = 1;
+    while index < mem::len(name) {
+        let current = name[index];
+        if (current >= cast<u8>(97) and current <= cast<u8>(122)) or
+            (current >= cast<u8>(48) and current <= cast<u8>(57)) or
+            current == cast<u8>(95) {
+            index = index + 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/// Creates target or rejects a non-directory, the Go `ensureInitTarget`.
+fn ensure_init_target(io: Io, target: []u8) -> !bool {
+    if try fs::exists(io, target) {
+        let info = try fs::metadata(io, target);
+        return info.is_dir;
+    }
+    try fsutil::create_dir_all(io, target);
+    return true;
+}
+
+/// Returns the first init file that already exists, the Go
+/// `rejectExistingInitFiles`.
+fn reject_existing_init_files(
+    io: Io,
+    allocator: Allocator,
+    target: []u8
+) -> !?string::String {
+    let manifest_path = try path::join(allocator, target, "kizu.toml");
+    errdefer manifest_path.deinit();
+    if try retained_path_exists(io, &manifest_path) {
+        return move manifest_path;
+    }
+    manifest_path.deinit();
+    let main_path = try path::join(allocator, target, "src/main.kizu");
+    errdefer main_path.deinit();
+    if try retained_path_exists(io, &main_path) {
+        return move main_path;
+    }
+    main_path.deinit();
+    return null;
+}
+
+fn retained_path_exists(io: Io, retained: &string::String) -> !bool {
+    let bytes = retained.as_bytes();
+    return fs::exists(io, bytes);
+}
+
+/// Renders the minimal manifest, the Go `initManifest`.
+fn init_manifest(allocator: Allocator, package_name: []u8) -> !string::String {
+    var out = try string::from_bytes(allocator, "[package]");
+    errdefer out.deinit();
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("name = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(package_name);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("version = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("0.1.0");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("[modules]");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("paths = [");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("src");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(93));
+    try out.append_byte(cast<u8>(10));
+    return move out;
+}
+
+/// Writes a new init file after the earlier rejection pass, the Go
+/// `writeNewFile`. std has no exclusive-create primitive, so a concurrent
+/// creator between the check and write remains the recorded fs gap.
+fn write_new_file(io: Io, file: []u8, content: []u8) -> !void {
+    return fs::write_file(io, file, content);
+}
+
+fn write_init_invalid_name(io: Io, allocator: Allocator, name: []u8) -> !void {
+    return write_init_path_error(
+        io,
+        allocator,
+        "error: init error: invalid package name `",
+        name,
+        "`"
+    );
+}
+
+fn write_init_path_error(
+    io: Io,
+    allocator: Allocator,
+    prefix: []u8,
+    value: []u8,
+    suffix: []u8
+) -> !void {
+    var message = try string::from_bytes(allocator, prefix);
+    defer message.deinit();
+    try message.append_bytes(value);
+    try message.append_bytes(suffix);
+    let bytes = message.as_bytes();
+    return io::write_stderr_line(io, bytes);
 }
 
 /// Writes one diagnostic the way the CLI reports errors.
@@ -902,14 +1492,14 @@ fn add_test_main(allocator: Allocator, module: &var ir::Module) -> !?diagnostic:
     while test_names.get(index) |test_name| {
         var called_spelling = try string::from_bytes(allocator, "%test.");
         errdefer called_spelling.deinit();
-        try fmt::append_i64(&var called_spelling, index);
+        try stdfmt::append_i64(&var called_spelling, index);
         let called_name = try module.names.intern_owned(move called_spelling);
         let called = ir::Value { name: called_name, type_name: bang_void };
         let call = module.blank_instr(called, ir::Op::Call, test_name, ir::empty_name());
         let _ = try module.add_instr(block, move call);
         var tried_spelling = try string::from_bytes(allocator, "%try.");
         errdefer tried_spelling.deinit();
-        try fmt::append_i64(&var tried_spelling, index);
+        try stdfmt::append_i64(&var tried_spelling, index);
         let tried_name = try module.names.intern_owned(move tried_spelling);
         let tried = ir::Value { name: tried_name, type_name: void_name };
         var tried_instr = module.blank_instr(tried, ir::Op::ErrorTry, ir::empty_name(), ir::empty_name());
