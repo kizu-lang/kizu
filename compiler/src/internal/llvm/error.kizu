@@ -16,6 +16,9 @@ fn (self: &var Emitter) write_error_instr(module: &ir::Module, node: &ir::InstrN
         ErrorOk => return self.write_error_ok(module, node),
         ErrorError => return self.write_error_error(module, node),
         ErrorTry => return self.write_error_try(module, node),
+        ErrorHas => return self.write_error_has(module, node),
+        ErrorValue => return self.write_error_value(module, node),
+        ErrorCode => return self.write_error_code(module, node),
         _ => {
             let op = try self.op_name(module, node);
             return try self.fail1("llvm error: unsupported error instruction `%s`", Arg::Str(op));
@@ -90,12 +93,13 @@ fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrN
             let shown = try self.own(module, arg.type_name);
             return try self.fail1("llvm error: error.error expects an error set member, got %s", Arg::Str(shown));
         }
-        // A declared `E!T` accepts only E. Codes are global, so a member of
-        // another set would lower to a union that claims E while holding
-        // another set's code, and nothing below here records which set a
-        // union carries.
+        // A declared `E!T` accepts the sets whose codes are a subset of E's:
+        // E itself and the sets it combines (ADR-0127). Codes are global, so
+        // any other set would lower to a union that claims E while holding a
+        // code E does not carry, and nothing below here records which set a
+        // union holds.
         let err_bytes = parts.err.as_bytes();
-        if parts.err.len() > 0 and !module.names.is(arg.type_name, err_bytes) {
+        if parts.err.len() > 0 and !module.error_set_fits(arg_bytes, err_bytes) {
             let arg_shown = try self.own(module, arg.type_name);
             let result_shown = try self.own(module, node.result.type_name);
             return try self.fail2("llvm error: error.error cannot put %s into %s", Arg::Str(arg_shown), Arg::Str(result_shown));
@@ -108,6 +112,104 @@ fn (self: &var Emitter) write_error_error(module: &ir::Module, node: &ir::InstrN
     }
     let shown = try self.own(module, node.result.type_name);
     return try self.fail1("llvm error: error.error result must be !T, got %s", Arg::Str(shown));
+}
+
+/// Tests an error union for success, the Go `writeErrorHas`, the way
+/// opt.has tests an optional for presence. `catch` and `else |err|` branch
+/// on it.
+fn (self: &var Emitter) write_error_has(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: error.has expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if try self.error_union_parts(source_type) |parts| {
+        defer parts.deinit();
+        let result_name = try self.local_name(module, node.result.name);
+        let tag_name = try self.suffixed(result_name, ".tag");
+        let union_type = try self.llvm_type(module, source_type);
+        let info = try self.operand(module, source);
+        try self.line3("  %s = extractvalue %s %s, 0", Arg::Str(tag_name), Arg::Str(union_type), Arg::Str(info.operand));
+        try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(result_name), Arg::Str(tag_name));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail1("llvm error: error.has expects !T, got %s", Arg::Str(shown));
+}
+
+/// Extracts the success payload of an error union, the Go
+/// `writeErrorValue`. The caller has already branched on success; a failed
+/// union's payload is only ever produced, never read.
+fn (self: &var Emitter) write_error_value(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: error.value expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if try self.error_union_parts(source_type) |parts| {
+        defer parts.deinit();
+        let success_bytes = parts.success.as_bytes();
+        if mem::equal_bytes(success_bytes, "void") {
+            let shown = try self.own(module, source.type_name);
+            return try self.fail1(
+                "llvm error: error.value expects an `E!T` with a payload, got %s",
+                Arg::Str(shown)
+            );
+        }
+        if !module.names.is(node.result.type_name, success_bytes) {
+            let success_shown = try self.names.intern(success_bytes);
+            let result_shown = try self.own(module, node.result.type_name);
+            return try self.fail2("llvm error: error.value returns %s, got %s", Arg::Str(success_shown), Arg::Str(result_shown));
+        }
+        let result_name = try self.local_name(module, node.result.name);
+        let union_type = try self.llvm_type(module, source_type);
+        let info = try self.operand(module, source);
+        try self.line3("  %s = extractvalue %s %s, 1", Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail1("llvm error: error.value expects an `E!T` with a payload, got %s", Arg::Str(shown));
+}
+
+/// Extracts the failure member of an error union as a value of its declared
+/// set, the Go `writeErrorCode`. The caller has already branched on failure,
+/// and a code is global, so extracting it converts nothing.
+fn (self: &var Emitter) write_error_code(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("llvm error: error.code expects 1 arg");
+    }
+    let source = node.args.get_or_panic(0);
+    let source_text = ir::name_text(&module.names, source.type_name);
+    let source_type = source_text.as_bytes();
+    if try self.error_union_parts(source_type) |parts| {
+        defer parts.deinit();
+        if parts.err.len() == 0 {
+            let shown = try self.own(module, source.type_name);
+            return try self.fail1("llvm error: error.code expects `E!T`, got %s", Arg::Str(shown));
+        }
+        let err_bytes = parts.err.as_bytes();
+        if !module.names.is(node.result.type_name, err_bytes) {
+            let err_shown = try self.names.intern(err_bytes);
+            let result_shown = try self.own(module, node.result.type_name);
+            return try self.fail2("llvm error: error.code returns %s, got %s", Arg::Str(err_shown), Arg::Str(result_shown));
+        }
+        let result_name = try self.local_name(module, node.result.name);
+        let union_type = try self.llvm_type(module, source_type);
+        let info = try self.operand(module, source);
+        let failure_index = try self.error_union_failure_index(source_type);
+        try self.line4(
+            "  %s = extractvalue %s %s, %d",
+            Arg::Str(result_name), Arg::Str(union_type), Arg::Str(info.operand), Arg::Int(failure_index)
+        );
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let shown = try self.own(module, source.type_name);
+    return try self.fail1("llvm error: error.code expects `E!T`, got %s", Arg::Str(shown));
 }
 
 /// Builds a failed error union around one error code, the Go
@@ -154,7 +256,7 @@ fn (self: &var Emitter) write_error_try(module: &ir::Module, node: &ir::InstrNod
             defer target.deinit();
             let source_err = parts.err.as_bytes();
             let target_err = target.err.as_bytes();
-            if target.err.len() > 0 and !mem::equal_bytes(source_err, target_err) {
+            if target.err.len() > 0 and !module.error_set_fits(source_err, target_err) {
                 let source_shown = try self.own(module, source.type_name);
                 let return_shown = try self.own(module, self.current_return);
                 return try self.fail2(

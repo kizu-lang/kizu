@@ -188,6 +188,11 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 			return err
 		}
 	}
+	// Combined error sets resolve after every set is collected, so the sets
+	// they name may be declared later in the file.
+	if err := c.resolveErrorSetCompositions(); err != nil {
+		return err
+	}
 	for _, decl := range program.Decls {
 		if err := c.collectMethodDecl(decl); err != nil {
 			return err
@@ -1648,7 +1653,9 @@ func (c *Checker) checkErrorUnionReturn(
 		if err != nil {
 			return false, err
 		}
-		if sameType(coerced, success) || sameType(got, errorType) {
+		// A member of a set whose values are a subset of E returns as a
+		// failure the same way `try` propagates it (ADR-0127).
+		if sameType(coerced, success) || c.errorSetFits(got, errorType) {
 			return true, nil
 		}
 		if ok, err := c.wrapsIntoOptional(expr, success, got); ok || err != nil {
@@ -2021,18 +2028,34 @@ func (c *Checker) checkIfStmt(
 	unsafe unsafeMark,
 ) (bool, error) {
 	consequence := env.child()
+	alternative := env.child()
 	handled, err := c.bindContainerBorrowCapture(
 		stmt.Capture, stmt.Condition, consequence, env, unsafe)
 	if err != nil {
 		return false, err
+	}
+	if handled && stmt.ErrCapture != "" {
+		return false, errorf(
+			"type error: `else |%s|` requires an error union condition", stmt.ErrCapture)
 	}
 	if !handled {
 		cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 		if err != nil {
 			return false, err
 		}
-		if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
-			return false, err
+		if _, _, ok := c.types.errorUnionParts(cond); ok {
+			if err := c.bindErrorUnionCaptures(stmt, cond, consequence, alternative); err != nil {
+				return false, err
+			}
+		} else {
+			if stmt.ErrCapture != "" {
+				return false, errorf(
+					"type error: `else |%s|` requires an error union condition, got %s",
+					stmt.ErrCapture, cond)
+			}
+			if err := c.bindConditionCapture("if", stmt.Capture, cond, consequence); err != nil {
+				return false, err
+			}
 		}
 	}
 	leftReturns, err := c.checkBlock(stmt.Consequence, consequence, wantReturn, unsafe)
@@ -2042,11 +2065,46 @@ func (c *Checker) checkIfStmt(
 	if stmt.Alternative == nil {
 		return false, nil
 	}
-	rightReturns, err := c.checkBlock(stmt.Alternative, env.child(), wantReturn, unsafe)
+	rightReturns, err := c.checkBlock(stmt.Alternative, alternative, wantReturn, unsafe)
 	if err != nil {
 		return false, err
 	}
 	return leftReturns && rightReturns, nil
+}
+
+// bindErrorUnionCaptures types an error union if condition: the success
+// payload binds into the consequence, and `else |err|` binds the error member
+// into the alternative (SPEC §11.1). `else |err|` is required because leaving
+// it off would drop the failure silently.
+func (c *Checker) bindErrorUnionCaptures(
+	stmt *ast.IfStmt,
+	cond Type,
+	consequence *scope,
+	alternative *scope,
+) error {
+	errorType, success, _ := c.types.errorUnionParts(cond)
+	if errorType == "" {
+		return errorf(
+			"type error: if cannot open %s; a `!T` without a declared error set"+
+				" propagates with `try`", cond)
+	}
+	if stmt.ErrCapture == "" {
+		return errorf("type error: if on %s requires `else |err|`", cond)
+	}
+	if success == typeVoid {
+		if stmt.Capture != "" {
+			return errorf(
+				"type error: %s has no success payload to capture `|%s|`",
+				cond, stmt.Capture)
+		}
+	} else if stmt.Capture == "" {
+		return errorf("type error: if on %s requires a success capture `|name|`", cond)
+	} else if err := requireScopeDefinition(
+		stmt.Capture, consequence.define(stmt.Capture, success, false)); err != nil {
+		return err
+	}
+	return requireScopeDefinition(
+		stmt.ErrCapture, alternative.define(stmt.ErrCapture, errorType, false))
 }
 
 // bindConditionCapture types an if/while condition: with a capture the
@@ -2223,12 +2281,15 @@ func (c *Checker) checkMatchStmt(
 		return false, err
 	}
 	valueType = borrowedValueType(valueType)
+	if set := c.errorSets[string(valueType)]; set != nil {
+		return c.checkMatchArms(stmt, nil, nil, set, env, wantReturn, unsafe)
+	}
 	if tagged := c.taggedType(valueType); tagged != nil {
-		return c.checkMatchArms(stmt, tagged, nil, env, wantReturn, unsafe)
+		return c.checkMatchArms(stmt, tagged, nil, nil, env, wantReturn, unsafe)
 	}
 	unionType := c.unions[string(valueType)]
 	if unionType != nil {
-		return c.checkMatchArms(stmt, nil, unionType, env, wantReturn, unsafe)
+		return c.checkMatchArms(stmt, nil, unionType, nil, env, wantReturn, unsafe)
 	}
 	return false, errorf("type error: match expects enum or union, got %s", valueType)
 }
@@ -2238,6 +2299,7 @@ func (c *Checker) checkMatchArms(
 	stmt *ast.MatchStmt,
 	enumType *enumType,
 	unionType *unionType,
+	errorSet *errorSetType,
 	env *scope,
 	wantReturn Type,
 	unsafe unsafeMark,
@@ -2261,16 +2323,10 @@ func (c *Checker) checkMatchArms(
 			}
 			wildcard = true
 		} else {
-			got, err := matchPayloadType(enumType, unionType, arm)
+			got, err := c.recordMatchArm(arm, enumType, unionType, errorSet, seen)
 			if err != nil {
 				return false, err
 			}
-			typeName := matchTypeName(enumType, unionType)
-			if seen[arm.Tag] {
-				return false, errorf("type error: duplicate match tag `%s::%s`",
-					typeName, arm.Tag)
-			}
-			seen[arm.Tag] = true
 			payload = got
 		}
 		armEnv := env.child()
@@ -2288,12 +2344,141 @@ func (c *Checker) checkMatchArms(
 		}
 		allReturn = allReturn && returns
 	}
-	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return false, errorf("type error: match on `%s` is not exhaustive: missing %s",
-			matchTypeName(enumType, unionType),
-			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
+	if !wildcard {
+		if err := matchCoverageError(enumType, unionType, errorSet, seen); err != nil {
+			return false, err
+		}
 	}
 	return allReturn, nil
+}
+
+// recordMatchArm validates one non-wildcard arm, records what it covers, and
+// returns the union payload type it binds. An error arm is counted under the
+// member value it resolves to, so two spellings of one member collide and two
+// members that share a spelling do not (ADR-0127).
+func (c *Checker) recordMatchArm(
+	arm ast.MatchArm,
+	enumType *enumType,
+	unionType *unionType,
+	errorSet *errorSetType,
+	seen map[string]bool,
+) (string, error) {
+	key := arm.Tag
+	payload := ""
+	if errorSet != nil {
+		resolved, err := c.errorMatchArmValue(errorSet, arm)
+		if err != nil {
+			return "", err
+		}
+		key = resolved
+	} else {
+		got, err := matchPayloadType(enumType, unionType, arm)
+		if err != nil {
+			return "", err
+		}
+		payload = got
+	}
+	if seen[key] {
+		return "", errorf("type error: duplicate match tag `%s::%s`",
+			matchOwnerName(enumType, unionType, errorSet), arm.Tag)
+	}
+	seen[key] = true
+	return payload, nil
+}
+
+// matchOwnerName names the type a match runs over, for diagnostics.
+func matchOwnerName(enumType *enumType, unionType *unionType, errorSet *errorSetType) string {
+	if errorSet != nil {
+		return errorSet.name
+	}
+	return matchTypeName(enumType, unionType)
+}
+
+// matchCoverageError reports the variants a match without a wildcard misses.
+func matchCoverageError(
+	enumType *enumType,
+	unionType *unionType,
+	errorSet *errorSetType,
+	seen map[string]bool,
+) error {
+	if errorSet != nil {
+		if len(seen) == len(errorSet.values) {
+			return nil
+		}
+		return errorf("type error: match on `%s` is not exhaustive: missing %s",
+			errorSet.name,
+			strings.Join(missingErrorMatchValues(errorSet, seen), ", "))
+	}
+	if len(seen) == matchVariantCount(enumType, unionType) {
+		return nil
+	}
+	return errorf("type error: match on `%s` is not exhaustive: missing %s",
+		matchTypeName(enumType, unionType),
+		strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
+}
+
+// errorMatchArmValue resolves one error match arm to the member value it
+// covers. A bare arm must name exactly one declaring set; a qualified arm
+// names it explicitly, which a combined set needs when two of its sets
+// declare the same member name (SPEC §11.2).
+func (c *Checker) errorMatchArmValue(set *errorSetType, arm ast.MatchArm) (string, error) {
+	if arm.Binding != "" {
+		return "", errorf("type error: error `%s::%s` has no payload", set.name, arm.Tag)
+	}
+	if arm.TagSet != "" {
+		origin := c.errorSets[arm.TagSet]
+		if origin == nil {
+			return "", errorf(
+				"type error: match arm qualifier `%s` is not a declared error set",
+				arm.TagSet)
+		}
+		if origin.combines != nil {
+			return "", errorf(
+				"type error: `%s` is a combined set; qualify `%s` with the set"+
+					" that declares it", arm.TagSet, arm.Tag)
+		}
+		key := errorValueKey(arm.TagSet, arm.Tag)
+		if !origin.members[arm.Tag] || !set.values[key] {
+			return "", errorf("type error: `%s::%s` is not a member of `%s`",
+				arm.TagSet, arm.Tag, set.name)
+		}
+		return key, nil
+	}
+	origins := set.byName[arm.Tag]
+	if len(origins) == 0 {
+		return "", errorf("type error: unknown match tag `%s::%s`", set.name, arm.Tag)
+	}
+	if len(origins) > 1 {
+		quals := make([]string, 0, len(origins))
+		for _, origin := range origins {
+			quals = append(quals, "`"+errorValueKey(origin, arm.Tag)+"`")
+		}
+		return "", errorf(
+			"type error: `%s` reaches `%s` from more than one set; write %s",
+			arm.Tag, set.name, strings.Join(quals, " or "))
+	}
+	return errorValueKey(origins[0], arm.Tag), nil
+}
+
+// missingErrorMatchValues lists the member values a match does not cover,
+// sorted so the message is stable. A member whose bare name is unambiguous is
+// listed bare; one that reaches the set from more than one declaring set is
+// listed qualified, the way its arm has to be written.
+func missingErrorMatchValues(set *errorSetType, seen map[string]bool) []string {
+	var missing []string
+	for _, key := range set.valueOrder {
+		if seen[key] {
+			continue
+		}
+		_, bare := splitErrorValueKey(key)
+		if len(set.byName[bare]) > 1 {
+			missing = append(missing, key)
+			continue
+		}
+		missing = append(missing, bare)
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // matchArmVariants indexes by tag the variants a `comptime match` arm body is
@@ -2345,6 +2530,10 @@ func validateWildcardMatchArm(arm ast.MatchArm, idx int, count int) error {
 
 // matchPayloadType validates a match arm pattern and returns its payload type.
 func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm) (string, error) {
+	if arm.TagSet != "" {
+		return "", errorf("type error: qualified match arm `%s::%s` requires an error set value",
+			arm.TagSet, arm.Tag)
+	}
 	if enumType != nil {
 		if !enumType.tags[arm.Tag] {
 			return "", errorf("type error: unknown match tag `%s::%s`", enumType.name, arm.Tag)
@@ -2486,6 +2675,8 @@ func (c *Checker) checkControlExpr(
 		return c.checkMatchExpr(e, env, unsafe)
 	case *ast.OrelseGuardExpr:
 		return c.checkOrelseGuardExpr(e, env, unsafe)
+	case *ast.CatchGuardExpr:
+		return c.checkCatchGuardExpr(e, env, unsafe)
 	default:
 		return "", errorf("type error: unsupported expression %T", expr)
 	}
@@ -2531,6 +2722,11 @@ func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeMark) (
 	if stmt.Capture != "" {
 		return "", errorf(
 			"type error: if capture is a statement form; use `orelse` in expressions")
+	}
+	if stmt.ErrCapture != "" {
+		return "", errorf(
+			"type error: `else |%s|` is a statement form; use `catch` in expressions",
+			stmt.ErrCapture)
 	}
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
@@ -2607,12 +2803,15 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeM
 		return "", err
 	}
 	valueType = borrowedValueType(valueType)
+	if set := c.errorSets[string(valueType)]; set != nil {
+		return c.checkMatchExprArms(stmt.Arms, nil, nil, set, env, unsafe)
+	}
 	tagged := c.taggedType(valueType)
 	unionType := c.unions[string(valueType)]
 	if tagged == nil && unionType == nil {
 		return "", errorf("type error: match expects enum or union, got %s", valueType)
 	}
-	return c.checkMatchExprArms(stmt.Arms, tagged, unionType, env, unsafe)
+	return c.checkMatchExprArms(stmt.Arms, tagged, unionType, nil, env, unsafe)
 }
 
 // checkMatchExprArms validates match expression arms and returns their common type.
@@ -2620,6 +2819,7 @@ func (c *Checker) checkMatchExprArms(
 	arms []ast.MatchArm,
 	enumType *enumType,
 	unionType *unionType,
+	errorSet *errorSetType,
 	env *scope,
 	unsafe unsafeMark,
 ) (Type, error) {
@@ -2643,15 +2843,10 @@ func (c *Checker) checkMatchExprArms(
 			}
 		} else {
 			var err error
-			got, err = c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
+			got, err = c.checkRecordedMatchExprArm(arm, enumType, unionType, errorSet, seen, env, unsafe)
 			if err != nil {
 				return "", err
 			}
-			if seen[arm.Tag] {
-				return "", errorf("type error: duplicate match tag `%s::%s`",
-					matchTypeName(enumType, unionType), arm.Tag)
-			}
-			seen[arm.Tag] = true
 		}
 		if idx == 0 {
 			result = got
@@ -2659,12 +2854,47 @@ func (c *Checker) checkMatchExprArms(
 			return "", errorf("type error: match arm types differ: %s vs %s", result, got)
 		}
 	}
-	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return "", errorf("type error: match on `%s` is not exhaustive: missing %s",
-			matchTypeName(enumType, unionType),
-			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
+	if !wildcard {
+		if err := matchCoverageError(enumType, unionType, errorSet, seen); err != nil {
+			return "", err
+		}
 	}
 	return result, nil
+}
+
+// checkRecordedMatchExprArm validates one non-wildcard match expression arm,
+// records what it covers, and returns its value type.
+func (c *Checker) checkRecordedMatchExprArm(
+	arm ast.MatchArm,
+	enumType *enumType,
+	unionType *unionType,
+	errorSet *errorSetType,
+	seen map[string]bool,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if errorSet != nil {
+		key, err := c.errorMatchArmValue(errorSet, arm)
+		if err != nil {
+			return "", err
+		}
+		if seen[key] {
+			return "", errorf("type error: duplicate match tag `%s::%s`",
+				errorSet.name, arm.Tag)
+		}
+		seen[key] = true
+		return c.checkStmtValue(arm.Body, env.child(), unsafe)
+	}
+	got, err := c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if seen[arm.Tag] {
+		return "", errorf("type error: duplicate match tag `%s::%s`",
+			matchTypeName(enumType, unionType), arm.Tag)
+	}
+	seen[arm.Tag] = true
+	return got, nil
 }
 
 // checkMatchExprArm validates one match expression arm and returns its value type.
@@ -2783,6 +3013,104 @@ func (c *Checker) checkOrelseExpr(
 		return "", errorf("type error: `orelse` default must be %s, got %s", elem, right)
 	}
 	return elem, nil
+}
+
+// checkCatchExpr types `union catch default`: the left side must be an error
+// union with a declared set and the result is its success type, with the
+// default checked at that type. The error member is not bound here; touching
+// it is the statement form's job (SPEC §11.1).
+func (c *Checker) checkCatchExpr(
+	expr *ast.BinaryExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	left, err := c.checkExpr(expr.Left, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, err := c.catchSuccessType(left)
+	if err != nil {
+		return "", err
+	}
+	right, err := c.checkContextualExpr(expr.Right, elem, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(right, elem) {
+		return "", errorf("type error: `catch` default must be %s, got %s", elem, right)
+	}
+	return elem, nil
+}
+
+// checkCatchGuardExpr types `union catch return/break/continue`: on failure
+// the guard leaves the enclosing function or loop, so the guard itself always
+// yields the success payload.
+func (c *Checker) checkCatchGuardExpr(
+	expr *ast.CatchGuardExpr,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	cond, err := c.checkExpr(expr.Cond, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, err := c.catchSuccessType(cond)
+	if err != nil {
+		return "", err
+	}
+	switch exit := expr.Exit.(type) {
+	case *ast.ReturnStmt:
+		if _, err := c.checkReturnStmt(exit, env, c.currentReturn, unsafe); err != nil {
+			return "", err
+		}
+	case *ast.BreakStmt:
+		if err := c.checkLoopBranch("break", exit.Label); err != nil {
+			return "", err
+		}
+	case *ast.ContinueStmt:
+		if err := c.checkLoopBranch("continue", exit.Label); err != nil {
+			return "", err
+		}
+	default:
+		return "", errorf("type error: `catch` guard must exit with return, break, or continue")
+	}
+	return elem, nil
+}
+
+// catchSuccessType returns T for the `E!T` a catch or error capture handles.
+// `!T` declares no set, so its failures cannot be enumerated and it stays
+// propagation-only (SPEC §11.1).
+func (c *Checker) catchSuccessType(union Type) (Type, error) {
+	errorType, success, ok := c.types.errorUnionParts(union)
+	if !ok {
+		return "", errorf("type error: `catch` expects an error union left operand, got %s", union)
+	}
+	if errorType == "" {
+		return "", errorf(
+			"type error: `catch` requires a declared error set; `!%s` propagates with `try`",
+			success)
+	}
+	return success, nil
+}
+
+// errorSetFits reports whether every member value of the source set is a
+// member of the target set. Members keep their per-set identity through a
+// union (ADR-0127), so the check runs over declaring-set values, not names.
+func (c *Checker) errorSetFits(source Type, target Type) bool {
+	if sameType(source, target) {
+		return true
+	}
+	src := c.errorSets[string(source)]
+	dst := c.errorSets[string(target)]
+	if src == nil || dst == nil {
+		return false
+	}
+	for key := range src.values {
+		if !dst.values[key] {
+			return false
+		}
+	}
+	return true
 }
 
 // checkContextualExpr validates an expression and narrows integer literals to want.
@@ -2961,6 +3289,9 @@ func (c *Checker) checkBinaryExpr(
 	if expr.Operator == "orelse" {
 		return c.checkOrelseExpr(expr, env, unsafe)
 	}
+	if expr.Operator == "catch" {
+		return c.checkCatchExpr(expr, env, unsafe)
+	}
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
 		return "", err
@@ -3117,8 +3448,10 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeMark)
 	targetError, _, _ := c.types.errorUnionParts(c.currentReturn)
 	// `!T` declares no error set, so it propagates whatever the body fails
 	// with, which is what lets a function call things that fail in different
-	// ways without naming every one. A declared `E!T` accepts only E.
-	if targetError != "" && sourceError != targetError {
+	// ways without naming every one. A declared `E!T` accepts the sets whose
+	// member values are a subset of E: E itself and the sets it combines
+	// (ADR-0127).
+	if targetError != "" && !c.errorSetFits(sourceError, targetError) {
 		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
 	return success, nil
@@ -5067,6 +5400,14 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 		return Type(enumType.name), nil
 	}
 	if set, ok := errorSetReceiver(expr.Receiver, c.errorSets); ok {
+		if set.combines != nil {
+			// A combined set re-exports nothing: its members stay the values
+			// of the sets that declared them, so the reference names the
+			// declaring set (ADR-0127).
+			return "", errorf(
+				"type error: `%s` is a combined set and declares no members;"+
+					" write the declaring set's `Origin::%s`", set.name, expr.Name)
+		}
 		if !set.members[expr.Name] {
 			return "", errorf("type error: unknown error `%s::%s`", set.name, expr.Name)
 		}

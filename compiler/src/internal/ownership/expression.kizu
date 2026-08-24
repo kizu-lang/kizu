@@ -121,6 +121,9 @@ fn (self: &var Checker) read_control_expr(
     if orelse_guard_expr(tree, expression) |value| {
         return self.read_orelse_guard_expr(tree, env, value, out);
     }
+    if catch_guard_expr(tree, expression) |value| {
+        return self.read_catch_guard_expr(tree, env, value, out);
+    }
     if move_expr(tree, expression) |value| {
         return try self.error1(
             tree, value.span, "move error: `move` marks a hand-off, and `%s` is only read here",
@@ -164,6 +167,46 @@ fn (self: &var Checker) read_orelse_guard_expr(
         }
     }
     out.* = try self.names.optional_payload_name(cond_type);
+    return null;
+}
+
+/// Reads `cond catch return/break/continue`, the Go `readCatchGuardExpr`.
+/// The failure arm is a real exit like an orelse guard's null arm: it
+/// carries the matching statement's obligations, checked in a clone so
+/// nothing it consumes looks moved on the fall-through path. The handled
+/// failure is not an error return path, so no errdefer obligations attach
+/// here.
+fn (self: &var Checker) read_catch_guard_expr(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    guard: ast::CatchGuardExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var cond_type = empty_name();
+    if try self.read_expr(tree, env, guard.condition, &var cond_type) |failed| {
+        return move failed;
+    }
+    if return_stmt(tree, guard.exit) |exit| {
+        let cloned = try self.store.clone_scope(env);
+        if try self.check_return_stmt(tree, cloned, guard.exit, exit) |failed| {
+            return move failed;
+        }
+    }
+    if break_stmt(tree, guard.exit) |exit| {
+        if try self.check_loop_branch_label(tree, exit.label) |failed| {
+            return move failed;
+        }
+    }
+    if continue_stmt(tree, guard.exit) |exit| {
+        if try self.check_loop_branch_label(tree, exit.label) |failed| {
+            return move failed;
+        }
+    }
+    if try self.names.error_union_parts(cond_type) |parts| {
+        out.* = parts.success;
+        return null;
+    }
+    out.* = cond_type;
     return null;
 }
 
@@ -645,7 +688,7 @@ fn (self: &var Checker) check_match_expr_arm_value(
             return try self.error0(ast::zero_span(), "move error: wildcard match arm cannot bind payload");
         }
     } else {
-        if !self.match_tag_known(tree, tags, arm.tag) {
+        if !self.match_arm_tag_known(tree, tags, arm) {
             return try self.error1(tree, ast::zero_span(), "move error: unknown match tag `%s`", Arg::Text(arm.tag));
         }
     }
@@ -854,6 +897,9 @@ fn (self: &var Checker) read_binary_expr(
         }
         return self.read_orelse_default(tree, env, left, binary.right, out);
     }
+    if text_equals(tree, binary.operator, "catch") {
+        return self.read_catch_default(tree, env, left, binary.right, out);
+    }
     var ignored = empty_name();
     if try self.read_expr(tree, env, binary.right, &var ignored) |failed| {
         return move failed;
@@ -882,6 +928,36 @@ fn (self: &var Checker) read_orelse_default(
     out: &var Name
 ) -> !?diagnostic::Diagnostic {
     let elem = try self.names.optional_payload_name(left);
+    var ignored = empty_name();
+    if try self.value_type_needs_consume(elem) {
+        if try self.move_expr(tree, env, right, &var ignored) |failed| {
+            return move failed;
+        }
+        out.* = elem;
+        return null;
+    }
+    if try self.read_expr(tree, env, right, &var ignored) |failed| {
+        return move failed;
+    }
+    out.* = elem;
+    return null;
+}
+
+/// Reads the default arm of `catch`, the Go `readCatchDefault`. The default
+/// stands in for the success payload the same way an `orelse` default stands
+/// in for the optional payload, so an owner payload makes it a competing
+/// producer.
+fn (self: &var Checker) read_catch_default(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    left: Name,
+    right: ast::Expression,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var elem = left;
+    if try self.names.error_union_parts(left) |parts| {
+        elem = parts.success;
+    }
     var ignored = empty_name();
     if try self.value_type_needs_consume(elem) {
         if try self.move_expr(tree, env, right, &var ignored) |failed| {

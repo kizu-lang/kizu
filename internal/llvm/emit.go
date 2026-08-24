@@ -1093,9 +1093,82 @@ func (e *emitter) writeErrorInstr(instr *ir.Instr) error {
 		return e.writeErrorError(instr)
 	case "error.try":
 		return e.writeErrorTry(instr)
+	case "error.has":
+		return e.writeErrorHas(instr)
+	case "error.value":
+		return e.writeErrorValue(instr)
+	case "error.code":
+		return e.writeErrorCode(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported error instruction `%s`", instr.Op)
 	}
+}
+
+// writeErrorHas tests an error union for success, the way opt.has tests an
+// optional for presence. `catch` and `else |err|` branch on it.
+func (e *emitter) writeErrorHas(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: error.has expects 1 arg")
+	}
+	source := instr.Args[0]
+	if _, _, ok := e.errorUnionParts(source.Type); !ok {
+		return fmt.Errorf("llvm error: error.has expects !T, got %s", source.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	tagName := resultName + ".tag"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n",
+		tagName, e.llvmType(source.Type), e.value(source).operand)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", resultName, tagName)
+	e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: resultName}
+	return nil
+}
+
+// writeErrorValue extracts the success payload of an error union. The caller
+// has already branched on success; a failed union's payload is only ever
+// produced, never read.
+func (e *emitter) writeErrorValue(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: error.value expects 1 arg")
+	}
+	source := instr.Args[0]
+	_, success, ok := e.errorUnionParts(source.Type)
+	if !ok || success == "void" {
+		return fmt.Errorf("llvm error: error.value expects an `E!T` with a payload, got %s",
+			source.Type)
+	}
+	if instr.Result.Type != success {
+		return fmt.Errorf("llvm error: error.value returns %s, got %s",
+			success, instr.Result.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n",
+		resultName, e.llvmType(source.Type), e.value(source).operand)
+	e.values[instr.Result.Name] = valueInfo{typ: success, operand: resultName}
+	return nil
+}
+
+// writeErrorCode extracts the failure member of an error union as a value of
+// its declared set. The caller has already branched on failure, and a code is
+// global, so extracting it converts nothing.
+func (e *emitter) writeErrorCode(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: error.code expects 1 arg")
+	}
+	source := instr.Args[0]
+	errorName, _, ok := e.errorUnionParts(source.Type)
+	if !ok || errorName == "" {
+		return fmt.Errorf("llvm error: error.code expects `E!T`, got %s", source.Type)
+	}
+	if instr.Result.Type != errorName {
+		return fmt.Errorf("llvm error: error.code returns %s, got %s",
+			errorName, instr.Result.Type)
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		resultName, e.llvmType(source.Type), e.value(source).operand,
+		e.errorUnionFailureIndex(source.Type))
+	e.values[instr.Result.Name] = valueInfo{typ: errorName, operand: resultName}
+	return nil
 }
 
 // writeSliceInstr dispatches checked byte-slice operations.
@@ -2015,11 +2088,12 @@ func (e *emitter) writeErrorError(instr *ir.Instr) error {
 	if _, ok := e.module.ErrorSets[arg.Type]; !ok {
 		return fmt.Errorf("llvm error: error.error expects an error set member, got %s", arg.Type)
 	}
-	// A declared `E!T` accepts only E. Codes are global, so a member of another
-	// set would lower to a union that claims E while holding another set's code,
-	// and nothing below here records which set a union carries.
+	// A declared `E!T` accepts the sets whose codes are a subset of E's: E
+	// itself and the sets it combines (ADR-0127). Codes are global, so any
+	// other set would lower to a union that claims E while holding a code E
+	// does not carry, and nothing below here records which set a union holds.
 	if errorName, _, _ := e.errorUnionParts(instr.Result.Type); errorName != "" &&
-		arg.Type != errorName {
+		!e.errorSetFits(arg.Type, errorName) {
 		return fmt.Errorf("llvm error: error.error cannot put %s into %s",
 			arg.Type, instr.Result.Type)
 	}
@@ -2064,7 +2138,7 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	if !ok {
 		return fmt.Errorf("llvm error: error.try requires function to return !T")
 	}
-	if targetError != "" && sourceError != targetError {
+	if targetError != "" && !e.errorSetFits(sourceError, targetError) {
 		return fmt.Errorf(
 			"llvm error: error.try cannot propagate %s into %s",
 			source.Type,
@@ -2638,6 +2712,30 @@ func structFieldIndex(st ir.Struct, name string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// errorSetFits reports whether every member code of the source set is a
+// member of the target set. A combined set carries its origins' codes, so
+// the subset check `try` generalized to runs over codes, never names
+// (ADR-0127).
+func (e *emitter) errorSetFits(source string, target string) bool {
+	if source == target {
+		return true
+	}
+	sourceCodes, ok := ir.ErrorSetCodes(e.module, source)
+	if !ok {
+		return false
+	}
+	targetCodes, ok := ir.ErrorSetCodes(e.module, target)
+	if !ok {
+		return false
+	}
+	for code := range sourceCodes {
+		if !targetCodes[code] {
+			return false
+		}
+	}
+	return true
 }
 
 // errorUnionFailureIndex returns the field index of the failure payload.

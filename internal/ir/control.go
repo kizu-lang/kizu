@@ -17,18 +17,9 @@ type branchResult struct {
 // the condition is an optional: the branch tests presence and the payload is
 // bound for the consequence only.
 func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
-	cond, err := l.lowerExpr(stmt.Condition)
+	cond, payload, errPayload, err := l.lowerIfCondition(stmt)
 	if err != nil {
 		return err
-	}
-	var payload Value
-	if stmt.Capture != "" {
-		elem, ok := optionalElemType(cond.Type)
-		if !ok {
-			return fmt.Errorf("ir error: if capture needs a `?T` condition, got %s", cond.Type)
-		}
-		payload = l.emit("opt.value", elem, []Value{cond}, "")
-		cond = l.emit("opt.has", "bool", []Value{cond}, "")
 	}
 	thenBlock := l.newBlock(l.nextBlockName("if.then"))
 	elseBlock := l.newBlock(l.nextBlockName("if.else"))
@@ -36,21 +27,10 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
-	var previous Value
-	var hadPrevious bool
-	if stmt.Capture != "" {
-		previous, hadPrevious = l.env.get(stmt.Capture)
-		l.env.set(stmt.Capture, payload)
-	}
-	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name, false)
-	if stmt.Capture != "" {
-		// The capture is scoped to the consequence; the else branch and the
-		// merged environment see whatever the name meant outside.
-		l.restoreLoopVar(stmt.Capture, previous, hadPrevious)
-		if err == nil {
-			restoreBranchVar(thenResult.env, stmt.Capture, previous, hadPrevious)
-		}
-	}
+	// Each capture is scoped to its own branch; the other branch and the
+	// merged environment see whatever the name meant outside.
+	thenResult, err := l.lowerCaptureBranch(
+		thenBlock, stmt.Consequence, mergeBlock.Name, stmt.Capture, payload)
 	if err != nil {
 		return err
 	}
@@ -58,7 +38,8 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	if elseBody == nil {
 		elseBody = &ast.BlockStmt{}
 	}
-	elseResult, err := l.lowerBranchBlock(elseBlock, elseBody, mergeBlock.Name, false)
+	elseResult, err := l.lowerCaptureBranch(
+		elseBlock, elseBody, mergeBlock.Name, stmt.ErrCapture, errPayload)
 	if err != nil {
 		return err
 	}
@@ -74,6 +55,68 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 		mergeBlock.Terminator = Terminator{Op: "unreachable"}
 	}
 	return nil
+}
+
+// lowerIfCondition lowers an if condition into its branch test, with the
+// payloads its captures bind. An error union condition (`else |err|` present)
+// tests success and binds the success payload and failure member; an optional
+// condition tests presence and binds the value (SPEC §6.9, §11.1).
+func (l *lowerer) lowerIfCondition(stmt *ast.IfStmt) (Value, Value, Value, error) {
+	cond, err := l.lowerExpr(stmt.Condition)
+	if err != nil {
+		return Value{}, Value{}, Value{}, err
+	}
+	var payload Value
+	var errPayload Value
+	if stmt.ErrCapture != "" {
+		errType, elem, ok := errorUnionParts(l.types, cond.Type)
+		if !ok || errType == "" {
+			return Value{}, Value{}, Value{}, fmt.Errorf(
+				"ir error: `else |err|` needs an `E!T` condition, got %s", cond.Type)
+		}
+		if stmt.Capture != "" {
+			payload = l.emit("error.value", elem, []Value{cond}, "")
+		}
+		errPayload = l.emit("error.code", errType, []Value{cond}, "")
+		cond = l.emit("error.has", "bool", []Value{cond}, "")
+		return cond, payload, errPayload, nil
+	}
+	if stmt.Capture != "" {
+		elem, ok := optionalElemType(cond.Type)
+		if !ok {
+			return Value{}, Value{}, Value{}, fmt.Errorf(
+				"ir error: if capture needs a `?T` condition, got %s", cond.Type)
+		}
+		payload = l.emit("opt.value", elem, []Value{cond}, "")
+		cond = l.emit("opt.has", "bool", []Value{cond}, "")
+	}
+	return cond, payload, errPayload, nil
+}
+
+// lowerCaptureBranch lowers one branch of an if with a capture bound for its
+// body only: the binding is put in place before the branch and taken back out
+// after, so the merge never sees it. An empty capture lowers a plain branch.
+func (l *lowerer) lowerCaptureBranch(
+	block *Block,
+	body *ast.BlockStmt,
+	target string,
+	capture string,
+	payload Value,
+) (branchResult, error) {
+	var previous Value
+	var hadPrevious bool
+	if capture != "" {
+		previous, hadPrevious = l.env.get(capture)
+		l.env.set(capture, payload)
+	}
+	result, err := l.lowerBranchBlock(block, body, target, false)
+	if capture != "" {
+		l.restoreLoopVar(capture, previous, hadPrevious)
+		if err == nil {
+			restoreBranchVar(result.env, capture, previous, hadPrevious)
+		}
+	}
+	return result, err
 }
 
 // restoreBranchVar puts a scoped capture's outer meaning back into a branch
@@ -122,6 +165,82 @@ func (l *lowerer) lowerOrelseExpr(expr *ast.BinaryExpr) (Value, error) {
 		{Block: someEnd, Value: value},
 		{Block: elseEnd, Value: fallback},
 	}), nil
+}
+
+// lowerCatchExpr lowers `union catch default` as a success branch merged by a
+// phi, the same shape `orelse` takes over an optional. The handled failure is
+// not an error return path, so no errdefer cleanups run here.
+func (l *lowerer) lowerCatchExpr(expr *ast.BinaryExpr) (Value, error) {
+	union, err := l.lowerExpr(expr.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	errType, elem, ok := errorUnionParts(l.types, union.Type)
+	if !ok || errType == "" {
+		return Value{}, fmt.Errorf(
+			"ir error: catch needs an `E!T` left operand, got %s", union.Type)
+	}
+	has := l.emit("error.has", "bool", []Value{union}, "")
+	okBlock := l.newBlock(l.nextBlockName("catch.ok"))
+	elseBlock := l.newBlock(l.nextBlockName("catch.else"))
+	mergeBlock := l.newBlock(l.nextBlockName("catch.end"))
+	l.block.Terminator = Terminator{
+		Op: "branch", Cond: has, Target: okBlock.Name, Else: elseBlock.Name,
+	}
+	l.block = okBlock
+	var value Value
+	if elem != "void" {
+		value = l.emit("error.value", elem, []Value{union}, "")
+	}
+	okEnd := l.block.Name
+	l.block.Terminator = Terminator{Op: "jump", Target: mergeBlock.Name}
+	l.block = elseBlock
+	fallback, err := l.lowerContextualExpr(expr.Right, elem)
+	if err != nil {
+		return Value{}, err
+	}
+	elseEnd := l.block.Name
+	if l.block.Terminator.Op == "" {
+		l.block.Terminator = Terminator{Op: "jump", Target: mergeBlock.Name}
+	}
+	l.block = mergeBlock
+	if elem == "void" {
+		return Value{Type: "void"}, nil
+	}
+	return l.addPhi(mergeBlock, elem, []Incoming{
+		{Block: okEnd, Value: value},
+		{Block: elseEnd, Value: fallback},
+	}), nil
+}
+
+// lowerCatchGuardExpr lowers `union catch return/break/continue`. The failure
+// arm lowers the exit statement and never rejoins, so only the success arm
+// reaches the code after the guard and no merge phi is needed.
+func (l *lowerer) lowerCatchGuardExpr(expr *ast.CatchGuardExpr) (Value, error) {
+	union, err := l.lowerExpr(expr.Cond)
+	if err != nil {
+		return Value{}, err
+	}
+	errType, elem, ok := errorUnionParts(l.types, union.Type)
+	if !ok || errType == "" {
+		return Value{}, fmt.Errorf(
+			"ir error: catch needs an `E!T` left operand, got %s", union.Type)
+	}
+	has := l.emit("error.has", "bool", []Value{union}, "")
+	okBlock := l.newBlock(l.nextBlockName("catch.ok"))
+	exitBlock := l.newBlock(l.nextBlockName("catch.exit"))
+	l.block.Terminator = Terminator{
+		Op: "branch", Cond: has, Target: okBlock.Name, Else: exitBlock.Name,
+	}
+	l.block = exitBlock
+	if err := l.lowerGuardExit(expr.Exit); err != nil {
+		return Value{}, err
+	}
+	l.block = okBlock
+	if elem == "void" {
+		return Value{Type: "void"}, nil
+	}
+	return l.emit("error.value", elem, []Value{union}, ""), nil
 }
 
 // lowerOrelseGuardExpr lowers `cond orelse return/break/continue`. The null

@@ -519,6 +519,7 @@ func TestFunctionNames(module *Module) []string {
 
 // collectDecls records signatures and struct layouts.
 func (l *lowerer) collectDecls() error {
+	var combined []*ast.ErrorSetDecl
 	for _, decl := range l.program.Decls {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
@@ -526,6 +527,10 @@ func (l *lowerer) collectDecls() error {
 		case *ast.EnumDecl:
 			l.module.Enums[d.Name] = lowerEnum(d)
 		case *ast.ErrorSetDecl:
+			if len(d.Combines) > 0 {
+				combined = append(combined, d)
+				continue
+			}
 			set, err := l.lowerErrorSet(d)
 			if err != nil {
 				return err
@@ -534,6 +539,9 @@ func (l *lowerer) collectDecls() error {
 		case *ast.UnionDecl:
 			l.module.Unions[d.Name] = lowerUnion(d)
 		}
+	}
+	if err := l.lowerCombinedErrorSets(combined); err != nil {
+		return err
 	}
 	for _, decl := range l.program.Decls {
 		if fn, ok := decl.(*ast.FunctionDecl); ok {
@@ -603,6 +611,78 @@ func (l *lowerer) lowerErrorSet(decl *ast.ErrorSetDecl) (Enum, error) {
 		l.nextErrorCode++
 	}
 	return Enum{Name: decl.Name, Tags: members}, nil
+}
+
+// lowerCombinedErrorSets records the `error C = A or B;` declarations once
+// every declaring set is filed. A combined set keeps no codes of its own: it
+// lists the `{ }`-form sets its members come from, resolved through any
+// combined sets it names, so its member set is a code-set union and nothing
+// is renumbered (ADR-0127).
+func (l *lowerer) lowerCombinedErrorSets(decls []*ast.ErrorSetDecl) error {
+	pending := map[string]*ast.ErrorSetDecl{}
+	for _, decl := range decls {
+		pending[decl.Name] = decl
+	}
+	var resolve func(decl *ast.ErrorSetDecl) error
+	resolve = func(decl *ast.ErrorSetDecl) error {
+		delete(pending, decl.Name)
+		seen := map[string]bool{}
+		var origins []string
+		for _, ref := range decl.Combines {
+			if next, ok := pending[ref]; ok {
+				if err := resolve(next); err != nil {
+					return err
+				}
+			}
+			origin, ok := l.module.ErrorSets[ref]
+			if !ok {
+				return fmt.Errorf("ir error: `%s` combines unknown error set `%s`",
+					decl.Name, ref)
+			}
+			contributed := origin.Origins
+			if contributed == nil {
+				contributed = []string{ref}
+			}
+			for _, name := range contributed {
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				origins = append(origins, name)
+			}
+		}
+		l.module.ErrorSets[decl.Name] = Enum{Name: decl.Name, Origins: origins}
+		return nil
+	}
+	for _, decl := range decls {
+		if _, open := pending[decl.Name]; !open {
+			continue
+		}
+		if err := resolve(decl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ErrorSetCodes returns the member codes a set carries: its own for a
+// declaring set, its origins' for a combined one. Backends ask here so the
+// subset checks `try` and `return` generalized to (ADR-0127) cannot drift.
+func ErrorSetCodes(module *Module, name string) (map[int]bool, bool) {
+	set, ok := module.ErrorSets[name]
+	if !ok {
+		return nil, false
+	}
+	codes := map[int]bool{}
+	for _, code := range set.Tags {
+		codes[code] = true
+	}
+	for _, origin := range set.Origins {
+		for _, code := range module.ErrorSets[origin].Tags {
+			codes[code] = true
+		}
+	}
+	return codes, true
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.
@@ -1132,7 +1212,7 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
-	case *ast.IfStmt, *ast.MatchStmt, *ast.OrelseGuardExpr:
+	case *ast.IfStmt, *ast.MatchStmt, *ast.OrelseGuardExpr, *ast.CatchGuardExpr:
 		return l.lowerBranchingExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
@@ -1156,6 +1236,8 @@ func (l *lowerer) lowerBranchingExpr(expr ast.Expression) (Value, error) {
 		return l.lowerMatchExpr(e)
 	case *ast.OrelseGuardExpr:
 		return l.lowerOrelseGuardExpr(e)
+	case *ast.CatchGuardExpr:
+		return l.lowerCatchGuardExpr(e)
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression `%s`", expr.String())
 	}
@@ -1488,6 +1570,9 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 	}
 	if expr.Operator == "orelse" {
 		return l.lowerOrelseExpr(expr)
+	}
+	if expr.Operator == "catch" {
+		return l.lowerCatchExpr(expr)
 	}
 	left, err := l.lowerExpr(expr.Left)
 	if err != nil {

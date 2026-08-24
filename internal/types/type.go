@@ -158,6 +158,32 @@ type errorSetType struct {
 	// failure it is, is the question a match on an enum asks, so it is answered
 	// by the same code rather than a second copy of it.
 	tagged *enumType
+	// combines lists the declared sets an `error Name = A or B;` declaration
+	// takes the union of, resolved to their filed names. nil for the `{ }`
+	// form. A combined set declares no values of its own (ADR-0127).
+	combines []string
+	// values identifies every member by the set that declared it
+	// ("Origin::Name"). Members keep their per-set identity through a union,
+	// so subset checks and match coverage count values, not spellings.
+	values map[string]bool
+	// valueOrder lists values in declaration order for stable diagnostics.
+	valueOrder []string
+	// byName maps a bare member name to the declaring sets that contribute
+	// it, in order. More than one means a bare match arm is ambiguous and
+	// must qualify the declaring set. nil until the set is resolved.
+	byName map[string][]string
+}
+
+// errorValueKey identifies one error member by the set that declared it.
+func errorValueKey(origin string, member string) string {
+	return origin + "::" + member
+}
+
+// splitErrorValueKey returns the declaring set and bare name of a value key.
+// A set name may itself be module-qualified, so the member is the last segment.
+func splitErrorValueKey(key string) (string, string) {
+	at := strings.LastIndex(key, "::")
+	return key[:at], key[at+2:]
 }
 
 type unionType struct {

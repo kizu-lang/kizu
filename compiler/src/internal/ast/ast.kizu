@@ -151,13 +151,16 @@ pub struct EnumDecl {
     pub public: bool
 }
 
-/// Represents a top-level error set declaration.
+/// Represents a top-level error set declaration. The `error C = A or B;`
+/// form lists the declared sets it combines and declares no members of its
+/// own; the `{ }` form leaves combines empty (ADR-0127).
 pub struct ErrorSetDecl {
     pub name: Text,
     pub doc: Text,
     pub members: array::Array<Text>,
     pub member_docs: ?map::Map<[]u8, Text>,
-    pub public: bool
+    pub public: bool,
+    pub combines: array::Array<Text>
 }
 
 /// Represents a top-level tagged union declaration.
@@ -274,6 +277,7 @@ pub union ExpressionNode {
     String(StringExpr),
     Null(NullExpr),
     OrelseGuard(OrelseGuardExpr),
+    CatchGuard(CatchGuardExpr),
     Bool(BoolExpr),
     Type(TypeExpr),
     Comptime(ComptimeExpr),
@@ -328,12 +332,15 @@ pub struct ErrDeferStmt {
     pub expr: Expression
 }
 
-/// Represents a conditional branch or conditional expression.
+/// Represents a conditional branch or conditional expression. err_capture
+/// names the error member an `else |err|` block binds when the condition is
+/// an error union; it is empty otherwise (SPEC §11.1).
 pub struct IfStmt {
     pub condition: Expression,
     pub consequence: Block,
     pub alternative: ?Block,
-    pub capture: Text
+    pub capture: Text,
+    pub err_capture: Text
 }
 
 /// Represents a loop guarded by a condition expression.
@@ -371,11 +378,14 @@ pub struct MatchStmt {
     pub meta_owner: Text
 }
 
-/// Represents one tag branch in a match.
+/// Represents one tag branch in a match. tag_set qualifies tag with the
+/// error set that declared it (`FsError::NotFound => ...`); it is empty for
+/// bare arms and for enum or union tags (SPEC §11.2).
 pub struct MatchArm {
     pub tag: Text,
     pub binding: Text,
-    pub body: Statement
+    pub body: Statement,
+    pub tag_set: Text
 }
 
 /// Represents a branch selected during compilation.
@@ -429,6 +439,15 @@ pub struct NullExpr {
 
 /// Is `cond orelse return/break/continue`.
 pub struct OrelseGuardExpr {
+    pub condition: Expression,
+    pub exit: Statement,
+    pub span: Span
+}
+
+/// Is `cond catch return/break/continue`: on failure the guard leaves the
+/// enclosing function or loop, so the expression itself always yields the
+/// success payload. The default form (`cond catch expr`) is a BinaryExpr.
+pub struct CatchGuardExpr {
     pub condition: Expression,
     pub exit: Statement,
     pub span: Span
@@ -860,6 +879,13 @@ fn append_expression(
             try append_guard_exit(out, ast, value.exit);
             try out.append_byte(cast<u8>(41));
         },
+        CatchGuard(value) => {
+            try out.append_byte(cast<u8>(40));
+            try append_expression(out, ast, value.condition);
+            try out.append_bytes(" catch ");
+            try append_guard_exit(out, ast, value.exit);
+            try out.append_byte(cast<u8>(41));
+        },
         Bool(value) => try fmt::append_bool(out, value.value),
         Type(value) => {
             try out.append_bytes("type<");
@@ -1148,6 +1174,10 @@ fn append_match_arm(
     ast: &Ast,
     arm: &MatchArm
 ) -> !void {
+    if !text_is_empty(ast, arm.tag_set) {
+        try append_text(out, ast, arm.tag_set);
+        try out.append_bytes("::");
+    }
     try append_text(out, ast, arm.tag);
     if !text_is_empty(ast, arm.binding) {
         try out.append_byte(cast<u8>(40));
@@ -1535,6 +1565,12 @@ fn append_error_set_decl(
     }
     try out.append_bytes("error ");
     try append_text(out, ast, declaration.name);
+    if declaration.combines.len() > 0 {
+        try out.append_bytes(" = ");
+        try append_text_list(out, ast, &declaration.combines, " or ");
+        try out.append_byte(cast<u8>(59));
+        return;
+    }
     try out.append_bytes(" { ");
     try append_text_list(out, ast, &declaration.members, ", ");
     try out.append_bytes(" }");
@@ -1682,7 +1718,8 @@ pub fn comptime_match_expansion(
         try arms.append(MatchArm {
             tag: variant.name,
             binding: binding,
-            body: body
+            body: body,
+            tag_set: empty
         });
         index = index + 1;
     }
@@ -2069,7 +2106,8 @@ fn derive_struct_deinit(
                     condition: read,
                     consequence: consequence,
                     alternative: null,
-                    capture: names.capture
+                    capture: names.capture,
+                    err_capture: names.empty
                 }
                 )));
             },
@@ -2157,7 +2195,8 @@ fn derive_union_deinit(
             try arms.append(MatchArm {
                 tag: variant.name,
                 binding: names.capture,
-                body: add_derived_cleanup(ast, names, held)
+                body: add_derived_cleanup(ast, names, held),
+                tag_set: names.empty
             });
         } else {
             // Empty arms keep the generated match exhaustive.
@@ -2165,7 +2204,8 @@ fn derive_union_deinit(
             try arms.append(MatchArm {
                 tag: variant.name,
                 binding: names.empty,
-                body: body.as_statement()
+                body: body.as_statement(),
+                tag_set: names.empty
             });
         }
         index = index + 1;

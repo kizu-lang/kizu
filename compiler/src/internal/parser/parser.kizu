@@ -445,6 +445,20 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
         return tree.add_recovered_declaration(token_span_at(self));
     }
     let name = try self.retain_current_literal(tree);
+    if self.peek_kind() == token::Kind::Assign {
+        try self.next_token();
+        let combines = try self.parse_error_set_combines(tree);
+        return tree.add_declaration(ast::DeclarationNode::ErrorSet(
+            ast::ErrorSetDecl {
+            name: name,
+            doc: doc,
+            members: array::new<ast::Text>(self.allocator),
+            member_docs: null,
+            public: public,
+            combines: move combines
+        }
+        ));
+    }
     if !try self.expect_peek(token::Kind::LBrace) {
         return tree.add_recovered_declaration(token_span_at(self));
     }
@@ -455,9 +469,62 @@ fn (self: &var Parser) parse_error_set_decl_with_doc(
         doc: doc,
         members: move list.names,
         member_docs: move list.docs,
-        public: public
+        public: public,
+        combines: array::new<ast::Text>(self.allocator)
     }
     ));
+}
+
+// Parses the right side of `error Name = A or B;`: a list of declared set
+// references joined by `or`. The `=` form declares no members of its own, so
+// only names appear here.
+fn (self: &var Parser) parse_error_set_combines(
+    tree: &var ast::Ast
+) -> !array::Array<ast::Text> {
+    var combines = array::new<ast::Text>(self.allocator);
+    errdefer combines.deinit();
+    while true {
+        if try self.parse_error_set_reference(tree) |reference| {
+            try combines.append(reference);
+        } else {
+            return move combines;
+        }
+        if self.peek_kind() != token::Kind::Or {
+            break;
+        }
+        try self.next_token();
+    }
+    let _ = try self.expect_peek(token::Kind::Semicolon);
+    return move combines;
+}
+
+// Parses one set name on the right side of an `=` error set declaration,
+// module qualification included.
+fn (self: &var Parser) parse_error_set_reference(
+    tree: &var ast::Ast
+) -> !?ast::Text {
+    if !try self.expect_peek(token::Kind::Ident) {
+        return null;
+    }
+    var name = string::new(self.allocator);
+    errdefer name.deinit();
+    try append_token_literal(&var name, self.current_token());
+    while self.peek_kind() == token::Kind::DoubleColon {
+        try self.next_token();
+        if !try self.expect_peek(token::Kind::Ident) {
+            name.deinit();
+            return null;
+        }
+        try name.append_bytes("::");
+        try append_token_literal(&var name, self.current_token());
+    }
+    return tree.add_text(move name);
+}
+
+// Appends one token's literal bytes to an owned spelling.
+fn append_token_literal(name: &var string::String, current: &token::Token) -> !void {
+    let bytes = current.literal.as_bytes();
+    return name.append_bytes(bytes);
 }
 
 fn (self: &var Parser) parse_name_list(
@@ -1382,8 +1449,17 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
         }
         let consequence = try self.parse_block_stmt(tree);
         var alternative = no_block();
+        var err_capture = tree.add_empty_text();
         if self.peek_kind() == token::Kind::Else {
             try self.next_token();
+            // `else |err|` binds the error member of an error union condition
+            // (SPEC §11.1), with the same `|name|` spelling as the success
+            // capture.
+            if try self.parse_payload_capture(tree) |bound| {
+                err_capture = bound;
+            } else {
+                return null;
+            }
             if try self.expect_peek(token::Kind::LBrace) {
                 alternative = try self.parse_block_stmt(tree);
             }
@@ -1392,7 +1468,8 @@ fn (self: &var Parser) parse_if_stmt(tree: &var ast::Ast) -> !?ast::IfStmt {
             condition: condition,
             consequence: consequence,
             alternative: alternative,
-            capture: capture
+            capture: capture,
+            err_capture: err_capture
         };
     }
     return null;
@@ -1561,7 +1638,20 @@ fn (self: &var Parser) parse_match_arm(tree: &var ast::Ast) -> !?ast::MatchArm {
         try self.error_token("expected match tag, got ", self.current_token());
         return null;
     }
-    let tag = try self.retain_current_literal(tree);
+    var tag = try self.retain_current_literal(tree);
+    var tag_set = tree.add_empty_text();
+    // A qualified arm (`FsError::NotFound =>`) names the error set a member
+    // originates from, which a combined set needs when two of its sets
+    // declare the same member name. Every segment before the last is the set
+    // reference, module qualification included.
+    while self.peek_kind() == token::Kind::DoubleColon {
+        try self.next_token();
+        if !try self.expect_peek(token::Kind::Ident) {
+            return null;
+        }
+        tag_set = try join_qualified_text(tree, self.allocator, tag_set, tag);
+        tag = try self.retain_current_literal(tree);
+    }
     var binding = tree.add_empty_text();
     if self.peek_kind() == token::Kind::LParen {
         try self.next_token();
@@ -1579,18 +1669,63 @@ fn (self: &var Parser) parse_match_arm(tree: &var ast::Ast) -> !?ast::MatchArm {
     try self.next_token();
     if self.current_kind() == token::Kind::Return {
         let body = try self.parse_match_arm_return(tree);
-        return ast::MatchArm { tag: tag, binding: binding, body: body };
+        return ast::MatchArm {
+            tag: tag,
+            binding: binding,
+            body: body,
+            tag_set: tag_set
+        };
     }
     if self.current_kind() == token::Kind::LBrace {
         let block = try self.parse_block_stmt(tree);
         return ast::MatchArm {
             tag: tag,
             binding: binding,
-            body: block.as_statement()
+            body: block.as_statement(),
+            tag_set: tag_set
         };
     }
     let body = try self.parse_statement(tree);
-    return ast::MatchArm { tag: tag, binding: binding, body: body };
+    return ast::MatchArm {
+        tag: tag,
+        binding: binding,
+        body: body,
+        tag_set: tag_set
+    };
+}
+
+// Appends one qualifier segment to a retained set reference: an empty
+// qualifier becomes the segment, a filled one gains `::segment`.
+fn join_qualified_text(
+    tree: &var ast::Ast,
+    allocator: Allocator,
+    qualifier: ast::Text,
+    segment: ast::Text
+) -> !ast::Text {
+    let joined = try joined_qualifier(tree, allocator, qualifier, segment);
+    return tree.add_text(move joined);
+}
+
+// Renders qualifier and segment into one owned `A::B` spelling. The reads
+// stay in this borrow scope so the caller may retain the result.
+fn joined_qualifier(
+    tree: &ast::Ast,
+    allocator: Allocator,
+    qualifier: ast::Text,
+    segment: ast::Text
+) -> !string::String {
+    var joined = string::new(allocator);
+    errdefer joined.deinit();
+    let head = tree.texts.at(qualifier.node);
+    let head_bytes = head.as_bytes();
+    if head.len() > 0 {
+        try joined.append_bytes(head_bytes);
+        try joined.append_bytes("::");
+    }
+    let tail = tree.texts.at(segment.node);
+    let tail_bytes = tail.as_bytes();
+    try joined.append_bytes(tail_bytes);
+    return move joined;
 }
 
 fn (self: &var Parser) parse_break_stmt(tree: &var ast::Ast) -> !ast::Statement {
@@ -1664,7 +1799,11 @@ fn (self: &var Parser) parse_expression(
         match next_kind {
             Orelse => {
                 try self.next_token();
-                left = try self.parse_orelse_expr(tree, left);
+                left = try self.parse_guardable_expr(tree, left);
+            },
+            Catch => {
+                try self.next_token();
+                left = try self.parse_guardable_expr(tree, left);
             },
             LParen => {
                 try self.next_token();
@@ -1985,11 +2124,16 @@ fn (self: &var Parser) parse_cast_expr(
     }));
 }
 
-fn (self: &var Parser) parse_orelse_expr(
+// Parses the right side of `orelse` or `catch`: either a default expression
+// or a return/break/continue guard that leaves the enclosing function or loop
+// on null or failure. The two keywords share one grammar (SPEC §11.1); only
+// the node they build differs.
+fn (self: &var Parser) parse_guardable_expr(
     tree: &var ast::Ast,
     left: ast::Expression
 ) -> !ast::Expression {
     let span = token_span_at(self);
+    let catch_keyword = self.current_kind() == token::Kind::Catch;
     if self.peek_kind() == token::Kind::Return {
         try self.next_token();
         var value = no_expression();
@@ -2000,7 +2144,7 @@ fn (self: &var Parser) parse_orelse_expr(
         let exit = tree.add_statement(ast::StatementNode::Return(
             ast::ReturnStmt { value: value }
         ));
-        return add_orelse_guard(tree, left, exit, span);
+        return add_guard(tree, left, exit, span, catch_keyword);
     }
     if self.peek_kind() == token::Kind::Break {
         try self.next_token();
@@ -2008,7 +2152,7 @@ fn (self: &var Parser) parse_orelse_expr(
         let exit = tree.add_statement(ast::StatementNode::Break(
             ast::BreakStmt { label: label }
         ));
-        return add_orelse_guard(tree, left, exit, span);
+        return add_guard(tree, left, exit, span, catch_keyword);
     }
     if self.peek_kind() == token::Kind::Continue {
         try self.next_token();
@@ -2016,17 +2160,27 @@ fn (self: &var Parser) parse_orelse_expr(
         let exit = tree.add_statement(ast::StatementNode::Continue(
             ast::ContinueStmt { label: label }
         ));
-        return add_orelse_guard(tree, left, exit, span);
+        return add_guard(tree, left, exit, span, catch_keyword);
     }
     return self.parse_binary_expr(tree, left);
 }
 
-fn add_orelse_guard(
+fn add_guard(
     tree: &var ast::Ast,
     condition: ast::Expression,
     exit: ast::Statement,
-    span: ast::Span
+    span: ast::Span,
+    catch_keyword: bool
 ) -> ast::Expression {
+    if catch_keyword {
+        return tree.add_expression(ast::ExpressionNode::CatchGuard(
+            ast::CatchGuardExpr {
+            condition: condition,
+            exit: exit,
+            span: span
+        }
+        ));
+    }
     return tree.add_expression(ast::ExpressionNode::OrelseGuard(
         ast::OrelseGuardExpr {
         condition: condition,
@@ -2991,6 +3145,7 @@ fn lowest_precedence() -> i64 {
 fn precedence(kind: token::Kind) -> i64 {
     return match kind {
         Orelse => 2,
+        Catch => 2,
         Or => 3,
         And => 4,
         Eq => 5,

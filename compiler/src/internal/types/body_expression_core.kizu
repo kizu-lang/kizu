@@ -106,6 +106,7 @@ fn (self: &var Checker) check_expr(
         If(_) => return self.check_control_expr(tree, scope, expression, out),
         Match(_) => return self.check_control_expr(tree, scope, expression, out),
         OrelseGuard(_) => return self.check_control_expr(tree, scope, expression, out),
+        CatchGuard(_) => return self.check_control_expr(tree, scope, expression, out),
         Recovered(_) => return self.check_control_expr(tree, scope, expression, out),
     }
 }
@@ -240,6 +241,9 @@ fn (self: &var Checker) check_binary_expr(
     if mem::equal_bytes(operator, "orelse") {
         return self.check_orelse_expr(tree, scope, expression, out);
     }
+    if mem::equal_bytes(operator, "catch") {
+        return self.check_catch_expr(tree, scope, expression, out);
+    }
     var left = empty_type();
     if try self.check_expr(tree, scope, expression.left, &var left) |problem| {
         return move problem;
@@ -313,6 +317,104 @@ fn (self: &var Checker) check_orelse_expr(
         return try self.checker_message_at("type error", ast::zero_span(), move message);
     }
     out.* = elem;
+    return null;
+}
+
+// Types `union catch default`: the left side must be an error union with a
+// declared set and the result is its success type, with the default checked
+// at that type. The error member is not bound here; touching it is the
+// statement form's job (SPEC §11.1).
+fn (self: &var Checker) check_catch_expr(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    expression: &ast::BinaryExpr,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    var left = empty_type();
+    if try self.check_expr(tree, scope, expression.left, &var left) |problem| {
+        return move problem;
+    }
+    var elem = empty_type();
+    if try self.catch_success_type(left, &var elem) |problem| {
+        return move problem;
+    }
+    var right = empty_type();
+    if try self.check_contextual_expr(tree, scope, expression.right, elem, &var right) |problem| {
+        return move problem;
+    }
+    if !same_type(right, elem) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`catch` default must be ");
+        try self.append_checker_type(&var message, elem);
+        try message.append_bytes(", got ");
+        try self.append_checker_type(&var message, right);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    out.* = elem;
+    return null;
+}
+
+// Returns T for the `E!T` a catch or error capture handles. `!T` declares no
+// set, so its failures cannot be enumerated and it stays propagation-only
+// (SPEC §11.1).
+fn (self: &var Checker) catch_success_type(union_type: Type, out: &var Type) -> !?diagnostic::Diagnostic {
+    var error_type = empty_type();
+    var success = empty_type();
+    if try self.types.error_union_parts(union_type) |parts| {
+        error_type = parts.err;
+        success = parts.success;
+    } else {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`catch` expects an error union left operand, got ");
+        try self.append_checker_type(&var message, union_type);
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    if same_type(error_type, empty_type()) {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_bytes("`catch` requires a declared error set; `!");
+        try self.append_checker_type(&var message, success);
+        try message.append_bytes("` propagates with `try`");
+        return try self.checker_message_at("type error", ast::zero_span(), move message);
+    }
+    out.* = success;
+    return null;
+}
+
+// Reports whether every member value of the source set is a member of the
+// target set. Members keep their per-set identity through a union
+// (ADR-0127), so the check runs over declaring-set values, not names.
+fn (self: &Checker) error_set_fits(source: Type, target: Type) -> bool {
+    if same_type(source, target) {
+        return true;
+    }
+    let source_handle = self.error_set_of_type(source) orelse return false;
+    let target_handle = self.error_set_of_type(target) orelse return false;
+    if self.metadata.error_sets.at(source_handle.index) |src| {
+        if self.metadata.error_sets.at(target_handle.index) |dst| {
+            var index = 0;
+            while src.value_order.at(index) |value| {
+                index = index + 1;
+                let value_bytes = value.as_bytes();
+                if !dst.values.contains(value_bytes) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Returns the declared error set a type names, or null.
+fn (self: &Checker) error_set_of_type(value: Type) -> ?ErrorSetHandle {
+    if value.node |handle| {
+        let entry = self.types.entries.at(handle);
+        let name = entry.spelling.as_bytes();
+        return self.metadata.error_sets_by_name.get(name);
+    }
     return null;
 }
 
@@ -525,8 +627,10 @@ fn (self: &var Checker) check_try_expr(
     if try self.types.error_union_parts(current_return) |parts| {
         target_error = parts.err;
     }
+    // A declared `E!T` accepts the sets whose member values are a subset of
+    // E: E itself and the sets it combines (ADR-0127).
     if !same_type(target_error, empty_type()) and
-        !same_type(source_error, target_error) {
+        !self.error_set_fits(source_error, target_error) {
         var message = string::new(self.allocator);
         errdefer message.deinit();
         try message.append_bytes("try cannot propagate ");
@@ -550,6 +654,7 @@ fn (self: &var Checker) check_control_expr(
         If(value) => return self.check_if_expr(tree, scope, value, out),
         Match(value) => return self.check_match_expr(tree, scope, value, out),
         OrelseGuard(value) => return self.check_orelse_guard_expr(tree, scope, value, out),
+        CatchGuard(value) => return self.check_catch_guard_expr(tree, scope, value, out),
         _ => return try self.checker_error_at(
             "type error", expression_span(tree, expression),
             "unsupported expression"

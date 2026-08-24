@@ -27,6 +27,13 @@ type Struct struct {
 type Enum struct {
 	Name string
 	Tags map[string]int
+	// Origins lists the `{ }`-form error sets a combined error set
+	// (`error C = A or B;`) takes its members from, fully resolved. It is nil
+	// for enums and for sets that declare their own members. A combined set
+	// carries no Tags of its own: its member codes stay filed under the sets
+	// that declared them, which keeps every code's spelling unique and lets a
+	// match arm resolve through the declaring set (ADR-0127).
+	Origins []string
 }
 
 // Union is the IR view of a tagged union declaration.

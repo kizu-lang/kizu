@@ -210,15 +210,21 @@ func expressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
 // guardExpressionChildren returns the walkable children of an orelse guard:
 // the condition, and the value a return exit carries.
 func guardExpressionChildren(expr ast.Expression) ([]ast.Expression, bool) {
-	guard, ok := expr.(*ast.OrelseGuardExpr)
-	if !ok {
-		return nil, false
+	switch guard := expr.(type) {
+	case *ast.OrelseGuardExpr:
+		children := []ast.Expression{guard.Cond}
+		if ret, ok := guard.Exit.(*ast.ReturnStmt); ok && ret.Value != nil {
+			children = append(children, ret.Value)
+		}
+		return children, true
+	case *ast.CatchGuardExpr:
+		children := []ast.Expression{guard.Cond}
+		if ret, ok := guard.Exit.(*ast.ReturnStmt); ok && ret.Value != nil {
+			children = append(children, ret.Value)
+		}
+		return children, true
 	}
-	children := []ast.Expression{guard.Cond}
-	if ret, ok := guard.Exit.(*ast.ReturnStmt); ok && ret.Value != nil {
-		children = append(children, ret.Value)
-	}
-	return children, true
+	return nil, false
 }
 
 // structLiteralValues returns the initializer of each field in a literal.

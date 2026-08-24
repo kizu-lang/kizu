@@ -40,6 +40,17 @@ func (c *graphChecker) qualifyDecl(module *moduleFile, decl ast.Decl) (ast.Decl,
 	case *ast.ErrorSetDecl:
 		cp := *d
 		cp.Name = module.qualify(d.Name)
+		if len(d.Combines) > 0 {
+			resolver := typeResolver{checker: c, module: module}
+			cp.Combines = append([]string(nil), d.Combines...)
+			for idx := range cp.Combines {
+				resolved, err := resolver.resolveBase(cp.Combines[idx])
+				if err != nil {
+					return nil, err
+				}
+				cp.Combines[idx] = resolved
+			}
+		}
 		return &cp, nil
 	case *ast.UnionDecl:
 		return c.qualifyUnion(module, d)
@@ -433,6 +444,16 @@ func (c *graphChecker) qualifyMatchStmt(
 	}
 	cp.Arms = append([]ast.MatchArm(nil), stmt.Arms...)
 	for idx := range cp.Arms {
+		if cp.Arms[idx].TagSet != "" {
+			// A qualified arm names the error set a member originates from,
+			// so the set reference resolves like any other type name.
+			resolver := typeResolver{checker: c, module: module}
+			resolved, err := resolver.resolveBase(cp.Arms[idx].TagSet)
+			if err != nil {
+				return nil, err
+			}
+			cp.Arms[idx].TagSet = resolved
+		}
 		cp.Arms[idx].Body, err = c.qualifyStmt(module, cp.Arms[idx].Body)
 		if err != nil {
 			return nil, err
@@ -465,9 +486,34 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyMoveExpr(module, e)
 	case *ast.OrelseGuardExpr:
 		return c.qualifyOrelseGuardExpr(module, e)
+	case *ast.CatchGuardExpr:
+		return c.qualifyCatchGuardExpr(module, e)
 	default:
 		return c.qualifyTypeOrControlExpr(module, expr)
 	}
+}
+
+// qualifyCatchGuardExpr rewrites the condition and any returned value of a
+// catch guard.
+func (c *graphChecker) qualifyCatchGuardExpr(
+	module *moduleFile,
+	expr *ast.CatchGuardExpr,
+) (*ast.CatchGuardExpr, error) {
+	cp := *expr
+	var err error
+	cp.Cond, err = c.qualifyExpr(module, expr.Cond)
+	if err != nil {
+		return nil, err
+	}
+	if ret, ok := expr.Exit.(*ast.ReturnStmt); ok {
+		retCp := *ret
+		retCp.Value, err = c.qualifyExpr(module, ret.Value)
+		if err != nil {
+			return nil, err
+		}
+		cp.Exit = &retCp
+	}
+	return &cp, nil
 }
 
 // qualifyOrelseGuardExpr rewrites the condition and any returned value of an
