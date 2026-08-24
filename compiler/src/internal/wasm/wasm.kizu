@@ -1,0 +1,857 @@
+import compiler::internal::ast;
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::array;
+import std::fmt;
+import std::map;
+import std::mem;
+import std::string;
+
+// Mechanical port of internal/wasm/emit.go: the module header, the WASI
+// runtime helpers, and the per-function walk that formats a typed SSA IR
+// module as WebAssembly text. Go holds the module by pointer and spells every
+// value, type and generated expression as a string; here the module is
+// borrowed by every method, a value the module names is read through the
+// module's NameTable, and every text the emitter spells itself is interned in
+// its own NameTable and handed on as a Name. Go's `fmt.Fprintf` lines are kept
+// as their format strings with `%s` / `%d` interpolated by `line*`, so the
+// text stays the Go text. The per-block writers live in control.kizu and the
+// type and escaping helpers in types.kizu, the files their Go originals are.
+
+/// The Go `scratchOffset`: where the fd_write iovec and its result are built.
+fn scratch_offset() -> i64 {
+    return 0;
+}
+
+/// The Go `intBufferEnd`: one past the last byte of the decimal scratch area.
+fn int_buffer_end() -> i64 {
+    return 192;
+}
+
+/// The Go `dataOffset`: where the first data segment is placed.
+fn data_offset() -> i64 {
+    return 4096;
+}
+
+/// Formats a typed SSA IR module as WASI-compatible WebAssembly text, the Go
+/// `Emit`: the text goes to out, and a failure comes back as one diagnostic
+/// reading `wasm error: ...`.
+pub fn emit(
+    allocator: Allocator,
+    module: &ir::Module,
+    out: &var string::String
+) -> !?diagnostic::Diagnostic {
+    var emitter = Emitter {
+        allocator: allocator,
+        names: ir::new_name_table(allocator),
+        out: string::new(allocator),
+        strings: map::new<[]u8, DataRef>(allocator),
+        data_order: array::new<ir::Name>(allocator),
+        values: map::new<[]u8, ValueInfo>(allocator),
+        generation: 0
+    };
+    defer emitter.deinit();
+    if try emitter.emit_module(module) |failed| {
+        return move failed;
+    }
+    while emitter.out.len() > 0 and last_byte_is(&emitter.out, 10) {
+        try emitter.out.truncate(emitter.out.len() - 1);
+    }
+    let text = emitter.out.as_bytes();
+    try out.append_bytes(text);
+    return null;
+}
+
+/// Reports whether the last byte of a text is byte, the Go `strings.TrimRight`
+/// test.
+fn last_byte_is(text: &string::String, byte: i64) -> bool {
+    let bytes = text.as_bytes();
+    return bytes[mem::len(bytes) - 1] == cast<u8>(byte);
+}
+
+/// Is where one data segment lives and how long it is, the Go `dataRef`.
+struct DataRef {
+    offset: i64,
+    length: i64
+}
+
+/// Returns the zero data reference, what a missing Go map key reads as.
+fn empty_data_ref() -> DataRef {
+    return DataRef { offset: 0, length: 0 };
+}
+
+/// Is what the emitter knows about one SSA value, the Go `valueInfo`: its IR
+/// type, the WebAssembly expression that stands for it, and the data length of
+/// a `[]u8` constant. Go writes typ and no writer reads it. Go gives every
+/// function a fresh values map; a Map cannot be emptied, so an entry carries
+/// the generation (the function count) it was written in and one from an
+/// earlier function is not found.
+struct ValueInfo {
+    typ: ir::Name,
+    expr: ir::Name,
+    length: i64,
+    generation: i64
+}
+
+/// Holds the state one emission walks with, the Go `emitter`. names owns every
+/// text the emitter spells itself; strings files each data segment under the
+/// bytes of its quoted literal or one of the three helper keys, and data_order
+/// keeps the order collectStrings assigned them, which is the ascending offset
+/// order Go re-derives by sorting the map.
+struct Emitter {
+    allocator: Allocator,
+    names: ir::NameTable,
+    out: string::String,
+    strings: map::Map<[]u8, DataRef>,
+    data_order: array::Array<ir::Name>,
+    values: map::Map<[]u8, ValueInfo>,
+    generation: i64
+}
+
+/// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
+/// `%s` takes a Str (a name the emitter spelled), a Lit (a static text) or an
+/// Owned (a text built for this one line), `%d` an Int.
+union Arg {
+    Str(ir::Name),
+    Lit([]u8),
+    Owned(string::String),
+    Int(i64),
+    None,
+}
+
+/// Appends one interpolated argument.
+fn append_arg(out: &var string::String, names: &ir::NameTable, arg: Arg) -> !void {
+    match arg {
+        Str(name) => return names.append_to(out, name),
+        Lit(text) => return out.append_bytes(text),
+        Owned(text) => {
+            defer text.deinit();
+            return out.append_string(&text);
+        },
+        Int(value) => return fmt::append_i64(out, value),
+        None => return,
+    }
+}
+
+/// Appends format with `%s` / `%d` replaced in order by the arguments and
+/// `%%` by `%`, the Go `fmt.Fprintf` / `fmt.Sprintf`; an argument the format
+/// does not place is released.
+fn format_args(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    errdefer c.deinit();
+    errdefer d.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    try place_arg(out, names, format, &var position, move c);
+    try place_arg(out, names, format, &var position, move d);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends the text of format from position up to the next `%s` / `%d`, then
+/// the argument in its place, and moves position past it; an argument with no
+/// placeholder left is released.
+fn place_arg(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    position: &var i64,
+    arg: Arg
+) -> !void {
+    errdefer arg.deinit();
+    var index = position.*;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if format[index + 1] == cast<u8>(37) {
+                try out.append_byte(cast<u8>(37));
+                index = index + 2;
+                continue;
+            }
+            try append_arg(out, names, move arg);
+            position.* = index + 2;
+            return;
+        }
+        try out.append_byte(byte);
+        index = index + 1;
+    }
+    arg.deinit();
+    position.* = index;
+    return;
+}
+
+/// Appends the text of format after its last placeholder.
+fn append_format_rest(out: &var string::String, format: []u8, position: i64) -> !void {
+    var index = position;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) and
+            format[index + 1] == cast<u8>(37) {
+            try out.append_byte(cast<u8>(37));
+            index = index + 2;
+            continue;
+        }
+        try out.append_byte(byte);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Writes one line of WAT with no interpolation, the Go
+/// `e.out.WriteString("...\n")`.
+fn (self: &var Emitter) line(text: []u8) -> !void {
+    try self.out.append_bytes(text);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line, the Go `fmt.Fprintf(&e.out, "...\n", a)`.
+fn (self: &var Emitter) line1(format: []u8, a: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, Arg::None, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with two arguments.
+fn (self: &var Emitter) line2(format: []u8, a: Arg, b: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, Arg::None, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with three arguments.
+fn (self: &var Emitter) line3(format: []u8, a: Arg, b: Arg, c: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, Arg::None);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one formatted line with four arguments.
+fn (self: &var Emitter) line4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !void {
+    let names = &self.names;
+    try format_args(&var self.out, names, format, move a, move b, move c, move d);
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Builds one failure, the Go `fmt.Errorf("wasm error: ...")`: the format with
+/// its argument interpolated becomes a diagnostic without a span, which the
+/// CLI prints as `error: wasm error: ...`.
+fn (self: &Emitter) fail(format: []u8, a: Arg) -> !diagnostic::Diagnostic {
+    var out = string::new(self.allocator);
+    defer out.deinit();
+    let names = &self.names;
+    try format_args(&var out, names, format, move a, Arg::None, Arg::None, Arg::None);
+    let text = out.as_bytes();
+    return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
+}
+
+/// Builds one failure from a finished message.
+fn (self: &Emitter) fail0(format: []u8) -> !diagnostic::Diagnostic {
+    return self.fail(format, Arg::None);
+}
+
+/// Names the text of a module name in the emitter's table, so it can be
+/// interpolated by the writers.
+fn (self: &var Emitter) own(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    return self.names.intern(bytes);
+}
+
+/// Names the WAT local one SSA name becomes, for the lines that spell it.
+fn (self: &var Emitter) symbol_name_of(name: []u8) -> !ir::Name {
+    var out = string::new(self.allocator);
+    errdefer out.deinit();
+    try append_symbol_name(&var out, name);
+    return self.names.intern_owned(move out);
+}
+
+/// Names the `(local.get $x)` expression one SSA name reads as.
+fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "(local.get ");
+    errdefer out.deinit();
+    try append_symbol_name(&var out, name);
+    try out.append_bytes(")");
+    return self.names.intern_owned(move out);
+}
+
+/// Writes the module, runtime helpers, and user functions, the Go `emit`.
+fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    try self.collect_strings(module);
+    try self.write_header();
+    try self.write_runtime();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        if try self.write_function(module, function) |failed| {
+            return move failed;
+        }
+    }
+    let start =
+        \\  (func $_start (export "_start")
+    ;
+    try self.line(start);
+    try self.line("    (call $main))");
+    try self.line(")");
+    return null;
+}
+
+/// Collects the string constants in deterministic IR order, the Go
+/// `sortedStringLiteralsByDiscovery`.
+fn (self: &Emitter) collect_literals(
+    module: &ir::Module,
+    literals: &var array::Array<ir::Name>
+) -> !void {
+    var found = map::new<[]u8, bool>(self.allocator);
+    defer found.deinit();
+    var index = 0;
+    while module.functions.get(index) |function| {
+        index = index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op != ir::Op::Const or
+                    !module.names.is(instr_node.result.type_name, "[]u8") {
+                    continue;
+                }
+                let literal = ir::name_text(&module.names, instr_node.immediate);
+                let literal_bytes = literal.as_bytes();
+                if found.contains(literal_bytes) {
+                    continue;
+                }
+                try found.insert(literal_bytes, true);
+                try literals.append(instr_node.immediate);
+            }
+        }
+    }
+    return;
+}
+
+/// Assigns stable memory offsets to literal data, the Go `collectStrings`.
+fn (self: &var Emitter) collect_strings(module: &ir::Module) -> !void {
+    var literals = array::new<ir::Name>(self.allocator);
+    defer literals.deinit();
+    try self.collect_literals(module, &var literals);
+    var offset = data_offset();
+    var index = 0;
+    while literals.get(index) |literal| {
+        index = index + 1;
+        let length = try self.record_literal(module, literal, offset);
+        offset = offset + length;
+    }
+    try self.record_data("true", offset, 4);
+    offset = offset + 4;
+    try self.record_data("false", offset, 5);
+    offset = offset + 5;
+    return self.record_data("newline", offset, 1);
+}
+
+/// Files one string constant at an offset and returns the bytes it occupies.
+fn (self: &var Emitter) record_literal(
+    module: &ir::Module,
+    literal: ir::Name,
+    offset: i64
+) -> !i64 {
+    var unquoted = string::new(self.allocator);
+    defer unquoted.deinit();
+    let retained = ir::name_text(&module.names, literal);
+    let bytes = retained.as_bytes();
+    try append_unquoted(&var unquoted, bytes);
+    let length = unquoted.len();
+    try self.record_data(bytes, offset, length);
+    return length;
+}
+
+/// Files one data entry under its key and keeps the order it was assigned in.
+fn (self: &var Emitter) record_data(key: []u8, offset: i64, length: i64) -> !void {
+    try self.strings.insert(key, DataRef { offset: offset, length: length });
+    let name = try self.names.intern(key);
+    return self.data_order.append(name);
+}
+
+/// Returns the data entry filed under a key, the Go `e.strings[key]`.
+fn (self: &Emitter) data_ref(key: []u8) -> DataRef {
+    return self.strings.get(key) orelse empty_data_ref();
+}
+
+/// Writes imports, memory, and data segments, the Go `writeHeader`. Go sorts
+/// the map by offset; the assignment order the data_order keeps is that order.
+fn (self: &var Emitter) write_header() -> !void {
+    try self.line("(module");
+    let import_line =
+        \\  (import "wasi_snapshot_preview1" "fd_write"
+    ;
+    try self.line(import_line);
+    try self.line("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))");
+    let memory_line =
+        \\  (memory (export "memory") 1)
+    ;
+    try self.line(memory_line);
+    var index = 0;
+    while self.data_order.get(index) |key| {
+        index = index + 1;
+        var text = string::new(self.allocator);
+        errdefer text.deinit();
+        let offset = try self.append_data_literal(&var text, key);
+        let format =
+            \\  (data (i32.const %d) "%s")
+        ;
+        try self.line2(format, Arg::Int(offset), Arg::Owned(move text));
+    }
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Converts a data key to WAT data text and returns its offset, the Go
+/// `dataLiteral` and the offset writeHeader reads beside it.
+fn (self: &Emitter) append_data_literal(out: &var string::String, key: ir::Name) -> !i64 {
+    let retained = ir::name_text(&self.names, key);
+    let bytes = retained.as_bytes();
+    let found = self.data_ref(bytes);
+    if mem::equal_bytes(bytes, "newline") {
+        try out.append_bytes("\0a");
+        return found.offset;
+    }
+    if mem::equal_bytes(bytes, "true") or mem::equal_bytes(bytes, "false") {
+        try out.append_bytes(bytes);
+        return found.offset;
+    }
+    var unquoted = string::new(self.allocator);
+    defer unquoted.deinit();
+    try append_unquoted(&var unquoted, bytes);
+    let unquoted_bytes = unquoted.as_bytes();
+    try append_string_bytes(out, unquoted_bytes);
+    return found.offset;
+}
+
+/// Writes the minimal WASI stdout helpers, the Go `writeRuntime`.
+fn (self: &var Emitter) write_runtime() -> !void {
+    try self.write_line_helper();
+    try self.write_bool_helper();
+    return self.write_int_helper();
+}
+
+/// Writes a buffer and a trailing newline to stdout, the Go
+/// `writeLineHelper`.
+fn (self: &var Emitter) write_line_helper() -> !void {
+    let newline = self.data_ref("newline");
+    let scratch = scratch_offset();
+    try self.line("  (func $__write_line (param $ptr i32) (param $len i32)");
+    try self.line1("    (i32.store (i32.const %d) (local.get $ptr))", Arg::Int(scratch));
+    try self.line1("    (i32.store (i32.const %d) (local.get $len))", Arg::Int(scratch + 4));
+    try self.write_fd_write(scratch);
+    // Go writes this line with two Fprintf calls, the pointer and the length.
+    try self.line2("    (i32.store (i32.const %d) (i32.const %d))",
+        Arg::Int(scratch), Arg::Int(newline.offset));
+    try self.line1("    (i32.store (i32.const %d) (i32.const 1))", Arg::Int(scratch + 4));
+    try self.write_fd_write(scratch);
+    try self.line("  )");
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes one dropped fd_write call over the scratch iovec.
+fn (self: &var Emitter) write_fd_write(scratch: i64) -> !void {
+    try self.line("    (drop (call $__wasi_fd_write");
+    return self.line2("      (i32.const 1) (i32.const %d) (i32.const 1) (i32.const %d)))",
+        Arg::Int(scratch), Arg::Int(scratch + 16));
+}
+
+/// Writes bool values as lowercase text, the Go `writeBoolHelper`.
+fn (self: &var Emitter) write_bool_helper() -> !void {
+    let truth = self.data_ref("true");
+    let falsehood = self.data_ref("false");
+    try self.line("  (func $__print_bool (param $value i32)");
+    try self.line("    (if (local.get $value)");
+    try self.line2("      (then (call $__write_line (i32.const %d) (i32.const %d)))",
+        Arg::Int(truth.offset), Arg::Int(truth.length));
+    try self.line2("      (else (call $__write_line (i32.const %d) (i32.const %d))))",
+        Arg::Int(falsehood.offset), Arg::Int(falsehood.length));
+    try self.line("  )");
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes signed i64 values as decimal text, the Go `writeIntHelper`.
+fn (self: &var Emitter) write_int_helper() -> !void {
+    try self.line("  (func $__print_i64 (param $value i64)");
+    try self.line("    (local $n i64) (local $pos i32) (local $negative i32)");
+    try self.line("    (local.set $n (local.get $value))");
+    try self.line("    (local.set $pos (i32.const 192))");
+    try self.line("    (if (i64.eqz (local.get $n))");
+    try self.line("      (then");
+    try self.line("        (i32.store8 (i32.const 191) (i32.const 48))");
+    try self.line("        (call $__write_line (i32.const 191) (i32.const 1))");
+    try self.line("        (return)))");
+    try self.line("    (if (i64.lt_s (local.get $n) (i64.const 0))");
+    try self.line("      (then");
+    try self.line("        (local.set $negative (i32.const 1))");
+    try self.line("        (local.set $n (i64.sub (i64.const 0) (local.get $n)))))");
+    try self.write_int_loop();
+    try self.line("    (if (local.get $negative)");
+    try self.line("      (then");
+    try self.line("        (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))");
+    try self.line("        (i32.store8 (local.get $pos) (i32.const 45))))");
+    // Go writes this line with three calls, around the buffer end constant.
+    try self.line1(
+        "    (call $__write_line (local.get $pos) (i32.sub (i32.const %d) (local.get $pos)))",
+        Arg::Int(int_buffer_end())
+    );
+    try self.line("  )");
+    return self.out.append_byte(cast<u8>(10));
+}
+
+/// Writes decimal digits into memory from right to left, the Go
+/// `writeIntLoop`.
+fn (self: &var Emitter) write_int_loop() -> !void {
+    try self.line("    (loop $digits");
+    try self.line("      (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))");
+    try self.line("      (i32.store8 (local.get $pos)");
+    try self.line("        (i32.add");
+    try self.line("          (i32.wrap_i64 (i64.rem_u (local.get $n) (i64.const 10)))");
+    try self.line("          (i32.const 48)))");
+    try self.line("      (local.set $n (i64.div_u (local.get $n) (i64.const 10)))");
+    return self.line("      (br_if $digits (i64.ne (local.get $n) (i64.const 0))))");
+}
+
+/// Writes one user function with a dispatch loop for blocks, the Go
+/// `writeFunction`. Go gives the function a fresh values map; the generation
+/// this bumps hides the entries of the previous one.
+fn (self: &var Emitter) write_function(
+    module: &ir::Module,
+    function: ir::Function
+) -> !?diagnostic::Diagnostic {
+    self.generation = self.generation + 1;
+    let node = module.function_nodes.at(function.node);
+    var params = string::new(self.allocator);
+    errdefer params.deinit();
+    try self.append_function_params(module, node, &var params);
+    var result = string::new(self.allocator);
+    errdefer result.deinit();
+    try append_function_result(&module.names, &var result, node.return_type);
+    let symbol = try self.own(module, node.name);
+    try self.line3("  (func $%s %s%s",
+        Arg::Str(symbol), Arg::Owned(move params), Arg::Owned(move result));
+    try self.write_locals(module, node);
+    try self.line("    (local $pc i32)");
+    try self.line("    (block $exit");
+    try self.line("      (loop $dispatch");
+    var index = map::new<[]u8, DispatchBlock>(self.allocator);
+    defer index.deinit();
+    try block_indexes(module, node, &var index);
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        let id = block_index;
+        block_index = block_index + 1;
+        if try self.write_block(module, block, &index, id) |failed| {
+            return move failed;
+        }
+    }
+    try self.line("        (br $exit)");
+    try self.line("      )");
+    try self.line("    )");
+    if !module.names.is(node.return_type, "void") {
+        try self.line("    (unreachable)");
+    }
+    try self.line("  )");
+    try self.out.append_byte(cast<u8>(10));
+    return null;
+}
+
+/// Writes WebAssembly parameters and records their values, the Go
+/// `functionParams`.
+fn (self: &var Emitter) append_function_params(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &var string::String
+) -> !void {
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        if index > 1 {
+            try out.append_bytes(" ");
+        }
+        let name_retained = ir::name_text(&module.names, param.name);
+        let name_bytes = name_retained.as_bytes();
+        try out.append_bytes("(param ");
+        try append_symbol_name(out, name_bytes);
+        try out.append_bytes(" ");
+        try out.append_bytes(wasm_type(&module.names, param.type_name));
+        try out.append_bytes(")");
+        let expr = try self.local_expr(name_bytes);
+        try self.set_value(module, param.value(), expr, 0);
+    }
+    return;
+}
+
+/// Writes the WebAssembly result declaration, the Go `functionResult`.
+fn append_function_result(names: &ir::NameTable, out: &var string::String, typ: ir::Name) -> !void {
+    if names.is(typ, "void") {
+        return;
+    }
+    try out.append_bytes(" (result ");
+    try out.append_bytes(wasm_type(names, typ));
+    return out.append_bytes(")");
+}
+
+/// Declares SSA locals that must live across blocks, the Go `writeLocals`.
+fn (self: &var Emitter) write_locals(module: &ir::Module, node: &ir::FunctionNode) -> !void {
+    var block_index = 0;
+    while node.blocks.get(block_index) |block| {
+        block_index = block_index + 1;
+        let block_node = module.blocks.at(block.node);
+        var instr_index = 0;
+        while block_node.instrs.get(instr_index) |instr| {
+            instr_index = instr_index + 1;
+            let instr_node = module.instrs.at(instr.node);
+            if !needs_local(module, instr_node) {
+                continue;
+            }
+            let name_retained = ir::name_text(&module.names, instr_node.result.name);
+            let name_bytes = name_retained.as_bytes();
+            let symbol = try self.symbol_name_of(name_bytes);
+            try self.line2("    (local %s %s)",
+                Arg::Str(symbol), Arg::Lit(wasm_type(&module.names, instr_node.result.type_name)));
+        }
+    }
+    return;
+}
+
+/// Reports whether an instruction result needs a WebAssembly local, the Go
+/// `needsLocal`.
+fn needs_local(module: &ir::Module, node: &ir::InstrNode) -> bool {
+    if ir::is_empty(node.result.type_name) or module.names.is(node.result.type_name, "void") {
+        return false;
+    }
+    return node.op != ir::Op::Const or !module.names.is(node.result.type_name, "[]u8");
+}
+
+/// Is the block one name reaches and the id its dispatch arm tests for, the Go
+/// `dispatchBlock`.
+struct DispatchBlock {
+    block: ir::Block,
+    id: i64
+}
+
+/// Maps block names to their dispatch arms, the Go `blockIndexes`. The map is
+/// one function's, because a block name is unique only inside the function that
+/// declares it: lowering numbers each function's blocks from scratch, so
+/// `entry` and `while.header.1` name a block in every function that has one.
+fn block_indexes(
+    module: &ir::Module,
+    node: &ir::FunctionNode,
+    out: &var map::Map<[]u8, DispatchBlock>
+) -> !void {
+    var index = 0;
+    while node.blocks.get(index) |block| {
+        let name = module.block_name(block);
+        let retained = ir::name_text(&module.names, name);
+        let bytes = retained.as_bytes();
+        try out.insert(bytes, DispatchBlock { block: block, id: index });
+        index = index + 1;
+    }
+    return;
+}
+
+/// Returns the dispatch id of a block name, the Go `index[target].id`: a name
+/// the map does not hold reads as 0.
+fn block_index_of(
+    module: &ir::Module,
+    index: &map::Map<[]u8, DispatchBlock>,
+    target: ir::Name
+) -> i64 {
+    let retained = ir::name_text(&module.names, target);
+    let bytes = retained.as_bytes();
+    if index.get(bytes) |found| {
+        return found.id;
+    }
+    return 0;
+}
+
+/// Returns the block a name reaches in this function, the Go
+/// `index[target].block`, or null when the function has no such block.
+fn block_named(
+    module: &ir::Module,
+    index: &map::Map<[]u8, DispatchBlock>,
+    target: ir::Name
+) -> ?ir::Block {
+    let retained = ir::name_text(&module.names, target);
+    let bytes = retained.as_bytes();
+    if index.get(bytes) |found| {
+        return found.block;
+    }
+    return null;
+}
+
+/// Records the expression that stands for a result, the Go
+/// `e.values[instr.Result.Name] = valueInfo{...}`.
+fn (self: &var Emitter) set_value(
+    module: &ir::Module,
+    result: ir::Value,
+    expr: ir::Name,
+    length: i64
+) -> !void {
+    let retained = ir::name_text(&module.names, result.name);
+    let bytes = retained.as_bytes();
+    return self.values.insert(bytes, ValueInfo {
+        typ: result.type_name,
+        expr: expr,
+        length: length,
+        generation: self.generation
+    });
+}
+
+/// Resolves a typed IR value to a WebAssembly expression, the Go `value`: a
+/// value the walk recorded, a decimal name as an i64 constant, anything else
+/// as the local of that name.
+fn (self: &var Emitter) value_of(module: &ir::Module, value: ir::Value) -> !ValueInfo {
+    let retained = ir::name_text(&module.names, value.name);
+    let bytes = retained.as_bytes();
+    if self.values.get(bytes) |found| {
+        if found.generation == self.generation {
+            return found;
+        }
+    }
+    if is_decimal(bytes) {
+        var out = try string::from_bytes(self.allocator, "(i64.const ");
+        errdefer out.deinit();
+        try out.append_bytes(bytes);
+        try out.append_bytes(")");
+        let constant = try self.names.intern_owned(move out);
+        return ValueInfo {
+            typ: value.type_name,
+            expr: constant,
+            length: 0,
+            generation: self.generation
+        };
+    }
+    let local = try self.local_expr(bytes);
+    return ValueInfo {
+        typ: value.type_name,
+        expr: local,
+        length: 0,
+        generation: self.generation
+    };
+}
+
+/// Reports whether a name is a decimal integer, the Go `strconv.Atoi` reading
+/// it without an error: an optional sign, at least one digit, nothing else,
+/// and a value an int64 holds.
+fn is_decimal(name: []u8) -> bool {
+    var start = 0;
+    if mem::len(name) > 0 and (name[0] == cast<u8>(43) or name[0] == cast<u8>(45)) {
+        start = 1;
+    }
+    if start == mem::len(name) {
+        return false;
+    }
+    var index = start;
+    while index < mem::len(name) {
+        if name[index] < cast<u8>(48) or name[index] > cast<u8>(57) {
+            return false;
+        }
+        index = index + 1;
+    }
+    var digits = start;
+    while digits + 1 < mem::len(name) and name[digits] == cast<u8>(48) {
+        digits = digits + 1;
+    }
+    let width = mem::len(name) - digits;
+    if width != 19 {
+        return width < 19;
+    }
+    if name[0] == cast<u8>(45) {
+        return !exceeds(name[digits..mem::len(name)], "9223372036854775808");
+    }
+    return !exceeds(name[digits..mem::len(name)], "9223372036854775807");
+}
+
+/// Reports whether one decimal text is greater than another of equal length.
+fn exceeds(left: []u8, right: []u8) -> bool {
+    var index = 0;
+    while index < mem::len(left) {
+        if left[index] != right[index] {
+            return left[index] > right[index];
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+/// Appends the bytes a quoted IR string literal spells, the Go
+/// `strconv.Unquote` over the form `internal/quote.Bytes` writes: `"` ... `"`
+/// with `\\`, `\"`, `\n`, `\r`, `\t` and `\xNN`. Go drops the result of a
+/// malformed literal; here the output stays empty for one.
+fn append_unquoted(out: &var string::String, literal: []u8) -> !void {
+    let length = mem::len(literal);
+    if length < 2 or literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
+        return;
+    }
+    let start = out.len();
+    var index = 1;
+    while index < length - 1 {
+        let ch = literal[index];
+        if ch != cast<u8>(92) {
+            try out.append_byte(ch);
+            index = index + 1;
+            continue;
+        }
+        if index + 1 >= length - 1 {
+            return out.truncate(start);
+        }
+        let escape = literal[index + 1];
+        index = index + 2;
+        if escape == cast<u8>(92) or escape == cast<u8>(34) {
+            try out.append_byte(escape);
+            continue;
+        }
+        if escape == cast<u8>(110) {
+            try out.append_byte(cast<u8>(10));
+            continue;
+        }
+        if escape == cast<u8>(114) {
+            try out.append_byte(cast<u8>(13));
+            continue;
+        }
+        if escape == cast<u8>(116) {
+            try out.append_byte(cast<u8>(9));
+            continue;
+        }
+        if escape == cast<u8>(120) and index + 2 <= length - 1 {
+            if hex_value(literal[index]) |high| {
+                if hex_value(literal[index + 1]) |low| {
+                    try out.append_byte(cast<u8>(high * 16 + low));
+                    index = index + 2;
+                    continue;
+                }
+            }
+        }
+        return out.truncate(start);
+    }
+    return;
+}
+
+/// Returns the value of one hexadecimal digit, or null.
+fn hex_value(ch: u8) -> ?i64 {
+    if ch >= cast<u8>(48) and ch <= cast<u8>(57) {
+        return cast<i64>(ch) - 48;
+    }
+    if ch >= cast<u8>(65) and ch <= cast<u8>(70) {
+        return cast<i64>(ch) - 55;
+    }
+    if ch >= cast<u8>(97) and ch <= cast<u8>(102) {
+        return cast<i64>(ch) - 87;
+    }
+    return null;
+}

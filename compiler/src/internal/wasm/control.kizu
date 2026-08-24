@@ -1,0 +1,429 @@
+import compiler::internal::diagnostic;
+import compiler::internal::ir;
+import std::fmt;
+import std::map;
+import std::string;
+
+// Mechanical port of internal/wasm/control.go: the dispatch arm one IR block
+// becomes, the instructions this backend lowers, and the control transfer at
+// the end of a block. Go reads an operation as a string and matches it by
+// prefix; here the operation is the ir::Op tag and the name it carries, so the
+// `binary.` / `call.` / `field.` prefixes become the tags that spell them.
+
+/// Writes a dispatch arm for one IR block, the Go `writeBlock`.
+fn (self: &var Emitter) write_block(
+    module: &ir::Module,
+    block: ir::Block,
+    index: &map::Map<[]u8, DispatchBlock>,
+    id: i64
+) -> !?diagnostic::Diagnostic {
+    try self.line1("        (if (i32.eq (local.get $pc) (i32.const %d))", Arg::Int(id));
+    try self.line("          (then");
+    let node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        if module.instr_op(instr) == ir::Op::Phi {
+            continue;
+        }
+        if try self.write_instr(module, instr) |failed| {
+            return move failed;
+        }
+    }
+    if try self.write_terminator(module, block, index) |failed| {
+        return move failed;
+    }
+    try self.line("          )");
+    try self.line("        )");
+    return null;
+}
+
+/// Writes one WebAssembly instruction sequence, the Go `writeInstr`.
+fn (self: &var Emitter) write_instr(
+    module: &ir::Module,
+    instr: ir::Instr
+) -> !?diagnostic::Diagnostic {
+    let node = module.instrs.at(instr.node);
+    if node.op == ir::Op::Const {
+        return self.write_const(module, node);
+    }
+    if node.op == ir::Op::Binary {
+        return self.write_binary(module, node);
+    }
+    if node.op == ir::Op::Call {
+        return self.write_call(module, node);
+    }
+    if node.op == ir::Op::Cast {
+        return self.write_cast(module, node);
+    }
+    if is_opaque_op(node.op) {
+        return self.write_unsupported_opaque(module, node);
+    }
+    return try self.fail_op(module, node, "wasm error: unsupported instruction `%s`");
+}
+
+/// Reports the instructions this backend records as opaque rather than lowers,
+/// the aggregate, memory, arena and error union arms of the Go `writeInstr`.
+/// Go's arena arm does not name `arena.at_mut`, so that one is reported as an
+/// unsupported instruction instead.
+fn is_opaque_op(op: ir::Op) -> bool {
+    if is_error_union_op(op) {
+        return true;
+    }
+    return match op {
+        StructNew => true,
+        Field => true,
+        FieldRef => true,
+        FieldSet => true,
+        FieldRefSet => true,
+        FieldAddr => true,
+        RefStore => true,
+        ArenaNew => true,
+        ArenaAdd => true,
+        ArenaAt => true,
+        ArenaLen => true,
+        ArenaPopOrPanic => true,
+        ArenaDeinit => true,
+        _ => false,
+    };
+}
+
+/// Reports the error union instructions this backend records as opaque rather
+/// than lowers, the Go `isErrorUnionOp`.
+fn is_error_union_op(op: ir::Op) -> bool {
+    return match op {
+        ErrorError => true,
+        ErrorTry => true,
+        ErrorHas => true,
+        ErrorValue => true,
+        ErrorCode => true,
+        _ => false,
+    };
+}
+
+/// Marks values that are not part of the phase 11 target subset, the Go
+/// `writeUnsupportedOpaque`.
+fn (self: &Emitter) write_unsupported_opaque(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    return try self.fail_op(module, node, "wasm error: `%s` is outside the phase 11 target subset");
+}
+
+/// Builds one failure naming the operation the way Go spells `instr.Op`.
+fn (self: &Emitter) fail_op(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    format: []u8
+) -> !diagnostic::Diagnostic {
+    var text = string::new(self.allocator);
+    errdefer text.deinit();
+    try ir::append_op(&var text, &module.names, node.op, node.operand);
+    return self.fail(format, Arg::Owned(move text));
+}
+
+/// Records a no-op value conversion for the Phase 16 low-level subset, the Go
+/// `writeCast`.
+fn (self: &var Emitter) write_cast(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: cast expects 1 arg");
+    }
+    let expr = try self.arg_expr(module, node, 0);
+    try self.set_value(module, node.result, expr, 0);
+    return null;
+}
+
+/// Records scalar and string constants, the Go `writeConst`.
+fn (self: &var Emitter) write_const(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if is_integer_type(&module.names, node.result.type_name) {
+        // Every scalar integer is one wasm i64, so a constant of any width is
+        // written the same way.
+        let expr = try self.constant_expr(module, node, "(i64.const ");
+        try self.set_value(module, node.result, expr, 0);
+        return null;
+    }
+    if module.names.is(node.result.type_name, "bool") {
+        let expr = try self.names.intern(wasm_bool(&module.names, node.immediate));
+        try self.set_value(module, node.result, expr, 0);
+        return null;
+    }
+    if module.names.is(node.result.type_name, "[]u8") {
+        let immediate = ir::name_text(&module.names, node.immediate);
+        let immediate_bytes = immediate.as_bytes();
+        let found = self.data_ref(immediate_bytes);
+        let expr = try self.offset_expr(found.offset);
+        try self.set_value(module, node.result, expr, found.length);
+        return null;
+    }
+    let type_name = try self.own(module, node.result.type_name);
+    return try self.fail("wasm error: unsupported const type `%s`", Arg::Str(type_name));
+}
+
+/// Names one constant expression made of a prefix and the immediate.
+fn (self: &var Emitter) constant_expr(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    prefix: []u8
+) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, prefix);
+    errdefer out.deinit();
+    try module.names.append_to(&var out, node.immediate);
+    try out.append_bytes(")");
+    return self.names.intern_owned(move out);
+}
+
+/// Names the `(i32.const N)` expression one data offset reads as.
+fn (self: &var Emitter) offset_expr(offset: i64) -> !ir::Name {
+    var out = try string::from_bytes(self.allocator, "(i32.const ");
+    errdefer out.deinit();
+    try fmt::append_i64(&var out, offset);
+    try out.append_bytes(")");
+    return self.names.intern_owned(move out);
+}
+
+/// Writes arithmetic and comparison local assignments, the Go `writeBinary`.
+fn (self: &var Emitter) write_binary(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 2 {
+        return try self.fail0("wasm error: binary expects 2 args");
+    }
+    let left = try self.arg_expr(module, node, 0);
+    let right = try self.arg_expr(module, node, 1);
+    let result_retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = result_retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line4("            (local.set %s (%s %s %s))", Arg::Str(symbol),
+        Arg::Lit(binary_operation(module, node)), Arg::Str(left), Arg::Str(right));
+    let expr = try self.local_expr(result_bytes);
+    try self.set_value(module, node.result, expr, 0);
+    return null;
+}
+
+/// Returns the WebAssembly operation one binary instruction lowers to: a
+/// comparison when its result is a bool, the Go `wasmOp` choice.
+fn binary_operation(module: &ir::Module, node: &ir::InstrNode) -> []u8 {
+    if module.names.is(node.result.type_name, "bool") {
+        return wasm_compare_op(&module.names, node.operand);
+    }
+    return wasm_binary_op(&module.names, node.operand);
+}
+
+/// Writes builtin print and user function calls, the Go `writeCall`.
+fn (self: &var Emitter) write_call(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if module.names.is(node.operand, "print") {
+        return self.write_print(module, node);
+    }
+    var call = try string::from_bytes(self.allocator, "(call $");
+    errdefer call.deinit();
+    try module.names.append_to(&var call, node.operand);
+    try call.append_bytes(" ");
+    var index = 0;
+    while node.args.get(index) |arg| {
+        if index > 0 {
+            try call.append_bytes(" ");
+        }
+        index = index + 1;
+        let info = try self.value_of(module, arg);
+        try self.names.append_to(&var call, info.expr);
+    }
+    try call.append_bytes(")");
+    if module.names.is(node.result.type_name, "void") {
+        try self.line1("            %s", Arg::Owned(move call));
+        return null;
+    }
+    let result_retained = ir::name_text(&module.names, node.result.name);
+    let result_bytes = result_retained.as_bytes();
+    let symbol = try self.symbol_name_of(result_bytes);
+    try self.line2("            (local.set %s %s)", Arg::Str(symbol), Arg::Owned(move call));
+    let expr = try self.local_expr(result_bytes);
+    try self.set_value(module, node.result, expr, 0);
+    return null;
+}
+
+/// Writes calls to WASI stdout helpers, the Go `writePrint`.
+fn (self: &var Emitter) write_print(
+    module: &ir::Module,
+    node: &ir::InstrNode
+) -> !?diagnostic::Diagnostic {
+    if node.args.len() != 1 {
+        return try self.fail0("wasm error: print expects 1 arg");
+    }
+    let arg = node.args.get(0) orelse ir::empty_value();
+    let info = try self.value_of(module, arg);
+    if module.names.is(arg.type_name, "[]u8") {
+        try self.line2("            (call $__write_line %s (i32.const %d))",
+            Arg::Str(info.expr), Arg::Int(info.length));
+        return null;
+    }
+    if module.names.is(arg.type_name, "i64") {
+        try self.line1("            (call $__print_i64 %s)", Arg::Str(info.expr));
+        return null;
+    }
+    if module.names.is(arg.type_name, "bool") {
+        try self.line1("            (call $__print_bool %s)", Arg::Str(info.expr));
+        return null;
+    }
+    let type_name = try self.own(module, arg.type_name);
+    return try self.fail("wasm error: unsupported print type `%s`", Arg::Str(type_name));
+}
+
+/// Returns the expression standing for one instruction argument, the Go
+/// `e.value(instr.Args[i]).expr`.
+fn (self: &var Emitter) arg_expr(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    index: i64
+) -> !ir::Name {
+    let arg = node.args.get(index) orelse ir::empty_value();
+    let info = try self.value_of(module, arg);
+    return info.expr;
+}
+
+/// Writes control transfer for one dispatch arm, the Go `writeTerminator`.
+fn (self: &var Emitter) write_terminator(
+    module: &ir::Module,
+    block: ir::Block,
+    index: &map::Map<[]u8, DispatchBlock>
+) -> !?diagnostic::Diagnostic {
+    let term = module.block_terminator(block);
+    if term.op == ir::TermOp::Return {
+        return self.write_return(module, term.value);
+    }
+    if term.op == ir::TermOp::Jump {
+        try self.write_jump(module, block, term.target, index);
+        return null;
+    }
+    if term.op == ir::TermOp::Branch {
+        try self.write_branch(module, block, index);
+        return null;
+    }
+    let spelling = term_op_spelling(term.op);
+    return try self.fail("wasm error: unsupported terminator `%s`", Arg::Lit(spelling));
+}
+
+/// Returns the Go `Terminator.Op` spelling a failure message names; a block
+/// that has not ended yet is the Go empty string.
+fn term_op_spelling(op: ir::TermOp) -> []u8 {
+    return match op {
+        None => "",
+        Return => "return",
+        Jump => "jump",
+        Branch => "branch",
+        Unreachable => "unreachable",
+    };
+}
+
+/// Writes a function return or exits a void function, the Go `writeReturn`.
+fn (self: &var Emitter) write_return(
+    module: &ir::Module,
+    value: ir::Value
+) -> !?diagnostic::Diagnostic {
+    if module.names.is(value.type_name, "void") {
+        try self.line("            (br $exit)");
+        return null;
+    }
+    let info = try self.value_of(module, value);
+    try self.line1("            (return %s)", Arg::Str(info.expr));
+    return null;
+}
+
+/// Writes an unconditional dispatch jump, the Go `writeJump`.
+fn (self: &var Emitter) write_jump(
+    module: &ir::Module,
+    block: ir::Block,
+    target: ir::Name,
+    index: &map::Map<[]u8, DispatchBlock>
+) -> !void {
+    let source = module.block_name(block);
+    try self.write_phi_copies(module, source, target, index);
+    let id = block_index_of(module, index, target);
+    try self.line1("            (local.set $pc (i32.const %d))", Arg::Int(id));
+    return self.line("            (br $dispatch)");
+}
+
+/// Writes a conditional dispatch jump, the Go `writeBranch`.
+fn (self: &var Emitter) write_branch(
+    module: &ir::Module,
+    block: ir::Block,
+    index: &map::Map<[]u8, DispatchBlock>
+) -> !void {
+    let term = module.block_terminator(block);
+    let source = module.block_name(block);
+    let info = try self.value_of(module, term.cond);
+    try self.line1("            (if %s", Arg::Str(info.expr));
+    try self.line("              (then");
+    try self.write_phi_copies(module, source, term.target, index);
+    let target_id = block_index_of(module, index, term.target);
+    try self.line1("                (local.set $pc (i32.const %d))", Arg::Int(target_id));
+    try self.line("                (br $dispatch))");
+    try self.line("              (else");
+    try self.write_phi_copies(module, source, term.else_target, index);
+    let else_id = block_index_of(module, index, term.else_target);
+    try self.line1("                (local.set $pc (i32.const %d))", Arg::Int(else_id));
+    return self.line("                (br $dispatch)))");
+}
+
+/// Assigns target phi locals for an edge, the Go `writePhiCopies`. The edge
+/// stays inside one function, so the target is read out of that function's
+/// dispatch map.
+fn (self: &var Emitter) write_phi_copies(
+    module: &ir::Module,
+    source: ir::Name,
+    target: ir::Name,
+    index: &map::Map<[]u8, DispatchBlock>
+) -> !void {
+    let block = block_named(module, index, target) orelse return;
+    let node = module.blocks.at(block.node);
+    var instr_index = 0;
+    while node.instrs.get(instr_index) |instr| {
+        instr_index = instr_index + 1;
+        let instr_node = module.instrs.at(instr.node);
+        if instr_node.op != ir::Op::Phi {
+            continue;
+        }
+        var incoming_index = 0;
+        while instr_node.incoming.get(incoming_index) |incoming| {
+            incoming_index = incoming_index + 1;
+            if !ir::same_name(incoming.block, source) {
+                continue;
+            }
+            try self.write_local_copy(module, instr_node.result, incoming.value, "            ");
+        }
+    }
+    return;
+}
+
+/// Copies one value into a local, the Go `writeLocalCopy`.
+fn (self: &var Emitter) write_local_copy(
+    module: &ir::Module,
+    dst: ir::Value,
+    src: ir::Value,
+    indent: []u8
+) -> !void {
+    let info = try self.value_of(module, src);
+    let dst_retained = ir::name_text(&module.names, dst.name);
+    let dst_bytes = dst_retained.as_bytes();
+    let symbol = try self.symbol_name_of(dst_bytes);
+    try self.line3("%s(local.set %s %s)", Arg::Lit(indent), Arg::Str(symbol), Arg::Str(info.expr));
+    let expr = try self.local_expr(dst_bytes);
+    return self.set_value(module, dst, expr, 0);
+}
+
+/// Maps bool constants to WebAssembly i32 constants, the Go `wasmBool`.
+fn wasm_bool(names: &ir::NameTable, value: ir::Name) -> []u8 {
+    if names.is(value, "true") {
+        return "(i32.const 1)";
+    }
+    return "(i32.const 0)";
+}

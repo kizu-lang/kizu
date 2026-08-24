@@ -32,3 +32,9 @@ run_example "if" "examples/if.kizu" "adult"
 run_example "while" "examples/while.kizu" "0
 1
 2"
+# A loop in a called function repeats the block names of the caller's loop, so
+# this crosses the phi copies of two dispatch loops in one module.
+run_example "loop_in_called_function" "examples/loop_in_called_function.kizu" "0
+0
+1
+3"

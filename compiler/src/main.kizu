@@ -15,6 +15,7 @@ import compiler::internal::project;
 import compiler::internal::source;
 import compiler::internal::stdfmt;
 import compiler::internal::types;
+import compiler::internal::wasm;
 import std::array;
 import std::fs;
 import std::io;
@@ -29,6 +30,8 @@ import std::string;
 // std modules, type-checks it, and ownership-checks it,
 // `ir` lowers a checked file or package to typed SSA IR and prints it,
 // `build --emit-llvm` prints the LLVM IR the lowered module emits to,
+// `build --target wasm32-wasi` prints the WASI WebAssembly text one source
+// file emits to,
 // `build --target native` links a program into the executable it names,
 // `run` / `test` build a temporary executable and run it, forwarding
 // the child's exit status through `std::process::ExitStatus` (ADR-0085),
@@ -125,6 +128,10 @@ fn main() -> !process::ExitStatus {
             return process::ExitStatus::Specific(1);
         }
         let target_kind = try process::arg(next + 2);
+        if mem::equal_bytes(target_kind, "wasm32-wasi") {
+            let code = try build_wasm_command(io, allocator, lib_dir_bytes, next + 3, count);
+            return exit_of(code);
+        }
         if !mem::equal_bytes(target_kind, "native") {
             try usage(io);
             var message = try string::from_bytes(allocator, "error: invalid build target `");
@@ -168,11 +175,31 @@ fn exit_of(code: i64) -> process::ExitStatus {
     return process::ExitStatus::Specific(cast<u8>(code));
 }
 
-/// Names what a lowered module is printed as: its IR dump, or the LLVM IR
-/// emitted from it.
+/// Names what a lowered module is printed as: its IR dump, the LLVM IR
+/// emitted from it, or the WASI WebAssembly text emitted from it.
 enum Output {
     Ir,
     Llvm,
+    Wasm,
+}
+
+/// Runs `build --target wasm32-wasi [--opt] <file>`, the Go `emitTargetFile`
+/// over `parseOptFileArgs`: one source file, optionally preceded by `--opt`.
+fn build_wasm_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, count: i64) -> !i64 {
+    if count - start == 1 {
+        let target = try process::arg(start);
+        return ir_target(io, allocator, lib_dir, target, false, Output::Wasm);
+    }
+    if count - start == 2 {
+        let flag = try process::arg(start);
+        if mem::equal_bytes(flag, "--opt") {
+            let target = try process::arg(start + 1);
+            return ir_target(io, allocator, lib_dir, target, true, Output::Wasm);
+        }
+    }
+    try usage(io);
+    try io::write_stderr_line(io, "error: invalid command arguments");
+    return 1;
 }
 
 /// Writes the usage lines for the commands this binary has.
@@ -934,10 +961,10 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !i
 }
 
 /// Lowers a checked file or package to typed SSA IR and prints it, the Go
-/// `irCommand` over `lowerFile` / `lowerPackage`, or the LLVM IR emitted
-/// from it, the Go `emitLLVMFile`: a package also gets the `main` entry
-/// wrapper the native build adds. The text is emitted fresh every time
-/// (ADR-0126).
+/// `irCommand` over `lowerFile` / `lowerPackage`, the LLVM IR emitted from it,
+/// the Go `emitLLVMFile`, or the WASI WebAssembly text emitted from it, the Go
+/// `emitWASMFile`: a package also gets the `main` entry wrapper the native
+/// build adds. The text is emitted fresh every time (ADR-0126).
 fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
     var tree = ast::new(allocator);
     defer tree.deinit();
@@ -945,7 +972,15 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
     defer loader.deinit();
     var package_name = string::new(allocator);
     defer package_name.deinit();
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, false);
+    let loaded = try load_for_output(
+        io,
+        allocator,
+        &var loader,
+        &var tree,
+        target,
+        &var package_name,
+        output
+    );
     match loaded {
         Error(failed) => {
             defer failed.deinit();
@@ -1000,6 +1035,18 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
                         }
+                    }
+                    if output == Output::Wasm {
+                        var text = string::new(allocator);
+                        defer text.deinit();
+                        if try wasm::emit(allocator, &lowerer.module, &var text) |failed| {
+                            defer failed.deinit();
+                            try report(io, allocator, &loader.sources, &failed);
+                            return 1;
+                        }
+                        let text_bytes = text.as_bytes();
+                        try io::write_stdout_line(io, text_bytes);
+                        return 0;
                     }
                     if output == Output::Llvm {
                         var text = string::new(allocator);
@@ -1068,6 +1115,27 @@ fn is_package_root(io: Io, target: []u8) -> !bool {
         return true;
     }
     return mem::equal_bytes(path::basename(target), "kizu.toml");
+}
+
+/// Loads the target the way the requested output loads it: the wasm backend
+/// takes one source file, the Go `emitWASMFile` over `lowerFile`, where `ir`
+/// and `build --emit-llvm` take a package root as well.
+fn load_for_output(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    target: []u8,
+    package_name: &var string::String,
+    output: Output
+) -> !project::LoadResult {
+    if output == Output::Wasm {
+        let text = try fs::read_file(io, allocator, target, mem::Limit::Unlimited);
+        defer text.deinit();
+        let text_bytes = text.as_bytes();
+        return loader.load_source(tree, target, text_bytes);
+    }
+    return load_target(io, allocator, loader, tree, target, package_name, false);
 }
 
 /// Loads the target as a package when it is a package root, else as one file

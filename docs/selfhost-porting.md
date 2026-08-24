@@ -316,13 +316,14 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | ownership | 7893 | 12998 | 1.65(words 46,330 / 28,224 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `tests/behavior` package `ir` / `ir --opt` byte 比較(std を含む CLI 経路)+ unit(verify の rejection) |
 | llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `tests/behavior` package `build --emit-llvm` / `--opt` byte 比較(std を含む CLI 経路)|
+| wasm | 543 | 1165 | 2.15(words 4,151 / 1,914 = 2.17) | `TestSelfhostFrontend` の wasm 12 case(hello の data segment と文字列 print、i64 引数と戻り値を持つ call、loop の phi copy と dispatch arm、`--opt` の畳み込み、tab / backslash / 非 ASCII / multi-line literal の改行が data segment で受ける escape、呼ばれた function の loop が caller の block 名を繰り返す形、backend が出す 5 つの reject message すべて、package manifest が package ではなく 1 source file として読まれること)と、wasm target が出す 3 つの引数 error を Go CLI と stdout / stderr / exit status で byte 比較 |
 | native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)| `TestSelfhostBehavior`: conformance block から behavior / testing 7 case(うち `tests/behavior` は 211 assert を 1 package で link / run)と I/O / process 2 case の stdout / stderr / exit status。`TestSelfhostFrontend`: `build --target native` / `--opt` を両 CLI で build、両 exe を実行し、metadata を絶対 path 正規化で byte 比較。`kizu check compiler` / `kizu test compiler` |
 | buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
 | cimport | 196 | 567 | 2.89(words 2,099 / 704 = 2.98) | `TestSelfhostFrontend` の import-c-header 14 case(受理する 4 shape と reject 10 分類)を Go CLI 経路と stdout / stderr / exit status で byte 比較 |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
-| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache / import-c-header) | 1023(全 command) | 1470(main 1465 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
+| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / --target wasm32-wasi / run / test / cache / import-c-header) | 1023(全 command) | 1529(main 1524 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -331,7 +332,6 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 
 | module | Go | `kizu` から到達 | 状態 |
 | --- | --- | --- | --- |
-| `internal/wasm` | 549 | `build --target wasm32-wasi` | 移植する |
 | `internal/quote` | 31 | 無(ir / llvm 経由)| 移植しない。`std::fmt::append_bytes_literal` が同じ仕事をしていて、selfhost 側は既にそれを使っている |
 | `internal/conformance` | 199 | 無(Go test 専用)| 移植しない。example の case block を読むのは Go test harness の仕事 |
 | `internal/lsp` | 4627 | 無(`cmd/kizu-lsp` 別 binary)| `kizu` の CLI ではなく release にも入らない(`go install` で配る)。cutover 条件の外 |
@@ -476,6 +476,54 @@ main の増分 33 行は、`ImportResult` union の 2 arm をそれぞれ `defer
 Go が `fmt.Fprintln(os.Stderr, "error: "+msg)` の 1 行で書く前置きを `String` の組立に
 したことで尽きる。
 
+wasm の増分(+622 行、1,165 / 543 = 2.15。words 4,151 / 1,914 = 2.17 なので行の折返しでは
+動いていない)の分類。Go 側に対応する行が 1 つも無い std 代替が 219 行:`fmt.Fprintf` /
+`Sprintf` / `Errorf` に当たる formatter(`Arg` union、`format_args` / `place_arg` /
+`append_format_rest`、`line` / `line1..4`、`fail` / `fail0`)117 行と、`strconv.Unquote` /
+`strconv.Atoi` / `strings.TrimRight` に当たる `append_unquoted` + `hex_value` + `is_decimal` +
+`exceeds` + `last_byte_is` 102 行。llvm が同じ formatter と `append_unquoted` を module 内に
+別々に持っているのと同じで、std へ切り出す判断は module 完了時に行う。残る 946 行 /
+Go 543 行 = 1.74 が本体で、その分類は次のとおり。API shape が最大で、閉じ括弧だけの行が
+Go 120 に対して Kizu 201、signature を 1 引数 1 行に折り返した 62 行 + その閉じ括弧 26 行、
+Go の `switch` を `if` 連鎖に展開した分(`if ... {` が Go 33 に対して Kizu 80。Go の
+switch / case 43 行に当たる)、`while` の `var index = 0` 22 行 + `index = index + 1` 24 行
+(Go の `for range`)。ownership の明示は `defer` / `errdefer` 23 行(Go は 0)と
+`name_text` + `as_bytes()` の view 束縛 32 行(`[]u8` view を関数から返せない gap)。error
+処理は Go の `if err != nil` / `return err` / `fmt.Errorf` 14 に対して `return move failed` /
+`if try f() \|failed\|` 10 で、増分ではない。残りは Go が `fmt.Fprintf` の引数に inline する
+式を `let` に束縛した行と、Go が map index と string 連結で書くところを copy 値を返す
+accessor / result helper(`own` / `symbol_name_of` / `local_expr` / `data_ref` / `set_value` /
+`block_index_of` / `constant_expr` / `offset_expr` / `arg_expr` / `fail_op` /
+`term_op_spelling` / `binary_operation` / `is_opaque_op`)にした宣言。
+
+wasm work unit 全体は Go 555 行(`internal/wasm` 543 + `cmd/kizu/build.go` の
+`emitWASMFile` 12)、Kizu 1,224 行(module 1,165 + main の増分 59)で 2.21。compiler module
+累計は Go 1,023 行 / Kizu 1,529 行 = 1.49、words 5,169 / 3,294 = 1.57 で words だけ 1.5
+trigger に触れる。main の増分 59 行は、`build --target wasm32-wasi` の引数検査を Go の
+`parseOptFileArgs` と同じ 3 つの形に開いた `build_wasm_command` 20 行、`Output::Wasm` の
+emit arm 12 行、wasm だけが Go の `lowerFile` に当たる 1 file 読みをする `load_for_output`
+20 行で尽きる。
+
+移植中に Go 側の bug を 1 つ直した(Source of truth の規則どおり、bug は写さず先に Go を
+契約へ合わせた)。`internal/wasm` の `findBlock` は block 名で module 全体を走査していたが、
+block 名は function 内でしか一意でない —— lowering が function ごとに番号を振り直すので
+`entry` も `while.header.1` もそれを持つ全 function に出る。loop を持つ function が 2 つ以上
+ある program では、`writePhiCopies` が別 function の block の phi を読み、その function の
+local を書き出す invalid な module になっていた(wasmtime が `unknown local` で拒否)。
+`blockIndexes` が返す per-function の map に block 自身を持たせ(`dispatchBlock`)、
+`writePhiCopies` はそこから引くようにして、探索の scope を signature で固定した。Kizu 側は
+同じ形で移植している。この形を踏む example が無かったので
+`examples/loop_in_called_function.kizu` を足し、`scripts/run-wasi-smoke.sh` が wasmtime で
+実行する(修正前の binary はこの case で落ちる)。
+
+Go の `sortedDataLiterals` は data segment を map から集め直して offset で sort するが、
+offset は `collectStrings` が単調増加で配ったものなので、Kizu は配った順(`data_order`)を
+そのまま出す。両者が違うのは空の `[]u8` literal がある場合だけで、そのとき 2 つの entry が
+同じ offset に並び、Go の `sort.Slice` は stable でないため run ごとに順序が変わる
+(`print(""); print("x");` を 25 回 build して 19 / 6 に割れた)。Kizu は常に discovery 順を
+出すので、この 1 case では Go の 2 通りの出力のうち一方と一致する。Go 側の非決定性なので
+移植では直さず、比較 case にも空 literal を入れていない。
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
@@ -537,5 +585,6 @@ Go が `fmt.Fprintln(os.Stderr, "error: "+msg)` の 1 行で書く前置きを `
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
 | `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
 | `strings` の走査 API が無い(`Fields` / `Split` / `Join` / `Contains` / `HasPrefix` / `Index` / `Count` / `ReplaceAll` / `TrimSpace`)と、`unicode.IsSpace` に当たる述語も無い | cimport は Go 196 行に対し 179 行をこの代替に使う。fmt は `strings.Split` / `ContainsAny` / `TrimSpace`、llvm は `strings.Contains` 系を、それぞれ module 内に別々に持っている | module 内に局所実装。空白判定は `space_width` が White_Space の 25 scalar を byte 幅で読む(UTF-8 の continuation byte は lead byte になれないので byte 走査で誤検出しない) |
-| file を読めなかったときの CLI message が Go と違う | selfhost の全 command が `fs::read_file` の error をそのまま返すため `runtime error: std::fs::Error::NotFound` になる。Go は `error: open <path>: no such file or directory`。exit status はどちらも 1 | 局所解を置いていない。`std::fs` の error が path を運べないので command 側では直せず、cutover 前に std の判断として決める |
+| file を読めなかったときの CLI message が Go と違う | selfhost の全 command が `fs::read_file` の error をそのまま返すため `runtime error: std::fs::Error::NotFound` になる。Go は `error: open <path>: no such file or directory`。exit status はどちらも 1。`build --target wasm32-wasi <directory>` は Go の `emitWASMFile` が package 判定をせず 1 file を読むので同じ gap の `ReadFailed` 版になり、Go の `error: read <path>: is a directory` と違う | 局所解を置いていない。`std::fs` の error が path を運べないので command 側では直せず、cutover 前に std の判断として決める |
+| `strconv.Unquote` / `strconv.Atoi` に当たる std API が無い | wasm は quoted IR literal を読むのに llvm と同じ `append_unquoted` を、`strconv.Atoi` の受理条件(符号 + 数字 1 つ以上 + int64 に収まる)を `is_decimal` を、module 内にそれぞれ持つ | module 内に局所実装。llvm / fmt / cimport が持つ同種の helper と一緒に module 完了時に判断する |
 | `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | `compiler::internal::timestamp`(別記録): 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |

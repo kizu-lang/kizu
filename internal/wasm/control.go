@@ -9,7 +9,7 @@ import (
 )
 
 // writeBlock writes a dispatch arm for one IR block.
-func (e *emitter) writeBlock(block *ir.Block, index map[string]int, id int) error {
+func (e *emitter) writeBlock(block *ir.Block, index map[string]dispatchBlock, id int) error {
 	fmt.Fprintf(&e.out, "        (if (i32.eq (local.get $pc) (i32.const %d))\n", id)
 	e.out.WriteString("          (then\n")
 	for _, instr := range block.Instrs {
@@ -166,7 +166,7 @@ func (e *emitter) writeUnsupportedOpaque(instr *ir.Instr) error {
 }
 
 // writeTerminator writes control transfer for one dispatch arm.
-func (e *emitter) writeTerminator(block *ir.Block, index map[string]int) error {
+func (e *emitter) writeTerminator(block *ir.Block, index map[string]dispatchBlock) error {
 	switch block.Terminator.Op {
 	case "return":
 		return e.writeReturn(block.Terminator.Value)
@@ -191,29 +191,30 @@ func (e *emitter) writeReturn(value ir.Value) error {
 }
 
 // writeJump writes an unconditional dispatch jump.
-func (e *emitter) writeJump(block *ir.Block, target string, index map[string]int) {
-	e.writePhiCopies(block.Name, target)
-	fmt.Fprintf(&e.out, "            (local.set $pc (i32.const %d))\n", index[target])
+func (e *emitter) writeJump(block *ir.Block, target string, index map[string]dispatchBlock) {
+	e.writePhiCopies(block.Name, target, index)
+	fmt.Fprintf(&e.out, "            (local.set $pc (i32.const %d))\n", index[target].id)
 	e.out.WriteString("            (br $dispatch)\n")
 }
 
 // writeBranch writes a conditional dispatch jump.
-func (e *emitter) writeBranch(block *ir.Block, index map[string]int) {
+func (e *emitter) writeBranch(block *ir.Block, index map[string]dispatchBlock) {
 	term := block.Terminator
 	e.out.WriteString("            (if " + e.value(term.Cond).expr + "\n")
 	e.out.WriteString("              (then\n")
-	e.writePhiCopies(block.Name, term.Target)
-	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Target])
+	e.writePhiCopies(block.Name, term.Target, index)
+	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Target].id)
 	e.out.WriteString("                (br $dispatch))\n")
 	e.out.WriteString("              (else\n")
-	e.writePhiCopies(block.Name, term.Else)
-	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Else])
+	e.writePhiCopies(block.Name, term.Else, index)
+	fmt.Fprintf(&e.out, "                (local.set $pc (i32.const %d))\n", index[term.Else].id)
 	e.out.WriteString("                (br $dispatch)))\n")
 }
 
-// writePhiCopies assigns target phi locals for an edge.
-func (e *emitter) writePhiCopies(source string, target string) {
-	block := e.findBlock(target)
+// writePhiCopies assigns target phi locals for an edge. The edge stays inside
+// one function, so the target is read out of that function's dispatch map.
+func (e *emitter) writePhiCopies(source string, target string, index map[string]dispatchBlock) {
+	block := index[target].block
 	if block == nil {
 		return
 	}
@@ -234,18 +235,6 @@ func (e *emitter) writeLocalCopy(dst ir.Value, src ir.Value, indent string) {
 	value := e.value(src)
 	fmt.Fprintf(&e.out, "%s(local.set %s %s)\n", indent, symbolName(dst.Name), value.expr)
 	e.values[dst.Name] = valueInfo{typ: dst.Type, expr: "(local.get " + symbolName(dst.Name) + ")"}
-}
-
-// findBlock returns the block with the given name.
-func (e *emitter) findBlock(name string) *ir.Block {
-	for _, fn := range e.module.Functions {
-		for _, block := range fn.Blocks {
-			if block.Name == name {
-				return block
-			}
-		}
-	}
-	return nil
 }
 
 // value resolves a typed IR value to a WebAssembly expression.

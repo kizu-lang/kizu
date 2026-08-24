@@ -268,11 +268,21 @@ func needsLocal(instr *ir.Instr) bool {
 		!(instr.Op == "const" && instr.Result.Type == "[]u8")
 }
 
-// blockIndexes maps block names to dispatch ids.
-func blockIndexes(fn *ir.Function) map[string]int {
-	index := map[string]int{}
+// dispatchBlock is the block one name reaches and the id its dispatch arm
+// tests for.
+type dispatchBlock struct {
+	block *ir.Block
+	id    int
+}
+
+// blockIndexes maps block names to their dispatch arms. The map is one
+// function's, because a block name is unique only inside the function that
+// declares it: lowering numbers each function's blocks from scratch, so
+// `entry` and `while.header.1` name a block in every function that has one.
+func blockIndexes(fn *ir.Function) map[string]dispatchBlock {
+	index := map[string]dispatchBlock{}
 	for i, block := range fn.Blocks {
-		index[block.Name] = i
+		index[block.Name] = dispatchBlock{block: block, id: i}
 	}
 	return index
 }
