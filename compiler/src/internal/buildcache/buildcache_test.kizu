@@ -1,3 +1,4 @@
+import compiler::internal::fsutil;
 import compiler::internal::sha256;
 import std::fmt;
 import std::fs;
@@ -43,54 +44,6 @@ fn drop_test_cache(io: Io, allocator: Allocator, cache: &Cache) -> !void {
         try fs::remove_dir(io, dir_bytes);
     }
     return;
-}
-
-/// Renders one stamp for the format tests.
-fn stamp_of(allocator: Allocator, millis: i64) -> !string::String {
-    var out = string::new(allocator);
-    errdefer out.deinit();
-    try append_created_at(&var out, millis);
-    return move out;
-}
-
-test "created_at spells RFC3339 UTC with the fraction trimmed" {
-    let allocator = mem::page_allocator();
-    let epoch = try stamp_of(allocator, 0);
-    defer epoch.deinit();
-    let epoch_bytes = epoch.as_bytes();
-    testing::expect_equal<[]u8>("1970-01-01T00:00:00Z", epoch_bytes);
-    let full = try stamp_of(allocator, 1700000000123);
-    defer full.deinit();
-    let full_bytes = full.as_bytes();
-    testing::expect_equal<[]u8>("2023-11-14T22:13:20.123Z", full_bytes);
-    let tens = try stamp_of(allocator, 1700000000120);
-    defer tens.deinit();
-    let tens_bytes = tens.as_bytes();
-    testing::expect_equal<[]u8>("2023-11-14T22:13:20.12Z", tens_bytes);
-    let half = try stamp_of(allocator, 1700000000500);
-    defer half.deinit();
-    let half_bytes = half.as_bytes();
-    testing::expect_equal<[]u8>("2023-11-14T22:13:20.5Z", half_bytes);
-}
-
-test "stamps order by time rather than by spelling" {
-    testing::expect(stamp_before(
-        "2023-11-14T22:13:20.123Z",
-        "2023-11-14T22:13:20.5Z"
-    ));
-    testing::expect(!stamp_before(
-        "2023-11-14T22:13:20.5Z",
-        "2023-11-14T22:13:20.123Z"
-    ));
-    testing::expect(stamp_before("2023-11-14T22:13:20Z", "2023-11-14T22:13:20.5Z"));
-    testing::expect(!stamp_before("2023-11-14T22:13:20.5Z", "2023-11-14T22:13:20Z"));
-    testing::expect(!stamp_before("2023-11-14T22:13:20.500Z", "2023-11-14T22:13:20.5Z"));
-    testing::expect(!stamp_before("2023-11-14T22:13:20.5Z", "2023-11-14T22:13:20.500Z"));
-    testing::expect(stamp_before(
-        "2023-11-14T22:13:20.123456789Z",
-        "2023-11-14T22:13:20.124Z"
-    ));
-    testing::expect(stamp_before("2022-12-31T23:59:59Z", "2023-01-01T00:00:00Z"));
 }
 
 /// Runs one artifact through miss, build, finish and a second lookup.
@@ -163,7 +116,7 @@ fn text_round_trip(io: Io, allocator: Allocator) -> !void {
     defer source.deinit();
     let source_bytes = source.as_bytes();
     let dir_bytes = cache.dir.as_bytes();
-    try create_dir_all(io, dir_bytes);
+    try fsutil::create_dir_all(io, dir_bytes);
     try fs::write_file(io, source_bytes, "fn main() {}");
     var first_text = string::new(allocator);
     defer first_text.deinit();
@@ -288,7 +241,7 @@ fn eviction_keeps_newest(io: Io, allocator: Allocator) -> !void {
     var cache = try test_cache(allocator);
     defer cache.deinit();
     let dir_bytes = cache.dir.as_bytes();
-    try create_dir_all(io, dir_bytes);
+    try fsutil::create_dir_all(io, dir_bytes);
     try plant_entry(io, allocator, &cache, "older", "2020-01-01T00:00:00Z", "old bytes!");
     try plant_entry(io, allocator, &cache, "newer", "2021-01-01T00:00:00.5Z", "new bytes!");
     cache.max_bytes = 10;

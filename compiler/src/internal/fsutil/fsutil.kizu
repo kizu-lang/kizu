@@ -1,0 +1,89 @@
+import std::fmt;
+import std::fs;
+import std::mem;
+import std::path;
+import std::process;
+import std::string;
+
+// Replacements for what the Go side reads from os, path/filepath and
+// strings. They are std gap material recorded in docs/selfhost-porting.md:
+// more than one module needs them, so they live here rather than inside
+// whichever module needed them first.
+
+/// Creates every directory a path names that is not there yet, the Go
+/// `os.MkdirAll`: `fs::create_dir` tolerates an existing directory.
+pub fn create_dir_all(io: Io, target: []u8) -> !void {
+    var index = 0;
+    while index < mem::len(target) {
+        if target[index] == cast<u8>(47) and index > 0 {
+            let prefix = target[0..index];
+            try fs::create_dir(io, prefix);
+        }
+        index = index + 1;
+    }
+    if mem::len(target) > 0 {
+        try fs::create_dir(io, target);
+    }
+    return;
+}
+
+/// Reports whether text ends with suffix, the Go `strings.HasSuffix`.
+pub fn has_suffix(text: []u8, suffix: []u8) -> bool {
+    let text_len = mem::len(text);
+    let suffix_len = mem::len(suffix);
+    if text_len < suffix_len {
+        return false;
+    }
+    let tail = text[text_len - suffix_len..text_len];
+    return mem::equal_bytes(tail, suffix);
+}
+
+pub error Error {
+    MissingHome,
+}
+
+/// Appends the platform cache directory, the Go `os.UserCacheDir`, probed
+/// rather than compiled per platform: a home with Library/Caches is the
+/// macOS spelling, and XDG_CACHE_HOME or ~/.cache is the Linux spelling.
+pub fn append_user_cache_dir(io: Io, allocator: Allocator, out: &var string::String) -> !void {
+    let home = process::env("HOME") orelse "";
+    if mem::len(home) > 0 {
+        let mac_base = try path::join(allocator, home, "Library/Caches");
+        defer mac_base.deinit();
+        let mac_bytes = mac_base.as_bytes();
+        let mac = try fs::exists(io, mac_bytes);
+        if mac {
+            return out.append_bytes(mac_bytes);
+        }
+    }
+    if process::env("XDG_CACHE_HOME") |xdg| {
+        if mem::len(xdg) > 0 {
+            return out.append_bytes(xdg);
+        }
+    }
+    if mem::len(home) == 0 {
+        return Error::MissingHome;
+    }
+    try out.append_bytes(home);
+    return out.append_bytes("/.cache");
+}
+
+/// Names one scratch file the way Go draws one from `os.CreateTemp`. std
+/// has no randomness, so distinctness comes from what differs between
+/// concurrent writers: the name they build for, the wall clock, and a
+/// per-process sequence. Two processes collide only when they build the
+/// same name in the same millisecond, and the loser fails loudly.
+pub fn append_scratch_name(source: &string::String, sequence: i64, out: &var string::String) -> !void {
+    try out.append_bytes("artifact-");
+    let source_bytes = source.as_bytes();
+    var head = mem::len(source_bytes);
+    if head > 16 {
+        head = 16;
+    }
+    let prefix = source_bytes[0..head];
+    try out.append_bytes(prefix);
+    try out.append_bytes("-");
+    try fmt::append_i64(out, process::unix_millis());
+    try out.append_bytes("-");
+    return fmt::append_i64(out, sequence);
+}
