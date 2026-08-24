@@ -318,10 +318,11 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `tests/behavior` package `build --emit-llvm` / `--opt` byte 比較(std を含む CLI 経路)|
 | native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)| `TestSelfhostBehavior`: conformance block から behavior / testing 7 case(うち `tests/behavior` は 211 assert を 1 package で link / run)と I/O / process 2 case の stdout / stderr / exit status。`TestSelfhostFrontend`: `build --target native` / `--opt` を両 CLI で build、両 exe を実行し、metadata を絶対 path 正規化で byte 比較。`kizu check compiler` / `kizu test compiler` |
 | buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
+| cimport | 196 | 567 | 2.89(words 2,099 / 704 = 2.98) | `TestSelfhostFrontend` の import-c-header 14 case(受理する 4 shape と reject 10 分類)を Go CLI 経路と stdout / stderr / exit status で byte 比較 |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
-| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 1437(main 1432 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
+| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache / import-c-header) | 1023(全 command) | 1470(main 1465 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -331,7 +332,6 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | module | Go | `kizu` から到達 | 状態 |
 | --- | --- | --- | --- |
 | `internal/wasm` | 549 | `build --target wasm32-wasi` | 移植する |
-| `internal/cimport` | 196 | `extern "c"` の宣言読み | 移植する |
 | `internal/quote` | 31 | 無(ir / llvm 経由)| 移植しない。`std::fmt::append_bytes_literal` が同じ仕事をしていて、selfhost 側は既にそれを使っている |
 | `internal/conformance` | 199 | 無(Go test 専用)| 移植しない。example の case block を読むのは Go test harness の仕事 |
 | `internal/lsp` | 4627 | 無(`cmd/kizu-lsp` 別 binary)| `kizu` の CLI ではなく release にも入らない(`go install` で配る)。cutover 条件の外 |
@@ -448,6 +448,34 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 (generic sort が無い std gap、14 行)。Go 対応が標準 library の実装は sha256 と
 同じ別記録の module(timestamp / fsutil)が持ち、この表の上の行にある。
 
+cimport の増分(+371 行、567 / 196 = 2.89。words 2,099 / 704 = 2.98 なので行の折返しでは
+動いていない)の分類。半分は Go 側に対応する行が 1 つも無い std 代替で 179 行:
+`strings.Fields` / `TrimSpace` に当たる `FieldCursor` 24 + `space_width` 39 + `trim_space` 14 =
+77 行(`unicode.IsSpace` の White_Space 25 scalar を byte 幅で読む。ASCII だけにすると
+`int<NBSP>f(void);` を Go が受理して selfhost が拒否する)、`strings.Contains` /
+`HasPrefix` / `Count` / `ReplaceAll` / `Index` に当たる 50 行、`strings.Join` の 16 行、
+regexp の文字 class と block comment 走査に当たる 36 行。残る 383 行 / Go 188 行 = 2.04 が
+本体で、その分類は次のとおり。std gap は `fmt.Errorf` 相当が無いことによる message 組立
+(`import_error` + 4 箇所の `errdefer` / `append_bytes` / `` ` `` 付与)約 30 行で、Go は
+`fmt.Errorf` 10 箇所が 10 行。API shape は signature の 1 引数 1 行折返し 30 行、Go の
+`(string, error)` 返しを `&var string::String` の out 引数 + `?string::String` に写した
+`var x = string::new(allocator);` 11 行と `if try f(..) |failure| { return move failure; }`
+7 組、閉じ括弧だけの行が Go 40 に対して Kizu 117。ownership の明示は `defer` / `errdefer`
+22 行と `as_bytes()` の view 束縛 8 行。重複処理は `while` の `index = index + 1` 15 行
+(Go の `for range`)。Go の regexp は移植先を持たないので、`^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$`
+は正規化済み statement を 1 回走査して span を返す `match_function` に写した — lazy な
+先頭 group は最左の分割を選ぶことと同じなので、最初に「空白 + 識別子 + 開き括弧」が
+続く位置で返す。汎用 regex engine は置いていない。ratio 2.89 は gate 未達だが、増分の
+半分が std 側の欠落で、残りは他 module と同じ 4 分類で尽きる。std へ切り出す判断は
+fmt / llvm が持つ同じ helper と一緒に module 完了時に行う。
+
+import-c-header work unit 全体は Go 214 行(`internal/cimport` 196 + `cmd/kizu/cimport.go` 18)、
+Kizu 600 行(module 567 + main の増分 33)で 2.80。compiler module 累計は Go 1,023 行 /
+Kizu 1,470 行 = 1.44、words 4,974 / 3,294 = 1.51 で words だけ 1.5 trigger に触れる。
+main の増分 33 行は、`ImportResult` union の 2 arm をそれぞれ `defer` 付きで開いたことと、
+Go が `fmt.Fprintln(os.Stderr, "error: "+msg)` の 1 行で書く前置きを `String` の組立に
+したことで尽きる。
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
@@ -508,4 +536,6 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 | generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
 | `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
+| `strings` の走査 API が無い(`Fields` / `Split` / `Join` / `Contains` / `HasPrefix` / `Index` / `Count` / `ReplaceAll` / `TrimSpace`)と、`unicode.IsSpace` に当たる述語も無い | cimport は Go 196 行に対し 179 行をこの代替に使う。fmt は `strings.Split` / `ContainsAny` / `TrimSpace`、llvm は `strings.Contains` 系を、それぞれ module 内に別々に持っている | module 内に局所実装。空白判定は `space_width` が White_Space の 25 scalar を byte 幅で読む(UTF-8 の continuation byte は lead byte になれないので byte 走査で誤検出しない) |
+| file を読めなかったときの CLI message が Go と違う | selfhost の全 command が `fs::read_file` の error をそのまま返すため `runtime error: std::fs::Error::NotFound` になる。Go は `error: open <path>: no such file or directory`。exit status はどちらも 1 | 局所解を置いていない。`std::fs` の error が path を運べないので command 側では直せず、cutover 前に std の判断として決める |
 | `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | `compiler::internal::timestamp`(別記録): 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |
