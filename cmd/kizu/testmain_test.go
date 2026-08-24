@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
 	"testing"
 
@@ -12,8 +13,16 @@ import (
 	"github.com/kizu-lang/kizu/internal/stdlib/stdlibtest"
 )
 
-// kizuBinaryPath is the shared CLI binary built once for all command smokes.
-var kizuBinaryPath string
+var (
+	// kizuBinaryPath is the shared CLI binary built once for all command smokes.
+	kizuBinaryPath string
+	testBinaryDir  string
+
+	selfhostBuildOnce   sync.Once
+	selfhostBinaryPath  string
+	selfhostBuildOutput []byte
+	selfhostBuildErr    error
+)
 
 // TestMain builds the kizu CLI once so command smokes exec it directly
 // instead of paying a `go run .` link per test.
@@ -40,6 +49,7 @@ func runTestMain(m *testing.M) (int, error) {
 		return 0, err
 	}
 	defer os.RemoveAll(dir)
+	testBinaryDir = dir
 	binary := filepath.Join(dir, "kizu")
 	out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput()
 	if err != nil {
@@ -52,4 +62,41 @@ func runTestMain(m *testing.M) (int, error) {
 // kizuCommand returns a command that runs the shared test-built kizu CLI.
 func kizuCommand(args ...string) *exec.Cmd {
 	return exec.Command(kizuBinaryPath, args...)
+}
+
+// sharedSelfhost builds the selfhost compiler lazily and returns the immutable
+// binary shared by every selfhost gate. Keeping this lazy means short and
+// unrelated targeted tests do not pay for it.
+func sharedSelfhost(t *testing.T) string {
+	t.Helper()
+	selfhostBuildOnce.Do(func() {
+		selfhostBinaryPath = os.Getenv("KIZU_TEST_SELFHOST")
+		if selfhostBinaryPath == "" {
+			selfhostBinaryPath = filepath.Join(testBinaryDir, "selfhost", "kizu")
+		}
+		info, statErr := os.Stat(selfhostBinaryPath)
+		if statErr == nil {
+			if !info.Mode().IsRegular() {
+				selfhostBuildErr = fmt.Errorf("cached selfhost path is not a file: %s", selfhostBinaryPath)
+			}
+			return
+		}
+		if !os.IsNotExist(statErr) {
+			selfhostBuildErr = statErr
+			return
+		}
+		dir := filepath.Dir(selfhostBinaryPath)
+		selfhostBuildErr = os.MkdirAll(dir, 0o755)
+		if selfhostBuildErr != nil {
+			return
+		}
+		build := kizuCommand(
+			"build", "--target", "native", "-o", selfhostBinaryPath, "../../compiler",
+		)
+		selfhostBuildOutput, selfhostBuildErr = build.CombinedOutput()
+	})
+	if selfhostBuildErr != nil {
+		t.Fatalf("build shared selfhost compiler: %v\n%s", selfhostBuildErr, selfhostBuildOutput)
+	}
+	return selfhostBinaryPath
 }

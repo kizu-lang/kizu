@@ -16,20 +16,18 @@ const (
 	machOLCCodeSignature = 0x1d
 )
 
-// TestSelfhostBootstrap builds the selfhost compiler with the shipping one,
-// then builds the same source a second time with what the first build
-// produced, and requires the two executables to be identical.
+// TestSelfhostBootstrap uses the compiler built once by the shipping one to
+// build the same source again, and requires the two executables to be
+// identical.
 //
 // It is the one gate that asks the selfhost compiler to build its own source
-// the whole way down. TestSelfhostFrontend reaches compiler/ but stops at
-// the emitted LLVM text, and TestSelfhostNative links and runs executables
-// but for the examples, tests/behavior and the module examples -- never for
-// compiler/ itself, which is the largest program in the tree.
+// the whole way down. The shipping-built first stage is shared with the other
+// selfhost gates, while only this test asks it for the second stage.
 //
 // Reproducing itself byte for byte is what says the self-built compiler
 // compiles that source the way the shipping compiler does, so the
-// comparisons both suites make against the shipping-built compiler hold for
-// the self-built one without either suite running twice. Mach-O's linker-made
+// comparisons against the shipping-built compiler hold for the self-built one
+// without running those behavior gates twice. Mach-O's linker-made
 // UUID and its derived ad-hoc signature are normalized first: they identify a
 // link invocation rather than compiler output, and every other byte still has
 // to agree.
@@ -40,14 +38,10 @@ const (
 // those bytes and by nothing else.
 func TestSelfhostBootstrap(t *testing.T) {
 	if testing.Short() {
-		t.Skip("builds the selfhost compiler twice")
+		t.Skip("builds the selfhost compiler")
 	}
 	root := t.TempDir()
-	stage1 := selfhostStagePath(t, root, "stage1")
-	build := kizuCommand("build", "--target", "native", "-o", stage1, "../../compiler")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("shipping compiler building the selfhost compiler: %v\n%s", err, out)
-	}
+	stage1 := sharedSelfhost(t)
 	stage2 := selfhostStagePath(t, root, "stage2")
 	rebuild := exec.Command(stage1, "build", "--target", "native", "-o", stage2, "../../compiler")
 	if out, err := rebuild.CombinedOutput(); err != nil {

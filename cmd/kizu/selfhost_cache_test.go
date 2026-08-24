@@ -4,15 +4,14 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
 
-// TestSelfhostCache builds the selfhost compiler with the shipping one and
-// checks the two CLIs share one build cache: an artifact stored by either
+// TestSelfhostCache uses the shared shipping-built selfhost compiler and checks
+// the two CLIs share one build cache: an artifact stored by either
 // is reused by the other in both directions, and `cache status` and
 // `cache prune` print the same lines over the same cache state. Every case
 // pins KIZU_CACHE_DIR to a directory of its own, so nothing here reads or
@@ -21,12 +20,7 @@ func TestSelfhostCache(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the selfhost compiler and clang")
 	}
-	selfhost := filepath.Join(t.TempDir(), "selfhost-kizu")
-	build := kizuCommand("build", "--target", "native", "-o", selfhost, "../../compiler")
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build selfhost compiler: %v\n%s", err, out)
-	}
+	selfhost := sharedSelfhost(t)
 	target := "../../examples/hello.kizu"
 
 	t.Run("go-builds-selfhost-reuses", func(t *testing.T) {

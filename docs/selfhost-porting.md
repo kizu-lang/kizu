@@ -215,16 +215,17 @@ check corpus は `compiler/tests/check/` で、1 file = 入力 + `// check` + `/
 IR corpus は `compiler/tests/ir/` で、1 file = 入力 + `// ir` + `// lower:`(lowering した
 module の render)+ `// opt:`(同じ入力を lower し直して optimize した module の render)です。
 どちらも失敗なら `// ` + error text の 1 行で、std の関数(symbol が `std::` で始まるもの)は
-量が多いので render から除きます(std の lowering は `TestSelfhostFrontend` の `ir` 比較が
-全 example と package で byte 比較します)。期待 block は
+量が多いので render から除きます(std を含む CLI 経路は
+`TestSelfhostFrontend` が `tests/behavior` package の `ir` / `ir --opt` を byte 比較します)。期待 block は
 `go test ./internal/ir -run TestIRCorpus -update` が生成し、`compiler/src/ir_corpus_test.kizu`
 が同じ file を読みます。case は check corpus の入力のうち check が `ok` のもの(同名)、
 tests/behavior の各 test file(`beh_`)、internal/ir の test source(`ir_`)から採っています。
 LLVM corpus は `compiler/tests/llvm/` で、1 file = 入力 + `// llvm` + `// emit:`(lowering した
 module を emit した LLVM IR)+ `// opt:`(optimize した module を emit した LLVM IR)です。
 どちらも失敗なら `// ` + error text の 1 行で、IR corpus と同じく std の関数(symbol が
-`std::` で始まるもの)は emit する前に module から落とします(std を含む full text は
-`TestSelfhostFrontend` の `build --emit-llvm` 比較が持ちます)。期待 block は
+`std::` で始まるもの)は emit する前に module から落とします(std を含む CLI 経路は
+`TestSelfhostFrontend` が `tests/behavior` package の `build --emit-llvm` / `--opt` を
+byte 比較します)。期待 block は
 `go test ./internal/llvm -run TestLLVMCorpus -update` が生成し、
 `compiler/src/llvm_corpus_test.kizu` が同じ file を読みます。case の入力集合は IR corpus と
 同じで、llvm 固有の入力(`llvm_`)は internal/llvm の test source から採っています。LLVM text の
@@ -267,12 +268,21 @@ compiler と、それが同じ source から build した compiler の byte 一�
 Mach-O では linker が link ごとに作る `LC_UUID` と、そこから導出される ad-hoc code
 signature だけを比較前に zero 化します。これは compiler 出力ではない identity metadata
 で、それ以外の code、data、symbol、load command field はすべて byte 一致を要求します。
-2 は `TestSelfhostFrontend` と `TestSelfhostNative` が持ちます。3 に gate はなく、
-「未移植」表が残りを持ちます。
-selfhost が自分の source を最後まで build する経路はここにしかありません
-(`TestSelfhostFrontend` は `compiler/` を emit-llvm text までしか見ず、
-`TestSelfhostNative` が link して実行するのは examples / `tests/behavior` /
-module examples で、`compiler/` は入っていない)。
+2 は重複した command 行列ではなく、次の合成 gate が持ちます。
+
+- `TestConformance` が shipping compiler で全 example と `tests/behavior` の宣言を実行する
+- parser / check / IR / LLVM の共有 corpus が、example、negative example、behavior 入力の
+  selfhost frontend を Go と比較する
+- `TestSelfhostBehavior` が 1 回の link にまとめた `tests/behavior` の assert、
+  testing の成功/失敗、I/O・引数・exit status の process 境界を実行する
+- `TestSelfhostFrontend` が corpus / conformance に出ない CLI 出力、fmt、init、
+  native artifact と metadata を Go CLI と比較する
+
+native runtime の source byte 一致は `TestRuntimeSourceKizu` が持つため、runtime の各
+failure を selfhost でもう一度 link することはしません。3 に gate はなく、
+「未移植」表が残りを持ちます。selfhost が自分の source を最後まで build する
+経路は `TestSelfhostBootstrap` にしかありません。shipping compiler が作る第 1 stage は
+他の selfhost gate と共有し、この test だけが第 2 stage を build します。
 
 ここだけ byte 一致を使うのは、fixed point の主張がまさに「両者が同じもの」で
 あることと、代わりに挙動で示すなら corpus 全体をもう一周する必要があるからです。
@@ -301,17 +311,17 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | stdprim / stdmeta / stdmethod / unsafecap | 142 / 211 / 80 / 60 | 263 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1861 | 3448 | 1.85 | check corpus 635 case の load 段 + package 単位 render |
-| fmt | 789 | 1234 | 1.56(words 3,963 / 2,375 = 1.67) | `TestSelfhostFrontend`: examples / negative examples / tests/behavior / compiler/src の全 `.kizu` 691 file で `fmt` の stdout / stderr / exit status を Go CLI と byte 比較 + `--write` / `-w` の出力 file byte 比較 |
+| fmt | 789 | 1234 | 1.56(words 3,963 / 2,375 = 1.67) | Go unit が formatter の個別規則、`TestSelfhostFrontend` が 6 つの振る舞別 fixture(基本 layout、import / top-level、literal / match、comment / tagged declaration、type / operator spacing、continuation / multiline string)と parse failure の stdout / stderr / exit status を Go CLI と byte 比較。`--write` は move marker 挿入後の file byte、`-w` は alias を比較 |
 | types | 8154 | 16051 | 1.97 | check corpus 765 case(diagnostics)+ unit(catch / error set 合成の diagnostics) |
 | ownership | 7893 | 12998 | 1.65(words 46,330 / 28,224 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
-| ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
-| llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
-| native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)| `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
+| ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `tests/behavior` package `ir` / `ir --opt` byte 比較(std を含む CLI 経路)+ unit(verify の rejection) |
+| llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `tests/behavior` package `build --emit-llvm` / `--opt` byte 比較(std を含む CLI 経路)|
+| native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)| `TestSelfhostBehavior`: conformance block から behavior / testing 7 case(うち `tests/behavior` は 211 assert を 1 package で link / run)と I/O / process 2 case の stdout / stderr / exit status。`TestSelfhostFrontend`: `build --target native` / `--opt` を両 CLI で build、両 exe を実行し、metadata を絶対 path 正規化で byte 比較。`kizu check compiler` / `kizu test compiler` |
 | buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
-| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 1437(main 1432 + import 衝突 helper 5) | — | 従来の `TestSelfhostFrontend` 2,826 case に fmt 691 file と init(生成 2 file、current directory、両 existing-file rejection)を追加。native の run / test / build は `TestSelfhostNative`、compiler/ 自身を最後まで build して同じ compiler になることは `TestSelfhostBootstrap` |
+| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 1437(main 1432 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -491,10 +501,10 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 | union payload / struct field に local binding 由来の `[]u8` view を置けない(literal と literal 由来の戻り値だけ) | llvm の `Arg::Lit`(Go の string 引数) | 生成 text は `Name` に intern(`Arg::Str`)か owned `String`(`Arg::Owned`)で渡し、`[]u8` を返す helper(`llvm_binary_op` など)は `&NameTable` + `Name` を受けて literal だけ返す |
 | closure / function value が無いので callback を取る Go 関数(`collectModuleTypeNames(collect func)`、`writeContainerNew(isResultType func)`)を写せない | llvm の header / container | 呼び分けを enum(`TypeCollector`、`ContainerKind`)で受け、中で match する |
 | `typ::walk` の visitor は `&Node` しか受けず、部分木を render する `Type` handle を持てない | llvm の `collectErrorUnionName`(`typ.Walk` で ErrorUnion node を `String()` する) | `root_node` / `child_type` で明示的に再帰する |
-| 子 process の出力 capture が無い(`spawn_wait8` は stdout / stderr 継承) | native の `runClang` / `compileRuntime`: Go は clang の CombinedOutput を成功時は捨て、失敗時は error に載せる。selfhost では clang の `-Woverride-module` warning が毎回 stderr に流れ、失敗出力を message に運べない | 失敗 message は「native error: clang failed: exit status N」の行だけ合わせる。`TestSelfhostNative` は selfhost 側 stderr から toolchain noise を落とし、Go の build が clang で失敗する case は比較から除外 |
+| 子 process の出力 capture が無い(`spawn_wait8` は stdout / stderr 継承) | native の `runClang` / `compileRuntime`: Go は clang の CombinedOutput を成功時は捨て、失敗時は error に載せる。selfhost では clang の `-Woverride-module` warning が毎回 stderr に流れ、失敗出力を message に運べない | 失敗 message は「native error: clang failed: exit status N」の行だけ合わせる。`TestSelfhostBehavior` / `TestSelfhostFrontend` は selfhost 側 stderr から toolchain noise を落とし、Go の build が clang で失敗する case は比較から除外 |
 | fs に `os.MkdirTemp` / `RemoveAll` / `MkdirAll` 相当が無い | native の一時 build directory 管理 | `TempDirs`(TMPDIR + `kizu-native-<monotonic_millis>-<連番>`)と `create_dir_all` / `clean_build_dir`(既知 file の削除 + rmdir)を module 内に書いた。buildcache module でも要るなら std gap として切り出す |
 | `spawn_wait8` は引数 8 個の固定形 | clang の link argv は `--triple` 付きでちょうど 8。`run` の child args は exe + 7 個まで | clang は triple 有無で 2 つの呼び出し形に分岐。8 個を超える構成が要る場合は止めて報告する |
-| `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostNative` は絶対 path を正規化して比較する |
+| `std::json` は `<` `>` `&` を `\u003c` 形に escape しない(encoding/json の HTML escape 差) | native の build metadata(`write_metadata`) | metadata の値にこれらが入るのは path だけで、`TestSelfhostFrontend` は絶対 path を正規化して比較する |
 | generic 関数の呼び出しは static 引数の明示が必須(推論されない) | native の `sorted_keys<V>` | call site で `sorted_keys<i64>(...)` と書く |
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
 | `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
