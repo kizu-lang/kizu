@@ -743,6 +743,14 @@ int64_t std__internal__builtin__process_monotonic_millis(void) {
     return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
+int64_t std__internal__builtin__process_unix_millis(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        return 0;
+    }
+    return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
+}
+
 static int kizu_run_child_process(char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) {

@@ -1,0 +1,336 @@
+import std::array;
+import std::mem;
+import std::string;
+
+// SHA-256 (FIPS 180-4) over bytes. The shipping compiler hashes build cache
+// inputs with Go's crypto/sha256, and the two compilers share one cache, so
+// this module has to compute the same function rather than a stand-in. Kizu
+// has no fixed-width unsigned arithmetic and no bitwise operators yet: a
+// 32-bit word lives in the low half of an i64, AND and XOR of two bytes are
+// read from tables built once per hasher, and shifts and rotations are
+// division and multiplication by powers of two.
+
+/// Owns what every digest reads: the byte-pair AND and XOR tables and the
+/// round constants. Building the tables walks every byte pair once, so a
+/// hasher is made once and reused for each input a run hashes.
+pub struct Hasher {
+    and_table: array::Array<i64>,
+    xor_table: array::Array<i64>,
+    k: array::Array<i64>
+}
+
+/// Returns a hasher with its tables and round constants built.
+pub fn new(allocator: Allocator) -> !Hasher {
+    var and_table = array::new<i64>(allocator);
+    errdefer and_table.deinit();
+    var xor_table = array::new<i64>(allocator);
+    errdefer xor_table.deinit();
+    try build_tables(&var and_table, &var xor_table);
+    var k = array::new<i64>(allocator);
+    errdefer k.deinit();
+    try append_round_constants(&var k);
+    return Hasher { and_table: move and_table, xor_table: move xor_table, k: move k };
+}
+
+/// Appends the lowercase hex SHA-256 digest of bytes to out, the Go
+/// `hex.EncodeToString` of `sha256.Sum256(bytes)`.
+pub fn (self: &Hasher) append_hex_digest(
+    allocator: Allocator,
+    bytes: []u8,
+    out: &var string::String
+) -> !void {
+    var state = array::new<i64>(allocator);
+    defer state.deinit();
+    try append_initial_state(&var state);
+    var w = array::new<i64>(allocator);
+    defer w.deinit();
+    var slot = 0;
+    while slot < 64 {
+        try w.append(0);
+        slot = slot + 1;
+    }
+    let and_table = &self.and_table;
+    let xor_table = &self.xor_table;
+    let k = &self.k;
+    let total = mem::len(bytes);
+    var offset = 0;
+    while offset + 64 <= total {
+        let block = bytes[offset..offset + 64];
+        try compress(and_table, xor_table, k, &var w, &var state, block);
+        offset = offset + 64;
+    }
+    var tail = string::new(allocator);
+    defer tail.deinit();
+    try tail.append_bytes(bytes[offset..total]);
+    try tail.append_byte(cast<u8>(128));
+    while tail.len() % 64 != 56 {
+        try tail.append_byte(cast<u8>(0));
+    }
+    let bits = total * 8;
+    try tail.append_byte(cast<u8>((bits / 72057594037927936) % 256));
+    try tail.append_byte(cast<u8>((bits / 281474976710656) % 256));
+    try tail.append_byte(cast<u8>((bits / 1099511627776) % 256));
+    try tail.append_byte(cast<u8>((bits / 4294967296) % 256));
+    try tail.append_byte(cast<u8>((bits / 16777216) % 256));
+    try tail.append_byte(cast<u8>((bits / 65536) % 256));
+    try tail.append_byte(cast<u8>((bits / 256) % 256));
+    try tail.append_byte(cast<u8>(bits % 256));
+    let tail_len = tail.len();
+    var tail_offset = 0;
+    while tail_offset < tail_len {
+        let tail_bytes = tail.as_bytes();
+        let block = tail_bytes[tail_offset..tail_offset + 64];
+        try compress(and_table, xor_table, k, &var w, &var state, block);
+        tail_offset = tail_offset + 64;
+    }
+    var index = 0;
+    while index < 8 {
+        let word = state.get_or_panic(index);
+        try append_hex_word(out, word);
+        index = index + 1;
+    }
+    return;
+}
+
+/// Folds one 64-byte block into the running state.
+fn compress(
+    and_table: &array::Array<i64>,
+    xor_table: &array::Array<i64>,
+    k: &array::Array<i64>,
+    w: &var array::Array<i64>,
+    state: &var array::Array<i64>,
+    block: []u8
+) -> !void {
+    var t = 0;
+    while t < 16 {
+        let base = t * 4;
+        let b0 = cast<i64>(block[base]);
+        let b1 = cast<i64>(block[base + 1]);
+        let b2 = cast<i64>(block[base + 2]);
+        let b3 = cast<i64>(block[base + 3]);
+        try w.set(t, b0 * 16777216 + b1 * 65536 + b2 * 256 + b3);
+        t = t + 1;
+    }
+    while t < 64 {
+        let w15 = w.get_or_panic(t - 15);
+        let s0 = xor3(xor_table, rotr(w15, 128, 33554432), rotr(w15, 262144, 16384), w15 / 8);
+        let w2 = w.get_or_panic(t - 2);
+        let s1 = xor3(xor_table, rotr(w2, 131072, 32768), rotr(w2, 524288, 8192), w2 / 1024);
+        let w16 = w.get_or_panic(t - 16);
+        let w7 = w.get_or_panic(t - 7);
+        let value = (w16 + s0 + w7 + s1) % 4294967296;
+        try w.set(t, value);
+        t = t + 1;
+    }
+    var a = state.get_or_panic(0);
+    var b = state.get_or_panic(1);
+    var c = state.get_or_panic(2);
+    var d = state.get_or_panic(3);
+    var e = state.get_or_panic(4);
+    var f = state.get_or_panic(5);
+    var g = state.get_or_panic(6);
+    var h = state.get_or_panic(7);
+    var round = 0;
+    while round < 64 {
+        let big_s1 = xor3(
+            xor_table,
+            rotr(e, 64, 67108864),
+            rotr(e, 2048, 2097152),
+            rotr(e, 33554432, 128)
+        );
+        let e_and_f = lookup32(and_table, e, f);
+        let not_e_and_g = lookup32(and_table, 4294967295 - e, g);
+        let ch = lookup32(xor_table, e_and_f, not_e_and_g);
+        let round_k = k.get_or_panic(round);
+        let round_w = w.get_or_panic(round);
+        let temp1 = (h + big_s1 + ch + round_k + round_w) % 4294967296;
+        let big_s0 = xor3(
+            xor_table,
+            rotr(a, 4, 1073741824),
+            rotr(a, 8192, 524288),
+            rotr(a, 4194304, 1024)
+        );
+        let a_and_b = lookup32(and_table, a, b);
+        let a_and_c = lookup32(and_table, a, c);
+        let b_and_c = lookup32(and_table, b, c);
+        let maj = xor3(xor_table, a_and_b, a_and_c, b_and_c);
+        let temp2 = (big_s0 + maj) % 4294967296;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + temp1) % 4294967296;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) % 4294967296;
+        round = round + 1;
+    }
+    let h0 = state.get_or_panic(0);
+    try state.set(0, (h0 + a) % 4294967296);
+    let h1 = state.get_or_panic(1);
+    try state.set(1, (h1 + b) % 4294967296);
+    let h2 = state.get_or_panic(2);
+    try state.set(2, (h2 + c) % 4294967296);
+    let h3 = state.get_or_panic(3);
+    try state.set(3, (h3 + d) % 4294967296);
+    let h4 = state.get_or_panic(4);
+    try state.set(4, (h4 + e) % 4294967296);
+    let h5 = state.get_or_panic(5);
+    try state.set(5, (h5 + f) % 4294967296);
+    let h6 = state.get_or_panic(6);
+    try state.set(6, (h6 + g) % 4294967296);
+    let h7 = state.get_or_panic(7);
+    try state.set(7, (h7 + h) % 4294967296);
+    return;
+}
+
+/// Reads one bitwise word operation from a byte-pair table: the four byte
+/// pairs of two 32-bit words looked up and recomposed.
+fn lookup32(table: &array::Array<i64>, a: i64, b: i64) -> i64 {
+    let index0 = (a % 256) * 256 + b % 256;
+    let index1 = ((a / 256) % 256) * 256 + (b / 256) % 256;
+    let index2 = ((a / 65536) % 256) * 256 + (b / 65536) % 256;
+    let index3 = (a / 16777216) * 256 + b / 16777216;
+    let byte0 = table.get_or_panic(index0);
+    let byte1 = table.get_or_panic(index1);
+    let byte2 = table.get_or_panic(index2);
+    let byte3 = table.get_or_panic(index3);
+    return byte0 + byte1 * 256 + byte2 * 65536 + byte3 * 16777216;
+}
+
+/// XORs three words through the byte-pair table; XOR is associative, so the
+/// spelling `xor(xor(a, b), c)` is the one FIPS formulas fold to.
+fn xor3(xor_table: &array::Array<i64>, a: i64, b: i64, c: i64) -> i64 {
+    let ab = lookup32(xor_table, a, b);
+    return lookup32(xor_table, ab, c);
+}
+
+/// Rotates a 32-bit word right by n where down is 2^n and up is 2^(32-n):
+/// the bits divided off the bottom re-enter scaled to the top.
+fn rotr(value: i64, down: i64, up: i64) -> i64 {
+    return value / down + (value % down) * up;
+}
+
+/// Builds the byte-pair AND and XOR tables in one ascending walk: entry
+/// (a, b) reads entry (a/2, b/2), which the walk has always built already,
+/// and appends the low bits' contribution.
+fn build_tables(and_table: &var array::Array<i64>, xor_table: &var array::Array<i64>) -> !void {
+    var a = 0;
+    while a < 256 {
+        var b = 0;
+        while b < 256 {
+            if a == 0 and b == 0 {
+                try and_table.append(0);
+                try xor_table.append(0);
+            } else {
+                let head = (a / 2) * 256 + b / 2;
+                let and_head = and_table.get_or_panic(head);
+                let xor_head = xor_table.get_or_panic(head);
+                let a_bit = a % 2;
+                let b_bit = b % 2;
+                try and_table.append(and_head * 2 + a_bit * b_bit);
+                try xor_table.append(xor_head * 2 + (a_bit + b_bit) % 2);
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    return;
+}
+
+/// Appends the eight hex digits of one 32-bit word, highest nibble first.
+fn append_hex_word(out: &var string::String, word: i64) -> !void {
+    var divisor = 268435456;
+    while divisor > 0 {
+        let nibble = (word / divisor) % 16;
+        if nibble < 10 {
+            try out.append_byte(cast<u8>(48 + nibble));
+        } else {
+            try out.append_byte(cast<u8>(87 + nibble));
+        }
+        divisor = divisor / 16;
+    }
+    return;
+}
+
+/// Appends the FIPS 180-4 initial hash value H(0).
+fn append_initial_state(state: &var array::Array<i64>) -> !void {
+    try state.append(1779033703);
+    try state.append(3144134277);
+    try state.append(1013904242);
+    try state.append(2773480762);
+    try state.append(1359893119);
+    try state.append(2600822924);
+    try state.append(528734635);
+    try state.append(1541459225);
+    return;
+}
+
+/// Appends the FIPS 180-4 round constants K in order.
+fn append_round_constants(k: &var array::Array<i64>) -> !void {
+    try k.append(1116352408);
+    try k.append(1899447441);
+    try k.append(3049323471);
+    try k.append(3921009573);
+    try k.append(961987163);
+    try k.append(1508970993);
+    try k.append(2453635748);
+    try k.append(2870763221);
+    try k.append(3624381080);
+    try k.append(310598401);
+    try k.append(607225278);
+    try k.append(1426881987);
+    try k.append(1925078388);
+    try k.append(2162078206);
+    try k.append(2614888103);
+    try k.append(3248222580);
+    try k.append(3835390401);
+    try k.append(4022224774);
+    try k.append(264347078);
+    try k.append(604807628);
+    try k.append(770255983);
+    try k.append(1249150122);
+    try k.append(1555081692);
+    try k.append(1996064986);
+    try k.append(2554220882);
+    try k.append(2821834349);
+    try k.append(2952996808);
+    try k.append(3210313671);
+    try k.append(3336571891);
+    try k.append(3584528711);
+    try k.append(113926993);
+    try k.append(338241895);
+    try k.append(666307205);
+    try k.append(773529912);
+    try k.append(1294757372);
+    try k.append(1396182291);
+    try k.append(1695183700);
+    try k.append(1986661051);
+    try k.append(2177026350);
+    try k.append(2456956037);
+    try k.append(2730485921);
+    try k.append(2820302411);
+    try k.append(3259730800);
+    try k.append(3345764771);
+    try k.append(3516065817);
+    try k.append(3600352804);
+    try k.append(4094571909);
+    try k.append(275423344);
+    try k.append(430227734);
+    try k.append(506948616);
+    try k.append(659060556);
+    try k.append(883997877);
+    try k.append(958139571);
+    try k.append(1322822218);
+    try k.append(1537002063);
+    try k.append(1747873779);
+    try k.append(1955562222);
+    try k.append(2024104815);
+    try k.append(2227730452);
+    try k.append(2361852424);
+    try k.append(2428436474);
+    try k.append(2756734187);
+    try k.append(3204031479);
+    try k.append(3329325298);
+    return;
+}

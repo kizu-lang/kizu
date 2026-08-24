@@ -2771,6 +2771,7 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::env(name)` は `?[]u8` を返し、未設定なら `null` を返す
   (空にしたければ `orelse ""`)
 * `std::process::monotonic_millis()` は `i64` を返す
+* `std::process::unix_millis()` は Unix epoch からの壁時計 milliseconds を `i64` で返す
 * `std::process::spawn_wait8(argc, arg0, ..., arg7)` は子プロセスを起動して
   終了を待ち、`!i64` を返す。可変長引数を持たないので引数は 8 個までの固定形
 * `std::process::exit_code(code)` は `i64` を返す

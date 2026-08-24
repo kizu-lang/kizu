@@ -1937,7 +1937,9 @@ const nativeWhileBreakPhiSource = `fn main() {
     print(found);
 }`
 
-// TestCacheCommands checks cache status and prune.
+// TestCacheCommands checks cache status and prune, and that emitting text
+// stores nothing: the cache holds only content-addressed artifacts
+// (ADR-0126), so `build --emit-llvm` leaves it empty.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()
 	build := kizuCommand("build", "--emit-llvm", "../../examples/hello.kizu")
@@ -1951,37 +1953,16 @@ func TestCacheCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "entries: 1") {
+	if !strings.Contains(string(out), "entries: 0") {
 		t.Fatalf("got %q", out)
 	}
 	prune := kizuCommand("cache", "prune")
 	prune.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	if out, err = prune.CombinedOutput(); err != nil {
+	out, err = prune.CombinedOutput()
+	if err != nil {
 		t.Fatalf("prune failed: %v\n%s", err, out)
 	}
-}
-
-// TestBuildOptUsesSeparateCacheEntry checks optimization level shapes cache keys.
-func TestBuildOptUsesSeparateCacheEntry(t *testing.T) {
-	cacheDir := t.TempDir()
-	source := "../../examples/hello.kizu"
-	plain := kizuCommand("build", "--emit-llvm", source)
-	plain.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	if out, err := plain.CombinedOutput(); err != nil {
-		t.Fatalf("plain build failed: %v\n%s", err, out)
-	}
-	opt := kizuCommand("build", "--emit-llvm", "--opt", source)
-	opt.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	if out, err := opt.CombinedOutput(); err != nil {
-		t.Fatalf("opt build failed: %v\n%s", err, out)
-	}
-	status := kizuCommand("cache", "status")
-	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
-	out, err := status.CombinedOutput()
-	if err != nil {
-		t.Fatalf("status failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "entries: 2") {
+	if string(out) != "cache pruned: removed 0 entries, freed 0 bytes\n" {
 		t.Fatalf("got %q", out)
 	}
 }

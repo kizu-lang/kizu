@@ -54,6 +54,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "?[]u8",
 	},
 	"std::internal::builtin::process_monotonic_millis": {Return: "i64"},
+	"std::internal::builtin::process_unix_millis":      {Return: "i64"},
 	"std::internal::builtin::process_spawn_wait8": {
 		Args: []ArgKind{
 			ArgI64,
@@ -147,6 +148,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::process_env":              true,
 	"std::internal::builtin::process_monotonic_millis": true,
 	"std::internal::builtin::process_spawn_wait8":      true,
+	"std::internal::builtin::process_unix_millis":      true,
 	"std::internal::builtin::test_fail":                true,
 	"std::internal::builtin::test_fail_equal":          true,
 }
