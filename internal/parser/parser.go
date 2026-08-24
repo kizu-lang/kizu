@@ -519,11 +519,55 @@ func (p *Parser) parseErrorSetDeclWithDoc(docs string) ast.Decl {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	if p.peek.Type == token.Assign {
+		p.nextToken()
+		decl.Combines = p.parseErrorSetCombines()
+		return decl
+	}
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
 	decl.Members, decl.MemberDocs = p.parseNameList("error name")
 	return decl
+}
+
+// parseErrorSetCombines parses the right side of `error Name = A or B;`: a
+// list of declared set references joined by `or`. The `=` form declares no
+// members of its own, so only names appear here.
+func (p *Parser) parseErrorSetCombines() []string {
+	combines := []string{}
+	for {
+		name, ok := p.parseErrorSetReference()
+		if !ok {
+			return combines
+		}
+		combines = append(combines, name)
+		if p.peek.Type != token.Or {
+			break
+		}
+		p.nextToken()
+	}
+	if !p.expectPeek(token.Semicolon) {
+		return combines
+	}
+	return combines
+}
+
+// parseErrorSetReference parses one set name on the right side of an `=`
+// error set declaration, module qualification included.
+func (p *Parser) parseErrorSetReference() (string, bool) {
+	if !p.expectPeek(token.Ident) {
+		return "", false
+	}
+	name := p.cur.Literal
+	for p.peek.Type == token.DoubleColon {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return "", false
+		}
+		name = name + "::" + p.cur.Literal
+	}
+	return name, true
 }
 
 // parseNameList parses the comma-separated names inside a brace. An enum tag and
@@ -915,6 +959,13 @@ func (p *Parser) parseIfStmt() *ast.IfStmt {
 	stmt.Consequence = p.parseBlockStmt()
 	if p.peek.Type == token.Else {
 		p.nextToken()
+		// `else |err|` binds the error member of an error union condition
+		// (SPEC §11.1), with the same `|name|` spelling as the success capture.
+		errCapture, ok := p.parsePayloadCapture()
+		if !ok {
+			return stmt
+		}
+		stmt.ErrCapture = errCapture
 		if !p.expectPeek(token.LBrace) {
 			return stmt
 		}
@@ -1171,6 +1222,21 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 		return arm, false
 	}
 	arm.Tag = p.cur.Literal
+	// A qualified arm (`FsError::NotFound =>`) names the error set a member
+	// originates from, which a combined set needs when two of its sets
+	// declare the same member name. Every segment before the last is the
+	// set reference, module qualification included.
+	for p.peek.Type == token.DoubleColon {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return arm, false
+		}
+		if arm.TagSet != "" {
+			arm.TagSet = arm.TagSet + "::"
+		}
+		arm.TagSet = arm.TagSet + arm.Tag
+		arm.Tag = p.cur.Literal
+	}
 	if p.peek.Type == token.LParen {
 		p.nextToken()
 		if !p.expectPeek(token.Ident) {
@@ -1217,6 +1283,7 @@ const (
 
 var precedences = map[token.Type]int{
 	token.Orelse:      orElse,
+	token.Catch:       orElse,
 	token.Or:          logicalOr,
 	token.And:         logicalAnd,
 	token.Eq:          equals,
@@ -1249,9 +1316,9 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			token.And, token.Or, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
 			p.nextToken()
 			left = p.parseBinaryExpr(left)
-		case token.Orelse:
+		case token.Orelse, token.Catch:
 			p.nextToken()
-			left = p.parseOrelseExpr(left)
+			left = p.parseGuardableExpr(left)
 		case token.LParen:
 			p.nextToken()
 			left = p.parseCallExpr(left)
@@ -1726,11 +1793,26 @@ func (p *Parser) parseTypeArg(allowConst bool) typ.Type {
 	return p.parseTypeName()
 }
 
-// parseOrelseExpr parses the right side of `orelse`: either a default
-// expression or a return/break/continue guard that leaves the enclosing
-// function or loop on null.
-func (p *Parser) parseOrelseExpr(left ast.Expression) ast.Expression {
-	guard := &ast.OrelseGuardExpr{Cond: left, Span: tokenSpan(p.cur)}
+// parseGuardableExpr parses the right side of `orelse` or `catch`: either a
+// default expression or a return/break/continue guard that leaves the
+// enclosing function or loop on null or failure. The two keywords share one
+// grammar (SPEC §11.1); only the node they build differs.
+func (p *Parser) parseGuardableExpr(left ast.Expression) ast.Expression {
+	span := tokenSpan(p.cur)
+	catchKeyword := p.cur.Type == token.Catch
+	exit := p.parseGuardExit()
+	if exit == nil {
+		return p.parseBinaryExpr(left)
+	}
+	if catchKeyword {
+		return &ast.CatchGuardExpr{Cond: left, Exit: exit, Span: span}
+	}
+	return &ast.OrelseGuardExpr{Cond: left, Exit: exit, Span: span}
+}
+
+// parseGuardExit parses the return/break/continue arm of a guard, or reports
+// none so the caller reads a default expression instead.
+func (p *Parser) parseGuardExit() ast.Statement {
 	switch p.peek.Type {
 	case token.Return:
 		p.nextToken()
@@ -1739,18 +1821,15 @@ func (p *Parser) parseOrelseExpr(left ast.Expression) ast.Expression {
 			p.nextToken()
 			ret.Value = p.parseExpression(lowest)
 		}
-		guard.Exit = ret
-		return guard
+		return ret
 	case token.Break:
 		p.nextToken()
-		guard.Exit = &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
-		return guard
+		return &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
 	case token.Continue:
 		p.nextToken()
-		guard.Exit = &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
-		return guard
+		return &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
 	}
-	return p.parseBinaryExpr(left)
+	return nil
 }
 
 // peekIsExpressionEnd reports whether the next token closes the expression a

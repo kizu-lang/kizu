@@ -160,7 +160,7 @@ func (l *lowerer) lowerMatchCheck(
 		l.block.Terminator = Terminator{Op: "jump", Target: armBlock.Name}
 		return nil
 	}
-	index, err := l.matchTagIndex(subject, arm.Tag)
+	index, err := l.matchTagIndex(subject, arm)
 	if err != nil {
 		return err
 	}
@@ -178,14 +178,33 @@ func (l *lowerer) lowerMatchCheck(
 	return nil
 }
 
-// matchTagIndex resolves an enum or union match tag.
-func (l *lowerer) matchTagIndex(subject matchSubject, tag string) (int, error) {
-	if subject.enum.Name != "" {
-		index, ok := subject.enum.Tags[tag]
+// matchTagIndex resolves an enum or union match tag. An error match arm may
+// qualify its declaring set (`FsError::NotFound =>`), and a bare arm on a
+// combined set resolves through the sets it combines — the checker keeps a
+// bare arm unambiguous, so the first declaring set that knows the name is it.
+func (l *lowerer) matchTagIndex(subject matchSubject, arm ast.MatchArm) (int, error) {
+	tag := arm.Tag
+	if arm.TagSet != "" {
+		origin, ok := l.module.ErrorSets[arm.TagSet]
 		if !ok {
-			return 0, fmt.Errorf("ir error: unknown enum tag `%s::%s`", subject.enum.Name, tag)
+			return 0, fmt.Errorf("ir error: unknown error set `%s`", arm.TagSet)
+		}
+		index, ok := origin.Tags[tag]
+		if !ok {
+			return 0, fmt.Errorf("ir error: unknown error `%s::%s`", arm.TagSet, tag)
 		}
 		return index, nil
+	}
+	if subject.enum.Name != "" {
+		if index, ok := subject.enum.Tags[tag]; ok {
+			return index, nil
+		}
+		for _, origin := range subject.enum.Origins {
+			if index, ok := l.module.ErrorSets[origin].Tags[tag]; ok {
+				return index, nil
+			}
+		}
+		return 0, fmt.Errorf("ir error: unknown enum tag `%s::%s`", subject.enum.Name, tag)
 	}
 	variant, ok := subject.union.Variants[tag]
 	if !ok {

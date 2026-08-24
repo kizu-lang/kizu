@@ -287,6 +287,10 @@ type ErrorSetDecl struct {
 	Members    []string
 	MemberDocs map[string]string
 	Public     bool
+	// Combines lists the declared sets the `error Name = A or B;` form takes
+	// the union of. It is nil for the `{ }` form. A combined set declares no
+	// values of its own: its members are the members of the sets it names.
+	Combines []string
 }
 
 // declNode marks ErrorSetDecl as a declaration node.
@@ -297,6 +301,9 @@ func (d *ErrorSetDecl) String() string {
 	prefix := ""
 	if d.Public {
 		prefix = "pub "
+	}
+	if len(d.Combines) > 0 {
+		return fmt.Sprintf("%serror %s = %s;", prefix, d.Name, strings.Join(d.Combines, " or "))
 	}
 	return fmt.Sprintf("%serror %s { %s }", prefix, d.Name, strings.Join(d.Members, ", "))
 }
@@ -549,9 +556,12 @@ type IfStmt struct {
 	Condition   Expression
 	Consequence *BlockStmt
 	Alternative *BlockStmt
-	// Capture names the unwrapped payload of an optional condition
-	// (`if expr |name| { ... }`). Empty for a plain bool condition.
+	// Capture names the unwrapped payload of an optional or error union
+	// condition (`if expr |name| { ... }`). Empty for a plain bool condition.
 	Capture string
+	// ErrCapture names the error member an `else |err|` block binds when the
+	// condition is an error union (`if f() |v| { ... } else |err| { ... }`).
+	ErrCapture string
 }
 
 // statementNode marks IfStmt as a statement node.
@@ -679,6 +689,11 @@ type MatchArm struct {
 	Tag     string
 	Binding string
 	Body    Statement
+	// TagSet qualifies Tag with the error set that declared it
+	// (`FsError::NotFound => ...`). A combined error set can receive the same
+	// member name from more than one set, and the qualified arm names which
+	// one this arm matches. Empty for bare arms and for enum or union tags.
+	TagSet string
 }
 
 // IsWildcard reports whether the arm is the fallback match arm.
@@ -692,10 +707,14 @@ func (a MatchArm) String() string {
 	if expr, ok := a.Body.(*ExprStmt); ok && !expr.Semicolon {
 		body = expr.Expr.String()
 	}
-	if a.Binding != "" {
-		return fmt.Sprintf("%s(%s) => %s", a.Tag, a.Binding, body)
+	tag := a.Tag
+	if a.TagSet != "" {
+		tag = a.TagSet + "::" + a.Tag
 	}
-	return fmt.Sprintf("%s => %s", a.Tag, body)
+	if a.Binding != "" {
+		return fmt.Sprintf("%s(%s) => %s", tag, a.Binding, body)
+	}
+	return fmt.Sprintf("%s => %s", tag, body)
 }
 
 // ComptimeIfStmt represents a branch selected during compilation.
@@ -836,6 +855,25 @@ func (*OrelseGuardExpr) expressionNode() {}
 func (e *OrelseGuardExpr) String() string {
 	exit := strings.TrimSuffix(e.Exit.String(), ";")
 	return "(" + e.Cond.String() + " orelse " + exit + ")"
+}
+
+// CatchGuardExpr is `cond catch return/break/continue`: on failure the guard
+// leaves the enclosing function or loop, so the expression itself always
+// yields the success payload. Exit is a *ReturnStmt, *BreakStmt, or
+// *ContinueStmt. The default form (`cond catch expr`) is a BinaryExpr.
+type CatchGuardExpr struct {
+	Cond Expression
+	Exit Statement
+	Span Span
+}
+
+// expressionNode marks CatchGuardExpr as an expression node.
+func (*CatchGuardExpr) expressionNode() {}
+
+// String returns a compact debug representation of the guard.
+func (e *CatchGuardExpr) String() string {
+	exit := strings.TrimSuffix(e.Exit.String(), ";")
+	return "(" + e.Cond.String() + " catch " + exit + ")"
 }
 
 // BoolExpr represents a boolean literal.

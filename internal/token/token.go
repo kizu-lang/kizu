@@ -80,6 +80,7 @@ const (
 	Move     Type = "move"
 	Null     Type = "null"
 	Orelse   Type = "orelse"
+	Catch    Type = "catch"
 )
 
 type Token struct {
@@ -131,6 +132,7 @@ var keywords = map[string]Type{
 	"move":     Move,
 	"null":     Null,
 	"orelse":   Orelse,
+	"catch":    Catch,
 }
 
 // LookupIdent returns the keyword token for ident or Ident for user names.

@@ -311,11 +311,18 @@ func (c *Checker) collectEnums(program *ast.Program) {
 }
 
 // collectErrorSets records error set declarations for error value reads. An
-// error carries nothing, so reading one moves nothing.
+// error carries nothing, so reading one moves nothing. A combined set
+// (`error C = A or B;`) records the names of its parts' members; which set a
+// name resolves to is the types checker's question, not an ownership one.
 func (c *Checker) collectErrorSets(program *ast.Program) {
+	var combined []*ast.ErrorSetDecl
 	for _, decl := range program.Decls {
 		setDecl, ok := decl.(*ast.ErrorSetDecl)
 		if !ok {
+			continue
+		}
+		if len(setDecl.Combines) > 0 {
+			combined = append(combined, setDecl)
 			continue
 		}
 		members := map[string]bool{}
@@ -323,6 +330,38 @@ func (c *Checker) collectErrorSets(program *ast.Program) {
 			members[member] = true
 		}
 		c.errorSets[setDecl.Name] = members
+	}
+	// A combined set may name a set declared later, or another combined set.
+	// Each pass of a well-typed program resolves at least one declaration, so
+	// the loop settles; an unresolved reference is left for the checker that
+	// names it.
+	for len(combined) > 0 {
+		progress := false
+		var remaining []*ast.ErrorSetDecl
+		for _, setDecl := range combined {
+			members := map[string]bool{}
+			ready := true
+			for _, ref := range setDecl.Combines {
+				part, ok := c.errorSets[ref]
+				if !ok {
+					ready = false
+					break
+				}
+				for member := range part {
+					members[member] = true
+				}
+			}
+			if !ready {
+				remaining = append(remaining, setDecl)
+				continue
+			}
+			c.errorSets[setDecl.Name] = members
+			progress = true
+		}
+		combined = remaining
+		if !progress {
+			return
+		}
 	}
 }
 
@@ -2280,7 +2319,16 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope) error {
 		return err
 	}
 	if stmt.Alternative != nil {
-		if err := c.checkBlock(stmt.Alternative, right.child()); err != nil {
+		rightScope := right.child()
+		if stmt.ErrCapture != "" {
+			// `else |err|` binds the failure member: one scalar error code,
+			// a plain copy with no obligations of its own.
+			errName, _, _ := c.errorUnionParts(condType)
+			errBinding := c.newBinding(stmt.ErrCapture, errName)
+			errBinding.declSpan = expressionSpan(stmt.Condition)
+			rightScope.define(errBinding)
+		}
+		if err := c.checkBlock(stmt.Alternative, rightScope); err != nil {
 			return err
 		}
 	}
@@ -2517,11 +2565,18 @@ func (c *Checker) checkLoopCleansNoOuterField(env *scope, inBody map[int]*bindin
 		cleanedValue.name, cleanedField)
 }
 
-// optionalPayloadName returns T for a `?T` condition type, or the type itself
-// when it is not an optional.
+// optionalPayloadName returns T for a `?T` condition type, or the success
+// type for an `E!T` one, or the type itself when it is neither. An error
+// union capture binds the success payload the same way an optional capture
+// binds the value (SPEC §11.1).
 func optionalPayloadName(typeName string) string {
 	if elem, ok := typ.OptionalElem(typeName); ok {
 		return elem
+	}
+	if parsed, err := typ.Parse(typeName); err == nil {
+		if _, success, ok := typ.ErrorUnionParts(parsed); ok {
+			return typ.Text(success)
+		}
 	}
 	return typeName
 }
@@ -2926,7 +2981,7 @@ func (c *Checker) checkMatchArms(
 			if arm.Binding != "" {
 				return nil, errorf("move error: wildcard match arm cannot bind payload")
 			}
-		} else if !ctx.tags[arm.Tag] {
+		} else if !c.matchArmTagKnown(ctx.tags, arm) {
 			return nil, errorf("move error: unknown match tag `%s::%s`", ctx.valueType, arm.Tag)
 		}
 		armEnv := base.clone()
@@ -3185,6 +3240,17 @@ func (c *Checker) classifyMatchPayload(typeName string) matchPayloadClass {
 	return payloadBorrows
 }
 
+// matchArmTagKnown reports whether a match arm names a known tag. A
+// qualified arm (`FsError::NotFound =>`) resolves through the set it names;
+// whether that set fits the matched value is the types checker's question.
+func (c *Checker) matchArmTagKnown(tags map[string]bool, arm ast.MatchArm) bool {
+	if arm.TagSet != "" {
+		members := c.errorSets[arm.TagSet]
+		return members != nil && members[arm.Tag]
+	}
+	return tags[arm.Tag]
+}
+
 // matchTags returns known tags for enum and union match ownership checks.
 func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string, bool) {
 	if tags := c.enums[typeName]; tags != nil {
@@ -3275,6 +3341,8 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 		return c.readMatchExpr(e, env)
 	case *ast.OrelseGuardExpr:
 		return c.readOrelseGuardExpr(e, env)
+	case *ast.CatchGuardExpr:
+		return c.readCatchGuardExpr(e, env)
 	case *ast.MoveExpr:
 		return "", errorAt(e.Span,
 			"move error: `move` marks a hand-off, and `%s` is only read here",
@@ -3311,6 +3379,37 @@ func (c *Checker) readOrelseGuardExpr(expr *ast.OrelseGuardExpr, env *scope) (st
 		}
 	}
 	return optionalPayloadName(condType), nil
+}
+
+// readCatchGuardExpr reads `cond catch return/break/continue`. The failure
+// arm is a real exit like an orelse guard's null arm: it carries the matching
+// statement's obligations, checked in a clone so nothing it consumes looks
+// moved on the fall-through path. The handled failure is not an error return
+// path, so no errdefer obligations attach here.
+func (c *Checker) readCatchGuardExpr(expr *ast.CatchGuardExpr, env *scope) (string, error) {
+	condType, err := c.readExpr(expr.Cond, env)
+	if err != nil {
+		return "", err
+	}
+	switch exit := expr.Exit.(type) {
+	case *ast.ReturnStmt:
+		if err := c.checkReturnStmt(exit, env.clone()); err != nil {
+			return "", err
+		}
+	case *ast.BreakStmt:
+		if err := c.checkLoopBranch(exit.Label); err != nil {
+			return "", err
+		}
+	case *ast.ContinueStmt:
+		if err := c.checkLoopBranch(exit.Label); err != nil {
+			return "", err
+		}
+	}
+	elem, _ := c.errorUnionElement(condType)
+	if elem == "" {
+		return condType, nil
+	}
+	return elem, nil
 }
 
 // readIndexExpr reads checked byte indexing and slicing without moving bytes.
@@ -3711,7 +3810,7 @@ func (c *Checker) checkMatchExprArmValue(
 		if arm.Binding != "" {
 			return "", errorf("move error: wildcard match arm cannot bind payload")
 		}
-	} else if !tags[arm.Tag] {
+	} else if !c.matchArmTagKnown(tags, arm) {
 		return "", errorf("move error: unknown match tag `%s`", arm.Tag)
 	}
 	armEnv := env.clone()
@@ -3824,6 +3923,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 		}
 		return c.readOrelseDefault(left, expr.Right, env)
 	}
+	if expr.Operator == "catch" {
+		return c.readCatchDefault(left, expr.Right, env)
+	}
 	if _, err := c.readExpr(expr.Right, env); err != nil {
 		return "", err
 	}
@@ -3841,6 +3943,26 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 // is a competing owner producer and must be moved, not aliased.
 func (c *Checker) readOrelseDefault(left string, right ast.Expression, env *scope) (string, error) {
 	elem := optionalPayloadName(left)
+	if c.valueTypeNeedsConsume(elem) {
+		if _, err := c.moveExpr(right, env); err != nil {
+			return "", err
+		}
+		return elem, nil
+	}
+	if _, err := c.readExpr(right, env); err != nil {
+		return "", err
+	}
+	return elem, nil
+}
+
+// readCatchDefault reads the default arm of `catch`. The default stands in
+// for the success payload the same way an `orelse` default stands in for the
+// optional payload, so an owner payload makes it a competing producer.
+func (c *Checker) readCatchDefault(left string, right ast.Expression, env *scope) (string, error) {
+	elem, _ := c.errorUnionElement(left)
+	if elem == "" {
+		elem = left
+	}
 	if c.valueTypeNeedsConsume(elem) {
 		if _, err := c.moveExpr(right, env); err != nil {
 			return "", err
