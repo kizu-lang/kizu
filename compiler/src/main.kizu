@@ -306,80 +306,12 @@ fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !i
     }
 }
 
-/// Lowers a checked file or package and prints its IR dump or its LLVM
-/// IR. `build --emit-llvm` for one source file goes through the build
-/// cache the way the Go `emitLLVMFile` does; a package and the `ir`
-/// command lower every time, the Go `irCommand` and `lowerPackage`.
+/// Lowers a checked file or package to typed SSA IR and prints it, the Go
+/// `irCommand` over `lowerFile` / `lowerPackage`, or the LLVM IR emitted
+/// from it, the Go `emitLLVMFile`: a package also gets the `main` entry
+/// wrapper the native build adds. The text is emitted fresh every time
+/// (ADR-0126).
 fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
-    if output == Output::Llvm {
-        let package = try is_package_root(io, target);
-        if !package {
-            return emit_llvm_file(io, allocator, lib_dir, target, opt);
-        }
-    }
-    var text = string::new(allocator);
-    defer text.deinit();
-    let code = try collect_target_output(io, allocator, lib_dir, target, opt, output, &var text);
-    if code != 0 {
-        return code;
-    }
-    let text_bytes = text.as_bytes();
-    try io::write_stdout_line(io, text_bytes);
-    return 0;
-}
-
-/// Prints the LLVM IR one source file lowers to, reusing the cached text
-/// when the file has not changed, the Go `emitLLVMFile` over `GetOrBuild`.
-fn emit_llvm_file(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool) -> !i64 {
-    var cache = try buildcache::new(io, allocator);
-    defer cache.deinit();
-    var text = string::new(allocator);
-    defer text.deinit();
-    let cache_target = emit_llvm_cache_target(opt);
-    let plan = try cache.get_or_build(io, allocator, target, cache_target, &var text);
-    match plan {
-        Hit => {
-            let text_bytes = text.as_bytes();
-            try io::write_stdout_line(io, text_bytes);
-            return 0;
-        },
-        Miss(input) => {
-            errdefer input.deinit();
-            let code = try collect_target_output(io, allocator, lib_dir, target, opt, Output::Llvm, &var text);
-            if code != 0 {
-                input.deinit();
-                return code;
-            }
-            let text_bytes = text.as_bytes();
-            try cache.finish_get_or_build(io, allocator, move input, text_bytes);
-            try io::write_stdout_line(io, text_bytes);
-            return 0;
-        },
-    }
-}
-
-/// Names the emit-llvm cache target, the Go `cacheTarget` over the
-/// optimization level.
-fn emit_llvm_cache_target(opt: bool) -> []u8 {
-    if opt {
-        return "emit-llvm-opt";
-    }
-    return "emit-llvm";
-}
-
-/// Lowers a checked file or package to typed SSA IR or LLVM IR and
-/// appends the text to out_text: a package also gets the `main` entry
-/// wrapper the native build adds. Diagnostics are reported here; the
-/// caller prints the collected text.
-fn collect_target_output(
-    io: Io,
-    allocator: Allocator,
-    lib_dir: []u8,
-    target: []u8,
-    opt: bool,
-    output: Output,
-    out_text: &var string::String
-) -> !i64 {
     var tree = ast::new(allocator);
     defer tree.deinit();
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -443,17 +375,21 @@ fn collect_target_output(
                         }
                     }
                     if output == Output::Llvm {
-                        if try llvm::emit(allocator, &var lowerer.module, out_text) |failed| {
+                        var text = string::new(allocator);
+                        defer text.deinit();
+                        if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
                             defer failed.deinit();
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
                         }
+                        let text_bytes = text.as_bytes();
+                        try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
                     let rendered = try ir::render(allocator, &lowerer.module);
                     defer rendered.deinit();
                     let rendered_bytes = rendered.as_bytes();
-                    try out_text.append_bytes(rendered_bytes);
+                    try io::write_stdout_line(io, rendered_bytes);
                     return 0;
                 },
             }

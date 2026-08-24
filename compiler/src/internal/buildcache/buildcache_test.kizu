@@ -108,50 +108,6 @@ test "an artifact is built once and then read from the cache" {
     try artifact_round_trip(stdio, allocator);
 }
 
-/// Runs one source file through the text path: miss, store, hit.
-fn text_round_trip(io: Io, allocator: Allocator) -> !void {
-    var cache = try test_cache(allocator);
-    defer cache.deinit();
-    let source = try cache.output_path(allocator, "input.kizu");
-    defer source.deinit();
-    let source_bytes = source.as_bytes();
-    let dir_bytes = cache.dir.as_bytes();
-    try fsutil::create_dir_all(io, dir_bytes);
-    try fs::write_file(io, source_bytes, "fn main() {}");
-    var first_text = string::new(allocator);
-    defer first_text.deinit();
-    let first = try cache.get_or_build(io, allocator, source_bytes, "unit-text", &var first_text);
-    match first {
-        Hit => {
-            testing::expect(false);
-        },
-        Miss(input) => {
-            try cache.finish_get_or_build(io, allocator, move input, "lowered text");
-        },
-    }
-    var second_text = string::new(allocator);
-    defer second_text.deinit();
-    let second = try cache.get_or_build(io, allocator, source_bytes, "unit-text", &var second_text);
-    match second {
-        Hit => {},
-        Miss(input) => {
-            testing::expect(false);
-            input.deinit();
-        },
-    }
-    let second_bytes = second_text.as_bytes();
-    testing::expect_equal<[]u8>("lowered text", second_bytes);
-    // The source file is not a cache record; remove it before dropping.
-    try fs::remove_file(io, source_bytes);
-    return drop_test_cache(io, allocator, &cache);
-}
-
-test "source text is stored once and then read from the cache" {
-    let allocator = mem::page_allocator();
-    let stdio = io::blocking();
-    try text_round_trip(stdio, allocator);
-}
-
 /// Appends `"name":"value"` and a trailing comma. String literals carry no
 /// escapes, so the quotes are appended as bytes.
 fn append_planted_field(out: &var string::String, name: []u8, value: []u8) -> !void {

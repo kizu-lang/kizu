@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/native"
@@ -59,36 +58,25 @@ func buildFile(args []string) error {
 	}
 }
 
-// emitLLVMFile lowers a checked source file to LLVM IR text.
+// emitLLVMFile lowers a checked source file or package to LLVM IR text.
+// The text is emitted fresh every time: a text cache keyed by the source
+// would have to key on the compiler itself to stay honest (ADR-0126).
 func emitLLVMFile(path string, opt bool) error {
+	var module *ir.Module
+	var err error
 	if isPackageRoot(path) {
-		module, err := lowerPackage(path, opt)
-		if err != nil {
-			return err
-		}
-		output, err := llvm.Emit(module)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Println(output)
-		return nil
+		module, err = lowerPackage(path, opt)
+	} else {
+		module, err = lowerFile(path, opt)
 	}
-
-	cache, err := buildcache.New()
 	if err != nil {
 		return err
 	}
-	result, err := cache.GetOrBuild(path, cacheTarget("emit-llvm", opt), func() (string, error) {
-		module, err := lowerFile(path, opt)
-		if err != nil {
-			return "", err
-		}
-		return llvm.Emit(module)
-	})
+	output, err := llvm.Emit(module)
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Println(result.Output)
+	_, _ = fmt.Println(output)
 	return nil
 }
 
@@ -108,23 +96,18 @@ func emitTargetFile(target string, args []string) error {
 	return emitWASMFile(path, opt)
 }
 
-// emitWASMFile lowers a checked source file to WASI WebAssembly text.
+// emitWASMFile lowers a checked source file to WASI WebAssembly text,
+// emitted fresh every time like emitLLVMFile (ADR-0126).
 func emitWASMFile(path string, opt bool) error {
-	cache, err := buildcache.New()
+	module, err := lowerFile(path, opt)
 	if err != nil {
 		return err
 	}
-	result, err := cache.GetOrBuild(path, cacheTarget("wasm32-wasi", opt), func() (string, error) {
-		module, err := lowerFile(path, opt)
-		if err != nil {
-			return "", err
-		}
-		return wasm.Emit(module)
-	})
+	output, err := wasm.Emit(module)
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Println(result.Output)
+	_, _ = fmt.Println(output)
 	return nil
 }
 
@@ -261,12 +244,4 @@ func defaultNativeOutput(path string, emit string) string {
 		name += ".ll"
 	}
 	return filepath.Join("target", "native", name)
-}
-
-// cacheTarget includes the optimization level in cache-shaping inputs.
-func cacheTarget(target string, opt bool) string {
-	if opt {
-		return target + "-opt"
-	}
-	return target
 }

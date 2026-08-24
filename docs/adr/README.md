@@ -119,3 +119,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0123: `Map` の owner value は `Array` の owner element と同じ規則で扱う](0123-map-owned-values-mirror-array.md) (旧 0031 を採番し直し、既存 key への insert の決定を訂正)
 - [ADR-0124: 複製は常に明示。owner の複製は per-type の copy 関数で書く](0124-owned-container-clone-policy.md) (旧 0032 を採番し直し)
 - [ADR-0125: `?Owner` を struct field に置く](0125-optional-owner-struct-fields.md) (#1632)
+- [ADR-0126: build cache は content-addressed な artifact だけを保持する](0126-cache-only-content-addressed-artifacts.md) (#1675)

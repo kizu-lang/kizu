@@ -73,14 +73,6 @@ pub struct CacheInput {
     pub source_hash: string::String
 }
 
-/// What the first half of the Go `GetOrBuild` decided: the artifact text
-/// was cached and is in the caller's buffer, or the caller has to run its
-/// builder and hand the output to `finish_get_or_build` with this input.
-pub union GetOrBuild {
-    Hit,
-    Miss(CacheInput),
-}
-
 /// A miss the Go `GetOrBuildArtifact` would build: the caller builds into
 /// `scratch` and hands the plan to `finish_artifact`, or abandons it with
 /// `discard_artifact` when its builder failed.
@@ -154,98 +146,6 @@ pub fn (self: &Cache) new_input(
         target: move target_copy,
         source_hash: move source_hash
     };
-}
-
-/// Reads a source file and keys it by where it is and what is in it, the
-/// Go `newFileInput`.
-pub fn (self: &Cache) new_file_input(
-    io: Io,
-    allocator: Allocator,
-    file: []u8,
-    target: []u8
-) -> !CacheInput {
-    let text = try fs::read_file(io, allocator, file, mem::Limit::Unlimited);
-    defer text.deinit();
-    var abs = string::new(allocator);
-    defer abs.deinit();
-    try append_abs_path(allocator, file, &var abs);
-    let abs_bytes = abs.as_bytes();
-    let content = text.as_bytes();
-    return self.new_input(allocator, abs_bytes, target, content);
-}
-
-/// Spells the Go `filepath.Abs`: an absolute path cleaned, a relative one
-/// joined to the working directory. std::process has no getcwd, so the
-/// directory comes from $PWD, which shells and the Go CLI's own child
-/// environment keep pointing at the working directory.
-fn append_abs_path(allocator: Allocator, file: []u8, out: &var string::String) -> !void {
-    if mem::len(file) > 0 and file[0] == cast<u8>(47) {
-        let cleaned = try path::clean(allocator, file);
-        defer cleaned.deinit();
-        let cleaned_bytes = cleaned.as_bytes();
-        return out.append_bytes(cleaned_bytes);
-    }
-    let base = process::env("PWD") orelse "";
-    let joined = try path::join(allocator, base, file);
-    defer joined.deinit();
-    let joined_bytes = joined.as_bytes();
-    return out.append_bytes(joined_bytes);
-}
-
-/// Answers the first half of the Go `GetOrBuild` for one source file: on a
-/// hit the cached text is appended to out_text, on a miss the caller runs
-/// its builder and hands the output to `finish_get_or_build`.
-pub fn (self: &Cache) get_or_build(
-    io: Io,
-    allocator: Allocator,
-    file: []u8,
-    target: []u8,
-    out_text: &var string::String
-) -> !GetOrBuild {
-    let input = try self.new_file_input(io, allocator, file, target);
-    errdefer input.deinit();
-    let hit = try self.read_hit(io, allocator, &input.key, out_text);
-    if hit {
-        input.deinit();
-        return GetOrBuild::Hit;
-    }
-    return GetOrBuild::Miss(move input);
-}
-
-/// Reads a hit's stored text into out_text and reports whether there was
-/// one. The key stays owned by the caller's CacheInput, so no borrow of
-/// the input outlives this call and the caller can move it afterwards.
-fn (self: &Cache) read_hit(
-    io: Io,
-    allocator: Allocator,
-    key: &string::String,
-    out_text: &var string::String
-) -> !bool {
-    let key_bytes = key.as_bytes();
-    if try self.has_artifact(io, allocator, key_bytes) |entry| {
-        defer entry.deinit();
-        let name_bytes = entry.output.as_bytes();
-        let stored = try self.output_path(allocator, name_bytes);
-        defer stored.deinit();
-        let stored_bytes = stored.as_bytes();
-        try fs::read_file_into(io, stored_bytes, out_text);
-        return true;
-    }
-    return false;
-}
-
-/// Stores builder output, the second half of the Go `GetOrBuild`:
-/// `writeEntry` and then `enforceLimit`.
-pub fn (self: &Cache) finish_get_or_build(
-    io: Io,
-    allocator: Allocator,
-    input: CacheInput,
-    output: []u8
-) -> !void {
-    errdefer input.deinit();
-    try self.write_entry(io, allocator, &input, output);
-    input.deinit();
-    return self.enforce_limit(io, allocator);
 }
 
 /// Answers the first half of the Go `GetOrBuildArtifact` for one artifact
@@ -368,25 +268,6 @@ fn (self: &Cache) artifact_hit(io: Io, allocator: Allocator, key: &string::Strin
         return true;
     }
     return false;
-}
-
-/// Writes metadata and output for one artifact, the Go `writeEntry`.
-fn (self: &Cache) write_entry(
-    io: Io,
-    allocator: Allocator,
-    input: &CacheInput,
-    output: []u8
-) -> !void {
-    let dir_bytes = self.dir.as_bytes();
-    try fsutil::create_dir_all(io, dir_bytes);
-    let stored = try output_name_of(allocator, &input.key);
-    defer stored.deinit();
-    let target = try self.output_path_of(allocator, &stored);
-    defer target.deinit();
-    let target_bytes = target.as_bytes();
-    try fs::write_file(io, target_bytes, output);
-    let stored_bytes = stored.as_bytes();
-    return self.write_meta(io, allocator, input, stored_bytes, mem::len(output));
 }
 
 /// Records what one stored artifact is and how much room it takes, the Go

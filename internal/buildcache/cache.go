@@ -43,13 +43,6 @@ type Status struct {
 	Entries   int
 }
 
-// Result contains the artifact and whether it came from cache.
-type Result struct {
-	Output string
-	Hit    bool
-	Key    string
-}
-
 // New returns the default local cache.
 func New() (*Cache, error) {
 	dir := os.Getenv("KIZU_CACHE_DIR")
@@ -63,39 +56,12 @@ func New() (*Cache, error) {
 	return &Cache{Dir: dir, MaxBytes: DefaultMaxBytes}, nil
 }
 
-// GetOrBuild returns a cached artifact or stores builder output.
-func (c *Cache) GetOrBuild(
-	path string,
-	target string,
-	builder func() (string, error),
-) (Result, error) {
-	input, err := newFileInput(path, target)
-	if err != nil {
-		return Result{}, err
-	}
-	if entry, ok := c.hasArtifact(input.key); ok {
-		out, err := os.ReadFile(c.outputPath(entry.Output))
-		if err != nil {
-			return Result{}, err
-		}
-		return Result{Output: string(out), Hit: true, Key: input.key}, nil
-	}
-	output, err := builder()
-	if err != nil {
-		return Result{}, err
-	}
-	if err := c.writeEntry(input, output); err != nil {
-		return Result{}, err
-	}
-	return Result{Output: output, Hit: false, Key: input.key}, c.enforceLimit()
-}
-
 // GetOrBuildArtifact returns the path of a cached file, building it with
-// builder when it is missing. GetOrBuild caches text lowered from a source file
-// on disk; this caches a file built from content the compiler carries itself,
-// which is what the native runtime object is. Nothing about the program being
-// built belongs in that key, so `name` and `content` stand in for the path and
-// the file bytes a source artifact is keyed by.
+// builder when it is missing. The cache holds only artifacts built from
+// content the compiler carries in full -- the native runtime object from its
+// source, the executable from its IR -- so a key always names exactly what
+// the artifact is made of (ADR-0126). `name` and `content` stand in for the
+// path and the file bytes a source artifact would be keyed by.
 func (c *Cache) GetOrBuildArtifact(
 	name string,
 	target string,
@@ -196,19 +162,6 @@ type cacheInput struct {
 	sourceHash string
 }
 
-// newFileInput reads a source file and keys it by where it is and what is in it.
-func newFileInput(path string, target string) (cacheInput, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cacheInput{}, err
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return cacheInput{}, err
-	}
-	return newInput(abs, target, data), nil
-}
-
 // newInput keys an artifact by everything it is made of: the cache format, the
 // target it is built for, the name it is filed under, and the bytes it is built
 // from.
@@ -217,18 +170,6 @@ func newInput(name string, target string, content []byte) cacheInput {
 	sourceHash := hex.EncodeToString(sourceHashBytes[:])
 	keyHash := sha256.Sum256([]byte(Version + "\n" + target + "\n" + name + "\n" + sourceHash))
 	return cacheInput{key: hex.EncodeToString(keyHash[:]), target: target, sourceHash: sourceHash}
-}
-
-// writeEntry writes metadata and output for one artifact.
-func (c *Cache) writeEntry(input cacheInput, output string) error {
-	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
-		return err
-	}
-	name := outputName(input.key)
-	if err := os.WriteFile(c.outputPath(name), []byte(output), 0o644); err != nil {
-		return err
-	}
-	return c.writeMeta(input, name, int64(len(output)))
 }
 
 // writeMeta records what one stored artifact is and how much room it takes. It

@@ -60,24 +60,6 @@ func TestSelfhostCache(t *testing.T) {
 				goPrune.output.stdout, selfPrune.output.stdout)
 		}
 	})
-	t.Run("emit-llvm-shares-one-entry", func(t *testing.T) {
-		t.Parallel()
-		cacheDir := t.TempDir()
-		goEmit := runCacheCLI(t, cacheDir, "", kizuBinaryPath, "build", "--emit-llvm", target)
-		requireCacheRunOK(t, goEmit, "go emit-llvm")
-		names := cacheFileNames(t, cacheDir)
-		if len(names) != 2 {
-			t.Fatalf("go emit-llvm stored %v", names)
-		}
-		selfEmit := runCacheCLI(t, cacheDir, "", selfhost, "build", "--emit-llvm", target)
-		requireCacheRunOK(t, selfEmit, "selfhost emit-llvm")
-		if selfEmit.output.stdout != goEmit.output.stdout {
-			t.Errorf("emit-llvm output differs")
-		}
-		if after := cacheFileNames(t, cacheDir); strings.Join(after, "\n") != strings.Join(names, "\n") {
-			t.Errorf("selfhost emit-llvm changed the entries: %v -> %v", names, after)
-		}
-	})
 }
 
 // requireSharedRun runs target with the first CLI into a fresh cache, then
