@@ -1,0 +1,90 @@
+import std::fs;
+import std::io;
+import std::mem;
+import std::string;
+import std::testing;
+
+// The vector corpus in compiler/tests/sha256 is shared with the Go side:
+// internal/buildcache's TestSharedSHA256Vectors recomputes every line with
+// crypto/sha256. One fixture gates both implementations, so a digest this
+// module gets wrong cannot agree with the file the Go side keeps honest.
+
+/// Decodes one lowercase hex digit to its value.
+fn hex_value(byte: u8) -> i64 {
+    if byte >= cast<u8>(97) {
+        return cast<i64>(byte) - 87;
+    }
+    return cast<i64>(byte) - 48;
+}
+
+/// Appends the bytes one hex spelling decodes to.
+fn append_decoded_hex(out: &var string::String, text: []u8) -> !void {
+    var index = 0;
+    while index + 1 < mem::len(text) {
+        let high = hex_value(text[index]);
+        let low = hex_value(text[index + 1]);
+        try out.append_byte(cast<u8>(high * 16 + low));
+        index = index + 2;
+    }
+    return;
+}
+
+/// Checks one `digest_hex:input_hex` line and reports whether it was a
+/// vector rather than a comment or a blank.
+fn check_line(allocator: Allocator, hasher: &Hasher, line: []u8) -> !bool {
+    if mem::len(line) == 0 {
+        return false;
+    }
+    if line[0] == cast<u8>(35) {
+        return false;
+    }
+    let digest = line[0..64];
+    let input_hex = line[65..mem::len(line)];
+    var input = string::new(allocator);
+    defer input.deinit();
+    try append_decoded_hex(&var input, input_hex);
+    var got = string::new(allocator);
+    defer got.deinit();
+    let input_bytes = input.as_bytes();
+    try hasher.append_hex_digest(allocator, input_bytes, &var got);
+    let got_bytes = got.as_bytes();
+    testing::expect_equal<[]u8>(digest, got_bytes);
+    return true;
+}
+
+/// Digests every vector in the shared corpus and counts the checked lines.
+fn run_vectors(io: Io, allocator: Allocator) -> !i64 {
+    var hasher = try new(allocator);
+    defer hasher.deinit();
+    let text = try fs::read_file(
+        io,
+        allocator,
+        "compiler/tests/sha256/vectors.txt",
+        mem::Limit::Unlimited
+    );
+    defer text.deinit();
+    let total = text.len();
+    var checked = 0;
+    var start = 0;
+    var index = 0;
+    while index < total {
+        let data = text.as_bytes();
+        if data[index] == cast<u8>(10) {
+            let line = data[start..index];
+            let counted = try check_line(allocator, &hasher, line);
+            if counted {
+                checked = checked + 1;
+            }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return checked;
+}
+
+test "sha256 digests match the shared vector corpus" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    let checked = try run_vectors(stdio, allocator);
+    testing::expect(checked >= 15);
+}
