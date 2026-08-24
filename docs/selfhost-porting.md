@@ -298,6 +298,7 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | stdprim / stdmeta / stdmethod / unsafecap | 142 / 211 / 80 / 60 | 263 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1861 | 3448 | 1.85 | check corpus 635 case の load 段 + package 単位 render |
+| fmt | 789 | 1234 | 1.56(words 3,963 / 2,375 = 1.67) | `TestSelfhostFrontend`: examples / negative examples / tests/behavior / compiler/src の全 `.kizu` 691 file で `fmt` の stdout / stderr / exit status を Go CLI と byte 比較 + `--write` / `-w` の出力 file byte 比較 |
 | types | 8154 | 16051 | 1.97 | check corpus 765 case(diagnostics)+ unit(catch / error set 合成の diagnostics) |
 | ownership | 7893 | 12998 | 1.65(words 46,330 / 28,224 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
@@ -306,8 +307,8 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
-| fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 68 | —(別記録) | buildcache / native の経路と `TestSelfhostCache` 経由 |
-| compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 893 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative`、compiler/ 自身を最後まで build して同じ compiler になることは `TestSelfhostBootstrap` |
+| fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
+| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 1437(main 1432 + import 衝突 helper 5) | — | 従来の `TestSelfhostFrontend` 2,826 case に fmt 691 file と init(生成 2 file、current directory、両 existing-file rejection)を追加。native の run / test / build は `TestSelfhostNative`、compiler/ 自身を最後まで build して同じ compiler になることは `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -316,8 +317,6 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 
 | module | Go | `kizu` から到達 | 状態 |
 | --- | --- | --- | --- |
-| `internal/fmt` | 789 | `kizu fmt` | 移植する |
-| `cmd/kizu` の `init` | 37 | `kizu init` | 移植する |
 | `internal/wasm` | 549 | `build --target wasm32-wasi` | 移植する |
 | `internal/cimport` | 196 | `extern "c"` の宣言読み | 移植する |
 | `internal/quote` | 31 | 無(ir / llvm 経由)| 移植しない。`std::fmt::append_bytes_literal` が同じ仕事をしていて、selfhost 側は既にそれを使っている |
@@ -380,6 +379,26 @@ tail call の `return self.write_x(...)` がある)。std gap は `fmt.Sprintf` 
 代わりの `ContainerKind` / `TypeCollector`)約 80 行は API shape。行比 1.48 で 2.0 未満に入った
 ので圧縮 pass は置かず、後続 module(native link)を優先する。
 
+fmt module の増分(+445 行、1,234 / 789 = 1.56)の分類。error 処理は、Go の
+`strings.Builder` / slice append が失敗しないのに対して Kizu の String / Array 操作を
+明示的に伝播する `try` 73 行。ownership の明示は Token / comment の owner Array、
+`defer` / `errdefer`、`as_bytes()` の local view、owner field を take できない Builder の
+最終出力 copy を合わせて約 54 行。std gap は comparator 付き stable sort が無い先頭 import
+range の insertion / rotation、`strings.Split` / `ContainsAny` / `TrimSpace` 相当の局所 helper、
+view を返せない `tokenSpelling` の append 形で約 94 行。残る約 224 行は signature の折返し、
+Go の `switch` / range loop を `if` / `while` に展開した API shape(閉じ括弧だけの差 +70 行を
+含む)。code words は 3,963 / 2,375 = 1.67 で、改行だけの増分ではないが、この 4 分類で
+説明できるため complete とする。
+
+fmt + init work unit 全体は Go 1,024 行(`internal/fmt` 789 + `cmd/kizu/fmt.go` 92 +
+`cmd/kizu/init.go` 143)、Kizu 1,786 行(fmt 1,234 + main の増分 539 + import 衝突 helper 5 +
+fsutil の増分 8)で 1.74。words は 5,684 / 3,214 = 1.77。未移植表の init 37 行は
+user-facing core の到達規模だったが、size gate は規則どおり `init.go` の全 declaration と
+専用 helper を数えた。compiler module 累計は Go 1,023 行 / Kizu 1,437 行 = 1.40、words
+4,880 / 3,294 = 1.48 なので 1.5 trigger 未満。work unit の増分は上の fmt 分類に加え、init の
+明示 error message 組立、既存 file 2 件の owned path、`filepath.Abs` / exclusive create の
+fs gap で尽きる。
+
 
 native の増分(+245 行、490 + runtime_source wrapper 4 に対して Go 249。Go 側には
 buildcache module へ回した cache key 3 関数 14 行を含む)の分類。buildcache を移植しない
@@ -424,10 +443,15 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 | --- | --- | --- |
 | sequence literal(`[N]T{a, b}` / table / table-driven test)が無い | parser の precedence table(if 連鎖 23 行)、Go の table test 7 本が展開されている | 展開のまま |
 | 文字列組立の std API が `append_*` だけ | parser の message helper 155 行、checker の `errorf` 315 箇所 | parser は `error_*` method に融合(parser.kizu) |
-| struct field からの take / replace が無い | parser が cur/peek を持てず全 token を arena に保持 | `Arena<Token>` + handle stream |
+| struct field からの take / replace が無い | parser が cur/peek を持てず全 token を arena に保持。fmt の Builder から完成した `out` だけを取り出せない | parser は `Arena<Token>` + handle stream。fmt は完成時に出力を 1 回 copy し、Builder 全体を deinit |
 | `orelse` の右辺に block を書けない | parser の early return | `if opt \|v\| {} else {}` に展開 |
 | owner の `?T` は産出した場所で capture / orelse が必須 | parser test | 同上 |
-| `[]u8` view は関数から返せず、`as_bytes()` は local binding に束縛必須 | loader の `module_name() -> []u8` 系 helper が書けない | `&string::String` を返す / 渡し、callee 側で bind する。append 系 helper に変える |
+| `[]u8` view は関数から返せず、`as_bytes()` は local binding に束縛必須 | loader の `module_name() -> []u8` 系 helper と fmt の `tokenSpelling(Token) -> string` が書けない | `&string::String` を返す / 渡し、callee 側で bind する。fmt は `append_token_spelling` に変える |
+| comparator を受ける stable sort が無い(`std::sort` は owned String 専用) | fmt の `normalizeLeadingImports` は variable-length token range を `sort.SliceStable` で path key 順にする | Token owner を 1 Array に保ったまま、隣接 import range の stable insertion / rotation を局所実装 |
+| alias import が無く、import は末尾 segment 名だけを束縛する | compiler main は既存の `std::fmt` と新しい `compiler::internal::fmt` の両方を使うため `fmt` が衝突する | 既存の decimal append 4 call だけを 5 行の `compiler::internal::stdfmt` wrapper 経由にする |
+| error set を宣言しない `!T` は `try` 専用で `catch` できない | fmt の Go `insertMoveMarkers` は `loadFileProgram` の全 error で元 source を返すが、Kizu の `Loader.load_source -> !LoadResult` は load graph 内の fs / allocation failure を catch できない | `LoadResult::Error`、types diagnostic、ownership diagnostic は元 source のまま返す。診断になる前の fs / allocation failure だけは伝播し、project 全体の error set を移植途中で変更しない |
+| current working directory を読む API が無い | init の Go `filepath.Abs(target)`。`TestSelfhostFrontend/init` の引数無し case は process の cwd を変えて比較する | `fsutil::absolute` は test / shell が cwd と同じ値に保つ `PWD` と `path::join` / `clean` を使う |
+| file の exclusive create が無い | init の Go `writeNewFile` は `O_CREATE|O_EXCL` で事前検査後の race でも既存 file を上書きしない | `reject_existing_init_files` で `kizu.toml` と `src/main.kizu` を先に拒否してから `fs::write_file`。検査と write の間に別 process が作る race は残る |
 | `match try f()` では owner payload を move out できない | loader の `match try self.read_std_graph()` | `let r = try f(); match r { ... }` |
 | `else if` が無い | loader | `else { if ... }` に展開 |
 | owner field への代入不可のため「field を入れ替える」書き方が無い | loader の `self.order` の差し替え、ModuleFile.imports の設定 | 空で作って in place に insert する。入れ替えが要る場合は 2 つの field を持つ |
