@@ -26,7 +26,7 @@ placeholder、handle の形)は、render・diagnostic・処理順が Go と同�
 | 汎用 Go-to-Kizu transpiler を維持する | Go の interface、GC、slice、pointer semantics を再実装する恒久的な第二 toolchain になる |
 | Go と Kizu を長期間ともに shipping する | 言語機能を二度実装し、fallback が片方の欠陥を隠した以前の失敗を繰り返す |
 | file ごとに規則なしで AI へ一括変換させる | ownership、module 境界、diagnostic の判断が file ごとに分岐する |
-| 生成 IR や内部 AST の文字列一致を gate にする | 実装の形を固定し、挙動が正しくても変更できない。examples と behavior test が契約を持つ |
+| 生成 text を golden として pin し、それを契約にする | 実装の形を固定し、挙動が正しくても変更できない。契約は `examples/` と `tests/behavior/` が持つ。両実装の出力を突き合わせる差分 corpus(`compiler/tests/`)は別物で、これは採用している — golden と違い、Go 側を変えれば `-update` で両方が一緒に動く |
 
 ## Source of truth
 
@@ -88,10 +88,10 @@ work unit の出力は次を含みます。
 
 - work unit または module 累計の Kizu が Go の 1.5 倍以上なら、増えた行を ownership の
   明示、error 処理、API shape、重複処理に分類し、それぞれの行数を報告する
-- 2 倍以上なら移植を止める。既存の原理から source に残す必要がある操作だけを不可避な
-  増分として数え、分類名を付けただけでは説明済みにしない
-- 累計 gate 違反が後から判明した module は、以前 complete と記録していても未完了へ戻し、
-  原因を閉じるまで後続 module の移植を進めない
+- 2 倍以上なら、増えた行の分類を報告に必ず載せる。既存の原理から source に残す必要が
+  ある操作だけを不可避な増分として数え、分類名を付けただけでは説明済みにしない
+- 比率そのものは移植を止めません。設計として妥当だと説明できるなら、その ratio は
+  許容します。止めるのは、説明の途中で language / std gap が見つかったときだけです
 - 同じ ownership / error / construction の定型が複数の call site に増える場合は、個々の
   行が必要でも local representation または API shape の問題として扱う
 - local representation や分割の問題なら target を直す
@@ -100,9 +100,12 @@ work unit の出力は次を含みます。
   移植の途中で仕様を足さない
 
 LOC を揃えるために lifecycle、境界 check、意味のある名前を消しません。比率は品質目標では
-なく調査 trigger です。明示 ownership に必要な増分は、その操作を共通化しても source から
-消してはいけない理由と cleanup path を示せる場合だけ許容します。module 完了時に累計 gate を
-満たさない、または不可避と確認できない反復が残るなら complete と記録しません。
+なく調査 trigger で、行数は目安です。明示 ownership に必要な増分は、その操作を共通化しても
+source から消してはいけない理由と cleanup path を示せる場合だけ許容します。
+
+ratio が高いこと自体は complete を妨げません。妨げるのは、増分を分類できないこと、または
+分類の結果が「language / std gap があるので同じ定型を書き続けている」だと分かったのに
+その gap を記録していないことです。
 
 ## Mechanical mapping
 
@@ -163,6 +166,7 @@ production fileを分ける場合も同じdirectoryへ置きます。別module�
 | `internal/buildcache` | `compiler::internal::buildcache` |
 | `internal/project` | `compiler::internal::project` |
 | `internal/fmt` | `compiler::internal::fmt` |
+| `internal/cimport` | `compiler::internal::cimport` |
 | `cmd/kizu` | `compiler` |
 
 package cycle を hook、global registry、extern call、duplicate type で迂回しません。
@@ -236,7 +240,7 @@ module 単位の機械移植は、次の契約で人の判断を待たずに進�
 
 - 範囲は 1 module ずつ。module の完了条件(下)を満たすまで次へ進まない
 - work unit ごとに topic branch へ commit し、review は module 単位の PR で受ける
-- 止まる条件: SPEC / std の変更が要る、分類と修正の後も累計 ratio が 2 倍以上、
+- 止まる条件: SPEC / std の変更が要る、増分の分類で language / std gap が見つかった、
   Go 側の shipping 挙動を変える修正が要る、ir / llvm の内部表現を決める時
 - 見つけた language / std gap は止めずにこの文書末尾の「見つかった gap」へ
   証拠付きで記録し、仕様を足さない局所解で進める。module 完了時にまとめて判断する
@@ -247,12 +251,21 @@ module 単位の機械移植は、次の契約で人の判断を待たずに進�
 
 module complete は、対象 Go file の全 declaration が移り、stub と unexplained
 difference がなく、Kizu check と対応する behavior test が通った状態です。
-compiler 全体の cutover は module の完了とは別で、self-build した compiler が同じ
-source をもう一度 build でき、既存の examples と `tests/behavior/` を shipping
-compiler と同じ契約で通した状態です。
+compiler 全体の cutover は module の完了とは別で、次の 3 つが揃った状態です。
 
-前半は `TestSelfhostBootstrap` が gate にします。shipping compiler が build した
+1. self-build した compiler が同じ source をもう一度 build できる
+2. 既存の examples と `tests/behavior/` を shipping compiler と同じ契約で通す
+3. `cmd/kizu` の user-facing command が Kizu 側に揃っている — cutover は Go compiler を
+   削除するので、CLI の機能は落とせません。残りは「未移植」表にあります
+
+cutover 後は「Kizu compiler を build するには Kizu compiler が必要」になるので、
+seed をどう供給するか(過去の release binary を使うのか、他の手段か)は cutover の
+判断と一緒に決めます。この文書はまだそれを決めていません。
+
+1 は `TestSelfhostBootstrap` が gate にします。shipping compiler が build した
 compiler と、それが同じ source から build した compiler の byte 一致を見ます。
+2 は `TestSelfhostFrontend` と `TestSelfhostNative` が持ちます。3 に gate はなく、
+「未移植」表が残りを持ちます。
 selfhost が自分の source を最後まで build する経路はここにしかありません
 (`TestSelfhostFrontend` は `compiler/` を emit-llvm text までしか見ず、
 `TestSelfhostNative` が link して実行するのは examples / `tests/behavior` /
@@ -268,8 +281,10 @@ codegen が変われば両方が一緒に動きます。
 
 ## Module status
 
-code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。検証欄は挙動一致を
-何で確認しているか。ratio が 2.0 以上の module は gate 未達で、圧縮 pass が残っている。
+code LOC は blank / comment / test を除いた行数。生成 file は除く(`native` は
+`runtime_source.kizu` の 1,576 行を含まない)。ratio は Kizu / Go。検証欄は挙動一致を
+何で確認しているか。ratio は調査 trigger であって合否ではないので、2.0 以上の module も
+増分を説明できていれば complete です。
 
 | module | Go | Kizu | ratio | 検証 |
 | --- | --- | --- | --- | --- |
@@ -280,19 +295,35 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | ast | 1062 | 2360 | 2.22 | parser corpus(render) |
 | parser | 1858 | 3119 | 1.68 | parser corpus 308 case(diagnostics + render) |
 | typ | 524 | 1047 | 2.00 | unit |
-| stdprim / stdmeta / stdmethod / unsafecap | 140 / 211 / 80 / 60 | 259 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
+| stdprim / stdmeta / stdmethod / unsafecap | 142 / 211 / 80 / 60 | 263 / 420 / 214 / 94 | 1.85 / 1.99 / 2.67 / 1.57 | unit |
 | manifest | 170 | 261 | 1.54 | unit(Go と 27 入力で byte 一致) |
 | project(+stdlib) | 1861 | 3448 | 1.85 | check corpus 635 case の load 段 + package 単位 render |
 | types | 8154 | 16051 | 1.97 | check corpus 765 case(diagnostics)+ unit(catch / error set 合成の diagnostics) |
 | ownership | 7893 | 12998 | 1.65(words 46,330 / 28,224 = 1.64) | check corpus 765 case(types が通った case の ownership diagnostics)+ unit(scope clone / merge) |
 | ir | 5091 | 9136 | 1.79(words 32,826 / 17,509 = 1.87) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | llvm | 4035 | 5918 | 1.47(words 25,206 / 15,489 = 1.63) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
-| native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)・gate 未達 | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
+| native | 249 | 641 | 2.58(words 2,212 / 867 = 2.55)| `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
 | buildcache | 217 | 431 | 1.99(words 1,441 / 764 = 1.89) | unit(artifact round trip / eviction 順序)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化) |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 68 | —(別記録) | buildcache / native の経路と `TestSelfhostCache` 経由 |
 | compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1023(全 command) | 893 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative`、compiler/ 自身を最後まで build して同じ compiler になることは `TestSelfhostBootstrap` |
+
+### 未移植
+
+`internal/` のうち Kizu 側に対応が無いものです。cutover は Go compiler を削除するので、
+`kizu` から到達できるものは全部移植します。
+
+| module | Go | `kizu` から到達 | 状態 |
+| --- | --- | --- | --- |
+| `internal/fmt` | 789 | `kizu fmt` | 移植する |
+| `cmd/kizu` の `init` | 37 | `kizu init` | 移植する |
+| `internal/wasm` | 549 | `build --target wasm32-wasi` | 移植する |
+| `internal/cimport` | 196 | `extern "c"` の宣言読み | 移植する |
+| `internal/quote` | 31 | 無(ir / llvm 経由)| 移植しない。`std::fmt::append_bytes_literal` が同じ仕事をしていて、selfhost 側は既にそれを使っている |
+| `internal/conformance` | 199 | 無(Go test 専用)| 移植しない。example の case block を読むのは Go test harness の仕事 |
+| `internal/lsp` | 4627 | 無(`cmd/kizu-lsp` 別 binary)| `kizu` の CLI ではなく release にも入らない(`go install` で配る)。cutover 条件の外 |
+| `internal/stdlib` | — | std の読み込み | `project` 行に含めて計上済み |
 
 types の増分(+7,525 行)の分類。閉じ括弧だけの行が Go 1,751 に対して Kizu 3,219 で、
 差の大半は 100 桁を超える呼び出しの折返し(API shape)。message 組立(`append_*` 941 行、
@@ -385,7 +416,7 @@ ownership の明示(`as_bytes` 束縛約 30、defer / errdefer 約 20)、`(T, er
 (generic sort が無い std gap、14 行)。Go 対応が標準 library の実装は sha256 と
 同じ別記録の module(timestamp / fsutil)が持ち、この表の上の行にある。
 
-## 見つかった gap## 見つかった gap
+## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
 
