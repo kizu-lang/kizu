@@ -681,15 +681,98 @@ fn put_enum(values: &var map::Map<[]u8, EnumInfo>, key: []u8, info: EnumInfo) ->
 /// Records error set declarations for error value reads, the Go
 /// `collectErrorSets`. An error carries nothing, so reading one moves nothing.
 fn (self: &var Checker) collect_error_sets(tree: &ast::Ast, program: &ast::Program) -> !void {
+    var combined = array::new<ast::Declaration>(self.allocator);
+    defer combined.deinit();
     var index = 0;
     while program.declarations.get(index) |declaration| {
         index = index + 1;
         match tree.declarations.at(declaration.node) {
-            ErrorSet(value) => try self.collect_error_set(tree, value),
+            ErrorSet(value) => {
+                if value.combines.len() > 0 {
+                    try combined.append(declaration);
+                } else {
+                    try self.collect_error_set(tree, value);
+                }
+            },
             _ => {},
         }
     }
+    // A combined set may name a set declared later, or another combined set.
+    // Each pass of a well-typed program resolves at least one declaration,
+    // so the loop settles; an unresolved reference is left for the checker
+    // that names it.
+    var done = array::new<bool>(self.allocator);
+    defer done.deinit();
+    index = 0;
+    while index < combined.len() {
+        try done.append(false);
+        index = index + 1;
+    }
+    var remaining = combined.len();
+    while remaining > 0 {
+        var progress = false;
+        index = 0;
+        while combined.get(index) |declaration| {
+            let position = index;
+            index = index + 1;
+            if done.get(position) orelse false {
+                continue;
+            }
+            var resolved = false;
+            try self.collect_combined_error_set(tree, declaration, &var resolved);
+            if resolved {
+                progress = true;
+                remaining = remaining - 1;
+                try done.set(position, true);
+            }
+        }
+        if !progress {
+            return;
+        }
+    }
     return;
+}
+
+/// Records one combined set's member names when every set it names is
+/// already recorded, reporting whether it was. Which set a name resolves to
+/// is the types checker's question, not an ownership one.
+fn (self: &var Checker) collect_combined_error_set(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    resolved: &var bool
+) -> !void {
+    resolved.* = false;
+    var members = map::new<[]u8, bool>(self.allocator);
+    errdefer members.deinit();
+    match tree.declarations.at(declaration.node) {
+        ErrorSet(value) => {
+            var index = 0;
+            while value.combines.at(index) |reference| {
+                index = index + 1;
+                let retained = tree.texts.at(reference.node);
+                let bytes = retained.as_bytes();
+                if self.error_sets.at(bytes) |part| {
+                    var position = 0;
+                    while part.key_at(position) |member| {
+                        position = position + 1;
+                        try put_flag(&var members, member, true);
+                    }
+                } else {
+                    members.deinit();
+                    return;
+                }
+            }
+            let name_text = tree.texts.at(value.name.node);
+            let name_bytes = name_text.as_bytes();
+            try put_flags(&var self.error_sets, name_bytes, move members);
+            resolved.* = true;
+            return;
+        },
+        _ => {
+            members.deinit();
+            return;
+        },
+    }
 }
 
 fn (self: &var Checker) collect_error_set(tree: &ast::Ast, declaration: &ast::ErrorSetDecl) -> !void {

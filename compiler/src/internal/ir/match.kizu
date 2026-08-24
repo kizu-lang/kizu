@@ -258,7 +258,7 @@ fn (self: &var Lowerer) lower_match_check(
         return null;
     }
     var index = 0;
-    if try self.match_tag_index(tree, subject, arm.tag, &var index) |failed| {
+    if try self.match_tag_index(tree, subject, arm, &var index) |failed| {
         return move failed;
     }
     let tag = Value { name: try self.module.names.intern_i64(index), type_name: subject.value.type_name };
@@ -276,14 +276,26 @@ fn (self: &var Lowerer) lower_match_check(
     return null;
 }
 
-/// Resolves an enum or union match tag, the Go `matchTagIndex`.
+/// Resolves an enum or union match tag, the Go `matchTagIndex`. An error
+/// match arm may qualify its declaring set (`FsError::NotFound =>`), and a
+/// bare arm on a combined set resolves through the sets it combines — the
+/// checker keeps a bare arm unambiguous.
 fn (self: &var Lowerer) match_tag_index(
     tree: &ast::Ast,
     subject: MatchSubject,
-    tag: ast::Text,
+    arm: ast::MatchArm,
     out: &var i64
 ) -> !?diagnostic::Diagnostic {
+    let tag = arm.tag;
     let tag_name = try self.text_name(tree, tag);
+    if !text_empty(tree, arm.tag_set) {
+        let set_name = try self.text_name(tree, arm.tag_set);
+        let index = self.module.enum_tag(set_name, tag_name) orelse return try self.fail2(
+            tree, "ir error: unknown error `%s::%s`", Arg::Text(arm.tag_set), Arg::Text(tag)
+        );
+        out.* = index;
+        return null;
+    }
     if !is_empty(subject.enum_name) {
         let index = self.module.enum_tag(subject.enum_name, tag_name) orelse return try self.fail2(
             tree, "ir error: unknown enum tag `%s::%s`", Arg::Str(subject.enum_name), Arg::Text(tag)

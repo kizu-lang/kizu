@@ -50,10 +50,17 @@ pub struct Struct {
     pub fields: array::Array<Field>
 }
 
-/// Is the IR view of a declared tag enum: each tag's integer.
+/// Is the IR view of a declared tag enum: each tag's integer. origins lists
+/// the `{ }`-form error sets a combined error set (`error C = A or B;`) takes
+/// its members from, fully resolved; it is empty for enums and for sets that
+/// declare their own members. A combined set carries no tags of its own: its
+/// member codes stay filed under the sets that declared them, which keeps
+/// every code's spelling unique and lets a match arm resolve through the
+/// declaring set (ADR-0127).
 pub struct Enum {
     pub name: Name,
-    pub tags: map::Map<[]u8, i64>
+    pub tags: map::Map<[]u8, i64>,
+    pub origins: array::Array<Name>
 }
 
 /// Is the IR view of a tagged union declaration.
@@ -312,6 +319,9 @@ pub enum Op {
     ErrorOk,
     ErrorError,
     ErrorTry,
+    ErrorHas,
+    ErrorValue,
+    ErrorCode,
     OptNull,
     OptSome,
     OptValue,
@@ -396,6 +406,9 @@ pub fn op_spelling(op: Op) -> []u8 {
         ErrorOk => "error.ok",
         ErrorError => "error.error",
         ErrorTry => "error.try",
+        ErrorHas => "error.has",
+        ErrorValue => "error.value",
+        ErrorCode => "error.code",
         OptNull => "opt.null",
         OptSome => "opt.some",
         OptValue => "opt.value",
@@ -598,9 +611,103 @@ pub fn (self: &Module) enum_tag(enum_name: Name, tag: Name) -> ?i64 {
         return declared.tags.get(tag_bytes);
     }
     if self.error_sets.at(enum_bytes) |declared| {
-        return declared.tags.get(tag_bytes);
+        if declared.tags.get(tag_bytes) |code| {
+            return code;
+        }
+        // A combined set files no tags of its own; a bare tag resolves
+        // through the sets it combines (the checker keeps it unambiguous).
+        var index = 0;
+        while declared.origins.at(index) |origin| {
+            index = index + 1;
+            let origin_text = name_text(&self.names, origin.*);
+            let origin_bytes = origin_text.as_bytes();
+            if self.error_sets.at(origin_bytes) |part| {
+                if part.tags.get(tag_bytes) |code| {
+                    return code;
+                }
+            }
+        }
+        return null;
     }
     return null;
+}
+
+/// Reports whether every member code of the source set is a member of the
+/// target set. A combined set carries its origins' codes, so the subset
+/// check `try` generalized to runs over codes, never names (ADR-0127).
+pub fn (self: &Module) error_set_fits(source: []u8, target: []u8) -> bool {
+    if mem::equal_bytes(source, target) {
+        return true;
+    }
+    if self.error_sets.at(source) |src| {
+        if !self.enum_codes_fit(src, target) {
+            return false;
+        }
+        var index = 0;
+        while src.origins.at(index) |origin| {
+            index = index + 1;
+            let origin_text = name_text(&self.names, origin.*);
+            let origin_bytes = origin_text.as_bytes();
+            if self.error_sets.at(origin_bytes) |part| {
+                if !self.enum_codes_fit(part, target) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether every code one declaring set carries is a member of the
+/// target set.
+fn (self: &Module) enum_codes_fit(source: &Enum, target: []u8) -> bool {
+    var position = 0;
+    while source.tags.key_at(position) |member| {
+        position = position + 1;
+        if source.tags.get(member) |code| {
+            if !self.error_set_holds_code(target, code) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Reports whether the target set carries one global error code, through the
+/// sets it combines.
+fn (self: &Module) error_set_holds_code(target: []u8, code: i64) -> bool {
+    if self.error_sets.at(target) |declared| {
+        if tags_hold_code(&declared.tags, code) {
+            return true;
+        }
+        var index = 0;
+        while declared.origins.at(index) |origin| {
+            index = index + 1;
+            let origin_text = name_text(&self.names, origin.*);
+            let origin_bytes = origin_text.as_bytes();
+            if self.error_sets.at(origin_bytes) |part| {
+                if tags_hold_code(&part.tags, code) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Reports whether one tag map carries a code as a value.
+fn tags_hold_code(tags: &map::Map<[]u8, i64>, code: i64) -> bool {
+    var position = 0;
+    while tags.key_at(position) |member| {
+        position = position + 1;
+        if tags.get(member) |value| {
+            if value == code {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /// Returns one union variant by spelling, or null, the Go

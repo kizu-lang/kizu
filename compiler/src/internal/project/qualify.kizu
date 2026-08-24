@@ -105,21 +105,7 @@ fn (self: &var Loader) qualify_decl(
                 ast::EnumDecl { name: name, doc: value.doc, tags: move tags, tag_docs: null, public: value.public }
             )));
         },
-        ErrorSet(value) => {
-            let name = try self.qualify_text(tree, file, value.name);
-            let members = try value.members.clone(self.allocator);
-            errdefer members.deinit();
-            if value.member_docs |docs| {
-                let member_docs = try copy_docs(self.allocator, docs);
-                errdefer member_docs.deinit();
-                return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
-                    ast::ErrorSetDecl { name: name, doc: value.doc, members: move members, member_docs: move member_docs, public: value.public }
-                )));
-            }
-            return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
-                ast::ErrorSetDecl { name: name, doc: value.doc, members: move members, member_docs: null, public: value.public }
-            )));
-        },
+        ErrorSet(value) => return self.qualify_error_set(tree, file, value),
         Union(value) => return self.qualify_union(tree, file, value),
         Contract(value) => return self.qualify_contract(tree, file, value),
         Impl(value) => return self.qualify_impl(tree, file, value),
@@ -257,6 +243,59 @@ fn (self: &var Loader) qualify_struct(
         }
     }
     return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::Struct(move node)));
+}
+
+/// Rewrites an error set declaration: the name is filed under the module and
+/// every combined set reference resolves like a type name (ADR-0127).
+fn (self: &var Loader) qualify_error_set(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    decl: &ast::ErrorSetDecl
+) -> !DeclarationResult {
+    let name = try self.qualify_text(tree, file, decl.name);
+    var members = try decl.members.clone(self.allocator);
+    errdefer members.deinit();
+    var combines = array::new<ast::Text>(self.allocator);
+    errdefer combines.deinit();
+    var index = 0;
+    while decl.combines.at(index) |reference| {
+        index = index + 1;
+        let outcome = try self.resolve_text_base(tree, file, reference.*);
+        match outcome {
+            Name(resolved) => {
+                try combines.append(tree.add_text(move resolved));
+            },
+            Failed(failed) => {
+                members.deinit();
+                combines.deinit();
+                return DeclarationResult::Failed(move failed);
+            },
+        }
+    }
+    if decl.member_docs |docs| {
+        let member_docs = try copy_docs(self.allocator, docs);
+        errdefer member_docs.deinit();
+        return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
+            ast::ErrorSetDecl {
+                name: name,
+                doc: decl.doc,
+                members: move members,
+                member_docs: move member_docs,
+                public: decl.public,
+                combines: move combines
+            }
+        )));
+    }
+    return DeclarationResult::Declaration(tree.add_declaration(ast::DeclarationNode::ErrorSet(
+        ast::ErrorSetDecl {
+            name: name,
+            doc: decl.doc,
+            members: move members,
+            member_docs: null,
+            public: decl.public,
+            combines: move combines
+        }
+    )));
 }
 
 /// Rewrites a union declaration and its payload types.
@@ -803,6 +842,19 @@ fn (self: &var Loader) qualify_match_stmt(
             while source.at(index) |arm| {
                 index = index + 1;
                 var copied = arm.*;
+                // A qualified arm names the error set a member originates
+                // from, so the set reference resolves like any type name.
+                if try self.resolve_match_arm_set(tree, file, arm.tag_set) |set_outcome| {
+                    match set_outcome {
+                        Name(resolved) => {
+                            copied.tag_set = tree.add_text(move resolved);
+                        },
+                        Failed(failed) => {
+                            node.deinit();
+                            return MatchResult::Failed(move failed);
+                        },
+                    }
+                }
                 let outcome = try self.qualify_stmt(tree, file, arm.body);
                 match outcome {
                     Statement(body) => {
@@ -840,8 +892,37 @@ fn (self: &var Loader) qualify_expr(
         Unsafe(value) => return self.qualify_unsafe_expr(tree, file, value),
         Move(value) => return self.qualify_move_expr(tree, file, value),
         OrelseGuard(value) => return self.qualify_orelse_guard_expr(tree, file, value),
+        CatchGuard(value) => return self.qualify_catch_guard_expr(tree, file, value),
         _ => return self.qualify_type_or_control_expr(tree, file, expr),
     }
+}
+
+/// Resolves one retained set-reference spelling like a type name. The text
+/// read stays in this borrow scope so the caller may retain the result.
+fn (self: &var Loader) resolve_text_base(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    reference: ast::Text
+) -> !NameResolution {
+    let retained = tree.texts.at(reference.node);
+    let bytes = retained.as_bytes();
+    return self.resolve_base(file, bytes);
+}
+
+/// Resolves a match arm's error-set qualifier, or reports none for a bare
+/// arm.
+fn (self: &var Loader) resolve_match_arm_set(
+    tree: &ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    tag_set: ast::Text
+) -> !?NameResolution {
+    let retained = tree.texts.at(tag_set.node);
+    if retained.len() == 0 {
+        return null;
+    }
+    let bytes = retained.as_bytes();
+    let outcome = try self.resolve_base(file, bytes);
+    return move outcome;
 }
 
 /// Rewrites the condition and any returned value of an orelse guard.
@@ -872,6 +953,39 @@ fn (self: &var Loader) qualify_orelse_guard_expr(
                 _ => {},
             }
             return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::OrelseGuard(node)));
+        },
+        Failed(failed) => return ExpressionResult::Failed(move failed),
+    }
+}
+
+/// Rewrites the condition and any returned value of a catch guard.
+fn (self: &var Loader) qualify_catch_guard_expr(
+    tree: &var ast::Ast,
+    file: arena::Handle<ModuleFile>,
+    expr: ast::CatchGuardExpr
+) -> !ExpressionResult {
+    var node = expr;
+    let condition_outcome = try self.qualify_expr(tree, file, expr.condition);
+    match condition_outcome {
+        Expression(condition) => {
+            node.condition = condition;
+            match tree.statements.at(expr.exit.node) {
+                Return(value) => {
+                    var exit = value;
+                    if value.value |present| {
+                        let outcome = try self.qualify_expr(tree, file, present);
+                        match outcome {
+                            Expression(qualified) => {
+                                exit.value = qualified;
+                            },
+                            Failed(failed) => return ExpressionResult::Failed(move failed),
+                        }
+                    }
+                    node.exit = tree.add_statement(ast::StatementNode::Return(exit));
+                },
+                _ => {},
+            }
+            return ExpressionResult::Expression(tree.add_expression(ast::ExpressionNode::CatchGuard(node)));
         },
         Failed(failed) => return ExpressionResult::Failed(move failed),
     }

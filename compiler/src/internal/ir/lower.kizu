@@ -602,16 +602,25 @@ fn (self: &var Lowerer) collect_decls(
     std_errors: &project::StdErrorCodes
 ) -> !?diagnostic::Diagnostic {
     var index = 0;
+    var combined = array::new<ast::Declaration>(self.allocator);
+    errdefer combined.deinit();
     while program.declarations.get(index) |declaration| {
         index = index + 1;
         match tree.declarations.at(declaration.node) {
             Struct(declared) => try self.lower_struct(tree, declared),
             Enum(declared) => try self.lower_enum(tree, declared),
-            ErrorSet(declared) => try self.lower_error_set(tree, declared, std_errors),
+            ErrorSet(declared) => {
+                if declared.combines.len() > 0 {
+                    try combined.append(declaration);
+                } else {
+                    try self.lower_error_set(tree, declared, std_errors);
+                }
+            },
             Union(declared) => try self.lower_union(tree, declared),
             _ => {},
         }
     }
+    try self.lower_combined_error_sets(tree, move combined);
     index = 0;
     while self.decls.get(index) |handle| {
         index = index + 1;
@@ -710,7 +719,11 @@ fn (self: &var Lowerer) lower_enum(tree: &ast::Ast, declared: &ast::EnumDecl) ->
     let name = try self.module.names.intern_text(tree, declared.name);
     let retained = name_text(&self.module.names, name);
     let name_bytes = retained.as_bytes();
-    return self.module.enums.insert(name_bytes, Enum { name: name, tags: move tags });
+    return self.module.enums.insert(name_bytes, Enum {
+        name: name,
+        tags: move tags,
+        origins: array::new<Name>(self.allocator)
+    });
 }
 
 /// Converts an AST error set to IR metadata, the Go `lowerErrorSet`. An
@@ -735,7 +748,11 @@ fn (self: &var Lowerer) lower_error_set(
                 try members.insert(member, code);
             }
         }
-        return self.module.error_sets.insert(name_bytes, Enum { name: name, tags: move members });
+        return self.module.error_sets.insert(name_bytes, Enum {
+            name: name,
+            tags: move members,
+            origins: array::new<Name>(self.allocator)
+        });
     }
     if self.next_error_code == 0 {
         self.next_error_code = std_errors.base;
@@ -748,7 +765,123 @@ fn (self: &var Lowerer) lower_error_set(
         try members.insert(member_bytes, self.next_error_code);
         self.next_error_code = self.next_error_code + 1;
     }
-    return self.module.error_sets.insert(name_bytes, Enum { name: name, tags: move members });
+    return self.module.error_sets.insert(name_bytes, Enum {
+        name: name,
+        tags: move members,
+        origins: array::new<Name>(self.allocator)
+    });
+}
+
+/// Records the `error C = A or B;` declarations once every declaring set is
+/// filed, the Go `lowerCombinedErrorSets`. A combined set keeps no codes of
+/// its own: it lists the `{ }`-form sets its members come from, resolved
+/// through any combined sets it names, so its member set is a code-set union
+/// and nothing is renumbered (ADR-0127).
+fn (self: &var Lowerer) lower_combined_error_sets(
+    tree: &ast::Ast,
+    pending: array::Array<ast::Declaration>
+) -> !void {
+    var work = move pending;
+    defer work.deinit();
+    var done = array::new<bool>(self.allocator);
+    defer done.deinit();
+    var index = 0;
+    while index < work.len() {
+        try done.append(false);
+        index = index + 1;
+    }
+    var remaining = work.len();
+    while remaining > 0 {
+        var progress = false;
+        index = 0;
+        while work.get(index) |declaration| {
+            let position = index;
+            index = index + 1;
+            if done.get(position) orelse false {
+                continue;
+            }
+            var resolved = false;
+            try self.lower_combined_error_set(tree, declaration, &var resolved);
+            if resolved {
+                progress = true;
+                remaining = remaining - 1;
+                try done.set(position, true);
+            }
+        }
+        if !progress {
+            // A reference the checker did not already reject cannot appear
+            // here; an unresolved leftover is left unfiled rather than
+            // guessed at.
+            return;
+        }
+    }
+    return;
+}
+
+/// Files one combined error set when every set it names is already filed,
+/// reporting whether it was.
+fn (self: &var Lowerer) lower_combined_error_set(
+    tree: &ast::Ast,
+    declaration: ast::Declaration,
+    resolved: &var bool
+) -> !void {
+    resolved.* = false;
+    var origins = array::new<Name>(self.allocator);
+    errdefer origins.deinit();
+    var seen = map::new<[]u8, bool>(self.allocator);
+    defer seen.deinit();
+    var name = empty_name();
+    match tree.declarations.at(declaration.node) {
+        ErrorSet(declared) => {
+            name = try self.module.names.intern_text(tree, declared.name);
+            var index = 0;
+            while declared.combines.at(index) |reference| {
+                index = index + 1;
+                let reference_text = tree.texts.at(reference.node);
+                let reference_bytes = reference_text.as_bytes();
+                var contributed = array::new<Name>(self.allocator);
+                defer contributed.deinit();
+                if self.module.error_sets.at(reference_bytes) |part| {
+                    if part.origins.len() == 0 {
+                        try contributed.append(try self.module.names.intern(reference_bytes));
+                    } else {
+                        var position = 0;
+                        while part.origins.at(position) |origin| {
+                            position = position + 1;
+                            try contributed.append(origin.*);
+                        }
+                    }
+                } else {
+                    origins.deinit();
+                    return;
+                }
+                var position = 0;
+                while contributed.at(position) |origin| {
+                    position = position + 1;
+                    let origin_text = name_text(&self.module.names, origin.*);
+                    let origin_bytes = origin_text.as_bytes();
+                    if seen.contains(origin_bytes) {
+                        continue;
+                    }
+                    try seen.insert(origin_bytes, true);
+                    try origins.append(origin.*);
+                }
+            }
+        },
+        _ => {
+            origins.deinit();
+            return;
+        },
+    }
+    let retained = name_text(&self.module.names, name);
+    let name_bytes = retained.as_bytes();
+    try self.module.error_sets.insert(name_bytes, Enum {
+        name: name,
+        tags: map::new<[]u8, i64>(self.allocator),
+        origins: move origins
+    });
+    resolved.* = true;
+    return;
 }
 
 /// Converts an AST struct declaration to IR metadata, the Go `lowerStruct`.

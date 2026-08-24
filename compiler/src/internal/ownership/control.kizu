@@ -200,6 +200,19 @@ fn (self: &var Checker) check_if_stmt(
     var right_live = true;
     if statement.alternative |alternative| {
         let right_scope = self.store.child(right);
+        if !text_empty(tree, statement.err_capture) {
+            // `else |err|` binds the failure member: one scalar error code,
+            // a plain copy with no obligations of its own.
+            var err_type = empty_name();
+            if try self.names.error_union_parts(head.cond_type) |parts| {
+                err_type = parts.err;
+            }
+            let err_name = try self.names.intern_text(tree, statement.err_capture);
+            var err_binding = self.store.new_binding(err_name, err_type);
+            errdefer err_binding.deinit();
+            err_binding.decl_span = expression_span(tree, statement.condition);
+            let _ = try self.define(right_scope, move err_binding);
+        }
         if try self.check_block(tree, right_scope, alternative) |failed| {
             return move failed;
         }
@@ -954,7 +967,7 @@ fn (self: &var Checker) check_match_stmt_arms(
                 return try self.error0(ast::zero_span(), "move error: wildcard match arm cannot bind payload");
             }
         } else {
-            if !self.match_tag_known(tree, context.tags, arm.tag) {
+            if !self.match_arm_tag_known(tree, context.tags, arm) {
                 return try self.error2(
                     tree, ast::zero_span(), "move error: unknown match tag `%s::%s`",
                     Arg::Str(context.value_type), Arg::Text(arm.tag)
@@ -1285,6 +1298,24 @@ fn (self: &Checker) match_tags(type_name: Name) -> !?MatchTags {
         return MatchTags { kind: MatchTagKind::Union, type_name: type_name };
     }
     return null;
+}
+
+/// Reports whether a match arm names a known tag, the Go
+/// `matchArmTagKnown`. A qualified arm (`FsError::NotFound =>`) resolves
+/// through the set it names; whether that set fits the matched value is the
+/// types checker's question.
+fn (self: &Checker) match_arm_tag_known(tree: &ast::Ast, tags: MatchTags, arm: &ast::MatchArm) -> bool {
+    if !text_empty(tree, arm.tag_set) {
+        let retained_set = tree.texts.at(arm.tag_set.node);
+        let set_bytes = retained_set.as_bytes();
+        let retained_tag = tree.texts.at(arm.tag.node);
+        let tag_bytes = retained_tag.as_bytes();
+        if self.error_sets.at(set_bytes) |members| {
+            return members.contains(tag_bytes);
+        }
+        return false;
+    }
+    return self.match_tag_known(tree, tags, arm.tag);
 }
 
 /// Reports whether the matched declaration has a tag, the Go `tags[arm.Tag]`.

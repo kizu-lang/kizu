@@ -37,8 +37,29 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
         return move failed;
     }
     var payload = empty_value();
+    var err_payload = empty_value();
     let has_capture = !text_empty(tree, statement.capture);
-    if has_capture {
+    let has_err_capture = !text_empty(tree, statement.err_capture);
+    if has_err_capture {
+        // An error union condition: the branch tests success, the success
+        // payload is bound for the consequence, and `else |err|` binds the
+        // failure member for the alternative (SPEC §11.1).
+        let parts = try self.error_union_parts(cond.type_name) orelse return try self.fail1(
+            tree, "ir error: `else |err|` needs an `E!T` condition, got %s", Arg::Str(cond.type_name)
+        );
+        if is_empty(parts.err) {
+            return try self.fail1(
+                tree, "ir error: `else |err|` needs an `E!T` condition, got %s",
+                Arg::Str(cond.type_name)
+            );
+        }
+        if has_capture {
+            payload = try self.emit1(Op::ErrorValue, parts.success, cond);
+        }
+        err_payload = try self.emit1(Op::ErrorCode, parts.err, cond);
+        cond = try self.emit1(Op::ErrorHas, self.common.bool_type, cond);
+    }
+    if has_capture and !has_err_capture {
         let elem = try self.optional_elem_type(cond.type_name) orelse return try self.fail1(
             tree, "ir error: if capture needs a `?T` condition, got %s", Arg::Str(cond.type_name)
         );
@@ -74,9 +95,25 @@ fn (self: &var Lowerer) lower_if_stmt(tree: &var ast::Ast, statement: ast::IfStm
     let else_body = statement.alternative orelse tree.add_block(ast::BlockStmt {
         statements: array::new<ast::Statement>(self.allocator)
     });
+    var saved_err = ScopedBinding { name: empty_name(), value: empty_value(), bound: false };
+    if has_err_capture {
+        let err_capture = try self.text_name(tree, statement.err_capture);
+        saved_err = self.saved_binding(err_capture);
+        try self.envs.bind(self.env, err_capture, err_payload);
+    }
     var else_result = self.blank_branch();
     if try self.lower_branch_block(tree, else_block, else_body, merge_name, false, &var else_result) |failed| {
+        errdefer failed.deinit();
+        if has_err_capture {
+            try self.restore_loop_var(saved_err);
+        }
         return move failed;
+    }
+    if has_err_capture {
+        // The error capture is scoped to the alternative the same way the
+        // success capture is scoped to the consequence.
+        try self.restore_loop_var(saved_err);
+        try self.restore_branch_var(else_result.env, saved_err);
     }
     self.block = merge_block;
     if !then_result.reachable and !else_result.reachable {
@@ -205,6 +242,91 @@ fn (self: &var Lowerer) lower_orelse_guard_expr(tree: &var ast::Ast, guard: ast:
     }
     self.block = some_block;
     out.* = try self.emit1(Op::OptValue, elem, opt);
+    return null;
+}
+
+/// Lowers `union catch default` as a success branch merged by a phi, the Go
+/// `lowerCatchExpr`, the same shape `orelse` takes over an optional. The
+/// handled failure is not an error return path, so no errdefer cleanups run
+/// here.
+fn (self: &var Lowerer) lower_catch_expr(tree: &var ast::Ast, binary: ast::BinaryExpr, out: &var Value) -> !?diagnostic::Diagnostic {
+    var union_value = empty_value();
+    if try self.lower_expr(tree, binary.left, &var union_value) |failed| {
+        return move failed;
+    }
+    let parts = try self.error_union_parts(union_value.type_name) orelse return try self.fail1(
+        tree, "ir error: catch needs an `E!T` left operand, got %s", Arg::Str(union_value.type_name)
+    );
+    if is_empty(parts.err) {
+        return try self.fail1(
+            tree, "ir error: catch needs an `E!T` left operand, got %s",
+            Arg::Str(union_value.type_name)
+        );
+    }
+    let has = try self.emit1(Op::ErrorHas, self.common.bool_type, union_value);
+    let ok_block = try self.new_block_named("catch.ok");
+    let else_block = try self.new_block_named("catch.else");
+    let merge_block = try self.new_block_named("catch.end");
+    let merge_name = self.module.block_name(merge_block);
+    self.terminate_branch(has, ok_block, else_block);
+    self.block = ok_block;
+    let void_success = self.module.names.is(parts.success, "void");
+    var value = empty_value();
+    if !void_success {
+        value = try self.emit1(Op::ErrorValue, parts.success, union_value);
+    }
+    let ok_end = self.block_label();
+    self.terminate(jump_terminator(merge_name));
+    self.block = else_block;
+    var fallback = empty_value();
+    if try self.lower_contextual_expr(tree, binary.right, parts.success, &var fallback) |failed| {
+        return move failed;
+    }
+    let else_end = self.block_label();
+    if !self.terminated() {
+        self.terminate(jump_terminator(merge_name));
+    }
+    self.block = merge_block;
+    if void_success {
+        out.* = Value { name: empty_name(), type_name: parts.success };
+        return null;
+    }
+    out.* = try self.add_phi2(merge_block, parts.success, ok_end, value, else_end, fallback);
+    return null;
+}
+
+/// Lowers `union catch return/break/continue`, the Go
+/// `lowerCatchGuardExpr`. The failure arm lowers the exit statement and
+/// never rejoins, so only the success arm reaches the code after the guard
+/// and no merge phi is needed.
+fn (self: &var Lowerer) lower_catch_guard_expr(tree: &var ast::Ast, guard: ast::CatchGuardExpr, out: &var Value) -> !?diagnostic::Diagnostic {
+    var union_value = empty_value();
+    if try self.lower_expr(tree, guard.condition, &var union_value) |failed| {
+        return move failed;
+    }
+    let parts = try self.error_union_parts(union_value.type_name) orelse return try self.fail1(
+        tree, "ir error: catch needs an `E!T` left operand, got %s", Arg::Str(union_value.type_name)
+    );
+    if is_empty(parts.err) {
+        return try self.fail1(
+            tree, "ir error: catch needs an `E!T` left operand, got %s",
+            Arg::Str(union_value.type_name)
+        );
+    }
+    let has = try self.emit1(Op::ErrorHas, self.common.bool_type, union_value);
+    let ok_block = try self.new_block_named("catch.ok");
+    let exit_block = try self.new_block_named("catch.exit");
+    self.terminate_branch(has, ok_block, exit_block);
+    self.block = exit_block;
+    if try self.lower_guard_exit(tree, guard.exit) |failed| {
+        return move failed;
+    }
+    self.block = ok_block;
+    if self.module.names.is(parts.success, "void") {
+        out.* = Value { name: empty_name(), type_name: parts.success };
+        return null;
+    }
+    out.* = try self.emit1(Op::ErrorValue, parts.success, union_value);
     return null;
 }
 
