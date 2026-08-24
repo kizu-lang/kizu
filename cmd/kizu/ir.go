@@ -12,7 +12,7 @@ func irCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	module, err := lowerFile(path, opt)
+	module, err := lowerTarget(path, opt)
 	if err != nil {
 		return err
 	}
