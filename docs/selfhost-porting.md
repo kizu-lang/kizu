@@ -323,7 +323,7 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
-| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / --target wasm32-wasi / run / test / cache / import-c-header) | 1023(全 command) | 1529(main 1524 + import 衝突 helper 5) | — | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力と init(生成 2 file、current directory、両 existing-file rejection)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
+| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / --target wasm32-wasi / run / test / cache / import-c-header) | 1023(全 command) | 1715(main 1710 + import 衝突 helper 5) | 1.68 | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力、init(生成 2 file、current directory、両 existing-file rejection)、CLI が引数を拒否する 13 の代表 command line(各 error message と、target を読めない 3 つの理由)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -524,6 +524,31 @@ offset は `collectStrings` が単調増加で配ったものなので、Kizu �
 出すので、この 1 case では Go の 2 通りの出力のうち一方と一致する。Go 側の非決定性なので
 移植では直さず、比較 case にも空 literal を入れていない。
 
+CLI 引数 error の増分(main 1,524 → 1,710 行、+186)の分類。compiler module 累計は
+Go 1,023 行 / Kizu 1,715 行 = 1.68、words 5,730 / 3,299 = 1.74。std gap が最大で 81 行:
+Go は `os.ReadFile` の error が失敗した syscall・path・errno text をそのまま持つのに対し、
+`std::fs::Error` は member しか持たないので、`read_source_file` / `append_read_failure` /
+`open_failure_reason` / `is_directory` / `write_error_line` / `load_read_failure` と
+`SourceRead` union で同じ message を組む。runtime が read 段階の errno を `ReadFailed` に
+畳むため、`read <path>: is a directory` かどうかは `fs::metadata` に聞き直している。
+API shape が約 91 行で、`match read { Failed => ..., Text => ... }` の arm から owner
+payload を move out できないので「読めた続き」を別関数(`parse_source` /
+`validate_fmt_source` / `import_c_header_source` / `format_source` / `load_one_file` /
+`load_manifest_package`)に渡す形にした分の signature と arm。残る 14 行は `parse` /
+`check` の引数個数検査で、Go の `len(args) != 1` に当たる。引数検査そのものは
+`opt_file_command` / `build_command` / `report_unknown_command` の 64 行が、置き換えた
+inline の分岐 67 行とほぼ同じで増分ではない。
+
+移植中に Go 側の取りこぼしを 2 つ直した。`irCommand` だけが `lowerFile` を直に呼んで
+いて、`check` / `build --emit-llvm` / `build --target native` / `run` / `test` が受ける
+package root を `ir` だけ拒否していた(`error: read <dir>: is a directory`)。package と
+file の振り分けを `lowerTarget` 1 本にまとめ、`ir` と `build --emit-llvm` が同じ関数を
+通るようにした。もう 1 つは `parseOptFileArgs` が引数 1 個のときに中身を見ず path 扱い
+していたことで、`kizu ir --opt` が `--opt` という名の file を開こうとしていた。flag だけ
+なら `invalid command arguments` を返す。`TestSelfhostFrontend` の
+`lowerFrontendTarget` は production の `lowerTarget` と同じ分岐を test 側に写したもの
+だったので、CLI が package を受けるようになったのに合わせて削除した。
+
 ## 見つかった gap
 
 移植中に見つかった language / std gap と、その場で使った局所解。module 完了時に判断する。
@@ -585,6 +610,6 @@ offset は `collectStrings` が単調増加で配ったものなので、Kizu �
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
 | `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `fsutil::append_scratch_name`: `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>`。並列プロセス間の distinctness は build 中の key が持ち、同じ key を同じ ms に 2 プロセスが build した場合だけ衝突して負けた側は明示的に失敗する。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
 | `strings` の走査 API が無い(`Fields` / `Split` / `Join` / `Contains` / `HasPrefix` / `Index` / `Count` / `ReplaceAll` / `TrimSpace`)と、`unicode.IsSpace` に当たる述語も無い | cimport は Go 196 行に対し 179 行をこの代替に使う。fmt は `strings.Split` / `ContainsAny` / `TrimSpace`、llvm は `strings.Contains` 系を、それぞれ module 内に別々に持っている | module 内に局所実装。空白判定は `space_width` が White_Space の 25 scalar を byte 幅で読む(UTF-8 の continuation byte は lead byte になれないので byte 走査で誤検出しない) |
-| file を読めなかったときの CLI message が Go と違う | selfhost の全 command が `fs::read_file` の error をそのまま返すため `runtime error: std::fs::Error::NotFound` になる。Go は `error: open <path>: no such file or directory`。exit status はどちらも 1。`build --target wasm32-wasi <directory>` は Go の `emitWASMFile` が package 判定をせず 1 file を読むので同じ gap の `ReadFailed` 版になり、Go の `error: read <path>: is a directory` と違う | 局所解を置いていない。`std::fs` の error が path を運べないので command 側では直せず、cutover 前に std の判断として決める |
+| `std::fs` の error は失敗した path も read 段階の errno も運ばない | CLI の全 command が target を読む。Go は `open <path>: no such file or directory` / `read <path>: is a directory` を出す | std は変えずに CLI 側で解いた。path は caller が持っているので `read_source_file` が `fs::Error` を捕まえて message を組む。runtime が read 段階の errno を `ReadFailed` に畳むので、directory かどうかは `fs::metadata` に聞き直す |
 | `strconv.Unquote` / `strconv.Atoi` に当たる std API が無い | wasm は quoted IR literal を読むのに llvm と同じ `append_unquoted` を、`strconv.Atoi` の受理条件(符号 + 数字 1 つ以上 + int64 に収まる)を `is_decimal` を、module 内にそれぞれ持つ | module 内に局所実装。llvm / fmt / cimport が持つ同種の helper と一緒に module 完了時に判断する |
 | `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | `compiler::internal::timestamp`(別記録): 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |

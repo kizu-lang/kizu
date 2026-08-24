@@ -73,6 +73,7 @@ func TestSelfhostFrontend(t *testing.T) {
 		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
 	})
 	runSelfhostWASMCases(t, selfhost)
+	runSelfhostArgumentCases(t, selfhost)
 	for _, header := range cimportRepresentativeHeaders() {
 		t.Run("import-c-header/"+header.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), header.name+".h")
@@ -185,8 +186,14 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
 	}
-	for _, arguments := range wasmRepresentativeArguments() {
-		t.Run("wasm-arguments/"+arguments.name, func(t *testing.T) {
+}
+
+// runSelfhostArgumentCases compares one command line per distinct argument
+// error the CLI reports, and per distinct failure of reading the target.
+func runSelfhostArgumentCases(t *testing.T, selfhost string) {
+	t.Helper()
+	for _, arguments := range cliRepresentativeArguments() {
+		t.Run("arguments/"+arguments.name, func(t *testing.T) {
 			compareSelfhostCLI(t, selfhost, arguments.args...)
 		})
 	}
@@ -326,20 +333,33 @@ fn main() {
 	}
 }
 
-// wasmArguments is one command line the wasm target rejects.
-type wasmArguments struct {
+// cliArguments is one command line and the name its subtest runs under.
+type cliArguments struct {
 	name string
 	args []string
 }
 
-// wasmRepresentativeArguments is one command line per distinct argument error
-// the wasm target reports: no file, more than one file, and a target name the
-// build does not have.
-func wasmRepresentativeArguments() []wasmArguments {
-	return []wasmArguments{
-		{"missing_file", []string{"build", "--target", "wasm32-wasi"}},
-		{"extra_file", []string{"build", "--target", "wasm32-wasi", "a.kizu", "b.kizu"}},
-		{"unknown_target", []string{"build", "--target", "wasm64"}},
+// cliRepresentativeArguments is one command line per distinct message the CLI
+// prints for a command line it will not run, and per distinct reason reading
+// the target can fail. The file the good cases name is the hello example, so a
+// failure here is the argument handling and not the program.
+func cliRepresentativeArguments() []cliArguments {
+	file := "../../examples/hello.kizu"
+	pkg := "../../tests/behavior"
+	return []cliArguments{
+		{"unknown_command", []string{"frobnicate", file}},
+		{"parse_extra_target", []string{"parse", file, "EXTRA"}},
+		{"check_extra_target", []string{"check", file, "EXTRA"}},
+		{"ir_lone_opt", []string{"ir", "--opt"}},
+		{"ir_extra_target", []string{"ir", file, "EXTRA"}},
+		{"build_unknown_subcommand", []string{"build", "junk"}},
+		{"build_missing_subcommand", []string{"build", "--target"}},
+		{"build_unknown_target", []string{"build", "--target", "wasm64"}},
+		{"wasm_missing_file", []string{"build", "--target", "wasm32-wasi"}},
+		{"wasm_extra_file", []string{"build", "--target", "wasm32-wasi", "a.kizu", "b.kizu"}},
+		{"target_not_found", []string{"parse", "../../examples/missing.kizu"}},
+		{"target_is_directory", []string{"parse", pkg}},
+		{"target_under_file", []string{"parse", file + "/inner.kizu"}},
 	}
 }
 
@@ -603,7 +623,7 @@ func goCheckOutput(target string) cliOutput {
 // lowered module, optimized when opt is set. A package lowers the way build
 // lowers it, with the package main exposed as the entrypoint.
 func goIrOutput(target string, opt bool) cliOutput {
-	module, err := lowerFrontendTarget(target, opt)
+	module, err := lowerTarget(target, opt)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
@@ -614,7 +634,7 @@ func goIrOutput(target string, opt bool) cliOutput {
 // target: the LLVM IR emitted from the lowered module, optimized when opt is
 // set.
 func goEmitLLVMOutput(target string, opt bool) cliOutput {
-	module, err := lowerFrontendTarget(target, opt)
+	module, err := lowerTarget(target, opt)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
@@ -623,15 +643,6 @@ func goEmitLLVMOutput(target string, opt bool) cliOutput {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: text + "\n"}
-}
-
-// lowerFrontendTarget lowers a file the way the ir command does, or a package
-// the way build does.
-func lowerFrontendTarget(target string, opt bool) (*ir.Module, error) {
-	if isPackageRoot(target) {
-		return lowerPackage(target, opt)
-	}
-	return lowerFile(target, opt)
 }
 
 // loadFrontendTarget loads a file or a package the way the check command does.

@@ -76,10 +76,20 @@ fn main() -> !process::ExitStatus {
     let target = try process::arg(next + 1);
     let lib_dir_bytes = lib_dir.as_bytes();
     if mem::equal_bytes(command, "parse") {
+        if count - next != 2 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: parse takes one target");
+            return process::ExitStatus::Specific(1);
+        }
         let code = try parse_file(io, allocator, target);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "check") {
+        if count - next != 2 {
+            try usage(io);
+            try io::write_stderr_line(io, "error: check takes one target");
+            return process::ExitStatus::Specific(1);
+        }
         let code = try check_target(io, allocator, lib_dir_bytes, target);
         return exit_of(code);
     }
@@ -94,16 +104,7 @@ fn main() -> !process::ExitStatus {
         return exit_of(code);
     }
     if mem::equal_bytes(command, "ir") {
-        if mem::equal_bytes(target, "--opt") {
-            if count - next < 3 {
-                try usage(io);
-                return process::ExitStatus::Specific(1);
-            }
-            let opt_target = try process::arg(next + 2);
-            let code = try ir_target(io, allocator, lib_dir_bytes, opt_target, true, Output::Ir);
-            return exit_of(code);
-        }
-        let code = try ir_target(io, allocator, lib_dir_bytes, target, false, Output::Ir);
+        let code = try opt_file_command(io, allocator, lib_dir_bytes, next + 1, count, Output::Ir);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "run") {
@@ -122,49 +123,129 @@ fn main() -> !process::ExitStatus {
         let code = try import_c_header_command(io, allocator, target);
         return exit_of(code);
     }
-    if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--target") {
-        if count - next < 3 {
-            try usage(io);
-            return process::ExitStatus::Specific(1);
-        }
-        let target_kind = try process::arg(next + 2);
-        if mem::equal_bytes(target_kind, "wasm32-wasi") {
-            let code = try build_wasm_command(io, allocator, lib_dir_bytes, next + 3, count);
-            return exit_of(code);
-        }
-        if !mem::equal_bytes(target_kind, "native") {
-            try usage(io);
-            var message = try string::from_bytes(allocator, "error: invalid build target `");
-            defer message.deinit();
-            try message.append_bytes(target_kind);
-            try message.append_bytes("`");
-            let message_bytes = message.as_bytes();
-            try io::write_stderr_line(io, message_bytes);
-            return process::ExitStatus::Specific(1);
-        }
-        let code = try build_native_command(io, allocator, lib_dir_bytes, next + 3, count);
-        return exit_of(code);
-    }
-    if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--emit-llvm") {
-        if count - next < 3 {
-            try usage(io);
-            return process::ExitStatus::Specific(1);
-        }
-        let third = try process::arg(next + 2);
-        if mem::equal_bytes(third, "--opt") {
-            if count - next < 4 {
-                try usage(io);
-                return process::ExitStatus::Specific(1);
-            }
-            let opt_target = try process::arg(next + 3);
-            let code = try ir_target(io, allocator, lib_dir_bytes, opt_target, true, Output::Llvm);
-            return exit_of(code);
-        }
-        let code = try ir_target(io, allocator, lib_dir_bytes, third, false, Output::Llvm);
+    if mem::equal_bytes(command, "build") {
+        let code = try build_command(io, allocator, lib_dir_bytes, next, count);
         return exit_of(code);
     }
     try usage(io);
+    try report_unknown_command(io, allocator, command);
     return process::ExitStatus::Specific(1);
+}
+
+/// Writes the line the Go `dispatch` default arm returns for a command this
+/// binary does not have.
+fn report_unknown_command(io: Io, allocator: Allocator, command: []u8) -> !void {
+    var message = try string::from_bytes(allocator, "error: unknown command `");
+    defer message.deinit();
+    try message.append_bytes(command);
+    try message.append_bytes("`");
+    let message_bytes = message.as_bytes();
+    return io::write_stderr_line(io, message_bytes);
+}
+
+/// Is one source file read, or the message the CLI prints for its failure.
+union SourceRead {
+    Text(string::String),
+    Failed(string::String),
+}
+
+/// Reads one file, naming a failure the way the Go CLI names the `os.ReadFile`
+/// error it stops at. The path is the caller's, so the error itself does not
+/// have to carry it.
+fn read_source_file(io: Io, allocator: Allocator, path: []u8) -> !SourceRead {
+    if fs::read_file(io, allocator, path, mem::Limit::Unlimited) |text| {
+        return SourceRead::Text(move text);
+    } else |failed| {
+        var message = string::new(allocator);
+        errdefer message.deinit();
+        try append_read_failure(io, &var message, path, failed);
+        return SourceRead::Failed(move message);
+    }
+}
+
+/// Appends the message one read failure prints: the syscall that failed, the
+/// path, and the reason. Go's `os.ReadFile` opens and then reads, so `open`
+/// names a failure to open and `read` one to read. The runtime folds every
+/// read-stage errno into ReadFailed, so a directory is recognized by asking
+/// the file system rather than by the error alone.
+fn append_read_failure(
+    io: Io,
+    out: &var string::String,
+    path: []u8,
+    failed: fs::Error
+) -> !void {
+    if read_stage_failure(failed) {
+        try out.append_bytes("read ");
+        try out.append_bytes(path);
+        if is_directory(io, path) {
+            return out.append_bytes(": is a directory");
+        }
+        return out.append_bytes(": input/output error");
+    }
+    try out.append_bytes("open ");
+    try out.append_bytes(path);
+    try out.append_bytes(": ");
+    let reason = open_failure_reason(failed);
+    return out.append_bytes(reason);
+}
+
+/// Reports the failure the runtime raises once the file is already open.
+fn read_stage_failure(failed: fs::Error) -> bool {
+    return match failed {
+        ReadFailed => true,
+        _ => false,
+    };
+}
+
+/// Returns the reason text the C library gives one open failure, the text the
+/// Go error carries from errno.
+fn open_failure_reason(failed: fs::Error) -> []u8 {
+    return match failed {
+        NotFound => "no such file or directory",
+        PermissionDenied => "permission denied",
+        IsDirectory => "is a directory",
+        NotDirectory => "not a directory",
+        AlreadyExists => "file exists",
+        DirectoryNotEmpty => "directory not empty",
+        NoSpaceLeft => "no space left on device",
+        TooManyOpenFiles => "too many open files",
+        InvalidPath => "invalid argument",
+        OutOfMemory => "cannot allocate memory",
+        LimitExceeded => "file too large",
+        _ => "input/output error",
+    };
+}
+
+/// Reports whether a path names a directory, answering without a failure of
+/// its own: a path the file system cannot describe is not one.
+fn is_directory(io: Io, path: []u8) -> bool {
+    let found = fs::exists(io, path) catch false;
+    if !found {
+        return false;
+    }
+    let info = fs::metadata(io, path) catch return false;
+    return info.is_dir;
+}
+
+/// Writes one top-level failure line, the Go `printError` prefix.
+fn write_error_line(io: Io, allocator: Allocator, message: []u8) -> !void {
+    var line = try string::from_bytes(allocator, "error: ");
+    defer line.deinit();
+    try line.append_bytes(message);
+    let bytes = line.as_bytes();
+    return io::write_stderr_line(io, bytes);
+}
+
+/// Turns one read failure message into the diagnostic a load reports.
+fn load_read_failure(allocator: Allocator, message: &string::String) -> !project::LoadResult {
+    let bytes = message.as_bytes();
+    let failed = try diagnostic::from_text(
+        allocator,
+        diagnostic::Severity::Error,
+        ast::zero_span(),
+        bytes
+    );
+    return project::LoadResult::Error(move failed);
 }
 
 /// Maps one command exit code to the ExitStatus main returns.
@@ -183,22 +264,66 @@ enum Output {
     Wasm,
 }
 
-/// Runs `build --target wasm32-wasi [--opt] <file>`, the Go `emitTargetFile`
-/// over `parseOptFileArgs`: one source file, optionally preceded by `--opt`.
-fn build_wasm_command(io: Io, allocator: Allocator, lib_dir: []u8, start: i64, count: i64) -> !i64 {
+/// Runs one `[--opt] <target>` command, the Go `parseOptFileArgs` and the
+/// command it feeds: `ir`, `build --emit-llvm` and `build --target wasm32-wasi`
+/// take the same shape. A lone `--opt` names the flag, not a file.
+fn opt_file_command(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    start: i64,
+    count: i64,
+    output: Output
+) -> !i64 {
     if count - start == 1 {
-        let target = try process::arg(start);
-        return ir_target(io, allocator, lib_dir, target, false, Output::Wasm);
+        let only = try process::arg(start);
+        if !mem::equal_bytes(only, "--opt") {
+            return ir_target(io, allocator, lib_dir, only, false, output);
+        }
     }
     if count - start == 2 {
         let flag = try process::arg(start);
         if mem::equal_bytes(flag, "--opt") {
             let target = try process::arg(start + 1);
-            return ir_target(io, allocator, lib_dir, target, true, Output::Wasm);
+            return ir_target(io, allocator, lib_dir, target, true, output);
         }
     }
     try usage(io);
     try io::write_stderr_line(io, "error: invalid command arguments");
+    return 1;
+}
+
+/// Runs `build <--emit-llvm|--target> ...`, the Go `buildFile` over
+/// `emitTargetFile`: anything else names no build this binary has.
+fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: i64) -> !i64 {
+    if count - next < 3 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid build command");
+        return 1;
+    }
+    let kind = try process::arg(next + 1);
+    if mem::equal_bytes(kind, "--emit-llvm") {
+        return opt_file_command(io, allocator, lib_dir, next + 2, count, Output::Llvm);
+    }
+    if !mem::equal_bytes(kind, "--target") {
+        try usage(io);
+        try io::write_stderr_line(io, "error: invalid build command");
+        return 1;
+    }
+    let target_kind = try process::arg(next + 2);
+    if mem::equal_bytes(target_kind, "wasm32-wasi") {
+        return opt_file_command(io, allocator, lib_dir, next + 3, count, Output::Wasm);
+    }
+    if mem::equal_bytes(target_kind, "native") {
+        return build_native_command(io, allocator, lib_dir, next + 3, count);
+    }
+    try usage(io);
+    var message = try string::from_bytes(allocator, "error: invalid build target `");
+    defer message.deinit();
+    try message.append_bytes(target_kind);
+    try message.append_bytes("`");
+    let message_bytes = message.as_bytes();
+    try io::write_stderr_line(io, message_bytes);
     return 1;
 }
 
@@ -273,12 +398,21 @@ fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !v
 /// Prints the Kizu extern declarations a C header maps to, the Go
 /// `importCHeaderFile`.
 fn import_c_header_command(io: Io, allocator: Allocator, target: []u8) -> !i64 {
-    let source_text = try fs::read_file(
-        io,
-        allocator,
-        target,
-        mem::Limit::Unlimited
-    );
+    let read = try read_source_file(io, allocator, target);
+    match read {
+        Failed(message) => {
+            defer message.deinit();
+            let bytes = message.as_bytes();
+            try write_error_line(io, allocator, bytes);
+            return 1;
+        },
+        Text(source_text) => return import_c_header_source(io, allocator, move source_text),
+    }
+}
+
+/// Prints the declarations one read C header maps to, the rest of the Go
+/// `importCHeaderFile` once the header is in hand.
+fn import_c_header_source(io: Io, allocator: Allocator, source_text: string::String) -> !i64 {
     defer source_text.deinit();
     let source_bytes = source_text.as_bytes();
     let imported = try cimport::import_header(allocator, source_bytes);
@@ -361,12 +495,31 @@ fn fmt_command(
         );
         return 1;
     }
-    var source_text = try fs::read_file(
-        io,
-        allocator,
-        file,
-        mem::Limit::Unlimited
-    );
+    let read = try read_source_file(io, allocator, file);
+    match read {
+        Failed(message) => {
+            defer message.deinit();
+            let bytes = message.as_bytes();
+            try write_error_line(io, allocator, bytes);
+            return 1;
+        },
+        Text(source_text) => {
+            return format_source(io, allocator, lib_dir, file, write, move source_text);
+        },
+    }
+}
+
+/// Formats one read source file, the rest of the Go `fmtCommand` once the file
+/// is in hand.
+fn format_source(
+    io: Io,
+    allocator: Allocator,
+    lib_dir: []u8,
+    file: []u8,
+    write: bool,
+    text: string::String
+) -> !i64 {
+    var source_text = move text;
     defer source_text.deinit();
     if !try validate_fmt_parse(io, allocator, file) {
         return 1;
@@ -410,7 +563,26 @@ fn starts_with_dash(argument: []u8) -> bool {
 /// Validates syntax before token formatting, the parse-first part of the Go
 /// `fmtCommand`.
 fn validate_fmt_parse(io: Io, allocator: Allocator, file: []u8) -> !bool {
-    let text = try fs::read_file(io, allocator, file, mem::Limit::Unlimited);
+    let read = try read_source_file(io, allocator, file);
+    match read {
+        Failed(message) => {
+            defer message.deinit();
+            let bytes = message.as_bytes();
+            try write_error_line(io, allocator, bytes);
+            return false;
+        },
+        Text(text) => return validate_fmt_source(io, allocator, file, move text),
+    }
+}
+
+/// Parses one read source file for `fmt`, the rest of `validate_fmt_parse`
+/// once the file is in hand.
+fn validate_fmt_source(
+    io: Io,
+    allocator: Allocator,
+    file: []u8,
+    text: string::String
+) -> !bool {
     errdefer text.deinit();
     var sources = source::new(allocator);
     defer sources.deinit();
@@ -893,7 +1065,21 @@ fn report(
 
 /// Parses a source file and prints its AST summary.
 fn parse_file(io: Io, allocator: Allocator, file: []u8) -> !i64 {
-    let text = try fs::read_file(io, allocator, file, mem::Limit::Unlimited);
+    let read = try read_source_file(io, allocator, file);
+    match read {
+        Failed(message) => {
+            defer message.deinit();
+            let bytes = message.as_bytes();
+            try write_error_line(io, allocator, bytes);
+            return 1;
+        },
+        Text(text) => return parse_source(io, allocator, file, move text),
+    }
+}
+
+/// Parses one read source file and prints its AST summary, the rest of the Go
+/// `parseFile` once the file is in hand.
+fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) -> !i64 {
     errdefer text.deinit();
     var sources = source::new(allocator);
     defer sources.deinit();
@@ -1117,6 +1303,29 @@ fn is_package_root(io: Io, target: []u8) -> !bool {
     return mem::equal_bytes(path::basename(target), "kizu.toml");
 }
 
+/// Loads one loose source file together with the std it imports, reporting a
+/// read failure as the diagnostic the load path carries.
+fn load_one_file(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    target: []u8
+) -> !project::LoadResult {
+    let read = try read_source_file(io, allocator, target);
+    match read {
+        Failed(message) => {
+            defer message.deinit();
+            return load_read_failure(allocator, &message);
+        },
+        Text(text) => {
+            defer text.deinit();
+            let text_bytes = text.as_bytes();
+            return loader.load_source(tree, target, text_bytes);
+        },
+    }
+}
+
 /// Loads the target the way the requested output loads it: the wasm backend
 /// takes one source file, the Go `emitWASMFile` over `lowerFile`, where `ir`
 /// and `build --emit-llvm` take a package root as well.
@@ -1130,10 +1339,7 @@ fn load_for_output(
     output: Output
 ) -> !project::LoadResult {
     if output == Output::Wasm {
-        let text = try fs::read_file(io, allocator, target, mem::Limit::Unlimited);
-        defer text.deinit();
-        let text_bytes = text.as_bytes();
-        return loader.load_source(tree, target, text_bytes);
+        return load_one_file(io, allocator, loader, tree, target);
     }
     return load_target(io, allocator, loader, tree, target, package_name, false);
 }
@@ -1151,10 +1357,7 @@ fn load_target(
 ) -> !project::LoadResult {
     let package = try is_package_root(io, target);
     if !package {
-        let text = try fs::read_file(io, allocator, target, mem::Limit::Unlimited);
-        defer text.deinit();
-        let text_bytes = text.as_bytes();
-        return loader.load_source(tree, target, text_bytes);
+        return load_one_file(io, allocator, loader, tree, target);
     }
     var root = try string::from_bytes(allocator, target);
     defer root.deinit();
@@ -1167,8 +1370,40 @@ fn load_target(
         try manifest_path.append_bytes(target);
     }
     let manifest_bytes = manifest_path.as_bytes();
-    let text = try fs::read_file(io, allocator, manifest_bytes, mem::Limit::Unlimited);
-    defer text.deinit();
+    let manifest_read = try read_source_file(io, allocator, manifest_bytes);
+    match manifest_read {
+        Failed(message) => {
+            defer message.deinit();
+            return load_read_failure(allocator, &message);
+        },
+        Text(text) => {
+            defer text.deinit();
+            return load_manifest_package(
+                io,
+                allocator,
+                loader,
+                tree,
+                &root,
+                package_name,
+                include_tests,
+                &text
+            );
+        },
+    }
+}
+
+/// Resolves and loads the package one manifest text declares, the rest of the
+/// Go `loadPackageProgramMode` once the manifest is in hand.
+fn load_manifest_package(
+    io: Io,
+    allocator: Allocator,
+    loader: &var project::Loader,
+    tree: &var ast::Ast,
+    root: &string::String,
+    package_name: &var string::String,
+    include_tests: bool,
+    text: &string::String
+) -> !project::LoadResult {
     let text_bytes = text.as_bytes();
     let parsed = try manifest::parse_manifest(allocator, text_bytes);
     match parsed {

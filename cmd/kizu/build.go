@@ -58,17 +58,22 @@ func buildFile(args []string) error {
 	}
 }
 
+// lowerTarget lowers a package root the way build lowers it and any other
+// target as one file. Every command that shows or links a lowered module goes
+// through here, so `ir` and `build` are asked the same question about the same
+// program instead of one of them refusing a directory.
+func lowerTarget(path string, opt bool) (*ir.Module, error) {
+	if isPackageRoot(path) {
+		return lowerPackage(path, opt)
+	}
+	return lowerFile(path, opt)
+}
+
 // emitLLVMFile lowers a checked source file or package to LLVM IR text.
 // The text is emitted fresh every time: a text cache keyed by the source
 // would have to key on the compiler itself to stay honest (ADR-0126).
 func emitLLVMFile(path string, opt bool) error {
-	var module *ir.Module
-	var err error
-	if isPackageRoot(path) {
-		module, err = lowerPackage(path, opt)
-	} else {
-		module, err = lowerFile(path, opt)
-	}
+	module, err := lowerTarget(path, opt)
 	if err != nil {
 		return err
 	}
@@ -154,8 +159,10 @@ func emitNativeFile(args []string) error {
 }
 
 // parseOptFileArgs parses an optional --opt flag followed by one file path.
+// A lone `--opt` names the flag, not a file, so it is an argument error rather
+// than a path the command tries to open.
 func parseOptFileArgs(args []string) (string, bool, error) {
-	if len(args) == 1 {
+	if len(args) == 1 && args[0] != "--opt" {
 		return args[0], false, nil
 	}
 	if len(args) == 2 && args[0] == "--opt" {
