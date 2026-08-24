@@ -270,6 +270,11 @@ func (c *Cache) entries() ([]Entry, error) {
 	for _, item := range items {
 		data, err := os.ReadFile(item)
 		if err != nil {
+			// A concurrent process may evict an entry between the glob and
+			// the read. Work that is gone is a miss, not a failure.
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, err
 		}
 		var entry Entry
