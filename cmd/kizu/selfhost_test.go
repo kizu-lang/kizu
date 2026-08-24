@@ -20,6 +20,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/types"
+	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
 // TestSelfhostFrontend checks the user-facing compiler boundaries not expressed
@@ -44,6 +45,12 @@ func TestSelfhostFrontend(t *testing.T) {
 		{"ir-opt-package", goIrOutput(pkg, true), []string{"ir", "--opt", pkg}},
 		{"llvm-package", goEmitLLVMOutput(pkg, false), []string{"build", "--emit-llvm", pkg}},
 		{"llvm-opt-package", goEmitLLVMOutput(pkg, true), []string{"build", "--emit-llvm", "--opt", pkg}},
+		{"wasm-file", goWASMOutput(file, false),
+			[]string{"build", "--target", "wasm32-wasi", file}},
+		// The wasm target lowers one source file whatever the path names, so a
+		// package manifest reaches it as Kizu source and fails to parse.
+		{"wasm-package-manifest", goWASMOutput(pkg+"/kizu.toml", false),
+			[]string{"build", "--target", "wasm32-wasi", pkg + "/kizu.toml"}},
 	}
 	for _, command := range commands {
 		t.Run(command.name, func(t *testing.T) {
@@ -65,6 +72,7 @@ func TestSelfhostFrontend(t *testing.T) {
 	t.Run("fmt-w", func(t *testing.T) {
 		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
 	})
+	runSelfhostWASMCases(t, selfhost)
 	for _, header := range cimportRepresentativeHeaders() {
 		t.Run("import-c-header/"+header.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), header.name+".h")
@@ -153,6 +161,201 @@ func goFmtOutput(file string) nativeCLIResult {
 		return failedCLIResult(err)
 	}
 	return nativeCLIResult{output: cliOutput{stdout: kizufmt.Format(marked)}}
+}
+
+// runSelfhostWASMCases compares the wasm target on one program per backend
+// behavior and on each distinct argument error it reports.
+func runSelfhostWASMCases(t *testing.T, selfhost string) {
+	t.Helper()
+	// A loop in a called function repeats the block names of the caller's loop,
+	// so this crosses phi copies that have to stay inside one function.
+	loops := "../../examples/loop_in_called_function.kizu"
+	t.Run("wasm/cross_function_loops", func(t *testing.T) {
+		compareSelfhostArgs(t, selfhost, goWASMOutput(loops, false),
+			"build", "--target", "wasm32-wasi", loops)
+	})
+	for _, fixture := range wasmRepresentativeFixtures() {
+		t.Run("wasm/"+fixture.name, func(t *testing.T) {
+			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
+			args := []string{"build", "--target", "wasm32-wasi"}
+			if fixture.opt {
+				args = append(args, "--opt")
+			}
+			args = append(args, path)
+			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
+		})
+	}
+	for _, arguments := range wasmRepresentativeArguments() {
+		t.Run("wasm-arguments/"+arguments.name, func(t *testing.T) {
+			compareSelfhostCLI(t, selfhost, arguments.args...)
+		})
+	}
+}
+
+// goWASMOutput renders what `kizu build --target wasm32-wasi` prints for one
+// source file: the WASI WebAssembly text emitted from the lowered module,
+// optimized when opt is set. The command lowers one file whether or not the
+// path names a package root, so the comparison lowers it the same way.
+func goWASMOutput(file string, opt bool) cliOutput {
+	module, err := lowerFile(file, opt)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	text, err := wasm.Emit(module)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	return cliOutput{stdout: text + "\n"}
+}
+
+// wasmFixture is one program the wasm backend is compared on.
+type wasmFixture struct {
+	name   string
+	source string
+	opt    bool
+}
+
+// wasmRepresentativeFixtures is one program per wasm backend behavior: what it
+// emits, then each rejection message the target subset draws.
+func wasmRepresentativeFixtures() []wasmFixture {
+	return append(wasmEmitFixtures(), wasmRejectionFixtures()...)
+}
+
+// wasmEmitFixtures is one program per emitted shape: calls with i64 parameters
+// and a return, the phi copies and dispatch arms of a loop with a bool print,
+// what the optimizer folds away, and the bytes a data segment escapes. The
+// plain data segment and string print are the hello file the command table
+// already crosses.
+func wasmEmitFixtures() []wasmFixture {
+	return []wasmFixture{
+		{name: "functions", source: `fn add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn main() {
+    print(add(1, 2));
+}
+`},
+		{name: "control_flow", source: `fn main() {
+    var i = 0;
+    while i < 3 {
+        print(i);
+        i = i + 1;
+    }
+    print(true);
+}
+`},
+		{name: "opt", opt: true, source: `fn unused(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn main() {
+    let a = 2 + 3;
+    if a > 4 {
+        print(a);
+    } else {
+        print(0);
+    }
+}
+`},
+		// A Kizu literal carries the bytes between the quotes verbatim, so the
+		// tab, the backslash and the two multi-byte characters below reach the
+		// data segment as themselves, and the multi-line literal joins with a
+		// newline. Together they cross every escape the WAT writer draws.
+		{name: "data_escapes", source: "fn main() {\n" +
+			"    print(\"tab\there\");\n" +
+			"    print(\"back\\slash and tilde ~\");\n" +
+			"    print(\"héllo ✓\");\n" +
+			"    print(\n" +
+			"        \\\\first line\n" +
+			"        \\\\second line\n" +
+			"    );\n" +
+			"}\n"},
+	}
+}
+
+// wasmRejectionFixtures is one program per rejection message the backend
+// reports: an aggregate and an arena-free container instruction outside the
+// target subset, a constant and a print of a type it does not lower, and a
+// block that ends unreachable.
+func wasmRejectionFixtures() []wasmFixture {
+	return []wasmFixture{
+		{name: "reject_aggregate", source: `struct Point {
+    x: i64,
+}
+
+fn main() {
+    let p = Point { x: 1 };
+    print(p.x);
+}
+`},
+		{name: "reject_instruction", source: `import std;
+
+fn main() {
+    let s = "abcd";
+    print(std::mem::len(s));
+}
+`},
+		{name: "reject_const_type", source: `enum Color {
+    Red,
+    Blue,
+}
+
+fn main() {
+    let c = Color::Red;
+    print(c);
+}
+`},
+		{name: "reject_print_type", source: `fn main() {
+    let x = cast<u32>(5);
+    print(x);
+}
+`},
+		{name: "reject_terminator", source: `fn pick(x: i64) -> i64 {
+    if x > 0 {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn main() {
+    print(pick(1));
+}
+`},
+	}
+}
+
+// wasmArguments is one command line the wasm target rejects.
+type wasmArguments struct {
+	name string
+	args []string
+}
+
+// wasmRepresentativeArguments is one command line per distinct argument error
+// the wasm target reports: no file, more than one file, and a target name the
+// build does not have.
+func wasmRepresentativeArguments() []wasmArguments {
+	return []wasmArguments{
+		{"missing_file", []string{"build", "--target", "wasm32-wasi"}},
+		{"extra_file", []string{"build", "--target", "wasm32-wasi", "a.kizu", "b.kizu"}},
+		{"unknown_target", []string{"build", "--target", "wasm64"}},
+	}
+}
+
+// compareSelfhostCLI runs one command line through both compilers and compares
+// what each printed and the exact status it exited with. The usage lines an
+// argument error prints belong to the CLI, not to a package the test can call.
+func compareSelfhostCLI(t *testing.T, selfhost string, args ...string) {
+	t.Helper()
+	want := runNativeCLI(t, kizuBinaryPath, args...)
+	got := runNativeCLI(t, selfhost, args...)
+	if got != want {
+		t.Errorf("selfhost %s differs\n--- want (code=%d)\nstdout:\n%sstderr:\n%s"+
+			"--- got (code=%d)\nstdout:\n%sstderr:\n%s",
+			strings.Join(args, " "), want.code, want.output.stdout, want.output.stderr,
+			got.code, got.output.stdout, got.output.stderr)
+	}
 }
 
 // goImportCHeaderOutput renders the shipping import-c-header path without
