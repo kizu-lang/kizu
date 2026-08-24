@@ -74,6 +74,9 @@ func TestSelfhostFrontend(t *testing.T) {
 	})
 	runSelfhostWASMCases(t, selfhost)
 	runSelfhostArgumentCases(t, selfhost)
+	t.Run("version", func(t *testing.T) {
+		compareSelfhostVersion(t, selfhost)
+	})
 	for _, header := range cimportRepresentativeHeaders() {
 		t.Run("import-c-header/"+header.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), header.name+".h")
@@ -186,6 +189,32 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
 	}
+}
+
+// compareSelfhostVersion checks the selfhost binary names itself the way the
+// Go one does. The line carries the revision each was built from, so it is
+// compared byte for byte only when this run linked the selfhost compiler:
+// a binary restored from the CI cache truthfully names an older revision.
+func compareSelfhostVersion(t *testing.T, selfhost string) {
+	t.Helper()
+	for _, arg := range []string{"version", "--version"} {
+		got := runNativeCLI(t, selfhost, arg)
+		if got.code != 0 || got.output.stderr != "" {
+			t.Fatalf("selfhost %s failed (code=%d)\nstderr:\n%s", arg, got.code, got.output.stderr)
+		}
+		if !strings.HasPrefix(got.output.stdout, "kizu ") {
+			t.Errorf("selfhost %s output %q does not name the binary", arg, got.output.stdout)
+		}
+		if selfhostBuiltHere {
+			want := runNativeCLI(t, kizuBinaryPath, arg)
+			if got != want {
+				t.Errorf("selfhost %s differs\n--- want\n%s--- got\n%s",
+					arg, want.output.stdout, got.output.stdout)
+			}
+		}
+	}
+	// The refusal does not depend on what either binary was built from.
+	compareSelfhostCLI(t, selfhost, "version", "EXTRA")
 }
 
 // runSelfhostArgumentCases compares one command line per distinct argument
