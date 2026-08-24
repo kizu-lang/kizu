@@ -98,8 +98,9 @@ func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 // writeArraySwap exchanges two initialized slots without copying ownership.
 func (e *emitter) writeArraySwap(instr *ir.Instr) error {
 	if len(instr.Args) != 3 || instr.Args[1].Type != "i64" ||
-		instr.Args[2].Type != "i64" || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: array.swap expects Array<T>, i64, i64 -> !void")
+		instr.Args[2].Type != "i64" || instr.Result.Type != "std::array::Error!void" {
+		return fmt.Errorf(
+			"llvm error: array.swap expects Array<T>, i64, i64 -> std::array::Error!void")
 	}
 	array := e.value(instr.Args[0])
 	left := e.value(instr.Args[1])
@@ -137,8 +138,8 @@ func (e *emitter) writeContainerNew(
 
 // writeArrayAppend lowers Array.append(value) and preserves !void failure flow.
 func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: array.append expects Array<T>, T -> !void")
+	if len(instr.Args) != 2 || instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf("llvm error: array.append expects Array<T>, T -> std::mem::Error!void")
 	}
 	array := e.value(instr.Args[0])
 	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[1])
@@ -175,8 +176,9 @@ func (e *emitter) writeArrayCapacity(instr *ir.Instr) error {
 
 // writeArrayReserve lowers Array.reserve(additional).
 func (e *emitter) writeArrayReserve(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: array.reserve expects Array<T>, i64 -> !void")
+	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" ||
+		instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf("llvm error: array.reserve expects Array<T>, i64 -> std::mem::Error!void")
 	}
 	array := e.value(instr.Args[0])
 	additional := e.value(instr.Args[1])
@@ -262,8 +264,9 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.
 func (e *emitter) writeArraySet(instr *ir.Instr) error {
-	if len(instr.Args) != 3 || instr.Args[1].Type != "i64" || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: array.set expects Array<T>, i64, T -> !void")
+	if len(instr.Args) != 3 || instr.Args[1].Type != "i64" ||
+		instr.Result.Type != "std::array::Error!void" {
+		return fmt.Errorf("llvm error: array.set expects Array<T>, i64, T -> std::array::Error!void")
 	}
 	array := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
@@ -276,8 +279,9 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 
 // writeArrayTruncate lowers Array.truncate(length).
 func (e *emitter) writeArrayTruncate(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || instr.Result.Type != "!void" {
-		return fmt.Errorf("llvm error: array.truncate expects Array<T>, i64 -> !void")
+	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" ||
+		instr.Result.Type != "std::array::Error!void" {
+		return fmt.Errorf("llvm error: array.truncate expects Array<T>, i64 -> std::array::Error!void")
 	}
 	array := e.value(instr.Args[0])
 	length := e.value(instr.Args[1])

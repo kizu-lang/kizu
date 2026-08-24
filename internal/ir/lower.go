@@ -2147,7 +2147,7 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 			return Value{}, fmt.Errorf("ir error: box.new expects allocator and value")
 		}
 		return l.releaseOwnerOnFailure(
-			l.emit("box.new", "!"+boxTypeName+"<"+elem+">", args, elem), args[1])
+			l.emit("box.new", "std::mem::Error!"+boxTypeName+"<"+elem+">", args, elem), args[1])
 	case "borrow":
 		// A returned borrow travels under the same rule any borrow return
 		// does: unions stay behind a pointer, everything else as a copy.
@@ -2181,7 +2181,7 @@ func mapPrimitiveValueType(typeArg string) string {
 func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (Value, error) {
 	switch name {
 	case "insert":
-		return l.emit("map.insert", "!void", args, valueType), nil
+		return l.emit("map.insert", "std::mem::Error!void", args, valueType), nil
 	case "get":
 		return l.emit("map.get", "?"+valueType, args, valueType), nil
 	case "at":
@@ -2243,8 +2243,11 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 // path rather than lowering them to an instruction.
 func arrayMethodResultType(name string) (string, bool) {
 	switch name {
-	case "append", "reserve", "set", "swap", "truncate":
-		return "!void", true
+	case "append", "reserve":
+		// Growing needs memory and nothing else (ADR-0128).
+		return "std::mem::Error!void", true
+	case "set", "swap", "truncate":
+		return "std::array::Error!void", true
 	case "len", "capacity":
 		return "i64", true
 	case "clear", "deinit":

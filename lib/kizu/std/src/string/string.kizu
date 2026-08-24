@@ -2,6 +2,11 @@ pub error Error {
     InvalidLength,
 }
 
+// Growing storage to a requested size fails two ways: the size itself is
+// refused (`Error::InvalidLength`) or memory ran out (`std::mem::Error`).
+// The union carries both without converting either (ADR-0128).
+pub error GrowError = Error or std::mem::Error;
+
 // The C runtime mirrors this layout as KizuString (internal/native/build.go);
 // changing the fields means changing it there too.
 pub struct String {
@@ -27,7 +32,7 @@ pub fn new(allocator: Allocator) -> std::string::String {
 pub fn from_bytes(
     allocator: Allocator,
     bytes: []u8
-) -> !std::string::String {
+) -> std::mem::Error!std::string::String {
     var out = new(allocator);
     errdefer out.deinit();
     try out.append_bytes(bytes);
@@ -42,7 +47,7 @@ pub fn join(
     allocator: Allocator,
     parts: &std::array::Array<std::string::String>,
     separator: []u8
-) -> !std::string::String {
+) -> std::string::GrowError!std::string::String {
     let total = join_length(parts, separator) orelse
         return std::string::Error::InvalidLength;
     var out = new(allocator);
@@ -114,7 +119,7 @@ fn join_length(
     return total;
 }
 
-fn (self: String) append_bytes(bytes: []u8) -> !void {
+fn (self: String) append_bytes(bytes: []u8) -> std::mem::Error!void {
     var index = 0;
     let length = std::mem::len(bytes);
     while index < length {
@@ -124,18 +129,18 @@ fn (self: String) append_bytes(bytes: []u8) -> !void {
     return;
 }
 
-fn (self: String) append_byte(byte: u8) -> !void {
+fn (self: String) append_byte(byte: u8) -> std::mem::Error!void {
     try self.bytes.append(byte);
     return;
 }
 
-fn (self: String) append_string(other: &std::string::String) -> !void {
+fn (self: String) append_string(other: &std::string::String) -> std::mem::Error!void {
     let view = other.as_bytes();
     try self.append_bytes(view);
     return;
 }
 
-fn (self: String) reserve(additional: i64) -> !void {
+fn (self: String) reserve(additional: i64) -> std::string::GrowError!void {
     if additional < 0 {
         return std::string::Error::InvalidLength;
     }
@@ -163,11 +168,13 @@ fn (self: String) clear() -> void {
     self.bytes.clear();
 }
 
-fn (self: String) truncate(length: i64) -> !void {
+fn (self: String) truncate(length: i64) -> std::string::Error!void {
     if length < 0 or length > self.len() {
         return std::string::Error::InvalidLength;
     }
-    try self.bytes.truncate(length);
+    // The guard above makes the storage truncate infallible; the catch names
+    // the only length failure this method reports.
+    self.bytes.truncate(length) catch return std::string::Error::InvalidLength;
     return;
 }
 

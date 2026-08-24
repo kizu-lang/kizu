@@ -2244,7 +2244,7 @@ fn main() -> !void {
     std::mem::box<i64>(allocator, 1);
     return;
 }`,
-			want: "produces owned `!std::mem::Box<i64>` and discards it",
+			want: "produces owned `std::mem::Error!std::mem::Box<i64>` and discards it",
 		},
 	}
 	runErrorCases(t, cases)

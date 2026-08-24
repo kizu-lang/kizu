@@ -5,10 +5,10 @@
 ```text
 std::mem::page_allocator() -> Allocator
 std::array::new<T>(allocator: Allocator) -> std::array::Array<T>
-array.append(value: T) -> !void
+array.append(value: T) -> std::mem::Error!void
 array.len() -> i64
 array.capacity() -> i64
-array.reserve(additional: i64) -> !void
+array.reserve(additional: i64) -> std::mem::Error!void
 array.clone(allocator: Allocator) -> !Array<T>
 array.pop() -> ?T
 array.pop_or_panic() -> T
@@ -16,8 +16,8 @@ array.get(index: i64) -> ?T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> ?&T
 array.at_mut(index: i64) -> ?&var T
-array.set(index: i64, value: T) -> !void
-array.swap(left: i64, right: i64) -> !void
+array.set(index: i64, value: T) -> std::array::Error!void
+array.swap(left: i64, right: i64) -> std::array::Error!void
 array.deinit() -> void
 ```
 

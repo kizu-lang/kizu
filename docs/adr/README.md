@@ -121,3 +121,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0125: `?Owner` を struct field に置く](0125-optional-owner-struct-fields.md) (#1632)
 - [ADR-0126: build cache は content-addressed な artifact だけを保持する](0126-cache-only-content-addressed-artifacts.md) (#1675)
 - [ADR-0127: `catch` による error 処理と set の合成宣言](0127-error-catch-and-set-composition.md) (#1675 の gap を履行)
+- [ADR-0128: std の allocation 失敗は `std::mem::Error::OutOfMemory` の 1 値にする](0128-std-allocation-error-taxonomy.md)

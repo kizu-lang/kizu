@@ -4,7 +4,7 @@ symbol table と scope lookup のための最小 owned map です。
 
 ```text
 std::map::new<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
-map.insert(key: []u8, value: V) -> !void
+map.insert(key: []u8, value: V) -> std::mem::Error!void
 map.get(key: []u8) -> ?V
 map.at(key: []u8) -> ?&V
 map.at_mut(key: []u8) -> ?&var V

@@ -305,7 +305,13 @@ func (l *lowerer) lowerMetaConstruct(typeArg string, args []ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("error.ok", "!"+owner, []Value{built}, ""), nil
+	// The union carries the enclosing function's error set, the same set the
+	// expansion's `try`s already propagate into (ADR-0128).
+	wrap := "!" + owner
+	if errorPart, _, ok := errorUnionParts(l.types, l.current.Return); ok && errorPart != "" {
+		wrap = errorPart + "!" + owner
+	}
+	return l.emit("error.ok", wrap, []Value{built}, ""), nil
 }
 
 // resolveMetaTypeDeep resolves the forms inside a wrapped spelling. A worker
