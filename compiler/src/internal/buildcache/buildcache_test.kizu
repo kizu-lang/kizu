@@ -1,0 +1,307 @@
+import compiler::internal::sha256;
+import std::fmt;
+import std::fs;
+import std::io;
+import std::mem;
+import std::process;
+import std::string;
+import std::testing;
+
+// The interop contract -- keys, file names and entry JSON shared with the
+// Go cache -- is exercised end to end by the Go TestSelfhostCache. What
+// lives here are the pieces input and output cannot show from outside:
+// the created_at spelling, the stamp ordering, and the hit/miss protocol
+// against a directory of this module's own.
+
+/// Builds a cache in a directory of its own under TMPDIR, so a test
+/// neither reads nor pollutes the user's cache.
+fn test_cache(allocator: Allocator) -> !Cache {
+    let base = process::env("TMPDIR") orelse "/tmp";
+    var dir = string::new(allocator);
+    errdefer dir.deinit();
+    try dir.append_bytes(base);
+    try dir.append_bytes("/kizu-buildcache-test-");
+    try fmt::append_i64(&var dir, process::unix_millis());
+    try dir.append_bytes("-");
+    try fmt::append_i64(&var dir, process::monotonic_millis());
+    let hasher = try sha256::new(allocator);
+    return Cache {
+        dir: move dir,
+        max_bytes: default_max_bytes(),
+        hasher: move hasher,
+        scratch_sequence: 0
+    };
+}
+
+/// Removes what a test cache holds and the directory itself.
+fn drop_test_cache(io: Io, allocator: Allocator, cache: &Cache) -> !void {
+    let removed = try cache.prune(io, allocator);
+    let _ = removed;
+    let dir_bytes = cache.dir.as_bytes();
+    let found = try fs::exists(io, dir_bytes);
+    if found {
+        try fs::remove_dir(io, dir_bytes);
+    }
+    return;
+}
+
+/// Renders one stamp for the format tests.
+fn stamp_of(allocator: Allocator, millis: i64) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    try append_created_at(&var out, millis);
+    return move out;
+}
+
+test "created_at spells RFC3339 UTC with the fraction trimmed" {
+    let allocator = mem::page_allocator();
+    let epoch = try stamp_of(allocator, 0);
+    defer epoch.deinit();
+    let epoch_bytes = epoch.as_bytes();
+    testing::expect_equal<[]u8>("1970-01-01T00:00:00Z", epoch_bytes);
+    let full = try stamp_of(allocator, 1700000000123);
+    defer full.deinit();
+    let full_bytes = full.as_bytes();
+    testing::expect_equal<[]u8>("2023-11-14T22:13:20.123Z", full_bytes);
+    let tens = try stamp_of(allocator, 1700000000120);
+    defer tens.deinit();
+    let tens_bytes = tens.as_bytes();
+    testing::expect_equal<[]u8>("2023-11-14T22:13:20.12Z", tens_bytes);
+    let half = try stamp_of(allocator, 1700000000500);
+    defer half.deinit();
+    let half_bytes = half.as_bytes();
+    testing::expect_equal<[]u8>("2023-11-14T22:13:20.5Z", half_bytes);
+}
+
+test "stamps order by time rather than by spelling" {
+    testing::expect(stamp_before(
+        "2023-11-14T22:13:20.123Z",
+        "2023-11-14T22:13:20.5Z"
+    ));
+    testing::expect(!stamp_before(
+        "2023-11-14T22:13:20.5Z",
+        "2023-11-14T22:13:20.123Z"
+    ));
+    testing::expect(stamp_before("2023-11-14T22:13:20Z", "2023-11-14T22:13:20.5Z"));
+    testing::expect(!stamp_before("2023-11-14T22:13:20.5Z", "2023-11-14T22:13:20Z"));
+    testing::expect(!stamp_before("2023-11-14T22:13:20.500Z", "2023-11-14T22:13:20.5Z"));
+    testing::expect(!stamp_before("2023-11-14T22:13:20.5Z", "2023-11-14T22:13:20.500Z"));
+    testing::expect(stamp_before(
+        "2023-11-14T22:13:20.123456789Z",
+        "2023-11-14T22:13:20.124Z"
+    ));
+    testing::expect(stamp_before("2022-12-31T23:59:59Z", "2023-01-01T00:00:00Z"));
+}
+
+/// Runs one artifact through miss, build, finish and a second lookup.
+fn artifact_round_trip(io: Io, allocator: Allocator) -> !void {
+    var cache = try test_cache(allocator);
+    defer cache.deinit();
+    var first_path = string::new(allocator);
+    defer first_path.deinit();
+    let first = try cache.get_or_build_artifact(
+        io,
+        allocator,
+        "unit-artifact",
+        "unit-target",
+        "artifact content",
+        &var first_path
+    );
+    match first {
+        Hit => {
+            testing::expect(false);
+        },
+        Miss(pending) => {
+            errdefer pending.deinit();
+            let scratch_bytes = pending.scratch.as_bytes();
+            try fs::write_file(io, scratch_bytes, "built bytes");
+            try cache.finish_artifact(io, allocator, move pending);
+        },
+    }
+    var second_path = string::new(allocator);
+    defer second_path.deinit();
+    let second = try cache.get_or_build_artifact(
+        io,
+        allocator,
+        "unit-artifact",
+        "unit-target",
+        "artifact content",
+        &var second_path
+    );
+    match second {
+        Hit => {},
+        Miss(pending) => {
+            testing::expect(false);
+            try cache.discard_artifact(io, move pending);
+        },
+    }
+    let first_bytes = first_path.as_bytes();
+    let second_bytes = second_path.as_bytes();
+    testing::expect_equal<[]u8>(first_bytes, second_bytes);
+    let stored = try fs::read_file(io, allocator, second_bytes, mem::Limit::Unlimited);
+    defer stored.deinit();
+    let stored_bytes = stored.as_bytes();
+    testing::expect_equal<[]u8>("built bytes", stored_bytes);
+    let listed = try cache.status(io, allocator);
+    defer listed.deinit();
+    testing::expect_equal<i64>(1, listed.entries);
+    testing::expect_equal<i64>(11, listed.size_bytes);
+    return drop_test_cache(io, allocator, &cache);
+}
+
+test "an artifact is built once and then read from the cache" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try artifact_round_trip(stdio, allocator);
+}
+
+/// Runs one source file through the text path: miss, store, hit.
+fn text_round_trip(io: Io, allocator: Allocator) -> !void {
+    var cache = try test_cache(allocator);
+    defer cache.deinit();
+    let source = try cache.output_path(allocator, "input.kizu");
+    defer source.deinit();
+    let source_bytes = source.as_bytes();
+    let dir_bytes = cache.dir.as_bytes();
+    try create_dir_all(io, dir_bytes);
+    try fs::write_file(io, source_bytes, "fn main() {}");
+    var first_text = string::new(allocator);
+    defer first_text.deinit();
+    let first = try cache.get_or_build(io, allocator, source_bytes, "unit-text", &var first_text);
+    match first {
+        Hit => {
+            testing::expect(false);
+        },
+        Miss(input) => {
+            try cache.finish_get_or_build(io, allocator, move input, "lowered text");
+        },
+    }
+    var second_text = string::new(allocator);
+    defer second_text.deinit();
+    let second = try cache.get_or_build(io, allocator, source_bytes, "unit-text", &var second_text);
+    match second {
+        Hit => {},
+        Miss(input) => {
+            testing::expect(false);
+            input.deinit();
+        },
+    }
+    let second_bytes = second_text.as_bytes();
+    testing::expect_equal<[]u8>("lowered text", second_bytes);
+    // The source file is not a cache record; remove it before dropping.
+    try fs::remove_file(io, source_bytes);
+    return drop_test_cache(io, allocator, &cache);
+}
+
+test "source text is stored once and then read from the cache" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try text_round_trip(stdio, allocator);
+}
+
+/// Appends `"name":"value"` and a trailing comma. String literals carry no
+/// escapes, so the quotes are appended as bytes.
+fn append_planted_field(out: &var string::String, name: []u8, value: []u8) -> !void {
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(58));
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(value);
+    try out.append_byte(cast<u8>(34));
+    return out.append_byte(cast<u8>(44));
+}
+
+/// Writes one entry pair by hand with a chosen stamp and size.
+fn plant_entry(
+    io: Io,
+    allocator: Allocator,
+    cache: &Cache,
+    key: []u8,
+    stamp: []u8,
+    content: []u8
+) -> !void {
+    var stored_spelling = string::new(allocator);
+    defer stored_spelling.deinit();
+    try stored_spelling.append_bytes(key);
+    try stored_spelling.append_bytes(".out");
+    var meta = string::new(allocator);
+    defer meta.deinit();
+    try meta.append_byte(cast<u8>(123));
+    try append_planted_field(&var meta, "key", key);
+    try append_planted_field(&var meta, "target", "unit");
+    try append_planted_field(&var meta, "source_hash", "x");
+    try append_planted_field(&var meta, "version", "native-v1");
+    let stored_spelling_bytes = stored_spelling.as_bytes();
+    try append_planted_field(&var meta, "output", stored_spelling_bytes);
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_bytes("size_bytes");
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_byte(cast<u8>(58));
+    try fmt::append_i64(&var meta, mem::len(content));
+    try meta.append_byte(cast<u8>(44));
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_bytes("created_at");
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_byte(cast<u8>(58));
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_bytes(stamp);
+    try meta.append_byte(cast<u8>(34));
+    try meta.append_byte(cast<u8>(125));
+    let meta_path = try cache.meta_path(allocator, key);
+    defer meta_path.deinit();
+    let meta_path_bytes = meta_path.as_bytes();
+    let meta_bytes = meta.as_bytes();
+    try fs::write_file(io, meta_path_bytes, meta_bytes);
+    let stored_name = try output_name(allocator, key);
+    defer stored_name.deinit();
+    let stored_name_bytes = stored_name.as_bytes();
+    let stored = try cache.output_path(allocator, stored_name_bytes);
+    defer stored.deinit();
+    let stored_bytes = stored.as_bytes();
+    try fs::write_file(io, stored_bytes, content);
+    return;
+}
+
+/// Reports whether the entry pair for key is still stored.
+fn entry_files_exist(io: Io, allocator: Allocator, cache: &Cache, key: []u8) -> !bool {
+    let meta_path = try cache.meta_path(allocator, key);
+    defer meta_path.deinit();
+    let meta_path_bytes = meta_path.as_bytes();
+    let meta_found = try fs::exists(io, meta_path_bytes);
+    let stored_name = try output_name(allocator, key);
+    defer stored_name.deinit();
+    let stored_name_bytes = stored_name.as_bytes();
+    let stored = try cache.output_path(allocator, stored_name_bytes);
+    defer stored.deinit();
+    let stored_bytes = stored.as_bytes();
+    let stored_found = try fs::exists(io, stored_bytes);
+    if meta_found and stored_found {
+        return true;
+    }
+    return false;
+}
+
+/// Plants an old and a new entry, shrinks the limit, and requires the old
+/// one to be evicted first.
+fn eviction_keeps_newest(io: Io, allocator: Allocator) -> !void {
+    var cache = try test_cache(allocator);
+    defer cache.deinit();
+    let dir_bytes = cache.dir.as_bytes();
+    try create_dir_all(io, dir_bytes);
+    try plant_entry(io, allocator, &cache, "older", "2020-01-01T00:00:00Z", "old bytes!");
+    try plant_entry(io, allocator, &cache, "newer", "2021-01-01T00:00:00.5Z", "new bytes!");
+    cache.max_bytes = 10;
+    try cache.enforce_limit(io, allocator);
+    let old_kept = try entry_files_exist(io, allocator, &cache, "older");
+    testing::expect(!old_kept);
+    let new_kept = try entry_files_exist(io, allocator, &cache, "newer");
+    testing::expect(new_kept);
+    return drop_test_cache(io, allocator, &cache);
+}
+
+test "enforce_limit evicts the oldest entry first" {
+    let allocator = mem::page_allocator();
+    let stdio = io::blocking();
+    try eviction_keeps_newest(stdio, allocator);
+}
