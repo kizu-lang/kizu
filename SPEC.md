@@ -798,6 +798,8 @@ if find(text, b) |at| {
 }
 ```
 
+error union 条件の capture は §11.1 です。
+
 ### 6.9.1 bool 演算
 
 Kizu は boolean logic に `and` と `or` を使います。
@@ -807,12 +809,14 @@ Kizu は boolean logic に `and` と `or` を使います。
 優先順位は低い順に次の通りです。
 
 ```text
-orelse
+orelse catch
 or
 and
 == !=
 < <= > >=
 ```
+
+`orelse` と `catch`(§11.1)は同じ段です。
 
 `opt orelse default` は optional の値、無ければ default を返します。
 左辺は `?T`、右辺と結果は `T` です。右辺は左辺が null のときだけ評価
@@ -1769,7 +1773,55 @@ fn main() -> ConfigError!void {
 }
 ```
 
-### 6.14.1 error set
+### 11.1 catch
+
+`try` が伝播、`catch` が処理です。`catch` は set を宣言した error union
+`E!T` を call site で処理します。`!T` は set を持たず member を列挙できない
+ので、伝播専用のままです。
+
+expression 形は `orelse`(§6.9.1)の error union 版です。成功なら `T` の
+値、失敗なら右辺を返します。右辺は失敗したときだけ評価されます。
+expression 形で error 値は束縛できません。
+
+```kizu
+let port = read_port(false) catch 8080;
+```
+
+右辺には `orelse` と同じ guard 形(`return [expr]` / `break [:label]` /
+`continue [:label]`)を書けます。優先順位は `orelse` と同じ段です(§6.9.1)。
+
+```kizu
+let port = read_port(false) catch return -1;
+```
+
+error 値に触るのは statement 形だけです。optional の capture(§6.9)の
+error union 版で、`else |err|` が error member を束縛します。`err` の型は
+`E` で、enum と同じ規則の `match` で分岐します(§11.2)。
+
+```kizu
+if read_port(true) |port| {
+    print(port);
+} else |err| {
+    match err {
+        NotFound => print(0),
+        InvalidPort => print(-1),
+    }
+}
+```
+
+ルール:
+
+* `catch` / error capture の対象は `E!T` だけです。`!T` は `try` でしか
+  消費できません
+* 条件が error union の `if` は `else |err|` が必須です。書かなければ失敗を
+  黙って捨てる形になるためです
+* `T` が `void` の場合、成功 capture は書きません: `if f() { } else |err| { }`
+* 成功 payload の階級は optional capture と同じ規則です(§7)。owner payload
+  は capture / `catch` 式の結果として消費します
+* `catch` / `else |err|` で処理した error は関数を出ません。error return
+  path ではないので、`errdefer`(§6.3.1)は実行しません
+
+### 11.2 error set
 
 失敗の種類は `error` で宣言します。
 
@@ -1792,8 +1844,36 @@ error 値は set の member そのものであり、**payload を持ちません
 * member は `Name::A` で参照する
 * `!T` は error set を宣言しない error union で、あらゆる set の member を受け取る
 * `E!T` は宣言した set の member だけを受け取る
-* 宣言した set は `match` で網羅的に分岐できる。`!T` は set を持たないので分岐できない
+* 宣言した set は `match` で網羅的に分岐できる(§11.1 の capture で束縛した
+  値)。`!T` は set を持たないので分岐できない
 * error 値が `main` から出た場合、`runtime error: Name::A` として報告される
+
+set は他の set の和として宣言できます。
+
+```kizu
+error JsonError {
+    Truncated,
+}
+
+error CacheError = FsError or JsonError;
+```
+
+`=` 形は member 集合の和です。新しい error 値は作らず、合成された member は
+元の set の値そのものです。`FsError::NotFound` は変換なしで `CacheError` の
+member でもあるので、`CacheError!T` の関数は `FsError!T` の呼び出しを
+`try` で伝播できます。
+
+* 値を宣言するのは `{ }` 形だけです。`=` 形の右辺は宣言済み set を `or` で
+  つないだ列で、新 member は書けません。自前の member も足したい場合は、
+  その member を持つ set を宣言して和に入れます
+* 右辺に set を 1 つだけ書くと、その set の別名になります
+* 和の和は単に和で、階層を作りません。同じ member が複数の経路から来ても
+  1 つに数えます
+* member の名前は出自に残ります。参照は元の set で書き、合成側の名前
+  (`CacheError::NotFound`)は作りません
+* `match` の arm は bare 名、または元 set 修飾名で書きます。合成が同名
+  member を複数の set から受け取る場合、bare 名の arm は compile error で、
+  元 set を修飾して書きます
 
 ルール:
 
@@ -1802,7 +1882,8 @@ error 値は set の member そのものであり、**payload を持ちません
 * `E!T` の `E` は宣言済みの `error` set でなければならない
 * `E!T` では `E` の member または `T` を返せる
 * `!T` は set を宣言しないので、body はどの set の member でも伝播・返却できる
-* `E!T` と宣言した場合、`try` は同じ `E` だけを伝播できる
+* `E!T` と宣言した場合、`try` で伝播できるのは member 集合が `E` の部分集合で
+  ある set(`E` 自身と、その合成元)だけ
 * `!T` 関数では `T` を返すと成功値、error set の member を返すと失敗値として扱う
 * error 値は大域一意な整数 1 個に lower される。set をまたぐ変換は存在しない
 * `!void` の成功 return は `return;` と書く
