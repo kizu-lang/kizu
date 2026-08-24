@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/cimport"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	kizufmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -64,6 +65,14 @@ func TestSelfhostFrontend(t *testing.T) {
 	t.Run("fmt-w", func(t *testing.T) {
 		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
 	})
+	for _, header := range cimportRepresentativeHeaders() {
+		t.Run("import-c-header/"+header.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), header.name+".h")
+			writeTestFile(t, path, []byte(header.source))
+			compareSelfhostArgs(t, selfhost,
+				goImportCHeaderOutput(path), "import-c-header", path)
+		})
+	}
 	t.Run("init", func(t *testing.T) {
 		compareSelfhostInit(t, selfhost)
 	})
@@ -144,6 +153,72 @@ func goFmtOutput(file string) nativeCLIResult {
 		return failedCLIResult(err)
 	}
 	return nativeCLIResult{output: cliOutput{stdout: kizufmt.Format(marked)}}
+}
+
+// goImportCHeaderOutput renders the shipping import-c-header path without
+// starting one Go process per header, the pattern goFmtOutput uses.
+func goImportCHeaderOutput(file string) cliOutput {
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	declarations, err := cimport.Import(string(source))
+	if err != nil {
+		return cliOutput{stderr: cliErrorLine(err), failed: true}
+	}
+	return cliOutput{stdout: declarations + "\n"}
+}
+
+// cHeaderFixture is one C header and the name its subtest runs under.
+type cHeaderFixture struct {
+	name   string
+	source string
+}
+
+// cimportRepresentativeHeaders is one header per import-c-header behavior: the
+// shapes the importer accepts on one side, and every feature it rejects on the
+// other. One rejection ends the whole header, so each needs its own file.
+func cimportRepresentativeHeaders() []cHeaderFixture {
+	return []cHeaderFixture{
+		{
+			name: "prototypes",
+			source: `int puts(const char *s);
+void write_byte(unsigned char *p, unsigned char value);
+size_t len(const uint8_t *data, size_t n);
+int read_i32(const int32_t *);
+void nada();
+double zeta(void);
+`,
+		},
+		{
+			// The U+00A0 separates a type from a name: Go splits fields on
+			// unicode.IsSpace, so an ASCII-only importer would reject this.
+			name: "comments_and_spacing",
+			source: "/* block\n   comment */\nint   a ( void ) ;   // trailing comment\n" +
+				"/* mid */ int\u00a0b (  int   x ) ; // another\n",
+		},
+		{
+			name: "pointers_and_qualifiers",
+			source: `void deep(const char **p, char *const q, volatile int *r);
+void keep(int *restrict r, unsigned long long z);
+float scale(double *out, intptr_t offset);
+`,
+		},
+		{
+			name:   "only_comments",
+			source: "// nothing but comments\n/* and a block */\n",
+		},
+		{name: "preprocessor", source: "#define X 1\n"},
+		{name: "typedef", source: "typedef int my_int;\n"},
+		{name: "struct", source: "struct point { int x; };\n"},
+		{name: "enum", source: "enum color { RED };\n"},
+		{name: "variadic", source: "int printf(const char *fmt, ...);\n"},
+		{name: "function_pointer", source: "void qsort_cb(int (*cmp)(int, int));\n"},
+		{name: "array", source: "void fill(char buf[8]);\n"},
+		{name: "unknown_type", source: "widget make_widget(void);\n"},
+		{name: "empty_parameter", source: "int pair(,);\n"},
+		{name: "not_a_prototype", source: "int counter;\n"},
+	}
 }
 
 // failedCLIResult renders one Go error through the shipping top-level prefix.

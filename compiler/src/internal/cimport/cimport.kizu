@@ -1,0 +1,686 @@
+import std::array;
+import std::fmt;
+import std::mem;
+import std::sort;
+import std::string;
+
+// Mechanical port of internal/cimport/importer.go: the supported subset of a C
+// header becomes Kizu extern declarations. Go's helpers return `(value, error)`;
+// a Kizu error value carries no text, so each helper returns the import error
+// text as `?string::String` (null is success) and writes what it built through
+// a `&var` parameter, the way internal/manifest already does. Neither Go table
+// has a runtime here: the prototype regexp is one index scan over the
+// space-normalized statement, and the primitive map is a lookup function.
+
+/// Is either the extern declarations a header maps to, or the text the Go
+/// `Import` reports through its error.
+pub union ImportResult {
+    Declarations(string::String),
+    Error(string::String),
+}
+
+// Names the three spans Go's functionPattern submatches out of one normalized
+// statement: the return type is [0, return_end), the function name is
+// [name_start, name_end) and the parameter list is [params_start, params_end).
+struct FunctionMatch {
+    return_end: i64,
+    name_start: i64,
+    name_end: i64,
+    params_start: i64,
+    params_end: i64
+}
+
+// Walks the semicolon-separated statements of the comment-free header the way
+// splitStatements walks strings.Split(header, ";"): [start, end) is the current
+// statement and end starts at -1, the separator in front of the first one.
+struct StatementCursor {
+    start: i64,
+    end: i64
+}
+
+// Walks the whitespace-separated fields of a byte range the way strings.Fields
+// does: [start, end) is the current field and end is where the next scan
+// resumes.
+struct FieldCursor {
+    start: i64,
+    end: i64
+}
+
+/// Converts the supported C function prototypes in header into Kizu extern
+/// declarations, the Go `Import`.
+pub fn import_header(allocator: Allocator, header: []u8) -> !ImportResult {
+    var clean = try strip_comments(allocator, header);
+    defer clean.deinit();
+    var decls = array::new<string::String>(allocator);
+    defer decls.deinit();
+    let clean_bytes = clean.as_bytes();
+    if try import_statements(allocator, clean_bytes, &var decls) |failure| {
+        return ImportResult::Error(move failure);
+    }
+    try sort::strings(&var decls);
+    let joined = try join_lines(allocator, &decls);
+    return ImportResult::Declarations(move joined);
+}
+
+// import_statements imports every non-empty statement of a comment-free
+// header. It takes the header as a view because a loop over bytes borrowed
+// from a String in the same scope as that String's cleanup is refused.
+fn import_statements(
+    allocator: Allocator,
+    clean: []u8,
+    decls: &var array::Array<string::String>
+) -> !?string::String {
+    var cursor = StatementCursor { start: 0, end: -1 };
+    while cursor.next(clean) {
+        let stmt = trim_space(clean[cursor.start..cursor.end]);
+        if mem::len(stmt) == 0 {
+            continue;
+        }
+        if try import_statement(allocator, stmt, decls) |failure| {
+            return move failure;
+        }
+    }
+    return null;
+}
+
+// join_lines concatenates the sorted declarations with one newline between
+// adjacent ones, the Go strings.Join(decls, "\n").
+fn join_lines(
+    allocator: Allocator,
+    decls: &array::Array<string::String>
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var index = 0;
+    while decls.at(index) |decl| {
+        if index > 0 {
+            try out.append_byte(cast<u8>(10));
+        }
+        try out.append_string(decl);
+        index = index + 1;
+    }
+    return move out;
+}
+
+// import_statement imports one semicolon-terminated C declaration.
+fn import_statement(
+    allocator: Allocator,
+    stmt: []u8,
+    decls: &var array::Array<string::String>
+) -> !?string::String {
+    if try reject_unsupported(allocator, stmt) |failure| {
+        return move failure;
+    }
+    var normalized = try normalize_spaces(allocator, stmt);
+    defer normalized.deinit();
+    let bytes = normalized.as_bytes();
+    if match_function(bytes) |found| {
+        var return_type = string::new(allocator);
+        defer return_type.deinit();
+        let return_bytes = bytes[0..found.return_end];
+        if try c_type_to_kizu(allocator, return_bytes, &var return_type) |failure| {
+            return move failure;
+        }
+        var params = string::new(allocator);
+        defer params.deinit();
+        let params_bytes = bytes[found.params_start..found.params_end];
+        if try import_params(allocator, params_bytes, &var params) |failure| {
+            return move failure;
+        }
+        var decl = string::new(allocator);
+        errdefer decl.deinit();
+        try decl.append_bytes("extern ");
+        try decl.append_byte(cast<u8>(34));
+        try decl.append_bytes("c");
+        try decl.append_byte(cast<u8>(34));
+        try decl.append_bytes(" fn ");
+        try decl.append_bytes(bytes[found.name_start..found.name_end]);
+        try decl.append_bytes("(");
+        try decl.append_string(&params);
+        try decl.append_bytes(") -> ");
+        try decl.append_string(&return_type);
+        try decls.append(move decl);
+        return null;
+    }
+    var failure = try import_error(allocator, "unsupported declaration `");
+    errdefer failure.deinit();
+    try failure.append_bytes(stmt);
+    try failure.append_bytes("`");
+    return move failure;
+}
+
+// import_params imports a function parameter list into out.
+fn import_params(
+    allocator: Allocator,
+    raw: []u8,
+    out: &var string::String
+) -> !?string::String {
+    let trimmed = trim_space(raw);
+    let length = mem::len(trimmed);
+    if length == 0 or mem::equal_bytes(trimmed, "void") {
+        return null;
+    }
+    var number = 1;
+    var start = 0;
+    while start <= length {
+        let end = find_byte(trimmed, start, cast<u8>(44));
+        if number > 1 {
+            try out.append_bytes(", ");
+        }
+        if try import_param(allocator, trimmed[start..end], number, out) |failure| {
+            return move failure;
+        }
+        number = number + 1;
+        start = end + 1;
+    }
+    return null;
+}
+
+// import_param imports one C parameter declaration into out. Go names a
+// parameter whose last field carries a pointer star after its position.
+fn import_param(
+    allocator: Allocator,
+    raw: []u8,
+    number: i64,
+    out: &var string::String
+) -> !?string::String {
+    var normalized = try normalize_pointer_stars(allocator, raw);
+    defer normalized.deinit();
+    let bytes = normalized.as_bytes();
+    let length = mem::len(bytes);
+    if contains(bytes, "[") or contains(bytes, "]") {
+        var failure = try import_error(allocator, "arrays are unsupported in `");
+        errdefer failure.deinit();
+        try failure.append_bytes(bytes);
+        try failure.append_bytes("`");
+        return move failure;
+    }
+    if length == 0 {
+        return try import_error(allocator, "empty parameter");
+    }
+    let last = last_field_start(bytes);
+    let unnamed = contains(bytes[last..length], "*");
+    var type_text = string::new(allocator);
+    defer type_text.deinit();
+    let type_end = if last > 0 { last - 1 } else { 0 };
+    let type_bytes = if unnamed { bytes[0..length] } else { bytes[0..type_end] };
+    if try c_type_to_kizu(allocator, type_bytes, &var type_text) |failure| {
+        return move failure;
+    }
+    if unnamed {
+        try out.append_bytes("p");
+        try fmt::append_i64(out, number);
+    } else {
+        try out.append_bytes(bytes[last..length]);
+    }
+    try out.append_bytes(": ");
+    try out.append_string(&type_text);
+    return null;
+}
+
+// c_type_to_kizu maps a limited C type spelling to a Kizu type written into
+// out, the Go cTypeToKizu together with its pointerType wrapping.
+fn c_type_to_kizu(
+    allocator: Allocator,
+    raw: []u8,
+    out: &var string::String
+) -> !?string::String {
+    var starred = try normalize_pointer_stars(allocator, raw);
+    defer starred.deinit();
+    let starred_bytes = starred.as_bytes();
+    let depth = count_byte(starred_bytes, cast<u8>(42));
+    var stripped = try without_byte(allocator, starred_bytes, cast<u8>(42));
+    defer stripped.deinit();
+    let stripped_bytes = stripped.as_bytes();
+    var is_const = false;
+    var element = try normalize_c_base(allocator, stripped_bytes, &var is_const);
+    defer element.deinit();
+    let element_bytes = element.as_bytes();
+    let base = primitive_spelling(element_bytes);
+    if mem::len(base) == 0 {
+        var failure = try import_error(allocator, "unsupported C type `");
+        errdefer failure.deinit();
+        try failure.append_bytes(stripped_bytes);
+        try failure.append_bytes("`");
+        return move failure;
+    }
+    var level = 0;
+    while level < depth {
+        try out.append_bytes("ptr<");
+        level = level + 1;
+    }
+    if depth > 0 and is_const {
+        try out.append_bytes("const ");
+    }
+    try out.append_bytes(base);
+    level = 0;
+    while level < depth {
+        try out.append_bytes(">");
+        level = level + 1;
+    }
+    return null;
+}
+
+// normalize_c_base drops qualifiers, reports whether the element is const and
+// returns the remaining fields joined by single spaces.
+fn normalize_c_base(
+    allocator: Allocator,
+    raw: []u8,
+    is_const: &var bool
+) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var cursor = FieldCursor { start: 0, end: 0 };
+    while cursor.next(raw) {
+        let field = raw[cursor.start..cursor.end];
+        if mem::equal_bytes(field, "const") {
+            is_const.* = true;
+            continue;
+        }
+        if mem::equal_bytes(field, "volatile") or mem::equal_bytes(field, "restrict") {
+            continue;
+        }
+        if out.len() > 0 {
+            try out.append_bytes(" ");
+        }
+        try out.append_bytes(field);
+    }
+    return move out;
+}
+
+// reject_unsupported reports the C features outside the supported subset.
+fn reject_unsupported(allocator: Allocator, stmt: []u8) -> !?string::String {
+    let trimmed = trim_space(stmt);
+    if mem::starts_with(trimmed, "#") {
+        return try import_error(allocator, "preprocessor directives are unsupported");
+    }
+    if mem::starts_with(trimmed, "typedef") {
+        return try import_error(allocator, "typedef is unsupported");
+    }
+    if mem::starts_with(trimmed, "struct ") {
+        return try import_error(allocator, "struct declarations are unsupported");
+    }
+    if mem::starts_with(trimmed, "enum ") {
+        return try import_error(allocator, "enum declarations are unsupported");
+    }
+    if contains(trimmed, "...") {
+        return try import_error(allocator, "variadic functions are unsupported");
+    }
+    if contains(trimmed, "(*") {
+        return try import_error(allocator, "function pointers are unsupported");
+    }
+    return null;
+}
+
+// import_error starts one message with the prefix every Go import error has.
+fn import_error(allocator: Allocator, text: []u8) -> !string::String {
+    var out = try string::from_bytes(allocator, "c import error: ");
+    errdefer out.deinit();
+    try out.append_bytes(text);
+    return move out;
+}
+
+// match_function is Go's `^(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$` over
+// a space-normalized statement. The lazy first group makes the leftmost split
+// win, so the scan returns at the first space a name and an open parenthesis
+// follow, and the greedy last group ends at the closing parenthesis the
+// anchor pins to the last byte. Normalization left single ASCII spaces, so
+// each `\s` run here is one byte.
+fn match_function(bytes: []u8) -> ?FunctionMatch {
+    let length = mem::len(bytes);
+    if length == 0 or bytes[length - 1] != cast<u8>(41) {
+        return null;
+    }
+    var index = 1;
+    while index < length {
+        if bytes[index] == cast<u8>(32) {
+            let name_start = index + 1;
+            if name_start < length and is_name_start(bytes[name_start]) {
+                var name_end = name_start + 1;
+                while name_end < length and is_name_byte(bytes[name_end]) {
+                    name_end = name_end + 1;
+                }
+                var open = name_end;
+                if open < length and bytes[open] == cast<u8>(32) {
+                    open = open + 1;
+                }
+                if open < length and bytes[open] == cast<u8>(40) {
+                    return FunctionMatch {
+                        return_end: index,
+                        name_start: name_start,
+                        name_end: name_end,
+                        params_start: open + 1,
+                        params_end: length - 1
+                    };
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// primitive_spelling is Go's primitiveTypes map: the Kizu spelling of one C
+// primitive, or empty bytes when the table has no entry. No entry spells as
+// nothing, so empty says unknown without a second return value.
+fn primitive_spelling(element: []u8) -> []u8 {
+    if mem::equal_bytes(element, "void") { return "void"; }
+    if mem::equal_bytes(element, "char") { return "i8"; }
+    if mem::equal_bytes(element, "signed char") { return "i8"; }
+    if mem::equal_bytes(element, "unsigned char") { return "u8"; }
+    if mem::equal_bytes(element, "short") { return "i16"; }
+    if mem::equal_bytes(element, "signed short") { return "i16"; }
+    if mem::equal_bytes(element, "unsigned short") { return "u16"; }
+    if mem::equal_bytes(element, "int") { return "i32"; }
+    if mem::equal_bytes(element, "signed int") { return "i32"; }
+    if mem::equal_bytes(element, "unsigned int") { return "u32"; }
+    if mem::equal_bytes(element, "long long") { return "i64"; }
+    if mem::equal_bytes(element, "signed long long") { return "i64"; }
+    if mem::equal_bytes(element, "unsigned long long") { return "u64"; }
+    if mem::equal_bytes(element, "int8_t") { return "i8"; }
+    if mem::equal_bytes(element, "uint8_t") { return "u8"; }
+    if mem::equal_bytes(element, "int16_t") { return "i16"; }
+    if mem::equal_bytes(element, "uint16_t") { return "u16"; }
+    if mem::equal_bytes(element, "int32_t") { return "i32"; }
+    if mem::equal_bytes(element, "uint32_t") { return "u32"; }
+    if mem::equal_bytes(element, "int64_t") { return "i64"; }
+    if mem::equal_bytes(element, "uint64_t") { return "u64"; }
+    if mem::equal_bytes(element, "size_t") { return "usize"; }
+    if mem::equal_bytes(element, "intptr_t") { return "isize"; }
+    if mem::equal_bytes(element, "float") { return "f32"; }
+    if mem::equal_bytes(element, "double") { return "f64"; }
+    return "";
+}
+
+// strip_comments removes block comments and then line comments, the order Go
+// runs them in: a `/*` inside a line comment is still a block comment.
+fn strip_comments(allocator: Allocator, input: []u8) -> !string::String {
+    var no_block = string::new(allocator);
+    defer no_block.deinit();
+    try strip_block_comments(input, &var no_block);
+    let bytes = no_block.as_bytes();
+    return strip_line_comments(allocator, bytes);
+}
+
+// strip_block_comments writes input into out with each `/* ... */` replaced by
+// one space. A `/*` that nothing closes is not a comment, the same way the Go
+// pattern finds no match to replace.
+fn strip_block_comments(input: []u8, out: &var string::String) -> !void {
+    let length = mem::len(input);
+    var index = 0;
+    while index < length {
+        if starts_at(input, index, "/*") {
+            if block_comment_end(input, index + 2) |end| {
+                try out.append_byte(cast<u8>(32));
+                index = end + 2;
+                continue;
+            }
+        }
+        try out.append_byte(input[index]);
+        index = index + 1;
+    }
+    return;
+}
+
+// strip_line_comments returns input with every line cut at its first `//`.
+fn strip_line_comments(allocator: Allocator, input: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    let length = mem::len(input);
+    var index = 0;
+    while index < length {
+        if starts_at(input, index, "//") {
+            while index < length and input[index] != cast<u8>(10) {
+                index = index + 1;
+            }
+            continue;
+        }
+        try out.append_byte(input[index]);
+        index = index + 1;
+    }
+    return move out;
+}
+
+// normalize_spaces collapses runs of whitespace, the Go
+// strings.Join(strings.Fields(input), " ").
+fn normalize_spaces(allocator: Allocator, input: []u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    var cursor = FieldCursor { start: 0, end: 0 };
+    while cursor.next(input) {
+        if out.len() > 0 {
+            try out.append_bytes(" ");
+        }
+        try out.append_bytes(input[cursor.start..cursor.end]);
+    }
+    return move out;
+}
+
+// normalize_pointer_stars makes C pointer stars easy to split.
+fn normalize_pointer_stars(allocator: Allocator, input: []u8) -> !string::String {
+    var spaced = string::new(allocator);
+    defer spaced.deinit();
+    let length = mem::len(input);
+    var index = 0;
+    while index < length {
+        if input[index] == cast<u8>(42) {
+            try spaced.append_bytes(" * ");
+        } else {
+            try spaced.append_byte(input[index]);
+        }
+        index = index + 1;
+    }
+    let bytes = spaced.as_bytes();
+    return normalize_spaces(allocator, bytes);
+}
+
+// trim_space returns input without its leading and trailing whitespace, the
+// Go strings.TrimSpace.
+fn trim_space(input: []u8) -> []u8 {
+    var cursor = FieldCursor { start: 0, end: 0 };
+    var start = 0;
+    var end = 0;
+    var found = false;
+    while cursor.next(input) {
+        if !found {
+            start = cursor.start;
+            found = true;
+        }
+        end = cursor.end;
+    }
+    return input[start..end];
+}
+
+// next moves to the statement after the current separator and reports false
+// past the last one.
+fn (self: &var StatementCursor) next(source: []u8) -> bool {
+    if self.end >= mem::len(source) {
+        return false;
+    }
+    self.start = self.end + 1;
+    self.end = find_byte(source, self.start, cast<u8>(59));
+    return true;
+}
+
+// next moves to the following whitespace-separated field and reports false
+// once only whitespace is left.
+fn (self: &var FieldCursor) next(source: []u8) -> bool {
+    let length = mem::len(source);
+    var index = self.end;
+    while index < length {
+        let width = space_width(source, index);
+        if width == 0 {
+            break;
+        }
+        index = index + width;
+    }
+    if index >= length {
+        return false;
+    }
+    self.start = index;
+    while index < length and space_width(source, index) == 0 {
+        index = index + 1;
+    }
+    self.end = index;
+    return true;
+}
+
+// space_width reports how many bytes the White_Space scalar at index takes, or
+// 0 when the bytes there are not one. Go splits and trims on unicode.IsSpace,
+// so the ASCII set alone would keep a non-breaking space inside a field the Go
+// importer splits on. Every member outside ASCII starts with one of four lead
+// bytes, and a UTF-8 continuation byte can never be one of them, so scanning
+// byte by byte cannot report a false space inside another scalar.
+fn space_width(bytes: []u8, index: i64) -> i64 {
+    let length = mem::len(bytes);
+    let first = bytes[index];
+    if first >= cast<u8>(9) and first <= cast<u8>(13) {
+        return 1;
+    }
+    if first == cast<u8>(32) {
+        return 1;
+    }
+    if first == cast<u8>(194) and index + 1 < length {
+        let second = bytes[index + 1];
+        // U+0085 NEL and U+00A0 NO-BREAK SPACE.
+        if second == cast<u8>(133) or second == cast<u8>(160) {
+            return 2;
+        }
+    }
+    if index + 2 >= length {
+        return 0;
+    }
+    let second = bytes[index + 1];
+    let third = bytes[index + 2];
+    // U+1680 OGHAM SPACE MARK.
+    if first == cast<u8>(225) and second == cast<u8>(154) and third == cast<u8>(128) {
+        return 3;
+    }
+    if first == cast<u8>(226) and second == cast<u8>(128) {
+        // U+2000..U+200A, U+2028, U+2029 and U+202F.
+        if third >= cast<u8>(128) and third <= cast<u8>(138) {
+            return 3;
+        }
+        if third == cast<u8>(168) or third == cast<u8>(169) or third == cast<u8>(175) {
+            return 3;
+        }
+    }
+    // U+205F MEDIUM MATHEMATICAL SPACE.
+    if first == cast<u8>(226) and second == cast<u8>(129) and third == cast<u8>(159) {
+        return 3;
+    }
+    // U+3000 IDEOGRAPHIC SPACE.
+    if first == cast<u8>(227) and second == cast<u8>(128) and third == cast<u8>(128) {
+        return 3;
+    }
+    return 0;
+}
+
+// last_field_start returns where the last space-separated field of a
+// normalized parameter begins. Everything before the space in front of it is
+// the type, the Go strings.Join(fields[:len(fields)-1], " ").
+fn last_field_start(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 0 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(32) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+// block_comment_end returns where the `*/` closing a block comment starts.
+fn block_comment_end(bytes: []u8, from: i64) -> ?i64 {
+    let length = mem::len(bytes);
+    var index = from;
+    while index + 1 < length {
+        if bytes[index] == cast<u8>(42) and bytes[index + 1] == cast<u8>(47) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return null;
+}
+
+// find_byte returns the index of the first byte at or after start, or the
+// length when there is none.
+fn find_byte(bytes: []u8, start: i64, byte: u8) -> i64 {
+    let length = mem::len(bytes);
+    var index = start;
+    while index < length {
+        if bytes[index] == byte {
+            return index;
+        }
+        index = index + 1;
+    }
+    return length;
+}
+
+// count_byte counts one byte over the whole range, the Go strings.Count.
+fn count_byte(bytes: []u8, byte: u8) -> i64 {
+    let length = mem::len(bytes);
+    var count = 0;
+    var index = 0;
+    while index < length {
+        if bytes[index] == byte {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// without_byte copies bytes with every occurrence of one byte dropped, the Go
+// strings.ReplaceAll(input, "*", "").
+fn without_byte(allocator: Allocator, bytes: []u8, byte: u8) -> !string::String {
+    var out = string::new(allocator);
+    errdefer out.deinit();
+    let length = mem::len(bytes);
+    var index = 0;
+    while index < length {
+        if bytes[index] != byte {
+            try out.append_byte(bytes[index]);
+        }
+        index = index + 1;
+    }
+    return move out;
+}
+
+// starts_at reports whether needle begins at index, the Go
+// strings.HasPrefix(bytes[index:], needle).
+fn starts_at(bytes: []u8, index: i64, needle: []u8) -> bool {
+    return mem::starts_with(bytes[index..mem::len(bytes)], needle);
+}
+
+// contains reports whether needle appears anywhere, the Go strings.Contains.
+fn contains(bytes: []u8, needle: []u8) -> bool {
+    let last = mem::len(bytes) - mem::len(needle);
+    var index = 0;
+    while index <= last {
+        if starts_at(bytes, index, needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// is_name_start reports the C identifier lead bytes `[A-Za-z_]`.
+fn is_name_start(byte: u8) -> bool {
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    return byte == cast<u8>(95);
+}
+
+// is_name_byte reports the C identifier bytes `[A-Za-z0-9_]`.
+fn is_name_byte(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    return is_name_start(byte);
+}

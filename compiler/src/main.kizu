@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::buildcache;
+import compiler::internal::cimport;
 import compiler::internal::diagnostic;
 import compiler::internal::fmt;
 import compiler::internal::fsutil;
@@ -29,8 +30,9 @@ import std::string;
 // `ir` lowers a checked file or package to typed SSA IR and prints it,
 // `build --emit-llvm` prints the LLVM IR the lowered module emits to,
 // `build --target native` links a program into the executable it names,
-// and `run` / `test` build a temporary executable and run it, forwarding
-// the child's exit status through `std::process::ExitStatus` (ADR-0085).
+// `run` / `test` build a temporary executable and run it, forwarding
+// the child's exit status through `std::process::ExitStatus` (ADR-0085),
+// and `import-c-header` prints the externs a C header maps to.
 // Not connected to the shipping CLI.
 
 /// Dispatches the command line and maps each command's exit code to the
@@ -111,6 +113,10 @@ fn main() -> !process::ExitStatus {
     }
     if mem::equal_bytes(command, "cache") {
         let code = try cache_command(io, allocator, target, next, count);
+        return exit_of(code);
+    }
+    if mem::equal_bytes(command, "import-c-header") {
+        let code = try import_c_header_command(io, allocator, target);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "build") and mem::equal_bytes(target, "--target") {
@@ -235,6 +241,37 @@ fn write_count_line(io: Io, allocator: Allocator, label: []u8, value: i64) -> !v
     try stdfmt::append_i64(&var line, value);
     let line_bytes = line.as_bytes();
     return io::write_stdout_line(io, line_bytes);
+}
+
+/// Prints the Kizu extern declarations a C header maps to, the Go
+/// `importCHeaderFile`.
+fn import_c_header_command(io: Io, allocator: Allocator, target: []u8) -> !i64 {
+    let source_text = try fs::read_file(
+        io,
+        allocator,
+        target,
+        mem::Limit::Unlimited
+    );
+    defer source_text.deinit();
+    let source_bytes = source_text.as_bytes();
+    let imported = try cimport::import_header(allocator, source_bytes);
+    match imported {
+        Declarations(declarations) => {
+            defer declarations.deinit();
+            let declaration_bytes = declarations.as_bytes();
+            try io::write_stdout_line(io, declaration_bytes);
+            return 0;
+        },
+        Error(message) => {
+            defer message.deinit();
+            var line = try string::from_bytes(allocator, "error: ");
+            defer line.deinit();
+            try line.append_string(&message);
+            let line_bytes = line.as_bytes();
+            try io::write_stderr_line(io, line_bytes);
+            return 1;
+        },
+    }
 }
 
 /// Decides the library tree std is read from: `--lib-dir` or KIZU_LIB_DIR.
