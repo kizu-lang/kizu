@@ -304,10 +304,7 @@ pub fn (self: &var Cache) get_or_build_artifact(
     try create_dir_all(io, dir_bytes);
     var scratch_name = string::new(allocator);
     defer scratch_name.deinit();
-    try scratch_name.append_bytes("artifact-");
-    try fmt::append_i64(&var scratch_name, process::unix_millis());
-    try scratch_name.append_bytes("-");
-    try fmt::append_i64(&var scratch_name, self.scratch_sequence);
+    try append_scratch_name(&input.key, self.scratch_sequence, &var scratch_name);
     self.scratch_sequence = self.scratch_sequence + 1;
     let scratch = try self.output_path_of(allocator, &scratch_name);
     errdefer scratch.deinit();
@@ -318,6 +315,26 @@ pub fn (self: &var Cache) get_or_build_artifact(
         stored: move stored,
         output: move output
     });
+}
+
+/// Names one scratch file. Go's `os.CreateTemp` draws a random name; std
+/// has no randomness, so distinctness comes from what differs between
+/// concurrent builders: the key being built, the wall clock, and a
+/// per-process sequence. Two processes collide only when they build the
+/// same key in the same millisecond, and the loser fails loudly.
+fn append_scratch_name(key: &string::String, sequence: i64, out: &var string::String) -> !void {
+    try out.append_bytes("artifact-");
+    let key_bytes = key.as_bytes();
+    var head = mem::len(key_bytes);
+    if head > 16 {
+        head = 16;
+    }
+    let prefix = key_bytes[0..head];
+    try out.append_bytes(prefix);
+    try out.append_bytes("-");
+    try fmt::append_i64(out, process::unix_millis());
+    try out.append_bytes("-");
+    return fmt::append_i64(out, sequence);
 }
 
 /// Moves what the builder made into place and records it, the tail of the

@@ -276,7 +276,7 @@ code LOC は blank / comment / test を除いた行数。ratio は Kizu / Go。�
 | ir | 4885 | 8785 | 1.80(words 31,670 / 16,727 = 1.89) | IR corpus 333 case(lower / opt の render)+ `TestSelfhostFrontend` の `ir` / `ir --opt`(examples 466 file + 6 package、std の lowering を含む)+ unit(verify の rejection) |
 | llvm | 3897 | 5761 | 1.48(words 24,388 / 14,875 = 1.64) | LLVM corpus 352 case(emit / opt の LLVM IR text、emit error を含む)+ `TestSelfhostFrontend` の `build --emit-llvm` / `--emit-llvm --opt`(examples 466 file + 6 package、std の関数を含む full text を byte 比較)|
 | native | 249 | 654 | 2.64(words 2,261 / 867 = 2.61)・gate 未達 | `TestSelfhostNative`: run / test / build --target native を Go CLI と比較(423 case。stdout / stderr(toolchain noise のみ除去)/ exact exit status、build は両 exe も実行して比較、metadata は絶対 path 正規化で byte 比較)+ `kizu check compiler` / `kizu test compiler` |
-| buildcache | 264 | 660 | 2.50(words 2,319 / 944 = 2.46)・gate 未達 | unit(created_at の spelling / stamp 順序 / artifact・text の round trip / eviction)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化)、emit-llvm の GetOrBuild 共有 |
+| buildcache | 264 | 671 | 2.54(words 2,359 / 944 = 2.50)・gate 未達 | unit(created_at の spelling / stamp 順序 / artifact・text の round trip / eviction)+ `TestSelfhostCache`: 隔離 KIZU_CACHE_DIR で Go build → selfhost run の再利用(toolchain の無い PATH で成功 + entry file 名一致)、逆方向、`cache status` / `prune` の出力比較(同一 cache 状態は byte 一致、別 fill は byte 数正規化)、emit-llvm の GetOrBuild 共有 |
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | compiler(cmd/kizu の parse / check / ir / build --emit-llvm / --target native / run / test / cache) | 1041(全 command) | 947 | — | `TestSelfhostFrontend`: selfhost binary を build し、examples 466 file の parse / check / ir / ir --opt / build --emit-llvm / --emit-llvm --opt と tests/behavior・compiler/・examples/modules の check / ir / ir --opt / build --emit-llvm(types → ownership → ir → optimize → llvm)を Go の front end と byte 比較(2,826 case)。native の run / test / build は `TestSelfhostNative` |
 
@@ -359,20 +359,20 @@ module 境界へ渡せないことによる 2 段 API の caller 側 protocol(la
 旧経路の削除で -30。module 累計 2.64 は gate 未達で、増分は上の 3 分類で
 尽きる: 圧縮余地は signature の折返し(100 桁制限で不可)以外に見つからなかった。
 
-buildcache の増分(+396 行、660 / 264 = 2.50)の分類。標準 library 置換が 131 行
+buildcache の増分(+407 行、671 / 264 = 2.54)の分類。標準 library 置換が 145 行
 (`append_created_at` + `append_padded` の civil 変換 = Go の time.Time JSON、
 `stamp_before` + `fraction_digit` + `entry_before` = `time.Before` + `sort.Slice`、
 `create_dir_all` = `os.MkdirAll`、`has_suffix` = glob の `*.json`、
-`append_abs_path` = `filepath.Abs`)。closure gap の 2 段 API(`GetOrBuild` /
-`ArtifactPlan` / `PendingArtifact` の宣言と `finish_*` / `discard_artifact` /
-`install_artifact` / `remove_scratch` / `read_hit` / `artifact_hit` /
-`output_name_of` / `output_path_of` の borrow shim)が約 95 行: shim は
-「`errdefer` の cleanup receiver は error path で borrow されていてはならない」
-規則が、view を callee scope へ閉じることを要求するため消せない。残りは
-ownership の明示(`as_bytes` 束縛約 35、defer / errdefer 約 25)と 100 桁超
-signature の折返し(約 55 行)。std 置換を sha256 と同じ別記録に置いても
-529 / 264 = 2.00 で、gate(2.0 未満)に届かない。これは Unattended work の
-停止条件なので、module は complete と記録せず判断をユーザーに返す。
+`append_abs_path` = `filepath.Abs`、`append_scratch_name` = `os.CreateTemp`)。
+closure gap の 2 段 API(`GetOrBuild` / `ArtifactPlan` / `PendingArtifact` の宣言と
+`finish_*` / `discard_artifact` / `install_artifact` / `remove_scratch` /
+`read_hit` / `artifact_hit` / `output_name_of` / `output_path_of` の borrow shim)が
+約 95 行: shim は「`errdefer` の cleanup receiver は error path で borrow されて
+いてはならない」規則が、view を callee scope へ閉じることを要求するため消せない。
+残りは ownership の明示(`as_bytes` 束縛約 35、defer / errdefer 約 25)と 100 桁超
+signature の折返し(約 55 行)。標準 library 置換を sha256 と同じ別記録に置くと
+526 / 264 = 1.99 で gate 内、置かなければ 2.54 で gate 未達。どちらの帳簿を
+取るかは goal が sha256 にだけ別記録を認めた判断の延長線なので、ユーザーに返す。
 
 ## 見つかった gap
 
@@ -430,6 +430,6 @@ signature の折返し(約 55 行)。std 置換を sha256 と同じ別記録に�
 | `!T` の error を catch する構文が無い(`try` は伝播だけ) | buildcache の `readEntry` / `entries`: Go は壊れた entry JSON を `json.Unmarshal` の失敗として miss / skip に落とす | `std::json::decode_ignore_unknown` の失敗をそのまま伝播する。壊れた entry は Go: miss、selfhost: error という観測差が残る(実 cache は両 CLI しか書かないので、手で壊した場合だけ) |
 | getcwd 相当が無い | buildcache の `filepath.Abs`(emit-llvm の cache key が絶対 path を含む) | `$PWD` を読んで join / clean する。cwd と PWD がずれた環境では key が Go と揃わない(挙動は正しく、cache 共有だけ効かない)。`TestSelfhostCache` は PWD を明示して比較する |
 | `runtime.GOOS` / `GOARCH` 相当が無い | native の toolchainKey(cache key の host 部) | claim した temp dir で `sh -c "PATH=/usr/bin:/bin uname -sm > file"` を実行して読む(spawn の出力 capture 不能の既知 gap の続き)。未知の host は guess せず error で止める |
-| `os.CreateTemp` 相当が無い | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `artifact-<unix_millis>-<連番>` を Cache が振る。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
+| `os.CreateTemp` 相当が無い(乱数源も無い) | buildcache の scratch file(半端な artifact を key の名で見せないための build 先) | `artifact-<key 先頭 16 桁>-<unix_millis>-<連番>` を Cache が振る: 並列プロセス間の distinctness は build 中の key が持つ(同じ key を同じ ms に 2 プロセスが build した場合だけ衝突し、負けた側は明示的に失敗する)。rename 前に fs error で止まると scratch が残る(Go は defer Remove が拾う) |
 | `time` package 相当が無い(civil 変換・RFC3339・時刻比較) | buildcache の `Entry.CreatedAt`(Go は time.Time の JSON) | 書きは `std::process::unix_millis()` から civil 変換で RFC3339 UTC を組み立て(fraction は RFC3339Nano と同じく trim)、eviction 順序は spelling の桁比較 `stamp_before`。offset 付き stamp は 0 扱い(両 CLI は Z しか書かない) |
 | emit-llvm text cache の key に compiler version が入らない(Go 由来の挙動) | `cacheTarget("emit-llvm")` + 絶対 path + source hash が key の全部で、compiler を変えても同じ key を引く | Go と同じ挙動で移植した。compiler 変更後は stale hit があり得て、実 cache を共有する `TestSelfhostFrontend` の `build --emit-llvm` byte 比較を割り得る(Go CLI 自身も stale text を返す)。cache format の変更は goal の停止条件なので、直すなら別判断(`kizu cache prune` が回避策) |
