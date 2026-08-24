@@ -36,6 +36,10 @@ package doc にあります。
 - shipping 実装は Go 一本で、`compiler/` は CLI から呼ばない selfhost 移植先。
   `compiler/` を変更する前に `docs/selfhost-porting.md` を読む。
   言語機能を移植先だけで追加しない。
+  `compiler/` の check / test / build は `just selfhost` から回す。`kizu version` が
+  名乗る行は commit ごとに変わるので checked-in にできず、
+  `go run ./scripts/gen-selfhost-version` が先に生成する必要がある(pre-commit と
+  `cmd/kizu` の test は自分で走らせる)。
 - Go の comment は英語で書く。package comment と `package main` の command
   comment は必須(pre-commit の `go comments` が見ている)。
 

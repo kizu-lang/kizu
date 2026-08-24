@@ -257,7 +257,8 @@ compiler 全体の cutover は module の完了とは別で、次の 3 つが揃
 1. self-build した compiler が同じ source をもう一度 build できる
 2. 既存の examples と `tests/behavior/` を shipping compiler と同じ契約で通す
 3. `cmd/kizu` の user-facing command が Kizu 側に揃っている — cutover は Go compiler を
-   削除するので、CLI の機能は落とせません。残りは「未移植」表にあります
+   削除するので、CLI の機能は落とせません。11 command すべてが揃い、`TestSelfhostFrontend`
+   が各 command 境界と、CLI が引数を拒否する形を Go CLI と byte 比較しています
 
 cutover 後は「Kizu compiler を build するには Kizu compiler が必要」になるので、
 seed をどう供給するか(過去の release binary を使うのか、他の手段か)は cutover の
@@ -279,8 +280,7 @@ signature だけを比較前に zero 化します。これは compiler 出力で
   native artifact と metadata を Go CLI と比較する
 
 native runtime の source byte 一致は `TestRuntimeSourceKizu` が持つため、runtime の各
-failure を selfhost でもう一度 link することはしません。3 に gate はなく、
-「未移植」表が残りを持ちます。selfhost が自分の source を最後まで build する
+failure を selfhost でもう一度 link することはしません。3 は `TestSelfhostFrontend` の command 境界と引数比較が持ちます。selfhost が自分の source を最後まで build する
 経路は `TestSelfhostBootstrap` にしかありません。shipping compiler が作る第 1 stage は
 他の selfhost gate と共有し、この test だけが第 2 stage を build します。
 
@@ -323,7 +323,7 @@ code LOC は blank / comment / test を除いた行数。生成 file は除く(`
 | sha256(別記録: Go 対応は crypto/sha256)| — | 298 | —(別記録) | 共有 vector corpus `compiler/tests/sha256/vectors.txt` を Go `TestSharedSHA256Vectors` と Kizu unit test が両方読む(NIST FIPS 180-4 vectors + padding 境界長) |
 | timestamp(別記録: Go 対応は time)| — | 87 | —(別記録) | unit(RFC3339 UTC の spelling と trim、nanos / millis spelling の順序) |
 | fsutil(別記録: Go 対応は os / path/filepath / strings)| — | 76 | —(別記録) | buildcache / native の経路と `TestSelfhostCache`、init の `filepath.Abs` 対応を `TestSelfhostFrontend` の current-directory case で Go と比較 |
-| compiler(cmd/kizu の parse / check / fmt / init / ir / build --emit-llvm / --target native / --target wasm32-wasi / run / test / cache / import-c-header) | 1023(全 command) | 1715(main 1710 + import 衝突 helper 5) | 1.68 | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力、init(生成 2 file、current directory、両 existing-file rejection)、CLI が引数を拒否する 13 の代表 command line(各 error message と、target を読めない 3 つの理由)を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
+| compiler(cmd/kizu の 11 command すべて: parse / check / fmt / init / ir / build --emit-llvm / --target native / --target wasm32-wasi / run / test / cache / import-c-header / version) | 1035(全 command + `internal/version`) | 1729(main 1724 + import 衝突 helper 5。生成 file `version_source.kizu` は除く) | 1.67 | `TestSelfhostFrontend` が corpus / conformance に出ない各 command 境界の代表入力、init(生成 2 file、current directory、両 existing-file rejection)、CLI が引数を拒否する 13 の代表 command line(各 error message と、target を読めない 3 つの理由)、`version` / `--version` を比較。run / test は `TestSelfhostBehavior`、cache は `TestSelfhostCache`、compiler/ 自身の fixed point は `TestSelfhostBootstrap` |
 
 ### 未移植
 
@@ -548,6 +548,32 @@ file の振り分けを `lowerTarget` 1 本にまとめ、`ir` と `build --emit
 なら `invalid command arguments` を返す。`TestSelfhostFrontend` の
 `lowerFrontendTarget` は production の `lowerTarget` と同じ分岐を test 側に写したもの
 だったので、CLI が package を受けるようになったのに合わせて削除した。
+
+`version` の移植(main +14 行、`internal/version` 12 行 + `internal/selfhost` 60 行 +
+`scripts/gen-selfhost-version` 8 行)。Go は release version を
+`-ldflags "-X ...version.Release=v0.1.2"` で注入し、revision / commit 時刻 / dirty 判定を
+`debug.ReadBuildInfo` から読みます。Kizu には build 時定数の注入も build info もないので、
+Zig が `build.zig` の `addOption` でやっているのと同じく **生成 module** で渡します:
+`scripts/gen-selfhost-version` が git から同じ 3 値を読み、Go と同じ formatter
+(`internal/version.Format`、shipping CLI と共用)で 1 行を組み、
+`compiler/src/internal/version/version_source.kizu` に書きます。
+
+生成 file を checked-in にできないのは、行が revision を名乗るので commit ごとに変わる
+ためです。`runtime_source.kizu` のような「生成して commit し、test が陳腐化を落とす」形が
+使えず、**build の前に走る step** が要ります。今は `compiler/` を触る 2 経路
+(pre-commit の `selfhost` hook、`cmd/kizu` の `TestMain`)と `just selfhost` に生成を
+足して済ませています。生成前に `kizu check compiler` を直接叩くと
+`missing import \`compiler::internal::version\`` になります。
+
+Zig がこの必要から `build.zig` を持つのに対し、Kizu はまだ 1 件なので build script は
+置きません(ADR-0052 は build input を command-line flag と build metadata に見せる方針、
+原理 8 は閉→開が additive)。生成 source、複数 artifact / cross matrix、user package への
+C source 混在、依存取得のうち 2 件以上が出てきたら、そのとき判断します。build script は
+それ自体が Kizu compiler を要求するので、cutover の seed に要求される機能も増やします。
+
+比較は `version` だけ条件付きです。CI は selfhost binary を commit をまたいで cache する
+ので、cache が当たった run では selfhost は古い revision を正しく名乗ります。この run で
+link した場合だけ byte 比較し、それ以外は `kizu ` で始まることと、引数を拒否する形を見ます。
 
 ## 見つかった gap
 

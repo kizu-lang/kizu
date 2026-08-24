@@ -15,6 +15,7 @@ import compiler::internal::project;
 import compiler::internal::source;
 import compiler::internal::stdfmt;
 import compiler::internal::types;
+import compiler::internal::version;
 import compiler::internal::wasm;
 import std::array;
 import std::fs;
@@ -35,7 +36,8 @@ import std::string;
 // `build --target native` links a program into the executable it names,
 // `run` / `test` build a temporary executable and run it, forwarding
 // the child's exit status through `std::process::ExitStatus` (ADR-0085),
-// and `import-c-header` prints the externs a C header maps to.
+// `import-c-header` prints the externs a C header maps to,
+// and `version` names the binary from the VCS state it was generated with.
 // Not connected to the shipping CLI.
 
 /// Dispatches the command line and maps each command's exit code to the
@@ -67,6 +69,10 @@ fn main() -> !process::ExitStatus {
     let command = try process::arg(next);
     if mem::equal_bytes(command, "init") {
         let code = try init_command(io, allocator, next, count);
+        return exit_of(code);
+    }
+    if mem::equal_bytes(command, "version") or mem::equal_bytes(command, "--version") {
+        let code = try version_command(io, next, count);
         return exit_of(code);
     }
     if count - next < 2 {
@@ -325,6 +331,19 @@ fn build_command(io: Io, allocator: Allocator, lib_dir: []u8, next: i64, count: 
     let message_bytes = message.as_bytes();
     try io::write_stderr_line(io, message_bytes);
     return 1;
+}
+
+/// Runs `version`, the Go `versionCommand`: the binary names itself and takes
+/// nothing else. The line is generated with the compiler, because a selfhost
+/// build has no linker flag to stamp and no build info to read.
+fn version_command(io: Io, next: i64, count: i64) -> !i64 {
+    if count - next != 1 {
+        try usage(io);
+        try io::write_stderr_line(io, "error: version takes no arguments");
+        return 1;
+    }
+    try io::write_stdout_line(io, version::version_string());
+    return 0;
 }
 
 /// Writes the usage lines for the commands this binary has.

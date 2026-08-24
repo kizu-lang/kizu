@@ -9,6 +9,7 @@ import (
 
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/selfhost"
 	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/stdlib/stdlibtest"
 )
@@ -22,6 +23,10 @@ var (
 	selfhostBinaryPath  string
 	selfhostBuildOutput []byte
 	selfhostBuildErr    error
+	// selfhostBuiltHere records whether this run linked the selfhost compiler
+	// or reused one built earlier. A reused binary names the revision it was
+	// built from, which is not this one.
+	selfhostBuiltHere bool
 )
 
 // TestMain builds the kizu CLI once so command smokes exec it directly
@@ -42,6 +47,12 @@ func runTestMain(m *testing.M) (int, error) {
 	// installed one. Setting it here rather than on each command keeps it in
 	// os.Environ(), which the tests that build their own environment copy.
 	if err := os.Setenv(stdlib.LibDirEnv, stdlibtest.RepoLibDir()); err != nil {
+		return 0, err
+	}
+	// The selfhost compiler reads its version from a module generated with it,
+	// because a Kizu build has no linker flag to stamp. Write it before
+	// anything builds `compiler/`.
+	if err := selfhost.WriteVersionSource("../.."); err != nil {
 		return 0, err
 	}
 	dir, err := os.MkdirTemp("", "kizu-test-bin-")
@@ -94,6 +105,7 @@ func sharedSelfhost(t *testing.T) string {
 			"build", "--target", "native", "-o", selfhostBinaryPath, "../../compiler",
 		)
 		selfhostBuildOutput, selfhostBuildErr = build.CombinedOutput()
+		selfhostBuiltHere = selfhostBuildErr == nil
 	})
 	if selfhostBuildErr != nil {
 		t.Fatalf("build shared selfhost compiler: %v\n%s", selfhostBuildErr, selfhostBuildOutput)
