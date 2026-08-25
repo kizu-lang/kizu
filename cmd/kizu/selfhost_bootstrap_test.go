@@ -41,7 +41,7 @@ func TestSelfhostBootstrap(t *testing.T) {
 		t.Skip("builds the selfhost compiler")
 	}
 	root := t.TempDir()
-	stage1 := sharedSelfhost(t)
+	stage1 := bootstrapStage1(t, root)
 	stage2 := selfhostStagePath(t, root, "stage2")
 	rebuild := exec.Command(stage1, "build", "--target", "native", "-o", stage2, "../../compiler")
 	if out, err := rebuild.CombinedOutput(); err != nil {
@@ -67,6 +67,27 @@ func TestSelfhostBootstrap(t *testing.T) {
 			" %d of %d bytes differ, first at offset %d",
 			differing, len(first), firstAt)
 	}
+}
+
+// bootstrapStage1 returns a compiler the shipping one built from the source in
+// this checkout. The shared binary is that when this run built it, but a run
+// that restored it from a cache has one built at an older revision: the
+// version module generated with a compiler names the revision it was built
+// from, and that is not in the cache key because it is not checked in. Asking
+// such a binary to reproduce itself would be asking it to reproduce a source
+// it was not built from.
+func bootstrapStage1(t *testing.T, root string) string {
+	t.Helper()
+	shared := sharedSelfhost(t)
+	if selfhostBuiltHere {
+		return shared
+	}
+	stage1 := selfhostStagePath(t, root, "stage1")
+	build := kizuCommand("build", "--target", "native", "-o", stage1, "../../compiler")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build stage1 from this checkout: %v\n%s", err, out)
+	}
+	return stage1
 }
 
 // normalizeMachOLinkIdentity removes the two pieces of link-invocation

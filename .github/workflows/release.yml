@@ -11,9 +11,14 @@
 # installs.
 name: release
 
+# workflow_dispatch builds and smoke-tests the four artifacts without
+# publishing anything, so the path a tag takes has been walked before a tag
+# takes it. It is also where darwin-amd64 is exercised: CI runs macOS arm64
+# and Linux amd64, and this is the only place the other two are built.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -42,7 +47,9 @@ jobs:
       - name: Build
         env:
           KIZU_LIB_DIR: ${{ github.workspace }}/lib/kizu
-          RELEASE_LDFLAGS: -X github.com/kizu-lang/kizu/internal/version.Release=${{ github.ref_name }}
+          # A tag names the release; a dry run carries no version and the
+          # binary names itself by the VCS state, the way a local build does.
+          KIZU_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           set -eu
           clang --version | head -1
@@ -50,18 +57,22 @@ jobs:
           go build -trimpath -o seed/kizu ./cmd/kizu
           # The released binary has no linker flag to stamp, so the version it
           # names is generated with it, from the tag this release is cut from.
-          go run -ldflags "$RELEASE_LDFLAGS" ./scripts/gen-selfhost-version
-          prefix="dist/kizu-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          go run -ldflags \
+            "-X github.com/kizu-lang/kizu/internal/version.Release=$KIZU_RELEASE" \
+            ./scripts/gen-selfhost-version
+          prefix="dist/kizu-${KIZU_RELEASE:-devel}-${{ matrix.target }}"
           mkdir -p "$prefix/bin" "$prefix/lib"
           ./seed/kizu build --target native --opt -o "$prefix/bin/kizu" compiler
           cp -R lib/kizu "$prefix/lib/kizu"
           tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
       - name: Smoke
+        env:
+          KIZU_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           set -eu
           # From an unrelated directory with nothing pointing at a library
           # tree: what a user gets after extracting the tarball.
-          prefix="$PWD/dist/kizu-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          prefix="$PWD/dist/kizu-${KIZU_RELEASE:-devel}-${{ matrix.target }}"
           cd "$(mktemp -d)"
           "$prefix/bin/kizu" version
           "$prefix/bin/kizu" run "$GITHUB_WORKSPACE/examples/hello.kizu"
@@ -73,6 +84,8 @@ jobs:
 
   release:
     needs: build
+    # A dry run stops after the artifacts are built and smoke-tested.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
