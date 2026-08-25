@@ -84,7 +84,8 @@ func typeResolutionError(issue typeResolutionIssue) error {
 	case typeResolutionMapArity:
 		return errorf("type error: std::map::Map expects 2 static arguments")
 	case typeResolutionMapKey:
-		return errorf("type error: std::map::Map key type must be []u8")
+		return errorf("type error: std::map::Map key type must be one of %s",
+			typ.MapKeyTypeNames())
 	case typeResolutionUnknownGeneric:
 		return errorf("type error: unknown generic type `%s`", issue.subject)
 	case typeResolutionUserGenericArity:
@@ -376,7 +377,7 @@ func (c *Checker) resolveMapType(
 		return "", typeResolutionIssue{kind: typeResolutionMapArity}
 	}
 	key := Type(args[0].String())
-	if !sameType(key, typeByteString) && !c.typeParams.contains(string(key)) {
+	if !typ.IsMapKey(string(key)) && !c.typeParams.contains(string(key)) {
 		return "", typeResolutionIssue{kind: typeResolutionMapKey}
 	}
 	if _, issue := c.resolveTypeNode(args[1]); issue.present() {

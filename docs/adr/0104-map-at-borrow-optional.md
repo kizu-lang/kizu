@@ -23,7 +23,7 @@ copy out できない value を borrow で読む経路を前提とする。
    value borrow、なければ `null`。
 2. **recognizer を container 種別に general 化する**。at/at_mut capture
    条件の recognizer は receiver 型で分岐する: `Array` は i64 index、
-   `Map` は []u8 key。それ以外の規則(capture 条件限定、保存・`orelse`・
+   `Map` はその map の key 型。それ以外の規則(capture 条件限定、保存・`orelse`・
    signature の拒否、`at_mut` の mutable binding 要求)は ADR-0103 と同一。
 3. **mutable borrow 中の map read は拒否する**。`at_mut` capture が map を
    mutable に borrow している間、`get` / `key_at` / `contains` / `len` は

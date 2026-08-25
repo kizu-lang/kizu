@@ -1,0 +1,73 @@
+import std::map;
+import std::mem;
+import std::testing;
+
+// An integer key is hashed and compared as its own bytes, the same way a
+// `[]u8` key is, so every Map operation answers it without a second path.
+test "std map i64 key" {
+    let allocator = mem::page_allocator();
+    var counts = map::new<i64, i64>(allocator);
+    defer counts.deinit();
+
+    var index = 0;
+    while index < 256 {
+        try counts.insert(index * 7, index);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(256, counts.len());
+    testing::expect_equal<i64>(0, counts.get(0) orelse -1);
+    testing::expect_equal<i64>(255, counts.get(1785) orelse -1);
+    testing::expect(counts.contains(7));
+    testing::expect(!counts.contains(8));
+    testing::expect_equal<i64>(-1, counts.get(8) orelse -1);
+
+    // An existing key overwrites in place, and a new one grows the table.
+    try counts.insert(7, 999);
+    testing::expect_equal<i64>(256, counts.len());
+    testing::expect_equal<i64>(999, counts.get(7) orelse -1);
+    if counts.at_mut(7) |slot| {
+        slot.* = 1000;
+    }
+    testing::expect_equal<i64>(1000, counts.get(7) orelse -1);
+}
+
+// key_at walks the keys in insertion order (ADR-0088). An integer key is a
+// value rather than a view into map storage, so it leaves through the same
+// capture without borrowing the map for longer than the read.
+test "std map i64 key_at walks insertion order" {
+    let allocator = mem::page_allocator();
+    var seen = map::new<i64, i64>(allocator);
+    defer seen.deinit();
+    try seen.insert(30, 3);
+    try seen.insert(10, 1);
+    try seen.insert(20, 2);
+
+    var order = 0;
+    var index = 0;
+    while seen.key_at(index) |key| {
+        order = order * 100 + key;
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(3, index);
+    testing::expect_equal<i64>(301020, order);
+}
+
+// The key width is the key type's own, so u8 keys and i32 keys are hashed
+// over 1 and 4 bytes rather than being widened to a common one.
+test "std map narrow integer keys" {
+    let allocator = mem::page_allocator();
+    var bytes = map::new<u8, i64>(allocator);
+    defer bytes.deinit();
+    try bytes.insert(0, 100);
+    try bytes.insert(255, 200);
+    testing::expect_equal<i64>(2, bytes.len());
+    testing::expect_equal<i64>(100, bytes.get(0) orelse -1);
+    testing::expect_equal<i64>(200, bytes.get(255) orelse -1);
+
+    var wide = map::new<i32, i64>(allocator);
+    defer wide.deinit();
+    try wide.insert(-1, 7);
+    try wide.insert(1, 8);
+    testing::expect_equal<i64>(7, wide.get(-1) orelse -1);
+    testing::expect_equal<i64>(8, wide.get(1) orelse -1);
+}

@@ -9,6 +9,13 @@ allocator の規則)は言語の一部なので SPEC §14.3 と §14.4 にあり
 
 ```text
 std::mem::page_allocator() -> Allocator
+std::mem::allocator_header() -> std::mem::AllocatorHeader
+std::mem::allocator_from<T>(
+    state: &var T,
+    alloc: unsafe fn(&var T, i64) -> ?ptr<u8>,
+    free: unsafe fn(&var T, ptr<u8>, i64) -> void,
+) -> Allocator
+std::mem::limit_bytes(limit: std::mem::Limit) -> i64
 std::mem::box<T>(allocator: Allocator, value: T) -> std::mem::Error!std::mem::Box<T>
 std::mem::leak<T>(value: T) -> void
 box.borrow() -> &T
@@ -34,6 +41,19 @@ bytes_iter.next() -> ?u8
 返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
 再利用できます。allocator を受け取る constructor は capability を読み取るだけで、
 allocator binding を move しません。
+
+`std::mem::allocator_from<T>` は利用者が書いた実装から `Allocator` を作ります
+(ADR-0129)。allocator は言語がどこでも要求する capability なので、利用者が
+自分で書けるものです。`alloc` は要求 byte 数か `null` を返し、`free` は `alloc`
+が返したものを、要求されたときの size と一緒に受け取ります。どちらも
+`unsafe fn` 宣言が名指す義務を負います。返る `Allocator` は渡した state に
+tie され、state より長生きできません。`allocator_header` はその実装の第 1
+field に置く zeroed header を返します。実例は `examples/user_allocator.kizu`
+です。
+
+`std::mem::Limit` は allocation の上限を綴ります。上限を付けないことも選択なので
+`Unlimited` と書き、source に残ります。`limit_bytes` は runtime primitive 用に
+`Bytes(n)` を `n`、`Unlimited` を `-1` として描きます。
 
 `std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
 non-copy / move-only な indirection です。

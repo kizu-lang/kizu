@@ -104,17 +104,29 @@ func boxElementType(name string) (string, bool) {
 	return strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"), true
 }
 
-// mapValueType returns V for the supported std::map::Map<[]u8, V> shape.
-func mapValueType(name string) (string, bool) {
+// mapTypeArgs returns K and V for a std::map::Map<K, V> spelling the checker
+// has already accepted.
+func mapTypeArgs(name string) (string, string, bool) {
 	const prefix = mapTypeName + "<"
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
-		return "", false
+		return "", "", false
 	}
 	args := splitStaticArgs(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"))
-	if len(args) != 2 || args[0] != "[]u8" {
+	if len(args) != 2 || !typ.IsMapKey(args[0]) {
+		return "", "", false
+	}
+	return args[0], args[1], true
+}
+
+// mapStaticArgs returns the `K, V` argument list a std::map::Map wrapper is
+// instantiated with. Both static parameters name the instance, so a caller
+// that only wanted V would pick the wrong one.
+func mapStaticArgs(name string) (string, bool) {
+	key, value, ok := mapTypeArgs(name)
+	if !ok {
 		return "", false
 	}
-	return args[1], true
+	return key + ", " + value, true
 }
 
 // splitStaticArgs splits a static argument list, and reports no arguments for a
@@ -128,15 +140,14 @@ func splitStaticArgs(args string) []string {
 	return parts
 }
 
-// mapInstanceType returns std::map::Map<[]u8, V> and V for the argument list a
+// mapInstanceType returns std::map::Map<K, V> and V for the argument list a
 // map constructor was written with.
 func mapInstanceType(typeArg string) (string, string, bool) {
 	args := splitStaticArgs(typeArg)
-	if len(args) != 2 || args[0] != "[]u8" {
+	if len(args) != 2 || !typ.IsMapKey(args[0]) {
 		return "", "", false
 	}
-	valueType := args[1]
-	return mapTypeName + "<[]u8, " + valueType + ">", valueType, true
+	return mapTypeName + "<" + args[0] + ", " + args[1] + ">", args[1], true
 }
 
 // isReferenceType reports whether a type is a local borrow.

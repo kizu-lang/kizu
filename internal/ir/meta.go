@@ -378,7 +378,7 @@ func (l *lowerer) metaPredicate(form stdmeta.Form, typeArg string) (bool, error)
 		_, ok := boxElementType(subject)
 		return ok, nil
 	case stdmeta.IsMap:
-		_, ok := mapValueType(subject)
+		_, _, ok := mapTypeArgs(subject)
 		return ok, nil
 	case stdmeta.IsOwner:
 		return ast.OwnerType(l.deinitOwners, subject), nil

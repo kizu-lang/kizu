@@ -4,7 +4,7 @@
 
 Accepted.
 
-Extends ADR-0061, ADR-0062, ADR-0067, and ADR-0074.
+Extends ADR-0061, ADR-0067, and ADR-0074.
 
 ## Context
 

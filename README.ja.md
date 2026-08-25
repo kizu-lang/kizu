@@ -27,37 +27,39 @@ lowering は 1 本しかないため、同じプログラムが `run` と `build
 
 | 機能 | 例の数 | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 32 | ✅ | ✅ | ✅ | 11/32 |
+| fn / let / struct / literals | 34 | ✅ | ✅ | ✅ | 12/34 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 9 | ✅ | ✅ | ✅ | 8/9 |
+| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | 9/10 |
 | if / match | 13 | ✅ | ✅ | ✅ | 2/13 |
-| enum / union | 14 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 17 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 39 | ✅ | ✅ | ✅ | 2/39 |
-| deinit / defer | 17 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 8 | ✅ | ✅ | ✅ | ❌ |
+| enum / union | 15 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 18 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 41 | ✅ | ✅ | ✅ | 2/41 |
+| deinit / defer | 18 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 9 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 8 | ✅ | ✅ | ✅ | 1/8 |
-| cast / slice / raw pointer / box | 7 | ✅ | ✅ | ✅ | 1/7 |
+| cast / slice / raw pointer / box | 8 | ✅ | ✅ | ✅ | 1/8 |
 | contract / generics | 8 | ✅ | ✅ | ✅ | 1/8 |
 | std::array | 14 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 27 | ✅ | ✅ | ✅ | ❌ |
-| std::map | 9 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 29 | ✅ | ✅ | ✅ | ❌ |
+| std::map | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::mem / allocator | 13 | ✅ | ✅ | ✅ | ❌ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
 | std::fmt | 5 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 5 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` はその行の example が全て通ること、分数は一部だけ通ること、`❌` は 1 つも
-通らないことを表します。runnable example は 120 件、測定は 2026-08-20 に
+通らないことを表します。runnable example は 129 件、測定は 2026-08-25 に
 `just backend-matrix` で実施しました。backend を触ったら回し直してください。
-`run` はプログラムの出力で判定し、`llvm` と `wasm` は lowering が通ったかで判定します。
+`run` と `wasm` はプログラムの出力で判定します。`run` は native build を実行し、
+`wasm` は出力した module を `wasmtime` で読み込みます。`llvm` は lowering が
+通ったかで判定します —— native target は `run` が同じ text から build するためです。
 
 | 経路 | 通過 |
 | --- | --- |
-| `kizu check` | 120/120 |
-| `kizu run` | 120/120 |
-| `kizu build --emit-llvm` | 120/120 |
-| `kizu build --target wasm32-wasi` | 19/120 |
+| `kizu check` | 129/129 |
+| `kizu run` | 129/129 |
+| `kizu build --emit-llvm` | 129/129 |
+| `kizu build --target wasm32-wasi` | 21/129 |
 
 native 経路に pending の runnable example はありません。WASI はまだ target subset
 であり、未対応 lowering と出力差分は `just backend-matrix` が報告します。
@@ -87,7 +89,7 @@ build policy としては受理済みですが、未実装です。
 | 機能 | 状態 |
 | --- | --- |
 | 並列処理のための thread | **予定。** 以前の API は checker rule だけを持ち lowering も runtime も無かったため撤回しました。戻すための受け入れ条件は ADR-0025 にあり、その第 1 条件は `kizu run` で実行できることです |
-| 現在の subset を超える wasm backend | **進行中。** 74 件中 16 件が load して動きます |
+| 現在の subset を超える wasm backend | **進行中。** 129 件中 21 件が load して動きます |
 | raw pointer の実行時操作 | **check のみ。** `pointer_policy.kizu` と `raw_pointer_deref.kizu` は検査だけで実行しません |
 | float literal と float 演算 | **未着手。** `f32` / `f64` は型名として存在しますが、`1.5` は 1 つの literal として字句解析されません |
 | type alias | **未着手** |
@@ -127,8 +129,8 @@ prototype の process argument は `--` 以降で渡します。
 go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 ```
 
-機能ごとの実行例と失敗すべき安全性ルールは
-[examples catalog](examples/README.md) にまとめています。
+[`examples/`](examples/README.md) は機能ごとに読めるプログラムを 1 つずつ、
+`examples/negative/` は言語が拒否する規則を 1 つずつ持ちます。
 すべての例は末尾に自分の case -- どのコマンドで実行し、何を出力すべきか -- を
 書いており、conformance test はそれを読みます。
 safe code のメモリ安全契約は
@@ -200,7 +202,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - [docs/architecture.md](docs/architecture.md): アーキテクチャ概観(オンボーディングはここから)
 - [SPEC.md](SPEC.md): 言語仕様
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [examples](examples/README.md): examples catalog
+- [examples](examples/README.md): 機能ごとの読めるプログラムと、`negative/` の拒否例
 - [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry と移行計画
 - [docs/adr](docs/adr): Architecture Decision Record
 - [docs/perf.md](docs/perf.md): build/cache performance policy

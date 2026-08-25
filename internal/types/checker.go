@@ -4718,7 +4718,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		return valueType, nil
 	}
 	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
-		return c.checkMapMethod(valueType, name, args, env, unsafe)
+		return c.checkMapMethod(Type(keyType), valueType, name, args, env, unsafe)
 	}
 	return c.checkGenericMapPrimitiveMethod(keyType, valueType, name, args, env, unsafe)
 }
@@ -4768,7 +4768,7 @@ func (c *Checker) checkGenericMapPrimitiveMethod(
 		}
 		return typeBool, nil
 	default:
-		return c.checkMapMethod(valueType, name, args, env, unsafe)
+		return c.checkMapMethod(Type(keyType), valueType, name, args, env, unsafe)
 	}
 }
 
@@ -6203,7 +6203,7 @@ func (c *Checker) checkMapReceiverMethod(
 	if err != nil {
 		return "", err
 	}
-	return c.checkMapMethod(Type(mapArgs[1]), field.Name, args, env, unsafe)
+	return c.checkMapMethod(Type(mapArgs[0]), Type(mapArgs[1]), field.Name, args, env, unsafe)
 }
 
 // mutableReceiverPlace reports whether a method receiver expression names a
@@ -6477,8 +6477,9 @@ func (c *Checker) checkMapConstructorForArgs(
 	return Type(fmt.Sprintf("std::map::Map<%s, %s>", keyType, valueType)), true, nil
 }
 
-// checkMapMethod validates owned Map<[]u8, V> prototype methods.
+// checkMapMethod validates owned Map<K, V> prototype methods.
 func (c *Checker) checkMapMethod(
+	keyType Type,
 	valueType Type,
 	name string,
 	args []ast.Expression,
@@ -6491,9 +6492,9 @@ func (c *Checker) checkMapMethod(
 	// Array already answers for owner elements (ADR-0123).
 	switch name {
 	case "insert":
-		return c.checkMapInsert(valueType, args, env, unsafe)
+		return c.checkMapInsert(keyType, valueType, args, env, unsafe)
 	case "get":
-		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+		if err := c.checkMapKeyArg(keyType, name, args, env, unsafe); err != nil {
 			return "", err
 		}
 		if !isGenericParamType(valueType) && !c.isCopyType(valueType) {
@@ -6501,14 +6502,14 @@ func (c *Checker) checkMapMethod(
 		}
 		return Type("?" + string(valueType)), nil
 	case "at", "at_mut":
-		return c.checkMapAtCondition(valueType, name, args, env, unsafe)
+		return c.checkMapAtCondition(keyType, valueType, name, args, env, unsafe)
 	case "key_at":
 		if err := c.checkMapIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("?[]u8"), nil
+		return Type("?" + string(keyType)), nil
 	case "contains":
-		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+		if err := c.checkMapKeyArg(keyType, name, args, env, unsafe); err != nil {
 			return "", err
 		}
 		return typeBool, nil
@@ -6530,6 +6531,7 @@ func (c *Checker) checkMapMethod(
 // checkMapAtCondition types at/at_mut inside a capture condition and refuses
 // them anywhere else: the borrow optional they produce exists only there.
 func (c *Checker) checkMapAtCondition(
+	keyType Type,
 	valueType Type,
 	name string,
 	args []ast.Expression,
@@ -6545,7 +6547,7 @@ func (c *Checker) checkMapAtCondition(
 	// a nested at/at_mut in argument position refuses as usual — and back
 	// on for the result the call gate reads.
 	c.captureCondition = false
-	err := c.checkMapKeyArg(name, args, env, unsafe)
+	err := c.checkMapKeyArg(keyType, name, args, env, unsafe)
 	c.captureCondition = true
 	if err != nil {
 		return "", err
@@ -6558,6 +6560,7 @@ func (c *Checker) checkMapAtCondition(
 
 // checkMapInsert validates Map.insert arguments.
 func (c *Checker) checkMapInsert(
+	keyType Type,
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
@@ -6566,10 +6569,10 @@ func (c *Checker) checkMapInsert(
 	if len(args) != 2 {
 		return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
 	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
+	if got, err := c.checkContextualExpr(args[0], keyType, env, unsafe); err != nil {
 		return "", err
-	} else if !sameType(got, typeByteString) {
-		return "", errorf("type error: `Map.insert` expects []u8 key, got %s", got)
+	} else if !sameType(got, keyType) {
+		return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 	}
 	got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 	if err != nil {
@@ -6581,8 +6584,9 @@ func (c *Checker) checkMapInsert(
 	return "std::mem::Error!void", nil
 }
 
-// checkMapKeyArg validates one []u8 lookup key.
+// checkMapKeyArg validates one lookup key against the map's key type.
 func (c *Checker) checkMapKeyArg(
+	keyType Type,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -6591,12 +6595,12 @@ func (c *Checker) checkMapKeyArg(
 	if len(args) != 1 {
 		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], keyType, env, unsafe)
 	if err != nil {
 		return err
 	}
-	if !sameType(got, typeByteString) {
-		return errorf("type error: `Map.%s` expects []u8 key, got %s", name, got)
+	if !sameType(got, keyType) {
+		return errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
 	}
 	return nil
 }
@@ -6618,8 +6622,9 @@ func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	if len(args) != 2 {
 		return errorf("type error: std::map::Map expects 2 static arguments")
 	}
-	if !sameType(args[0], typeByteString) {
-		return errorf("type error: std::map::Map key type must be []u8")
+	if !typ.IsMapKey(string(args[0])) {
+		return errorf("type error: std::map::Map key type must be one of %s",
+			typ.MapKeyTypeNames())
 	}
 	return nil
 }

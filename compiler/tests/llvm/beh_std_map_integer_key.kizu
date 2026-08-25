@@ -1,0 +1,910 @@
+import std::map;
+import std::mem;
+import std::testing;
+
+// An integer key is hashed and compared as its own bytes, the same way a
+// `[]u8` key is, so every Map operation answers it without a second path.
+test "std map i64 key" {
+    let allocator = mem::page_allocator();
+    var counts = map::new<i64, i64>(allocator);
+    defer counts.deinit();
+
+    var index = 0;
+    while index < 256 {
+        try counts.insert(index * 7, index);
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(256, counts.len());
+    testing::expect_equal<i64>(0, counts.get(0) orelse -1);
+    testing::expect_equal<i64>(255, counts.get(1785) orelse -1);
+    testing::expect(counts.contains(7));
+    testing::expect(!counts.contains(8));
+    testing::expect_equal<i64>(-1, counts.get(8) orelse -1);
+
+    // An existing key overwrites in place, and a new one grows the table.
+    try counts.insert(7, 999);
+    testing::expect_equal<i64>(256, counts.len());
+    testing::expect_equal<i64>(999, counts.get(7) orelse -1);
+    if counts.at_mut(7) |slot| {
+        slot.* = 1000;
+    }
+    testing::expect_equal<i64>(1000, counts.get(7) orelse -1);
+}
+
+// key_at walks the keys in insertion order (ADR-0088). An integer key is a
+// value rather than a view into map storage, so it leaves through the same
+// capture without borrowing the map for longer than the read.
+test "std map i64 key_at walks insertion order" {
+    let allocator = mem::page_allocator();
+    var seen = map::new<i64, i64>(allocator);
+    defer seen.deinit();
+    try seen.insert(30, 3);
+    try seen.insert(10, 1);
+    try seen.insert(20, 2);
+
+    var order = 0;
+    var index = 0;
+    while seen.key_at(index) |key| {
+        order = order * 100 + key;
+        index = index + 1;
+    }
+    testing::expect_equal<i64>(3, index);
+    testing::expect_equal<i64>(301020, order);
+}
+
+// The key width is the key type's own, so u8 keys and i32 keys are hashed
+// over 1 and 4 bytes rather than being widened to a common one.
+test "std map narrow integer keys" {
+    let allocator = mem::page_allocator();
+    var bytes = map::new<u8, i64>(allocator);
+    defer bytes.deinit();
+    try bytes.insert(0, 100);
+    try bytes.insert(255, 200);
+    testing::expect_equal<i64>(2, bytes.len());
+    testing::expect_equal<i64>(100, bytes.get(0) orelse -1);
+    testing::expect_equal<i64>(200, bytes.get(255) orelse -1);
+
+    var wide = map::new<i32, i64>(allocator);
+    defer wide.deinit();
+    try wide.insert(-1, 7);
+    try wide.insert(1, 8);
+    testing::expect_equal<i64>(7, wide.get(-1) orelse -1);
+    testing::expect_equal<i64>(8, wide.get(1) orelse -1);
+}
+
+
+// llvm
+// emit:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._var_i64 = type { i8, ptr }
+// %kizu.opt.i64 = type { i8, i64 }
+// 
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.29 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [30 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.29, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare %kizu.opt._var_i64 @std__map__Map_at_mut_i64_i64(ptr, i64)
+// declare i1 @std__map__Map_contains_i64_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr, i32)
+// declare %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr, i8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr, i32, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr, i64, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr, i8, i64)
+// declare %kizu.opt.i64 @std__map__Map_key_at_i64_i64(ptr, i64)
+// declare i64 @std__map__Map_len_i64_i64(ptr)
+// declare i64 @std__map__Map_len_u8_i64(ptr)
+// declare ptr @std__mem__page_allocator()
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_std_map_i64_key() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.4 = phi i64 [ 0, %entry ], [ %kizu.12, %kizu.10.try.ok ]
+//   %kizu.6 = icmp slt i64 %kizu.4, 256
+//   br i1 %kizu.6, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.8 = mul i64 %kizu.4, 7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 %kizu.8, i64 %kizu.4)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.10.try.ok:
+//   %kizu.12 = add i64 %kizu.4, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.14 = call i64 @std__map__Map_len_i64_i64(ptr %kizu.2)
+//   %kizu.15.ok = icmp eq i64 256, %kizu.14
+//   br i1 %kizu.15.ok, label %kizu.15.ok.ok, label %kizu.15.ok.fail
+// kizu.15.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 256, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.15.ok.ok:
+//   %kizu.18 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 0)
+//   %kizu.19.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.22 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.23 = phi i64 [ %kizu.20, %orelse.some.4 ], [ %kizu.22, %orelse.else.5 ]
+//   %kizu.24.ok = icmp eq i64 0, %kizu.23
+//   br i1 %kizu.24.ok, label %kizu.24.ok.ok, label %kizu.24.ok.fail
+// kizu.24.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.24.ok.ok:
+//   %kizu.27 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 1785)
+//   %kizu.28.tag = extractvalue %kizu.opt.i64 %kizu.27, 0
+//   %kizu.28 = icmp ne i8 %kizu.28.tag, 0
+//   br i1 %kizu.28, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.29 = extractvalue %kizu.opt.i64 %kizu.27, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.31 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.32 = phi i64 [ %kizu.29, %orelse.some.7 ], [ %kizu.31, %orelse.else.8 ]
+//   %kizu.33.ok = icmp eq i64 255, %kizu.32
+//   br i1 %kizu.33.ok, label %kizu.33.ok.ok, label %kizu.33.ok.fail
+// kizu.33.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 255, i64 %kizu.32, i64 0, i64 0)
+//   unreachable
+// kizu.33.ok.ok:
+//   %kizu.35 = call i1 @std__map__Map_contains_i64_i64(ptr %kizu.2, i64 7)
+//   call void @std__testing__expect(i1 %kizu.35)
+//   %kizu.38 = call i1 @std__map__Map_contains_i64_i64(ptr %kizu.2, i64 8)
+//   %kizu.39 = xor i1 %kizu.38, true
+//   call void @std__testing__expect(i1 %kizu.39)
+//   %kizu.42 = sub i64 0, 1
+//   %kizu.44 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 8)
+//   %kizu.45.tag = extractvalue %kizu.opt.i64 %kizu.44, 0
+//   %kizu.45 = icmp ne i8 %kizu.45.tag, 0
+//   br i1 %kizu.45, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.46 = extractvalue %kizu.opt.i64 %kizu.44, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.48 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.49 = phi i64 [ %kizu.46, %orelse.some.10 ], [ %kizu.48, %orelse.else.11 ]
+//   %kizu.50.ok = icmp eq i64 %kizu.42, %kizu.49
+//   br i1 %kizu.50.ok, label %kizu.50.ok.ok, label %kizu.50.ok.fail
+// kizu.50.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.42, i64 %kizu.49, i64 0, i64 0)
+//   unreachable
+// kizu.50.ok.ok:
+//   %kizu.53 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 7, i64 999)
+//   %kizu.54.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.53, 0
+//   %kizu.54.ok.bool = icmp ne i8 %kizu.54.ok, 0
+//   br i1 %kizu.54.ok.bool, label %kizu.54.try.ok, label %kizu.54.try.err
+// kizu.54.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.53, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.54.try.ok:
+//   %kizu.56 = call i64 @std__map__Map_len_i64_i64(ptr %kizu.2)
+//   %kizu.57.ok = icmp eq i64 256, %kizu.56
+//   br i1 %kizu.57.ok, label %kizu.57.ok.ok, label %kizu.57.ok.fail
+// kizu.57.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 256, i64 %kizu.56, i64 0, i64 0)
+//   unreachable
+// kizu.57.ok.ok:
+//   %kizu.60 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.61.tag = extractvalue %kizu.opt.i64 %kizu.60, 0
+//   %kizu.61 = icmp ne i8 %kizu.61.tag, 0
+//   br i1 %kizu.61, label %orelse.some.13, label %orelse.else.14
+// orelse.some.13:
+//   %kizu.62 = extractvalue %kizu.opt.i64 %kizu.60, 1
+//   br label %orelse.end.15
+// orelse.else.14:
+//   %kizu.64 = sub i64 0, 1
+//   br label %orelse.end.15
+// orelse.end.15:
+//   %kizu.65 = phi i64 [ %kizu.62, %orelse.some.13 ], [ %kizu.64, %orelse.else.14 ]
+//   %kizu.66.ok = icmp eq i64 999, %kizu.65
+//   br i1 %kizu.66.ok, label %kizu.66.ok.ok, label %kizu.66.ok.fail
+// kizu.66.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 999, i64 %kizu.65, i64 0, i64 0)
+//   unreachable
+// kizu.66.ok.ok:
+//   %kizu.68 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.69 = extractvalue %kizu.opt._var_i64 %kizu.68, 1
+//   %kizu.70.tag = extractvalue %kizu.opt._var_i64 %kizu.68, 0
+//   %kizu.70 = icmp ne i8 %kizu.70.tag, 0
+//   br i1 %kizu.70, label %if.then.16, label %if.else.17
+// if.then.16:
+//   store i64 1000, ptr %kizu.69
+//   br label %if.end.18
+// if.else.17:
+//   br label %if.end.18
+// if.end.18:
+//   %kizu.75 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.76.tag = extractvalue %kizu.opt.i64 %kizu.75, 0
+//   %kizu.76 = icmp ne i8 %kizu.76.tag, 0
+//   br i1 %kizu.76, label %orelse.some.19, label %orelse.else.20
+// orelse.some.19:
+//   %kizu.77 = extractvalue %kizu.opt.i64 %kizu.75, 1
+//   br label %orelse.end.21
+// orelse.else.20:
+//   %kizu.79 = sub i64 0, 1
+//   br label %orelse.end.21
+// orelse.end.21:
+//   %kizu.80 = phi i64 [ %kizu.77, %orelse.some.19 ], [ %kizu.79, %orelse.else.20 ]
+//   %kizu.81.ok = icmp eq i64 1000, %kizu.80
+//   br i1 %kizu.81.ok, label %kizu.81.ok.ok, label %kizu.81.ok.fail
+// kizu.81.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1000, i64 %kizu.80, i64 0, i64 0)
+//   unreachable
+// kizu.81.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.83 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.83
+// }
+// 
+// define %kizu.error.void @test_std_map_i64_key_at_walks_insertion_order() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 30, i64 3)
+//   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.6.try.ok:
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 10, i64 1)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.10.try.ok:
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 20, i64 2)
+//   %kizu.14.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
+//   ret %kizu.error.void %kizu.try.err.6
+// kizu.14.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.17 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.24, %while.body.2 ]
+//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.26, %while.body.2 ]
+//   %kizu.19 = call %kizu.opt.i64 @std__map__Map_key_at_i64_i64(ptr %kizu.2, i64 %kizu.18)
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.19, 1
+//   %kizu.21.tag = extractvalue %kizu.opt.i64 %kizu.19, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.23 = mul i64 %kizu.17, 100
+//   %kizu.24 = add i64 %kizu.23, %kizu.20
+//   %kizu.26 = add i64 %kizu.18, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.28.ok = icmp eq i64 3, %kizu.18
+//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
+// kizu.28.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.28.ok.ok:
+//   %kizu.30.ok = icmp eq i64 301020, %kizu.17
+//   br i1 %kizu.30.ok, label %kizu.30.ok.ok, label %kizu.30.ok.fail
+// kizu.30.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 301020, i64 %kizu.17, i64 0, i64 0)
+//   unreachable
+// kizu.30.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.32 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.32
+// }
+// 
+// define %kizu.error.void @test_std_map_narrow_integer_keys() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr %kizu.2, i8 0, i64 100)
+//   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.6.try.ok:
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr %kizu.2, i8 255, i64 200)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.10.try.ok:
+//   %kizu.12 = call i64 @std__map__Map_len_u8_i64(ptr %kizu.2)
+//   %kizu.13.ok = icmp eq i64 2, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   %kizu.16 = call %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr %kizu.2, i8 0)
+//   %kizu.17.tag = extractvalue %kizu.opt.i64 %kizu.16, 0
+//   %kizu.17 = icmp ne i8 %kizu.17.tag, 0
+//   br i1 %kizu.17, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.18 = extractvalue %kizu.opt.i64 %kizu.16, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.20 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.21 = phi i64 [ %kizu.18, %orelse.some.1 ], [ %kizu.20, %orelse.else.2 ]
+//   %kizu.22.ok = icmp eq i64 100, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 100, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   %kizu.25 = call %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr %kizu.2, i8 255)
+//   %kizu.26.tag = extractvalue %kizu.opt.i64 %kizu.25, 0
+//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   br i1 %kizu.26, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.27 = extractvalue %kizu.opt.i64 %kizu.25, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.29 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.30 = phi i64 [ %kizu.27, %orelse.some.4 ], [ %kizu.29, %orelse.else.5 ]
+//   %kizu.31.ok = icmp eq i64 200, %kizu.30
+//   br i1 %kizu.31.ok, label %kizu.31.ok.ok, label %kizu.31.ok.fail
+// kizu.31.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 200, i64 %kizu.30, i64 0, i64 0)
+//   unreachable
+// kizu.31.ok.ok:
+//   %kizu.32 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.34 = sub i32 0, 1
+//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr %kizu.32, i32 %kizu.34, i64 7)
+//   %kizu.37.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 0
+//   %kizu.37.ok.bool = icmp ne i8 %kizu.37.ok, 0
+//   br i1 %kizu.37.ok.bool, label %kizu.37.try.ok, label %kizu.37.try.err
+// kizu.37.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.7.code = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 1
+//   %kizu.try.err.7.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.7 = insertvalue %kizu.error.void %kizu.try.err.7.base, i64 %kizu.try.err.7.code, 1
+//   ret %kizu.error.void %kizu.try.err.7
+// kizu.37.try.ok:
+//   %kizu.40 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr %kizu.32, i32 1, i64 8)
+//   %kizu.41.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.40, 0
+//   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
+//   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
+// kizu.41.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.40, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
+//   ret %kizu.error.void %kizu.try.err.10
+// kizu.41.try.ok:
+//   %kizu.44 = sub i32 0, 1
+//   %kizu.45 = call %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr %kizu.32, i32 %kizu.44)
+//   %kizu.46.tag = extractvalue %kizu.opt.i64 %kizu.45, 0
+//   %kizu.46 = icmp ne i8 %kizu.46.tag, 0
+//   br i1 %kizu.46, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.47 = extractvalue %kizu.opt.i64 %kizu.45, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.49 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.50 = phi i64 [ %kizu.47, %orelse.some.7 ], [ %kizu.49, %orelse.else.8 ]
+//   %kizu.51.ok = icmp eq i64 7, %kizu.50
+//   br i1 %kizu.51.ok, label %kizu.51.ok.ok, label %kizu.51.ok.fail
+// kizu.51.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.50, i64 0, i64 0)
+//   unreachable
+// kizu.51.ok.ok:
+//   %kizu.54 = call %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr %kizu.32, i32 1)
+//   %kizu.55.tag = extractvalue %kizu.opt.i64 %kizu.54, 0
+//   %kizu.55 = icmp ne i8 %kizu.55.tag, 0
+//   br i1 %kizu.55, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.56 = extractvalue %kizu.opt.i64 %kizu.54, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.58 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.59 = phi i64 [ %kizu.56, %orelse.some.10 ], [ %kizu.58, %orelse.else.11 ]
+//   %kizu.60.ok = icmp eq i64 8, %kizu.59
+//   br i1 %kizu.60.ok, label %kizu.60.ok.ok, label %kizu.60.ok.fail
+// kizu.60.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.59, i64 0, i64 0)
+//   unreachable
+// kizu.60.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.63 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.63
+// }
+// opt:
+// ; Kizu LLVM IR
+// %kizu.slice.u8 = type { ptr, i64 }
+// %kizu.opt._var_i64 = type { i8, ptr }
+// %kizu.opt.i64 = type { i8, i64 }
+// 
+// %kizu.error.void = type { i8, i64 }
+// %kizu.error.std__mem__Error.void = type { i8, i64 }
+// 
+// %kizu.union.std__mem__Limit = type { i64, [8 x i8] }
+// 
+// %kizu.struct.std__mem__AllocatorHeader = type { i64, i64, i64, i64 }
+// %kizu.struct.std__mem__BytesIter = type { %kizu.slice.u8, i64 }
+// 
+// @.kizu.error.name.29 = private unnamed_addr constant [29 x i8] c"std::mem::Error::OutOfMemory\00"
+// @.kizu.error.names = private unnamed_addr constant [30 x { ptr, i64 }] [{ ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr null, i64 0 }, { ptr, i64 } { ptr @.kizu.error.name.29, i64 28 }]
+// 
+// declare void @kizu_print_string(ptr, i64)
+// declare void @kizu_print_int(i64)
+// declare void @kizu_print_bool(i1)
+// declare void @kizu_main_error_message(ptr, i64)
+// 
+// declare void @kizu_runtime_init_args(i32, ptr)
+// 
+// declare ptr @kizu_map_new(ptr, i64)
+// declare i1 @kizu_map_insert(ptr, ptr, i64, ptr)
+// declare ptr @kizu_map_get(ptr, ptr, i64)
+// declare ptr @kizu_map_value_at(ptr, i64)
+// declare void @kizu_map_key_at(ptr, ptr, i64)
+// declare i1 @kizu_map_contains(ptr, ptr, i64)
+// declare i64 @kizu_map_len(ptr)
+// declare void @kizu_map_deinit(ptr)
+// 
+// declare %kizu.opt._var_i64 @std__map__Map_at_mut_i64_i64(ptr, i64)
+// declare i1 @std__map__Map_contains_i64_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr, i32)
+// declare %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr, i64)
+// declare %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr, i8)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr, i32, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr, i64, i64)
+// declare %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr, i8, i64)
+// declare %kizu.opt.i64 @std__map__Map_key_at_i64_i64(ptr, i64)
+// declare i64 @std__map__Map_len_i64_i64(ptr)
+// declare i64 @std__map__Map_len_u8_i64(ptr)
+// declare ptr @std__mem__page_allocator()
+// declare void @std__testing__expect(i1)
+// 
+// declare void @kizu_panic_expect_equal_int(i64, i64, i64, i64)
+// 
+// define %kizu.error.void @test_std_map_i64_key() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.4 = phi i64 [ 0, %entry ], [ %kizu.12, %kizu.10.try.ok ]
+//   %kizu.6 = icmp slt i64 %kizu.4, 256
+//   br i1 %kizu.6, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.8 = mul i64 %kizu.4, 7
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 %kizu.8, i64 %kizu.4)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.10.try.ok:
+//   %kizu.12 = add i64 %kizu.4, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.14 = call i64 @std__map__Map_len_i64_i64(ptr %kizu.2)
+//   %kizu.15.ok = icmp eq i64 256, %kizu.14
+//   br i1 %kizu.15.ok, label %kizu.15.ok.ok, label %kizu.15.ok.fail
+// kizu.15.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 256, i64 %kizu.14, i64 0, i64 0)
+//   unreachable
+// kizu.15.ok.ok:
+//   %kizu.18 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 0)
+//   %kizu.19.tag = extractvalue %kizu.opt.i64 %kizu.18, 0
+//   %kizu.19 = icmp ne i8 %kizu.19.tag, 0
+//   br i1 %kizu.19, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.18, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.22 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.23 = phi i64 [ %kizu.20, %orelse.some.4 ], [ %kizu.22, %orelse.else.5 ]
+//   %kizu.24.ok = icmp eq i64 0, %kizu.23
+//   br i1 %kizu.24.ok, label %kizu.24.ok.ok, label %kizu.24.ok.fail
+// kizu.24.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 0, i64 %kizu.23, i64 0, i64 0)
+//   unreachable
+// kizu.24.ok.ok:
+//   %kizu.27 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 1785)
+//   %kizu.28.tag = extractvalue %kizu.opt.i64 %kizu.27, 0
+//   %kizu.28 = icmp ne i8 %kizu.28.tag, 0
+//   br i1 %kizu.28, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.29 = extractvalue %kizu.opt.i64 %kizu.27, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.31 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.32 = phi i64 [ %kizu.29, %orelse.some.7 ], [ %kizu.31, %orelse.else.8 ]
+//   %kizu.33.ok = icmp eq i64 255, %kizu.32
+//   br i1 %kizu.33.ok, label %kizu.33.ok.ok, label %kizu.33.ok.fail
+// kizu.33.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 255, i64 %kizu.32, i64 0, i64 0)
+//   unreachable
+// kizu.33.ok.ok:
+//   %kizu.35 = call i1 @std__map__Map_contains_i64_i64(ptr %kizu.2, i64 7)
+//   call void @std__testing__expect(i1 %kizu.35)
+//   %kizu.38 = call i1 @std__map__Map_contains_i64_i64(ptr %kizu.2, i64 8)
+//   %kizu.39 = xor i1 %kizu.38, true
+//   call void @std__testing__expect(i1 %kizu.39)
+//   %kizu.42 = sub i64 0, 1
+//   %kizu.44 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 8)
+//   %kizu.45.tag = extractvalue %kizu.opt.i64 %kizu.44, 0
+//   %kizu.45 = icmp ne i8 %kizu.45.tag, 0
+//   br i1 %kizu.45, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.46 = extractvalue %kizu.opt.i64 %kizu.44, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.48 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.49 = phi i64 [ %kizu.46, %orelse.some.10 ], [ %kizu.48, %orelse.else.11 ]
+//   %kizu.50.ok = icmp eq i64 %kizu.42, %kizu.49
+//   br i1 %kizu.50.ok, label %kizu.50.ok.ok, label %kizu.50.ok.fail
+// kizu.50.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 %kizu.42, i64 %kizu.49, i64 0, i64 0)
+//   unreachable
+// kizu.50.ok.ok:
+//   %kizu.53 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 7, i64 999)
+//   %kizu.54.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.53, 0
+//   %kizu.54.ok.bool = icmp ne i8 %kizu.54.ok, 0
+//   br i1 %kizu.54.ok.bool, label %kizu.54.try.ok, label %kizu.54.try.err
+// kizu.54.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.53, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.54.try.ok:
+//   %kizu.56 = call i64 @std__map__Map_len_i64_i64(ptr %kizu.2)
+//   %kizu.57.ok = icmp eq i64 256, %kizu.56
+//   br i1 %kizu.57.ok, label %kizu.57.ok.ok, label %kizu.57.ok.fail
+// kizu.57.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 256, i64 %kizu.56, i64 0, i64 0)
+//   unreachable
+// kizu.57.ok.ok:
+//   %kizu.60 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.61.tag = extractvalue %kizu.opt.i64 %kizu.60, 0
+//   %kizu.61 = icmp ne i8 %kizu.61.tag, 0
+//   br i1 %kizu.61, label %orelse.some.13, label %orelse.else.14
+// orelse.some.13:
+//   %kizu.62 = extractvalue %kizu.opt.i64 %kizu.60, 1
+//   br label %orelse.end.15
+// orelse.else.14:
+//   %kizu.64 = sub i64 0, 1
+//   br label %orelse.end.15
+// orelse.end.15:
+//   %kizu.65 = phi i64 [ %kizu.62, %orelse.some.13 ], [ %kizu.64, %orelse.else.14 ]
+//   %kizu.66.ok = icmp eq i64 999, %kizu.65
+//   br i1 %kizu.66.ok, label %kizu.66.ok.ok, label %kizu.66.ok.fail
+// kizu.66.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 999, i64 %kizu.65, i64 0, i64 0)
+//   unreachable
+// kizu.66.ok.ok:
+//   %kizu.68 = call %kizu.opt._var_i64 @std__map__Map_at_mut_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.69 = extractvalue %kizu.opt._var_i64 %kizu.68, 1
+//   %kizu.70.tag = extractvalue %kizu.opt._var_i64 %kizu.68, 0
+//   %kizu.70 = icmp ne i8 %kizu.70.tag, 0
+//   br i1 %kizu.70, label %if.then.16, label %if.else.17
+// if.then.16:
+//   store i64 1000, ptr %kizu.69
+//   br label %if.end.18
+// if.else.17:
+//   br label %if.end.18
+// if.end.18:
+//   %kizu.75 = call %kizu.opt.i64 @std__map__Map_get_i64_i64(ptr %kizu.2, i64 7)
+//   %kizu.76.tag = extractvalue %kizu.opt.i64 %kizu.75, 0
+//   %kizu.76 = icmp ne i8 %kizu.76.tag, 0
+//   br i1 %kizu.76, label %orelse.some.19, label %orelse.else.20
+// orelse.some.19:
+//   %kizu.77 = extractvalue %kizu.opt.i64 %kizu.75, 1
+//   br label %orelse.end.21
+// orelse.else.20:
+//   %kizu.79 = sub i64 0, 1
+//   br label %orelse.end.21
+// orelse.end.21:
+//   %kizu.80 = phi i64 [ %kizu.77, %orelse.some.19 ], [ %kizu.79, %orelse.else.20 ]
+//   %kizu.81.ok = icmp eq i64 1000, %kizu.80
+//   br i1 %kizu.81.ok, label %kizu.81.ok.ok, label %kizu.81.ok.fail
+// kizu.81.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 1000, i64 %kizu.80, i64 0, i64 0)
+//   unreachable
+// kizu.81.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.83 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.83
+// }
+// 
+// define %kizu.error.void @test_std_map_i64_key_at_walks_insertion_order() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 30, i64 3)
+//   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.6.try.ok:
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 10, i64 1)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.10.try.ok:
+//   %kizu.13 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i64_i64(ptr %kizu.2, i64 20, i64 2)
+//   %kizu.14.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 0
+//   %kizu.14.ok.bool = icmp ne i8 %kizu.14.ok, 0
+//   br i1 %kizu.14.ok.bool, label %kizu.14.try.ok, label %kizu.14.try.err
+// kizu.14.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.6.code = extractvalue %kizu.error.std__mem__Error.void %kizu.13, 1
+//   %kizu.try.err.6.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.6 = insertvalue %kizu.error.void %kizu.try.err.6.base, i64 %kizu.try.err.6.code, 1
+//   ret %kizu.error.void %kizu.try.err.6
+// kizu.14.try.ok:
+//   br label %while.header.1
+// while.header.1:
+//   %kizu.17 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.24, %while.body.2 ]
+//   %kizu.18 = phi i64 [ 0, %kizu.14.try.ok ], [ %kizu.26, %while.body.2 ]
+//   %kizu.19 = call %kizu.opt.i64 @std__map__Map_key_at_i64_i64(ptr %kizu.2, i64 %kizu.18)
+//   %kizu.20 = extractvalue %kizu.opt.i64 %kizu.19, 1
+//   %kizu.21.tag = extractvalue %kizu.opt.i64 %kizu.19, 0
+//   %kizu.21 = icmp ne i8 %kizu.21.tag, 0
+//   br i1 %kizu.21, label %while.body.2, label %while.end.3
+// while.body.2:
+//   %kizu.23 = mul i64 %kizu.17, 100
+//   %kizu.24 = add i64 %kizu.23, %kizu.20
+//   %kizu.26 = add i64 %kizu.18, 1
+//   br label %while.header.1
+// while.end.3:
+//   %kizu.28.ok = icmp eq i64 3, %kizu.18
+//   br i1 %kizu.28.ok, label %kizu.28.ok.ok, label %kizu.28.ok.fail
+// kizu.28.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 3, i64 %kizu.18, i64 0, i64 0)
+//   unreachable
+// kizu.28.ok.ok:
+//   %kizu.30.ok = icmp eq i64 301020, %kizu.17
+//   br i1 %kizu.30.ok, label %kizu.30.ok.ok, label %kizu.30.ok.fail
+// kizu.30.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 301020, i64 %kizu.17, i64 0, i64 0)
+//   unreachable
+// kizu.30.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.32 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.32
+// }
+// 
+// define %kizu.error.void @test_std_map_narrow_integer_keys() {
+// entry:
+//   %kizu.1 = call ptr @std__mem__page_allocator()
+//   %kizu.2 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.5 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr %kizu.2, i8 0, i64 100)
+//   %kizu.6.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 0
+//   %kizu.6.ok.bool = icmp ne i8 %kizu.6.ok, 0
+//   br i1 %kizu.6.ok.bool, label %kizu.6.try.ok, label %kizu.6.try.err
+// kizu.6.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.2.code = extractvalue %kizu.error.std__mem__Error.void %kizu.5, 1
+//   %kizu.try.err.2.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.2 = insertvalue %kizu.error.void %kizu.try.err.2.base, i64 %kizu.try.err.2.code, 1
+//   ret %kizu.error.void %kizu.try.err.2
+// kizu.6.try.ok:
+//   %kizu.9 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_u8_i64(ptr %kizu.2, i8 255, i64 200)
+//   %kizu.10.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 0
+//   %kizu.10.ok.bool = icmp ne i8 %kizu.10.ok, 0
+//   br i1 %kizu.10.ok.bool, label %kizu.10.try.ok, label %kizu.10.try.err
+// kizu.10.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.4.code = extractvalue %kizu.error.std__mem__Error.void %kizu.9, 1
+//   %kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, i64 %kizu.try.err.4.code, 1
+//   ret %kizu.error.void %kizu.try.err.4
+// kizu.10.try.ok:
+//   %kizu.12 = call i64 @std__map__Map_len_u8_i64(ptr %kizu.2)
+//   %kizu.13.ok = icmp eq i64 2, %kizu.12
+//   br i1 %kizu.13.ok, label %kizu.13.ok.ok, label %kizu.13.ok.fail
+// kizu.13.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 2, i64 %kizu.12, i64 0, i64 0)
+//   unreachable
+// kizu.13.ok.ok:
+//   %kizu.16 = call %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr %kizu.2, i8 0)
+//   %kizu.17.tag = extractvalue %kizu.opt.i64 %kizu.16, 0
+//   %kizu.17 = icmp ne i8 %kizu.17.tag, 0
+//   br i1 %kizu.17, label %orelse.some.1, label %orelse.else.2
+// orelse.some.1:
+//   %kizu.18 = extractvalue %kizu.opt.i64 %kizu.16, 1
+//   br label %orelse.end.3
+// orelse.else.2:
+//   %kizu.20 = sub i64 0, 1
+//   br label %orelse.end.3
+// orelse.end.3:
+//   %kizu.21 = phi i64 [ %kizu.18, %orelse.some.1 ], [ %kizu.20, %orelse.else.2 ]
+//   %kizu.22.ok = icmp eq i64 100, %kizu.21
+//   br i1 %kizu.22.ok, label %kizu.22.ok.ok, label %kizu.22.ok.fail
+// kizu.22.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 100, i64 %kizu.21, i64 0, i64 0)
+//   unreachable
+// kizu.22.ok.ok:
+//   %kizu.25 = call %kizu.opt.i64 @std__map__Map_get_u8_i64(ptr %kizu.2, i8 255)
+//   %kizu.26.tag = extractvalue %kizu.opt.i64 %kizu.25, 0
+//   %kizu.26 = icmp ne i8 %kizu.26.tag, 0
+//   br i1 %kizu.26, label %orelse.some.4, label %orelse.else.5
+// orelse.some.4:
+//   %kizu.27 = extractvalue %kizu.opt.i64 %kizu.25, 1
+//   br label %orelse.end.6
+// orelse.else.5:
+//   %kizu.29 = sub i64 0, 1
+//   br label %orelse.end.6
+// orelse.end.6:
+//   %kizu.30 = phi i64 [ %kizu.27, %orelse.some.4 ], [ %kizu.29, %orelse.else.5 ]
+//   %kizu.31.ok = icmp eq i64 200, %kizu.30
+//   br i1 %kizu.31.ok, label %kizu.31.ok.ok, label %kizu.31.ok.fail
+// kizu.31.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 200, i64 %kizu.30, i64 0, i64 0)
+//   unreachable
+// kizu.31.ok.ok:
+//   %kizu.32 = call ptr @kizu_map_new(ptr %kizu.1, i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64))
+//   %kizu.34 = sub i32 0, 1
+//   %kizu.36 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr %kizu.32, i32 %kizu.34, i64 7)
+//   %kizu.37.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 0
+//   %kizu.37.ok.bool = icmp ne i8 %kizu.37.ok, 0
+//   br i1 %kizu.37.ok.bool, label %kizu.37.try.ok, label %kizu.37.try.err
+// kizu.37.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.7.code = extractvalue %kizu.error.std__mem__Error.void %kizu.36, 1
+//   %kizu.try.err.7.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.7 = insertvalue %kizu.error.void %kizu.try.err.7.base, i64 %kizu.try.err.7.code, 1
+//   ret %kizu.error.void %kizu.try.err.7
+// kizu.37.try.ok:
+//   %kizu.40 = call %kizu.error.std__mem__Error.void @std__map__Map_insert_i32_i64(ptr %kizu.32, i32 1, i64 8)
+//   %kizu.41.ok = extractvalue %kizu.error.std__mem__Error.void %kizu.40, 0
+//   %kizu.41.ok.bool = icmp ne i8 %kizu.41.ok, 0
+//   br i1 %kizu.41.ok.bool, label %kizu.41.try.ok, label %kizu.41.try.err
+// kizu.41.try.err:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.try.err.10.code = extractvalue %kizu.error.std__mem__Error.void %kizu.40, 1
+//   %kizu.try.err.10.base = insertvalue %kizu.error.void zeroinitializer, i8 0, 0
+//   %kizu.try.err.10 = insertvalue %kizu.error.void %kizu.try.err.10.base, i64 %kizu.try.err.10.code, 1
+//   ret %kizu.error.void %kizu.try.err.10
+// kizu.41.try.ok:
+//   %kizu.44 = sub i32 0, 1
+//   %kizu.45 = call %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr %kizu.32, i32 %kizu.44)
+//   %kizu.46.tag = extractvalue %kizu.opt.i64 %kizu.45, 0
+//   %kizu.46 = icmp ne i8 %kizu.46.tag, 0
+//   br i1 %kizu.46, label %orelse.some.7, label %orelse.else.8
+// orelse.some.7:
+//   %kizu.47 = extractvalue %kizu.opt.i64 %kizu.45, 1
+//   br label %orelse.end.9
+// orelse.else.8:
+//   %kizu.49 = sub i64 0, 1
+//   br label %orelse.end.9
+// orelse.end.9:
+//   %kizu.50 = phi i64 [ %kizu.47, %orelse.some.7 ], [ %kizu.49, %orelse.else.8 ]
+//   %kizu.51.ok = icmp eq i64 7, %kizu.50
+//   br i1 %kizu.51.ok, label %kizu.51.ok.ok, label %kizu.51.ok.fail
+// kizu.51.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 7, i64 %kizu.50, i64 0, i64 0)
+//   unreachable
+// kizu.51.ok.ok:
+//   %kizu.54 = call %kizu.opt.i64 @std__map__Map_get_i32_i64(ptr %kizu.32, i32 1)
+//   %kizu.55.tag = extractvalue %kizu.opt.i64 %kizu.54, 0
+//   %kizu.55 = icmp ne i8 %kizu.55.tag, 0
+//   br i1 %kizu.55, label %orelse.some.10, label %orelse.else.11
+// orelse.some.10:
+//   %kizu.56 = extractvalue %kizu.opt.i64 %kizu.54, 1
+//   br label %orelse.end.12
+// orelse.else.11:
+//   %kizu.58 = sub i64 0, 1
+//   br label %orelse.end.12
+// orelse.end.12:
+//   %kizu.59 = phi i64 [ %kizu.56, %orelse.some.10 ], [ %kizu.58, %orelse.else.11 ]
+//   %kizu.60.ok = icmp eq i64 8, %kizu.59
+//   br i1 %kizu.60.ok, label %kizu.60.ok.ok, label %kizu.60.ok.fail
+// kizu.60.ok.fail:
+//   call void @kizu_panic_expect_equal_int(i64 8, i64 %kizu.59, i64 0, i64 0)
+//   unreachable
+// kizu.60.ok.ok:
+//   call void @kizu_map_deinit(ptr %kizu.32)
+//   call void @kizu_map_deinit(ptr %kizu.2)
+//   %kizu.63 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
+//   ret %kizu.error.void %kizu.63
+// }

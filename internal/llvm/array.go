@@ -321,7 +321,7 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	array := e.value(instr.Args[0])
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
-	return e.writeArrayOptionalLoadResult(instr, ptrName)
+	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
 // writeArrayPopOrPanic moves the last element out or traps on an empty Array.
@@ -348,7 +348,7 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
 	return e.writeArrayOptionalLoadResult(
-		instr, e.arrayCheckedElement(instr, handle, index.operand))
+		instr, e.arrayCheckedElement(instr, handle, index.operand), 0)
 }
 
 // writeArrayGetOrPanic lowers Array.get_or_panic(index).
@@ -476,7 +476,15 @@ func (e *emitter) writeArrayDeinit(instr *ir.Instr) error {
 
 // writeArrayOptionalLoadResult converts a nullable element pointer to ?T:
 // null becomes the all-zero optional and a live pointer loads the payload.
-func (e *emitter) writeArrayOptionalLoadResult(instr *ir.Instr, ptrName string) error {
+// loadAlign is what the pointer is known to be aligned to, or 0 for the
+// payload type's own alignment: container storage is laid out for its element,
+// but a map key blob is sized by the key and aligned by whatever allocator
+// handed it out, so that load names 1.
+func (e *emitter) writeArrayOptionalLoadResult(
+	instr *ir.Instr,
+	ptrName string,
+	loadAlign int,
+) error {
 	elem, ok := optionalElemLLVM(instr.Result.Type)
 	if !ok {
 		return fmt.Errorf(
@@ -493,7 +501,8 @@ func (e *emitter) writeArrayOptionalLoadResult(instr *ir.Instr, ptrName string) 
 	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 	valueName := resultName + ".value"
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", valueName, e.llvmType(elem), ptrName)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s%s\n",
+		valueName, e.llvmType(elem), ptrName, alignSuffix(loadAlign))
 	someName := resultName + ".some"
 	okName := resultName + ".ok"
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n", someName, optType)
@@ -598,4 +607,14 @@ func (e *emitter) elementSizeOperand(typ string) string {
 // isArrayLLVMType reports whether a lowered IR type is a std::array::Array<T>.
 func isArrayLLVMType(typ string) bool {
 	return strings.HasPrefix(typ, "std::array::Array<") && strings.HasSuffix(typ, ">")
+}
+
+// alignSuffix renders the `, align N` an LLVM load carries when the pointer is
+// known to be aligned to less than its type wants. 0 leaves the type's own
+// alignment in force.
+func alignSuffix(align int) string {
+	if align <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", align %d", align)
 }

@@ -564,3 +564,29 @@ func SubstituteText(text string, subst map[string]string) (string, error) {
 	}
 	return Substitute(parsed, replacements).String(), nil
 }
+
+// mapKeyTypes lists what std::map::Map accepts as a key besides `[]u8`. A key
+// is hashed and compared as the bytes it occupies, so a type qualifies when
+// its bytes are its value: no padding to read, no pointer to follow, and no
+// two byte patterns that have to compare equal. The integer types answer that;
+// f32/f64 do not, because `0.0` and `-0.0` are equal with different bytes and
+// a NaN is unequal to its own. How wide each one is stays with the backend
+// that lays it out, so there is one answer to that and not two.
+var mapKeyTypes = map[string]bool{
+	"i8": true, "i16": true, "i32": true, "i64": true,
+	"u8": true, "u16": true, "u32": true, "u64": true,
+	"isize": true, "usize": true,
+}
+
+// IsMapKey reports whether text spells a type std::map::Map accepts as a key.
+// Every layer that gates a key asks here, so the checkers, the lowering and
+// the backend cannot disagree about what a key is.
+func IsMapKey(text string) bool {
+	return text == "[]u8" || mapKeyTypes[text]
+}
+
+// MapKeyTypeNames lists the accepted key spellings for a diagnostic, in the
+// order a reader scans them.
+func MapKeyTypeNames() string {
+	return "[]u8, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize"
+}

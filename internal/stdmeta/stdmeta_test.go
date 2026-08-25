@@ -33,8 +33,8 @@ func TestResolveElementTypeForms(t *testing.T) {
 		},
 		{
 			name: "invalid map key",
-			in:   "std::meta::element<std::map::Map<i64, bool>>",
-			want: "std::meta::element<std::map::Map<i64, bool>>",
+			in:   "std::meta::element<std::map::Map<f64, bool>>",
+			want: "std::meta::element<std::map::Map<f64, bool>>",
 		},
 	}
 	for _, tc := range cases {

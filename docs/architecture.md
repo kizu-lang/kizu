@@ -21,12 +21,15 @@ examples 約 5k 行。
 ```
 cmd/kizu/            CLI 本体と、パッケージ横断の統合テスト・conformance
 internal/            Go 実装(1 パッケージ = 1 責務)
-  token, lexer, parser, ast     字句・構文・AST
+  source, token, lexer, parser, ast   入力 text・字句・構文・AST
+  typ                           型の綴りを 1 度だけ parse した形(文字列手術の代わり)
   types, ownership              型検査・所有権/借用検査
   ir, llvm, wasm, native        typed SSA IR と各 backend
   project, stdlib, manifest     パッケージ/モジュール解決(std も含む)、std の在処、kizu.toml
-  stdmethod, stdprim            std の method 署名と builtin primitive の一覧
+  stdmethod, stdprim, stdmeta   std の method 署名、builtin primitive の一覧、`std::meta` の形
   unsafecap                     unsafe が覆う操作の種類と診断文言
+  conformance                   example が末尾に宣言する case の読み取り
+  version, selfhost             binary の名乗りと、移植先が読めない生成 source
   fmt, diagnostic, quote, buildcache, cimport, lsp
 compiler/            non-shipping の Kizu compiler 移植先(cutover まで CLI 非接続)
   src/main_test.kizu test-only package root。cutover までは user-facing entrypoint を持たない

@@ -1460,6 +1460,12 @@ struct SliceParts {
     len: ir::Name
 }
 
+/// Names an unset pointer and length pair, for an out parameter a caller
+/// fills before reading.
+fn empty_slice_parts() -> SliceParts {
+    return SliceParts { ptr: ir::empty_name(), len: ir::empty_name() };
+}
+
 /// Extracts a byte-slice pointer and length, the Go `writeSliceParts`.
 fn (self: &var Emitter) write_slice_parts(prefix: ir::Name, slice_operand: ir::Name) -> !SliceParts {
     let ptr_name = try self.suffixed(prefix, ".ptr");
@@ -1653,6 +1659,20 @@ fn (self: &var Emitter) write_array_optional_load_result(
     node: &ir::InstrNode,
     ptr_name: ir::Name
 ) -> !?diagnostic::Diagnostic {
+    return self.write_optional_load_result(module, node, ptr_name, 0);
+}
+
+/// Converts a nullable element pointer to ?T with a stated load alignment.
+/// load_align is what the pointer is known to be aligned to, or 0 for the
+/// payload type's own alignment: container storage is laid out for its
+/// element, but a map key blob is sized by the key and aligned by whatever
+/// allocator handed it out, so that load names 1.
+fn (self: &var Emitter) write_optional_load_result(
+    module: &ir::Module,
+    node: &ir::InstrNode,
+    ptr_name: ir::Name,
+    load_align: i64
+) -> !?diagnostic::Diagnostic {
     let result_text = ir::name_text(&module.names, node.result.type_name);
     let result_type = result_text.as_bytes();
     if typ::optional_elem(result_type) |elem| {
@@ -1668,7 +1688,14 @@ fn (self: &var Emitter) write_array_optional_load_result(
         try self.line1("%s:", Arg::Str(labels.ok));
         let value_name = try self.suffixed(result_name, ".value");
         let elem_type = try self.llvm_type(module, elem);
-        try self.line3("  %s = load %s, ptr %s", Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name));
+        if load_align > 0 {
+            try self.line4(
+                "  %s = load %s, ptr %s, align %d",
+                Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name), Arg::Int(load_align)
+            );
+        } else {
+            try self.line3("  %s = load %s, ptr %s", Arg::Str(value_name), Arg::Str(elem_type), Arg::Str(ptr_name));
+        }
         let some_name = try self.suffixed(result_name, ".some");
         let ok_name = try self.suffixed(result_name, ".ok");
         try self.line2("  %s = insertvalue %s zeroinitializer, i8 1, 0", Arg::Str(some_name), Arg::Str(opt_type));

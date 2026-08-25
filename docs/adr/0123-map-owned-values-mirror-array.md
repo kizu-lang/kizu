@@ -34,7 +34,7 @@ move-out)を備えている。
 | `insert`(既存の key) | 上書き | trap |
 | `deinit` | table と key を解放 | 値を 1 つずつ解放してから table と key |
 
-key 型は `[]u8` 据え置き。owned key は別に扱う。
+owned key は別に扱う(ADR-0044)。
 
 ## 既存 key への insert
 

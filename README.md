@@ -29,28 +29,28 @@ not in any one execution path.
 
 | Feature | Examples | check | run | llvm | wasm |
 | --- | ---: | :--: | :--: | :--: | :--: |
-| fn / let / struct / literals | 32 | ✅ | ✅ | ✅ | 11/32 |
+| fn / let / struct / literals | 34 | ✅ | ✅ | ✅ | 12/34 |
 | arithmetic / comparison / logical | 3 | ✅ | ✅ | ✅ | ✅ |
-| while / break / continue / for / label | 9 | ✅ | ✅ | ✅ | 8/9 |
+| while / break / continue / for / label | 10 | ✅ | ✅ | ✅ | 9/10 |
 | if / match | 13 | ✅ | ✅ | ✅ | 2/13 |
-| enum / union | 14 | ✅ | ✅ | ✅ | ❌ |
-| error union `!T` / try / errdefer | 17 | ✅ | ✅ | ✅ | ❌ |
-| move / borrow | 39 | ✅ | ✅ | ✅ | 2/39 |
-| deinit / defer | 17 | ✅ | ✅ | ✅ | ❌ |
-| arena / handle | 8 | ✅ | ✅ | ✅ | ❌ |
+| enum / union | 15 | ✅ | ✅ | ✅ | ❌ |
+| error union `!T` / try / errdefer | 18 | ✅ | ✅ | ✅ | ❌ |
+| move / borrow | 41 | ✅ | ✅ | ✅ | 2/41 |
+| deinit / defer | 18 | ✅ | ✅ | ✅ | ❌ |
+| arena / handle | 9 | ✅ | ✅ | ✅ | ❌ |
 | comptime | 8 | ✅ | ✅ | ✅ | 1/8 |
-| cast / slice / raw pointer / box | 7 | ✅ | ✅ | ✅ | 1/7 |
+| cast / slice / raw pointer / box | 8 | ✅ | ✅ | ✅ | 1/8 |
 | contract / generics | 8 | ✅ | ✅ | ✅ | 1/8 |
 | std::array | 14 | ✅ | ✅ | ✅ | ❌ |
-| std::string | 27 | ✅ | ✅ | ✅ | ❌ |
-| std::map | 9 | ✅ | ✅ | ✅ | ❌ |
-| std::mem / allocator | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::string | 29 | ✅ | ✅ | ✅ | ❌ |
+| std::map | 10 | ✅ | ✅ | ✅ | ❌ |
+| std::mem / allocator | 13 | ✅ | ✅ | ✅ | ❌ |
 | std::testing | 1 | ✅ | ✅ | ✅ | ❌ |
 | std::fmt | 5 | ✅ | ✅ | ✅ | ❌ |
-| std::fs / path / io / process | 5 | ✅ | ✅ | ✅ | ❌ |
+| std::fs / path / io / process | 6 | ✅ | ✅ | ✅ | ❌ |
 
 `✅` means every example in the row passes, a fraction means only some do, and
-`❌` means none do. 120 runnable examples, measured on 2026-08-20 with
+`❌` means none do. 129 runnable examples, measured on 2026-08-25 with
 `just backend-matrix` -- re-run it after touching a backend. `run` and `wasm`
 are judged on the program's output: `run` executes the native build, `wasm`
 loads the emitted module with `wasmtime`. `llvm` is judged on whether lowering
@@ -58,10 +58,10 @@ succeeded, because `run` already builds the native target from the same text.
 
 | Route | Passing |
 | --- | --- |
-| `kizu check` | 120/120 |
-| `kizu run` | 120/120 |
-| `kizu build --emit-llvm` | 120/120 |
-| `kizu build --target wasm32-wasi` | 19/120 |
+| `kizu check` | 129/129 |
+| `kizu run` | 129/129 |
+| `kizu build --emit-llvm` | 129/129 |
+| `kizu build --target wasm32-wasi` | 21/129 |
 
 The native route has no pending runnable example. WASI remains a target subset;
 `just backend-matrix` reports both unsupported lowering and output mismatches.
@@ -95,7 +95,7 @@ deliberately excluded, so the two are not confused.
 | Feature | State |
 | --- | --- |
 | threads for parallel work | **planned.** The earlier API was withdrawn because it had checker rules but no lowering and no runtime. ADR-0025 records the acceptance criteria it must meet to return, and the first one is that `kizu run` executes it |
-| wasm backend beyond the current subset | **in progress.** 16 of 74 examples load and run today |
+| wasm backend beyond the current subset | **in progress.** 21 of 129 examples load and run today |
 | raw pointer runtime operations | **check-only.** `pointer_policy.kizu` and `raw_pointer_deref.kizu` are checked but not executed |
 | float literals and float arithmetic | **not started.** `f32` / `f64` name a type; `1.5` does not lex as one literal |
 | type alias | **not started** |
@@ -141,10 +141,10 @@ Pass prototype process arguments with `--`:
 go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 ```
 
-See the [examples catalog](examples/README.md) for runnable feature
-examples and negative safety-rule examples. Every example ends with the case it
-declares -- the command to run it with and what that has to produce -- which is
-what the conformance test reads.
+[`examples/`](examples/README.md) holds one readable program per feature, and
+`examples/negative/` one per safety rule the language refuses. Every example
+ends with the case it declares -- the command to run it with and what that has
+to produce -- which is what the conformance test reads.
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
 
@@ -227,7 +227,7 @@ go run ./cmd/kizu version
 - [docs/architecture.md](docs/architecture.md): architecture overview (in Japanese; start here for onboarding)
 - [SPEC.md](SPEC.md): language specification
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [examples](examples/README.md): examples catalog
+- [examples](examples/README.md): readable programs per feature, and the refusals in `negative/`
 - [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry and migration plan
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy

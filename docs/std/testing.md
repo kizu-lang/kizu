@@ -7,6 +7,7 @@ test 用の assertion です。`test` 宣言そのものは言語の構文なの
 std::testing::expect(condition: bool) -> void
 std::testing::expect_equal<T>(expected: T, actual: T) -> void
 std::testing::fail(message: []u8) -> !void
+std::testing::failing_io() -> Io
 ```
 
 `expect` は test assertion 用の void helper です。
@@ -19,5 +20,10 @@ failure は `expected ... got ...` 形式の diagnostic を出し、assertion �
 static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
 期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
 導入しません。
+
+`failing_io` はすべての操作を拒否する `Io` です。プログラムの error 経路は何かが
+失敗したときしか走らず、本物の `Io` に失敗を頼むことはできないので、失敗する
+capability を渡す方を明示します。`examples/negative/fs_failing_io.kizu` と
+`examples/negative/std_io_failing_write.kizu` がその形です。
 
 `test` 宣言の構文と `kizu test` の挙動は SPEC §14.5 にあります。

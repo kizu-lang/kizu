@@ -1863,9 +1863,12 @@ func (l *lowerer) lowerTypedContainerPrimitive(
 		if err != nil {
 			return Value{}, true, err
 		}
-		value, err := l.lowerMapMethod(
-			method, mapPrimitiveValueType(l.resolveTypeArgs(typeArg)), args)
-		return value, true, err
+		key, value, err := mapPrimitiveTypeArgs(l.resolveTypeArgs(typeArg))
+		if err != nil {
+			return Value{}, true, err
+		}
+		result, err := l.lowerMapMethod(method, key, value, args)
+		return result, true, err
 	}
 	if method, ok := boxPrimitives[name]; ok {
 		args, err := l.lowerCallArgsAs(nil, rawArgs)
@@ -1916,11 +1919,12 @@ func (l *lowerer) lowerArrayConstructor(typeArg string, args []ast.Expression) (
 	return l.emit("array.new", arrayTypeName+"<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
-// lowerMapConstructor lowers std::map::new<[]u8, V>(allocator).
+// lowerMapConstructor lowers std::map::new<K, V>(allocator).
 func (l *lowerer) lowerMapConstructor(typeArg string, args []ast.Expression) (Value, error) {
 	mapType, valueType, ok := mapInstanceType(typeArg)
 	if !ok {
-		return Value{}, fmt.Errorf("ir error: std::map::Map only supports []u8 keys")
+		return Value{}, fmt.Errorf("ir error: std::map::Map key type must be one of %s",
+			typ.MapKeyTypeNames())
 	}
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("ir error: %s expects exactly one allocator argument", mapType)
@@ -2017,8 +2021,8 @@ func (l *lowerer) lowerResolvedMethod(
 	if elem, ok := arrayElementType(receiverType); ok {
 		return l.lowerStdContainerMethod(arrayTypeName, method, elem, allArgs)
 	}
-	if valueType, ok := mapValueType(receiverType); ok {
-		return l.lowerStdContainerMethod(mapTypeName, method, valueType, allArgs)
+	if args, ok := mapStaticArgs(receiverType); ok {
+		return l.lowerStdContainerMethod(mapTypeName, method, args, allArgs)
 	}
 	if elem, ok := boxElementType(receiverType); ok {
 		return l.lowerStdContainerMethod(boxTypeName, method, elem, allArgs)
@@ -2091,8 +2095,8 @@ func (l *lowerer) methodCalleeParams(receiver string, method string) ([]Param, e
 	if elem, ok := arrayElementType(receiver); ok {
 		return l.stdContainerParams(arrayTypeName, method, elem)
 	}
-	if valueType, ok := mapValueType(receiver); ok {
-		return l.stdContainerParams(mapTypeName, method, valueType)
+	if args, ok := mapStaticArgs(receiver); ok {
+		return l.stdContainerParams(mapTypeName, method, args)
 	}
 	if elem, ok := boxElementType(receiver); ok {
 		return l.stdContainerParams(boxTypeName, method, elem)
@@ -2286,20 +2290,26 @@ func (l *lowerer) lowerBoxMethod(name string, elem string, args []Value) (Value,
 	}
 }
 
-// mapPrimitiveValueType returns V from the `[]u8, V` static arguments a Map
+// mapPrimitiveTypeArgs returns K and V from the `K, V` static arguments a Map
 // primitive is applied to.
-func mapPrimitiveValueType(typeArg string) string {
+func mapPrimitiveTypeArgs(typeArg string) (string, string, error) {
 	args := splitStaticArgs(typeArg)
 	if len(args) != 2 {
-		return typeArg
+		return "", "", fmt.Errorf(
+			"ir error: a std::map::Map primitive takes 2 static arguments, got `%s`", typeArg)
 	}
-	return args[1]
+	return args[0], args[1], nil
 }
 
-// lowerMapMethod lowers the runtime primitive one std::map::Map<[]u8, V> method
+// lowerMapMethod lowers the runtime primitive one std::map::Map<K, V> method
 // forwards to. Only a wrapper body in std/src/map/map.kizu reaches it: a `m.get(k)`
 // call lowers as a call to that wrapper, and this is what the wrapper does.
-func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (Value, error) {
+func (l *lowerer) lowerMapMethod(
+	name string,
+	keyType string,
+	valueType string,
+	args []Value,
+) (Value, error) {
 	switch name {
 	case "insert":
 		return l.emit("map.insert", "std::mem::Error!void", args, valueType), nil
@@ -2312,7 +2322,7 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 	case "take_value_at":
 		return l.emit("map.take_value_at", valueType, args, valueType), nil
 	case "key_at":
-		return l.emit("map.key_at", "?[]u8", args, valueType), nil
+		return l.emit("map.key_at", "?"+keyType, args, valueType), nil
 	case "contains":
 		return l.emit("map.contains", "bool", args, valueType), nil
 	case "len":
