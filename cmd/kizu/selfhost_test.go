@@ -58,21 +58,7 @@ func TestSelfhostFrontend(t *testing.T) {
 			compareSelfhostArgs(t, selfhost, command.want, command.args...)
 		})
 	}
-	for _, fixture := range fmtRepresentativeFixtures() {
-		t.Run("fmt/"+fixture.name, func(t *testing.T) {
-			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
-			compareSelfhostFmt(t, selfhost, path)
-		})
-	}
-	t.Run("fmt/parse-error", func(t *testing.T) {
-		compareSelfhostFmt(t, selfhost, "../../examples/negative/unclosed_block.kizu")
-	})
-	t.Run("fmt-write", func(t *testing.T) {
-		compareSelfhostFmtWrite(t, selfhost, "--write", fmtMoveMarkerFixture())
-	})
-	t.Run("fmt-w", func(t *testing.T) {
-		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
-	})
+	runSelfhostFmtCases(t, selfhost)
 	runSelfhostWASMCases(t, selfhost)
 	runSelfhostArgumentCases(t, selfhost)
 	t.Run("version", func(t *testing.T) {
@@ -97,6 +83,28 @@ func TestSelfhostFrontend(t *testing.T) {
 	})
 	t.Run("build-native-opt", func(t *testing.T) {
 		compareNativeBuild(t, selfhost, file, true)
+	})
+}
+
+// runSelfhostFmtCases compares the formatter across the CLI boundary: each
+// layout fixture, a source that does not parse, and both spellings of the
+// in-place flag.
+func runSelfhostFmtCases(t *testing.T, selfhost string) {
+	t.Helper()
+	for _, fixture := range fmtRepresentativeFixtures() {
+		t.Run("fmt/"+fixture.name, func(t *testing.T) {
+			path := writeTempKizuSource(t, fixture.name+".kizu", fixture.source)
+			compareSelfhostFmt(t, selfhost, path)
+		})
+	}
+	t.Run("fmt/parse-error", func(t *testing.T) {
+		compareSelfhostFmt(t, selfhost, "../../examples/negative/unclosed_block.kizu")
+	})
+	t.Run("fmt-write", func(t *testing.T) {
+		compareSelfhostFmtWrite(t, selfhost, "--write", fmtMoveMarkerFixture())
+	})
+	t.Run("fmt-w", func(t *testing.T) {
+		compareSelfhostFmtWrite(t, selfhost, "-w", "fn main(){return;}\n")
 	})
 }
 
