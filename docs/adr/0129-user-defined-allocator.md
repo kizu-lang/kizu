@@ -39,6 +39,11 @@ std::mem::allocator_from<T>(
 2 関数が unsafe なのは raw pointer を返すからで、SPEC §12 の既存の規則が
 そのまま適用される。新しい unsafe の種類は増えない。
 
+`T` は先頭 field に `std::mem::AllocatorHeader` を持たなければならない。
+`Allocator` はその header を指す —— `fixed_buffer` が呼び出し側の buffer の
+先頭に header を書くのと同じ形で、`Allocator` は 1 pointer のまま、確保も
+増えない。32 byte は実際に消費されるので、隠さず型に書かせる(原理 1)。
+
 ### 2. 関数 pointer 型を入れる
 
 `fn(i64) -> i64` を型として書けるようにする。値になれるのは top-level function
@@ -63,11 +68,12 @@ tie で寿命を追うことで受ける。
 tied allocator の署名そのものである。したがって **checker に新しい規則は
 要らない**。既存の recognizer が署名の形で拾い、tie 規則は ADR-0099 が持つ。
 
-### 4. `Allocator` の runtime 表現を広げる
+### 4. `Allocator` の runtime 表現に kind を持たせる
 
 ADR-0092 決定 2 が「第二の allocator 種を実際に入れる変更が、その時に
 handle を導入する」として延期した handle 実体化を、ここで履行する。
-`Allocator` は 1 pointer から state pointer + 関数 pointer 2 本になる。
+`Allocator` は 1 pointer のままで、指す先の先頭 word が page / fixed / user の
+どれかを名乗り、`kizu_rt_*` の分岐がその word を読む。
 
 確保・解放ごとに間接呼び出しが 1 回増える。同じ malloc の上で測ると
 `ir compiler` で +1.5%、`build --emit-llvm compiler` で ±0% だった。呼び先が
@@ -89,4 +95,5 @@ handle を導入する」として延期した handle 実体化を、ここで�
 | 解放するブロックの class を header word で持つ | 64 byte の確保に 16 byte で 25% 損なう。runtime の解放 14 箇所のうち 13 箇所は size を知っているので、`free` に size を渡せば header は要らない |
 | `Function` static parameter(SPEC §13)で関数名を渡す | 綴りは消えるが間接呼び出しは残る。起きているものを言語から見えなくするだけで、原理 1 に反する。宣言はあるが body での呼び出し解決は未実装でもある |
 | 関数 pointer 呼び出しを `unsafe` にする | 印の誤用。指す先は解放されず、型が signature を保証するので、compiler が証明できない点が無い(ADR-0089) |
+| `Allocator` を state pointer + 関数 pointer 2 本の値にする | 32 byte を渡すことになり、集約の受け渡し規約に全 backend と全 container で触り、selfhost 移植でもう一度書くことになる。header を state の先頭に置けば 1 pointer のまま同じことができる |
 | user allocator を safe に書けるようにする | 確保は raw pointer を返す操作で compiler が証明できない。印のない unsafe を作らない(ADR-0089) |
