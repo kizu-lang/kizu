@@ -1,0 +1,133 @@
+import std::array;
+import std::mem;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+    extern "c" fn free(p: ptr<u8>) -> void
+
+    // A size-class allocator for the compiler's own run. One `kizu ir compiler`
+    // makes about 18 million allocations, 95% of them 128 bytes or less, and each
+    // one is a round trip to libc. Serving the small ones from per-class free
+    // lists makes both halves a few instructions, and a released block holds the
+    // next free block in its own first bytes, so the lists cost no memory.
+    //
+    // Blocks come from chunks taken with malloc and are never returned: what the
+    // compiler frees is reused by the next allocation of the same class, so the
+    // footprint is bounded by the live set per class rather than by the total.
+
+    /// The number of size classes. Class i serves sizes up to (i + 1) * 16 bytes,
+    /// so the last one serves 256.
+    fn class_count() -> i64 {
+    return 16;
+}
+
+/// The granularity classes step by.
+fn class_step() -> i64 {
+    return 16;
+}
+
+/// The size of a chunk carved into blocks, one megabyte.
+fn chunk_bytes() -> i64 {
+    return 1048576;
+}
+
+/// header is written by allocator_from and read only by the runtime. lists
+/// holds one free-list head per class, each entry the address of a released block
+/// whose first eight bytes hold the next; 0 ends a list. bump and remaining
+/// describe the unused tail of the current chunk. Every address in free, and
+/// every address bump has handed out, lies inside a chunk this pool took and
+/// has not returned.
+pub struct Pool {
+    header: mem::AllocatorHeader,
+    lists: array::Array<i64>,
+    bump: usize,
+    remaining: i64
+}
+
+/// Creates an empty pool. Its allocator is obtained with `allocator`.
+pub fn new(allocator: Allocator) -> !Pool {
+    var free_lists = array::new<i64>(allocator);
+    errdefer free_lists.deinit();
+    var index = 0;
+    while index < class_count() {
+        try free_lists.append(0);
+        index = index + 1;
+    }
+    return Pool {
+        header: mem::allocator_header(),
+        lists: move free_lists,
+        bump: cast<usize>(0),
+        remaining: 0
+    };
+}
+
+/// Returns the allocator this pool backs. The result is tied to the pool and
+/// cannot outlive it.
+pub fn allocator_of(pool: &var Pool) -> Allocator {
+    return mem::allocator_from<Pool>(pool, pool_alloc, pool_free);
+}
+
+/// Returns the class serving size, or -1 when size is too large for one.
+fn class_of(size: i64) -> i64 {
+    if size <= 0 {
+        return -1;
+    }
+    let index = (size - 1) / class_step();
+    if index >= class_count() {
+        return -1;
+    }
+    return index;
+}
+
+/// The block size class index serves.
+fn class_bytes(index: i64) -> i64 {
+    return (index + 1) * class_step();
+}
+
+/// Returns an address with size writable bytes, or null. The address is not
+/// handed out again until pool_free receives it back with the same size.
+unsafe fn pool_alloc(pool: &var Pool, size: i64) -> ?ptr<u8> {
+    let index = class_of(size);
+    if index < 0 {
+        // SAFETY: libc serves what no class does, and null is the OutOfMemory the caller handles
+        return unsafe malloc(cast<usize>(size));
+    }
+    let head = pool.lists.get_or_panic(index);
+    if head != 0 {
+        // SAFETY: head is a block this pool handed out; its first 8 bytes hold the next entry
+        let next = unsafe ptr_from_int<ptr<i64>>(cast<usize>(head)).*;
+        pool.lists.set(index, next);
+        // SAFETY: head is a block of class_bytes(index) bytes
+        return unsafe ptr_from_int<ptr<u8>>(cast<usize>(head));
+    }
+    let want = class_bytes(index);
+    if pool.remaining < want {
+        // SAFETY: a fresh chunk of chunk_bytes() bytes
+        let chunk = unsafe malloc(cast<usize>(chunk_bytes()));
+        // SAFETY: chunk is a live region of chunk_bytes() bytes
+        pool.bump = unsafe int_from_ptr<usize>(chunk);
+        pool.remaining = chunk_bytes();
+    }
+    let out = pool.bump;
+    pool.bump = pool.bump + cast<usize>(want);
+    pool.remaining = pool.remaining - want;
+    // SAFETY: out is a block of want bytes
+    return unsafe ptr_from_int<ptr<u8>>(out);
+}
+
+/// Takes back an address pool_alloc returned, with the size it was asked for.
+/// The caller must not use the address afterwards.
+unsafe fn pool_free(pool: &var Pool, block: ptr<u8>, size: i64) -> void {
+    let index = class_of(size);
+    if index < 0 {
+        // SAFETY: a block outside every class came from libc and is not used again
+        unsafe free(block);
+        return;
+    }
+    // SAFETY: block is a block this pool handed out, so its first 8 bytes are the pool's to use
+    let address = unsafe int_from_ptr<usize>(block);
+    let head = pool.lists.get_or_panic(index);
+    // SAFETY: same
+    unsafe ptr_from_int<ptr<i64>>(address).* = head;
+    pool.lists.set(index, cast<i64>(address));
+    return;
+}

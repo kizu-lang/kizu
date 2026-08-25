@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import std::array;
 import std::mem;
 import std::string;
 
@@ -72,12 +73,138 @@ fn (self: &var Checker) check_ident_expr(
     if mem::equal_bytes(name, "void") {
         return try self.checker_error_at("type error", expression.span, "void is not a value");
     }
+    // A top-level function's name is the one value a function pointer takes.
+    // There is nothing else to build one from: Kizu has no closures, so the
+    // name is read here rather than through a conversion form.
+    if try self.function_pointer_value(name) |value| {
+        out.* = value;
+        return null;
+    }
     var message = string::new(self.allocator);
     errdefer message.deinit();
     try message.append_bytes("undefined variable `");
     try message.append_bytes(name);
     try message.append_byte(cast<u8>(96));
     return try self.checker_message_at("type error", expression.span, move message);
+}
+
+// Resolves the declaration a name used as a value refers to. A callee is
+// qualified by the resolver; a name in any other position is not, so a
+// module-local function is looked up under the module the reader is inside as
+// well as under the name as written.
+fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
+    if self.metadata.functions_by_name.get(name) |handle| {
+        return handle;
+    }
+    var qualified = string::new(self.allocator);
+    defer qualified.deinit();
+    if try self.append_current_module_prefix(&var qualified) {
+        try qualified.append_bytes(name);
+        let bytes = qualified.as_bytes();
+        return self.metadata.functions_by_name.get(bytes);
+    }
+    return null;
+}
+
+// Appends the module prefix of the function being checked, `::` included, and
+// reports whether it has one.
+fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -> !bool {
+    let handle = self.current_function_handle() orelse return false;
+    var appended = false;
+    if self.metadata.functions.at(handle.index) |function| {
+        let bytes = function.name.as_bytes();
+        let cut = last_namespace_end(bytes);
+        if cut > 0 {
+            try out.append_bytes(bytes[0..cut]);
+            appended = true;
+        }
+    }
+    return appended;
+}
+
+// Returns the byte after the last `::` in a name, or 0 when it has none.
+fn last_namespace_end(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 1 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+// Returns the function pointer type a declared function's name has as a
+// value, and null for a name that declares none. A generic function has no
+// single signature, so its name is not a value. The spelling is built here
+// and interned, the way every other computed type reaches the table.
+fn (self: &var Checker) function_pointer_value(name: []u8) -> !?Type {
+    let handle = try self.function_by_value_name(name) orelse return null;
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    var known = false;
+    if self.metadata.functions.at(handle.index) |function| {
+        known = !function_has_type_params(function);
+    }
+    if !known {
+        return null;
+    }
+    try self.append_function_pointer_text(&var text, handle);
+    let bytes = text.as_bytes();
+    return try self.types.intern(bytes);
+}
+
+// Writes `fn(T, ...) -> R` for one declared function, with the borrow markers
+// its parameters were declared with.
+fn (self: &var Checker) append_function_pointer_text(
+    out: &var string::String,
+    handle: FunctionHandle
+) -> !void {
+    var params = array::new<string::String>(self.allocator);
+    defer params.deinit();
+    var result = string::new(self.allocator);
+    defer result.deinit();
+    var unsafe_call = false;
+    if self.metadata.functions.at(handle.index) |function| {
+        unsafe_call = function.signature.requires_unsafe;
+        var copied = try self.types.copy_text(self.allocator, function.return_type);
+        errdefer copied.deinit();
+        try result.append_string(&copied);
+        copied.deinit();
+        var index = 0;
+        while function.params.get(index) |param| {
+            var spelled = string::new(self.allocator);
+            errdefer spelled.deinit();
+            if function.mut_borrow_params.get_or_panic(index) {
+                try spelled.append_bytes("&var ");
+            } else {
+                if function.borrow_params.get_or_panic(index) {
+                    try spelled.append_byte(cast<u8>(38));
+                }
+            }
+            var param_text = try self.types.copy_text(self.allocator, param);
+            errdefer param_text.deinit();
+            try spelled.append_string(&param_text);
+            param_text.deinit();
+            try params.append(move spelled);
+            index = index + 1;
+        }
+    }
+    if unsafe_call {
+        try out.append_bytes("unsafe fn(");
+    } else {
+        try out.append_bytes("fn(");
+    }
+    var index = 0;
+    while params.at(index) |param| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try out.append_string(param);
+        index = index + 1;
+    }
+    try out.append_bytes(") -> ");
+    return out.append_string(&result);
 }
 
 // Treats a fit-checked integer literal as the expected integer type.

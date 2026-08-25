@@ -22,6 +22,8 @@ malloc / realloc を呼ぶ。#549 はこの状態を解消するか
 
 ### 1. user-defined allocator は当面入れない(opaque 維持)
 
+この決定は ADR-0129 が改訂した。開く条件として下に置いた「実需」が出たため。
+
 `Allocator` は user が実装できる contract にせず、std factory だけが作れる
 opaque capability のまま保つ。理由は可逆性の非対称にある。
 

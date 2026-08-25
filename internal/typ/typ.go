@@ -53,6 +53,15 @@ type Optional struct{ Elem Type }
 type Const struct{ Elem Type }
 
 // ErrorUnion is `!T`, or `E!T` when Err is set.
+// Func is a function pointer type: `fn(i64) -> i64`, or `unsafe fn(...) -> T`
+// when the function it points at carries an obligation (SPEC §12). The two are
+// different types, so an unsafe function cannot reach a safe call.
+type Func struct {
+	Params []Type
+	Result Type
+	Unsafe bool
+}
+
 type ErrorUnion struct {
 	Err Type
 	Ok  Type
@@ -78,6 +87,9 @@ func (*Const) typeNode() {}
 
 // typeNode marks ErrorUnion as a type.
 func (*ErrorUnion) typeNode() {}
+
+// typeNode marks Func as a type.
+func (*Func) typeNode() {}
 
 // String returns the spelling of a name and its static arguments.
 func (t *Name) String() string {
@@ -120,6 +132,19 @@ func (t *ErrorUnion) String() string {
 		return "!" + t.Ok.String()
 	}
 	return t.Err.String() + "!" + t.Ok.String()
+}
+
+// String returns the spelling of a function pointer type.
+func (t *Func) String() string {
+	params := make([]string, 0, len(t.Params))
+	for _, param := range t.Params {
+		params = append(params, param.String())
+	}
+	head := "fn("
+	if t.Unsafe {
+		head = "unsafe fn("
+	}
+	return head + strings.Join(params, ", ") + ") -> " + t.Result.String()
 }
 
 // Parse is the inverse of String. It reads a canonical spelling -- one this
@@ -241,6 +266,20 @@ func (t *ErrorUnion) equal(other Type) bool {
 	return ok && Equal(t.Err, b.Err) && Equal(t.Ok, b.Ok)
 }
 
+// equal reports whether other is a function pointer with the same shape.
+func (t *Func) equal(other Type) bool {
+	b, ok := other.(*Func)
+	if !ok || t.Unsafe != b.Unsafe || len(t.Params) != len(b.Params) {
+		return false
+	}
+	for i := range t.Params {
+		if !Equal(t.Params[i], b.Params[i]) {
+			return false
+		}
+	}
+	return Equal(t.Result, b.Result)
+}
+
 // Text returns the spelling of t, and "" where a declaration wrote no type at
 // all. A missing type is not a type, so it has no node to print.
 func Text(t Type) string {
@@ -275,6 +314,8 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 	case *Const:
 		elem, err := MapNames(node.Elem, rename)
 		return &Const{Elem: elem}, err
+	case *Func:
+		return mapFuncNode(node, rename)
 	case *ErrorUnion:
 		ok, err := MapNames(node.Ok, rename)
 		if err != nil {
@@ -291,6 +332,24 @@ func MapNames(t Type, rename func(path []string) ([]string, error)) (Type, error
 	default:
 		return t, nil
 	}
+}
+
+// mapFuncNode rewrites the parameter and result types of a function pointer.
+func mapFuncNode(node *Func, rename func(path []string) ([]string, error)) (Type, error) {
+	out := &Func{Params: make([]Type, 0, len(node.Params)), Unsafe: node.Unsafe}
+	for _, param := range node.Params {
+		mapped, err := MapNames(param, rename)
+		if err != nil {
+			return nil, err
+		}
+		out.Params = append(out.Params, mapped)
+	}
+	result, err := MapNames(node.Result, rename)
+	if err != nil {
+		return nil, err
+	}
+	out.Result = result
+	return out, nil
 }
 
 // mapNameNode rewrites a name node and its static arguments.
@@ -330,6 +389,11 @@ func Walk(t Type, visit func(Type)) {
 		Walk(node.Elem, visit)
 	case *Const:
 		Walk(node.Elem, visit)
+	case *Func:
+		for _, param := range node.Params {
+			Walk(param, visit)
+		}
+		Walk(node.Result, visit)
 	case *ErrorUnion:
 		if node.Err != nil {
 			Walk(node.Err, visit)
@@ -419,6 +483,34 @@ func SplitMethodName(name string) (string, string, bool) {
 // own something (ADR-0119). This is the one spelling; every layer reads it here.
 const CleanupMethod = "deinit"
 
+// substituteName instantiates a name: the whole name when it is a parameter,
+// and its static arguments otherwise.
+func substituteName(node *Name, subst map[string]Type) Type {
+	if len(node.Path) == 1 && len(node.Args) == 0 {
+		if replacement, ok := subst[node.Path[0]]; ok {
+			return replacement
+		}
+	}
+	if len(node.Args) == 0 {
+		return node
+	}
+	args := make([]Type, 0, len(node.Args))
+	for _, arg := range node.Args {
+		args = append(args, Substitute(arg, subst))
+	}
+	return &Name{Path: node.Path, Args: args}
+}
+
+// substituteFunc instantiates the parameter and result types of a function
+// pointer.
+func substituteFunc(node *Func, subst map[string]Type) Type {
+	out := &Func{Result: Substitute(node.Result, subst), Unsafe: node.Unsafe}
+	for _, param := range node.Params {
+		out.Params = append(out.Params, Substitute(param, subst))
+	}
+	return out
+}
+
 // Substitute replaces every type parameter named in subst, wherever it appears
 // in the structure. A name is replaced only when the whole name matches, so a
 // parameter `T` leaves `Timer` alone.
@@ -428,19 +520,7 @@ func Substitute(t Type, subst map[string]Type) Type {
 	}
 	switch node := t.(type) {
 	case *Name:
-		if len(node.Path) == 1 && len(node.Args) == 0 {
-			if replacement, ok := subst[node.Path[0]]; ok {
-				return replacement
-			}
-		}
-		if len(node.Args) == 0 {
-			return node
-		}
-		args := make([]Type, 0, len(node.Args))
-		for _, arg := range node.Args {
-			args = append(args, Substitute(arg, subst))
-		}
-		return &Name{Path: node.Path, Args: args}
+		return substituteName(node, subst)
 	case *Slice:
 		return &Slice{Elem: Substitute(node.Elem, subst)}
 	case *Buffer:
@@ -451,6 +531,8 @@ func Substitute(t Type, subst map[string]Type) Type {
 		return &Optional{Elem: Substitute(node.Elem, subst)}
 	case *Const:
 		return &Const{Elem: Substitute(node.Elem, subst)}
+	case *Func:
+		return substituteFunc(node, subst)
 	case *ErrorUnion:
 		out := &ErrorUnion{Ok: Substitute(node.Ok, subst)}
 		if node.Err != nil {

@@ -189,6 +189,8 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 		return "std::fs::Error!std::fs::Metadata", true
 	case "std::internal::builtin::fs_read_dir":
 		return "std::fs::Error!std::array::Array<std::fs::DirEntry>", true
+	case "std::internal::builtin::mem_allocator_from":
+		return "Allocator", true
 	default:
 		return "", false
 	}

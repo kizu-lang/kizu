@@ -148,6 +148,7 @@ var primitives = map[string]bool{
 	"std::internal::builtin::map_key_at":                   true,
 	"std::internal::builtin::map_len":                      true,
 	"std::internal::builtin::map_take_value_at":            true,
+	"std::internal::builtin::mem_allocator_from":           true,
 	"std::internal::builtin::mem_fixed_buffer":             true,
 	"std::internal::builtin::mem_len":                      true,
 	"std::internal::builtin::mem_page_allocator":           true,

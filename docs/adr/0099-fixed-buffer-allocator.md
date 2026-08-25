@@ -76,7 +76,7 @@ tie は pending として statement 終端で拒否する。
 | --- | --- |
 | unsafe 版 fixed_buffer | 現在の kizu には unsafe 漏れの無い経路しかなく、初の unmarked bleed になる(ADR-0089 の doctrine 違反) |
 | `contract Allocator` 化 | ADR-0092 決定 1 を維持。tied 値としての opaque 扱いで足り、開放は不可逆 |
-| generic / method な tied factory | recognizer が無く tie が黙って落ちるため宣言時に拒否。実需が出たら additive に開放 |
+| generic / method な tied factory | recognizer が無く tie が黙って落ちるため宣言時に拒否。実需が出たら additive に開放(generic は ADR-0129 が開いた。method は閉じたまま) |
 | 別 view 型・lifetime 注釈 | ADR-0098 で確立した構造的導出で足りる。新構文ゼロ |
 
 ## 影響

@@ -89,7 +89,7 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0089: `unsafe` は式のマーカーにし、不変条件は型に印を付ける](0089-unsafe-is-an-expression-marker.md)
 - [ADR-0090: owned な値への match は payload を取り出せる](0090-owned-match-moves-payloads-out.md)
 - [ADR-0091: owner は consume されなければならない](0091-owners-must-be-consumed.md)
-- [ADR-0092: Allocator は opaque capability のまま、実体化しない](0092-allocator-stays-opaque-capability.md) (決定 2・3 は 0099 が履行)
+- [ADR-0092: Allocator は opaque capability のまま、実体化しない](0092-allocator-stays-opaque-capability.md) (決定 2・3 は 0099 が履行、決定 1 は 0129 が改訂)
 - [ADR-0093: statement match の arm body に `return` を許す](0093-match-arm-return.md)
 - [ADR-0095: `borrows a, b` — 複数 source の保守的統合](0095-multi-source-borrows.md) (節構文は 0098 で置換、意味論は既定として存続)
 - [ADR-0096: 可変性は borrow が運ぶ — `&var []u8` の write-through](0096-mutable-slice-write-through.md)
@@ -122,3 +122,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0126: build cache は content-addressed な artifact だけを保持する](0126-cache-only-content-addressed-artifacts.md) (#1675)
 - [ADR-0127: `catch` による error 処理と set の合成宣言](0127-error-catch-and-set-composition.md) (#1675 の gap を履行)
 - [ADR-0128: std の allocation 失敗は `std::mem::Error::OutOfMemory` の 1 値にする](0128-std-allocation-error-taxonomy.md)
+- [ADR-0129: Allocator を user 実装に開く。安全性は tie が持つ](0129-user-defined-allocator.md) (ADR-0092 決定 1 の改訂)

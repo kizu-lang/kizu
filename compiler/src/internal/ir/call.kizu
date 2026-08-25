@@ -5,6 +5,7 @@ import compiler::internal::stdprim;
 import compiler::internal::typ;
 import std::array;
 import std::mem;
+import std::string;
 
 // Mechanical port of the call half of internal/ir/lower.go: call dispatch,
 // the raw pointer builtins, named and generic calls, the std storage
@@ -39,6 +40,15 @@ fn (self: &var Lowerer) lower_call_expr(
         return move failed;
     }
     if ptr_handled {
+        return null;
+    }
+    // A binding shadows a declaration: a name holding a function pointer is
+    // called through the pointer it holds.
+    var indirect_handled = false;
+    if try self.lower_func_pointer_call(tree, call, out, &var indirect_handled) |failed| {
+        return move failed;
+    }
+    if indirect_handled {
         return null;
     }
     if try self.function_callee_name(tree, call.callee) |name| {
@@ -122,6 +132,10 @@ fn (self: &var Lowerer) lower_type_apply_call(
     }
     if self.name_is(callee_name, "ptr_from_int") or self.name_is(callee_name, "int_from_ptr") {
         return self.lower_ptr_int_cast(tree, type_arg, args, out);
+    }
+    if self.name_is(callee_name, "std::internal::builtin::mem_allocator_from") {
+        let resolved = try self.resolve_type_args(type_arg);
+        return self.lower_allocator_from(tree, resolved, args, out);
     }
     var handled = false;
     if try self.lower_meta_apply(tree, callee_name, type_arg, args, out, &var handled) |failed| {
@@ -245,6 +259,123 @@ fn (self: &var Lowerer) lower_ptr_int_cast(
     }
     out.* = try self.emit_imm1(Op::Cast, target, target, value);
     return null;
+}
+
+/// Lowers `mem_allocator_from<T>`. The state stays a borrow: the runtime
+/// writes the allocator header into the caller's storage, so what crosses is
+/// the address, not a copy of the state.
+fn (self: &var Lowerer) lower_allocator_from(
+    tree: &var ast::Ast,
+    state: Name,
+    args: ast::ExpressionList,
+    out: &var Value
+) -> !?diagnostic::Diagnostic {
+    var values = array::new<Value>(self.allocator);
+    defer values.deinit();
+    var index = 0;
+    while ownership::arg_at(tree, args, index) |arg| {
+        var want = empty_name();
+        if index == 0 {
+            want = try self.borrowed_state_name(state);
+        }
+        index = index + 1;
+        var value = empty_value();
+        if try self.lower_contextual_expr(tree, arg, want, &var value) |failed| {
+            return move failed;
+        }
+        try values.append(value);
+    }
+    let allocator = try self.module.names.intern("Allocator");
+    let symbol = try self.module.names.intern("std::internal::builtin::mem_allocator_from");
+    out.* = try self.emit_with(Op::Call, symbol, allocator, empty_name(), &values);
+    return null;
+}
+
+/// Spells `&var T` for the state an allocator is built from.
+fn (self: &var Lowerer) borrowed_state_name(state: Name) -> !Name {
+    var text = try string::from_bytes(self.allocator, "&var ");
+    errdefer text.deinit();
+    try self.module.names.append_to(&var text, state);
+    return self.module.names.intern_owned(move text);
+}
+
+/// Lowers a call whose callee is a binding holding a function pointer. The
+/// pointer is the first argument of `call.indirect`, so the backend reads the
+/// callee where it reads every other operand.
+fn (self: &var Lowerer) lower_func_pointer_call(
+    tree: &var ast::Ast,
+    call: ast::CallExpr,
+    out: &var Value,
+    handled: &var bool
+) -> !?diagnostic::Diagnostic {
+    let ident = ownership::ident_expr(tree, call.callee) orelse return null;
+    let name = try self.text_name(tree, ident.name);
+    var callee = self.common.void_value;
+    var bound = false;
+    if self.envs.get(self.env, name) |value| {
+        callee = value;
+        bound = true;
+    }
+    if !bound {
+        return null;
+    }
+    if !self.name_starts_with(callee.type_name, "fn(") and
+        !self.name_starts_with(callee.type_name, "unsafe fn(") {
+        return null;
+    }
+    handled.* = true;
+    var args = array::new<Value>(self.allocator);
+    defer args.deinit();
+    try args.append(callee);
+    var index = 0;
+    while ownership::arg_at(tree, call.args, index) |argument| {
+        var lowered = self.common.void_value;
+        if try self.lower_expr(tree, argument, &var lowered) |failed| {
+            return move failed;
+        }
+        try args.append(lowered);
+        index = index + 1;
+    }
+    let result = try self.function_pointer_result_name(callee.type_name);
+    out.* = try self.emit_with(Op::CallIndirect, empty_name(), result, empty_name(), &args);
+    return null;
+}
+
+/// Reports whether an interned name starts with text.
+fn (self: &Lowerer) name_starts_with(value: Name, text: []u8) -> bool {
+    let retained = name_text(&self.module.names, value);
+    let bytes = retained.as_bytes();
+    return mem::starts_with(bytes, text);
+}
+
+/// Returns the result a function pointer spelling names: what follows the
+/// last ` -> `.
+fn (self: &var Lowerer) function_pointer_result_name(pointer: Name) -> !Name {
+    let bounds = pointer_result_bounds(&self.module.names, pointer);
+    if bounds.start == 0 {
+        return self.module.names.intern("void");
+    }
+    return self.module.names.intern_slice(pointer, bounds.start, bounds.end);
+}
+
+struct PointerResultBounds {
+    start: i64,
+    end: i64
+}
+
+fn pointer_result_bounds(names: &NameTable, pointer: Name) -> PointerResultBounds {
+    let retained = name_text(names, pointer);
+    let bytes = retained.as_bytes();
+    let total = mem::len(bytes);
+    var index = total;
+    while index > 4 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(62) and bytes[index - 1] == cast<u8>(45) and
+            bytes[index - 2] == cast<u8>(32) {
+            return PointerResultBounds { start: index + 2, end: total };
+        }
+    }
+    return PointerResultBounds { start: 0, end: total };
 }
 
 /// Lowers builtins and resolved function calls, the Go `lowerNamedCallExpr`.

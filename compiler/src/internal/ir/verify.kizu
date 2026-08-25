@@ -324,11 +324,29 @@ fn (self: &Verifier) verify_terminator(
     if term.op != TermOp::Return or is_empty(got) or try absorbs_error_set(module, types, self.fn_return, got) {
         return null;
     }
-    if !same_name(self.fn_return, got) {
+    if !same_name(self.fn_return, got) and
+        !fills_nullable_pointer(module, self.fn_return, got) {
         let position_text = try string::from_bytes(self.allocator, "return value");
         return try self.fail(module, move position_text, self.fn_return, got);
     }
     return null;
+}
+
+/// Reports whether a `ptr<T>` fills a `?ptr<T>` slot. The two spell the same
+/// machine value and the non-null one is a subset of the nullable one, so
+/// widening is always sound.
+fn fills_nullable_pointer(module: &Module, want: Name, got: Name) -> bool {
+    let want_retained = name_text(&module.names, want);
+    let want_bytes = want_retained.as_bytes();
+    if !mem::starts_with(want_bytes, "?ptr<") {
+        return false;
+    }
+    let got_retained = name_text(&module.names, got);
+    let got_bytes = got_retained.as_bytes();
+    if mem::len(want_bytes) != mem::len(got_bytes) + 1 {
+        return false;
+    }
+    return mem::equal_bytes(want_bytes[1..mem::len(want_bytes)], got_bytes);
 }
 
 /// Parses the IR spellings before asking the structural type query, the Go

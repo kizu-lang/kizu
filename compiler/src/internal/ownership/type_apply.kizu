@@ -247,9 +247,34 @@ fn (self: &var Checker) check_type_apply_call_expr(
     if handled {
         return null;
     }
+    if self.names.is(name, "std::internal::builtin::mem_allocator_from") {
+        return self.check_allocator_from(tree, env, args, out);
+    }
     return try self.error1(
         tree, ast::zero_span(), "move error: `%s` does not take static arguments", Arg::Str(name)
     );
+}
+
+/// Walks the arguments of `mem_allocator_from`. The state is borrowed for as
+/// long as the allocator lives, which the tied-allocator recognizer enforces
+/// from the wrapper's signature; the two functions own nothing, because the
+/// code they name outlives the program.
+fn (self: &var Checker) check_allocator_from(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while arg_at(tree, args, index) |argument| {
+        var ignored = try self.names.intern("void");
+        if try self.read_expr(tree, env, argument, &var ignored) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = try self.names.intern("Allocator");
+    return null;
 }
 
 /// Validates std::arena::new<T>(allocator) ownership, the Go
@@ -966,14 +991,6 @@ fn (self: &var Checker) check_generic_user_type_apply(
         return move failed;
     }
     self.meta_fields.restore(restore);
-    // No recognizer ties a generic factory's result, so a tied result would
-    // silently lose its buffer tie. Nothing needs this shape yet.
-    if self.names.is(result, "Allocator") and try self.call_ties_allocator(tree, function, args, env) {
-        return try self.error1(
-            tree, ast::zero_span(), "borrow error: generic function `%s` cannot return a tied allocator",
-            Arg::Str(name)
-        );
-    }
     out.* = result;
     return null;
 }

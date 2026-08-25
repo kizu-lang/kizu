@@ -1041,6 +1041,28 @@ ptr<const T>
 ?ptr<const T>
 ```
 
+**関数 pointer 型**は `fn(引数型, ...) -> 戻り値型` と綴ります。値になれるのは
+top-level function の名前だけで、closure も捕捉もありません。
+
+```kizu
+fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+fn apply(f: fn(i64) -> i64, value: i64) -> i64 {
+    return f(value);
+}
+
+fn main() -> void {
+    print(apply(double, 21));
+}
+```
+
+呼び出しは safe です。指す先はプログラムの生存期間ずっとあり、型が signature を
+保証するので、間接であること自体に `unsafe` の対象はありません。指す先が
+`unsafe fn` のときは `unsafe fn(...) -> ...` という別の型になり、その呼び出しに
+だけ `unsafe` が要ります(§12)。`?fn(...) -> ...` は nullable で、直接呼べません。
+
 type alias は持ちません。導入するかどうかは未検討です。
 
 **optional 型 `?T`** は「値が無いかもしれない」を型にします(ADR-0101)。
@@ -1994,6 +2016,8 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `extern "c" fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の呼び出しには `unsafe` が要る
 * `unsafe fn` の本体は暗黙に覆われない
+* `fn(...) -> T` を通した呼び出しに `unsafe` は要らない
+* `unsafe fn(...) -> T` を通した呼び出しには `unsafe` が要る
 * `ptr<T>` は non-null mutable raw pointer
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
@@ -2549,19 +2573,31 @@ C ABI へ `std::string::String` を暗黙に渡してはいけません。C へ�
 
 ### 14.3 Allocator capability
 
-安定 allocator factory は `std::mem::page_allocator()` と
-`std::mem::fixed_buffer(bytes)` の 2 つです。
+安定 allocator factory は `std::mem::page_allocator()`、
+`std::mem::fixed_buffer(bytes)`、`std::mem::allocator_from(...)` の 3 つです。
 
 ```text
 std::mem::page_allocator() -> Allocator
 std::mem::fixed_buffer(bytes: &var []u8) -> Allocator
+std::mem::allocator_from<T>(
+    state: &var T,
+    alloc: unsafe fn(&var T, i64) -> ?ptr<u8>,
+    free:  unsafe fn(&var T, ptr<u8>, i64) -> void,
+) -> Allocator
 ```
 
 `Allocator` は visible opaque capability type です。
-user-facing `contract` ではなく、field を持つ struct でもなく、
-user code が実装できる interface でもありません。
+user-facing `contract` ではなく、field を持つ struct でもありません。
 safe Kizu code は `Allocator` 型を名前として使い、local binding に束縛し、
 明示 allocator を要求する API に渡せます。
+
+`allocator_from` は user が書いた確保・解放から allocator を作ります
+(ADR-0129)。`alloc` は要求された byte 数の領域を返すか、確保できなければ
+null を返します。`free` は `alloc` が返した pointer と、その確保に渡された
+size を受け取ります。2 関数は `unsafe fn` で、契約 —— 返した領域は要求 byte
+数だけ書き込め、`free` に戻すまで他へ配られない —— は書いた側が負います
+(§12)。返る `Allocator` は `state` に **tied** で、下の `fixed_buffer` と
+同じ規則に従います。
 
 tie のない `Allocator`(`page_allocator()`)は copy 型です。`Array<T>`、
 `String`、`Map<K, V>`、`Box<T>`、`std::arena::Arena<T>` の構築に渡しても

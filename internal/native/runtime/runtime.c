@@ -121,11 +121,31 @@ typedef struct {
    the start of the caller's buffer, so a fixed-buffer allocator owns no
    storage beyond the buffer it was given. Every container allocation and
    release routes through kizu_rt_* below; that branch is the whole dispatch. */
+/* A non-NULL Allocator points at a header whose first word says which kind it
+   is, so one branch in kizu_rt_* reaches the right implementation. NULL stays
+   the page allocator, which needs no header at all. */
+typedef enum {
+    KIZU_ALLOC_FIXED = 1,
+    KIZU_ALLOC_USER = 2
+} KizuAllocKind;
+
 typedef struct {
+    int64_t kind;
     unsigned char *data; /* first usable byte, past this header, aligned */
     int64_t cap;         /* usable bytes */
     int64_t offset;      /* bump position within data */
 } KizuFixedBuffer;
+
+/* A user allocator is the state its two functions were written against plus
+   those functions (ADR-0129). It sits at the front of that state, the way a
+   fixed buffer's header sits at the front of the buffer it was given, so the
+   Allocator stays one pointer and the runtime allocates nothing for it. */
+typedef struct {
+    int64_t kind;
+    void *state;
+    void *(*alloc)(void *, int64_t);
+    void (*release)(void *, void *, int64_t);
+} KizuUserAllocator;
 
 #define KIZU_FIXED_ALIGN ((int64_t)16)
 /* Round up to a power-of-two alignment; works for any integer operand type. */
@@ -133,7 +153,7 @@ typedef struct {
 
 /* Shared zero-capacity state for buffers too small to hold a header. Every
    allocation from it fails; nothing ever writes to it. */
-static KizuFixedBuffer kizu_fixed_empty;
+static KizuFixedBuffer kizu_fixed_empty = {KIZU_ALLOC_FIXED, NULL, 0, 0};
 
 void *std__internal__builtin__mem_fixed_buffer(KizuSliceU8 view) {
     if (!view.ptr || view.len <= 0) {
@@ -147,6 +167,7 @@ void *std__internal__builtin__mem_fixed_buffer(KizuSliceU8 view) {
         return &kizu_fixed_empty;
     }
     KizuFixedBuffer *fixed = (KizuFixedBuffer *)header;
+    fixed->kind = KIZU_ALLOC_FIXED;
     fixed->data = (unsigned char *)data;
     fixed->cap = (int64_t)(end - data);
     fixed->offset = 0;
@@ -170,6 +191,10 @@ static void *kizu_rt_alloc(void *allocator, int64_t size) {
     if (!allocator) {
         return malloc((size_t)size);
     }
+    if (*(int64_t *)allocator == KIZU_ALLOC_USER) {
+        KizuUserAllocator *user = (KizuUserAllocator *)allocator;
+        return user->alloc(user->state, size);
+    }
     KizuFixedBuffer *fixed = (KizuFixedBuffer *)allocator;
     int64_t offset = KIZU_ALIGN_UP(fixed->offset, kizu_fixed_alignment(size));
     if (offset > fixed->cap - size) {
@@ -188,9 +213,21 @@ static void *kizu_rt_zalloc(void *allocator, int64_t size) {
     return out;
 }
 
-static void kizu_rt_free(void *allocator, void *ptr) {
+/* kizu_rt_free takes the size the allocation was made with. A size-class
+   allocator needs it to know which class a block returns to, and every caller
+   here already knows it, so a header recording it would cost space for
+   something the call site has (ADR-0129). */
+static void kizu_rt_free(void *allocator, void *ptr, int64_t size) {
     if (!allocator) {
         free(ptr);
+        return;
+    }
+    if (*(int64_t *)allocator == KIZU_ALLOC_USER) {
+        KizuUserAllocator *user = (KizuUserAllocator *)allocator;
+        if (ptr) {
+            user->release(user->state, ptr, size);
+        }
+        return;
     }
     /* Fixed-buffer memory is reclaimed with the buffer's frame. */
 }
@@ -201,6 +238,18 @@ static void *kizu_rt_realloc(void *allocator, void *ptr, int64_t old_size, int64
     }
     if (!allocator) {
         return realloc(ptr, (size_t)new_size);
+    }
+    if (*(int64_t *)allocator == KIZU_ALLOC_USER) {
+        KizuUserAllocator *user = (KizuUserAllocator *)allocator;
+        void *grown = user->alloc(user->state, new_size);
+        if (!grown) {
+            return NULL;
+        }
+        if (ptr) {
+            memcpy(grown, ptr, (size_t)(old_size < new_size ? old_size : new_size));
+            user->release(user->state, ptr, old_size);
+        }
+        return grown;
     }
     KizuFixedBuffer *fixed = (KizuFixedBuffer *)allocator;
     unsigned char *bytes = (unsigned char *)ptr;
@@ -565,6 +614,21 @@ void kizu_print_bool(_Bool v) {
 
 void *std__internal__builtin__mem_page_allocator(void) {
     return NULL;
+}
+
+/* The header goes at the front of the state, which the checker has required
+   the state's type to reserve. Nothing is allocated and the Allocator is the
+   header's address (ADR-0129). */
+void *std__internal__builtin__mem_allocator_from(
+    void *state,
+    void *(*alloc)(void *, int64_t),
+    void (*release)(void *, void *, int64_t)) {
+    KizuUserAllocator *user = (KizuUserAllocator *)state;
+    user->kind = KIZU_ALLOC_USER;
+    user->state = state;
+    user->alloc = alloc;
+    user->release = release;
+    return user;
 }
 
 // An Io capability is a token rather than a handle. std::io::failing() hands
@@ -1313,8 +1377,8 @@ void kizu_arena_deinit(void *handle) {
     if (!arena) {
         return;
     }
-    kizu_rt_free(arena->allocator, arena->data);
-    kizu_rt_free(arena->allocator, arena);
+    kizu_rt_free(arena->allocator, arena->data, arena->cap * arena->elem_size);
+    kizu_rt_free(arena->allocator, arena, (int64_t)sizeof(KizuArena));
 }
 
 /* A Box cell is one max-aligned header holding the owning allocator, followed
@@ -1332,6 +1396,8 @@ void *kizu_box_new(void *allocator, int64_t size, const void *value) {
         return NULL;
     }
     memcpy(cell, &allocator, sizeof(allocator));
+    int64_t cell_size = KIZU_BOX_HEADER + size;
+    memcpy(cell + sizeof(allocator), &cell_size, sizeof(cell_size));
     unsigned char *payload = cell + KIZU_BOX_HEADER;
     memcpy(payload, value, (size_t)size);
     return payload;
@@ -1344,7 +1410,9 @@ void kizu_box_deinit(void *payload) {
     unsigned char *cell = (unsigned char *)payload - KIZU_BOX_HEADER;
     void *allocator;
     memcpy(&allocator, cell, sizeof(allocator));
-    kizu_rt_free(allocator, cell);
+    int64_t cell_size;
+    memcpy(&cell_size, cell + sizeof(allocator), sizeof(cell_size));
+    kizu_rt_free(allocator, cell, cell_size);
 }
 
 /* One cache line's worth of elements, at least one, so a small Array does not
@@ -1552,7 +1620,7 @@ static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
     for (int64_t slot = 0; slot < next; slot += 1) {
         index[slot] = -1;
     }
-    kizu_rt_free(map->allocator, map->index);
+    kizu_rt_free(map->allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
     map->index = index;
     map->index_cap = next;
     uint64_t mask = (uint64_t)next - 1;
@@ -1614,8 +1682,8 @@ _Bool kizu_map_insert(void *handle, const unsigned char *key, int64_t key_len, c
     unsigned char *key_copy = (unsigned char *)kizu_rt_alloc(map->allocator, key_len);
     unsigned char *value_copy = (unsigned char *)kizu_rt_alloc(map->allocator, map->value_size);
     if ((!key_copy && key_len > 0) || !value_copy) {
-        kizu_rt_free(map->allocator, key_copy);
-        kizu_rt_free(map->allocator, value_copy);
+        kizu_rt_free(map->allocator, key_copy, key_len);
+        kizu_rt_free(map->allocator, value_copy, map->value_size);
         return 0;
     }
     if (key_len > 0) {
@@ -1678,12 +1746,12 @@ void kizu_map_deinit(void *handle) {
         return;
     }
     for (int64_t i = 0; i < map->len; i += 1) {
-        kizu_rt_free(map->allocator, map->entries[i].key);
-        kizu_rt_free(map->allocator, map->entries[i].value);
+        kizu_rt_free(map->allocator, map->entries[i].key, map->entries[i].key_len);
+        kizu_rt_free(map->allocator, map->entries[i].value, map->value_size);
     }
-    kizu_rt_free(map->allocator, map->entries);
-    kizu_rt_free(map->allocator, map->index);
-    kizu_rt_free(map->allocator, map);
+    kizu_rt_free(map->allocator, map->entries, map->cap * (int64_t)sizeof(KizuMapEntry));
+    kizu_rt_free(map->allocator, map->index, map->index_cap * (int64_t)sizeof(int64_t));
+    kizu_rt_free(map->allocator, map, (int64_t)sizeof(KizuMap));
 }
 
 void kizu_array_deinit(void *handle) {
@@ -1691,6 +1759,6 @@ void kizu_array_deinit(void *handle) {
     if (!array) {
         return;
     }
-    kizu_rt_free(array->allocator, array->data);
-    kizu_rt_free(array->allocator, array);
+    kizu_rt_free(array->allocator, array->data, array->cap * array->elem_size);
+    kizu_rt_free(array->allocator, array, (int64_t)sizeof(KizuArray));
 }

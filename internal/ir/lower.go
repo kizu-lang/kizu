@@ -719,7 +719,7 @@ func (l *lowerer) lowerSignature(sig ast.FunctionSignature) Signature {
 		params = append(params, l.lowerParam(param))
 	}
 	returned := l.lowerReturnType(l.resolveType(typ.Text(sig.ReturnType)))
-	return Signature{Params: params, Return: returned}
+	return Signature{Params: params, Return: returned, Unsafe: sig.RequiresUnsafe}
 }
 
 // lowerFunction lowers one function into SSA blocks.
@@ -1275,6 +1275,19 @@ func (l *lowerer) lowerDerefExpr(expr *ast.DerefExpr) (Value, error) {
 	return l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, ""), nil
 }
 
+// lowerAllocatorFrom lowers `mem_allocator_from<T>`. The state stays a borrow:
+// the runtime writes the allocator header into the caller's storage, so what
+// crosses is the address, not a copy of the state.
+func (l *lowerer) lowerAllocatorFrom(state string, args []ast.Expression) (Value, error) {
+	params := []Param{{Type: "&var " + state, Passing: PassCallerStorage}}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit(
+		"call.std::internal::builtin::mem_allocator_from", "Allocator", values, ""), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1295,6 +1308,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerMapConstructor(l.resolveTypeArgs(typeApply.TypeArg), args)
 	case "ptr_from_int", "int_from_ptr":
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
+	case "std::internal::builtin::mem_allocator_from":
+		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,
@@ -1548,7 +1563,51 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	if expr.Name == "void" {
 		return Value{Name: "void", Type: "void"}, nil
 	}
+	// A top-level function's name is a function pointer value. The address is
+	// an instruction rather than a constant so the backend names the symbol
+	// once, in the one place that knows how symbols are spelled.
+	if name, sig, ok := l.functionByValueName(expr.Name); ok {
+		return l.emit("func.addr."+name, functionPointerType(sig), nil, ""), nil
+	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
+}
+
+// functionByValueName resolves the declaration a name used as a value refers
+// to. A callee is qualified by the resolver; a name in any other position is
+// not, so a module-local function is looked up under the module the reader is
+// inside as well as under the name as written.
+func (l *lowerer) functionByValueName(name string) (string, Signature, bool) {
+	if sig, ok := l.signatures[name]; ok {
+		return name, sig, true
+	}
+	if l.current == nil {
+		return "", Signature{}, false
+	}
+	prefix := strings.LastIndex(l.current.Name, "::")
+	if prefix < 0 {
+		return "", Signature{}, false
+	}
+	qualified := l.current.Name[:prefix+2] + name
+	sig, ok := l.signatures[qualified]
+	return qualified, sig, ok
+}
+
+// functionPointerType spells the type a function's name has as a value.
+func functionPointerType(sig Signature) string {
+	node := &typ.Func{Unsafe: sig.Unsafe}
+	for _, param := range sig.Params {
+		parsed, err := typ.Parse(param.Type)
+		if err != nil {
+			return ""
+		}
+		node.Params = append(node.Params, parsed)
+	}
+	result, err := typ.Parse(sig.Return)
+	if err != nil {
+		return ""
+	}
+	node.Result = result
+	return node.String()
 }
 
 // lowerCastExpr lowers an explicit cast as a typed conversion instruction.
@@ -1614,6 +1673,11 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if value, handled, err := l.lowerPtrBuiltinCall(expr); handled || err != nil {
 		return value, err
 	}
+	// A binding shadows a declaration: a name holding a function pointer is
+	// called through the pointer it holds.
+	if value, handled, err := l.lowerFuncPointerCall(expr); handled || err != nil {
+		return value, err
+	}
 	if name, ok := l.functionCalleeName(expr.Callee); ok {
 		return l.lowerNamedCallExpr(name, expr.Args)
 	}
@@ -1621,6 +1685,48 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
 	return Value{}, fmt.Errorf("ir error: unsupported callee `%s`", expr.Callee.String())
+}
+
+// lowerFuncPointerCall lowers a call whose callee is a binding holding a
+// function pointer, and reports whether the callee is one. The pointer is the
+// first argument of `call.indirect`, so the backend reads the callee where it
+// reads every other operand.
+func (l *lowerer) lowerFuncPointerCall(expr *ast.CallExpr) (Value, bool, error) {
+	ident, ok := expr.Callee.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, false, nil
+	}
+	callee, ok := l.env.get(ident.Name)
+	if !ok {
+		return Value{}, false, nil
+	}
+	node, ok := funcPointerNode(callee.Type)
+	if !ok {
+		return Value{}, false, nil
+	}
+	args := []Value{callee}
+	for _, raw := range expr.Args {
+		arg, err := l.lowerExpr(raw)
+		if err != nil {
+			return Value{}, true, err
+		}
+		args = append(args, arg)
+	}
+	return l.emit("call.indirect", typ.Text(node.Result), args, ""), true, nil
+}
+
+// funcPointerNode parses a function pointer spelling, and reports whether the
+// text is one.
+func funcPointerNode(text string) (*typ.Func, bool) {
+	if !strings.HasPrefix(text, "fn(") && !strings.HasPrefix(text, "unsafe fn(") {
+		return nil, false
+	}
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return nil, false
+	}
+	node, ok := parsed.(*typ.Func)
+	return node, ok
 }
 
 // functionCalleeName resolves direct and namespace-qualified function names.

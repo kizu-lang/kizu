@@ -3,6 +3,7 @@ package ir
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/typ"
 )
@@ -181,10 +182,17 @@ func (v *verifier) terminator() error {
 	if term.Op != "return" || got == "" || absorbsErrorSet(v.types, v.fn.Return, got) {
 		return nil
 	}
-	if v.fn.Return != got {
+	if v.fn.Return != got && !fillsNullablePointer(v.fn.Return, got) {
 		return v.fail("return value", v.fn.Return, got)
 	}
 	return nil
+}
+
+// fillsNullablePointer reports whether a `ptr<T>` fills a `?ptr<T>` slot. The
+// two spell the same machine value and the non-null one is a subset of the
+// nullable one, so widening is always sound.
+func fillsNullablePointer(want string, got string) bool {
+	return strings.HasPrefix(want, "?ptr<") && want[1:] == got
 }
 
 // absorbsErrorSet parses the IR spellings before asking the structural type query.

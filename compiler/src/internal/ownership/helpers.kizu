@@ -350,7 +350,121 @@ fn (self: &var Checker) read_ident(
     if text_equals(tree, ident.name, "void") {
         return try self.error0(ident.span, "move error: void is not a value");
     }
+    // A top-level function's name is a function pointer value: it owns
+    // nothing, and the code it names outlives the program.
+    let candidate = try self.names.intern_text(tree, ident.name);
+    if try self.function_pointer_name(candidate) |pointer| {
+        out.* = pointer;
+        return null;
+    }
     return try self.error1(tree, ident.span, "move error: undefined variable `%s`", Arg::Text(ident.name));
+}
+
+/// Resolves the declaration a name used as a value refers to. A callee is
+/// qualified by the resolver; a name in any other position is not, so a
+/// module-local function is looked up under the module the reader is inside as
+/// well as under the name as written.
+fn (self: &var Checker) function_by_value_name(name: Name) -> !?FunctionHandle {
+    if self.function_named(name) |handle| {
+        return handle;
+    }
+    var qualified = string::new(self.allocator);
+    defer qualified.deinit();
+    if try self.append_current_module_prefix(&var qualified) {
+        let retained = name_text(&self.names, name);
+        let bytes = retained.as_bytes();
+        try qualified.append_bytes(bytes);
+        let text = qualified.as_bytes();
+        let candidate = try self.names.intern(text);
+        return self.function_named(candidate);
+    }
+    return null;
+}
+
+/// Appends the module prefix of the function being checked, `::` included, and
+/// reports whether it has one.
+fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -> !bool {
+    let handle = self.current_function orelse return false;
+    let info = self.functions.at(handle.index);
+    let retained = name_text(&self.names, info.name);
+    let bytes = retained.as_bytes();
+    let cut = last_namespace_end(bytes);
+    if cut == 0 {
+        return false;
+    }
+    try out.append_bytes(bytes[0..cut]);
+    return true;
+}
+
+/// Returns the byte after the last `::` in a name, or 0 when it has none.
+fn last_namespace_end(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 1 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+/// Spells the function pointer type a declaration's name has as a value, and
+/// returns null for a name that declares no function.
+fn (self: &var Checker) function_pointer_name(name: Name) -> !?Name {
+    let handle = try self.function_by_value_name(name) orelse return null;
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    var unsafe_call = false;
+    var params = array::new<Name>(self.allocator);
+    defer params.deinit();
+    var borrows = array::new<i64>(self.allocator);
+    defer borrows.deinit();
+    var result = name;
+    let info = self.functions.at(handle.index);
+    unsafe_call = info.requires_unsafe;
+    result = info.return_type;
+    var collected = 0;
+    while info.params.get(collected) |param| {
+        try params.append(param.type_name);
+        if param.mut_borrow {
+            try borrows.append(2);
+        } else {
+            if param.borrow {
+                try borrows.append(1);
+            } else {
+                try borrows.append(0);
+            }
+        }
+        collected = collected + 1;
+    }
+    if unsafe_call {
+        try text.append_bytes("unsafe fn(");
+    } else {
+        try text.append_bytes("fn(");
+    }
+    var index = 0;
+    while params.get(index) |param| {
+        if index > 0 {
+            try text.append_bytes(", ");
+        }
+        let marker = borrows.get_or_panic(index);
+        if marker == 2 {
+            try text.append_bytes("&var ");
+        }
+        if marker == 1 {
+            try text.append_byte(cast<u8>(38));
+        }
+        let retained = name_text(&self.names, param);
+        let bytes = retained.as_bytes();
+        try text.append_bytes(bytes);
+        index = index + 1;
+    }
+    try text.append_bytes(") -> ");
+    let retained_result = name_text(&self.names, result);
+    let result_bytes = retained_result.as_bytes();
+    try text.append_bytes(result_bytes);
+    let text_bytes = text.as_bytes();
+    return try self.names.intern(text_bytes);
 }
 
 /// Rejects arenas and known handles after arena cleanup, the Go

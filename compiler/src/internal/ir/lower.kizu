@@ -43,6 +43,7 @@ pub struct FunctionFacts {
     pub params: array::Array<ParamFacts>,
     pub return_type: Name,
     pub extern_abi: Name,
+    pub requires_unsafe: bool,
     pub body: ?ast::Block
 }
 
@@ -316,6 +317,7 @@ pub fn new_lowerer(
             params: array::new<ParamFacts>(allocator),
             return_type: empty_name(),
             extern_abi: empty_name(),
+            requires_unsafe: false,
             body: null
         })
     };
@@ -325,7 +327,11 @@ pub fn new_lowerer(
     var signature_nodes = arena::new<Signature>(allocator);
     errdefer signature_nodes.deinit();
     let scratch_signature = SignatureHandle {
-        node: signature_nodes.add(Signature { params: array::new<Param>(allocator), return_type: empty_name() })
+        node: signature_nodes.add(Signature {
+            params: array::new<Param>(allocator),
+            return_type: empty_name(),
+            requires_unsafe: false
+        })
     };
     var lowerer = Lowerer {
         allocator: allocator,
@@ -473,6 +479,7 @@ fn (self: &var Lowerer) function_facts(tree: &ast::Ast, function: &ast::Function
         params: move params,
         return_type: return_type,
         extern_abi: try self.module.names.intern_text(tree, function.signature.extern_abi),
+        requires_unsafe: function.signature.requires_unsafe,
         body: function.body
     };
     return FactsHandle { node: self.decl_facts.add(move facts) };
@@ -591,6 +598,7 @@ fn (self: &var Lowerer) lower_tests(tree: &var ast::Ast) -> !?diagnostic::Diagno
             params: array::new<ParamFacts>(self.allocator),
             return_type: try self.module.names.intern("!void"),
             extern_abi: empty_name(),
+            requires_unsafe: false,
             body: test.body
         };
         let handle = FactsHandle { node: self.decl_facts.add(move facts) };
@@ -985,7 +993,12 @@ fn (self: &var Lowerer) lower_signature(decl: FactsHandle) -> !SignatureHandle {
     let declared_return = self.decl_facts.at(decl.node).return_type;
     let resolved = try self.resolve_bound_type(declared_return);
     let returned = try self.lower_return_type(resolved);
-    let handle = self.signature_nodes.add(Signature { params: move params, return_type: returned });
+    let requires_unsafe = self.decl_facts.at(decl.node).requires_unsafe;
+    let handle = self.signature_nodes.add(Signature {
+        params: move params,
+        return_type: returned,
+        requires_unsafe: requires_unsafe
+    });
     return SignatureHandle { node: handle };
 }
 
@@ -1062,6 +1075,99 @@ fn params_after_self(signature: SignatureHandle) -> ParamsView {
 }
 
 /// Returns the signature recorded under name, the Go `l.signatures[name]`.
+/// Is a declaration a name used as a value refers to: the symbol it is
+/// registered under and its signature.
+struct ResolvedFunction {
+    name: Name,
+    signature: SignatureHandle
+}
+
+/// Resolves the declaration a name used as a value refers to. A callee is
+/// qualified by the resolver; a name in any other position is not, so a
+/// module-local function is looked up under the module the reader is inside as
+/// well as under the name as written.
+fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction {
+    if self.signature_named(name) |signature| {
+        return ResolvedFunction { name: name, signature: signature };
+    }
+    var qualified = string::new(self.allocator);
+    defer qualified.deinit();
+    if try self.append_current_module_prefix(&var qualified) {
+        let retained = name_text(&self.module.names, name);
+        let bytes = retained.as_bytes();
+        try qualified.append_bytes(bytes);
+        let text = qualified.as_bytes();
+        let candidate = try self.module.names.intern(text);
+        if self.signature_named(candidate) |signature| {
+            return ResolvedFunction { name: candidate, signature: signature };
+        }
+    }
+    return null;
+}
+
+/// Appends the module prefix of the function being lowered, `::` included, and
+/// reports whether it has one.
+fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -> !bool {
+    let node = self.module.function_nodes.at(self.current.node);
+    let retained = name_text(&self.module.names, node.name);
+    let bytes = retained.as_bytes();
+    let cut = last_namespace_end(bytes);
+    if cut == 0 {
+        return false;
+    }
+    try out.append_bytes(bytes[0..cut]);
+    return true;
+}
+
+/// Returns the byte after the last `::` in a name, or 0 when it has none.
+fn last_namespace_end(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 1 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+/// Spells the function pointer type a signature's name has as a value.
+fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Name {
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    var params = array::new<Name>(self.allocator);
+    defer params.deinit();
+    let node = self.signature_nodes.at(signature.node);
+    let unsafe_call = node.requires_unsafe;
+    let result = node.return_type;
+    var index = 0;
+    while node.params.get(index) |param| {
+        try params.append(param.type_name);
+        index = index + 1;
+    }
+    if unsafe_call {
+        try text.append_bytes("unsafe fn(");
+    } else {
+        try text.append_bytes("fn(");
+    }
+    index = 0;
+    while params.get(index) |param| {
+        if index > 0 {
+            try text.append_bytes(", ");
+        }
+        let retained = name_text(&self.module.names, param);
+        let bytes = retained.as_bytes();
+        try text.append_bytes(bytes);
+        index = index + 1;
+    }
+    try text.append_bytes(") -> ");
+    let retained_result = name_text(&self.module.names, result);
+    let result_bytes = retained_result.as_bytes();
+    try text.append_bytes(result_bytes);
+    let text_bytes = text.as_bytes();
+    return self.module.names.intern(text_bytes);
+}
+
 fn (self: &Lowerer) signature_named(name: Name) -> ?SignatureHandle {
     let retained = name_text(&self.module.names, name);
     let bytes = retained.as_bytes();

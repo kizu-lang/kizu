@@ -1574,6 +1574,9 @@ func (c *Checker) checkReturnValue(
 	if ok, err := c.checkErrorUnionReturn(expr, want, got); ok || err != nil {
 		return ok, err
 	}
+	if fillsNullablePointer(want, got) {
+		return true, nil
+	}
 	if _, ok := optionalElem(want); ok {
 		// A plain value returned as `?T` wraps implicitly, like `!T` success.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
@@ -3221,7 +3224,64 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	if expr.Name == "void" {
 		return "", errorAt(expr.Span, "type error: void is not a value")
 	}
+	// A top-level function name is the one value a function pointer takes.
+	// There is nothing else to build one from: Kizu has no closures, so the
+	// name is checked here rather than through a conversion form.
+	if value, ok := c.functionPointerValue(expr.Name); ok {
+		return value, nil
+	}
 	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
+}
+
+// lookupFunctionByValueName resolves the declaration a name used as a value
+// refers to. A callee is qualified by the resolver; a name in any other
+// position is not, so a module-local function is looked up under the module
+// the reader is inside as well as under the name as written.
+func (c *Checker) lookupFunctionByValueName(name string) (*functionType, bool) {
+	if fn, ok := c.functions[name]; ok {
+		return fn, true
+	}
+	if c.currentFunction == nil {
+		return nil, false
+	}
+	prefix := strings.LastIndex(c.currentFunction.name, "::")
+	if prefix < 0 {
+		return nil, false
+	}
+	fn, ok := c.functions[c.currentFunction.name[:prefix+2]+name]
+	return fn, ok
+}
+
+// borrowedParamType spells a parameter the way a caller writes it: the borrow
+// markers a declaration wrote beside the type are part of what the parameter
+// takes, so a function pointer carries them.
+func borrowedParamType(param ast.Param) typ.Type {
+	if param.MutBorrow {
+		return &typ.Borrow{Elem: param.TypeName, Mut: true}
+	}
+	if param.Borrow {
+		return &typ.Borrow{Elem: param.TypeName}
+	}
+	return param.TypeName
+}
+
+// functionPointerValue returns the function pointer type a declared function's
+// name has as a value, and reports whether the name declares one. A generic
+// function has no single signature, so its name is not a value.
+func (c *Checker) functionPointerValue(name string) (Type, bool) {
+	fn, ok := c.lookupFunctionByValueName(name)
+	if !ok || len(fn.sig.StaticParams) > 0 {
+		return "", false
+	}
+	node := &typ.Func{Unsafe: fn.sig.RequiresUnsafe, Result: fn.sig.ReturnType}
+	for _, param := range fn.sig.Params {
+		node.Params = append(node.Params, borrowedParamType(param))
+	}
+	if node.Result == nil {
+		return "", false
+	}
+	c.types.remember(node)
+	return Type(node.String()), true
 }
 
 // checkPrefixExpr validates unary operators.
@@ -3507,7 +3567,64 @@ func (c *Checker) checkCallExprDispatch(
 	if name.Name == "Io" {
 		return "", errorf("type error: use `std::io::blocking()`")
 	}
+	// A binding shadows a declaration here: a name bound to a function
+	// pointer is called through the pointer, not looked up as a declaration.
+	if bound, ok := env.lookup(name.Name); ok {
+		if node, isFunc := c.funcPointerNode(bound); isFunc {
+			return c.checkFuncPointerCall(name, node, expr.Args, env, unsafe)
+		}
+	}
 	return c.checkUserCall(name.Name, name.Span, expr.Args, env, unsafe)
+}
+
+// funcPointerNode returns the parsed function pointer a type spells, and
+// reports whether it is one.
+func (c *Checker) funcPointerNode(value Type) (*typ.Func, bool) {
+	parsed, ok := c.types.lookup(value)
+	if !ok {
+		return nil, false
+	}
+	node, isFunc := parsed.(*typ.Func)
+	return node, isFunc
+}
+
+// checkFuncPointerCall validates a call made through a function pointer. The
+// call is safe unless the pointee carries an obligation, which is what
+// `unsafe fn(...)` spells: the marker is required for the same reason a direct
+// call to an `unsafe fn` requires it.
+func (c *Checker) checkFuncPointerCall(
+	name *ast.IdentExpr,
+	node *typ.Func,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if node.Unsafe {
+		operation := fmt.Sprintf("call through `%s`", name.Name)
+		if err := requireUnsafeCapabilityAt(
+			unsafe, unsafeUnsafeCall, operation, name.Span,
+		); err != nil {
+			return "", err
+		}
+	}
+	if len(args) != len(node.Params) {
+		return "", errorf(
+			"type error: `%s` expects %d argument(s), got %d",
+			name.Name, len(node.Params), len(args))
+	}
+	for idx, arg := range args {
+		want := Type(node.Params[idx].String())
+		got, err := c.checkContextualExpr(arg, want, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, want) {
+			return "", errorf(
+				"type error: `%s` argument %d expects %s, got %s",
+				name.Name, idx+1, want, got)
+		}
+	}
+	return Type(node.Result.String()), nil
 }
 
 // checkFieldCallExpr validates qualified, union, and method calls.
@@ -4094,7 +4211,93 @@ func (c *Checker) checkBuiltinTypeApply(
 	); ok || err != nil {
 		return typ, ok, err
 	}
+	if name == "std::internal::builtin::mem_allocator_from" {
+		typ, err := c.checkAllocatorFrom(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
+}
+
+// checkAllocatorFrom validates `mem_allocator_from<T>(state, alloc, free)`.
+// The header the runtime writes lives at the front of the state, so T has to
+// have reserved it: its first field is `std::mem::AllocatorHeader` (ADR-0129).
+func (c *Checker) checkAllocatorFrom(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 3 {
+		return "", errorf(
+			"type error: `std::mem::allocator_from` expects state, alloc and free")
+	}
+	if err := c.requireAllocatorHeaderFirst(typeArg); err != nil {
+		return "", err
+	}
+	if err := c.checkAllocatorStateArg(typeArg, args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	wants := []Type{
+		Type("unsafe fn(&var " + typeArg + ", i64) -> ?ptr<u8>"),
+		Type("unsafe fn(&var " + typeArg + ", ptr<u8>, i64) -> void"),
+	}
+	names := []string{"alloc", "free"}
+	for idx, arg := range args[1:] {
+		got, err := c.checkContextualExpr(arg, wants[idx], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, wants[idx]) {
+			return "", errorf("type error: `std::mem::allocator_from` %s expects %s, got %s",
+				names[idx], wants[idx], got)
+		}
+	}
+	return Type("Allocator"), nil
+}
+
+// checkAllocatorStateArg validates the `&var T` an allocator is built from.
+func (c *Checker) checkAllocatorStateArg(
+	typeArg string,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if prefix, ok := borrowPrefix(arg); ok && prefix.Operator == "&var" {
+		got, _, err := c.checkBorrowPrefix(prefix, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if !sameType(got, Type(typeArg)) {
+			return errorf(
+				"type error: `std::mem::allocator_from` state expects &var %s, got &var %s",
+				typeArg, got)
+		}
+		return nil
+	}
+	// A std wrapper forwards the `&var T` it was given, so the argument
+	// arrives already borrowed rather than as a borrow expression.
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if !sameType(got, Type(typeArg)) && !sameType(got, Type("&var "+typeArg)) {
+		return errorf("type error: `std::mem::allocator_from` state expects &var %s, got %s",
+			typeArg, got)
+	}
+	return nil
+}
+
+// requireAllocatorHeaderFirst refuses a state whose type has not reserved the
+// room the runtime writes its header into.
+func (c *Checker) requireAllocatorHeaderFirst(typeArg string) error {
+	decl := c.structs[typeArg]
+	if decl == nil || len(decl.Fields) == 0 ||
+		typ.Text(decl.Fields[0].TypeName) != "std::mem::AllocatorHeader" {
+		return errorf(
+			"type error: `%s` must declare `std::mem::AllocatorHeader` as its first field"+
+				" to back an allocator", typeArg)
+	}
+	return nil
 }
 
 // checkBuiltinArenaTypeApply validates the Arena constructor and the storage

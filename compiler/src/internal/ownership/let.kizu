@@ -503,13 +503,28 @@ fn (self: &var Checker) returned_borrow_initializer(
         );
     }
     var ignored = empty_name();
-    if try self.check_user_call(tree, env, called.name, call.args, true, &var ignored) |failed| {
+    if try self.check_tied_factory_call(tree, env, called.name, call, &var ignored) |failed| {
         return move failed;
     }
     returned.elem = elem;
     returned.mutable = mutable;
     recognized.* = true;
     return null;
+}
+
+/// Runs the ordinary call check for a factory whose result is tied, through
+/// whichever arm the callee's shape belongs to.
+fn (self: &var Checker) check_tied_factory_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    name: Name,
+    call: ast::CallExpr,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    if type_apply_expr(tree, call.callee) |apply| {
+        return self.check_type_apply_call_expr(tree, env, apply, call.args, out);
+    }
+    return self.check_user_call(tree, env, name, call.args, true, out);
 }
 
 /// Lists the caller-side bindings a borrow-shaped call result stays tied
@@ -622,6 +637,12 @@ fn (self: &var Checker) called_user_function(tree: &ast::Ast, callee: ast::Expre
         let name = try self.qualified_name(tree, callee) orelse return null;
         let function = self.function_named(name) orelse return null;
         return CalledFunction { name: name, function: function };
+    }
+    // A generic call names the same declaration its static arguments
+    // instantiate. Reading through to it is what lets the tie recognizer see a
+    // generic factory, which ADR-0099 left closed for want of one.
+    if type_apply_expr(tree, callee) |apply| {
+        return self.called_user_function(tree, apply.callee);
     }
     return null;
 }

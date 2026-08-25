@@ -2531,12 +2531,81 @@ fn (self: &var Parser) parse_type_node(
         Amp => return self.parse_borrow_type(builder),
         LBracket => return self.parse_bracket_type(builder),
         Question => return self.parse_optional_type(builder),
+        Function => return self.parse_func_type(builder, false),
+        Unsafe => return self.parse_unsafe_func_type(builder),
         Ident => return self.parse_named_type(builder),
         _ => {
             try self.error_token("expected type, got ", self.current_token());
             return null;
         },
     }
+    return null;
+}
+
+// parse_unsafe_func_type reads `unsafe fn(...) -> T`. `unsafe` in a type
+// position names the obligation the function it points at carries, so nothing
+// else may follow it.
+fn (self: &var Parser) parse_unsafe_func_type(
+    builder: &var typ::Builder
+) -> !?arena::Handle<typ::Node> {
+    if self.peek_kind() != token::Kind::Function {
+        try self.error_token("expected `fn` after `unsafe` in a type, got ", self.peek_token());
+        return null;
+    }
+    try self.next_token();
+    return self.parse_func_type(builder, true);
+}
+
+// parse_func_type reads `fn(T, ...) -> R` with the current token on the `fn`.
+fn (self: &var Parser) parse_func_type(
+    builder: &var typ::Builder,
+    unsafe_call: bool
+) -> !?arena::Handle<typ::Node> {
+    if self.peek_kind() != token::Kind::LParen {
+        try self.error_token("expected `(` after `fn` in a type, got ", self.peek_token());
+        return null;
+    }
+    try self.next_token();
+    var params = array::new<arena::Handle<typ::Node>>(self.allocator);
+    errdefer params.deinit();
+    if self.peek_kind() != token::Kind::RParen {
+        while true {
+            try self.next_token();
+            let parsed = try self.parse_type_node(builder);
+            if parsed |param| {
+                try params.append(param);
+            } else {
+                params.deinit();
+                return null;
+            }
+            if self.peek_kind() != token::Kind::Comma {
+                break;
+            }
+            try self.next_token();
+        }
+    }
+    if self.peek_kind() != token::Kind::RParen {
+        try self.error_token("expected `)` in a function type, got ", self.peek_token());
+        params.deinit();
+        return null;
+    }
+    try self.next_token();
+    if self.peek_kind() != token::Kind::Arrow {
+        try self.error_token("expected `->` in a function type, got ", self.peek_token());
+        params.deinit();
+        return null;
+    }
+    try self.next_token();
+    try self.next_token();
+    let parsed = try self.parse_type_node(builder);
+    if parsed |result| {
+        return builder.add(typ::Node::Func(typ::Func {
+            params: move params,
+            result: result,
+            unsafe_call: unsafe_call
+        }));
+    }
+    params.deinit();
     return null;
 }
 

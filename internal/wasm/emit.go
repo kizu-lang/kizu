@@ -18,7 +18,13 @@ const (
 
 // Emit formats a typed SSA IR module as WASI-compatible WebAssembly text.
 func Emit(module *ir.Module) (string, error) {
-	e := &emitter{module: module, strings: map[string]dataRef{}, values: map[string]valueInfo{}}
+	e := &emitter{
+		module:         module,
+		strings:        map[string]dataRef{},
+		values:         map[string]valueInfo{},
+		tableIndex:     map[string]int{},
+		signatureIndex: map[string]int{},
+	}
 	if err := e.emit(); err != nil {
 		return "", err
 	}
@@ -41,11 +47,29 @@ type emitter struct {
 	out     bytes.Buffer
 	strings map[string]dataRef
 	values  map[string]valueInfo
+	// table lists, in call order, the functions whose address is taken. wasm
+	// reaches a function pointer through a table index rather than an
+	// address, so `func.addr` lowers to the position a name holds here.
+	table      []string
+	tableIndex map[string]int
+	// signatures lists the `(type ...)` declarations `call_indirect` names,
+	// in the order they were first needed.
+	signatures     []funcSignature
+	signatureIndex map[string]int
+}
+
+// funcSignature is one wasm function type a `call_indirect` names.
+type funcSignature struct {
+	params []string
+	result string
 }
 
 // emit writes the module, runtime helpers, and user functions.
 func (e *emitter) emit() error {
 	e.collectStrings()
+	if err := e.collectFunctionTable(); err != nil {
+		return err
+	}
 	e.writeHeader()
 	e.writeRuntime()
 	for _, fn := range e.module.Functions {
@@ -57,6 +81,62 @@ func (e *emitter) emit() error {
 	e.out.WriteString("    (call $main))\n")
 	e.out.WriteString(")\n")
 	return nil
+}
+
+// collectFunctionTable walks the module for the addresses it takes and the
+// indirect calls it makes, before anything is written: wasm declares its table
+// and its function types in the header, above the functions that use them.
+func (e *emitter) collectFunctionTable() error {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if err := e.collectCallableInstr(instr); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// collectCallableInstr records the table entry or function type one
+// instruction needs.
+func (e *emitter) collectCallableInstr(instr *ir.Instr) error {
+	if name, ok := strings.CutPrefix(instr.Op, "func.addr."); ok {
+		if _, seen := e.tableIndex[name]; !seen {
+			e.tableIndex[name] = len(e.table)
+			e.table = append(e.table, name)
+		}
+		return nil
+	}
+	if instr.Op != "call.indirect" {
+		return nil
+	}
+	if len(instr.Args) == 0 {
+		return fmt.Errorf("wasm error: call.indirect expects a callee")
+	}
+	e.internSignature(instr)
+	return nil
+}
+
+// internSignature records the wasm function type an indirect call names and
+// returns its index.
+func (e *emitter) internSignature(instr *ir.Instr) int {
+	sig := funcSignature{}
+	for _, arg := range instr.Args[1:] {
+		sig.params = append(sig.params, wasmType(arg.Type))
+	}
+	if instr.Result.Type != "void" {
+		sig.result = wasmType(instr.Result.Type)
+	}
+	key := strings.Join(sig.params, ",") + "->" + sig.result
+	if index, seen := e.signatureIndex[key]; seen {
+		return index
+	}
+	index := len(e.signatures)
+	e.signatureIndex[key] = index
+	e.signatures = append(e.signatures, sig)
+	return index
 }
 
 // collectStrings assigns stable memory offsets to literal data.
@@ -98,11 +178,38 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("  (import \"wasi_snapshot_preview1\" \"fd_write\"\n")
 	e.out.WriteString("    (func $__wasi_fd_write (param i32 i32 i32 i32) (result i32)))\n")
 	e.out.WriteString("  (memory (export \"memory\") 1)\n")
+	e.writeFunctionTable()
 	for _, lit := range e.sortedDataLiterals() {
 		ref := e.strings[lit]
 		fmt.Fprintf(&e.out, "  (data (i32.const %d) \"%s\")\n", ref.offset, dataLiteral(lit))
 	}
 	e.out.WriteByte('\n')
+}
+
+// writeFunctionTable writes the `(type ...)` declarations `call_indirect`
+// names and the table the addresses index into. Both are empty when no
+// address is taken, so a module that uses no function pointer is unchanged.
+func (e *emitter) writeFunctionTable() {
+	for index, sig := range e.signatures {
+		params := ""
+		for _, param := range sig.params {
+			params += " (param " + param + ")"
+		}
+		result := ""
+		if sig.result != "" {
+			result = " (result " + sig.result + ")"
+		}
+		fmt.Fprintf(&e.out, "  (type $sig%d (func%s%s))\n", index, params, result)
+	}
+	if len(e.table) == 0 {
+		return
+	}
+	fmt.Fprintf(&e.out, "  (table %d funcref)\n", len(e.table))
+	e.out.WriteString("  (elem (i32.const 0)")
+	for _, name := range e.table {
+		fmt.Fprintf(&e.out, " $%s", name)
+	}
+	e.out.WriteString(")\n")
 }
 
 // sortedDataLiterals returns memory data in ascending offset order.
