@@ -51,15 +51,18 @@ type verifier struct {
 	params map[string][]Param
 	fn     *Function
 	block  *Block
-	blocks map[string]bool
+	// at numbers this function's blocks by their position in fn.Blocks. Every
+	// rule below keys on that position rather than the name: a position indexes
+	// a slice, so one map per function replaces one map per rule.
+	at map[string]int
 }
 
 // function checks one function's blocks and the SSA property across them.
 func (v *verifier) function(fn *Function) error {
 	v.fn = fn
-	v.blocks = make(map[string]bool, len(fn.Blocks))
-	for _, block := range fn.Blocks {
-		v.blocks[block.Name] = true
+	v.at = make(map[string]int, len(fn.Blocks))
+	for position, block := range fn.Blocks {
+		v.at[block.Name] = position
 	}
 	for _, block := range fn.Blocks {
 		v.block = block
@@ -72,7 +75,7 @@ func (v *verifier) function(fn *Function) error {
 			return err
 		}
 	}
-	preds := blockPredecessors(fn)
+	preds := blockPredecessors(fn, v.at)
 	if err := v.phiIncomingMatchesPredecessors(preds); err != nil {
 		return err
 	}
@@ -173,7 +176,7 @@ func (v *verifier) terminator() error {
 			ErrVerify, v.fn.Name, v.block.Name)
 	}
 	for _, target := range term.Successors() {
-		if !v.blocks[target] {
+		if _, exists := v.at[target]; !exists {
 			return fmt.Errorf("%w: %s: block %s branches to %s, which does not exist",
 				ErrVerify, v.fn.Name, v.block.Name, target)
 		}
@@ -222,16 +225,25 @@ func (v *verifier) fail(position string, want string, got string) error {
 // phiIncomingDominates exempts unreachable blocks, which is not a disagreement:
 // that rule asks which paths reach a block, and an unreachable block is on
 // none, while this one asks which blocks name it as a target.
-func (v *verifier) phiIncomingMatchesPredecessors(preds map[string][]string) error {
-	for _, block := range v.fn.Blocks {
-		arrives := namesIn(preds[block.Name])
+func (v *verifier) phiIncomingMatchesPredecessors(preds [][]int) error {
+	// Two block-wide flag sets, reused: a rule that fails ends the whole
+	// verification, so only the path that continues has to clear them.
+	arrives := make([]bool, len(v.fn.Blocks))
+	named := make([]bool, len(v.fn.Blocks))
+	for position, block := range v.fn.Blocks {
+		for _, pred := range preds[position] {
+			arrives[pred] = true
+		}
 		for _, instr := range block.Instrs {
 			if instr.Op != "phi" {
 				continue
 			}
-			if err := v.phiEdges(block, instr, preds[block.Name], arrives); err != nil {
+			if err := v.phiEdges(block, instr, preds[position], arrives, named); err != nil {
 				return err
 			}
+		}
+		for _, pred := range preds[position] {
+			arrives[pred] = false
 		}
 	}
 	return nil
@@ -244,29 +256,30 @@ func (v *verifier) phiIncomingMatchesPredecessors(preds map[string][]string) err
 func (v *verifier) phiEdges(
 	block *Block,
 	instr *Instr,
-	preds []string,
-	arrives map[string]bool,
+	preds []int,
+	arrives []bool,
+	named []bool,
 ) error {
-	named := make(map[string]bool, len(instr.Incoming))
 	for _, incoming := range instr.Incoming {
-		if !arrives[incoming.Block] {
+		from, exists := v.at[incoming.Block]
+		if !exists || !arrives[from] {
 			return fmt.Errorf(
 				"%w: %s: phi %s in block %s takes a value from %s, "+
 					"which does not jump to %s",
 				ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
 				incoming.Block, block.Name)
 		}
-		named[incoming.Block] = true
+		named[from] = true
 	}
-	for _, name := range preds {
-		if named[name] {
+	for _, pred := range preds {
+		if named[pred] {
 			continue
 		}
 		return fmt.Errorf(
 			"%w: %s: phi %s in block %s has no value for %s, "+
 				"which jumps to %s",
 			ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
-			name, block.Name)
+			v.fn.Blocks[pred].Name, block.Name)
 	}
 	if len(instr.Incoming) != len(preds) {
 		return fmt.Errorf(
@@ -274,23 +287,17 @@ func (v *verifier) phiEdges(
 			ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
 			len(instr.Incoming), len(preds), block.Name)
 	}
-	return nil
-}
-
-// namesIn returns the set of names in a list.
-func namesIn(names []string) map[string]bool {
-	set := make(map[string]bool, len(names))
-	for _, name := range names {
-		set[name] = true
+	for _, incoming := range instr.Incoming {
+		named[v.at[incoming.Block]] = false
 	}
-	return set
+	return nil
 }
 
 // phiIncomingDominates checks the SSA property LLVM's verifier enforces: a
 // phi's incoming value must be defined in a block that dominates the
 // predecessor it arrives from. A value that is not yet defined on that edge is
 // read as whatever the register held.
-func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
+func (v *verifier) phiIncomingDominates(preds [][]int) error {
 	if len(v.fn.Blocks) == 0 {
 		return nil
 	}
@@ -302,8 +309,12 @@ func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
 				continue
 			}
 			for _, incoming := range instr.Incoming {
-				definition, ok := definedIn[incoming.Value.Name]
-				if !ok || tree.dominates(definition, incoming.Block) {
+				defined, ok := definedIn[incoming.Value.Name]
+				if !ok {
+					continue
+				}
+				from, exists := v.at[incoming.Block]
+				if !exists || tree.dominates(defined.block, from) {
 					continue
 				}
 				return fmt.Errorf(
@@ -311,7 +322,7 @@ func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
 						"defined in %s, which does not dominate %s",
 					ErrVerify, v.fn.Name, instr.Result.Name, block.Name,
 					incoming.Value.Name, incoming.Block, incoming.Value.Name,
-					definition, incoming.Block,
+					v.fn.Blocks[defined.block].Name, incoming.Block,
 				)
 			}
 		}
@@ -326,28 +337,24 @@ func (v *verifier) phiIncomingDominates(preds map[string][]string) error {
 // A phi is the exception this rule leaves alone. Its operands arrive on edges
 // rather than where it stands, so a value defined in the block a back edge
 // leaves from is correct there and would look backwards here.
-func (v *verifier) valuesDominateUses(preds map[string][]string) error {
+func (v *verifier) valuesDominateUses(preds [][]int) error {
 	if len(v.fn.Blocks) == 0 {
 		return nil
 	}
 	definedIn := valueDefiningBlocks(v.fn)
 	tree := buildDominatorTree(v.fn, preds)
-	for _, block := range v.fn.Blocks {
-		above := map[string]bool{}
-		for _, instr := range block.Instrs {
-			if instr.Op != "phi" {
-				for _, operand := range instrOperands(instr) {
-					if err := v.dominatesUse(tree, definedIn, above, block, operand); err != nil {
-						return err
-					}
-				}
+	for position, block := range v.fn.Blocks {
+		for step, instr := range block.Instrs {
+			if instr.Op == "phi" {
+				continue
 			}
-			if instr.Result.Name != "" {
-				above[instr.Result.Name] = true
+			if err := v.checkOperands(tree, definedIn, position, step, instr); err != nil {
+				return err
 			}
 		}
+		end := len(block.Instrs)
 		for _, operand := range []Value{block.Terminator.Cond, block.Terminator.Value} {
-			if err := v.dominatesUse(tree, definedIn, above, block, operand); err != nil {
+			if err := v.dominatesUse(tree, definedIn, position, end, operand); err != nil {
 				return err
 			}
 		}
@@ -355,61 +362,89 @@ func (v *verifier) valuesDominateUses(preds map[string][]string) error {
 	return nil
 }
 
-// dominatesUse checks one operand read in block. above holds what the block
-// has defined so far, which is what separates a read of an earlier instruction
-// from a read of a later one.
+// dominatesUse checks one operand read at step in the block at position. A read
+// from the block that defines the value is in order only past the step that
+// defines it.
 func (v *verifier) dominatesUse(
 	tree dominatorTree,
-	definedIn map[string]string,
-	above map[string]bool,
-	block *Block,
+	definedIn map[string]definition,
+	position int,
+	step int,
 	operand Value,
 ) error {
-	definition, defined := definedIn[operand.Name]
-	if !defined {
+	defined, known := definedIn[operand.Name]
+	if !known {
 		// A param or a literal has no defining block and is read anywhere.
 		return nil
 	}
-	if definition == block.Name {
-		if above[operand.Name] {
+	block := v.fn.Blocks[position].Name
+	if defined.block == position {
+		if defined.step < step {
 			return nil
 		}
 		return fmt.Errorf("%w: %s: block %s reads %s before it is defined",
-			ErrVerify, v.fn.Name, block.Name, operand.Name)
+			ErrVerify, v.fn.Name, block, operand.Name)
 	}
-	if tree.dominates(definition, block.Name) {
+	if tree.dominates(defined.block, position) {
 		return nil
 	}
+	definedAt := v.fn.Blocks[defined.block].Name
 	return fmt.Errorf(
 		"%w: %s: block %s reads %s, which is defined in %s, and %s does not "+
 			"dominate %s",
-		ErrVerify, v.fn.Name, block.Name, operand.Name, definition, definition,
-		block.Name)
+		ErrVerify, v.fn.Name, block, operand.Name, definedAt, definedAt, block)
 }
 
-// instrOperands returns the values an instruction reads where it stands.
-func instrOperands(instr *Instr) []Value {
-	operands := make([]Value, 0, len(instr.Args)+len(instr.Fields))
-	operands = append(operands, instr.Args...)
+// checkOperands checks every value one instruction reads where it stands: its
+// arguments, its field values, and the arguments of each cleanup. They are
+// walked in place rather than gathered, because gathering costs one slice per
+// instruction and the walk reads each value once either way.
+func (v *verifier) checkOperands(
+	tree dominatorTree,
+	definedIn map[string]definition,
+	position int,
+	step int,
+	instr *Instr,
+) error {
+	for _, operand := range instr.Args {
+		if err := v.dominatesUse(tree, definedIn, position, step, operand); err != nil {
+			return err
+		}
+	}
 	for _, field := range instr.Fields {
-		operands = append(operands, field.Value)
+		if err := v.dominatesUse(tree, definedIn, position, step, field.Value); err != nil {
+			return err
+		}
 	}
 	for _, cleanup := range instr.Cleanups {
-		operands = append(operands, cleanup.Args...)
+		for _, operand := range cleanup.Args {
+			if err := v.dominatesUse(tree, definedIn, position, step, operand); err != nil {
+				return err
+			}
+		}
 	}
-	return operands
+	return nil
 }
 
-// valueDefiningBlocks maps each instruction result to the block defining it.
+// definition is where one instruction result is defined: the block, and how far
+// into it. The step is what tells a read of an earlier instruction from a read
+// of a later one, which a set of what a block has defined so far would answer
+// by being rebuilt for every block.
+type definition struct {
+	block int
+	step  int
+}
+
+// valueDefiningBlocks maps each instruction result to where it is defined.
 // Params and literals have no defining block and are available everywhere.
-func valueDefiningBlocks(fn *Function) map[string]string {
-	defined := map[string]string{}
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
+func valueDefiningBlocks(fn *Function) map[string]definition {
+	defined := map[string]definition{}
+	for position, block := range fn.Blocks {
+		for step, instr := range block.Instrs {
 			if instr.Result.Name == "" {
 				continue
 			}
-			defined[instr.Result.Name] = block.Name
+			defined[instr.Result.Name] = definition{block: position, step: step}
 		}
 	}
 	return defined
@@ -419,11 +454,12 @@ func valueDefiningBlocks(fn *Function) map[string]string {
 // dominator per block rather than a set per block, so the whole tree is two
 // slices and a question is a walk up the chain.
 type dominatorTree struct {
-	// order holds the blocks in reverse postorder, which is the numbering the
-	// walk compares against. A block missing from index is unreachable.
-	index map[string]int
-	// idom[i] is the reverse-postorder position of block i's immediate
-	// dominator. The entry is its own.
+	// place[position] is where the block at position stands in reverse
+	// postorder, which is the numbering the walk compares against, or -1 when
+	// the entry cannot reach it.
+	place []int
+	// idom[i] is the reverse-postorder position of the block standing at i's
+	// immediate dominator. The entry is its own.
 	idom []int
 }
 
@@ -433,12 +469,15 @@ type dominatorTree struct {
 // predecessors. Storing sets instead costs a map per block and the entry count
 // grows with the square of the block count, which a function of a few dozen
 // blocks already feels.
-func buildDominatorTree(fn *Function, preds map[string][]string) dominatorTree {
+func buildDominatorTree(fn *Function, preds [][]int) dominatorTree {
 	order := reversePostorder(fn)
-	tree := dominatorTree{index: make(map[string]int, len(order)), idom: make([]int, len(order))}
-	for position, name := range order {
-		tree.index[name] = position
-		tree.idom[position] = -1
+	tree := dominatorTree{place: make([]int, len(fn.Blocks)), idom: make([]int, len(order))}
+	for position := range tree.place {
+		tree.place[position] = -1
+	}
+	for at, position := range order {
+		tree.place[position] = at
+		tree.idom[at] = -1
 	}
 	if len(order) == 0 {
 		return tree
@@ -449,8 +488,8 @@ func buildDominatorTree(fn *Function, preds map[string][]string) dominatorTree {
 		for position := 1; position < len(order); position++ {
 			meet := -1
 			for _, pred := range preds[order[position]] {
-				at, known := tree.index[pred]
-				if !known || tree.idom[at] < 0 {
+				at := tree.place[pred]
+				if at < 0 || tree.idom[at] < 0 {
 					continue
 				}
 				if meet < 0 {
@@ -486,13 +525,13 @@ func (d dominatorTree) meet(left int, right int) int {
 
 // dominates reports whether every path reaching block passes through dominator.
 // An unreachable block is reached by no path, so nothing is claimed about it.
-func (d dominatorTree) dominates(dominator string, block string) bool {
-	at, reachable := d.index[block]
-	if !reachable {
+func (d dominatorTree) dominates(dominator int, block int) bool {
+	at := d.place[block]
+	if at < 0 {
 		return true
 	}
-	target, known := d.index[dominator]
-	if !known {
+	target := d.place[dominator]
+	if target < 0 {
 		return false
 	}
 	for at != target {
@@ -509,26 +548,27 @@ func (d dominatorTree) dominates(dominator string, block string) bool {
 // block it can reach, then reversed. Predecessors therefore come first except
 // across a back edge, which is what makes one forward pass enough for most of
 // the dominator tree.
-func reversePostorder(fn *Function) []string {
-	blocks := make(map[string]*Block, len(fn.Blocks))
-	for _, block := range fn.Blocks {
-		blocks[block.Name] = block
+func reversePostorder(fn *Function) []int {
+	at := make(map[string]int, len(fn.Blocks))
+	for position, block := range fn.Blocks {
+		at[block.Name] = position
 	}
-	visited := make(map[string]bool, len(fn.Blocks))
-	order := make([]string, 0, len(fn.Blocks))
-	var visit func(name string)
-	visit = func(name string) {
-		block, exists := blocks[name]
-		if !exists || visited[name] {
+	visited := make([]bool, len(fn.Blocks))
+	order := make([]int, 0, len(fn.Blocks))
+	var visit func(position int)
+	visit = func(position int) {
+		if visited[position] {
 			return
 		}
-		visited[name] = true
-		for _, target := range block.Terminator.Successors() {
-			visit(target)
+		visited[position] = true
+		for _, target := range fn.Blocks[position].Terminator.Successors() {
+			if to, exists := at[target]; exists {
+				visit(to)
+			}
 		}
-		order = append(order, name)
+		order = append(order, position)
 	}
-	visit(fn.Blocks[0].Name)
+	visit(0)
 	for head, tail := 0, len(order)-1; head < tail; head, tail = head+1, tail-1 {
 		order[head], order[tail] = order[tail], order[head]
 	}
@@ -536,11 +576,15 @@ func reversePostorder(fn *Function) []string {
 }
 
 // blockPredecessors derives the CFG edges from each block's terminator.
-func blockPredecessors(fn *Function) map[string][]string {
-	preds := map[string][]string{}
-	for _, block := range fn.Blocks {
+func blockPredecessors(fn *Function, at map[string]int) [][]int {
+	preds := make([][]int, len(fn.Blocks))
+	for position, block := range fn.Blocks {
 		for _, target := range block.Terminator.Successors() {
-			preds[target] = append(preds[target], block.Name)
+			to, exists := at[target]
+			if !exists {
+				continue
+			}
+			preds[to] = append(preds[to], position)
 		}
 	}
 	return preds
