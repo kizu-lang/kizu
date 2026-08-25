@@ -96,7 +96,7 @@ fn main() -> !process::ExitStatus {
             try io::write_stderr_line(io, "error: check takes one target");
             return process::ExitStatus::Specific(1);
         }
-        let code = try check_target(io, allocator, lib_dir_bytes, target);
+        let code = try lower_target(io, allocator, lib_dir_bytes, target, false, Output::Check);
         return exit_of(code);
     }
     if mem::equal_bytes(command, "fmt") {
@@ -262,12 +262,14 @@ fn exit_of(code: i64) -> process::ExitStatus {
     return process::ExitStatus::Specific(cast<u8>(code));
 }
 
-/// Names what a lowered module is printed as: its IR dump, the LLVM IR
-/// emitted from it, or the WASI WebAssembly text emitted from it.
+/// Names what a lowered module produces: its IR dump, the LLVM IR emitted
+/// from it, the WASI WebAssembly text emitted from it, or nothing but the
+/// promise that emitting succeeded, which is what `check` prints.
 enum Output {
     Ir,
     Llvm,
     Wasm,
+    Check,
 }
 
 /// Runs one `[--opt] <target>` command, the Go `parseOptFileArgs` and the
@@ -284,14 +286,14 @@ fn opt_file_command(
     if count - start == 1 {
         let only = try process::arg(start);
         if !mem::equal_bytes(only, "--opt") {
-            return ir_target(io, allocator, lib_dir, only, false, output);
+            return lower_target(io, allocator, lib_dir, only, false, output);
         }
     }
     if count - start == 2 {
         let flag = try process::arg(start);
         if mem::equal_bytes(flag, "--opt") {
             let target = try process::arg(start + 1);
-            return ir_target(io, allocator, lib_dir, target, true, output);
+            return lower_target(io, allocator, lib_dir, target, true, output);
         }
     }
     try usage(io);
@@ -1158,46 +1160,17 @@ fn parse_source(io: Io, allocator: Allocator, file: []u8, text: string::String) 
     return 0;
 }
 
-/// Loads a file or a package with the std modules it imports, type-checks
-/// the merged program, and then checks its ownership rules.
-fn check_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8) -> !i64 {
-    var tree = ast::new(allocator);
-    defer tree.deinit();
-    var loader = try project::new_loader(io, allocator, lib_dir);
-    defer loader.deinit();
-    var package_name = string::new(allocator);
-    defer package_name.deinit();
-    let loaded = try load_target(io, allocator, &var loader, &var tree, target, &var package_name, false);
-    match loaded {
-        Error(failed) => {
-            defer failed.deinit();
-            try report(io, allocator, &loader.sources, &failed);
-            return 1;
-        },
-        Program(program) => {
-            defer program.deinit();
-            if try types::check(allocator, &var tree, &program) |failed| {
-                defer failed.deinit();
-                try report(io, allocator, &loader.sources, &failed);
-                return 1;
-            }
-            if try ownership::check(allocator, &var tree, &program) |failed| {
-                defer failed.deinit();
-                try report(io, allocator, &loader.sources, &failed);
-                return 1;
-            }
-            try io::write_stdout_line(io, "check: ok");
-            return 0;
-        },
-    }
-}
-
 /// Lowers a checked file or package to typed SSA IR and prints it, the Go
 /// `irCommand` over `lowerFile` / `lowerPackage`, the LLVM IR emitted from it,
 /// the Go `emitLLVMFile`, or the WASI WebAssembly text emitted from it, the Go
 /// `emitWASMFile`: a package also gets the `main` entry wrapper the native
 /// build adds. The text is emitted fresh every time (ADR-0126).
-fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
+///
+/// `Output::Check` runs the same path and throws the LLVM text away, the Go
+/// `checkFile`: `check: ok` promises the backend accepts the program, not just
+/// the checkers, so a lowering or emitter gap surfaces here rather than at the
+/// first `run`, and the promise cannot drift from what `run` does.
+fn lower_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: bool, output: Output) -> !i64 {
     var tree = ast::new(allocator);
     defer tree.deinit();
     var loader = try project::new_loader(io, allocator, lib_dir);
@@ -1280,13 +1253,17 @@ fn ir_target(io: Io, allocator: Allocator, lib_dir: []u8, target: []u8, opt: boo
                         try io::write_stdout_line(io, text_bytes);
                         return 0;
                     }
-                    if output == Output::Llvm {
+                    if output == Output::Llvm or output == Output::Check {
                         var text = string::new(allocator);
                         defer text.deinit();
                         if try llvm::emit(allocator, &var lowerer.module, &var text) |failed| {
                             defer failed.deinit();
                             try report(io, allocator, &loader.sources, &failed);
                             return 1;
+                        }
+                        if output == Output::Check {
+                            try io::write_stdout_line(io, "check: ok");
+                            return 0;
                         }
                         let text_bytes = text.as_bytes();
                         try io::write_stdout_line(io, text_bytes);
@@ -1373,8 +1350,8 @@ fn load_one_file(
 }
 
 /// Loads the target the way the requested output loads it: the wasm backend
-/// takes one source file, the Go `emitWASMFile` over `lowerFile`, where `ir`
-/// and `build --emit-llvm` take a package root as well.
+/// takes one source file, the Go `emitWASMFile` over `lowerFile`, where
+/// `check`, `ir` and `build --emit-llvm` take a package root as well.
 fn load_for_output(
     io: Io,
     allocator: Allocator,

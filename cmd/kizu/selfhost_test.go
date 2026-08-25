@@ -12,15 +12,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/cimport"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	kizufmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
-	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/stdlib"
-	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
@@ -35,6 +32,9 @@ func TestSelfhostFrontend(t *testing.T) {
 	selfhost := sharedSelfhost(t)
 	file := "../../examples/hello.kizu"
 	pkg := "../../tests/behavior"
+	// A program the checkers accept and the backend does not, so the case
+	// fails only if `check` reaches the backend on both sides.
+	backendReject := "../../examples/negative/union_recursive_payload.kizu"
 	commands := []struct {
 		name string
 		want cliOutput
@@ -42,6 +42,8 @@ func TestSelfhostFrontend(t *testing.T) {
 	}{
 		{"parse-file", goParseOutput(file), []string{"parse", file}},
 		{"check-package", goCheckOutput(pkg), []string{"check", pkg}},
+		{"check-backend-reject", goCheckOutput(backendReject),
+			[]string{"check", backendReject}},
 		{"ir-package", goIrOutput(pkg, false), []string{"ir", pkg}},
 		{"ir-opt-package", goIrOutput(pkg, true), []string{"ir", "--opt", pkg}},
 		{"llvm-package", goEmitLLVMOutput(pkg, false), []string{"build", "--emit-llvm", pkg}},
@@ -713,17 +715,16 @@ func goParseOutput(file string) cliOutput {
 	return cliOutput{stdout: program.String() + "\n"}
 }
 
-// goCheckOutput renders what `kizu check` prints for a target, stopping at the
-// ownership checker like the selfhost command does.
+// goCheckOutput renders what `kizu check` prints for a target by running the
+// path checkFile runs, backend included. Rebuilding the pipeline here from the
+// checkers alone once let the promise be weaker than the command's, and both
+// sides agreed on the weaker one.
 func goCheckOutput(target string) cliOutput {
-	program, err := loadFrontendTarget(target)
+	module, err := lowerRunTarget(target)
 	if err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
-	if err := types.New().Check(program); err != nil {
-		return cliOutput{stderr: cliErrorLine(err), failed: true}
-	}
-	if err := ownership.New().Check(program); err != nil {
+	if _, err := llvm.Emit(module); err != nil {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: "check: ok\n"}
@@ -753,15 +754,6 @@ func goEmitLLVMOutput(target string, opt bool) cliOutput {
 		return cliOutput{stderr: cliErrorLine(err), failed: true}
 	}
 	return cliOutput{stdout: text + "\n"}
-}
-
-// loadFrontendTarget loads a file or a package the way the check command does.
-func loadFrontendTarget(target string) (*ast.Program, error) {
-	if isPackageRoot(target) {
-		_, program, err := loadPackageProgram(target)
-		return program, err
-	}
-	return loadFileProgram(target)
 }
 
 // cliErrorLine renders an error the way printError writes it.
