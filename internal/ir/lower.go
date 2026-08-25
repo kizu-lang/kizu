@@ -28,10 +28,14 @@ func Lower(program *ast.Program, ownershipResult ownership.Result) (*Module, err
 }
 
 type lowerer struct {
-	program     *ast.Program
-	module      *Module
-	types       *typ.Table
-	signatures  map[string]Signature
+	program    *ast.Program
+	module     *Module
+	types      *typ.Table
+	signatures map[string]Signature
+	// methodSigs groups the signatures by the method name they end with, so a
+	// method call reaches the handful of methods that could answer it instead
+	// of every declaration in the program.
+	methodSigs  map[string][]Signature
 	current     *Function
 	block       *Block
 	env         *env
@@ -551,7 +555,18 @@ func (l *lowerer) collectDecls() error {
 			}
 		}
 	}
+	l.indexMethodSignatures()
 	return nil
+}
+
+// indexMethodSignatures groups every declared method under its method name.
+func (l *lowerer) indexMethodSignatures() {
+	l.methodSigs = make(map[string][]Signature, len(l.signatures))
+	for name, sig := range l.signatures {
+		if _, method, ok := stdmethod.SplitMethodName(name); ok {
+			l.methodSigs[method] = append(l.methodSigs[method], sig)
+		}
+	}
 }
 
 // externCSymbol strips the module qualification a resolver added to an extern
