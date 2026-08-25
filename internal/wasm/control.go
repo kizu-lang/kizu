@@ -35,8 +35,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeConst(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
-	case strings.HasPrefix(instr.Op, "call."):
-		return e.writeCall(instr)
+	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
+		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."),
@@ -112,6 +112,59 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	}
 	fmt.Fprintf(&e.out, "            (local.set %s (%s %s %s))\n",
 		symbolName(instr.Result.Name), wasmOp, left, right)
+	e.values[instr.Result.Name] = valueInfo{
+		typ: instr.Result.Type, expr: "(local.get " + symbolName(instr.Result.Name) + ")",
+	}
+	return nil
+}
+
+// writeCallableInstr writes the instructions that name or reach a function:
+// its table index, a call through one, and a call by name.
+func (e *emitter) writeCallableInstr(instr *ir.Instr) error {
+	if name, ok := strings.CutPrefix(instr.Op, "func.addr."); ok {
+		return e.writeFuncAddr(name, instr)
+	}
+	if instr.Op == "call.indirect" {
+		return e.writeIndirectCall(instr)
+	}
+	return e.writeCall(instr)
+}
+
+// writeFuncAddr writes the table index a function name holds. wasm has no
+// address for a function, so a pointer is the position the header's `elem`
+// gave it.
+func (e *emitter) writeFuncAddr(name string, instr *ir.Instr) error {
+	index, ok := e.tableIndex[name]
+	if !ok {
+		return fmt.Errorf("wasm error: `%s` has no table entry", name)
+	}
+	e.values[instr.Result.Name] = valueInfo{
+		typ:  instr.Result.Type,
+		expr: fmt.Sprintf("(i32.const %d)", index),
+	}
+	return nil
+}
+
+// writeIndirectCall writes a call through a function pointer. The callee is
+// the first operand and reaches wasm as the table index it lowered to, which
+// `call_indirect` takes last.
+func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
+	if len(instr.Args) == 0 {
+		return fmt.Errorf("wasm error: call.indirect expects a callee")
+	}
+	args := make([]string, 0, len(instr.Args))
+	for _, arg := range instr.Args[1:] {
+		args = append(args, e.value(arg).expr)
+	}
+	args = append(args, e.value(instr.Args[0]).expr)
+	call := fmt.Sprintf("(call_indirect (type $sig%d) %s)",
+		e.internSignature(instr), strings.Join(args, " "))
+	if instr.Result.Type == "void" {
+		fmt.Fprintf(&e.out, "            %s\n", call)
+		return nil
+	}
+	fmt.Fprintf(&e.out, "            (local.set %s %s)\n",
+		symbolName(instr.Result.Name), call)
 	e.values[instr.Result.Name] = valueInfo{
 		typ: instr.Result.Type, expr: "(local.get " + symbolName(instr.Result.Name) + ")",
 	}
