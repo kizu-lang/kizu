@@ -296,6 +296,7 @@ pub fn runtime_source() -> []u8 {
         \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right);
         \\_Bool kizu_array_truncate(void *handle, int64_t len);
         \\static _Bool kizu_array_reserve_storage(KizuArray *array, int64_t needed);
+        \\static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size);
         \\
         \\static int kizu_runtime_argc = 0;
         \\static char **kizu_runtime_argv = NULL;
@@ -1340,10 +1341,11 @@ pub fn runtime_source() -> []u8 {
         \\    if (needed <= arena->cap) {
         \\        return 1;
         \\    }
-        \\    int64_t next = arena->cap == 0 ? 16 : arena->cap * 2;
-        \\    while (next < needed) {
-        \\        next *= 2;
-        \\    }
+        \\    /* Grow the way an array does rather than by doubling: a factor below the
+        \\       golden ratio lets a later allocation reuse blocks freed by earlier ones,
+        \\       and an arena holding the AST and the IR is the largest thing the
+        \\       compiler keeps, so the half it would otherwise carry unused is real. */
+        \\    int64_t next = kizu_array_grow_capacity(needed, arena->elem_size);
         \\    if (arena->elem_size > 0 && next > INT64_MAX / arena->elem_size) {
         \\        return 0;
         \\    }
@@ -1449,6 +1451,12 @@ pub fn runtime_source() -> []u8 {
         \\static int64_t kizu_array_grow_capacity(int64_t minimum, int64_t elem_size) {
         \\    int64_t half = minimum / 2;
         \\    int64_t init = kizu_array_init_capacity(elem_size);
+        \\    /* The pad stops a growing collection reallocating early, and is worth at
+        \\       most a few times what was asked for: a one-element list does not need a
+        \\       cache line, and the compiler keeps over a million short ones alive at once. */
+        \\    if (init > minimum * 4) {
+        \\        init = minimum * 4;
+        \\    }
         \\    if (minimum > INT64_MAX - half - init) {
         \\        return INT64_MAX;
         \\    }
@@ -1626,9 +1634,11 @@ pub fn runtime_source() -> []u8 {
         \\}
         \\
         \\/* kizu_map_reindex grows the index to hold needed entries below a 3/4 load and
-        \\   rebuilds it. Entries carry their hash, so nothing rehashes the key bytes. */
+        \\   rebuilds it. Entries carry their hash, so nothing rehashes the key bytes.   The first index holds eight slots rather than sixteen: the compiler keeps
+        \\   half a million maps alive at once and most of them stay small, so what an
+        \\   empty one reserves is worth more than the one reindex it saves. */
         \\static _Bool kizu_map_reindex(KizuMap *map, int64_t needed) {
-        \\    int64_t next = map->index_cap == 0 ? 16 : map->index_cap;
+        \\    int64_t next = map->index_cap == 0 ? 8 : map->index_cap;
         \\    while (needed * 4 > next * 3) {
         \\        if (next > INT64_MAX / (int64_t)sizeof(int64_t) / 2) {
         \\            return 0;
@@ -1666,7 +1676,7 @@ pub fn runtime_source() -> []u8 {
         \\    if (needed <= map->cap) {
         \\        return 1;
         \\    }
-        \\    int64_t next = map->cap == 0 ? 8 : map->cap * 2;
+        \\    int64_t next = map->cap == 0 ? 4 : map->cap * 2;
         \\    while (next < needed) {
         \\        next *= 2;
         \\    }

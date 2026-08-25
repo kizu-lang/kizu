@@ -7,17 +7,83 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
+// arenaHeaderType names the runtime's KizuArena header in emitted modules.
+// Element access reads these fields rather than calling the runtime for each
+// one, the same reason Array does: the compiler keeps every AST node, IR
+// instruction and type node in an arena and reaches them constantly, and a
+// call the optimizer cannot see through costs more than the access. runtime.c
+// asserts the same offsets, so the two spellings cannot drift apart.
+const arenaHeaderType = "%kizu.arena"
+
+// The field indices of arenaHeaderType.
+const (
+	arenaFieldData     = 0
+	arenaFieldLen      = 1
+	arenaFieldElemSize = 3
+)
+
+// arenaEmptyGlobal is the header read in place of a null handle. An all-zero
+// header holds no elements, so every index is out of range on it -- the same
+// null element the runtime returned for a null arena.
+const arenaEmptyGlobal = "@kizu.arena.empty"
+
 // writeArenaRuntimeDecls writes declarations for the hosted Arena runtime.
 func (e *emitter) writeArenaRuntimeDecls() {
 	if !e.usesArenaRuntime() {
 		return
 	}
+	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64, ptr }\n", arenaHeaderType)
+	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
+		arenaEmptyGlobal, arenaHeaderType)
 	e.out.WriteString("declare ptr @kizu_arena_new(ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_arena_add(ptr, ptr)\n")
-	e.out.WriteString("declare ptr @kizu_arena_get(ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_arena_len(ptr)\n")
 	e.out.WriteString("declare ptr @kizu_arena_pop(ptr)\n")
 	e.out.WriteString("declare void @kizu_arena_deinit(ptr)\n\n")
+}
+
+// arenaHandle returns an operand that always points at a readable header.
+func (e *emitter) arenaHandle(operand string) string {
+	nullName := "%" + e.nextSyntheticValue("arena.handle.null")
+	handleName := "%" + e.nextSyntheticValue("arena.handle")
+	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, operand)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr %s\n",
+		handleName, nullName, arenaEmptyGlobal, operand)
+	return handleName
+}
+
+// arenaLoadField loads one i64 header field.
+func (e *emitter) arenaLoadField(handle string, field int, name string) string {
+	addr := "%" + e.nextSyntheticValue(name+".addr")
+	into := "%" + e.nextSyntheticValue(name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
+		addr, arenaHeaderType, handle, field)
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", into, addr)
+	return into
+}
+
+// arenaCheckedElement returns the address of the element a handle names, or
+// null when the handle is outside the arena. The stride is the arena's own
+// elem_size, which is what arena.new sized it by, so the address is the one
+// kizu_arena_get computed. The comparison is unsigned, so a negative index is
+// out of range without a second test.
+func (e *emitter) arenaCheckedElement(arenaOperand string, index string, into string) string {
+	handle := e.arenaHandle(arenaOperand)
+	length := e.arenaLoadField(handle, arenaFieldLen, "arena.len")
+	inRange := "%" + e.nextSyntheticValue("arena.in_range")
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
+	elemSize := e.arenaLoadField(handle, arenaFieldElemSize, "arena.elem_size")
+	offset := "%" + e.nextSyntheticValue("arena.offset")
+	fmt.Fprintf(&e.out, "  %s = mul i64 %s, %s\n", offset, index, elemSize)
+	dataAddr := "%" + e.nextSyntheticValue("arena.data.addr")
+	data := "%" + e.nextSyntheticValue("arena.data")
+	elemAddr := "%" + e.nextSyntheticValue("arena.elem")
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
+		dataAddr, arenaHeaderType, handle, arenaFieldData)
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
+	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n", elemAddr, data, offset)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", into, inRange, elemAddr)
+	return into
 }
 
 // usesArenaRuntime reports whether this module uses std::arena::Arena lowering.
@@ -118,8 +184,7 @@ func (e *emitter) writeArenaAt(instr *ir.Instr) error {
 	arena := e.value(instr.Args[0])
 	handle := e.value(instr.Args[1])
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
-		ptrName, arena.operand, handle.operand)
+	e.arenaCheckedElement(arena.operand, handle.operand, ptrName)
 	e.writeNullFailure(instr, ptrName, "arena.at", "arena_handle")
 	if strings.HasPrefix(instr.Result.Type, "&") {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: ptrName}
@@ -143,8 +208,7 @@ func (e *emitter) writeArenaAtMut(instr *ir.Instr) error {
 	arena := e.value(instr.Args[0])
 	handle := e.value(instr.Args[1])
 	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)\n",
-		ptrName, arena.operand, handle.operand)
+	e.arenaCheckedElement(arena.operand, handle.operand, ptrName)
 	return e.writeBorrowOptionalResult(instr, ptrName)
 }
 

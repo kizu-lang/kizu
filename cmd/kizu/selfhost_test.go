@@ -938,7 +938,7 @@ func assertNativeMetadata(t *testing.T, path string, output string, opt bool) {
 	wantFlag := "-O0"
 	if opt {
 		wantMode = "opt"
-		wantFlag = "-O2"
+		wantFlag = "-O3"
 	}
 	if got.Target != "native" || got.LibC != "on" || got.Runtime != "hosted" ||
 		got.Emit != "exe" || got.Linker != "clang" || got.Output != output ||

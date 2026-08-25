@@ -14,42 +14,40 @@ import std::string;
 // no owner Strings and equal spellings compare by handle. The type spelling
 // helpers of helpers.go that only read text live here as well.
 
-/// Identifies one retained text; a null node is the empty text.
+/// Identifies one retained text by the order it was retained in; 0 is the
+/// empty text. The number is dense, so a table keyed by a name can be an
+/// array indexed by it rather than a hash of the spelling.
 pub struct Name {
-    node: ?arena::Handle<string::String>
+    id: i64
 }
 
 /// Returns the empty text, the Go `""`.
 pub fn empty_name() -> Name {
-    return Name { node: null };
+    return Name { id: 0 };
+}
+
+/// Returns the dense number a name is retained under, for the tables that
+/// index by it. The empty text is 0.
+pub fn name_id(name: Name) -> i64 {
+    return name.id;
 }
 
 /// Reports whether two names spell the same text.
 pub fn same_name(left: Name, right: Name) -> bool {
-    if left.node |left_node| {
-        if right.node |right_node| {
-            return left_node == right_node;
-        }
-        return false;
-    }
-    if right.node |_| {
-        return false;
-    }
-    return true;
+    return left.id == right.id;
 }
 
 /// Reports whether a name is the empty text.
 pub fn is_empty(name: Name) -> bool {
-    if name.node |_| {
-        return false;
-    }
-    return true;
+    return name.id == 0;
 }
 
 /// Retains every text one module names.
 pub struct NameTable {
     allocator: Allocator,
     texts: arena::Arena<string::String>,
+    // handles[id - 1] is the text name id names; the empty text has no entry.
+    handles: array::Array<arena::Handle<string::String>>,
     by_text: map::Map<[]u8, Name>,
     empty: arena::Handle<string::String>
 }
@@ -61,6 +59,7 @@ pub fn new_name_table(allocator: Allocator) -> NameTable {
     return NameTable {
         allocator: allocator,
         texts: move texts,
+        handles: array::new<arena::Handle<string::String>>(allocator),
         by_text: map::new<[]u8, Name>(allocator),
         empty: empty
     };
@@ -68,14 +67,17 @@ pub fn new_name_table(allocator: Allocator) -> NameTable {
 
 fn (self: NameTable) deinit() -> void {
     self.texts.deinit();
+    self.handles.deinit();
     self.by_text.deinit();
     return;
 }
 
 /// Returns the retained text of a name; callers bind `as_bytes()` locally.
 pub fn name_text(names: &NameTable, name: Name) -> &string::String {
-    let node = name.node orelse names.empty;
-    return names.texts.at(node);
+    // id 0 is the empty text and has no entry, so it falls out of range on
+    // the same bounds check every other id already pays.
+    let handle = names.handles.get(name.id - 1) orelse names.empty;
+    return names.texts.at(handle);
 }
 
 /// Returns the one name that spells text, retaining it on first use.
@@ -101,7 +103,8 @@ pub fn (self: &var NameTable) intern_owned(text: string::String) -> !Name {
         return known;
     }
     let handle = self.texts.add(move text);
-    let name = Name { node: handle };
+    try self.handles.append(handle);
+    let name = Name { id: self.handles.len() };
     let retained = self.texts.at(handle);
     let retained_bytes = retained.as_bytes();
     try self.by_text.insert(retained_bytes, name);

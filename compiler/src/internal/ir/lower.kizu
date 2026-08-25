@@ -240,7 +240,9 @@ pub struct Lowerer {
     // instantiated records the generic instances already requested, keyed
     // by the symbol they were given; pending the ones still to lower, read
     // from pending_next on.
-    instantiated: map::Map<[]u8, bool>,
+    // Indexed by the name id of the instance symbol, the way the emitter
+    // indexes its value table: the ids are dense and the key is always a name.
+    instantiated: array::Array<bool>,
     pending: array::Array<GenericInstance>,
     pending_next: i64,
     // slots names the locals of the function being lowered that live in
@@ -251,7 +253,7 @@ pub struct Lowerer {
     // name; struct_decls, enum_decls and union_decls the sum and product
     // declarations, which is what `comptime for` and `std::meta::variants`
     // walk in source order.
-    generic_decls: map::Map<[]u8, FactsHandle>,
+    generic_decls: map::Map<i64, FactsHandle>,
     struct_decls: map::Map<[]u8, ast::Declaration>,
     enum_decls: map::Map<[]u8, ast::Declaration>,
     union_decls: map::Map<[]u8, ast::Declaration>,
@@ -261,7 +263,7 @@ pub struct Lowerer {
     meta_current: ?arena::Handle<MetaBinding>,
     // extern_symbols maps a resolved extern "c" function name to its C
     // symbol.
-    extern_symbols: map::Map<[]u8, Name>,
+    extern_symbols: array::Array<Name>,
     // next_error_code is the next global code for an error set the program
     // declares itself; std members keep the codes std assigns.
     next_error_code: i64,
@@ -357,17 +359,17 @@ pub fn new_lowerer(
         defer_frames: array::new<array::Array<Cleanup>>(allocator),
         generic_args: move generic_args,
         current_args: null,
-        instantiated: map::new<[]u8, bool>(allocator),
+        instantiated: array::new<bool>(allocator),
         pending: array::new<GenericInstance>(allocator),
         pending_next: 0,
         slots: array::new<Name>(allocator),
-        generic_decls: map::new<[]u8, FactsHandle>(allocator),
+        generic_decls: map::new<i64, FactsHandle>(allocator),
         struct_decls: map::new<[]u8, ast::Declaration>(allocator),
         enum_decls: map::new<[]u8, ast::Declaration>(allocator),
         union_decls: map::new<[]u8, ast::Declaration>(allocator),
         meta_bindings: arena::new<MetaBinding>(allocator),
         meta_current: null,
-        extern_symbols: map::new<[]u8, Name>(allocator),
+        extern_symbols: array::new<Name>(allocator),
         next_error_code: 0,
         deinit_owners: move deinit_owners,
         retired: array::new<RetiredReceiver>(allocator)
@@ -407,9 +409,7 @@ fn (self: &var Lowerer) collect_facts(tree: &ast::Ast, program: &ast::Program) -
                 try self.decls.append(handle);
                 let facts = self.decl_facts.at(handle.node);
                 if facts.static_params.len() > 0 {
-                    let retained = name_text(&self.module.names, facts.name);
-                    let name_bytes = retained.as_bytes();
-                    try self.generic_decls.insert(name_bytes, handle);
+                    try self.generic_decls.insert(name_id(facts.name), handle);
                 }
             },
             Test(test) => {
@@ -722,9 +722,11 @@ fn (self: &var Lowerer) record_signature(name: Name, signature: SignatureHandle)
 
 /// Records the C symbol an extern "c" declaration links to.
 fn (self: &var Lowerer) record_extern_symbol(name: Name, symbol: Name) -> !void {
-    let retained = name_text(&self.module.names, name);
-    let name_bytes = retained.as_bytes();
-    return self.extern_symbols.insert(name_bytes, symbol);
+    let id = name_id(name);
+    while self.extern_symbols.len() <= id {
+        try self.extern_symbols.append(empty_name());
+    }
+    return self.extern_symbols.set(id, symbol);
 }
 
 /// Strips the module qualification a resolver added to an extern "c"

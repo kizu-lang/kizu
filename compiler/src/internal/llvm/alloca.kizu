@@ -79,36 +79,64 @@ fn hoist_allocas_to_entry(allocator: Allocator, body: []u8, out: &var string::St
         try out.append_bytes(body);
         return null;
     }
+    var run = LineSpan { start: 0, end: 0 };
+    var open = false;
     var written = 0;
     index = 0;
     while index <= entry {
         let span = kept.get_or_panic(index);
-        try append_joined_line(out, body, span, written);
-        written = written + 1;
+        try extend_run(out, body, span, &var run, &var open, &var written);
         index = index + 1;
     }
     index = 0;
     while allocas.get(index) |span| {
-        try append_joined_line(out, body, span, written);
-        written = written + 1;
+        try extend_run(out, body, span, &var run, &var open, &var written);
         index = index + 1;
     }
     index = entry + 1;
     while kept.get(index) |span| {
-        try append_joined_line(out, body, span, written);
-        written = written + 1;
+        try extend_run(out, body, span, &var run, &var open, &var written);
         index = index + 1;
+    }
+    if open {
+        try append_run(out, body, run, written);
     }
     return null;
 }
 
-/// Appends one line of the joined body, the Go `strings.Join(hoisted, "\n")`:
-/// a newline separates it from the line before.
-fn append_joined_line(out: &var string::String, body: []u8, span: LineSpan, written: i64) -> !void {
+/// Adds one line to the run being built, or closes the run and starts a new
+/// one when the line does not follow it in the body. Lines that were already
+/// adjacent are copied once, with the newline the body already holds between
+/// them: only the hoisted allocas break a function into pieces, so most of it
+/// is two or three copies rather than one per line.
+fn extend_run(
+    out: &var string::String,
+    body: []u8,
+    span: LineSpan,
+    run: &var LineSpan,
+    open: &var bool,
+    written: &var i64
+) -> !void {
+    if open.* and span.start == run.end + 1 {
+        run.end = span.end;
+        return;
+    }
+    if open.* {
+        try append_run(out, body, run.*, written.*);
+        written.* = written.* + 1;
+    }
+    run.* = span;
+    open.* = true;
+    return;
+}
+
+/// Appends one run of the joined body, the Go `strings.Join(hoisted, "\n")`:
+/// a newline separates it from the run before.
+fn append_run(out: &var string::String, body: []u8, run: LineSpan, written: i64) -> !void {
     if written > 0 {
         try out.append_byte(cast<u8>(10));
     }
-    return out.append_bytes(body[span.start..span.end]);
+    return out.append_bytes(body[run.start..run.end]);
 }
 
 /// Refuses an alloca that takes an element count, the Go
