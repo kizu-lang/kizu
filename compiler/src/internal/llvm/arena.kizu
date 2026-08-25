@@ -14,13 +14,120 @@ fn is_arena_llvm_type(typ_name: []u8) -> bool {
 
 /// Writes declarations for the hosted Arena runtime, the Go
 /// `writeArenaRuntimeDecls`.
+/// Names the runtime's KizuArena header, the Go `arenaHeaderType`. Element
+/// access reads these fields rather than calling the runtime for each one, the
+/// same reason Array does: the compiler keeps every AST node, IR instruction
+/// and type node in an arena and reaches them constantly, and a call the
+/// optimizer cannot see through costs more than the access.
+fn arena_header_type() -> []u8 {
+    return "%kizu.arena";
+}
+
+/// The header read in place of a null handle, the Go `arenaEmptyGlobal`. An
+/// all-zero header holds no elements, so every index is out of range on it --
+/// the same null element the runtime returned for a null arena.
+fn arena_empty_global() -> []u8 {
+    return "@kizu.arena.empty";
+}
+
+/// The field index of the element storage.
+fn arena_field_data() -> i64 {
+    return 0;
+}
+
+/// The field index of the element count.
+fn arena_field_len() -> i64 {
+    return 1;
+}
+
+/// The field index of the element stride.
+fn arena_field_elem_size() -> i64 {
+    return 3;
+}
+
+/// Returns an operand that always points at a readable header, the Go
+/// `arenaHandle`.
+fn (self: &var Emitter) arena_handle(operand: ir::Name) -> !ir::Name {
+    let null_synthetic = try self.next_synthetic_value("arena.handle.null");
+    let null_name = try self.percent(null_synthetic);
+    let handle_synthetic = try self.next_synthetic_value("arena.handle");
+    let handle_name = try self.percent(handle_synthetic);
+    try self.line2("  %s = icmp eq ptr %s, null", Arg::Str(null_name), Arg::Str(operand));
+    try self.line4(
+        "  %s = select i1 %s, ptr %s, ptr %s",
+        Arg::Str(handle_name), Arg::Str(null_name), Arg::Lit(arena_empty_global()), Arg::Str(operand)
+    );
+    return handle_name;
+}
+
+/// Loads one i64 header field, the Go `arenaLoadField`.
+fn (self: &var Emitter) arena_load_field(handle: ir::Name, field: i64, name: []u8) -> !ir::Name {
+    let addr_synthetic = try self.next_synthetic_value_suffixed(name, ".addr");
+    let addr = try self.percent(addr_synthetic);
+    let into_synthetic = try self.next_synthetic_value(name);
+    let into = try self.percent(into_synthetic);
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
+        Arg::Str(addr), Arg::Lit(arena_header_type()), Arg::Str(handle), Arg::Int(field)
+    );
+    try self.line2("  %s = load i64, ptr %s", Arg::Str(into), Arg::Str(addr));
+    return into;
+}
+
+/// Writes the address of the element a handle names into `into`, or null when
+/// the handle is outside the arena, the Go `arenaCheckedElement`. The stride is
+/// the arena's own elem_size, which is what arena.new sized it by, so the
+/// address is the one kizu_arena_get computed. The comparison is unsigned, so a
+/// negative index is out of range without a second test.
+fn (self: &var Emitter) arena_checked_element(
+    arena_operand: ir::Name,
+    index: ir::Name,
+    into: ir::Name
+) -> !void {
+    let handle = try self.arena_handle(arena_operand);
+    let length = try self.arena_load_field(handle, arena_field_len(), "arena.len");
+    let in_range_synthetic = try self.next_synthetic_value("arena.in_range");
+    let in_range = try self.percent(in_range_synthetic);
+    try self.line3(
+        "  %s = icmp ult i64 %s, %s",
+        Arg::Str(in_range), Arg::Str(index), Arg::Str(length)
+    );
+    let elem_size = try self.arena_load_field(handle, arena_field_elem_size(), "arena.elem_size");
+    let offset_synthetic = try self.next_synthetic_value("arena.offset");
+    let offset = try self.percent(offset_synthetic);
+    try self.line3("  %s = mul i64 %s, %s", Arg::Str(offset), Arg::Str(index), Arg::Str(elem_size));
+    let data_addr_synthetic = try self.next_synthetic_value("arena.data.addr");
+    let data_addr = try self.percent(data_addr_synthetic);
+    let data_synthetic = try self.next_synthetic_value("arena.data");
+    let data = try self.percent(data_synthetic);
+    let elem_synthetic = try self.next_synthetic_value("arena.elem");
+    let elem_addr = try self.percent(elem_synthetic);
+    try self.line4(
+        "  %s = getelementptr %s, ptr %s, i64 0, i32 %d",
+        Arg::Str(data_addr), Arg::Lit(arena_header_type()), Arg::Str(handle), Arg::Int(arena_field_data())
+    );
+    try self.line2("  %s = load ptr, ptr %s", Arg::Str(data), Arg::Str(data_addr));
+    try self.line3(
+        "  %s = getelementptr i8, ptr %s, i64 %s",
+        Arg::Str(elem_addr), Arg::Str(data), Arg::Str(offset)
+    );
+    return self.line3(
+        "  %s = select i1 %s, ptr %s, ptr null",
+        Arg::Str(into), Arg::Str(in_range), Arg::Str(elem_addr)
+    );
+}
+
 fn (self: &var Emitter) write_arena_runtime_decls(module: &ir::Module) -> !void {
     if !self.uses_arena_runtime(module) {
         return;
     }
+    try self.line1("%s = type { ptr, i64, i64, i64, ptr }", Arg::Lit(arena_header_type()));
+    try self.line2(
+        "%s = private unnamed_addr global %s zeroinitializer",
+        Arg::Lit(arena_empty_global()), Arg::Lit(arena_header_type())
+    );
     try self.line("declare ptr @kizu_arena_new(ptr, i64)");
     try self.line("declare i64 @kizu_arena_add(ptr, ptr)");
-    try self.line("declare ptr @kizu_arena_get(ptr, i64)");
     try self.line("declare i64 @kizu_arena_len(ptr)");
     try self.line("declare ptr @kizu_arena_pop(ptr)");
     try self.line("declare void @kizu_arena_deinit(ptr)");
@@ -144,10 +251,7 @@ fn (self: &var Emitter) write_arena_at(module: &ir::Module, node: &ir::InstrNode
     let handle = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.line3(
-        "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)",
-        Arg::Str(ptr_name), Arg::Str(arena.operand), Arg::Str(handle.operand)
-    );
+    try self.arena_checked_element(arena.operand, handle.operand, ptr_name);
     let none = self.no_names();
     defer none.deinit();
     try self.write_null_failure(module, node, ptr_name, "arena.at", PanicKey::ArenaHandle, &none);
@@ -173,10 +277,7 @@ fn (self: &var Emitter) write_arena_at_mut(module: &ir::Module, node: &ir::Instr
     let handle = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let ptr_name = try self.suffixed(result_name, ".ptr");
-    try self.line3(
-        "  %s = call ptr @kizu_arena_get(ptr %s, i64 %s)",
-        Arg::Str(ptr_name), Arg::Str(arena.operand), Arg::Str(handle.operand)
-    );
+    try self.arena_checked_element(arena.operand, handle.operand, ptr_name);
     return self.write_borrow_optional_result(module, node, ptr_name);
 }
 
