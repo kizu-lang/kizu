@@ -1,6 +1,10 @@
-# Release binaries are built from the tag and name their version
-# (`kizu version`). A binary that says what it is cannot silently go stale
-# the way an anonymous local build can.
+# Release binaries are the Kizu compiler, built by the Go one from the tag,
+# and they name their version (`kizu version`). A binary that says what it is
+# cannot silently go stale the way an anonymous local build can.
+#
+# The Kizu backend links through the host clang, so there is no cross build:
+# each target is built on a runner of that platform and the four artifacts are
+# collected afterwards.
 #
 # The tarball layout is <prefix>/bin/kizu + <prefix>/lib/kizu, the same shape
 # the binary resolves its library tree from and the same shape `nix build`
@@ -15,32 +19,71 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: darwin-amd64
+            os: macos-13
+          - target: darwin-arm64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Build
+        env:
+          KIZU_LIB_DIR: ${{ github.workspace }}/lib/kizu
+          RELEASE_LDFLAGS: -X github.com/kizu-lang/kizu/internal/version.Release=${{ github.ref_name }}
         run: |
           set -eu
-          for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-            os="${target%-*}"
-            arch="${target#*-}"
-            prefix="dist/kizu-${GITHUB_REF_NAME}-${target}"
-            mkdir -p "$prefix/bin" "$prefix/lib"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -trimpath \
-              -ldflags "-X github.com/kizu-lang/kizu/internal/version.Release=${GITHUB_REF_NAME}" \
-              -o "$prefix/bin/kizu" ./cmd/kizu
-            cp -R lib/kizu "$prefix/lib/kizu"
-            tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
-          done
+          clang --version | head -1
+          # The seed compiles the Kizu compiler and is not shipped.
+          go build -trimpath -o seed/kizu ./cmd/kizu
+          # The released binary has no linker flag to stamp, so the version it
+          # names is generated with it, from the tag this release is cut from.
+          go run -ldflags "$RELEASE_LDFLAGS" ./scripts/gen-selfhost-version
+          prefix="dist/kizu-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$prefix/bin" "$prefix/lib"
+          ./seed/kizu build --target native --opt -o "$prefix/bin/kizu" compiler
+          cp -R lib/kizu "$prefix/lib/kizu"
+          tar -C dist -czf "$prefix.tar.gz" "$(basename "$prefix")"
+      - name: Smoke
+        run: |
+          set -eu
+          # From an unrelated directory with nothing pointing at a library
+          # tree: what a user gets after extracting the tarball.
+          prefix="$PWD/dist/kizu-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          cd "$(mktemp -d)"
+          "$prefix/bin/kizu" version
+          "$prefix/bin/kizu" run "$GITHUB_WORKSPACE/examples/hello.kizu"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kizu-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
-            --title "$GITHUB_REF_NAME" --generate-notes
+            --title "$GITHUB_REF_NAME" --generate-notes \
+            --repo "$GITHUB_REPOSITORY"

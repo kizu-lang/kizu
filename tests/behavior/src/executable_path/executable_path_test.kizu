@@ -1,0 +1,51 @@
+import std::fs;
+import std::io;
+import std::mem;
+import std::path;
+import std::process;
+import std::testing;
+
+// SPEC §15.2: `std::process::executable_path(allocator)` は実行中の binary の
+// path を返し、`std::fs::real_path(io, allocator, path)` は symlink と
+// `.` / `..` を実体へ解決する。どちらの値も実行環境で変わるので、ここでは
+// 「絶対 path が返る」「その path が実在する」「解決結果も実在する」ことを
+// 約束する。
+
+test "executable_path names the running binary" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit();
+    let bytes = executable.as_bytes();
+    testing::expect(mem::len(bytes) > 0);
+    testing::expect(bytes[0] == cast<u8>(47));
+    let found = try fs::exists(io, bytes);
+    testing::expect(found);
+    let name = path::basename(bytes);
+    testing::expect(mem::len(name) > 0);
+}
+
+test "real_path resolves the running binary to a file that exists" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    let executable = try process::executable_path(allocator);
+    defer executable.deinit();
+    let bytes = executable.as_bytes();
+    let resolved = try fs::real_path(io, allocator, bytes);
+    defer resolved.deinit();
+    let resolved_bytes = resolved.as_bytes();
+    testing::expect(resolved_bytes[0] == cast<u8>(47));
+    let found = try fs::exists(io, resolved_bytes);
+    testing::expect(found);
+}
+
+test "real_path reports a path that is not there" {
+    let allocator = mem::page_allocator();
+    let io = io::blocking();
+    if fs::real_path(io, allocator, "/definitely/not/here/kizu") |resolved| {
+        resolved.deinit();
+        testing::fail("real_path resolved a path that does not exist");
+    } else |failed| {
+        testing::expect(failed == fs::Error::NotFound);
+    }
+}

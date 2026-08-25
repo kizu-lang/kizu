@@ -34,19 +34,23 @@ placeholder、handle の形)は、render・diagnostic・処理順が Go と同�
 
 1. `SPEC.md` と `docs/std/` の現在の契約
 2. `examples/` と `tests/behavior/` が宣言する挙動
-3. Go compiler の observable behavior と diagnostic
-4. Go source の内部構造
+3. Kizu compiler(`compiler/`)の observable behavior と diagnostic
+4. Go compiler の observable behavior
 
-Go source が上位の契約と違う場合、その bug を Kizu へ写しません。work unit を
-止め、Go 側で契約を満たしてから同じ確定済み挙動を移します。
+移植の間は 3 と 4 が入れ替わっていました。release する compiler が Kizu に
+なった時点で、両者が食い違ったら Kizu 側の判断が先に来ます。Go は追従するか、
+追従できないならその gate を落とします。
 
 ## Shipping boundary
 
-- cutover までは `internal/` + `cmd/kizu` だけを release する
-- `compiler/` を `cmd/kizu`、fallback、feature flag、user-facing command へ接続しない
+- release する binary は Kizu compiler。Go compiler はそれを build する seed と、
+  差分比較の oracle として残る
+- Go を利用者が通る経路へ戻さない。fallback も feature flag も置かない
 - Kizu compiler から Go package や Go helper を呼ばない
 - 一部だけ移植した module を complete と記録しない
-- cutover 後は Go compiler とこの移植専用文書を削除する
+- Go compiler をいつ削除するかはユーザーの判断で、この文書は条件を持たない。
+  削除の判断と、その後 Kizu compiler を build する seed をどう供給するかの判断は
+  同じ 1 つの判断になる
 
 ## Work unit
 
@@ -260,9 +264,15 @@ compiler 全体の cutover は module の完了とは別で、次の 3 つが揃
    削除するので、CLI の機能は落とせません。11 command すべてが揃い、`TestSelfhostFrontend`
    が各 command 境界と、CLI が引数を拒否する形を Go CLI と byte 比較しています
 
-cutover 後は「Kizu compiler を build するには Kizu compiler が必要」になるので、
-seed をどう供給するか(過去の release binary を使うのか、他の手段か)は cutover の
-判断と一緒に決めます。この文書はまだそれを決めていません。
+3 つとも揃ったので、release する binary は Kizu compiler になりました。Go compiler が
+その seed であり、差分比較の oracle でもあります。「Kizu compiler を build するには
+Kizu compiler が必要」になるのは Go を削除したときで、seed をどう供給するかはその
+判断と一緒に決めます(Shipping boundary)。
+
+release は host の clang で link するので cross build を持ちません。4 つの target は
+それぞれの platform の runner で build し、成果物を集めます。CI も macOS と Linux の
+両方で回します —— link を host に任せている以上、走らせていない platform について
+gate は何も言いません。
 
 1 は `TestSelfhostBootstrap` が gate にします。shipping compiler が build した
 compiler と、それが同じ source から build した compiler の byte 一致を見ます。
@@ -280,7 +290,10 @@ signature だけを比較前に zero 化します。これは compiler 出力で
   native artifact と metadata を Go CLI と比較する
 
 native runtime の source byte 一致は `TestRuntimeSourceKizu` が持つため、runtime の各
-failure を selfhost でもう一度 link することはしません。3 は `TestSelfhostFrontend` の command 境界と引数比較が持ちます。selfhost が自分の source を最後まで build する
+failure を selfhost でもう一度 link することはしません。3 は `TestSelfhostFrontend` の command 境界と引数比較が持ちます。加えて
+`installed-tree` が、両 binary を `<prefix>/bin/kizu` + `<prefix>/lib/kizu` に置いて
+無関係な directory から(symlink 経由でも)動かし、release した形で library tree を
+見つけられることを見ます。selfhost が自分の source を最後まで build する
 経路は `TestSelfhostBootstrap` にしかありません。shipping compiler が作る第 1 stage は
 他の selfhost gate と共有し、この test だけが第 2 stage を build します。
 

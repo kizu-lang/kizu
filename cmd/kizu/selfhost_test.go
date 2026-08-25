@@ -19,6 +19,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
+	"github.com/kizu-lang/kizu/internal/stdlib"
 	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
@@ -76,6 +77,9 @@ func TestSelfhostFrontend(t *testing.T) {
 	runSelfhostArgumentCases(t, selfhost)
 	t.Run("version", func(t *testing.T) {
 		compareSelfhostVersion(t, selfhost)
+	})
+	t.Run("installed-tree", func(t *testing.T) {
+		compareSelfhostInstalledTree(t, selfhost, file)
 	})
 	for _, header := range cimportRepresentativeHeaders() {
 		t.Run("import-c-header/"+header.name, func(t *testing.T) {
@@ -188,6 +192,75 @@ func runSelfhostWASMCases(t *testing.T, selfhost string) {
 			args = append(args, path)
 			compareSelfhostArgs(t, selfhost, goWASMOutput(path, fixture.opt), args...)
 		})
+	}
+}
+
+// compareSelfhostInstalledTree checks both binaries find their library tree
+// the way a released one has to: laid out as <prefix>/bin/kizu next to
+// <prefix>/lib/kizu, run from an unrelated directory, with no environment
+// pointing at anything. A symlinked bin is included because that is how an
+// install is usually put on PATH.
+func compareSelfhostInstalledTree(t *testing.T, selfhost string, file string) {
+	t.Helper()
+	root := t.TempDir()
+	prefix := filepath.Join(root, "install")
+	for _, dir := range []string{filepath.Join(prefix, "bin"), filepath.Join(prefix, "lib")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copyTree(t, "../../lib/kizu", filepath.Join(prefix, "lib", "kizu"))
+	source, err := filepath.Abs(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "onpath")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []struct {
+		name string
+		from string
+	}{{"kizu", kizuBinaryPath}, {"selfhost", selfhost}} {
+		installed := filepath.Join(prefix, "bin", binary.name)
+		copyExecutable(t, binary.from, installed)
+		link := filepath.Join(linked, binary.name)
+		if err := os.Symlink(installed, link); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range []string{installed, link} {
+			got := runNativeCLIAtEnv(t, elsewhere,
+				[]string{stdlib.LibDirEnv + "="}, entry, "check", source)
+			if got.code != 0 || got.output.stdout != "check: ok\n" {
+				t.Errorf("%s from an installed tree failed (code=%d)\nstdout:\n%sstderr:\n%s",
+					entry, got.code, got.output.stdout, got.output.stderr)
+			}
+		}
+	}
+}
+
+// copyTree copies one directory recursively, following the shape a release
+// tarball carries.
+func copyTree(t *testing.T, from string, to string) {
+	t.Helper()
+	if out, err := exec.Command("cp", "-R", from, to).CombinedOutput(); err != nil {
+		t.Fatalf("copy %s: %v\n%s", from, err, out)
+	}
+}
+
+// copyExecutable copies one binary and keeps it runnable.
+func copyExecutable(t *testing.T, from string, to string) {
+	t.Helper()
+	content, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, content, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

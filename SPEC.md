@@ -2814,10 +2814,15 @@ runtime selection の方針は ADR-0039 に従います。
   `std::fs::Error::LimitExceeded` で、`OutOfMemory`(確保失敗)とは分ける
 * `std::fs::read_file_into(io, path, out: &var std::string::String)` は `!void` を
   返し、fs 側では確保しない
+* `std::fs::real_path(io, allocator, path)` は `!std::string::String` を返す。
+  symlink と `.` / `..` を実体へ解決するため path が存在する必要がある
+  (`std::path::clean` は filesystem を読まない pure 版)
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
-* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す
+* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す。
+  entry は name の byte 順に並ぶ。file system が返す順は host ごとに違うので、
+  同じ directory がどこでも同じ listing になるよう並べ替える
 * `std::fs::create_dir(io, path)` は `!void` を返す
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
@@ -2851,6 +2856,11 @@ stdio operation が `Io` capability を必ず要求し、I/O failure を error u
 * `std::process::arg(index)` は `![]u8` を返す
 * `std::process::env(name)` は `?[]u8` を返し、未設定なら `null` を返す
   (空にしたければ `orelse ""`)
+* `std::process::executable_path(allocator)` は実行中の binary の path を
+  `!std::string::String` で返す。binary の隣に置いた file を、起動した
+  directory に依らず見つけるための API。kernel が自プロセスについて答える
+  ので argv と同じく `Io` を取らない。返るのは kernel が報告する path で、
+  symlink を解決するなら `std::fs::real_path` に渡す
 * `std::process::monotonic_millis()` は `i64` を返す
 * `std::process::unix_millis()` は Unix epoch からの壁時計 milliseconds を `i64` で返す
 * `std::process::spawn_wait8(argc, arg0, ..., arg7)` は子プロセスを起動して
