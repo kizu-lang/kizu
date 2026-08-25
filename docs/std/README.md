@@ -22,7 +22,10 @@
 | [sort](sort.md) | owner-safe in-place string sorting |
 | [map](map.md) | owned symbol table |
 | [fmt](fmt.md) | diagnostic 用の最小 formatting |
-| [json](json.md) | JSON encode |
+| [json](json.md) | JSON の encode と decode |
+| [fs](fs.md) | `Io` 経由の file system 操作 |
+| [path](path.md) | file system を見ない path text 操作 |
+| [process](process.md) | 引数・環境変数・時刻・終了 status |
 | [testing](testing.md) | assertion |
 
 実装は `lib/kizu/std/src/` にあります。移行計画と builtin registry は
