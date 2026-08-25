@@ -3,6 +3,7 @@ import compiler::internal::diagnostic;
 import compiler::internal::ownership;
 import compiler::internal::project;
 import compiler::internal::stdmeta;
+import compiler::internal::stdmethod;
 import compiler::internal::typ;
 import std::arena;
 import std::array;
@@ -218,6 +219,10 @@ pub struct Lowerer {
     tests: array::Array<TestFacts>,
     signature_nodes: arena::Arena<Signature>,
     signatures: map::Map<[]u8, SignatureHandle>,
+    // method_signatures groups the signatures by the method name they
+    // end with, the Go `methodSigs`, so a method call reads the handful
+    // of methods that could answer it instead of every declaration.
+    method_signatures: map::Map<[]u8, array::Array<SignatureHandle>>,
     current: Function,
     block: Block,
     envs: EnvStore,
@@ -335,6 +340,7 @@ pub fn new_lowerer(
         tests: array::new<TestFacts>(allocator),
         signature_nodes: move signature_nodes,
         signatures: map::new<[]u8, SignatureHandle>(allocator),
+        method_signatures: map::new<[]u8, array::Array<SignatureHandle>>(allocator),
         current: scratch_function,
         block: scratch_block,
         envs: move envs,
@@ -633,6 +639,61 @@ fn (self: &var Lowerer) collect_decls(
             let symbol = try self.extern_c_symbol(name);
             try self.record_extern_symbol(name, symbol);
         }
+    }
+    try self.index_method_signatures();
+    return null;
+}
+
+/// Groups every declared method under the name it ends with, the Go
+/// `indexMethodSignatures`. The receiver's type is unknown before lowering,
+/// so a method call has to union every method bearing the name; reading them
+/// from here is what keeps that union from walking the whole program once
+/// per call site.
+fn (self: &var Lowerer) index_method_signatures() -> !void {
+    var method = string::new(self.allocator);
+    defer method.deinit();
+    let count = self.signatures.len();
+    var position = 0;
+    while position < count {
+        method.clear();
+        var signature = self.scratch_signature;
+        var found = false;
+        if self.signatures.key_at(position) |key| {
+            if stdmethod::split_method_name(key) |parts| {
+                try method.append_bytes(parts.method);
+                if self.signatures.get(key) |handle| {
+                    signature = handle;
+                    found = true;
+                }
+            }
+        }
+        if found {
+            let method_bytes = method.as_bytes();
+            try self.add_method_signature(method_bytes, signature);
+        }
+        position = position + 1;
+    }
+    return;
+}
+
+/// Records one method under its name, the Go
+/// `l.methodSigs[method] = append(l.methodSigs[method], sig)`.
+fn (self: &var Lowerer) add_method_signature(method: []u8, signature: SignatureHandle) -> !void {
+    if self.method_signatures.at_mut(method) |list| {
+        return list.append(signature);
+    }
+    var list = array::new<SignatureHandle>(self.allocator);
+    errdefer list.deinit();
+    try list.append(signature);
+    return self.method_signatures.insert(method, move list);
+}
+
+/// Returns the position-th declared method named method, null past the last.
+/// The Go arm reads the whole slice at once; the index is read one entry at a
+/// time so the borrow ends before the body marks a name.
+fn (self: &Lowerer) method_signature_at(method: []u8, position: i64) -> ?SignatureHandle {
+    if self.method_signatures.at(method) |list| {
+        return list.get(position);
     }
     return null;
 }

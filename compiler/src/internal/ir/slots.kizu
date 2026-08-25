@@ -1,9 +1,9 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
 import compiler::internal::ownership;
-import compiler::internal::stdmethod;
 import std::array;
 import std::mem;
+import std::string;
 
 // Mechanical port of internal/ir/slots.go. A local is an SSA value, which is
 // enough until something writes through a borrow of it: the callee stores
@@ -384,42 +384,29 @@ fn (self: &var Lowerer) mark_lent_method_args(
     field: ast::FieldExpr,
     args: ast::ExpressionList
 ) -> !void {
-    let count = self.signatures.len();
+    var method = string::new(self.allocator);
+    defer method.deinit();
+    try append_text(tree, field.name, &var method);
+    let method_bytes = method.as_bytes();
     var position = 0;
-    while position < count {
-        if self.method_signature_at(tree, position, field.name) |signature| {
-            if self.signature_param(signature, 0) |first| {
-                if first.passing == Passing::CallerStorage {
-                    try self.mark_if_name(tree, field.receiver);
-                }
-            }
-            var index = 0;
-            while ownership::arg_at(tree, args, index) |arg| {
-                if self.signature_param(signature, index + 1) |param| {
-                    if param.passing == Passing::CallerStorage {
-                        try self.mark_if_name(tree, arg);
-                    }
-                }
-                index = index + 1;
+    while self.method_signature_at(method_bytes, position) |signature| {
+        position = position + 1;
+        if self.signature_param(signature, 0) |first| {
+            if first.passing == Passing::CallerStorage {
+                try self.mark_if_name(tree, field.receiver);
             }
         }
-        position = position + 1;
+        var index = 0;
+        while ownership::arg_at(tree, args, index) |arg| {
+            if self.signature_param(signature, index + 1) |param| {
+                if param.passing == Passing::CallerStorage {
+                    try self.mark_if_name(tree, arg);
+                }
+            }
+            index = index + 1;
+        }
     }
     return;
-}
-
-/// Returns the declared function at position in the signature table when it
-/// is a method named method, the `stdmethod.SplitMethodName` test the Go
-/// `markLentMethodArgs` applies to each `l.signatures` entry; null past the
-/// last entry or for a function of another name.
-fn (self: &Lowerer) method_signature_at(tree: &ast::Ast, position: i64, method: ast::Text) -> ?SignatureHandle {
-    let key = self.signatures.key_at(position) orelse return null;
-    let parts = stdmethod::split_method_name(key) orelse return null;
-    let method_bytes = parts.method;
-    if !text_is(tree, method, method_bytes) {
-        return null;
-    }
-    return self.signatures.get(key);
 }
 
 /// Records the names a generic call lends, the Go `markLentGenericArgs`.

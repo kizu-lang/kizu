@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/stdmethod"
 )
 
 // A local is an SSA value, which is enough until something writes through a
@@ -277,10 +276,7 @@ func (l *lowerer) markLentMethodArgs(
 	args []ast.Expression,
 	found map[string]bool,
 ) {
-	for name, sig := range l.signatures {
-		if _, method, ok := stdmethod.SplitMethodName(name); !ok || method != field.Name {
-			continue
-		}
+	for _, sig := range l.methodSigs[field.Name] {
 		if len(sig.Params) > 0 && sig.Params[0].Passing == PassCallerStorage {
 			markIfName(field.Receiver, found)
 		}
