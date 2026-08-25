@@ -1062,6 +1062,44 @@ pub fn runtime_source() -> []u8 {
         \\    *out = kizu_std_builtin_fs_metadata_result(io, *path);
         \\}
         \\
+        \\/* Orders two names the way a byte-wise comparison does, with the shorter of
+        \\ * two shared prefixes first. */
+        \\static int kizu_slice_compare(KizuSliceU8 left, KizuSliceU8 right) {
+        \\    int64_t shared = left.len < right.len ? left.len : right.len;
+        \\    for (int64_t index = 0; index < shared; index++) {
+        \\        unsigned char a = left.ptr[index];
+        \\        unsigned char b = right.ptr[index];
+        \\        if (a != b) {
+        \\            return a < b ? -1 : 1;
+        \\        }
+        \\    }
+        \\    if (left.len == right.len) {
+        \\        return 0;
+        \\    }
+        \\    return left.len < right.len ? -1 : 1;
+        \\}
+        \\
+        \\/* readdir hands entries back in whatever order the file system keeps them, so
+        \\ * two hosts disagree about the same directory. tests/behavior declares the
+        \\ * order this returns, so the entries are sorted by name here and every caller
+        \\ * sees the same listing. Directories are small enough that an insertion sort
+        \\ * over the collected entries costs nothing worth a larger sort. */
+        \\static void kizu_sort_dir_entries(KizuArray *array) {
+        \\    if (!array || array->elem_size != (int64_t)sizeof(KizuFsDirEntry)) {
+        \\        return;
+        \\    }
+        \\    KizuFsDirEntry *items = (KizuFsDirEntry *)array->data;
+        \\    for (int64_t index = 1; index < array->len; index++) {
+        \\        KizuFsDirEntry item = items[index];
+        \\        int64_t place = index - 1;
+        \\        while (place >= 0 && kizu_slice_compare(items[place].name, item.name) > 0) {
+        \\            items[place + 1] = items[place];
+        \\            place--;
+        \\        }
+        \\        items[place + 1] = item;
+        \\    }
+        \\}
+        \\
         \\static KizuErrorPtr kizu_std_builtin_fs_read_dir_result(void *io, KizuSliceU8 path) {
         \\    if (kizu_io_is_failing(io)) {
         \\        return kizu_err_ptr(KIZU_ERR_STD_FS_ERROR_IO_FAILING);
@@ -1105,6 +1143,7 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    closedir(dir);
         \\    free(cpath);
+        \\    kizu_sort_dir_entries((KizuArray *)array);
         \\    return kizu_ok_ptr(array);
         \\}
         \\

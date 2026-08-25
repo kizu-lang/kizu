@@ -2820,7 +2820,9 @@ runtime selection の方針は ADR-0039 に従います。
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
-* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す
+* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す。
+  entry は name の byte 順に並ぶ。file system が返す順は host ごとに違うので、
+  同じ directory がどこでも同じ listing になるよう並べ替える
 * `std::fs::create_dir(io, path)` は `!void` を返す
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
