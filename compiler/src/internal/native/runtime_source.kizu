@@ -6,6 +6,7 @@
 pub fn runtime_source() -> []u8 {
     return
         \\
+        \\#include <stddef.h>
         \\#include <stdint.h>
         \\#include <stdio.h>
         \\#include <stdlib.h>
@@ -28,6 +29,16 @@ pub fn runtime_source() -> []u8 {
         \\    int64_t elem_size;
         \\    void *allocator;
         \\} KizuArray;
+        \\
+        \\/* The native backend reads these fields itself rather than calling in for every
+        \\   element, so their offsets are part of what it emits (`%kizu.array` in
+        \\   internal/llvm/array.go). Reordering the struct without changing that type is
+        \\   a failure here rather than a program that reads the wrong word. */
+        \\_Static_assert(offsetof(KizuArray, data) == 0, "KizuArray.data leads the header");
+        \\_Static_assert(offsetof(KizuArray, len) == 8, "KizuArray.len follows data");
+        \\_Static_assert(offsetof(KizuArray, cap) == 16, "KizuArray.cap follows len");
+        \\_Static_assert(offsetof(KizuArray, elem_size) == 24, "KizuArray.elem_size follows cap");
+        \\_Static_assert(sizeof(KizuArray) == 40, "KizuArray is five words");
         \\
         \\typedef struct {
         \\    unsigned char *ptr;
@@ -1475,30 +1486,12 @@ pub fn runtime_source() -> []u8 {
         \\    return 1;
         \\}
         \\
-        \\int64_t kizu_array_len(void *handle) {
-        \\    KizuArray *array = (KizuArray *)handle;
-        \\    return array ? array->len : 0;
-        \\}
-        \\
-        \\int64_t kizu_array_capacity(void *handle) {
-        \\    KizuArray *array = (KizuArray *)handle;
-        \\    return array ? array->cap : 0;
-        \\}
-        \\
         \\_Bool kizu_array_reserve(void *handle, int64_t additional) {
         \\    KizuArray *array = (KizuArray *)handle;
         \\    if (!array || additional < 0 || additional > INT64_MAX - array->len) {
         \\        return 0;
         \\    }
         \\    return kizu_array_reserve_storage(array, array->len + additional);
-        \\}
-        \\
-        \\void *kizu_array_get(void *handle, int64_t index) {
-        \\    KizuArray *array = (KizuArray *)handle;
-        \\    if (!array || index < 0 || index >= array->len) {
-        \\        return NULL;
-        \\    }
-        \\    return array->data + index * array->elem_size;
         \\}
         \\
         \\void *kizu_array_pop(void *handle) {
@@ -1508,15 +1501,6 @@ pub fn runtime_source() -> []u8 {
         \\    }
         \\    array->len -= 1;
         \\    return array->data + array->len * array->elem_size;
-        \\}
-        \\
-        \\_Bool kizu_array_set(void *handle, int64_t index, const void *elem) {
-        \\    KizuArray *array = (KizuArray *)handle;
-        \\    if (!array || !elem || index < 0 || index >= array->len) {
-        \\        return 0;
-        \\    }
-        \\    memcpy(array->data + index * array->elem_size, elem, (size_t)array->elem_size);
-        \\    return 1;
         \\}
         \\
         \\_Bool kizu_array_swap(void *handle, int64_t left, int64_t right) {
