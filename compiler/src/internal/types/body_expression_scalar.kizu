@@ -88,12 +88,58 @@ fn (self: &var Checker) check_ident_expr(
     return try self.checker_message_at("type error", expression.span, move message);
 }
 
+// Resolves the declaration a name used as a value refers to. A callee is
+// qualified by the resolver; a name in any other position is not, so a
+// module-local function is looked up under the module the reader is inside as
+// well as under the name as written.
+fn (self: &var Checker) function_by_value_name(name: []u8) -> !?FunctionHandle {
+    if self.metadata.functions_by_name.get(name) |handle| {
+        return handle;
+    }
+    var qualified = string::new(self.allocator);
+    defer qualified.deinit();
+    if try self.append_current_module_prefix(&var qualified) {
+        try qualified.append_bytes(name);
+        let bytes = qualified.as_bytes();
+        return self.metadata.functions_by_name.get(bytes);
+    }
+    return null;
+}
+
+// Appends the module prefix of the function being checked, `::` included, and
+// reports whether it has one.
+fn (self: &var Checker) append_current_module_prefix(out: &var string::String) -> !bool {
+    let handle = self.current_function_handle() orelse return false;
+    var appended = false;
+    if self.metadata.functions.at(handle.index) |function| {
+        let bytes = function.name.as_bytes();
+        let cut = last_namespace_end(bytes);
+        if cut > 0 {
+            try out.append_bytes(bytes[0..cut]);
+            appended = true;
+        }
+    }
+    return appended;
+}
+
+// Returns the byte after the last `::` in a name, or 0 when it has none.
+fn last_namespace_end(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 1 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
 // Returns the function pointer type a declared function's name has as a
 // value, and null for a name that declares none. A generic function has no
 // single signature, so its name is not a value. The spelling is built here
 // and interned, the way every other computed type reaches the table.
 fn (self: &var Checker) function_pointer_value(name: []u8) -> !?Type {
-    let handle = self.metadata.functions_by_name.get(name) orelse return null;
+    let handle = try self.function_by_value_name(name) orelse return null;
     var text = string::new(self.allocator);
     defer text.deinit();
     var known = false;

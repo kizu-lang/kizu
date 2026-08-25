@@ -1075,6 +1075,62 @@ fn params_after_self(signature: SignatureHandle) -> ParamsView {
 }
 
 /// Returns the signature recorded under name, the Go `l.signatures[name]`.
+/// Is a declaration a name used as a value refers to: the symbol it is
+/// registered under and its signature.
+struct ResolvedFunction {
+    name: Name,
+    signature: SignatureHandle
+}
+
+/// Resolves the declaration a name used as a value refers to. A callee is
+/// qualified by the resolver; a name in any other position is not, so a
+/// module-local function is looked up under the module the reader is inside as
+/// well as under the name as written.
+fn (self: &var Lowerer) function_by_value_name(name: Name) -> !?ResolvedFunction {
+    if self.signature_named(name) |signature| {
+        return ResolvedFunction { name: name, signature: signature };
+    }
+    var qualified = string::new(self.allocator);
+    defer qualified.deinit();
+    if try self.append_current_module_prefix(&var qualified) {
+        let retained = name_text(&self.module.names, name);
+        let bytes = retained.as_bytes();
+        try qualified.append_bytes(bytes);
+        let text = qualified.as_bytes();
+        let candidate = try self.module.names.intern(text);
+        if self.signature_named(candidate) |signature| {
+            return ResolvedFunction { name: candidate, signature: signature };
+        }
+    }
+    return null;
+}
+
+/// Appends the module prefix of the function being lowered, `::` included, and
+/// reports whether it has one.
+fn (self: &var Lowerer) append_current_module_prefix(out: &var string::String) -> !bool {
+    let node = self.module.function_nodes.at(self.current.node);
+    let retained = name_text(&self.module.names, node.name);
+    let bytes = retained.as_bytes();
+    let cut = last_namespace_end(bytes);
+    if cut == 0 {
+        return false;
+    }
+    try out.append_bytes(bytes[0..cut]);
+    return true;
+}
+
+/// Returns the byte after the last `::` in a name, or 0 when it has none.
+fn last_namespace_end(bytes: []u8) -> i64 {
+    var index = mem::len(bytes);
+    while index > 1 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) and bytes[index - 1] == cast<u8>(58) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
 /// Spells the function pointer type a signature's name has as a value.
 fn (self: &var Lowerer) function_pointer_type(signature: SignatureHandle) -> !Name {
     var text = string::new(self.allocator);

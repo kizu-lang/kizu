@@ -1566,10 +1566,30 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	// A top-level function's name is a function pointer value. The address is
 	// an instruction rather than a constant so the backend names the symbol
 	// once, in the one place that knows how symbols are spelled.
-	if sig, ok := l.signatures[expr.Name]; ok {
-		return l.emit("func.addr."+expr.Name, functionPointerType(sig), nil, ""), nil
+	if name, sig, ok := l.functionByValueName(expr.Name); ok {
+		return l.emit("func.addr."+name, functionPointerType(sig), nil, ""), nil
 	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
+}
+
+// functionByValueName resolves the declaration a name used as a value refers
+// to. A callee is qualified by the resolver; a name in any other position is
+// not, so a module-local function is looked up under the module the reader is
+// inside as well as under the name as written.
+func (l *lowerer) functionByValueName(name string) (string, Signature, bool) {
+	if sig, ok := l.signatures[name]; ok {
+		return name, sig, true
+	}
+	if l.current == nil {
+		return "", Signature{}, false
+	}
+	prefix := strings.LastIndex(l.current.Name, "::")
+	if prefix < 0 {
+		return "", Signature{}, false
+	}
+	qualified := l.current.Name[:prefix+2] + name
+	sig, ok := l.signatures[qualified]
+	return qualified, sig, ok
 }
 
 // functionPointerType spells the type a function's name has as a value.

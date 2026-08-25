@@ -3233,6 +3233,25 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
 }
 
+// lookupFunctionByValueName resolves the declaration a name used as a value
+// refers to. A callee is qualified by the resolver; a name in any other
+// position is not, so a module-local function is looked up under the module
+// the reader is inside as well as under the name as written.
+func (c *Checker) lookupFunctionByValueName(name string) (*functionType, bool) {
+	if fn, ok := c.functions[name]; ok {
+		return fn, true
+	}
+	if c.currentFunction == nil {
+		return nil, false
+	}
+	prefix := strings.LastIndex(c.currentFunction.name, "::")
+	if prefix < 0 {
+		return nil, false
+	}
+	fn, ok := c.functions[c.currentFunction.name[:prefix+2]+name]
+	return fn, ok
+}
+
 // borrowedParamType spells a parameter the way a caller writes it: the borrow
 // markers a declaration wrote beside the type are part of what the parameter
 // takes, so a function pointer carries them.
@@ -3250,7 +3269,7 @@ func borrowedParamType(param ast.Param) typ.Type {
 // name has as a value, and reports whether the name declares one. A generic
 // function has no single signature, so its name is not a value.
 func (c *Checker) functionPointerValue(name string) (Type, bool) {
-	fn, ok := c.functions[name]
+	fn, ok := c.lookupFunctionByValueName(name)
 	if !ok || len(fn.sig.StaticParams) > 0 {
 		return "", false
 	}

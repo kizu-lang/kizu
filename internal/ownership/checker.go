@@ -1184,7 +1184,7 @@ func (c *Checker) checkTiedAllocatorReturn(call *ast.CallExpr, env *scope) (bool
 				name)
 		}
 	}
-	if _, err := c.checkUserCall(name, call.Args, env, true); err != nil {
+	if err := c.checkTiedFactoryCall(name, call, env); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -4081,7 +4081,7 @@ func (c *Checker) moveUnboundIdent(ident *ast.IdentExpr) (string, bool, error) {
 	if ident.Name == "void" {
 		return "", false, errorAt(ident.Span, "move error: void is not a value")
 	}
-	if fn, isFunc := c.functions[ident.Name]; isFunc {
+	if fn, isFunc := c.lookupFunctionByValueName(ident.Name); isFunc {
 		return functionPointerText(fn.sig), false, nil
 	}
 	return "", false, errorAt(ident.Span,
@@ -4096,11 +4096,30 @@ func (c *Checker) readIdentExpr(expr *ast.IdentExpr, env *scope) (string, error)
 		return "type", nil
 	}
 	if _, bound := env.lookup(expr.Name); !bound {
-		if fn, isFunc := c.functions[expr.Name]; isFunc {
+		if fn, isFunc := c.lookupFunctionByValueName(expr.Name); isFunc {
 			return functionPointerText(fn.sig), nil
 		}
 	}
 	return readIdent(expr, env)
+}
+
+// lookupFunctionByValueName resolves the declaration a name used as a value
+// refers to. A callee is qualified by the resolver; a name in any other
+// position is not, so a module-local function is looked up under the module
+// the reader is inside as well as under the name as written.
+func (c *Checker) lookupFunctionByValueName(name string) (*functionInfo, bool) {
+	if fn, ok := c.functions[name]; ok {
+		return fn, true
+	}
+	if c.currentFunction == nil {
+		return nil, false
+	}
+	prefix := strings.LastIndex(c.currentFunction.name, "::")
+	if prefix < 0 {
+		return nil, false
+	}
+	fn, ok := c.functions[c.currentFunction.name[:prefix+2]+name]
+	return fn, ok
 }
 
 // functionPointerText spells the function pointer type a declaration's name

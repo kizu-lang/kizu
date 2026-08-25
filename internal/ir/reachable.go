@@ -63,8 +63,16 @@ func directCallees(fn *Function) []string {
 	return callees
 }
 
-// directCallee decodes one direct call operation.
+// directCallee decodes one operation that names a function: a direct call, and
+// taking a function's address. A name whose only use is as a pointer value is
+// still reached, because the call that reaches it is indirect.
 func directCallee(op string) (string, bool) {
+	if name, ok := strings.CutPrefix(op, "func.addr."); ok {
+		return name, true
+	}
+	if op == "call.indirect" {
+		return "", false
+	}
 	if !strings.HasPrefix(op, "call.") {
 		return "", false
 	}
