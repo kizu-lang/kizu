@@ -1,15 +1,16 @@
 import compiler::internal::diagnostic;
 import compiler::internal::ir;
+import compiler::internal::typ;
 import std::mem;
 
 // Mechanical port of internal/llvm/map.go: the hosted Map runtime
 // declarations and the `map.*` instructions. writeSliceParts, which other
 // files share, lives in llvm.kizu.
 
-/// Reports whether a lowered IR type is a std::map::Map<[]u8, V>, the Go
+/// Reports whether a lowered IR type is a std::map::Map<K, V>, the Go
 /// `isMapLLVMType`.
 fn is_map_llvm_type(typ_name: []u8) -> bool {
-    return mem::starts_with(typ_name, "std::map::Map<[]u8, ") and ir::ends_with_bytes(typ_name, ">");
+    return mem::starts_with(typ_name, "std::map::Map<") and ir::ends_with_bytes(typ_name, ">");
 }
 
 /// Writes declarations for the hosted Map runtime, the Go
@@ -73,58 +74,90 @@ fn (self: &var Emitter) write_map_instr(module: &ir::Module, node: &ir::InstrNod
     }
 }
 
-/// Lowers std::map::new<[]u8, V>(allocator), the Go `writeMapNew`.
+/// Lowers std::map::new<K, V>(allocator), the Go `writeMapNew`.
 fn (self: &var Emitter) write_map_new(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    return self.write_container_new(module, node, "kizu_map_new", ContainerKind::Map, "map.new expects allocator -> Map<[]u8, V>");
+    return self.write_container_new(module, node, "kizu_map_new", ContainerKind::Map, "map.new expects allocator -> Map<K, V>");
+}
+
+/// Renders one key as the (pointer, length) pair the runtime hashes and
+/// compares, the Go `writeMapKeyParts`. A `[]u8` key already is that pair. A
+/// scalar key is its own bytes, so it goes to a stack slot and the pair names
+/// that slot and the key's width -- the runtime has one key representation,
+/// and this is where a key becomes it.
+fn (self: &var Emitter) write_map_key_parts(
+    module: &ir::Module,
+    prefix: ir::Name,
+    key: ir::Value,
+    out: &var SliceParts
+) -> !?diagnostic::Diagnostic {
+    if module.names.is(key.type_name, "[]u8") {
+        let operand = try self.slice_value(module, key);
+        match operand {
+            Error(failed) => return move failed,
+            Operand(key_operand) => {
+                out.* = try self.write_slice_parts(prefix, key_operand);
+                return null;
+            },
+        }
+    }
+    var width = 0;
+    let key_text = ir::name_text(&module.names, key.type_name);
+    let key_bytes = key_text.as_bytes();
+    if typ::is_map_key(key_bytes) {
+        if integer_bit_width(key_bytes) |bits| {
+            width = bits / 8;
+        }
+    }
+    if width == 0 {
+        let shown = try self.own(module, key.type_name);
+        return try self.fail1("llvm error: `%s` is not a std::map::Map key type", Arg::Str(shown));
+    }
+    let slot = try self.write_stack_value(module, prefix, key);
+    let width_name = try self.names.intern_i64(width);
+    out.* = SliceParts { ptr: slot, len: width_name };
+    return null;
 }
 
 /// Lowers Map.insert(key, value), the Go `writeMapInsert`.
 fn (self: &var Emitter) write_map_insert(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 3 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
-        !module.names.is(node.result.type_name, "std::mem::Error!void") {
-        return try self.fail0("llvm error: map.insert expects Map, []u8, V -> std::mem::Error!void");
+    if node.args.len() != 3 or !module.names.is(node.result.type_name, "std::mem::Error!void") {
+        return try self.fail0("llvm error: map.insert expects Map, K, V -> std::mem::Error!void");
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
-    let key = try self.slice_value(module, node.args.get_or_panic(1));
-    match key {
-        Error(failed) => return move failed,
-        Operand(key_operand) => {
-            let result_name = try self.local_name(module, node.result.name);
-            let key_base = try self.suffixed(result_name, ".key");
-            let key_parts = try self.write_slice_parts(key_base, key_operand);
-            let value_base = try self.suffixed(result_name, ".value");
-            let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(2));
-            let ok_name = try self.suffixed(result_name, ".ok");
-            try self.line5(
-                "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)",
-                Arg::Str(ok_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(value_slot)
-            );
-            return self.write_array_bool_result(module, node.result, ok_name, FailureKey::MapInsert);
-        },
+    let result_name = try self.local_name(module, node.result.name);
+    let key_base = try self.suffixed(result_name, ".key");
+    var key_parts = empty_slice_parts();
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
+        return move failed;
     }
+    let value_base = try self.suffixed(result_name, ".value");
+    let value_slot = try self.write_stack_value(module, value_base, node.args.get_or_panic(2));
+    let ok_name = try self.suffixed(result_name, ".ok");
+    try self.line5(
+        "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)",
+        Arg::Str(ok_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len), Arg::Str(value_slot)
+    );
+    return self.write_array_bool_result(module, node.result, ok_name, FailureKey::MapInsert);
 }
 
 /// Lowers Map.get(key), the Go `writeMapGet`.
 fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
-        return try self.fail0("llvm error: map.get expects Map, []u8 -> ?V");
+    if node.args.len() != 2 {
+        return try self.fail0("llvm error: map.get expects Map, K -> ?V");
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
-    let key = try self.slice_value(module, node.args.get_or_panic(1));
-    match key {
-        Error(failed) => return move failed,
-        Operand(key_operand) => {
-            let result_name = try self.local_name(module, node.result.name);
-            let key_base = try self.suffixed(result_name, ".key");
-            let key_parts = try self.write_slice_parts(key_base, key_operand);
-            let ptr_name = try self.suffixed(result_name, ".ptr");
-            try self.line4(
-                "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
-                Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
-            );
-            return self.write_array_optional_load_result(module, node, ptr_name);
-        },
+    let result_name = try self.local_name(module, node.result.name);
+    let key_base = try self.suffixed(result_name, ".key");
+    var key_parts = empty_slice_parts();
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
+        return move failed;
     }
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line4(
+        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    );
+    return self.write_array_optional_load_result(module, node, ptr_name);
 }
 
 /// Lowers Map.at(key) and Map.at_mut(key) to a borrow optional, the Go
@@ -132,26 +165,23 @@ fn (self: &var Emitter) write_map_get(module: &ir::Module, node: &ir::InstrNode)
 /// and its presence, branch-free. It calls the same kizu_map_get as Map.get
 /// and skips the load.
 fn (self: &var Emitter) write_map_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") {
+    if node.args.len() != 2 {
         let op = try self.op_name(module, node);
-        return try self.fail1("llvm error: %s expects Map, []u8 -> ?&V", Arg::Str(op));
+        return try self.fail1("llvm error: %s expects Map, K -> ?&V", Arg::Str(op));
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
-    let key = try self.slice_value(module, node.args.get_or_panic(1));
-    match key {
-        Error(failed) => return move failed,
-        Operand(key_operand) => {
-            let result_name = try self.local_name(module, node.result.name);
-            let key_base = try self.suffixed(result_name, ".key");
-            let key_parts = try self.write_slice_parts(key_base, key_operand);
-            let ptr_name = try self.suffixed(result_name, ".ptr");
-            try self.line4(
-                "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
-                Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
-            );
-            return self.write_borrow_optional_result(module, node, ptr_name);
-        },
+    let result_name = try self.local_name(module, node.result.name);
+    let key_base = try self.suffixed(result_name, ".key");
+    var key_parts = empty_slice_parts();
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
+        return move failed;
     }
+    let ptr_name = try self.suffixed(result_name, ".ptr");
+    try self.line4(
+        "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(ptr_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    );
+    return self.write_borrow_optional_result(module, node, ptr_name);
 }
 
 /// Moves the value at insertion position index out of the map, or traps past
@@ -187,51 +217,98 @@ fn (self: &var Emitter) write_map_take_value_at(module: &ir::Module, node: &ir::
 /// Lowers Map.key_at(index), the Go `writeMapKeyAt`. The runtime fills a
 /// `?[]u8` slot through an out pointer: a by-value struct return would pin
 /// this declaration to the C ABI's aggregate-return rules, and the out
-/// pointer sidesteps that.
+/// pointer sidesteps that. A `[]u8` key is that slot. A scalar key is stored
+/// as its own bytes, so the same call answers it: the slot's pointer is where
+/// the key sits, and null past the end is the absent case every container
+/// optional already renders.
 fn (self: &var Emitter) write_map_key_at(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    var keyed = false;
+    var scalar_key = false;
+    let result_text = ir::name_text(&module.names, node.result.type_name);
+    let result_type = result_text.as_bytes();
+    if typ::optional_elem(result_type) |key_type| {
+        keyed = typ::is_map_key(key_type);
+        scalar_key = keyed and !mem::equal_bytes(key_type, "[]u8");
+    }
     if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "i64") or
-        !module.names.is(node.result.type_name, "?[]u8") {
-        return try self.fail0("llvm error: map.key_at expects Map, i64 -> ?[]u8");
+        !keyed {
+        return try self.fail0("llvm error: map.key_at expects Map, i64 -> ?K");
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
     let index = try self.operand(module, node.args.get_or_panic(1));
     let result_name = try self.local_name(module, node.result.name);
     let slot_name = try self.suffixed(result_name, ".slot");
-    let result_text = ir::name_text(&module.names, node.result.type_name);
-    let result_type = result_text.as_bytes();
-    let opt_type = try self.llvm_optional_type_name(result_type);
-    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(opt_type));
+    // The out slot is the runtime's `?[]u8` either way. Only a `[]u8` key is
+    // also the result, so only that spelling names the module's aggregate; a
+    // scalar key reads the same bytes through the literal layout, which a
+    // module holding no `[]u8` of its own still has.
+    var slot_type = try self.names.intern(map_key_slot_type());
+    if !scalar_key {
+        slot_type = try self.llvm_optional_type_name(result_type);
+    }
+    try self.line2("  %s = alloca %s", Arg::Str(slot_name), Arg::Str(slot_type));
     try self.line3(
         "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)",
         Arg::Str(slot_name), Arg::Str(map_value.operand), Arg::Str(index.operand)
     );
-    try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(opt_type), Arg::Str(slot_name));
-    try self.set_value(module, node.result, result_name);
-    return null;
+    if !scalar_key {
+        try self.line3("  %s = load %s, ptr %s", Arg::Str(result_name), Arg::Str(slot_type), Arg::Str(slot_name));
+        try self.set_value(module, node.result, result_name);
+        return null;
+    }
+    let key_ptr = try self.write_map_key_pointer(result_name, slot_name);
+    return self.write_optional_load_result(module, node, key_ptr, 1);
+}
+
+/// Is the layout kizu_map_key_at fills: a presence tag and the
+/// {pointer, length} pair behind it.
+fn map_key_slot_type() -> []u8 {
+    return "{ i8, ptr, i64 }";
+}
+
+/// Reads the filled slot back as a nullable pointer to the key bytes, the Go
+/// `writeMapKeyPointer`, so a scalar key rejoins the container-optional path
+/// an absent element already takes.
+fn (self: &var Emitter) write_map_key_pointer(result_name: ir::Name, slot_name: ir::Name) -> !ir::Name {
+    let slot_type = try self.names.intern(map_key_slot_type());
+    let opt_name = try self.suffixed(result_name, ".opt");
+    let has_name = try self.suffixed(result_name, ".has");
+    let found_name = try self.suffixed(result_name, ".found");
+    let bytes_name = try self.suffixed(result_name, ".bytes");
+    let ptr_name = try self.suffixed(result_name, ".key");
+    try self.line3("  %s = load %s, ptr %s", Arg::Str(opt_name), Arg::Str(slot_type), Arg::Str(slot_name));
+    try self.line3(
+        "  %s = extractvalue %s %s, 0", Arg::Str(has_name), Arg::Str(slot_type), Arg::Str(opt_name)
+    );
+    try self.line2("  %s = icmp ne i8 %s, 0", Arg::Str(found_name), Arg::Str(has_name));
+    try self.line3(
+        "  %s = extractvalue %s %s, 1", Arg::Str(bytes_name), Arg::Str(slot_type), Arg::Str(opt_name)
+    );
+    try self.line3(
+        "  %s = select i1 %s, ptr %s, ptr null",
+        Arg::Str(ptr_name), Arg::Str(found_name), Arg::Str(bytes_name)
+    );
+    return ptr_name;
 }
 
 /// Lowers Map.contains(key), the Go `writeMapContains`.
 fn (self: &var Emitter) write_map_contains(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
-    if node.args.len() != 2 or !module.names.is(node.args.get_or_panic(1).type_name, "[]u8") or
-        !module.names.is(node.result.type_name, "bool") {
-        return try self.fail0("llvm error: map.contains expects Map, []u8 -> bool");
+    if node.args.len() != 2 or !module.names.is(node.result.type_name, "bool") {
+        return try self.fail0("llvm error: map.contains expects Map, K -> bool");
     }
     let map_value = try self.operand(module, node.args.get_or_panic(0));
-    let key = try self.slice_value(module, node.args.get_or_panic(1));
-    match key {
-        Error(failed) => return move failed,
-        Operand(key_operand) => {
-            let result_name = try self.local_name(module, node.result.name);
-            let key_base = try self.suffixed(result_name, ".key");
-            let key_parts = try self.write_slice_parts(key_base, key_operand);
-            try self.line4(
-                "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)",
-                Arg::Str(result_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
-            );
-            try self.set_value(module, node.result, result_name);
-            return null;
-        },
+    let result_name = try self.local_name(module, node.result.name);
+    let key_base = try self.suffixed(result_name, ".key");
+    var key_parts = empty_slice_parts();
+    if try self.write_map_key_parts(module, key_base, node.args.get_or_panic(1), &var key_parts) |failed| {
+        return move failed;
     }
+    try self.line4(
+        "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)",
+        Arg::Str(result_name), Arg::Str(map_value.operand), Arg::Str(key_parts.ptr), Arg::Str(key_parts.len)
+    );
+    try self.set_value(module, node.result, result_name);
+    return null;
 }
 
 /// Lowers Map.len(), the Go `writeMapLen`.

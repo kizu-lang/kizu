@@ -96,8 +96,8 @@ func stdContainerCleanup(receiverType string) (containerCleanup, bool) {
 	if elem, ok := arrayElementType(receiverType); ok {
 		return containerCleanup{arrayTypeName, "array.deinit", elem}, true
 	}
-	if value, ok := mapValueType(receiverType); ok {
-		return containerCleanup{mapTypeName, "map.deinit", value}, true
+	if args, ok := mapStaticArgs(receiverType); ok {
+		return containerCleanup{mapTypeName, "map.deinit", args}, true
 	}
 	if elem, ok := boxElementType(receiverType); ok {
 		return containerCleanup{boxTypeName, "box.deinit", elem}, true

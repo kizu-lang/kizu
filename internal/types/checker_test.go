@@ -453,16 +453,16 @@ fn main() {}`
 // erasing an invalid container while the payload's semantic type is cached.
 func TestCheckValidatesMetaUnionPayloadBeforeProjection(t *testing.T) {
 	source := `import std::map;
-union Holder { Value(std::meta::element<map::Map<i64, bool>>) }
+union Holder { Value(std::meta::element<map::Map<f64, bool>>) }
 fn main() {}`
 	err := checkSource(source)
-	if err == nil || !strings.Contains(err.Error(), "Map key type must be []u8") {
+	if err == nil || !strings.Contains(err.Error(), "Map key type must be one of") {
 		t.Fatalf("invalid Map payload returned %v", err)
 	}
 }
 
 // TestCheckDefersMetaMapKeyType keeps a validated generic Map<K, V>
-// available until an instantiation supplies the []u8 key K must become.
+// available until an instantiation supplies the key type K must become.
 func TestCheckDefersMetaMapKeyType(t *testing.T) {
 	source := `import std::map;
 fn held<K, V>(value: std::meta::element<map::Map<K, V>>) -> V {
@@ -708,11 +708,11 @@ fn main() {}`,
 		},
 		{
 			name: "wrong key",
-			source: `fn use_table(table: std::map::Map<i64, i64>) -> void {
+			source: `fn use_table(table: std::map::Map<f64, i64>) -> void {
     return;
 }
 fn main() {}`,
-			want: "std::map::Map key type must be []u8",
+			want: "std::map::Map key type must be one of",
 		},
 	}
 	runErrorCases(t, cases)

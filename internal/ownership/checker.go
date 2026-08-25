@@ -7127,7 +7127,7 @@ func (c *Checker) checkArrayGet(
 	return elem, nil
 }
 
-// checkMapMethod validates ownership effects for owned Map<[]u8, V> methods.
+// checkMapMethod validates ownership effects for owned Map<K, V> methods.
 func (c *Checker) checkMapMethod(
 	mapValue *binding,
 	argsText string,
@@ -7139,15 +7139,15 @@ func (c *Checker) checkMapMethod(
 	if err != nil {
 		return "", err
 	}
-	valueType := mapArgs[1]
+	keyType, valueType := mapArgs[0], mapArgs[1]
 	if err := checkContainerMethodAccess("std::map::Map", mapValue, name); err != nil {
 		return "", err
 	}
 	switch name {
 	case "insert":
-		return c.checkMapInsert(valueType, args, env)
+		return c.checkMapInsert(keyType, valueType, args, env)
 	case "get":
-		if err := c.checkMapKeyArg(name, args, env); err != nil {
+		if err := c.checkMapKeyArg(keyType, name, args, env); err != nil {
 			return "", err
 		}
 		if !c.isCopyType(valueType) {
@@ -7155,14 +7155,14 @@ func (c *Checker) checkMapMethod(
 		}
 		return "?" + valueType, nil
 	case "at", "at_mut":
-		return c.checkMapAtCondition(mapValue, valueType, name, args, env)
+		return c.checkMapAtCondition(mapValue, keyType, valueType, name, args, env)
 	case "key_at":
 		if err := c.checkMapIndexArg(name, args, env); err != nil {
 			return "", err
 		}
-		return "?[]u8", nil
+		return "?" + keyType, nil
 	case "contains":
-		if err := c.checkMapKeyArg(name, args, env); err != nil {
+		if err := c.checkMapKeyArg(keyType, name, args, env); err != nil {
 			return "", err
 		}
 		return "bool", nil
@@ -7178,10 +7178,11 @@ func (c *Checker) checkMapMethod(
 }
 
 // checkMapAtCondition checks at/at_mut inside a capture condition — a
-// mutable binding for at_mut and one []u8 key — and refuses them everywhere
+// mutable binding for at_mut and one key — and refuses them everywhere
 // else: the borrow optional they produce exists only there.
 func (c *Checker) checkMapAtCondition(
 	mapValue *binding,
+	keyType string,
 	valueType string,
 	name string,
 	args []ast.Expression,
@@ -7200,7 +7201,7 @@ func (c *Checker) checkMapAtCondition(
 	// usual — and back for the result the call gate reads.
 	savedCapture, savedReturn := c.captureCondition, c.borrowReturn
 	c.captureCondition, c.borrowReturn = false, false
-	err := c.checkMapKeyArg(name, args, env)
+	err := c.checkMapKeyArg(keyType, name, args, env)
 	c.captureCondition, c.borrowReturn = savedCapture, savedReturn
 	if err != nil {
 		return "", err
@@ -7213,6 +7214,7 @@ func (c *Checker) checkMapAtCondition(
 
 // checkMapInsert validates read-only key and copy value insertion.
 func (c *Checker) checkMapInsert(
+	keyType string,
 	valueType string,
 	args []ast.Expression,
 	env *scope,
@@ -7220,10 +7222,10 @@ func (c *Checker) checkMapInsert(
 	if len(args) != 2 {
 		return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
 	}
-	if got, err := c.readExpr(args[0], env); err != nil {
+	if got, err := c.readContextualExpr(args[0], keyType, env); err != nil {
 		return "", err
-	} else if !sameOwnershipType(got, "[]u8") {
-		return "", errorf("map error: `Map.insert` expects []u8 key, got %s", got)
+	} else if !sameOwnershipType(got, keyType) {
+		return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 	}
 	got, err := c.moveContextualExpr(args[1], valueType, env)
 	if err != nil {
@@ -7254,17 +7256,22 @@ func (c *Checker) checkMapIndexArg(
 	return nil
 }
 
-// checkMapKeyArg validates one []u8 lookup key.
-func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope) error {
+// checkMapKeyArg validates one lookup key against the map's key type.
+func (c *Checker) checkMapKeyArg(
+	keyType string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) error {
 	if len(args) != 1 {
 		return errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.readExpr(args[0], env)
+	got, err := c.readContextualExpr(args[0], keyType, env)
 	if err != nil {
 		return err
 	}
-	if !sameOwnershipType(got, "[]u8") {
-		return errorf("map error: `Map.%s` expects []u8 key, got %s", name, got)
+	if !sameOwnershipType(got, keyType) {
+		return errorf("map error: `Map.%s` expects %s key, got %s", name, keyType, got)
 	}
 	return nil
 }
@@ -8392,8 +8399,9 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	if !ok || len(args) != 2 {
 		return nil, errorf("map error: std::map::Map expects 2 static arguments")
 	}
-	if !sameOwnershipType(args[0], "[]u8") {
-		return nil, errorf("map error: std::map::Map key type must be []u8")
+	if !typ.IsMapKey(args[0]) {
+		return nil, errorf("map error: std::map::Map key type must be one of %s",
+			typ.MapKeyTypeNames())
 	}
 	return args, nil
 }

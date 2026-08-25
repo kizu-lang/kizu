@@ -467,7 +467,7 @@ fn (self: &var Checker) check_map_receiver_method(
     if try self.checked_map_args(tree, type_args, &var checked) |problem| {
         return move problem;
     }
-    return self.check_map_method(tree, scope, checked.value, name, args, 0, out);
+    return self.check_map_method(tree, scope, checked.key, checked.value, name, args, 0, out);
 }
 
 fn (self: &Checker) check_map_receiver_borrow(
@@ -504,6 +504,7 @@ fn (self: &Checker) check_map_receiver_borrow(
 fn (self: &var Checker) check_map_method(
     tree: &var ast::Ast,
     scope: ScopeHandle,
+    key: Type,
     value: Type,
     name: []u8,
     args: ast::ExpressionList,
@@ -512,10 +513,10 @@ fn (self: &var Checker) check_map_method(
 ) -> !?diagnostic::Diagnostic {
     let count = args.len(tree) - offset;
     if mem::equal_bytes(name, "insert") {
-        return self.check_map_insert(tree, scope, value, args, offset, out);
+        return self.check_map_insert(tree, scope, key, value, args, offset, out);
     }
     if mem::equal_bytes(name, "get") {
-        if try self.check_map_key_arg(tree, scope, name, args, offset) |problem| {
+        if try self.check_map_key_arg(tree, scope, name, key, args, offset) |problem| {
             return move problem;
         }
         if !self.type_is_generic_param(value) and
@@ -530,18 +531,17 @@ fn (self: &var Checker) check_map_method(
     }
     if mem::equal_bytes(name, "at") or
         mem::equal_bytes(name, "at_mut") {
-        return self.check_map_at_condition(tree, scope, value, name, args, offset, out);
+        return self.check_map_at_condition(tree, scope, key, value, name, args, offset, out);
     }
     if mem::equal_bytes(name, "key_at") {
         if try self.check_map_index_arg(tree, scope, name, args, offset) |problem| {
             return move problem;
         }
-        let bytes = try self.types.byte_string_type();
-        out.* = try self.intern_optional_type(bytes);
+        out.* = try self.intern_optional_type(key);
         return null;
     }
     if mem::equal_bytes(name, "contains") {
-        if try self.check_map_key_arg(tree, scope, name, args, offset) |problem| {
+        if try self.check_map_key_arg(tree, scope, name, key, args, offset) |problem| {
             return move problem;
         }
         out.* = try self.types.bool_type();
@@ -572,6 +572,7 @@ fn (self: &var Checker) check_map_method(
 fn (self: &var Checker) check_map_at_condition(
     tree: &var ast::Ast,
     scope: ScopeHandle,
+    key: Type,
     value: Type,
     name: []u8,
     args: ast::ExpressionList,
@@ -592,7 +593,7 @@ fn (self: &var Checker) check_map_at_condition(
     }
     let saved_capture = self.capture_condition;
     self.capture_condition = false;
-    if try self.check_map_key_arg(tree, scope, name, args, offset) |failed| {
+    if try self.check_map_key_arg(tree, scope, name, key, args, offset) |failed| {
         self.capture_condition = saved_capture;
         return move failed;
     }
@@ -604,6 +605,7 @@ fn (self: &var Checker) check_map_at_condition(
 fn (self: &var Checker) check_map_insert(
     tree: &var ast::Ast,
     scope: ScopeHandle,
+    key: Type,
     value: Type,
     args: ast::ExpressionList,
     offset: i64,
@@ -613,14 +615,13 @@ fn (self: &var Checker) check_map_insert(
     if count != 2 {
         return try self.receiver_arity_error("Map", "insert", 2, count);
     }
-    let key_type = try self.types.byte_string_type();
     var got_key = empty_type();
     let argument = args.get_or_panic(tree, offset);
-    if try self.check_expr(tree, scope, argument, &var got_key) |problem| {
+    if try self.check_contextual_expr(tree, scope, argument, key, &var got_key) |problem| {
         return move problem;
     }
-    if !same_type(got_key, key_type) {
-        return try self.map_expected_arg_error("insert", "key", key_type, got_key);
+    if !same_type(got_key, key) {
+        return try self.map_expected_arg_error("insert", "key", key, got_key);
     }
     var got_value = empty_type();
     let second_argument = args.get_or_panic(tree, offset + 1);
@@ -645,6 +646,7 @@ fn (self: &var Checker) check_map_key_arg(
     tree: &var ast::Ast,
     scope: ScopeHandle,
     name: []u8,
+    key: Type,
     args: ast::ExpressionList,
     offset: i64
 ) -> !?diagnostic::Diagnostic {
@@ -652,14 +654,13 @@ fn (self: &var Checker) check_map_key_arg(
     if count != 1 {
         return try self.receiver_arity_error("Map", name, 1, count);
     }
-    let expected = try self.types.byte_string_type();
     var got = empty_type();
     let argument = args.get_or_panic(tree, offset);
-    if try self.check_expr(tree, scope, argument, &var got) |problem| {
+    if try self.check_contextual_expr(tree, scope, argument, key, &var got) |problem| {
         return move problem;
     }
-    if !same_type(got, expected) {
-        return try self.map_expected_arg_error(name, "key", expected, got);
+    if !same_type(got, key) {
+        return try self.map_expected_arg_error(name, "key", key, got);
     }
     return null;
 }

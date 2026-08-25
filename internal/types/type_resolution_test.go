@@ -50,7 +50,7 @@ func TestTypeResolutionReturnsCopyIssues(t *testing.T) {
 			kind: typeResolutionSingleGenericArity, subject: "std::array::Array",
 		},
 		{name: "map arity", text: "std::map::Map<[]u8>", kind: typeResolutionMapArity},
-		{name: "map key", text: "std::map::Map<i64, bool>", kind: typeResolutionMapKey},
+		{name: "map key", text: "std::map::Map<f64, bool>", kind: typeResolutionMapKey},
 		{
 			name: "unknown generic", text: "Mystery<i64>",
 			kind: typeResolutionUnknownGeneric, subject: "Mystery",

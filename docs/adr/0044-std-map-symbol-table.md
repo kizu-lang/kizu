@@ -6,42 +6,45 @@ Accepted.
 
 ## Context
 
-The Kizu self-host compiler needs deterministic lookup tables for keywords,
-symbols, and scopes. A general-purpose hash map is useful, but v0.2 must avoid
-introducing hidden allocation, unbounded ownership complexity, or borrowed keys
-that can outlive their source buffer.
+Lookup tables — keywords, symbols, scopes — need a hash map. A general-purpose
+one brings hidden allocation, keys that outlive the buffer they were read from,
+and a hashing contract users have to implement for their own types. The current
+API is in `docs/std/map.md`; this records why it has the shape it does.
 
 ## Decision
 
-`std::map::Map<K, V>` is introduced as a conservative owned map prototype.
+The map owns its storage and its keys. The constructor takes an explicit
+allocator capability, `insert` copies the key bytes into map storage, and
+`deinit` invalidates the binding in the ownership checker. A borrowed lookup key
+therefore never becomes a stored reference, and using a map after `deinit` is a
+use-after-free the checker refuses.
 
-```text
-std::map::Map<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
-map.insert(key: []u8, value: V) -> !void
-map.get(key: []u8) -> !V
-map.contains(key: []u8) -> bool
-map.len() -> i64
-map.deinit() -> void
-```
+The key is hashed and compared as the bytes it occupies. That one representation
+is what decides which types may be keys: a type qualifies when its bytes are its
+value — no padding to read, no pointer to follow, and no two byte patterns that
+have to compare equal. `[]u8` and the integer types answer that, and they are
+what `K` accepts.
 
-The v0.2 implementation supports only `[]u8` keys. `insert` copies the
-key bytes into owned map storage, so borrowed lookup keys never become stored
-references. Values are restricted to copy types in v0.2, which lets `get`
-return `!V` by value without moving out of the map or exposing long-lived
-borrows.
+### Rejected
 
-The constructor requires an explicit allocator capability. `deinit` invalidates
-the map binding in the ownership checker. Using a map after `deinit` is a
-use-after-free style error in safe Kizu.
+| Option | Why not |
+| --- | --- |
+| `[]u8` keys only | The runtime already takes a key as (pointer, length), so an integer key is its own bytes and needs neither a second lookup path nor an encoding step at the call site. Refusing it made callers spell integer keys as strings to reach a table the runtime could already index. |
+| Any copy type as a key | A struct's padding bytes are not part of its value, so two equal structs can hash apart. Deciding a layout for that is a separate decision from having integer keys. |
+| `f32` / `f64` keys | `0.0` and `-0.0` are equal with different bytes, and a NaN is unequal to its own bytes. Byte equality is not float equality, and a key type that lies about equality is worse than one that is absent. |
+| A `Hash` / `Eq` contract users implement | Nothing needs it yet: every accepted key hashes as its bytes. Adding the contract first would fix a shape before there is a type that requires it. |
+| Owned keys (`String`, `Array<T>`) | The map already copies key bytes, so an owned key would give the map a second cleanup obligation and a second answer to what `key_at` hands back. Deferred. |
+| Borrowed keys stored as-is | A stored key would outlive the buffer it was read from, which is the failure the copy exists to prevent. |
+| Hidden default allocator | `map::new<K, V>()` would allocate without the call site saying so, against the explicit-capability rule. |
 
-Iteration, deletion, non-copy values, custom hash/equality, and map values
-crossing task/thread/channel boundaries are deferred until their ownership and
-borrow rules are specified.
+Deletion and map values crossing task/thread/channel boundaries stay deferred
+until their ownership and borrow rules are specified. Owner values are settled
+by ADR-0123, iteration order by ADR-0088.
 
 ## Consequences
 
-- The self-host frontend can build keyword and symbol tables without linear
-  scans.
+- A frontend builds keyword and symbol tables without linear scans, and indexes
+  by integer id without turning the id into text first.
 - Safe Kizu does not store borrowed keys in owned maps.
-- The v0.2 map is intentionally narrower than a production hash map.
-- Future extensions must preserve explicit allocator and cleanup boundaries.
+- Widening `K` later is a decision about byte representation, not about the map:
+  a type becomes a key when its bytes are settled.

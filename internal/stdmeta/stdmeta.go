@@ -259,20 +259,10 @@ func ElementType(container typ.Type) (typ.Type, bool) {
 func projectedElementType(container typ.Type) (typ.Type, bool) {
 	name, ok := container.(*typ.Name)
 	if ok && strings.Join(name.Path, "::") == "std::map::Map" &&
-		(len(name.Args) != 2 || !isByteSlice(name.Args[0])) {
+		(len(name.Args) != 2 || !typ.IsMapKey(name.Args[0].String())) {
 		return nil, false
 	}
 	return ElementType(container)
-}
-
-// isByteSlice reports the one key type Map accepts.
-func isByteSlice(value typ.Type) bool {
-	slice, ok := value.(*typ.Slice)
-	if !ok {
-		return false
-	}
-	element, ok := slice.Elem.(*typ.Name)
-	return ok && len(element.Path) == 1 && element.Path[0] == "u8" && len(element.Args) == 0
 }
 
 // splitArgs splits a static argument list on the commas that sit outside any

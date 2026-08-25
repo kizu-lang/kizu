@@ -2440,7 +2440,7 @@ checker が使うものと同じです。
 storage を指し、確保は起きません。
 
 `element<T>` は `?T`、`std::array::Array<T>`、`std::mem::Box<T>` の中身の型を
-返します。`std::map::Map<[]u8, V>` では、key は entry の見つけ方なので、保持する
+返します。`std::map::Map<K, V>` では、key は entry の見つけ方なので、保持する
 値の型 `V` を返します。`field_type<T, f>` はその field の型を返します。どちらも
 型の位置に書くので、型値として比べるときは `type<std::meta::element<T>>` と
 綴ります。static 引数にも書けるので、そのまま再帰できます。
@@ -2672,7 +2672,8 @@ borrow が container の変更や解放より長生きする経路を positional
 (`var` binding または `&var` 借用)を要求します。capture の scope の間
 container は borrow され、shared borrow 中は `insert` / `deinit` が、
 mutable borrow 中はすべての操作が capture の最終使用まで待ちます。
-`Map.key_at` が返す key も map storage への view なので capture 限定です。
+`Map.key_at` が返す key は、key 型が `[]u8` のときだけ map storage への view
+なので capture 限定です。整数 key は値なので、その制限は付きません。
 
 `Arena.at(handle)` は handle provenance により要素の存在を静的に扱えるため、
 optional ではない `&T` を返します。直接 read するほか local binding に保存でき、

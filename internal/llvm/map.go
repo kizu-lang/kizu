@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/typ"
 )
 
 // writeMapRuntimeDecls writes declarations for the hosted Map runtime.
@@ -62,24 +63,23 @@ func (e *emitter) writeMapInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeMapNew lowers std::map::new<[]u8, V>(allocator).
+// writeMapNew lowers std::map::new<K, V>(allocator).
 func (e *emitter) writeMapNew(instr *ir.Instr) error {
 	return e.writeContainerNew(instr, "kizu_map_new",
-		isMapLLVMType, "map.new expects allocator -> Map<[]u8, V>")
+		isMapLLVMType, "map.new expects allocator -> Map<K, V>")
 }
 
 // writeMapInsert lowers Map.insert(key, value).
 func (e *emitter) writeMapInsert(instr *ir.Instr) error {
-	if len(instr.Args) != 3 || instr.Args[1].Type != "[]u8" ||
-		instr.Result.Type != "std::mem::Error!void" {
-		return fmt.Errorf("llvm error: map.insert expects Map, []u8, V -> std::mem::Error!void")
+	if len(instr.Args) != 3 || instr.Result.Type != "std::mem::Error!void" {
+		return fmt.Errorf("llvm error: map.insert expects Map, K, V -> std::mem::Error!void")
 	}
 	mapValue := e.value(instr.Args[0])
-	key, err := e.sliceValue(instr.Args[1])
+	keyPtr, keyLen, err := e.writeMapKeyParts(
+		localName(instr.Result.Name)+".key", instr.Args[1])
 	if err != nil {
 		return err
 	}
-	keyPtr, keyLen := e.writeSliceParts(localName(instr.Result.Name)+".key", key)
 	valueSlot := e.writeStackValue(localName(instr.Result.Name)+".value", instr.Args[2])
 	okName := localName(instr.Result.Name) + ".ok"
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_insert(ptr %s, ptr %s, i64 %s, ptr %s)\n",
@@ -89,35 +89,34 @@ func (e *emitter) writeMapInsert(instr *ir.Instr) error {
 
 // writeMapGet lowers Map.get(key).
 func (e *emitter) writeMapGet(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" {
-		return fmt.Errorf("llvm error: map.get expects Map, []u8 -> ?V")
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: map.get expects Map, K -> ?V")
 	}
 	mapValue := e.value(instr.Args[0])
-	key, err := e.sliceValue(instr.Args[1])
+	keyPtr, keyLen, err := e.writeMapKeyParts(
+		localName(instr.Result.Name)+".key", instr.Args[1])
 	if err != nil {
 		return err
 	}
-	keyPtr, keyLen := e.writeSliceParts(localName(instr.Result.Name)+".key", key)
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
-	return e.writeArrayOptionalLoadResult(instr, ptrName)
+	return e.writeArrayOptionalLoadResult(instr, ptrName, 0)
 }
 
 // writeMapAt lowers Map.at(key) and Map.at_mut(key) to a borrow optional: the
 // runtime's nullable value pointer becomes the payload and its presence,
 // branch-free. It calls the same kizu_map_get as Map.get and skips the load.
 func (e *emitter) writeMapAt(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" {
-		return fmt.Errorf("llvm error: %s expects Map, []u8 -> ?&V", instr.Op)
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: %s expects Map, K -> ?&V", instr.Op)
 	}
 	mapValue := e.value(instr.Args[0])
-	key, err := e.sliceValue(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	keyPtr, keyLen, err := e.writeMapKeyParts(resultName+".key", instr.Args[1])
 	if err != nil {
 		return err
 	}
-	resultName := localName(instr.Result.Name)
-	keyPtr, keyLen := e.writeSliceParts(resultName+".key", key)
 	ptrName := resultName + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_map_get(ptr %s, ptr %s, i64 %s)\n",
 		ptrName, mapValue.operand, keyPtr, keyLen)
@@ -150,35 +149,90 @@ func (e *emitter) writeMapTakeValueAt(instr *ir.Instr) error {
 // writeMapKeyAt lowers Map.key_at(index). The runtime fills a `?[]u8` slot
 // through an out pointer: a by-value struct return would pin this declaration
 // to the C ABI's aggregate-return rules, and the out pointer sidesteps that.
+// A `[]u8` key is that slot. A scalar key is stored as its own bytes, so the
+// same call answers it: the slot's pointer is where the key sits, and null
+// past the end is the absent case every container optional already renders.
 func (e *emitter) writeMapKeyAt(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || instr.Result.Type != "?[]u8" {
-		return fmt.Errorf("llvm error: map.key_at expects Map, i64 -> ?[]u8")
+	keyType, ok := typ.OptionalElem(instr.Result.Type)
+	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" || !ok || !typ.IsMapKey(keyType) {
+		return fmt.Errorf("llvm error: map.key_at expects Map, i64 -> ?K")
 	}
 	mapValue := e.value(instr.Args[0])
 	index := e.value(instr.Args[1])
 	resultName := localName(instr.Result.Name)
 	slotName := resultName + ".slot"
-	optType := llvmOptionalTypeName(instr.Result.Type)
-	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, optType)
+	// The out slot is the runtime's `?[]u8` either way. Only a `[]u8` key is
+	// also the result, so only that spelling names the module's aggregate;
+	// a scalar key reads the same bytes through the literal layout, which a
+	// module holding no `[]u8` of its own still has.
+	slotType := mapKeySlotType
+	if keyType == "[]u8" {
+		slotType = llvmOptionalTypeName(instr.Result.Type)
+	}
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, slotType)
 	fmt.Fprintf(&e.out, "  call void @kizu_map_key_at(ptr %s, ptr %s, i64 %s)\n",
 		slotName, mapValue.operand, index.operand)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, optType, slotName)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
-	return nil
+	if keyType == "[]u8" {
+		fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, slotType, slotName)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+		return nil
+	}
+	return e.writeArrayOptionalLoadResult(instr, e.writeMapKeyPointer(resultName, slotName), 1)
+}
+
+// mapKeySlotType is the layout kizu_map_key_at fills: a presence tag and the
+// {pointer, length} pair behind it.
+const mapKeySlotType = "{ i8, ptr, i64 }"
+
+// writeMapKeyPointer reads the filled slot back as a nullable pointer to the
+// key bytes, so a scalar key rejoins the container-optional path an absent
+// element already takes.
+func (e *emitter) writeMapKeyPointer(resultName string, slotName string) string {
+	optName := resultName + ".opt"
+	hasName := resultName + ".has"
+	foundName := resultName + ".found"
+	bytesName := resultName + ".bytes"
+	ptrName := resultName + ".key"
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", optName, mapKeySlotType, slotName)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", hasName, mapKeySlotType, optName)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", foundName, hasName)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", bytesName, mapKeySlotType, optName)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", ptrName, foundName, bytesName)
+	return ptrName
+}
+
+// writeMapKeyParts renders one key as the (pointer, length) pair the runtime
+// hashes and compares. A `[]u8` key already is that pair. A scalar key is its
+// own bytes, so it goes to a stack slot and the pair names that slot and the
+// key's width -- the runtime has one key representation, and this is where a
+// key becomes it.
+func (e *emitter) writeMapKeyParts(prefix string, key ir.Value) (string, string, error) {
+	if key.Type == "[]u8" {
+		operand, err := e.sliceValue(key)
+		if err != nil {
+			return "", "", err
+		}
+		ptrName, lenName := e.writeSliceParts(prefix, operand)
+		return ptrName, lenName, nil
+	}
+	bits, ok := integerBitWidth(key.Type)
+	if !ok || !typ.IsMapKey(key.Type) {
+		return "", "", fmt.Errorf("llvm error: `%s` is not a std::map::Map key type", key.Type)
+	}
+	return e.writeStackValue(prefix, key), fmt.Sprintf("%d", bits/8), nil
 }
 
 // writeMapContains lowers Map.contains(key).
 func (e *emitter) writeMapContains(instr *ir.Instr) error {
-	if len(instr.Args) != 2 || instr.Args[1].Type != "[]u8" || instr.Result.Type != "bool" {
-		return fmt.Errorf("llvm error: map.contains expects Map, []u8 -> bool")
+	if len(instr.Args) != 2 || instr.Result.Type != "bool" {
+		return fmt.Errorf("llvm error: map.contains expects Map, K -> bool")
 	}
 	mapValue := e.value(instr.Args[0])
-	key, err := e.sliceValue(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	keyPtr, keyLen, err := e.writeMapKeyParts(resultName+".key", instr.Args[1])
 	if err != nil {
 		return err
 	}
-	keyPtr, keyLen := e.writeSliceParts(localName(instr.Result.Name)+".key", key)
-	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_map_contains(ptr %s, ptr %s, i64 %s)\n",
 		resultName, mapValue.operand, keyPtr, keyLen)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
@@ -217,7 +271,7 @@ func (e *emitter) writeSliceParts(prefix string, sliceOperand string) (string, s
 	return ptrName, lenName
 }
 
-// isMapLLVMType reports whether a lowered IR type is a std::map::Map<[]u8, V>.
-func isMapLLVMType(typ string) bool {
-	return strings.HasPrefix(typ, "std::map::Map<[]u8, ") && strings.HasSuffix(typ, ">")
+// isMapLLVMType reports whether a lowered IR type is a std::map::Map<K, V>.
+func isMapLLVMType(name string) bool {
+	return strings.HasPrefix(name, "std::map::Map<") && strings.HasSuffix(name, ">")
 }

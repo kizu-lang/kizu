@@ -1,5 +1,6 @@
 import compiler::internal::ast;
 import compiler::internal::diagnostic;
+import compiler::internal::typ;
 import std::arena;
 import std::array;
 import std::map;
@@ -687,6 +688,22 @@ fn qualified_name_shape(tree: &ast::Ast, expression: ast::Expression) -> bool {
     return qualified_name_shape(tree, field.receiver);
 }
 
+/// Reports whether a type spelling is one std::map::Map accepts as a key.
+fn (self: &Checker) name_is_map_key(value: Name) -> bool {
+    let retained = name_text(&self.names, value);
+    let bytes = retained.as_bytes();
+    return typ::is_map_key(bytes);
+}
+
+/// Refuses a key type std::map::Map does not accept.
+fn (self: &Checker) map_key_type_error() -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("map error: std::map::Map key type must be one of ");
+    try message.append_bytes(typ::map_key_type_names());
+    return self.error_message(ast::zero_span(), move message);
+}
+
 /// Validates and returns Map key/value static type arguments, the Go
 /// `checkedMapArgs`.
 fn (self: &var Checker) checked_map_args(
@@ -700,8 +717,8 @@ fn (self: &var Checker) checked_map_args(
     if args.len() != 2 {
         return try self.error0(ast::zero_span(), "map error: std::map::Map expects 2 static arguments");
     }
-    if !self.names.is(args.get_or_panic(0), "[]u8") {
-        return try self.error0(ast::zero_span(), "map error: std::map::Map key type must be []u8");
+    if !self.name_is_map_key(args.get_or_panic(0)) {
+        return try self.map_key_type_error();
     }
     try out.append(args.get_or_panic(0));
     try out.append(args.get_or_panic(1));

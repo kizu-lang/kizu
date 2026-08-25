@@ -72,8 +72,8 @@ Zig の [#7696](https://github.com/ziglang/zig/issues/7696)
 
 - `internal/native/build.go` の C runtime のみ。`internal/llvm/map.go` は同じ
   `@kizu_map_*` を呼ぶだけで変更なし
-- `Hash` contract は要らない。key type は `[]u8` 限定なので、利用者の型を
-  hash する規則を今決める必要がない
+- `Hash` contract は要らない。key はどれも占めている byte 列として hash
+  されるので、利用者の型を hash する規則を今決める必要がない
 - tombstone は要らない。削除 API がまだ無い
 - SPEC.md に「map は挿入順で反復する」「insert / get / contains は amortized O(1)」
 

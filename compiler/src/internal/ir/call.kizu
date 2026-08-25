@@ -541,8 +541,15 @@ fn (self: &var Lowerer) lower_typed_container_primitive(
             return move failed;
         }
         let resolved = try self.resolve_type_args(type_arg);
-        let value_type = try self.map_primitive_value_type(resolved);
-        return self.lower_map_method(tree, op, value_type, &args, out);
+        var key_type = empty_name();
+        let value_type = try self.map_primitive_type_args(tree, resolved, &var key_type);
+        if same_name(value_type, empty_name()) {
+            return try self.fail1(
+                tree, "ir error: a std::map::Map primitive takes 2 static arguments, got `%s`",
+                Arg::Str(resolved)
+            );
+        }
+        return self.lower_map_method(tree, op, key_type, value_type, &args, out);
     }
     if box_op |op| {
         handled.* = true;
@@ -611,7 +618,7 @@ fn (self: &var Lowerer) lower_array_constructor(
     return null;
 }
 
-/// Lowers std::map::new<[]u8, V>(allocator), the Go `lowerMapConstructor`.
+/// Lowers std::map::new<K, V>(allocator), the Go `lowerMapConstructor`.
 fn (self: &var Lowerer) lower_map_constructor(
     tree: &var ast::Ast,
     type_arg: Name,
@@ -619,9 +626,8 @@ fn (self: &var Lowerer) lower_map_constructor(
     out: &var Value
 ) -> !?diagnostic::Diagnostic {
     var value_type = empty_name();
-    let map_type = try self.map_instance_type(type_arg, &var value_type) orelse return try self.fail0(
-        "ir error: std::map::Map only supports []u8 keys"
-    );
+    let map_type = try self.map_instance_type(type_arg, &var value_type) orelse
+        return try self.map_key_type_failure();
     if ownership::arg_count(tree, args) != 1 {
         return try self.fail1(tree, "ir error: %s expects exactly one allocator argument", Arg::Str(map_type));
     }
@@ -765,8 +771,8 @@ fn (self: &var Lowerer) lower_resolved_method(
     if try self.array_element_type(receiver_type) |elem| {
         return self.lower_std_container_method(tree, "std::array::Array", method, elem, args, out);
     }
-    if try self.map_value_type(receiver_type) |value_type| {
-        return self.lower_std_container_method(tree, "std::map::Map", method, value_type, args, out);
+    if try self.map_static_args(receiver_type) |map_args| {
+        return self.lower_std_container_method(tree, "std::map::Map", method, map_args, args, out);
     }
     if try self.box_element_type(receiver_type) |elem| {
         return self.lower_std_container_method(tree, "std::mem::Box", method, elem, args, out);
@@ -851,8 +857,8 @@ fn (self: &var Lowerer) method_callee_params(
     if try self.array_element_type(receiver) |elem| {
         return self.std_container_params(tree, "std::array::Array", method, elem, out);
     }
-    if try self.map_value_type(receiver) |value_type| {
-        return self.std_container_params(tree, "std::map::Map", method, value_type, out);
+    if try self.map_static_args(receiver) |map_args| {
+        return self.std_container_params(tree, "std::map::Map", method, map_args, out);
     }
     if try self.box_element_type(receiver) |elem| {
         return self.std_container_params(tree, "std::mem::Box", method, elem, out);
@@ -1187,24 +1193,31 @@ fn (self: &var Lowerer) lower_box_method(
     }
 }
 
-/// Returns V from the `[]u8, V` static arguments a Map primitive is applied
-/// to, the Go `mapPrimitiveValueType`.
-fn (self: &var Lowerer) map_primitive_value_type(type_arg: Name) -> !Name {
+/// Returns K and V from the `K, V` static arguments a Map primitive is
+/// applied to, the Go `mapPrimitiveTypeArgs`; the empty name for a list that
+/// is not one.
+fn (self: &var Lowerer) map_primitive_type_args(
+    tree: &var ast::Ast,
+    type_arg: Name,
+    key_out: &var Name
+) -> !Name {
     var args = try self.split_static_args(type_arg);
     defer args.deinit();
     if args.len() != 2 {
-        return type_arg;
+        return empty_name();
     }
+    key_out.* = args.get_or_panic(0);
     return args.get_or_panic(1);
 }
 
-/// Lowers the runtime primitive one std::map::Map<[]u8, V> method forwards
-/// to, the Go `lowerMapMethod`. Only a wrapper body in std/src/map/map.kizu
+/// Lowers the runtime primitive one std::map::Map<K, V> method forwards to,
+/// the Go `lowerMapMethod`. Only a wrapper body in std/src/map/map.kizu
 /// reaches it: a `m.get(k)` call lowers as a call to that wrapper, and this
 /// is what the wrapper does.
 fn (self: &var Lowerer) lower_map_method(
     tree: &var ast::Ast,
     op: Op,
+    key_type: Name,
     value_type: Name,
     args: &array::Array<Value>,
     out: &var Value
@@ -1227,7 +1240,7 @@ fn (self: &var Lowerer) lower_map_method(
             result_type = value_type;
         },
         MapKeyAt => {
-            result_type = try self.name("?[]u8");
+            result_type = try self.module.names.prefixed("?", key_type);
         },
         MapContains => {
             result_type = self.common.bool_type;

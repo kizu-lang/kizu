@@ -220,9 +220,9 @@ fn (self: &var Lowerer) box_element_type(name: Name) -> !?Name {
     return self.module.names.generic_arg_of(name, "std::mem::Box");
 }
 
-/// Names V for the supported `std::map::Map<[]u8, V>` shape, the Go
-/// `mapValueType`.
-fn (self: &var Lowerer) map_value_type(name: Name) -> !?Name {
+/// Names K and V for a `std::map::Map<K, V>` spelling the checker has already
+/// accepted, the Go `mapTypeArgs`.
+fn (self: &var Lowerer) map_key_value_type(name: Name, key_out: &var Name) -> !?Name {
     let args_text = try self.module.names.generic_arg_of(name, "std::map::Map") orelse return null;
     var args = try self.split_static_args(args_text);
     defer args.deinit();
@@ -230,10 +230,31 @@ fn (self: &var Lowerer) map_value_type(name: Name) -> !?Name {
         return null;
     }
     let key = args.get_or_panic(0);
-    if !self.module.names.is(key, "[]u8") {
+    if !self.name_is_map_key(key) {
         return null;
     }
+    key_out.* = key;
     return args.get_or_panic(1);
+}
+
+/// Names the `K, V` argument list a `std::map::Map` wrapper is instantiated
+/// with, the Go `mapStaticArgs`. Both static parameters name the instance, so
+/// a caller that only wanted V would pick the wrong one.
+fn (self: &var Lowerer) map_static_args(name: Name) -> !?Name {
+    var key = empty_name();
+    let value = try self.map_key_value_type(name, &var key) orelse return null;
+    return try self.module.names.joined(key, ", ", value);
+}
+
+/// Reports whether a type spelling is one std::map::Map accepts as a key.
+fn (self: &var Lowerer) name_is_map_key(value: Name) -> bool {
+    return self.module.names.is_map_key(value);
+}
+
+/// Names `std::map::Map<K, V>`.
+fn (self: &var Lowerer) map_type_name(key: Name, value: Name) -> !Name {
+    let args = try self.module.names.joined(key, ", ", value);
+    return self.module.names.wrapped("std::map::Map<", args, ">");
 }
 
 /// Names T for `std::arena::Arena<T>`, and `unknown` for any other spelling,
@@ -267,9 +288,9 @@ fn (self: &var Lowerer) split_static_args(args: Name) -> !array::Array<Name> {
     return array::new<Name>(self.allocator);
 }
 
-/// Names `std::map::Map<[]u8, V>` and V for the argument list a map
-/// constructor was written with, the Go `mapInstanceType`; null when the
-/// list is not a supported map shape.
+/// Names `std::map::Map<K, V>` and V for the argument list a map constructor
+/// was written with, the Go `mapInstanceType`; null when the list is not a
+/// supported map shape.
 fn (self: &var Lowerer) map_instance_type(type_arg: Name, value_out: &var Name) -> !?Name {
     var args = try self.split_static_args(type_arg);
     defer args.deinit();
@@ -277,12 +298,12 @@ fn (self: &var Lowerer) map_instance_type(type_arg: Name, value_out: &var Name) 
         return null;
     }
     let key = args.get_or_panic(0);
-    if !self.module.names.is(key, "[]u8") {
+    if !self.name_is_map_key(key) {
         return null;
     }
     let value_type = args.get_or_panic(1);
     value_out.* = value_type;
-    return try self.module.names.wrapped("std::map::Map<[]u8, ", value_type, ">");
+    return try self.map_type_name(key, value_type);
 }
 
 /// Returns the result type of a checked host-runtime builtin, the Go

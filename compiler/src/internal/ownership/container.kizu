@@ -493,7 +493,7 @@ fn (self: &var Checker) check_array_get(
     return null;
 }
 
-/// Validates ownership effects for owned Map<[]u8, V> methods, the Go
+/// Validates ownership effects for owned Map<K, V> methods, the Go
 /// `checkMapMethod`.
 fn (self: &var Checker) check_map_method(
     tree: &var ast::Ast,
@@ -509,16 +509,17 @@ fn (self: &var Checker) check_map_method(
     if try self.checked_map_args(tree, args_text, &var map_args) |failed| {
         return move failed;
     }
+    let key_type = map_args.get_or_panic(0);
     let value_type = map_args.get_or_panic(1);
     let base_name = try self.names.intern("std::map::Map");
     if try self.check_container_method_access(tree, base_name, map_value, method) |failed| {
         return move failed;
     }
     if self.names.is(method, "insert") {
-        return self.check_owned_map_insert(tree, env, value_type, args, out);
+        return self.check_owned_map_insert(tree, env, key_type, value_type, args, out);
     }
     if self.names.is(method, "get") {
-        if try self.check_map_key_arg(tree, env, method, args) |failed| {
+        if try self.check_map_key_arg(tree, env, method, key_type, args) |failed| {
             return move failed;
         }
         if !try self.is_copy_type(value_type) {
@@ -528,17 +529,19 @@ fn (self: &var Checker) check_map_method(
         return null;
     }
     if self.names.is(method, "at") or self.names.is(method, "at_mut") {
-        return self.check_map_at_condition(tree, env, map_value, value_type, method, args, out);
+        return self.check_map_at_condition(
+            tree, env, map_value, key_type, value_type, method, args, out
+        );
     }
     if self.names.is(method, "key_at") {
         if try self.check_map_index_arg(tree, env, method, args) |failed| {
             return move failed;
         }
-        out.* = try self.names.intern("?[]u8");
+        out.* = try self.names.prefixed("?", key_type);
         return null;
     }
     if self.names.is(method, "contains") {
-        if try self.check_map_key_arg(tree, env, method, args) |failed| {
+        if try self.check_map_key_arg(tree, env, method, key_type, args) |failed| {
             return move failed;
         }
         out.* = self.common.bool_name;
@@ -559,12 +562,13 @@ fn (self: &var Checker) check_map_method(
 }
 
 /// Checks at/at_mut inside a capture condition -- a mutable binding for
-/// at_mut and one []u8 key -- and refuses them everywhere else, the Go
+/// at_mut and one key -- and refuses them everywhere else, the Go
 /// `checkMapAtCondition`: the borrow optional they produce exists only there.
 fn (self: &var Checker) check_map_at_condition(
     tree: &var ast::Ast,
     env: ScopeHandle,
     map_value: BindingHandle,
+    key_type: Name,
     value_type: Name,
     method: Name,
     args: ast::ExpressionList,
@@ -589,7 +593,7 @@ fn (self: &var Checker) check_map_at_condition(
     let saved_return = self.borrow_return;
     self.capture_condition = false;
     self.borrow_return = false;
-    if try self.check_map_key_arg(tree, env, method, args) |failed| {
+    if try self.check_map_key_arg(tree, env, method, key_type, args) |failed| {
         self.capture_condition = saved_capture;
         self.borrow_return = saved_return;
         return move failed;
@@ -609,6 +613,7 @@ fn (self: &var Checker) check_map_at_condition(
 fn (self: &var Checker) check_owned_map_insert(
     tree: &var ast::Ast,
     env: ScopeHandle,
+    key_type: Name,
     value_type: Name,
     args: ast::ExpressionList,
     out: &var Name
@@ -621,14 +626,14 @@ fn (self: &var Checker) check_owned_map_insert(
         );
     }
     let first = args.get_or_panic(tree, 0);
-    var key_type = empty_name();
-    if try self.read_expr(tree, env, first, &var key_type) |failed| {
+    var got_key = empty_name();
+    if try self.read_contextual_expr(tree, env, first, key_type, &var got_key) |failed| {
         return move failed;
     }
-    if !self.names.is(key_type, "[]u8") {
-        return try self.error1(
-            tree, ast::zero_span(), "map error: `Map.insert` expects []u8 key, got %s",
-            Arg::Str(key_type)
+    if !same_name(got_key, key_type) {
+        return try self.error2(
+            tree, ast::zero_span(), "map error: `Map.insert` expects %s key, got %s",
+            Arg::Str(key_type), Arg::Str(got_key)
         );
     }
     let second = args.get_or_panic(tree, 1);
@@ -674,11 +679,13 @@ fn (self: &var Checker) check_map_index_arg(
     return null;
 }
 
-/// Validates one []u8 lookup key, the Go `checkMapKeyArg`.
+/// Validates one lookup key against the map's key type, the Go
+/// `checkMapKeyArg`.
 fn (self: &var Checker) check_map_key_arg(
     tree: &var ast::Ast,
     env: ScopeHandle,
     method: Name,
+    key_type: Name,
     args: ast::ExpressionList
 ) -> !?diagnostic::Diagnostic {
     let count = arg_count(tree, args);
@@ -690,13 +697,13 @@ fn (self: &var Checker) check_map_key_arg(
     }
     let first = args.get_or_panic(tree, 0);
     var got = empty_name();
-    if try self.read_expr(tree, env, first, &var got) |failed| {
+    if try self.read_contextual_expr(tree, env, first, key_type, &var got) |failed| {
         return move failed;
     }
-    if !self.names.is(got, "[]u8") {
-        return try self.error2(
-            tree, ast::zero_span(), "map error: `Map.%s` expects []u8 key, got %s",
-            Arg::Str(method), Arg::Str(got)
+    if !same_name(got, key_type) {
+        return try self.error3(
+            tree, ast::zero_span(), "map error: `Map.%s` expects %s key, got %s",
+            Arg::Str(method), Arg::Str(key_type), Arg::Str(got)
         );
     }
     return null;
