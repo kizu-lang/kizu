@@ -782,7 +782,10 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 				fn.Name, block.Name, err)
 		}
 	}
-	body := e.out.String()[bodyStart:]
+	// Bytes, not String: String copies the whole buffer, and the buffer holds
+	// the module written so far, so taking one function body that way costs
+	// the module size once per function.
+	body := string(e.out.Bytes()[bodyStart:])
 	hoisted, err := hoistAllocasToEntry(body)
 	if err != nil {
 		return fmt.Errorf("llvm error: function `%s`: %w", fn.Name, err)

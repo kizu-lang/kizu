@@ -7,24 +7,96 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 )
 
+// arrayHeaderType names the runtime's KizuArray header in emitted modules.
+// Element access reads these fields rather than calling the runtime for each
+// one: `kizu ir compiler` reaches an element 264 million times in one run, and
+// a call the optimizer cannot see through costs more than the access. runtime.c
+// asserts the same offsets, so the two spellings cannot drift apart.
+const arrayHeaderType = "%kizu.array"
+
+// The field indices of arrayHeaderType.
+const (
+	arrayFieldData     = 0
+	arrayFieldLen      = 1
+	arrayFieldCapacity = 2
+)
+
+// arrayEmptyGlobal is the header read in place of a null handle. The runtime
+// hands back null when the header itself could not be allocated, and answered
+// every read on it from its own null checks; an all-zero header answers them
+// the same way. It holds no capacity, so an append still goes back to the
+// runtime and comes back as the failure.
+const arrayEmptyGlobal = "@kizu.array.empty"
+
 // writeArrayRuntimeDecls writes declarations for the hosted Array runtime.
 func (e *emitter) writeArrayRuntimeDecls() {
 	if !e.usesArrayRuntime() {
 		return
 	}
+	fmt.Fprintf(&e.out, "%s = type { ptr, i64, i64, i64, ptr }\n", arrayHeaderType)
+	fmt.Fprintf(&e.out, "%s = private unnamed_addr global %s zeroinitializer\n",
+		arrayEmptyGlobal, arrayHeaderType)
 	e.out.WriteString("declare ptr @kizu_array_new(ptr, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_append(ptr, ptr)\n")
-	e.out.WriteString("declare i64 @kizu_array_len(ptr)\n")
-	e.out.WriteString("declare i64 @kizu_array_capacity(ptr)\n")
 	e.out.WriteString("declare i1 @kizu_array_reserve(ptr, i64)\n")
-	e.out.WriteString("declare ptr @kizu_array_get(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_pop(ptr)\n")
-	e.out.WriteString("declare i1 @kizu_array_set(ptr, i64, ptr)\n")
 	e.out.WriteString("declare i1 @kizu_array_swap(ptr, i64, i64)\n")
 	e.out.WriteString("declare i1 @kizu_array_truncate(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_array_clear(ptr)\n")
 	e.out.WriteString("declare %kizu.slice.u8 @kizu_array_as_bytes(ptr)\n")
 	e.out.WriteString("declare void @kizu_array_deinit(ptr)\n\n")
+}
+
+// arrayHandle returns an operand that always points at a readable header.
+func (e *emitter) arrayHandle(operand string) string {
+	nullName := "%" + e.nextSyntheticValue("array.handle.null")
+	handleName := "%" + e.nextSyntheticValue("array.handle")
+	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, operand)
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr %s\n",
+		handleName, nullName, arrayEmptyGlobal, operand)
+	return handleName
+}
+
+// arrayFieldAddr returns the address of one header field.
+func (e *emitter) arrayFieldAddr(handle string, field int, name string) string {
+	addr := "%" + e.nextSyntheticValue(name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 0, i32 %d\n",
+		addr, arrayHeaderType, handle, field)
+	return addr
+}
+
+// arrayLoadField loads one i64 header field into the named register.
+func (e *emitter) arrayLoadField(handle string, field int, name string, into string) {
+	addr := e.arrayFieldAddr(handle, field, name+".addr")
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", into, addr)
+}
+
+// arrayElementAddr returns the address of the element at index. The stride is
+// the element type, which is what array.new sized the elements by, and the
+// index is not checked here.
+func (e *emitter) arrayElementAddr(handle string, elem string, index string) string {
+	dataAddr := e.arrayFieldAddr(handle, arrayFieldData, "array.data.addr")
+	data := "%" + e.nextSyntheticValue("array.data")
+	elemAddr := "%" + e.nextSyntheticValue("array.elem")
+	fmt.Fprintf(&e.out, "  %s = load ptr, ptr %s\n", data, dataAddr)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i64 %s\n",
+		elemAddr, e.llvmType(elem), data, index)
+	return elemAddr
+}
+
+// arrayCheckedElement returns the address of the element at index, or null when
+// index is outside the array. The comparison is unsigned, so a negative index
+// is out of range without a second test -- the same answer the runtime gave by
+// returning a null element pointer.
+func (e *emitter) arrayCheckedElement(instr *ir.Instr, handle string, index string) string {
+	length := "%" + e.nextSyntheticValue("array.len")
+	e.arrayLoadField(handle, arrayFieldLen, "array.len", length)
+	inRange := "%" + e.nextSyntheticValue("array.in_range")
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
+	elemAddr := e.arrayElementAddr(handle, instr.Immediate, index)
+	checked := "%" + e.nextSyntheticValue("array.checked")
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, ptr %s, ptr null\n", checked, inRange, elemAddr)
+	return checked
 }
 
 // usesArrayRuntime reports whether this module uses std::array::Array lowering.
@@ -69,9 +141,9 @@ func (e *emitter) writeArrayInstr(instr *ir.Instr) error {
 }
 
 // writeArrayElementInstr dispatches the Array operations that move or borrow a
-// single element. All of them go through a pointer to one element slot -- built
-// on the stack for append and set, handed back by the runtime for the rest --
-// so they share the null-pointer trap and failure plumbing.
+// single element. All of them go through a pointer to one element slot -- read
+// out of the header here for the ones that only need an address, handed back by
+// the runtime for pop -- so they share the failure plumbing.
 func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "array.append":
@@ -142,11 +214,65 @@ func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: array.append expects Array<T>, T -> std::mem::Error!void")
 	}
 	array := e.value(instr.Args[0])
-	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[1])
+	handle := e.arrayHandle(array.operand)
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s)\n",
-		okName, array.operand, elemSlot)
+	e.writeArrayAppendPaths(instr, array.operand, handle, okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_append")
+}
+
+// writeArrayAppendPaths writes into the reserved tail when there is one and
+// otherwise hands the append back to the runtime, which is what owns growing
+// the storage. The slow path is given the handle as it came, not the readable
+// stand-in, so a null handle still comes back as the failure it is.
+func (e *emitter) writeArrayAppendPaths(
+	instr *ir.Instr,
+	handleOperand string,
+	handle string,
+	okName string,
+) {
+	length := "%" + e.nextSyntheticValue("array.append.len")
+	capacity := "%" + e.nextSyntheticValue("array.append.cap")
+	lengthAddr := e.arrayFieldAddr(handle, arrayFieldLen, "array.append.len.addr")
+	fmt.Fprintf(&e.out, "  %s = load i64, ptr %s\n", length, lengthAddr)
+	e.arrayLoadField(handle, arrayFieldCapacity, "array.append.cap", capacity)
+	fits := "%" + e.nextSyntheticValue("array.append.fits")
+	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, %s\n", fits, length, capacity)
+	fastLabel := helperLabel(okName, "array.append.fast")
+	slowLabel := helperLabel(okName, "array.append.slow")
+	joinLabel := helperLabel(okName, "array.append.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", fits, fastLabel, slowLabel)
+	fmt.Fprintf(&e.out, "%s:\n", fastLabel)
+	elemAddr := e.arrayElementAddr(handle, instr.Immediate, length)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, elemAddr)
+	grown := "%" + e.nextSyntheticValue("array.append.grown")
+	fmt.Fprintf(&e.out, "  %s = add i64 %s, 1\n", grown, length)
+	fmt.Fprintf(&e.out, "  store i64 %s, ptr %s\n", grown, lengthAddr)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", slowLabel)
+	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[1])
+	slowOk := "%" + e.nextSyntheticValue("array.append.slow.ok")
+	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_append(ptr %s, ptr %s)\n",
+		slowOk, handleOperand, elemSlot)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
+	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ %s, %%%s ]\n",
+		okName, fastLabel, slowOk, slowLabel)
+}
+
+// writeBoundsFailure traps when index is outside the array. The comparison is
+// unsigned, so a negative index is out of range without a second test.
+func (e *emitter) writeBoundsFailure(instr *ir.Instr, index string, length string) {
+	inRange := "%" + e.nextSyntheticValue("array.get.panic.in_range")
+	failLabel := helperLabel(inRange, "array.get.panic.bounds")
+	okLabel := helperLabel(inRange, "ok")
+	e.markCurrentBlockExit(okLabel)
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", inRange, okLabel, failLabel)
+	fmt.Fprintf(&e.out, "%s:\n", failLabel)
+	e.writePanicCall(instr, "bounds", index, length)
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 }
 
 // writeArrayLen lowers Array.len().
@@ -154,9 +280,9 @@ func (e *emitter) writeArrayLen(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: array.len expects Array<T> -> i64")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_array_len(ptr %s)\n", resultName, array.operand)
+	e.arrayLoadField(handle, arrayFieldLen, "array.len", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -166,10 +292,9 @@ func (e *emitter) writeArrayCapacity(instr *ir.Instr) error {
 	if len(instr.Args) != 1 || instr.Result.Type != "i64" {
 		return fmt.Errorf("llvm error: array.capacity expects Array<T> -> i64")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_array_capacity(ptr %s)\n",
-		resultName, array.operand)
+	e.arrayLoadField(handle, arrayFieldCapacity, "array.capacity", resultName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -220,12 +345,10 @@ func (e *emitter) writeArrayGet(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.get expects Array<T>, i64 -> ?T")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
-		ptrName, array.operand, index.operand)
-	return e.writeArrayOptionalLoadResult(instr, ptrName)
+	return e.writeArrayOptionalLoadResult(
+		instr, e.arrayCheckedElement(instr, handle, index.operand))
 }
 
 // writeArrayGetOrPanic lowers Array.get_or_panic(index).
@@ -233,16 +356,15 @@ func (e *emitter) writeArrayGetOrPanic(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.get_or_panic expects Array<T>, i64 -> T")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
 	lenName := "%" + e.nextSyntheticValue("array.get.panic.len")
-	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_array_len(ptr %s)\n", lenName, array.operand)
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
-		ptrName, array.operand, index.operand)
-	e.writeNullFailure(instr, ptrName, "array.get.panic", "bounds", index.operand, lenName)
+	e.arrayLoadField(handle, arrayFieldLen, "array.get.panic.len", lenName)
+	e.writeBoundsFailure(instr, index.operand, lenName)
+	elemAddr := e.arrayElementAddr(handle, instr.Immediate, index.operand)
 	resultName := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, e.llvmType(instr.Result.Type), ptrName)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+		resultName, e.llvmType(instr.Result.Type), elemAddr)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -254,12 +376,10 @@ func (e *emitter) writeArrayAt(instr *ir.Instr) error {
 	if len(instr.Args) != 2 || instr.Args[1].Type != "i64" {
 		return fmt.Errorf("llvm error: array.at expects Array<T>, i64 -> ?&T")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	ptrName := localName(instr.Result.Name) + ".ptr"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_get(ptr %s, i64 %s)\n",
-		ptrName, array.operand, index.operand)
-	return e.writeBorrowOptionalResult(instr, ptrName)
+	return e.writeBorrowOptionalResult(
+		instr, e.arrayCheckedElement(instr, handle, index.operand))
 }
 
 // writeArraySet lowers Array.set(index, value) and preserves !void failure flow.
@@ -268,13 +388,41 @@ func (e *emitter) writeArraySet(instr *ir.Instr) error {
 		instr.Result.Type != "std::array::Error!void" {
 		return fmt.Errorf("llvm error: array.set expects Array<T>, i64, T -> std::array::Error!void")
 	}
-	array := e.value(instr.Args[0])
+	handle := e.arrayHandle(e.value(instr.Args[0]).operand)
 	index := e.value(instr.Args[1])
-	elemSlot := e.writeStackValue(localName(instr.Result.Name)+".elem", instr.Args[2])
 	okName := localName(instr.Result.Name) + ".ok"
-	fmt.Fprintf(&e.out, "  %s = call i1 @kizu_array_set(ptr %s, i64 %s, ptr %s)\n",
-		okName, array.operand, index.operand, elemSlot)
+	e.writeArrayCheckedStore(handle, instr.Immediate, index.operand, instr.Args[2], okName)
 	return e.writeArrayBoolResult(instr.Result, okName, "array_bounds")
+}
+
+// writeArrayCheckedStore writes value at index when index is inside the array,
+// and leaves okName saying whether it did.
+func (e *emitter) writeArrayCheckedStore(
+	handle string,
+	elem string,
+	index string,
+	value ir.Value,
+	okName string,
+) {
+	length := "%" + e.nextSyntheticValue("array.set.len")
+	e.arrayLoadField(handle, arrayFieldLen, "array.set.len", length)
+	inRange := "%" + e.nextSyntheticValue("array.set.in_range")
+	fmt.Fprintf(&e.out, "  %s = icmp ult i64 %s, %s\n", inRange, index, length)
+	storeLabel := helperLabel(okName, "array.set.store")
+	skipLabel := helperLabel(okName, "array.set.skip")
+	joinLabel := helperLabel(okName, "array.set.join")
+	e.markCurrentBlockExit(joinLabel)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", inRange, storeLabel, skipLabel)
+	fmt.Fprintf(&e.out, "%s:\n", storeLabel)
+	elemAddr := e.arrayElementAddr(handle, elem, index)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		e.llvmType(value.Type), e.value(value).operand, elemAddr)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", skipLabel)
+	fmt.Fprintf(&e.out, "  br label %%%s\n", joinLabel)
+	fmt.Fprintf(&e.out, "%s:\n", joinLabel)
+	fmt.Fprintf(&e.out, "  %s = phi i1 [ true, %%%s ], [ false, %%%s ]\n",
+		okName, storeLabel, skipLabel)
 }
 
 // writeArrayTruncate lowers Array.truncate(length).
@@ -391,7 +539,6 @@ func (e *emitter) writeNullFailure(
 	key string,
 	args ...string,
 ) {
-	spec := panicEntries[key]
 	nullName := "%" + e.nextSyntheticValue(prefix+".is_null")
 	failLabel := helperLabel(ptrName, prefix+".null")
 	okLabel := helperLabel(ptrName, "ok")
@@ -399,6 +546,13 @@ func (e *emitter) writeNullFailure(
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
 	fmt.Fprintf(&e.out, "%s:\n", failLabel)
+	e.writePanicCall(instr, key, args...)
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+}
+
+// writePanicCall writes the trap that ends a refused access.
+func (e *emitter) writePanicCall(instr *ir.Instr, key string, args ...string) {
+	spec := panicEntries[key]
 	typed := make([]string, 0, len(args)+2)
 	for i, arg := range args {
 		typed = append(typed, spec.params[i]+" "+arg)
@@ -406,7 +560,6 @@ func (e *emitter) writeNullFailure(
 	typed = append(typed, panicPosition(instr.Span)...)
 	fmt.Fprintf(&e.out, "  call void @%s(%s)\n", spec.entry, strings.Join(typed, ", "))
 	e.out.WriteString("  unreachable\n")
-	fmt.Fprintf(&e.out, "%s:\n", okLabel)
 }
 
 // writeStackValue stores a first-class value in a temporary slot and returns its pointer.

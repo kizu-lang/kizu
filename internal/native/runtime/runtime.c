@@ -1,4 +1,5 @@
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,16 @@ typedef struct {
     int64_t elem_size;
     void *allocator;
 } KizuArray;
+
+/* The native backend reads these fields itself rather than calling in for every
+   element, so their offsets are part of what it emits (`%kizu.array` in
+   internal/llvm/array.go). Reordering the struct without changing that type is
+   a failure here rather than a program that reads the wrong word. */
+_Static_assert(offsetof(KizuArray, data) == 0, "KizuArray.data leads the header");
+_Static_assert(offsetof(KizuArray, len) == 8, "KizuArray.len follows data");
+_Static_assert(offsetof(KizuArray, cap) == 16, "KizuArray.cap follows len");
+_Static_assert(offsetof(KizuArray, elem_size) == 24, "KizuArray.elem_size follows cap");
+_Static_assert(sizeof(KizuArray) == 40, "KizuArray is five words");
 
 typedef struct {
     unsigned char *ptr;
@@ -1468,30 +1479,12 @@ _Bool kizu_array_append(void *handle, const void *elem) {
     return 1;
 }
 
-int64_t kizu_array_len(void *handle) {
-    KizuArray *array = (KizuArray *)handle;
-    return array ? array->len : 0;
-}
-
-int64_t kizu_array_capacity(void *handle) {
-    KizuArray *array = (KizuArray *)handle;
-    return array ? array->cap : 0;
-}
-
 _Bool kizu_array_reserve(void *handle, int64_t additional) {
     KizuArray *array = (KizuArray *)handle;
     if (!array || additional < 0 || additional > INT64_MAX - array->len) {
         return 0;
     }
     return kizu_array_reserve_storage(array, array->len + additional);
-}
-
-void *kizu_array_get(void *handle, int64_t index) {
-    KizuArray *array = (KizuArray *)handle;
-    if (!array || index < 0 || index >= array->len) {
-        return NULL;
-    }
-    return array->data + index * array->elem_size;
 }
 
 void *kizu_array_pop(void *handle) {
@@ -1501,15 +1494,6 @@ void *kizu_array_pop(void *handle) {
     }
     array->len -= 1;
     return array->data + array->len * array->elem_size;
-}
-
-_Bool kizu_array_set(void *handle, int64_t index, const void *elem) {
-    KizuArray *array = (KizuArray *)handle;
-    if (!array || !elem || index < 0 || index >= array->len) {
-        return 0;
-    }
-    memcpy(array->data + index * array->elem_size, elem, (size_t)array->elem_size);
-    return 1;
 }
 
 _Bool kizu_array_swap(void *handle, int64_t left, int64_t right) {
@@ -1567,12 +1551,46 @@ void *kizu_map_new(void *allocator, int64_t value_size) {
     return map;
 }
 
-static uint64_t kizu_map_hash(const unsigned char *key, int64_t key_len) {
-    uint64_t hash = 1469598103934665603ULL;
-    for (int64_t i = 0; i < key_len; i += 1) {
-        hash ^= (uint64_t)key[i];
-        hash *= 1099511628211ULL;
+/* kizu_map_read8 and kizu_map_read_tail read a key eight bytes at a time and
+   then the rest. The tail of four bytes or more is read as two overlapping
+   halves, so neither reader needs a loop or a variable-length copy: one
+   `kizu ir compiler` hashes 149 MB of keys, and a byte at a time makes that a
+   chain of dependent multiplies no wider than one byte per step. */
+static uint64_t kizu_map_read8(const unsigned char *p) {
+    uint64_t word;
+    memcpy(&word, p, 8);
+    return word;
+}
+
+static uint64_t kizu_map_read_tail(const unsigned char *p, int64_t len) {
+    if (len >= 4) {
+        uint32_t head, foot;
+        memcpy(&head, p, 4);
+        memcpy(&foot, p + len - 4, 4);
+        return ((uint64_t)head << 32) | (uint64_t)foot;
     }
+    if (len == 0) {
+        return 0;
+    }
+    return ((uint64_t)p[0] << 16) | ((uint64_t)p[len >> 1] << 8) | (uint64_t)p[len - 1];
+}
+
+/* The length seeds the hash so that keys differing only in trailing structure
+   still separate, and the final mix spreads the high bits down: the slot is
+   taken from the low bits, and the multiply alone leaves those weak. */
+static uint64_t kizu_map_hash(const unsigned char *key, int64_t key_len) {
+    uint64_t hash = (uint64_t)key_len;
+    int64_t i = 0;
+    for (; i + 8 <= key_len; i += 8) {
+        hash = (((hash << 5) | (hash >> 59)) ^ kizu_map_read8(key + i)) * 0x517cc1b727220a95ULL;
+    }
+    if (i < key_len) {
+        hash = (((hash << 5) | (hash >> 59)) ^ kizu_map_read_tail(key + i, key_len - i)) *
+               0x517cc1b727220a95ULL;
+    }
+    hash ^= hash >> 32;
+    hash *= 0xd6e8feb86659fd93ULL;
+    hash ^= hash >> 32;
     return hash;
 }
 
