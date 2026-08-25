@@ -26,18 +26,34 @@ borrow する形は borrow field 禁止と衝突する」)は ADR-0099 の tie �
 ### 1. `Allocator` は user が実装できる
 
 std factory だけが作れる opaque capability という制限を外す。user は確保と
-解放を `unsafe fn` の free function で書き、std の
-`allocator_from<T, alloc: Function, free: Function>(state: &var T)` が名前で
-受けて `Allocator` にまとめる(署名は SPEC §14.3)。
+解放を `unsafe fn` で書き、std の `allocator_from` に渡す(署名は SPEC §14.3):
 
-`Function` static parameter は SPEC §13 が既に持つ形で、まさに「std wrapper が
-名前で受けた関数を trusted primitive に転送する」ためのものである。closure では
-なく、局所を捕捉せず、runtime データに格納できない。**言語に足すものは無い。**
+```text
+std::mem::allocator_from<T>(
+    state: &var T,
+    alloc: unsafe fn(&var T, i64) -> ?ptr<u8>,
+    free:  unsafe fn(&var T, ptr<u8>, i64) -> void,
+) -> Allocator
+```
 
 2 関数が unsafe なのは raw pointer を返すからで、SPEC §12 の既存の規則が
 そのまま適用される。新しい unsafe の種類は増えない。
 
-### 2. 安全性は tie が持つ。contract 化はしない
+### 2. 関数 pointer 型を入れる
+
+`fn(i64) -> i64` を型として書けるようにする。値になれるのは top-level function
+の名前だけで、closure も捕捉も無い。
+
+**呼び出しは safe である。** 指す先はプログラムの生存期間ずっとあり、型が
+signature を保証するので、間接であること自体に compiler が証明できない点は
+無い。`unsafe` は指す先が `unsafe fn` のときだけ要り、直接呼ぶときと同じ扱いに
+なる。`unsafe fn(...)` は `fn(...)` と別の型で、safe な呼び出しへ紛れ込まない。
+
+Allocator は runtime に渡され struct field に格納される値なので、どう綴っても
+実行時の間接呼び出しは起きる。綴りを持たせるのは、起きているものを言語から
+見えなくしないためである(原理 1)。
+
+### 3. 安全性は tie が持つ。contract 化はしない
 
 `Allocator` を user-facing `contract` にはしない。ADR-0092 決定 1 が守った
 「container が user state を参照する形」の危険は、参照を禁じることではなく
@@ -47,7 +63,7 @@ tie で寿命を追うことで受ける。
 tied allocator の署名そのものである。したがって **checker に新しい規則は
 要らない**。既存の recognizer が署名の形で拾い、tie 規則は ADR-0099 が持つ。
 
-### 3. `Allocator` の runtime 表現を広げる
+### 4. `Allocator` の runtime 表現を広げる
 
 ADR-0092 決定 2 が「第二の allocator 種を実際に入れる変更が、その時に
 handle を導入する」として延期した handle 実体化を、ここで履行する。
@@ -71,5 +87,6 @@ handle を導入する」として延期した handle 実体化を、ここで�
 | user allocator を global に 1 つだけ登録(Rust の `#[global_allocator]` 相当) | 間接呼び出しは同じで、しかも同一プログラム内で 2 つの戦略を使い分けられない。freestanding の実体供給(ADR-0092 決定 4)は別機構として残す |
 | bump に in-place 成長を足して `fixed_buffer` で済ませる | 実測で in-place が当たるのは realloc 538 万回中 9 万回、1.7%。伸ばす対象が「最後の確保」であることが稀 |
 | 解放するブロックの class を header word で持つ | 64 byte の確保に 16 byte で 25% 損なう。runtime の解放 14 箇所のうち 13 箇所は size を知っているので、`free` に size を渡せば header は要らない |
-| runtime の関数値(function type)で 2 関数を渡す | Kizu に関数型が無い。足せば隠れた制御フローが言語に入る。`Function` static parameter が同じことを compile time に済ませる |
+| `Function` static parameter(SPEC §13)で関数名を渡す | 綴りは消えるが間接呼び出しは残る。起きているものを言語から見えなくするだけで、原理 1 に反する。宣言はあるが body での呼び出し解決は未実装でもある |
+| 関数 pointer 呼び出しを `unsafe` にする | 印の誤用。指す先は解放されず、型が signature を保証するので、compiler が証明できない点が無い(ADR-0089) |
 | user allocator を safe に書けるようにする | 確保は raw pointer を返す操作で compiler が証明できない。印のない unsafe を作らない(ADR-0089) |
