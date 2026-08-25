@@ -26,8 +26,13 @@ borrow する形は borrow field 禁止と衝突する」)は ADR-0099 の tie �
 ### 1. `Allocator` は user が実装できる
 
 std factory だけが作れる opaque capability という制限を外す。user は確保と
-解放の 2 関数を `unsafe fn` で書き、`std::mem::allocator_from(&var state,
-alloc, free)` がそれを `Allocator` にまとめる(署名は SPEC §14.3)。
+解放を `unsafe fn` の free function で書き、std の
+`allocator_from<T, alloc: Function, free: Function>(state: &var T)` が名前で
+受けて `Allocator` にまとめる(署名は SPEC §14.3)。
+
+`Function` static parameter は SPEC §13 が既に持つ形で、まさに「std wrapper が
+名前で受けた関数を trusted primitive に転送する」ためのものである。closure では
+なく、局所を捕捉せず、runtime データに格納できない。**言語に足すものは無い。**
 
 2 関数が unsafe なのは raw pointer を返すからで、SPEC §12 の既存の規則が
 そのまま適用される。新しい unsafe の種類は増えない。
@@ -66,4 +71,5 @@ handle を導入する」として延期した handle 実体化を、ここで�
 | user allocator を global に 1 つだけ登録(Rust の `#[global_allocator]` 相当) | 間接呼び出しは同じで、しかも同一プログラム内で 2 つの戦略を使い分けられない。freestanding の実体供給(ADR-0092 決定 4)は別機構として残す |
 | bump に in-place 成長を足して `fixed_buffer` で済ませる | 実測で in-place が当たるのは realloc 538 万回中 9 万回、1.7%。伸ばす対象が「最後の確保」であることが稀 |
 | 解放するブロックの class を header word で持つ | 64 byte の確保に 16 byte で 25% 損なう。runtime の解放 14 箇所のうち 13 箇所は size を知っているので、`free` に size を渡せば header は要らない |
+| runtime の関数値(function type)で 2 関数を渡す | Kizu に関数型が無い。足せば隠れた制御フローが言語に入る。`Function` static parameter が同じことを compile time に済ませる |
 | user allocator を safe に書けるようにする | 確保は raw pointer を返す操作で compiler が証明できない。印のない unsafe を作らない(ADR-0089) |
