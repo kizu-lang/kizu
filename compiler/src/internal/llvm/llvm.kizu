@@ -34,13 +34,16 @@ pub fn emit(allocator: Allocator, module: &var ir::Module, out: &var string::Str
         out: string::new(allocator),
         strings: map::new<[]u8, ir::Name>(allocator),
         string_literals: map::new<[]u8, ir::Name>(allocator),
-        values: map::new<[]u8, ValueInfo>(allocator),
+        values: array::new<ValueInfo>(allocator),
         function_names: map::new<[]u8, ir::Function>(allocator),
         current_return: ir::empty_name(),
         main_returns_int: false,
         next_label: 0,
         current_block: ir::empty_name(),
-        block_exit_label: map::new<[]u8, ExitLabel>(allocator),
+        block_exit_label: array::new<ExitLabel>(allocator),
+        local_names: array::new<ir::Name>(allocator),
+        owned_names: array::new<ir::Name>(allocator),
+        llvm_types: array::new<ir::Name>(allocator),
         entry_param_loads: string::new(allocator),
         wrote_param_loads: false,
         generation: 0
@@ -80,13 +83,25 @@ struct Emitter {
     out: string::String,
     strings: map::Map<[]u8, ir::Name>,
     string_literals: map::Map<[]u8, ir::Name>,
-    values: map::Map<[]u8, ValueInfo>,
+    // Indexed by the module name id of the SSA value, not keyed by its
+    // spelling: the ids are dense, the emitter reaches this table for every
+    // operand of every instruction, and a stale generation already stands for
+    // absent, so nothing has to be cleared between functions.
+    values: array::Array<ValueInfo>,
     function_names: map::Map<[]u8, ir::Function>,
     current_return: ir::Name,
     main_returns_int: bool,
     next_label: i64,
     current_block: ir::Name,
-    block_exit_label: map::Map<[]u8, ExitLabel>,
+    // Indexed by the module name id of the block, the way values is.
+    block_exit_label: array::Array<ExitLabel>,
+    // Three answers that depend on nothing but the module name asked about,
+    // each indexed by its id. The emitter asks for all three once per operand
+    // and once per type, so they are computed once rather than rebuilt and
+    // re-interned every time. An empty entry means "not computed yet".
+    local_names: array::Array<ir::Name>,
+    owned_names: array::Array<ir::Name>,
+    llvm_types: array::Array<ir::Name>,
     entry_param_loads: string::String,
     wrote_param_loads: bool,
     generation: i64
@@ -136,10 +151,169 @@ fn append_arg(out: &var string::String, names: &ir::NameTable, arg: Arg) -> !voi
     }
 }
 
-/// Appends format with `%s` / `%d` replaced in order by the arguments and
-/// `%%` by `%`, the Go `fmt.Fprintf` / `fmt.Sprintf`; an argument the format
-/// does not place is released.
-fn format_args(
+/// Appends the text of format from position up to the next `%s` / `%d`,
+/// then the argument in its place, and moves position past it; an argument
+/// with no placeholder left is released.
+fn place_arg(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    position: &var i64,
+    arg: Arg
+) -> !void {
+    errdefer arg.deinit();
+    var index = position.*;
+    // The literal run since `run` is appended in one copy rather than a byte
+    // at a time: a format is mostly literal, and every emitted line runs this.
+    var run = index;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
+            if format[index + 1] == cast<u8>(37) {
+                try out.append_bytes(format[run..index + 1]);
+                index = index + 2;
+                run = index;
+                continue;
+            }
+            try out.append_bytes(format[run..index]);
+            try append_arg(out, names, move arg);
+            position.* = index + 2;
+            return;
+        }
+        index = index + 1;
+    }
+    try out.append_bytes(format[run..index]);
+    arg.deinit();
+    position.* = index;
+    return;
+}
+
+/// Appends the text of format after its last placeholder.
+fn append_format_rest(out: &var string::String, format: []u8, position: i64) -> !void {
+    var index = position;
+    var run = index;
+    while index < mem::len(format) {
+        let byte = format[index];
+        if byte == cast<u8>(37) and index + 1 < mem::len(format) and format[index + 1] == cast<u8>(37) {
+            try out.append_bytes(format[run..index + 1]);
+            index = index + 2;
+            run = index;
+            continue;
+        }
+        index = index + 1;
+    }
+    return out.append_bytes(format[run..index]);
+}
+
+/// Appends format with its 1 argument placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args1(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg
+) -> !void {
+    errdefer a.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends format with its 2 arguments placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args2(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends format with its 3 arguments placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args3(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    errdefer c.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    try place_arg(out, names, format, &var position, move c);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends format with its 4 arguments placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args4(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    errdefer c.deinit();
+    errdefer d.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    try place_arg(out, names, format, &var position, move c);
+    try place_arg(out, names, format, &var position, move d);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends format with its 5 arguments placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args5(
+    out: &var string::String,
+    names: &ir::NameTable,
+    format: []u8,
+    a: Arg,
+    b: Arg,
+    c: Arg,
+    d: Arg,
+    e: Arg
+) -> !void {
+    errdefer a.deinit();
+    errdefer b.deinit();
+    errdefer c.deinit();
+    errdefer d.deinit();
+    errdefer e.deinit();
+    var position = 0;
+    try place_arg(out, names, format, &var position, move a);
+    try place_arg(out, names, format, &var position, move b);
+    try place_arg(out, names, format, &var position, move c);
+    try place_arg(out, names, format, &var position, move d);
+    try place_arg(out, names, format, &var position, move e);
+    return append_format_rest(out, format, position);
+}
+
+/// Appends format with its 6 arguments placed in order. Each arity has its
+/// own entry so a line pays for the arguments it has: the emitter writes
+/// millions of lines, and most of them carry one or two.
+fn format_args6(
     out: &var string::String,
     names: &ir::NameTable,
     format: []u8,
@@ -166,54 +340,6 @@ fn format_args(
     return append_format_rest(out, format, position);
 }
 
-/// Appends the text of format from position up to the next `%s` / `%d`,
-/// then the argument in its place, and moves position past it; an argument
-/// with no placeholder left is released.
-fn place_arg(
-    out: &var string::String,
-    names: &ir::NameTable,
-    format: []u8,
-    position: &var i64,
-    arg: Arg
-) -> !void {
-    errdefer arg.deinit();
-    var index = position.*;
-    while index < mem::len(format) {
-        let byte = format[index];
-        if byte == cast<u8>(37) and index + 1 < mem::len(format) {
-            if format[index + 1] == cast<u8>(37) {
-                try out.append_byte(cast<u8>(37));
-                index = index + 2;
-                continue;
-            }
-            try append_arg(out, names, move arg);
-            position.* = index + 2;
-            return;
-        }
-        try out.append_byte(byte);
-        index = index + 1;
-    }
-    arg.deinit();
-    position.* = index;
-    return;
-}
-
-/// Appends the text of format after its last placeholder.
-fn append_format_rest(out: &var string::String, format: []u8, position: i64) -> !void {
-    var index = position;
-    while index < mem::len(format) {
-        let byte = format[index];
-        if byte == cast<u8>(37) and index + 1 < mem::len(format) and format[index + 1] == cast<u8>(37) {
-            try out.append_byte(cast<u8>(37));
-            index = index + 2;
-            continue;
-        }
-        try out.append_byte(byte);
-        index = index + 1;
-    }
-    return;
-}
-
 /// Writes one line of LLVM text with no interpolation, the Go
 /// `e.out.WriteString("...\n")`.
 fn (self: &var Emitter) line(text: []u8) -> !void {
@@ -224,42 +350,42 @@ fn (self: &var Emitter) line(text: []u8) -> !void {
 /// Writes one formatted line, the Go `fmt.Fprintf(&e.out, "...\n", a)`.
 fn (self: &var Emitter) line1(format: []u8, a: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, Arg::None, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args1(&var self.out, names, format, move a);
     return self.out.append_byte(cast<u8>(10));
 }
 
 /// Writes one formatted line with two arguments.
 fn (self: &var Emitter) line2(format: []u8, a: Arg, b: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args2(&var self.out, names, format, move a, move b);
     return self.out.append_byte(cast<u8>(10));
 }
 
 /// Writes one formatted line with three arguments.
 fn (self: &var Emitter) line3(format: []u8, a: Arg, b: Arg, c: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    try format_args3(&var self.out, names, format, move a, move b, move c);
     return self.out.append_byte(cast<u8>(10));
 }
 
 /// Writes one formatted line with four arguments.
 fn (self: &var Emitter) line4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    try format_args4(&var self.out, names, format, move a, move b, move c, move d);
     return self.out.append_byte(cast<u8>(10));
 }
 
 /// Writes one formatted line with five arguments.
 fn (self: &var Emitter) line5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, move b, move c, move d, move e, Arg::None);
+    try format_args5(&var self.out, names, format, move a, move b, move c, move d, move e);
     return self.out.append_byte(cast<u8>(10));
 }
 
 /// Writes one formatted line with six arguments.
 fn (self: &var Emitter) line6(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg, f: Arg) -> !void {
     let names = &self.names;
-    try format_args(&var self.out, names, format, move a, move b, move c, move d, move e, move f);
+    try format_args6(&var self.out, names, format, move a, move b, move c, move d, move e, move f);
     return self.out.append_byte(cast<u8>(10));
 }
 
@@ -268,7 +394,7 @@ fn (self: &var Emitter) line6(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: A
 fn (self: &var Emitter) text1(format: []u8, a: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, Arg::None, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args1(&var out, &self.names, format, move a);
     return self.names.intern_owned(move out);
 }
 
@@ -276,7 +402,7 @@ fn (self: &var Emitter) text1(format: []u8, a: Arg) -> !ir::Name {
 fn (self: &var Emitter) text2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args2(&var out, &self.names, format, move a, move b);
     return self.names.intern_owned(move out);
 }
 
@@ -284,7 +410,7 @@ fn (self: &var Emitter) text2(format: []u8, a: Arg, b: Arg) -> !ir::Name {
 fn (self: &var Emitter) text3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    try format_args3(&var out, &self.names, format, move a, move b, move c);
     return self.names.intern_owned(move out);
 }
 
@@ -292,7 +418,7 @@ fn (self: &var Emitter) text3(format: []u8, a: Arg, b: Arg, c: Arg) -> !ir::Name
 fn (self: &var Emitter) text4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    try format_args4(&var out, &self.names, format, move a, move b, move c, move d);
     return self.names.intern_owned(move out);
 }
 
@@ -300,7 +426,7 @@ fn (self: &var Emitter) text4(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !
 fn (self: &var Emitter) text5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: Arg) -> !ir::Name {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, move c, move d, move e, Arg::None);
+    try format_args5(&var out, &self.names, format, move a, move b, move c, move d, move e);
     return self.names.intern_owned(move out);
 }
 
@@ -310,7 +436,7 @@ fn (self: &var Emitter) text5(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg, e: A
 fn (self: &Emitter) fail(format: []u8, a: Arg, b: Arg, c: Arg, d: Arg) -> !diagnostic::Diagnostic {
     var out = string::new(self.allocator);
     defer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, move c, move d, Arg::None, Arg::None);
+    try format_args4(&var out, &self.names, format, move a, move b, move c, move d);
     let text = out.as_bytes();
     return diagnostic::from_text(self.allocator, diagnostic::Severity::Error, ast::zero_span(), text);
 }
@@ -346,7 +472,7 @@ fn (self: &Emitter) wrap(format: []u8, a: Arg, b: Arg, inner: diagnostic::Diagno
     defer inner.deinit();
     var out = string::new(self.allocator);
     defer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args2(&var out, &self.names, format, move a, move b);
     try out.append_bytes(": ");
     if inner.category.len() > 0 {
         try out.append_string(&inner.category);
@@ -360,9 +486,33 @@ fn (self: &Emitter) wrap(format: []u8, a: Arg, b: Arg, inner: diagnostic::Diagno
 /// Names the text of a module name in the emitter's table, so it can be
 /// interpolated and compared with the names the emitter spells.
 fn (self: &var Emitter) own(module: &ir::Module, name: ir::Name) -> !ir::Name {
+    let id = ir::name_id(name);
+    if recalled_name(&self.owned_names, id) |cached| {
+        return cached;
+    }
     let retained = ir::name_text(&module.names, name);
     let bytes = retained.as_bytes();
-    return self.names.intern(bytes);
+    let computed = try self.names.intern(bytes);
+    try remember_name(&var self.owned_names, id, computed);
+    return computed;
+}
+
+/// Returns what a table remembered for an id, or null when it holds nothing.
+fn recalled_name(table: &array::Array<ir::Name>, id: i64) -> ?ir::Name {
+    if table.get(id) |cached| {
+        if !ir::is_empty(cached) {
+            return cached;
+        }
+    }
+    return null;
+}
+
+/// Stores one answer at its id, growing the table to reach it.
+fn remember_name(table: &var array::Array<ir::Name>, id: i64, value: ir::Name) -> !void {
+    while table.len() <= id {
+        try table.append(ir::empty_name());
+    }
+    return table.set(id, value);
 }
 
 /// Names name + suffix, the Go `name + ".suffix"` on an emitter name.
@@ -806,9 +956,9 @@ fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param
     }
     let addr_name = try self.suffixed(param_name, ".addr");
     let names = &self.names;
-    try format_args(
+    try format_args3(
         &var self.entry_param_loads, names, "  %s = load %s, ptr %s",
-        Arg::Str(param_name), Arg::Str(param_type), Arg::Str(addr_name), Arg::None, Arg::None, Arg::None
+        Arg::Str(param_name), Arg::Str(param_type), Arg::Str(addr_name)
     );
     try self.entry_param_loads.append_byte(cast<u8>(10));
     return self.sprint2("ptr byval(%s) %s", Arg::Str(param_type), Arg::Str(addr_name));
@@ -819,7 +969,7 @@ fn (self: &var Emitter) function_param_abi(module: &ir::Module, param: ir::Param
 fn (self: &Emitter) sprint2(format: []u8, a: Arg, b: Arg) -> !string::String {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, Arg::None, Arg::None, Arg::None, Arg::None);
+    try format_args2(&var out, &self.names, format, move a, move b);
     return move out;
 }
 
@@ -827,7 +977,7 @@ fn (self: &Emitter) sprint2(format: []u8, a: Arg, b: Arg) -> !string::String {
 fn (self: &Emitter) sprint3(format: []u8, a: Arg, b: Arg, c: Arg) -> !string::String {
     var out = string::new(self.allocator);
     errdefer out.deinit();
-    try format_args(&var out, &self.names, format, move a, move b, move c, Arg::None, Arg::None, Arg::None);
+    try format_args3(&var out, &self.names, format, move a, move b, move c);
     return move out;
 }
 
@@ -1156,13 +1306,13 @@ fn (self: &var Emitter) write_cleanup(module: &ir::Module, cleanup: ir::Cleanup)
 /// Returns the concrete LLVM label that reaches a successor, the Go
 /// `incomingBlockLabel`.
 fn (self: &var Emitter) incoming_block_label(module: &ir::Module, block: ir::Name) -> !ir::Name {
-    let retained = ir::name_text(&module.names, block);
-    let bytes = retained.as_bytes();
-    if self.block_exit_label.get(bytes) |exit| {
+    if self.block_exit_label.get(ir::name_id(block)) |exit| {
         if exit.generation == self.generation {
             return exit.label;
         }
     }
+    let retained = ir::name_text(&module.names, block);
+    let bytes = retained.as_bytes();
     return self.names.intern(bytes);
 }
 
@@ -1175,9 +1325,7 @@ fn (self: &var Emitter) precompute_block_exit_labels(module: &ir::Module, node: 
         let block_node = module.blocks.at(block.node);
         let label = try self.compute_block_exit_label(module, block_node);
         if !ir::is_empty(label) {
-            let retained = ir::name_text(&module.names, block_node.name);
-            let bytes = retained.as_bytes();
-            try self.block_exit_label.insert(bytes, ExitLabel { label: label, generation: self.generation });
+            try self.set_block_exit_label(block_node.name, label);
         }
     }
     return;
@@ -1236,9 +1384,19 @@ fn (self: &var Emitter) mark_current_block_exit(module: &ir::Module, label: ir::
     if ir::is_empty(self.current_block) {
         return;
     }
-    let retained = ir::name_text(&module.names, self.current_block);
-    let bytes = retained.as_bytes();
-    return self.block_exit_label.insert(bytes, ExitLabel { label: label, generation: self.generation });
+    return self.set_block_exit_label(self.current_block, label);
+}
+
+/// Stores one block's exit label at the block name's id, growing the table to
+/// reach it. A slot from an earlier function carries that function's
+/// generation, which already reads as absent.
+fn (self: &var Emitter) set_block_exit_label(block: ir::Name, label: ir::Name) -> !void {
+    let id = ir::name_id(block);
+    let stale = ExitLabel { label: ir::empty_name(), generation: -1 };
+    while self.block_exit_label.len() <= id {
+        try self.block_exit_label.append(stale);
+    }
+    return self.block_exit_label.set(id, ExitLabel { label: label, generation: self.generation });
 }
 
 /// Derives a deterministic local label from an SSA value the module names,
@@ -1386,9 +1544,7 @@ fn (self: &var Emitter) percent(name: ir::Name) -> !ir::Name {
 
 /// Resolves an SSA value to a LLVM operand, the Go `value`.
 fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !ValueInfo {
-    let retained = ir::name_text(&module.names, value.name);
-    let bytes = retained.as_bytes();
-    if self.values.get(bytes) |found| {
+    if self.values.get(ir::name_id(value.name)) |found| {
         if found.generation == self.generation {
             return found;
         }
@@ -1402,9 +1558,14 @@ fn (self: &var Emitter) operand(module: &ir::Module, value: ir::Value) -> !Value
 /// `e.values[instr.Result.Name] = valueInfo{...}`.
 fn (self: &var Emitter) set_value(module: &ir::Module, result: ir::Value, operand: ir::Name) -> !void {
     let typ_name = try self.own(module, result.type_name);
-    let retained = ir::name_text(&module.names, result.name);
-    let bytes = retained.as_bytes();
-    return self.values.insert(bytes, ValueInfo { typ: typ_name, operand: operand, generation: self.generation });
+    let id = ir::name_id(result.name);
+    let stale = ValueInfo {
+        typ: ir::empty_name(), operand: ir::empty_name(), generation: -1
+    };
+    while self.values.len() <= id {
+        try self.values.append(stale);
+    }
+    return self.values.set(id, ValueInfo { typ: typ_name, operand: operand, generation: self.generation });
 }
 
 /// Records that a result is the `void` operand, the Go

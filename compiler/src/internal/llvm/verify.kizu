@@ -38,12 +38,13 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
     var blocks = 0;
     var defs = map::new<[]u8, i64>(allocator);
     defer defs.deinit();
-    var uses = array::new<string::String>(allocator);
+    var uses = array::new<i64>(allocator);
     defer uses.deinit();
-    var tokens = array::new<string::String>(allocator);
+    var tokens = array::new<i64>(allocator);
     defer tokens.deinit();
     var start = 0;
     while start <= mem::len(text) {
+        let line_start = start;
         let end = line_end(text, start);
         let line = text[start..end];
         start = end + 1;
@@ -54,12 +55,13 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
             blocks = 0;
             drain(&var uses);
             drain(&var tokens);
-            try append_percent_tokens(allocator, line, &var tokens);
+            try append_percent_tokens(line_start, line, &var tokens);
             var index = 0;
-            while tokens.at(index) |name| {
-                index = index + 1;
-                let name_bytes = name.as_bytes();
-                try defs.insert(name_bytes, ordinal);
+            while index + 1 < tokens.len() {
+                let name_start = tokens.get(index) orelse break;
+                let name_end = tokens.get(index + 1) orelse break;
+                index = index + 2;
+                try defs.insert(text[name_start..name_end], ordinal);
             }
             continue;
         }
@@ -71,9 +73,11 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
         }
         if mem::equal_bytes(line, "}") {
             var index = 0;
-            while uses.at(index) |name| {
-                index = index + 1;
-                let name_bytes = name.as_bytes();
+            while index + 1 < uses.len() {
+                let use_start = uses.get(index) orelse break;
+                let use_end = uses.get(index + 1) orelse break;
+                index = index + 2;
+                let name_bytes = text[use_start..use_end];
                 if !defined_in(&defs, name_bytes, ordinal) and !types.contains(name_bytes) {
                     var message = try string::from_bytes(allocator, "llvm error: emitter bug: function `");
                     defer message.deinit();
@@ -103,28 +107,27 @@ fn verify_emitted_text(allocator: Allocator, text: []u8) -> !?diagnostic::Diagno
             return try diagnostic::from_text(allocator, diagnostic::Severity::Error, ast::zero_span(), message_bytes);
         }
         drain(&var tokens);
-        try append_percent_tokens(allocator, line, &var tokens);
+        try append_percent_tokens(line_start, line, &var tokens);
         var first = 0;
         if instruction_def(line) |def| {
             try defs.insert(def, ordinal);
-            first = 1;
+            first = 2;
         }
         var index = first;
-        while tokens.at(index) |name| {
-            index = index + 1;
-            let name_bytes = name.as_bytes();
-            let copied = try string::from_bytes(allocator, name_bytes);
-            errdefer copied.deinit();
-            try uses.append(move copied);
+        while index + 1 < tokens.len() {
+            let name_start = tokens.get(index) orelse break;
+            let name_end = tokens.get(index + 1) orelse break;
+            index = index + 2;
+            try uses.append(name_start);
+            try uses.append(name_end);
         }
     }
     return null;
 }
 
-/// Empties a list of owned texts, the Go `uses = nil`.
-fn drain(values: &var array::Array<string::String>) -> void {
-    while values.pop() |value| {
-        value.deinit();
+/// Empties a list of token spans, the Go `uses = nil`.
+fn drain(values: &var array::Array<i64>) -> void {
+    while values.pop() |_| {
     }
     return;
 }
@@ -240,8 +243,10 @@ fn trim_left_spaces(line: []u8) -> []u8 {
 }
 
 /// Appends each `%name` token in a line in order, skipping quoted spans,
-/// the Go `percentTokens`.
-fn append_percent_tokens(allocator: Allocator, line: []u8, out: &var array::Array<string::String>) -> !void {
+/// the Go `percentTokens`. Go slices the line and pays nothing per token;
+/// here each token is the pair of offsets it occupies in the enclosing text,
+/// so the scan reads the same bytes back without retaining any.
+fn append_percent_tokens(base: i64, line: []u8, out: &var array::Array<i64>) -> !void {
     var in_quote = false;
     var index = 0;
     while index < mem::len(line) {
@@ -263,9 +268,8 @@ fn append_percent_tokens(allocator: Allocator, line: []u8, out: &var array::Arra
             end = end + 1;
         }
         if end > index + 1 {
-            let copied = try string::from_bytes(allocator, line[index + 1..end]);
-            errdefer copied.deinit();
-            try out.append(move copied);
+            try out.append(base + index + 1);
+            try out.append(base + end);
         }
         index = end;
     }
