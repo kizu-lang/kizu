@@ -1544,12 +1544,69 @@ func (p *Parser) parseTypeName() typ.Type {
 		return p.parseSliceTypeName()
 	case token.Question:
 		return p.parseNullableTypeName()
+	case token.Function:
+		return p.parseFuncTypeName(false)
+	case token.Unsafe:
+		return p.parseUnsafeFuncTypeName()
 	case token.Ident:
 		return p.parseNamedTypeName()
 	default:
 		p.errorf("expected type, got %s", tokenDescription(p.cur))
 		return nil
 	}
+}
+
+// parseUnsafeFuncTypeName parses the `unsafe fn(...) -> T` spelling. `unsafe`
+// in a type position names the obligation the function it points at carries,
+// so nothing else may follow it.
+func (p *Parser) parseUnsafeFuncTypeName() typ.Type {
+	if p.peek.Type != token.Function {
+		p.errorf("expected `fn` after `unsafe` in a type, got %s", tokenDescription(p.peek))
+		return nil
+	}
+	p.nextToken()
+	return p.parseFuncTypeName(true)
+}
+
+// parseFuncTypeName parses `fn(T, ...) -> R` with p.cur on the `fn`.
+func (p *Parser) parseFuncTypeName(unsafeFn bool) typ.Type {
+	if p.peek.Type != token.LParen {
+		p.errorf("expected `(` after `fn` in a type, got %s", tokenDescription(p.peek))
+		return nil
+	}
+	p.nextToken()
+	out := &typ.Func{Unsafe: unsafeFn}
+	if p.peek.Type != token.RParen {
+		for {
+			p.nextToken()
+			param := p.parseTypeName()
+			if param == nil {
+				return nil
+			}
+			out.Params = append(out.Params, param)
+			if p.peek.Type != token.Comma {
+				break
+			}
+			p.nextToken()
+		}
+	}
+	if p.peek.Type != token.RParen {
+		p.errorf("expected `)` in a function type, got %s", tokenDescription(p.peek))
+		return nil
+	}
+	p.nextToken()
+	if p.peek.Type != token.Arrow {
+		p.errorf("expected `->` in a function type, got %s", tokenDescription(p.peek))
+		return nil
+	}
+	p.nextToken()
+	p.nextToken()
+	result := p.parseTypeName()
+	if result == nil {
+		return nil
+	}
+	out.Result = result
+	return out
 }
 
 // parseNullableTypeName parses ?T type spellings.

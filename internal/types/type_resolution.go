@@ -174,6 +174,8 @@ func (c *Checker) resolveTypeNode(parsed typ.Type) (Type, typeResolutionIssue) {
 		return c.resolveWrappingType(name, node.Elem)
 	case *typ.Optional:
 		return c.resolveNullableType(name, node.Elem)
+	case *typ.Func:
+		return c.resolveFuncType(name, node)
 	case *typ.Name:
 		if len(node.Args) == 0 {
 			return c.resolveNamedType(name)
@@ -185,6 +187,24 @@ func (c *Checker) resolveTypeNode(parsed typ.Type) (Type, typeResolutionIssue) {
 			kind: typeResolutionUnknown, subject: name,
 		}
 	}
+}
+
+// resolveFuncType validates the parameter and result types a function pointer
+// spells. The pointer itself names no declaration, so there is nothing to look
+// up: it is well formed when the types it mentions are.
+func (c *Checker) resolveFuncType(
+	name Type,
+	node *typ.Func,
+) (Type, typeResolutionIssue) {
+	for _, param := range node.Params {
+		if _, issue := c.resolveTypeNode(param); issue.present() {
+			return "", issue
+		}
+	}
+	if _, issue := c.resolveTypeNode(node.Result); issue.present() {
+		return "", issue
+	}
+	return name, typeResolutionIssue{}
 }
 
 // resolveWrappingType validates the element of a borrow, slice, buffer, or

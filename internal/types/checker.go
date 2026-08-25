@@ -3221,7 +3221,32 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	if expr.Name == "void" {
 		return "", errorAt(expr.Span, "type error: void is not a value")
 	}
+	// A top-level function name is the one value a function pointer takes.
+	// There is nothing else to build one from: Kizu has no closures, so the
+	// name is checked here rather than through a conversion form.
+	if value, ok := c.functionPointerValue(expr.Name); ok {
+		return value, nil
+	}
 	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
+}
+
+// functionPointerValue returns the function pointer type a declared function's
+// name has as a value, and reports whether the name declares one. A generic
+// function has no single signature, so its name is not a value.
+func (c *Checker) functionPointerValue(name string) (Type, bool) {
+	fn, ok := c.functions[name]
+	if !ok || len(fn.sig.StaticParams) > 0 {
+		return "", false
+	}
+	node := &typ.Func{Unsafe: fn.sig.RequiresUnsafe, Result: fn.sig.ReturnType}
+	for _, param := range fn.sig.Params {
+		node.Params = append(node.Params, param.TypeName)
+	}
+	if node.Result == nil {
+		return "", false
+	}
+	c.types.remember(node)
+	return Type(node.String()), true
 }
 
 // checkPrefixExpr validates unary operators.
@@ -3507,7 +3532,64 @@ func (c *Checker) checkCallExprDispatch(
 	if name.Name == "Io" {
 		return "", errorf("type error: use `std::io::blocking()`")
 	}
+	// A binding shadows a declaration here: a name bound to a function
+	// pointer is called through the pointer, not looked up as a declaration.
+	if bound, ok := env.lookup(name.Name); ok {
+		if node, isFunc := c.funcPointerNode(bound); isFunc {
+			return c.checkFuncPointerCall(name, node, expr.Args, env, unsafe)
+		}
+	}
 	return c.checkUserCall(name.Name, name.Span, expr.Args, env, unsafe)
+}
+
+// funcPointerNode returns the parsed function pointer a type spells, and
+// reports whether it is one.
+func (c *Checker) funcPointerNode(value Type) (*typ.Func, bool) {
+	parsed, ok := c.types.lookup(value)
+	if !ok {
+		return nil, false
+	}
+	node, isFunc := parsed.(*typ.Func)
+	return node, isFunc
+}
+
+// checkFuncPointerCall validates a call made through a function pointer. The
+// call is safe unless the pointee carries an obligation, which is what
+// `unsafe fn(...)` spells: the marker is required for the same reason a direct
+// call to an `unsafe fn` requires it.
+func (c *Checker) checkFuncPointerCall(
+	name *ast.IdentExpr,
+	node *typ.Func,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if node.Unsafe {
+		operation := fmt.Sprintf("call through `%s`", name.Name)
+		if err := requireUnsafeCapabilityAt(
+			unsafe, unsafeUnsafeCall, operation, name.Span,
+		); err != nil {
+			return "", err
+		}
+	}
+	if len(args) != len(node.Params) {
+		return "", errorf(
+			"type error: `%s` expects %d argument(s), got %d",
+			name.Name, len(node.Params), len(args))
+	}
+	for idx, arg := range args {
+		want := Type(node.Params[idx].String())
+		got, err := c.checkContextualExpr(arg, want, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, want) {
+			return "", errorf(
+				"type error: `%s` argument %d expects %s, got %s",
+				name.Name, idx+1, want, got)
+		}
+	}
+	return Type(node.Result.String()), nil
 }
 
 // checkFieldCallExpr validates qualified, union, and method calls.

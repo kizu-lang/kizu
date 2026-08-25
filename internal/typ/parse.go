@@ -58,6 +58,10 @@ func (p *parser) parsePrefix() (Type, error) {
 			return nil, err
 		}
 		return &Optional{Elem: elem}, nil
+	case p.accept("unsafe fn("):
+		return p.parseFunc(true)
+	case p.accept("fn("):
+		return p.parseFunc(false)
 	case p.accept("const "):
 		elem, err := p.parsePrefix()
 		if err != nil {
@@ -67,6 +71,38 @@ func (p *parser) parsePrefix() (Type, error) {
 	default:
 		return p.parseName()
 	}
+}
+
+// parseFunc reads a function pointer spelling once its `fn(` is consumed. An
+// empty parameter list is the `fn() -> T` a nullary function points at.
+func (p *parser) parseFunc(unsafeFn bool) (Type, error) {
+	out := &Func{Unsafe: unsafeFn}
+	if !p.accept(")") {
+		for {
+			param, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			out.Params = append(out.Params, param)
+			if p.accept(",") {
+				p.accept(" ")
+				continue
+			}
+			break
+		}
+		if !p.accept(")") {
+			return nil, fmt.Errorf("type error: unclosed `(` in `%s`", p.input)
+		}
+	}
+	if !p.accept(" -> ") {
+		return nil, fmt.Errorf("type error: expected `->` in `%s`", p.input)
+	}
+	result, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	out.Result = result
+	return out, nil
 }
 
 // peekByte reports whether the next unread byte is ch.

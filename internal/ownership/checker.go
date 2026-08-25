@@ -3644,10 +3644,7 @@ func (c *Checker) movePlaceExpr(expr ast.Expression, env *scope) (string, bool, 
 	}
 	value, ok := env.lookup(ident.Name)
 	if !ok {
-		if ident.Name == "void" {
-			return "", false, errorAt(ident.Span, "move error: void is not a value")
-		}
-		return "", false, errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
+		return c.moveUnboundIdent(ident)
 	}
 	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
 		return "", false, err
@@ -4049,7 +4046,70 @@ func (c *Checker) dispatchCallExpr(expr *ast.CallExpr, env *scope) (string, erro
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
+	// A binding shadows a declaration: a name bound to a function pointer is
+	// called through the pointer. The pointee owns nothing and borrows
+	// nothing here, so the arguments are checked as ordinary values.
+	if bound, ok := env.lookup(name.Name); ok {
+		if node, isFunc := funcPointerNode(bound.typeName); isFunc {
+			return c.checkFuncPointerCall(node, expr.Args, env)
+		}
+	}
 	return c.checkUserCall(name.Name, expr.Args, env, sanctioned)
+}
+
+// moveUnboundIdent resolves a name no binding holds. A top-level function's
+// name is a function pointer value: it owns nothing and borrows nothing,
+// because the code it names outlives the program.
+func (c *Checker) moveUnboundIdent(ident *ast.IdentExpr) (string, bool, error) {
+	if ident.Name == "void" {
+		return "", false, errorAt(ident.Span, "move error: void is not a value")
+	}
+	if fn, isFunc := c.functions[ident.Name]; isFunc {
+		return functionPointerText(fn.sig), false, nil
+	}
+	return "", false, errorAt(ident.Span,
+		"move error: undefined variable `%s`", ident.Name)
+}
+
+// functionPointerText spells the function pointer type a declaration's name
+// has as a value.
+func functionPointerText(sig ast.FunctionSignature) string {
+	node := &typ.Func{Unsafe: sig.RequiresUnsafe, Result: sig.ReturnType}
+	for _, param := range sig.Params {
+		node.Params = append(node.Params, param.TypeName)
+	}
+	return node.String()
+}
+
+// funcPointerNode parses a function pointer spelling, and reports whether the
+// text is one.
+func funcPointerNode(text string) (*typ.Func, bool) {
+	if !strings.HasPrefix(text, "fn(") && !strings.HasPrefix(text, "unsafe fn(") {
+		return nil, false
+	}
+	parsed, err := typ.Parse(text)
+	if err != nil {
+		return nil, false
+	}
+	node, ok := parsed.(*typ.Func)
+	return node, ok
+}
+
+// checkFuncPointerCall walks the arguments of a call made through a function
+// pointer. The pointee is not a declaration this checker can see, so its
+// parameters carry no borrow or consume obligation: only the argument
+// expressions themselves are checked.
+func (c *Checker) checkFuncPointerCall(
+	node *typ.Func,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return typ.Text(node.Result), nil
 }
 
 // checkUserCall validates one declared-function call. sanctioned marks the
