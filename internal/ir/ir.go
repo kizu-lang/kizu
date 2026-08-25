@@ -152,6 +152,9 @@ func (t Terminator) Successors() []string {
 type Signature struct {
 	Params []Param
 	Return string
+	// Unsafe carries the obligation the declaration named, so the type its
+	// name has as a value spells `unsafe fn(...)` the way the checker did.
+	Unsafe bool
 }
 
 // Param is one parameter of a callable: its SSA name, the type the callee sees,

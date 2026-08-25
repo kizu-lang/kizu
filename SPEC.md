@@ -1049,9 +1049,12 @@ fn double(value: i64) -> i64 {
     return value * 2;
 }
 
+fn apply(f: fn(i64) -> i64, value: i64) -> i64 {
+    return f(value);
+}
+
 fn main() -> void {
-    let f: fn(i64) -> i64 = double;
-    print(f(3));
+    print(apply(double, 21));
 }
 ```
 

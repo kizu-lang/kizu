@@ -928,8 +928,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "unary."):
 		return e.writeUnary(instr)
-	case strings.HasPrefix(instr.Op, "call."):
-		return e.writeCall(instr)
+	case strings.HasPrefix(instr.Op, "func.addr."), strings.HasPrefix(instr.Op, "call."):
+		return e.writeCallableInstr(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
 	case instr.Op == "phi":
@@ -1308,6 +1308,60 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: unsupported unary `%s`", op)
 	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeCallableInstr writes the instructions that name or reach a function:
+// its address, a call through a pointer, and a call by name.
+func (e *emitter) writeCallableInstr(instr *ir.Instr) error {
+	if strings.HasPrefix(instr.Op, "func.addr.") {
+		return e.writeFuncAddr(instr)
+	}
+	if instr.Op == "call.indirect" {
+		return e.writeIndirectCall(instr)
+	}
+	return e.writeCall(instr)
+}
+
+// writeFuncAddr writes the address of a declared function. A function symbol
+// is already a pointer in LLVM, so the value is the symbol itself and no
+// instruction is emitted for it.
+func (e *emitter) writeFuncAddr(instr *ir.Instr) error {
+	name := strings.TrimPrefix(instr.Op, "func.addr.")
+	if !e.functionNames[name] {
+		return fmt.Errorf("llvm error: `%s` is not a declared function", name)
+	}
+	e.values[instr.Result.Name] = valueInfo{
+		typ:     instr.Result.Type,
+		operand: "@" + llvmFunctionName(name),
+	}
+	return nil
+}
+
+// writeIndirectCall writes a call through a function pointer. The callee is
+// the first operand, the way it arrived from lowering.
+func (e *emitter) writeIndirectCall(instr *ir.Instr) error {
+	if len(instr.Args) == 0 {
+		return fmt.Errorf("llvm error: call.indirect expects a callee")
+	}
+	callee := e.value(instr.Args[0])
+	args := make([]string, 0, len(instr.Args)-1)
+	for _, arg := range instr.Args[1:] {
+		args = append(args, e.llvmType(arg.Type)+" "+e.value(arg).operand)
+	}
+	call := fmt.Sprintf(
+		"call %s %s(%s)",
+		e.llvmType(instr.Result.Type),
+		callee.operand,
+		strings.Join(args, ", "),
+	)
+	if instr.Result.Type == "void" {
+		fmt.Fprintf(&e.out, "  %s\n", call)
+		return nil
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 
