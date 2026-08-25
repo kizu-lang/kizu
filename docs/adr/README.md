@@ -123,3 +123,4 @@ ADR には積みません。残す価値が無くなったら消します。番�
 - [ADR-0127: `catch` による error 処理と set の合成宣言](0127-error-catch-and-set-composition.md) (#1675 の gap を履行)
 - [ADR-0128: std の allocation 失敗は `std::mem::Error::OutOfMemory` の 1 値にする](0128-std-allocation-error-taxonomy.md)
 - [ADR-0129: Allocator を user 実装に開く。安全性は tie が持つ](0129-user-defined-allocator.md) (ADR-0092 決定 1 の改訂)
+- [ADR-0130: selfhost は機械移植で作り、Go は seed として残す](0130-selfhost-by-mechanical-porting.md)
