@@ -1,0 +1,51 @@
+// An allocator is a capability the language asks for everywhere, so it is one
+// user code can implement (ADR-0129). The two functions carry the obligation
+// their `unsafe fn` declaration names; everything built from the allocator --
+// this Array -- stays safe, and stays tied to the state the allocator was
+// built from, so it cannot outlive it.
+
+import std::array;
+import std::mem;
+
+extern "c" fn malloc(size: usize) -> ptr<u8>
+extern "c" fn free(p: ptr<u8>) -> void
+
+/// header は allocator_from が書く。count は配った回数を数えるだけ。
+unsafe struct Passthrough {
+    header: mem::AllocatorHeader,
+    count: i64,
+}
+
+/// 返る address には size byte だけ書いてよく、release に戻すまで他に配られない。
+unsafe fn passthrough_alloc(self: &var Passthrough, size: i64) -> ?ptr<u8> {
+    // SAFETY: size は呼び出し側が要求した byte 数
+    let block = unsafe malloc(cast<usize>(size));
+    // SAFETY: count は不変条件を持たない数え上げ
+    unsafe self.count = self.count + 1;
+    return block;
+}
+
+/// p は passthrough_alloc が配った address でなければならない。
+unsafe fn passthrough_free(self: &var Passthrough, p: ptr<u8>, size: i64) -> void {
+    // SAFETY: p は malloc が返した領域
+    unsafe free(p);
+    return;
+}
+
+fn main() -> !void {
+    // SAFETY: 空の header と 0 の count は不変条件を満たす
+    var pool = unsafe Passthrough { header: mem::allocator_header(), count: 0 };
+    let a = mem::allocator_from<Passthrough>(&var pool, passthrough_alloc, passthrough_free);
+    var values = array::new<i64>(a);
+    defer values.deinit();
+    try values.append(7);
+    print(values.get(0) orelse -1);
+    print(pool.count);
+    return;
+}
+
+// run
+// features: allocator user-allocator function-pointer unsafe raw-pointer extern-c
+// output:
+// 7
+// 2

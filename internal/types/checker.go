@@ -1574,6 +1574,9 @@ func (c *Checker) checkReturnValue(
 	if ok, err := c.checkErrorUnionReturn(expr, want, got); ok || err != nil {
 		return ok, err
 	}
+	if fillsNullablePointer(want, got) {
+		return true, nil
+	}
 	if _, ok := optionalElem(want); ok {
 		// A plain value returned as `?T` wraps implicitly, like `!T` success.
 		wrapped, err := c.wrapsIntoOptional(expr, want, got)
@@ -3230,6 +3233,19 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
 }
 
+// borrowedParamType spells a parameter the way a caller writes it: the borrow
+// markers a declaration wrote beside the type are part of what the parameter
+// takes, so a function pointer carries them.
+func borrowedParamType(param ast.Param) typ.Type {
+	if param.MutBorrow {
+		return &typ.Borrow{Elem: param.TypeName, Mut: true}
+	}
+	if param.Borrow {
+		return &typ.Borrow{Elem: param.TypeName}
+	}
+	return param.TypeName
+}
+
 // functionPointerValue returns the function pointer type a declared function's
 // name has as a value, and reports whether the name declares one. A generic
 // function has no single signature, so its name is not a value.
@@ -3240,7 +3256,7 @@ func (c *Checker) functionPointerValue(name string) (Type, bool) {
 	}
 	node := &typ.Func{Unsafe: fn.sig.RequiresUnsafe, Result: fn.sig.ReturnType}
 	for _, param := range fn.sig.Params {
-		node.Params = append(node.Params, param.TypeName)
+		node.Params = append(node.Params, borrowedParamType(param))
 	}
 	if node.Result == nil {
 		return "", false
@@ -4176,7 +4192,93 @@ func (c *Checker) checkBuiltinTypeApply(
 	); ok || err != nil {
 		return typ, ok, err
 	}
+	if name == "std::internal::builtin::mem_allocator_from" {
+		typ, err := c.checkAllocatorFrom(typeArg, args, env, unsafe)
+		return typ, true, err
+	}
 	return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
+}
+
+// checkAllocatorFrom validates `mem_allocator_from<T>(state, alloc, free)`.
+// The header the runtime writes lives at the front of the state, so T has to
+// have reserved it: its first field is `std::mem::AllocatorHeader` (ADR-0129).
+func (c *Checker) checkAllocatorFrom(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) (Type, error) {
+	if len(args) != 3 {
+		return "", errorf(
+			"type error: `std::mem::allocator_from` expects state, alloc and free")
+	}
+	if err := c.requireAllocatorHeaderFirst(typeArg); err != nil {
+		return "", err
+	}
+	if err := c.checkAllocatorStateArg(typeArg, args[0], env, unsafe); err != nil {
+		return "", err
+	}
+	wants := []Type{
+		Type("unsafe fn(&var " + typeArg + ", i64) -> ?ptr<u8>"),
+		Type("unsafe fn(&var " + typeArg + ", ptr<u8>, i64) -> void"),
+	}
+	names := []string{"alloc", "free"}
+	for idx, arg := range args[1:] {
+		got, err := c.checkContextualExpr(arg, wants[idx], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, wants[idx]) {
+			return "", errorf("type error: `std::mem::allocator_from` %s expects %s, got %s",
+				names[idx], wants[idx], got)
+		}
+	}
+	return Type("Allocator"), nil
+}
+
+// checkAllocatorStateArg validates the `&var T` an allocator is built from.
+func (c *Checker) checkAllocatorStateArg(
+	typeArg string,
+	arg ast.Expression,
+	env *scope,
+	unsafe unsafeMark,
+) error {
+	if prefix, ok := borrowPrefix(arg); ok && prefix.Operator == "&var" {
+		got, _, err := c.checkBorrowPrefix(prefix, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if !sameType(got, Type(typeArg)) {
+			return errorf(
+				"type error: `std::mem::allocator_from` state expects &var %s, got &var %s",
+				typeArg, got)
+		}
+		return nil
+	}
+	// A std wrapper forwards the `&var T` it was given, so the argument
+	// arrives already borrowed rather than as a borrow expression.
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if !sameType(got, Type(typeArg)) && !sameType(got, Type("&var "+typeArg)) {
+		return errorf("type error: `std::mem::allocator_from` state expects &var %s, got %s",
+			typeArg, got)
+	}
+	return nil
+}
+
+// requireAllocatorHeaderFirst refuses a state whose type has not reserved the
+// room the runtime writes its header into.
+func (c *Checker) requireAllocatorHeaderFirst(typeArg string) error {
+	decl := c.structs[typeArg]
+	if decl == nil || len(decl.Fields) == 0 ||
+		typ.Text(decl.Fields[0].TypeName) != "std::mem::AllocatorHeader" {
+		return errorf(
+			"type error: `%s` must declare `std::mem::AllocatorHeader` as its first field"+
+				" to back an allocator", typeArg)
+	}
+	return nil
 }
 
 // checkBuiltinArenaTypeApply validates the Arena constructor and the storage

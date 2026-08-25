@@ -350,7 +350,73 @@ fn (self: &var Checker) read_ident(
     if text_equals(tree, ident.name, "void") {
         return try self.error0(ident.span, "move error: void is not a value");
     }
+    // A top-level function's name is a function pointer value: it owns
+    // nothing, and the code it names outlives the program.
+    let candidate = try self.names.intern_text(tree, ident.name);
+    if try self.function_pointer_name(candidate) |pointer| {
+        out.* = pointer;
+        return null;
+    }
     return try self.error1(tree, ident.span, "move error: undefined variable `%s`", Arg::Text(ident.name));
+}
+
+/// Spells the function pointer type a declaration's name has as a value, and
+/// returns null for a name that declares no function.
+fn (self: &var Checker) function_pointer_name(name: Name) -> !?Name {
+    let handle = self.function_named(name) orelse return null;
+    var text = string::new(self.allocator);
+    defer text.deinit();
+    var unsafe_call = false;
+    var params = array::new<Name>(self.allocator);
+    defer params.deinit();
+    var borrows = array::new<i64>(self.allocator);
+    defer borrows.deinit();
+    var result = name;
+    let info = self.functions.at(handle.index);
+    unsafe_call = info.requires_unsafe;
+    result = info.return_type;
+    var collected = 0;
+    while info.params.get(collected) |param| {
+        try params.append(param.type_name);
+        if param.mut_borrow {
+            try borrows.append(2);
+        } else {
+            if param.borrow {
+                try borrows.append(1);
+            } else {
+                try borrows.append(0);
+            }
+        }
+        collected = collected + 1;
+    }
+    if unsafe_call {
+        try text.append_bytes("unsafe fn(");
+    } else {
+        try text.append_bytes("fn(");
+    }
+    var index = 0;
+    while params.get(index) |param| {
+        if index > 0 {
+            try text.append_bytes(", ");
+        }
+        let marker = borrows.get_or_panic(index);
+        if marker == 2 {
+            try text.append_bytes("&var ");
+        }
+        if marker == 1 {
+            try text.append_byte(cast<u8>(38));
+        }
+        let retained = name_text(&self.names, param);
+        let bytes = retained.as_bytes();
+        try text.append_bytes(bytes);
+        index = index + 1;
+    }
+    try text.append_bytes(") -> ");
+    let retained_result = name_text(&self.names, result);
+    let result_bytes = retained_result.as_bytes();
+    try text.append_bytes(result_bytes);
+    let text_bytes = text.as_bytes();
+    return try self.names.intern(text_bytes);
 }
 
 /// Rejects arenas and known handles after arena cleanup, the Go

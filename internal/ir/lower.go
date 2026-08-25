@@ -1275,6 +1275,19 @@ func (l *lowerer) lowerDerefExpr(expr *ast.DerefExpr) (Value, error) {
 	return l.emit("ref.load", derefType(receiver.Type), []Value{receiver}, ""), nil
 }
 
+// lowerAllocatorFrom lowers `mem_allocator_from<T>`. The state stays a borrow:
+// the runtime writes the allocator header into the caller's storage, so what
+// crosses is the address, not a copy of the state.
+func (l *lowerer) lowerAllocatorFrom(state string, args []ast.Expression) (Value, error) {
+	params := []Param{{Type: "&var " + state, Passing: PassCallerStorage}}
+	values, err := l.lowerCallArgsAs(params, args)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit(
+		"call.std::internal::builtin::mem_allocator_from", "Allocator", values, ""), nil
+}
+
 // lowerTypeApplyCall lowers calls whose callee carries a static argument list.
 // The std storage constructors lower to one instruction each, so their std
 // bodies are never walked. Every other generic call resolves by name.
@@ -1295,6 +1308,8 @@ func (l *lowerer) lowerTypeApplyCall(
 		return l.lowerMapConstructor(l.resolveTypeArgs(typeApply.TypeArg), args)
 	case "ptr_from_int", "int_from_ptr":
 		return l.lowerPtrIntCast(typeApply.TypeArg, args)
+	case "std::internal::builtin::mem_allocator_from":
+		return l.lowerAllocatorFrom(l.resolveType(typeApply.TypeArg), args)
 	}
 	if value, ok, err := l.lowerMetaApply(
 		typeApply.Callee.String(), typeApply.TypeArg, args,

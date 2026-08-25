@@ -113,7 +113,75 @@ fn (self: &var Checker) dispatch_call_expr(
         return null;
     }
     let user_name = try self.names.intern_text(tree, name);
+    // A binding shadows a declaration: a name bound to a function pointer is
+    // called through the pointer. The pointee owns nothing and borrows nothing
+    // here, so the arguments are checked as ordinary values.
+    if self.lookup_text(tree, env, name) |value| {
+        let bound = self.binding(value).type_name;
+        if self.name_is_function_pointer(bound) {
+            return self.check_func_pointer_call(tree, env, bound, call.args, out);
+        }
+    }
     return self.check_user_call(tree, env, user_name, call.args, sanctioned, out);
+}
+
+/// Reports whether an interned type name spells a function pointer.
+fn (self: &Checker) name_is_function_pointer(value: Name) -> bool {
+    return self.names.starts_with(value, "fn(") or
+        self.names.starts_with(value, "unsafe fn(");
+}
+
+/// Walks the arguments of a call made through a function pointer. The pointee
+/// is not a declaration this checker can see, so its parameters carry no
+/// borrow or consume obligation: only the argument expressions are checked.
+fn (self: &var Checker) check_func_pointer_call(
+    tree: &var ast::Ast,
+    env: ScopeHandle,
+    pointer: Name,
+    args: ast::ExpressionList,
+    out: &var Name
+) -> !?diagnostic::Diagnostic {
+    var index = 0;
+    while arg_at(tree, args, index) |argument| {
+        var ignored = try self.names.intern("void");
+        if try self.read_expr(tree, env, argument, &var ignored) |failed| {
+            return move failed;
+        }
+        index = index + 1;
+    }
+    out.* = try self.function_pointer_result(pointer);
+    return null;
+}
+
+/// Names the byte range a function pointer spelling gives its result: what
+/// follows the last ` -> `. start is 0 when the spelling has none.
+struct ResultBounds {
+    start: i64,
+    end: i64
+}
+
+fn result_arrow_bounds(names: &NameTable, pointer: Name) -> ResultBounds {
+    let retained = name_text(names, pointer);
+    let bytes = retained.as_bytes();
+    let total = mem::len(bytes);
+    var index = total;
+    while index > 4 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(62) and bytes[index - 1] == cast<u8>(45) and
+            bytes[index - 2] == cast<u8>(32) {
+            return ResultBounds { start: index + 2, end: total };
+        }
+    }
+    return ResultBounds { start: 0, end: total };
+}
+
+/// Returns the result a function pointer spelling names.
+fn (self: &var Checker) function_pointer_result(pointer: Name) -> !Name {
+    let bounds = result_arrow_bounds(&self.names, pointer);
+    if bounds.start == 0 {
+        return self.names.intern("void");
+    }
+    return self.names.intern_slice(pointer, bounds.start, bounds.end);
 }
 
 /// Validates one declared-function call, the Go `checkUserCall`. sanctioned

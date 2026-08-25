@@ -1595,10 +1595,25 @@ func (c *Checker) returnedBorrowInitializer(
 		return nil, "", false, true,
 			errorf("borrow error: `%s` borrowed return has no source parameter", name)
 	}
-	if _, err := c.checkUserCall(name, call.Args, env, true); err != nil {
+	if err := c.checkTiedFactoryCall(name, call, env); err != nil {
 		return nil, "", false, true, err
 	}
 	return sources, elem, mutable, true, nil
+}
+
+// checkTiedFactoryCall runs the ordinary call check for a factory whose result
+// is tied, through whichever arm the callee's shape belongs to.
+func (c *Checker) checkTiedFactoryCall(
+	name string,
+	call *ast.CallExpr,
+	env *scope,
+) error {
+	if typeApply, ok := call.Callee.(*ast.TypeApplyExpr); ok {
+		_, err := c.checkTypeApplyCallExpr(typeApply, call.Args, env)
+		return err
+	}
+	_, err := c.checkUserCall(name, call.Args, env, true)
+	return err
 }
 
 // callBorrowReturnSources lists the caller-side bindings a borrow-shaped call
@@ -1693,6 +1708,11 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 			return "", nil
 		}
 		return name, c.functions[name]
+	case *ast.TypeApplyExpr:
+		// A generic call names the same declaration its static arguments
+		// instantiate. Reading through to it is what lets the tie recognizer
+		// see a generic factory, which ADR-0099 left closed for want of one.
+		return c.calledFunction(e.Callee)
 	default:
 		return "", nil
 	}
@@ -3285,10 +3305,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
-		if _, ok := c.typeArgValues[e.Name]; ok {
-			return "type", nil
-		}
-		return readIdent(e, env)
+		return c.readIdentExpr(e, env)
 	case *ast.BinaryExpr:
 		return c.readBinaryExpr(e, env)
 	case *ast.CallExpr:
@@ -4071,14 +4088,41 @@ func (c *Checker) moveUnboundIdent(ident *ast.IdentExpr) (string, bool, error) {
 		"move error: undefined variable `%s`", ident.Name)
 }
 
+// readIdentExpr resolves a name in a read position. A top-level function's
+// name is a function pointer value: it owns nothing, and the code it names
+// outlives the program.
+func (c *Checker) readIdentExpr(expr *ast.IdentExpr, env *scope) (string, error) {
+	if _, ok := c.typeArgValues[expr.Name]; ok {
+		return "type", nil
+	}
+	if _, bound := env.lookup(expr.Name); !bound {
+		if fn, isFunc := c.functions[expr.Name]; isFunc {
+			return functionPointerText(fn.sig), nil
+		}
+	}
+	return readIdent(expr, env)
+}
+
 // functionPointerText spells the function pointer type a declaration's name
 // has as a value.
 func functionPointerText(sig ast.FunctionSignature) string {
 	node := &typ.Func{Unsafe: sig.RequiresUnsafe, Result: sig.ReturnType}
 	for _, param := range sig.Params {
-		node.Params = append(node.Params, param.TypeName)
+		node.Params = append(node.Params, borrowedParamType(param))
 	}
 	return node.String()
+}
+
+// borrowedParamType spells a parameter the way a caller writes it: the borrow
+// markers a declaration wrote beside the type are part of what it takes.
+func borrowedParamType(param ast.Param) typ.Type {
+	if param.MutBorrow {
+		return &typ.Borrow{Elem: param.TypeName, Mut: true}
+	}
+	if param.Borrow {
+		return &typ.Borrow{Elem: param.TypeName}
+	}
+	return param.TypeName
 }
 
 // funcPointerNode parses a function pointer spelling, and reports whether the
@@ -4863,7 +4907,26 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
+	if name == "std::internal::builtin::mem_allocator_from" {
+		return c.checkAllocatorFrom(args, env)
+	}
 	return "", errorf("move error: `%s` does not take static arguments", name)
+}
+
+// checkAllocatorFrom walks the arguments of `mem_allocator_from`. The state is
+// borrowed for as long as the allocator lives, which the tied-allocator
+// recognizer enforces from the wrapper's signature; the two functions own
+// nothing, because the code they name outlives the program.
+func (c *Checker) checkAllocatorFrom(
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return "Allocator", nil
 }
 
 // checkArenaTypeApply validates std::arena::new<T>(allocator) ownership.
@@ -5365,14 +5428,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
-	ret := substituteOwnershipType(returnTypeName(fn), subst)
-	// No recognizer ties a generic factory's result, so a tied result would
-	// silently lose its buffer tie. Nothing needs this shape yet.
-	if ret == "Allocator" && c.callTiesAllocator(fn, args, env) {
-		return "", true, errorf(
-			"borrow error: generic function `%s` cannot return a tied allocator", name)
-	}
-	return ret, true, nil
+	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
 }
 
 // genericCallSubst resolves a generic call's static arguments into the

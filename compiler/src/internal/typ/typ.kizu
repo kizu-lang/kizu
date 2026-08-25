@@ -16,6 +16,8 @@ pub error Error {
     BufferSizeOverflow,
     ExpectedBufferClose,
     UnclosedArguments,
+    UnclosedParameters,
+    ExpectedResultArrow,
     UnbalancedArgumentClose,
     UnbalancedArgumentOpen,
     EmptyStaticArgument,
@@ -49,6 +51,7 @@ pub union Node {
     Optional(Optional),
     Const(Const),
     ErrorUnion(ErrorUnion),
+    Func(Func),
 }
 
 /// Is a primitive, declared type, type parameter, or generic application.
@@ -88,6 +91,15 @@ pub struct Const {
 pub struct ErrorUnion {
     pub err: ?arena::Handle<Node>,
     pub ok: arena::Handle<Node>
+}
+
+/// Is `fn(T, ...) -> R`, or `unsafe fn(...) -> R` when the function it points
+/// at carries an obligation. The two are different types, so an unsafe
+/// function cannot reach a safe call.
+pub struct Func {
+    pub params: array::Array<arena::Handle<Node>>,
+    pub result: arena::Handle<Node>,
+    pub unsafe_call: bool
 }
 
 /// Is the payload and mutability of a borrow optional spelling.
@@ -285,7 +297,42 @@ fn (self: &var Parser) parse_prefix() -> !arena::Handle<Node> {
         let elem = try self.parse_prefix();
         return self.nodes.add(Node::Const(Const { elem: elem }));
     }
+    if self.accept("unsafe fn(") {
+        return self.parse_func(true);
+    }
+    if self.accept("fn(") {
+        return self.parse_func(false);
+    }
     return self.parse_name();
+}
+
+// parse_func reads a function pointer spelling once its `fn(` is consumed. An
+// empty parameter list is the `fn() -> T` a nullary function points at.
+fn (self: &var Parser) parse_func(unsafe_call: bool) -> !arena::Handle<Node> {
+    var params = array::new<arena::Handle<Node>>(self.allocator);
+    errdefer params.deinit();
+    if !self.accept(")") {
+        while true {
+            try params.append(try self.parse_type());
+            if self.accept(",") {
+                let _ = self.accept(" ");
+            } else {
+                break;
+            }
+        }
+        if !self.accept(")") {
+            return Error::UnclosedParameters;
+        }
+    }
+    if !self.accept(" -> ") {
+        return Error::ExpectedResultArrow;
+    }
+    let result = try self.parse_type();
+    return self.nodes.add(Node::Func(Func {
+        params: move params,
+        result: result,
+        unsafe_call: unsafe_call
+    }));
 }
 
 // parse_bracketed reads the `[]T` and `[N]T` spellings.
@@ -639,8 +686,32 @@ fn append_tree_node_with<R>(
             try out.append_byte(cast<u8>(33));
             try append_tree_node_with<R>(out, tree, node.ok, lookup);
         },
+        Func(node) => try append_func_with<R>(out, tree, node, lookup),
     }
     return;
+}
+
+fn append_func_with<R>(
+    out: &var string::String,
+    tree: &TypeTree,
+    node: &Func,
+    lookup: &R
+) -> !void {
+    if node.unsafe_call {
+        try out.append_bytes("unsafe fn(");
+    } else {
+        try out.append_bytes("fn(");
+    }
+    var index = 0;
+    while node.params.get(index) |param| {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        try append_tree_node_with<R>(out, tree, param, lookup);
+        index = index + 1;
+    }
+    try out.append_bytes(") -> ");
+    return append_tree_node_with<R>(out, tree, node.result, lookup);
 }
 
 fn append_name_with<R>(
@@ -752,7 +823,32 @@ fn equal_node(
             ErrorUnion(b) => equal_error_union(left, a, right, b),
             _ => false,
         },
+        Func(a) => match right.nodes.at(right_handle) {
+            Func(b) => equal_func(left, a, right, b),
+            _ => false,
+        },
     };
+}
+
+fn equal_func(
+    left: &TypeTree,
+    a: &Func,
+    right: &TypeTree,
+    b: &Func
+) -> bool {
+    if a.unsafe_call != b.unsafe_call or a.params.len() != b.params.len() {
+        return false;
+    }
+    var index = 0;
+    while a.params.get(index) |left_param| {
+        if b.params.get(index) |right_param| {
+            if !equal_node(left, left_param, right, right_param) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    return equal_node(left, a.result, right, b.result);
 }
 
 fn equal_name(
@@ -867,7 +963,25 @@ fn map_names_node<M, F>(builder: &var Builder, value: &TypeTree, handle: arena::
             builder.nodes.add(Node::Const(Const { elem: elem }))
         },
         ErrorUnion(node) => try map_error_union_names<M, F>(builder, value, node, mapper, folder),
+        Func(node) => try map_func_names<M, F>(builder, value, node, mapper, folder),
     };
+}
+
+fn map_func_names<M, F>(builder: &var Builder, value: &TypeTree, node: &Func, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
+    let allocator = builder.allocator;
+    var params = array::new<arena::Handle<Node>>(allocator);
+    errdefer params.deinit();
+    var index = 0;
+    while node.params.get(index) |param| {
+        try params.append(try map_names_node<M, F>(builder, value, param, mapper, folder));
+        index = index + 1;
+    }
+    let result = try map_names_node<M, F>(builder, value, node.result, mapper, folder);
+    return builder.nodes.add(Node::Func(Func {
+        params: move params,
+        result: result,
+        unsafe_call: node.unsafe_call
+    }));
 }
 
 fn map_name_node<M, F>(builder: &var Builder, value: &TypeTree, node: &Name, mapper: &var M, folder: &var F) -> !arena::Handle<Node> {
@@ -999,7 +1113,43 @@ fn substitute_node(
             substitutions,
             replace_names
         ),
+        Func(node) => try substitute_func(
+            builder,
+            table,
+            tree,
+            node,
+            substitutions,
+            replace_names
+        ),
     };
+}
+
+fn substitute_func(
+    builder: &var Builder,
+    table: &Table,
+    tree: &TypeTree,
+    node: &Func,
+    substitutions: &map::Map<[]u8, Type>,
+    replace_names: bool
+) -> !arena::Handle<Node> {
+    let allocator = builder.allocator;
+    var params = array::new<arena::Handle<Node>>(allocator);
+    errdefer params.deinit();
+    var index = 0;
+    while node.params.get(index) |param| {
+        try params.append(try substitute_node(
+            builder, table, tree, param, substitutions, replace_names
+        ));
+        index = index + 1;
+    }
+    let result = try substitute_node(
+        builder, table, tree, node.result, substitutions, replace_names
+    );
+    return builder.nodes.add(Node::Func(Func {
+        params: move params,
+        result: result,
+        unsafe_call: node.unsafe_call
+    }));
 }
 
 fn substitute_name(
@@ -1185,6 +1335,14 @@ fn walk_node<V>(
                 walk_node<V>(value, err, visitor);
             }
             walk_node<V>(value, node.ok, visitor);
+        },
+        Func(node) => {
+            var index = 0;
+            while node.params.get(index) |param| {
+                walk_node<V>(value, param, visitor);
+                index = index + 1;
+            }
+            walk_node<V>(value, node.result, visitor);
         },
     }
     return;

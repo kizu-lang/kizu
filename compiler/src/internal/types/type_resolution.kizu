@@ -233,8 +233,37 @@ fn (self: &var Checker) resolve_type_value(tree: &ast::Ast, value: Type) -> !Typ
             return self.resolve_nullable_type(tree, value, elem);
         },
         Name(node) => return self.resolve_name_type(tree, value, parsed, node),
+        Func(node) => return self.resolve_func_type(tree, value, parsed, node),
         _ => return TypeResolution::Issue(TypeResolutionIssue::Unknown(value)),
     }
+}
+
+// resolve_func_type validates the parameter and result types a function
+// pointer spells. The pointer itself names no declaration, so there is nothing
+// to look up: it is well formed when the types it mentions are.
+fn (self: &var Checker) resolve_func_type(
+    tree: &ast::Ast,
+    value: Type,
+    parsed: typ::Type,
+    node: &typ::Func
+) -> !TypeResolution {
+    var index = 0;
+    while node.params.get(index) |param| {
+        index = index + 1;
+        let child = typ::child_type(parsed, param);
+        let elem = try self.types.retain_parsed(child);
+        match try self.resolve_type_value(tree, elem) {
+            Issue(issue) => return TypeResolution::Issue(issue),
+            Value(_) => {},
+        }
+    }
+    let result_child = typ::child_type(parsed, node.result);
+    let result = try self.types.retain_parsed(result_child);
+    match try self.resolve_type_value(tree, result) {
+        Issue(issue) => return TypeResolution::Issue(issue),
+        Value(_) => {},
+    }
+    return TypeResolution::Value(value);
 }
 
 fn (self: &var Checker) resolve_wrapping_type(

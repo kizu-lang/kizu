@@ -449,7 +449,8 @@ func (e *emitter) externalCallDecls() []string {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if !strings.HasPrefix(instr.Op, "call.") {
+				if !strings.HasPrefix(instr.Op, "call.") ||
+					instr.Op == "call.indirect" {
 					continue
 				}
 				name := strings.TrimPrefix(instr.Op, "call.")

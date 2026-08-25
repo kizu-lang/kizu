@@ -1256,6 +1256,10 @@ fn (self: &var Checker) check_builtin_type_apply(
     if handled.* {
         return null;
     }
+    if mem::equal_bytes(name, "std::internal::builtin::mem_allocator_from") {
+        handled.* = true;
+        return self.check_allocator_from(tree, scope, type_arg, args, out);
+    }
     return self.check_builtin_array_method_type_apply(
         tree,
         scope,
@@ -1265,6 +1269,133 @@ fn (self: &var Checker) check_builtin_type_apply(
         handled,
         out
     );
+}
+
+/// Validates `mem_allocator_from<T>(state, alloc, free)`. The header the
+/// runtime writes lives at the front of the state, so T has to have reserved
+/// it: its first field is `std::mem::AllocatorHeader` (ADR-0129).
+fn (self: &var Checker) check_allocator_from(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    type_arg: []u8,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if args.len(tree) != 3 {
+        return try self.checker_error_at(
+            "type error",
+            ast::zero_span(),
+            "`std::mem::allocator_from` expects state, alloc and free"
+        );
+    }
+    if try self.require_allocator_header_first(tree, type_arg) |problem| {
+        return move problem;
+    }
+    var state_want = string::new(self.allocator);
+    defer state_want.deinit();
+    try state_want.append_bytes(type_arg);
+    let state_bytes = state_want.as_bytes();
+    let state_type = try self.types.intern(state_bytes);
+    let state_arg = args.get_or_panic(tree, 0);
+    var got_state = empty_type();
+    if try self.check_expr(tree, scope, state_arg, &var got_state) |problem| {
+        return move problem;
+    }
+    if !same_type(got_state, state_type) {
+        return try self.allocator_from_arg_error("state", state_type, got_state);
+    }
+    var index = 1;
+    while index < 3 {
+        var want_text = string::new(self.allocator);
+        defer want_text.deinit();
+        try want_text.append_bytes("unsafe fn(&var ");
+        try want_text.append_bytes(type_arg);
+        if index == 1 {
+            try want_text.append_bytes(", i64) -> ?ptr<u8>");
+        } else {
+            try want_text.append_bytes(", ptr<u8>, i64) -> void");
+        }
+        let want_bytes = want_text.as_bytes();
+        let want = try self.types.intern(want_bytes);
+        let argument = args.get_or_panic(tree, index);
+        var got = empty_type();
+        if try self.check_contextual_expr(
+            tree, scope, argument, want, &var got
+        ) |problem| {
+            return move problem;
+        }
+        if !same_type(got, want) {
+            if index == 1 {
+                return try self.allocator_from_arg_error("alloc", want, got);
+            }
+            return try self.allocator_from_arg_error("free", want, got);
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.intern("Allocator");
+    return null;
+}
+
+/// Refuses a state whose type has not reserved the room the runtime writes
+/// its header into.
+/// Reports whether a state type declares the allocator header first.
+fn (self: &Checker) state_reserves_header(
+    tree: &ast::Ast,
+    type_arg: []u8
+) -> !bool {
+    let declaration = self.metadata.structs.get(type_arg) orelse return false;
+    let declared_type = first_field_type(tree, declaration) orelse return false;
+    let rendered = try typ::render(self.allocator, &tree.types, declared_type);
+    defer rendered.deinit();
+    let bytes = rendered.as_bytes();
+    return mem::equal_bytes(bytes, "std::mem::AllocatorHeader");
+}
+
+/// Returns the declared type of a struct's first field, and null when the
+/// declaration is not a struct or has no fields.
+fn first_field_type(tree: &ast::Ast, declaration: ast::Declaration) -> ?typ::Type {
+    match tree.declarations.at(declaration.node) {
+        Struct(declared) => {
+            if declared.fields.get(0) |field| {
+                return field.type_name;
+            }
+        },
+        _ => {},
+    }
+    return null;
+}
+
+fn (self: &var Checker) require_allocator_header_first(
+    tree: &var ast::Ast,
+    type_arg: []u8
+) -> !?diagnostic::Diagnostic {
+    let ok = try self.state_reserves_header(tree, type_arg);
+    if ok {
+        return null;
+    }
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(type_arg);
+    try message.append_bytes(
+        "` must declare `std::mem::AllocatorHeader` as its first field to back an allocator");
+    return try self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
+fn (self: &var Checker) allocator_from_arg_error(
+    label: []u8,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_bytes("`std::mem::allocator_from` ");
+    try message.append_bytes(label);
+    try message.append_bytes(" expects ");
+    try self.append_checker_type(&var message, want);
+    try message.append_bytes(", got ");
+    try self.append_checker_type(&var message, got);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
 }
 
 fn (self: &var Checker) check_builtin_arena_type_apply(

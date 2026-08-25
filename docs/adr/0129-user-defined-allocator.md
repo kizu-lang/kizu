@@ -65,8 +65,13 @@ Allocator は runtime に渡され struct field に格納される値なので�
 tie で寿命を追うことで受ける。
 
 `allocator_from` は `&var T` を取り `Allocator` を返す —— ADR-0099 が定めた
-tied allocator の署名そのものである。したがって **checker に新しい規則は
-要らない**。既存の recognizer が署名の形で拾い、tie 規則は ADR-0099 が持つ。
+tied allocator の署名そのものである。tie 規則は ADR-0099 が持ち、新しい規則は
+足さない。
+
+recognizer だけを 1 箇所広げる。ADR-0099 は generic な tied factory を「recognizer
+が無く tie が黙って落ちるため宣言時に拒否。実需が出たら additive に開放」として
+いた。`allocator_from<T>` がその実需なので、callee 解決が generic 呼び出しから
+その宣言まで辿るようにし、宣言時の拒否を外す。tie は既存の規則がそのまま付く。
 
 ### 4. `Allocator` の runtime 表現に kind を持たせる
 

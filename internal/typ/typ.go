@@ -483,6 +483,34 @@ func SplitMethodName(name string) (string, string, bool) {
 // own something (ADR-0119). This is the one spelling; every layer reads it here.
 const CleanupMethod = "deinit"
 
+// substituteName instantiates a name: the whole name when it is a parameter,
+// and its static arguments otherwise.
+func substituteName(node *Name, subst map[string]Type) Type {
+	if len(node.Path) == 1 && len(node.Args) == 0 {
+		if replacement, ok := subst[node.Path[0]]; ok {
+			return replacement
+		}
+	}
+	if len(node.Args) == 0 {
+		return node
+	}
+	args := make([]Type, 0, len(node.Args))
+	for _, arg := range node.Args {
+		args = append(args, Substitute(arg, subst))
+	}
+	return &Name{Path: node.Path, Args: args}
+}
+
+// substituteFunc instantiates the parameter and result types of a function
+// pointer.
+func substituteFunc(node *Func, subst map[string]Type) Type {
+	out := &Func{Result: Substitute(node.Result, subst), Unsafe: node.Unsafe}
+	for _, param := range node.Params {
+		out.Params = append(out.Params, Substitute(param, subst))
+	}
+	return out
+}
+
 // Substitute replaces every type parameter named in subst, wherever it appears
 // in the structure. A name is replaced only when the whole name matches, so a
 // parameter `T` leaves `Timer` alone.
@@ -492,19 +520,7 @@ func Substitute(t Type, subst map[string]Type) Type {
 	}
 	switch node := t.(type) {
 	case *Name:
-		if len(node.Path) == 1 && len(node.Args) == 0 {
-			if replacement, ok := subst[node.Path[0]]; ok {
-				return replacement
-			}
-		}
-		if len(node.Args) == 0 {
-			return node
-		}
-		args := make([]Type, 0, len(node.Args))
-		for _, arg := range node.Args {
-			args = append(args, Substitute(arg, subst))
-		}
-		return &Name{Path: node.Path, Args: args}
+		return substituteName(node, subst)
 	case *Slice:
 		return &Slice{Elem: Substitute(node.Elem, subst)}
 	case *Buffer:
@@ -515,6 +531,8 @@ func Substitute(t Type, subst map[string]Type) Type {
 		return &Optional{Elem: Substitute(node.Elem, subst)}
 	case *Const:
 		return &Const{Elem: Substitute(node.Elem, subst)}
+	case *Func:
+		return substituteFunc(node, subst)
 	case *ErrorUnion:
 		out := &ErrorUnion{Ok: Substitute(node.Ok, subst)}
 		if node.Err != nil {

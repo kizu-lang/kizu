@@ -36,6 +36,86 @@ fn (self: &var Checker) check_call_expr(
     return null;
 }
 
+// Validates a call made through a function pointer. The call is safe unless
+// the pointee carries an obligation, which is what `unsafe fn(...)` spells:
+// the marker is required for the same reason a direct call to an `unsafe fn`
+// requires it.
+fn (self: &var Checker) check_func_pointer_call(
+    tree: &var ast::Ast,
+    scope: ScopeHandle,
+    name: []u8,
+    span: ast::Span,
+    pointer: Type,
+    args: ast::ExpressionList,
+    out: &var Type
+) -> !?diagnostic::Diagnostic {
+    if self.types.function_pointer_is_unsafe(pointer) {
+        var operation = string::new(self.allocator);
+        defer operation.deinit();
+        try operation.append_bytes("call through `");
+        try operation.append_bytes(name);
+        try operation.append_byte(cast<u8>(96));
+        let operation_bytes = operation.as_bytes();
+        if try self.require_unsafe_capability_at(
+            UnsafeCapability::UnsafeCall,
+            operation_bytes,
+            span
+        ) |problem| {
+            return move problem;
+        }
+    }
+    let arity = self.types.function_pointer_arity(pointer);
+    if args.len(tree) != arity {
+        var message = string::new(self.allocator);
+        errdefer message.deinit();
+        try message.append_byte(cast<u8>(96));
+        try message.append_bytes(name);
+        try message.append_bytes("` expects ");
+        try fmt::append_i64(&var message, arity);
+        try message.append_bytes(" argument(s), got ");
+        try fmt::append_i64(&var message, args.len(tree));
+        return try self.checker_message_at("type error", span, move message);
+    }
+    var index = 0;
+    while index < arity {
+        let want = try self.types.function_pointer_part(pointer, index);
+        let argument = args.get_or_panic(tree, index);
+        var got = empty_type();
+        if try self.check_contextual_expr(tree, scope, argument, want, &var got) |problem| {
+            return move problem;
+        }
+        if !same_type(got, want) {
+            return try self.func_pointer_arg_error(name, index, want, got);
+        }
+        index = index + 1;
+    }
+    out.* = try self.types.function_pointer_part(pointer, -1);
+    return null;
+}
+
+fn (self: &var Checker) func_pointer_arg_error(
+    name: []u8,
+    index: i64,
+    want: Type,
+    got: Type
+) -> !diagnostic::Diagnostic {
+    var message = string::new(self.allocator);
+    errdefer message.deinit();
+    try message.append_byte(cast<u8>(96));
+    try message.append_bytes(name);
+    try message.append_bytes("` argument ");
+    try fmt::append_i64(&var message, index + 1);
+    try message.append_bytes(" expects ");
+    let want_text = try self.types.copy_text(self.allocator, want);
+    defer want_text.deinit();
+    try message.append_string(&want_text);
+    try message.append_bytes(", got ");
+    let got_text = try self.types.copy_text(self.allocator, got);
+    defer got_text.deinit();
+    try message.append_string(&got_text);
+    return self.checker_message_at("type error", ast::zero_span(), move message);
+}
+
 fn (self: &var Checker) check_call_expr_dispatch(
     tree: &var ast::Ast,
     scope: ScopeHandle,
@@ -87,6 +167,18 @@ fn (self: &var Checker) check_call_expr_dispatch(
                     ast::zero_span(),
                     "use `std::io::blocking()`"
                 );
+            }
+            // A binding shadows a declaration: a name bound to a function
+            // pointer is called through the pointer, not looked up as one.
+            // The lookup result is rebound before it is read: a capture of a
+            // Type is not usable as a value in the expression that follows.
+            var bound = empty_type();
+            if self.scopes.lookup(scope, name) |resolved| {
+                bound = resolved;
+            }
+            if self.types.is_function_pointer(bound) {
+                return self.check_func_pointer_call(
+                    tree, scope, name, span, bound, expression.args, out);
             }
             return self.check_user_call(tree, scope, name, span, expression.args, out);
         },

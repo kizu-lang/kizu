@@ -618,6 +618,82 @@ pub fn (self: &var TypeTable) pointer_element(value: Type) -> !?Type {
 }
 
 /// Reports whether value is `ptr<T>` or `?ptr<T>`.
+/// Reports whether a `ptr<T>` fills a `?ptr<T>` slot: the nullable spelling is
+/// the non-null one with a `?` in front, and both are the same machine value.
+pub fn (self: &TypeTable) fills_nullable_pointer(want: Type, got: Type) -> bool {
+    let want_handle = want.node orelse return false;
+    let got_handle = got.node orelse return false;
+    let want_entry = self.entries.at(want_handle);
+    let want_bytes = want_entry.spelling.as_bytes();
+    if !mem::starts_with(want_bytes, "?ptr<") {
+        return false;
+    }
+    let got_entry = self.entries.at(got_handle);
+    let got_bytes = got_entry.spelling.as_bytes();
+    if mem::len(want_bytes) != mem::len(got_bytes) + 1 {
+        return false;
+    }
+    return mem::equal_bytes(want_bytes[1..mem::len(want_bytes)], got_bytes);
+}
+
+/// Reports whether a type is a function pointer, the Go `funcPointerNode`.
+pub fn (self: &TypeTable) is_function_pointer(value: Type) -> bool {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Func(_) => return true,
+            _ => return false,
+        }
+    }
+    return false;
+}
+
+/// Returns the parameter count of a function pointer type, -1 for other types.
+pub fn (self: &TypeTable) function_pointer_arity(value: Type) -> i64 {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Func(node) => return node.params.len(),
+            _ => return -1,
+        }
+    }
+    return -1;
+}
+
+/// Reports whether the function a pointer type names carries an obligation.
+pub fn (self: &TypeTable) function_pointer_is_unsafe(value: Type) -> bool {
+    if self.lookup(value) |parsed| {
+        match typ::root_node(&self.parsed, parsed) {
+            Func(node) => return node.unsafe_call,
+            _ => return false,
+        }
+    }
+    return false;
+}
+
+/// Returns the type at one position of a function pointer: index 0 .. n-1 name
+/// the parameters, and -1 names the result.
+pub fn (self: &var TypeTable) function_pointer_part(value: Type, index: i64) -> !Type {
+    let child = function_pointer_child(self, value, index) orelse return empty_type();
+    return self.retain_parsed(child);
+}
+
+/// Names the child type at one position of a function pointer without
+/// touching the table, so the read is finished before the retain writes.
+fn function_pointer_child(table: &TypeTable, value: Type, index: i64) -> ?typ::Type {
+    let parsed = table.lookup(value) orelse return null;
+    match typ::root_node(&table.parsed, parsed) {
+        Func(node) => {
+            if index < 0 {
+                return typ::child_type(parsed, node.result);
+            }
+            if node.params.get(index) |param| {
+                return typ::child_type(parsed, param);
+            }
+            return null;
+        },
+        _ => return null,
+    }
+}
+
 pub fn (self: &TypeTable) is_pointer_type(value: Type) -> bool {
     if self.lookup(value) |parsed| {
         if parsed_pointer_element(&self.parsed, parsed) |_| {

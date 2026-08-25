@@ -48,7 +48,11 @@ pub fn emit(
         strings: map::new<[]u8, DataRef>(allocator),
         data_order: array::new<ir::Name>(allocator),
         values: map::new<[]u8, ValueInfo>(allocator),
-        generation: 0
+        generation: 0,
+        table: array::new<ir::Name>(allocator),
+        table_index: map::new<[]u8, i64>(allocator),
+        signatures: array::new<string::String>(allocator),
+        signature_index: map::new<[]u8, i64>(allocator)
     };
     defer emitter.deinit();
     if try emitter.emit_module(module) |failed| {
@@ -105,7 +109,16 @@ struct Emitter {
     strings: map::Map<[]u8, DataRef>,
     data_order: array::Array<ir::Name>,
     values: map::Map<[]u8, ValueInfo>,
-    generation: i64
+    generation: i64,
+    // table lists, in call order, the functions whose address is taken. wasm
+    // reaches a function pointer through a table index rather than an address,
+    // so `func.addr` lowers to the position a name holds here.
+    table: array::Array<ir::Name>,
+    table_index: map::Map<[]u8, i64>,
+    // signatures lists the `(type ...)` declarations `call_indirect` names,
+    // in the order they were first needed.
+    signatures: array::Array<string::String>,
+    signature_index: map::Map<[]u8, i64>
 }
 
 /// Is one value a format interpolates, the argument of a Go `fmt.Fprintf`:
@@ -286,7 +299,10 @@ fn (self: &var Emitter) local_expr(name: []u8) -> !ir::Name {
 /// Writes the module, runtime helpers, and user functions, the Go `emit`.
 fn (self: &var Emitter) emit_module(module: &ir::Module) -> !?diagnostic::Diagnostic {
     try self.collect_strings(module);
-    try self.write_header();
+    if try self.collect_function_table(module) |failed| {
+        return move failed;
+    }
+    try self.write_header(module);
     try self.write_runtime();
     var index = 0;
     while module.functions.get(index) |function| {
@@ -388,9 +404,117 @@ fn (self: &Emitter) data_ref(key: []u8) -> DataRef {
     return self.strings.get(key) orelse empty_data_ref();
 }
 
+/// Walks the module for the addresses it takes and the indirect calls it
+/// makes, before anything is written: wasm declares its table and its function
+/// types in the header, above the functions that use them.
+fn (self: &var Emitter) collect_function_table(module: &ir::Module) -> !?diagnostic::Diagnostic {
+    var function_index = 0;
+    while module.functions.get(function_index) |function| {
+        function_index = function_index + 1;
+        let node = module.function_nodes.at(function.node);
+        var block_index = 0;
+        while node.blocks.get(block_index) |block| {
+            block_index = block_index + 1;
+            let block_node = module.blocks.at(block.node);
+            var instr_index = 0;
+            while block_node.instrs.get(instr_index) |instr| {
+                instr_index = instr_index + 1;
+                let instr_node = module.instrs.at(instr.node);
+                if instr_node.op == ir::Op::FuncAddr {
+                    try self.intern_table_entry(module, instr_node.operand);
+                }
+                if instr_node.op == ir::Op::CallIndirect {
+                    if instr_node.args.len() == 0 {
+                        return try self.fail0("wasm error: call.indirect expects a callee");
+                    }
+                    let _ = try self.intern_signature(module, instr_node);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// Records the table position one taken address holds.
+fn (self: &var Emitter) intern_table_entry(module: &ir::Module, name: ir::Name) -> !void {
+    let retained = ir::name_text(&module.names, name);
+    let bytes = retained.as_bytes();
+    if self.table_index.contains(bytes) {
+        return;
+    }
+    let position = self.table.len();
+    try self.table_index.insert(bytes, position);
+    return self.table.append(name);
+}
+
+/// Records the wasm function type an indirect call names and returns its index.
+fn (self: &var Emitter) intern_signature(module: &ir::Module, node: &ir::InstrNode) -> !i64 {
+    var declaration = string::new(self.allocator);
+    errdefer declaration.deinit();
+    var key = string::new(self.allocator);
+    defer key.deinit();
+    var index = 1;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let wasm = wasm_type(&module.names, arg.type_name);
+        try declaration.append_bytes(" (param ");
+        try declaration.append_bytes(wasm);
+        try declaration.append_byte(cast<u8>(41));
+        try key.append_bytes(wasm);
+        try key.append_byte(cast<u8>(44));
+    }
+    if !module.names.is(node.result.type_name, "void") {
+        let wasm = wasm_type(&module.names, node.result.type_name);
+        try declaration.append_bytes(" (result ");
+        try declaration.append_bytes(wasm);
+        try declaration.append_byte(cast<u8>(41));
+        try key.append_bytes(wasm);
+    }
+    let key_bytes = key.as_bytes();
+    if self.signature_index.get(key_bytes) |known| {
+        declaration.deinit();
+        return known;
+    }
+    let position = self.signatures.len();
+    try self.signature_index.insert(key_bytes, position);
+    try self.signatures.append(move declaration);
+    return position;
+}
+
+/// Writes the `(type ...)` declarations `call_indirect` names and the table
+/// the addresses index into. Both are empty when no address is taken, so a
+/// module that uses no function pointer is unchanged.
+fn (self: &var Emitter) write_function_table(module: &ir::Module) -> !void {
+    let count = self.signatures.len();
+    var index = 0;
+    while index < count {
+        var copied = string::new(self.allocator);
+        errdefer copied.deinit();
+        if self.signatures.at(index) |declaration| {
+            try copied.append_string(declaration);
+        }
+        try self.line2("  (type $sig%d (func%s))", Arg::Int(index), Arg::Owned(move copied));
+        index = index + 1;
+    }
+    if self.table.len() == 0 {
+        return;
+    }
+    try self.line1("  (table %d funcref)", Arg::Int(self.table.len()));
+    var elem = try string::from_bytes(self.allocator, "  (elem (i32.const 0)");
+    errdefer elem.deinit();
+    index = 0;
+    while self.table.get(index) |name| {
+        index = index + 1;
+        try elem.append_bytes(" $");
+        try module.names.append_to(&var elem, name);
+    }
+    try elem.append_byte(cast<u8>(41));
+    return self.line1("%s", Arg::Owned(move elem));
+}
+
 /// Writes imports, memory, and data segments, the Go `writeHeader`. Go sorts
 /// the map by offset; the assignment order the data_order keeps is that order.
-fn (self: &var Emitter) write_header() -> !void {
+fn (self: &var Emitter) write_header(module: &ir::Module) -> !void {
     try self.line("(module");
     let import_line =
         \\  (import "wasi_snapshot_preview1" "fd_write"
@@ -401,6 +525,7 @@ fn (self: &var Emitter) write_header() -> !void {
         \\  (memory (export "memory") 1)
     ;
     try self.line(memory_line);
+    try self.write_function_table(module);
     var index = 0;
     while self.data_order.get(index) |key| {
         index = index + 1;

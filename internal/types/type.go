@@ -352,6 +352,18 @@ func optionalElem(t Type) (Type, bool) {
 	return Type(elem), ok
 }
 
+// fillsNullablePointer reports whether a `ptr<T>` fills a `?ptr<T>` slot. The
+// two spell the same machine value and the non-null one is a subset of the
+// nullable one, so widening is always sound. `?ptr<T>` is a raw-pointer
+// spelling rather than an optional value type (SPEC §11), so this does not go
+// through the optional wrapping path.
+func fillsNullablePointer(want Type, got Type) bool {
+	if !strings.HasPrefix(string(want), "?ptr<") {
+		return false
+	}
+	return string(want)[1:] == string(got)
+}
+
 // absorbsErrorUnion reports whether returning a result that fails one way from a
 // function that declares no error set is the same absorption `try` does. A
 // declared `E!T` is not this, because it named the one set it accepts.

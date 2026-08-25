@@ -38,6 +38,41 @@ fn (self: &var Emitter) write_call(module: &ir::Module, node: &ir::InstrNode) ->
     return self.write_call_line(module, node, call);
 }
 
+/// Writes the address of a declared function. A function symbol is already a
+/// pointer in LLVM, so the value is the symbol itself and no instruction is
+/// emitted for it.
+fn (self: &var Emitter) write_func_addr(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    if self.function_named(module, node.operand) |_| {
+        let symbol = try self.callee_symbol(module, node.operand);
+        let operand = try self.text1("@%s", Arg::Str(symbol));
+        try self.set_value(module, node.result, operand);
+        return null;
+    }
+    return try self.fail1("llvm error: `%s` is not a declared function", Arg::Str(node.operand));
+}
+
+/// Writes a call through a function pointer. The callee is the first operand,
+/// the way it arrived from lowering.
+fn (self: &var Emitter) write_indirect_call(module: &ir::Module, node: &ir::InstrNode) -> !?diagnostic::Diagnostic {
+    let callee_value = node.args.get(0) orelse
+        return try self.fail0("llvm error: call.indirect expects a callee");
+    let callee = try self.operand(module, callee_value);
+    var args = array::new<string::String>(self.allocator);
+    defer args.deinit();
+    var index = 1;
+    while node.args.get(index) |arg| {
+        index = index + 1;
+        let value = try self.operand(module, arg);
+        let arg_type = try self.llvm_type_of(module, arg.type_name);
+        try args.append(try self.sprint2("%s %s", Arg::Str(arg_type), Arg::Str(value.operand)));
+    }
+    let result_type = try self.llvm_type_of(module, node.result.type_name);
+    let joined = try string::join(self.allocator, &args, ", ");
+    let call = try self.text3(
+        "call %s %s(%s)", Arg::Str(result_type), Arg::Str(callee.operand), Arg::Owned(move joined));
+    return self.write_call_line(module, node, call);
+}
+
 /// Writes the call text as a statement or as a result definition, the tail
 /// the Go `writeCall` and `writeInternalCall` share.
 fn (self: &var Emitter) write_call_line(module: &ir::Module, node: &ir::InstrNode, call: ir::Name) -> !?diagnostic::Diagnostic {
