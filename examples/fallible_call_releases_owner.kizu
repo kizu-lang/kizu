@@ -1,39 +1,66 @@
 import std::mem;
 import std::string;
 
+// Four owner fields, so the cell this needs is four Strings wide. What the
+// buffer below has left after the four Strings themselves is far less than
+// that, on any host: the failure does not ride on where the stack put the
+// buffer.
 struct Noisy {
-    pub name: string::String,
+    pub first: string::String,
+    pub second: string::String,
+    pub third: string::String,
+    pub fourth: string::String,
 }
 
 fn (self: Noisy) deinit(allocator: Allocator) -> void {
     print("released");
-    self.name.deinit(allocator);
+    self.first.deinit(allocator);
+    self.second.deinit(allocator);
+    self.third.deinit(allocator);
+    self.fourth.deinit(allocator);
     return;
 }
 
-// `box` takes its value by value, so `name` is moved into the struct and the
-// struct into the call: this frame has nothing left to clean up. When the
-// allocation fails, the value was written nowhere, and the obligation is the
-// callee's — `box` releases it before the error leaves. `released` is that
-// cleanup running.
-fn attempt(alloc: Allocator) -> !void {
-    var name = string::new(alloc);
-    errdefer name.deinit(alloc);
-    try name.append_byte(alloc, cast<u8>(97));
+fn one(alloc: Allocator) -> !string::String {
+    var text = string::new(alloc);
+    errdefer text.deinit(alloc);
+    try text.append_byte(alloc, cast<u8>(97));
+    return move text;
+}
 
-    let boxed = try mem::box<Noisy>(alloc, Noisy { name: move name });
+// `box` takes its value by value, so the four Strings are moved into the
+// struct and the struct into the call: this frame has nothing left to clean
+// up. When the allocation fails, the value was written nowhere, and the
+// obligation is the callee's — `box` releases it before the error leaves.
+// `released` is that cleanup running.
+fn attempt(alloc: Allocator) -> !void {
+    let first = try one(alloc);
+    errdefer first.deinit(alloc);
+    let second = try one(alloc);
+    errdefer second.deinit(alloc);
+    let third = try one(alloc);
+    errdefer third.deinit(alloc);
+    let fourth = try one(alloc);
+    errdefer fourth.deinit(alloc);
+
+    let boxed = try mem::box<Noisy>(alloc, Noisy {
+        first: move first,
+        second: move second,
+        third: move third,
+        fourth: move fourth
+    });
     defer boxed.deinit(alloc);
     print("unreachable");
     return;
 }
 
 fn main() -> !void {
-    // The buffer has to hold the string and not the box. `fixed_buffer`
-    // writes its header at the first aligned byte of what it was given, so
-    // how much is left depends on where the stack put `buf` -- one alignment
-    // step either way. 56 sits in the middle of the window that holds on
-    // both: the point is the failure, not the number.
-    var buf = [56]u8{};
+    // Room for the four Strings and nowhere near enough for the cell that
+    // would hold them. Every size from 64 to 144 does that here, so the
+    // middle of that range leaves tens of bytes on both sides of the one
+    // alignment step `fixed_buffer` can lose to where the stack put the
+    // buffer: the point is the failure, not the number.
+    var buf = [112]u8{};
     let scratch = buf.as_mut_bytes();
     let alloc = mem::fixed_buffer(scratch);
     try attempt(alloc);
